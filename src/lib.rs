@@ -1,8 +1,10 @@
 mod raw_sequence;
 mod raw_stack;
+mod segment;
 
 pub use raw_sequence::RawSequence;
 pub use raw_stack::RawStack;
+pub use segment::*;
 
 pub fn add(a: i32, b: i32) -> i32 {
     a + b
