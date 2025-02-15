@@ -1,54 +1,38 @@
-use crate::raw_sequence::RawSequence;
-use crate::raw_stack::RawStack;
 use std::any::TypeId;
 
 type Operation = fn(&RawSequence, usize, &mut RawStack) -> usize;
 
-struct Op0<R, F>(F)
-where
-    F: Fn() -> R;
-
-struct Op1<T, R, F>(F)
-where
-    F: Fn(T) -> R;
-
-struct Op2<T, U, R, F>(F)
-where
-    F: Fn(T, U) -> R;
-
-struct Op3<T, U, V, R, F>(F)
-where
-    F: Fn(T, U, V) -> R;
+struct Segment;
 
 trait Push {
     fn push(self, segment: &mut Segment);
 }
 
 // For zero-argument functions:
-impl<R, F> Push for Op0<R, F>
+impl<R, F> Push for F
 where
     F: Fn() -> R + 'static,
     R: 'static,
 {
     fn push(self, segment: &mut Segment) {
-        segment.push_op0(self.0);
+        segment.push_op0(self);
     }
 }
 
 // For one-argument functions:
-impl<T, R, F> Push for Op1<T, R, F>
+impl<T, R, F> Push for F
 where
     F: Fn(T) -> R + 'static,
     T: 'static,
     R: 'static,
 {
     fn push(self, segment: &mut Segment) {
-        segment.push_op1(self.0);
+        segment.push_op1(self);
     }
 }
 
 // For two-argument functions:
-impl<T, U, R, F> Push for Op2<T, U, R, F>
+impl<T, U, R, F> Push for F
 where
     F: Fn(T, U) -> R + 'static,
     T: 'static,
@@ -56,12 +40,12 @@ where
     R: 'static,
 {
     fn push(self, segment: &mut Segment) {
-        segment.push_op2(self.0);
+        segment.push_op2(self);
     }
 }
 
 // For three-argument functions:
-impl<T, U, V, R, F> Push for Op3<T, U, V, R, F>
+impl<T, U, V, R, F> Push for F
 where
     F: Fn(T, U, V) -> R + 'static,
     T: 'static,
@@ -70,7 +54,7 @@ where
     R: 'static,
 {
     fn push(self, segment: &mut Segment) {
-        segment.push_op3(self.0);
+        segment.push_op3(self);
     }
 }
 
@@ -112,11 +96,11 @@ impl Segment {
             .push(|storage, p| unsafe { storage.drop_in_place::<T>(p) });
     }
 
-    pub fn push_op<P>(&mut self, op: P)
+    pub fn push_op<F>(&mut self, op: F)
     where
-        P: Push,
+        F: Push + 'static,
     {
-        op.push(self);
+        f.push(self);
     }
 
     pub fn push_op0<R, F>(&mut self, op: F)
@@ -224,16 +208,14 @@ fn main() {
     let mut operations = Segment::new();
 
     // Add a binary operation (addition).
-    operations.push_op(Op0(|| -> u32 { 30 }));
-    operations.push_op(Op0(|| -> u32 { 12 }));
-    operations.push_op(Op2(|x: u32, y: u32| -> u32 { x + y }));
-    operations.push_op(Op0(|| -> u32 { 100 }));
-    operations.push_op(Op0(|| -> u32 { 10 }));
+    operations.push_op(|| -> u32 { 30 });
+    operations.push_op(|| -> u32 { 12 });
+    operations.push_op(|x: u32, y: u32| -> u32 { x + y });
+    operations.push_op(|| -> u32 { 100 });
+    operations.push_op(|| -> u32 { 10 });
     // Add a ternary operation (x + y - z).
-    operations.push_op(Op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z }));
-    operations.push_op(Op1(|x: u32| -> String {
-        format!("result: {}", x.to_string())
-    }));
+    operations.push_op(|x: u32, y: u32, z: u32| -> u32 { x + y - z });
+    operations.push_op(|x: u32| -> String { format!("result: {}", x.to_string()) });
 
     let final_result: String = operations.run();
     println!("{}", final_result);
