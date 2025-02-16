@@ -1,7 +1,7 @@
 use aligned_vec::{AVec, ConstAlign};
 use std::mem;
 
-/*
+/**
 A sequence that stores heterogeneous values with proper alignment.
 
 The RawSequence provides a memory-efficient way to store heterogeneous values
@@ -14,7 +14,7 @@ pub struct RawSequence {
     buffer: AVec<u8, ConstAlign<4096>>,
 }
 
-/*
+/**
 Aligns an index to the specified alignment boundary.
 Returns the next aligned position that satisfies the alignment requirement.
 */
@@ -23,7 +23,7 @@ const fn align_index(align: usize, index: usize) -> usize {
 }
 
 impl RawSequence {
-    /*
+    /**
     Creates a new empty RawSequence.
     The sequence is initialized with a 4096-byte aligned buffer.
     */
@@ -33,7 +33,7 @@ impl RawSequence {
         }
     }
 
-    /*
+    /**
     Pushes a value onto the sequence.
 
     The value is stored at an address that satisfies its alignment requirements.
@@ -55,7 +55,7 @@ impl RawSequence {
         }
     }
 
-    /*
+    /**
     Drops a value in-place at the specified position.
 
     # Safety
@@ -70,7 +70,7 @@ impl RawSequence {
         aligned + mem::size_of::<T>()
     }
 
-    /*
+    /**
     Retrieves a reference to the next value at the specified position.
 
     # Safety
@@ -86,11 +86,15 @@ impl RawSequence {
         let ptr = unsafe { self.buffer.as_ptr().add(aligned) as *const T };
         unsafe { (&*ptr, aligned + mem::size_of::<T>()) }
     }
+
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    /*
+    /*!
     Test module for RawSequence.
 
     Contains tests that verify:

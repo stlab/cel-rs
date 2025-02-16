@@ -1,6 +1,7 @@
 use std::mem::size_of;
 
-/** A simple raw stack that stores values as raw bytes.
+/**
+A simple raw stack that stores values as raw bytes.
 
 `RawStack` allows pushing values of any type into a byte buffer and retrieving
 them manually. The retrieval (`pop`) operation is unsafe and requires the caller
@@ -12,7 +13,8 @@ pub struct RawStack {
 }
 
 impl RawStack {
-    /** Creates a new `RawStack` with an initial capacity.
+    /**
+    Creates a new `RawStack` with an initial capacity.
 
     # Examples
 
@@ -25,7 +27,8 @@ impl RawStack {
         RawStack { buffer: Vec::new() }
     }
 
-    /** Pushes a value of type `T` onto the stack.
+    /**
+    Pushes a value of type `T` onto the stack.
 
     The value is stored as raw bytes in the internal buffer. The pushed value must be
     later popped using the correct type.
@@ -55,7 +58,8 @@ impl RawStack {
         }
     }
 
-    /** Pops a value of type `T` from the stack. Does not change the stack capacity.
+    /**
+    Pops a value of type `T` from the stack. Does not change the stack capacity.
 
     # Safety
 
