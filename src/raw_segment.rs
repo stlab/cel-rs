@@ -111,7 +111,7 @@ impl RawSegment {
     popping values from the stack. The caller must ensure that the operations
     were pushed in the correct order and with matching types.
     */
-    pub unsafe fn run<T>(&mut self) -> T
+    pub unsafe fn run<T>(&self) -> T
     where
         T: 'static,
     {

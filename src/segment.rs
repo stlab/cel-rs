@@ -1,28 +1,56 @@
-use crate::dyn_segment::DynSegment;
+use crate::raw_segment::RawSegment;
 
-/**
-A type-safe wrapper around RawSegment that tracks the type of the last value
-on the stack at compile time.
-
-Type parameter T represents the type of the value currently at the top of
-the execution stack.
-*/
-pub struct Segment<T> {
-    segment: RawSegment,
+pub trait ConsCell {
+    type CAR;
+    type CDR: ConsCell;
+    //fn len() -> usize;
 }
 
-impl Segment<()> {
+impl ConsCell for () {
+    type CAR = ();
+    type CDR = ();
+    // fn len() -> usize {
+    //    0
+    // }
+}
+
+impl<T, U> ConsCell for (T, U)
+where
+    U: ConsCell,
+{
+    type CAR = T;
+    type CDR = U;
+    // fn len() -> usize {
+    //     1 + U::len()
+    // }
+}
+
+/**
+A type-safe wrapper around RawSegment that tracks the type of the values
+on the stack at compile time.
+
+T is a cons cell that represents the stack of values.
+*/
+
+pub struct Segment<T> {
+    segment: RawSegment,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> Segment<T>
+where
+    T: ConsCell,
+{
     /** Creates a new empty segment with no operations. */
     pub fn new() -> Self {
         Segment {
             segment: RawSegment::new(),
+            _phantom: std::marker::PhantomData,
         }
     }
-}
 
-impl<T> Segment<T> {
     /** Pushes a nullary operation that takes no arguments and returns a value of type R. */
-    pub fn push_op0<R, F>(self, op: F) -> Segment<R>
+    pub fn push_op0<R, F>(self, op: F) -> Segment<(R, T)>
     where
         F: Fn() -> R + 'static,
         R: 'static,
@@ -37,9 +65,9 @@ impl<T> Segment<T> {
     }
 
     /** Pushes a unary operation that takes the current stack value and returns a new value. */
-    pub fn push_op1<R, F>(self, op: F) -> Segment<R>
+    pub fn push_op1<R, F>(self, op: F) -> Segment<(R, T::CDR)>
     where
-        F: Fn(T) -> R + 'static,
+        F: Fn(T::CAR) -> R + 'static,
         T: 'static,
         R: 'static,
     {
@@ -51,12 +79,38 @@ impl<T> Segment<T> {
         }
     }
 
+    pub fn push_op2<R, F>(self, op: F) -> Segment<(R, <T::CDR as ConsCell>::CDR)>
+    where
+        F: Fn(T::CAR, <T::CDR as ConsCell>::CAR) -> R + 'static,
+        T: 'static,
+        R: 'static,
+    {
+        let mut seg = self.segment;
+        seg.push_op2(op);
+        Segment {
+            segment: seg,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
     /** Executes all operations in the segment and returns the final result. */
-    pub fn run(mut self) -> T
+    pub(crate) unsafe fn run_<U: 'static>(self) -> U
     where
         T: 'static,
     {
         self.segment.run()
+    }
+}
+
+trait Runner {
+    type Result;
+    fn run(self) -> Self::Result;
+}
+
+impl<T: 'static> Runner for Segment<(T, ())> {
+    type Result = T;
+    fn run(self) -> T {
+        unsafe { self.run_() }
     }
 }
 
@@ -68,11 +122,13 @@ mod tests {
     fn test_type_safe_operations() {
         let result = Segment::new()
             .push_op0(|| 42)
+            .push_op0(|| 10)
+            .push_op2(|x, y| x + y)
             .push_op1(|x: i32| x * 2)
             .push_op1(|x: i32| x.to_string())
             .run();
 
-        assert_eq!(result, "84");
+        assert_eq!(result, "104");
     }
 
     #[test]
