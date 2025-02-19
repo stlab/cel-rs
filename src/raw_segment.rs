@@ -111,11 +111,24 @@ impl RawSegment {
     popping values from the stack. The caller must ensure that the operations
     were pushed in the correct order and with matching types.
     */
-    pub unsafe fn run<T>(&self) -> T
+    pub unsafe fn call0<T>(&self) -> T
     where
         T: 'static,
     {
         let mut stack = RawStack::new();
+        let mut p = 0;
+        for op in self.ops.iter() {
+            p = op(&self.storage, p, &mut stack);
+        }
+        stack.pop()
+    }
+
+    pub unsafe fn call1<A, T>(&self, arg: A) -> T
+    where
+        T: 'static,
+    {
+        let mut stack = RawStack::new();
+        stack.push(arg);
         let mut p = 0;
         for op in self.ops.iter() {
             p = op(&self.storage, p, &mut stack);
@@ -143,7 +156,7 @@ mod tests {
         let mut segment = RawSegment::new();
         segment.push_op0(|| 42);
         unsafe {
-            assert_eq!(segment.run::<i32>(), 42);
+            assert_eq!(segment.call0::<i32>(), 42);
         }
     }
 
@@ -153,7 +166,7 @@ mod tests {
         segment.push_op0(|| 42);
         segment.push_op1(|x: i32| x * 2);
         unsafe {
-            assert_eq!(segment.run::<i32>(), 84);
+            assert_eq!(segment.call0::<i32>(), 84);
         }
     }
 
@@ -164,7 +177,7 @@ mod tests {
         segment.push_op0(|| 5);
         segment.push_op2(|x: i32, y: i32| x + y);
         unsafe {
-            assert_eq!(segment.run::<i32>(), 15);
+            assert_eq!(segment.call0::<i32>(), 15);
         }
     }
 
@@ -176,7 +189,7 @@ mod tests {
         segment.push_op0(|| 4);
         segment.push_op3(|x: i32, y: i32, z: i32| x + y + z);
         unsafe {
-            assert_eq!(segment.run::<i32>(), 9);
+            assert_eq!(segment.call0::<i32>(), 9);
         }
     }
 
@@ -188,7 +201,7 @@ mod tests {
         segment.push_op0(|| 5);
         segment.push_op2(|x: i32, y: i32| x + y);
         unsafe {
-            assert_eq!(segment.run::<i32>(), 25);
+            assert_eq!(segment.call0::<i32>(), 25);
         }
     }
 }

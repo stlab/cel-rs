@@ -121,7 +121,7 @@ impl DynSegment {
     Panics if the type stack is empty, the final type doesn't match T, or if
     there are remaining values on the stack after getting the result.
     */
-    pub fn run<T>(&mut self) -> T
+    pub fn call<T>(&mut self) -> T
     where
         T: 'static,
     {
@@ -129,7 +129,7 @@ impl DynSegment {
         if self.type_ids.len() != 0 {
             panic!("Value(s) left on execution stack");
         }
-        unsafe { self.segment.run() }
+        unsafe { self.segment.call0() }
     }
 }
 
@@ -149,7 +149,7 @@ mod tests {
         operations.push_op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z });
         operations.push_op1(|x: u32| -> String { format!("result: {}", x.to_string()) });
 
-        let final_result: String = operations.run();
+        let final_result: String = operations.call();
         assert_eq!(final_result, "result: 132");
     }
 }
