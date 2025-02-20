@@ -1,6 +1,34 @@
 use crate::raw_segment::RawSegment;
 use std::any::TypeId;
 
+pub trait TupleToDynTypeList {
+    fn to_type_list() -> Vec<TypeId>;
+}
+
+impl TupleToDynTypeList for () {
+    fn to_type_list() -> Vec<TypeId> {
+        Vec::new()
+    }
+}
+
+impl<A: 'static> TupleToDynTypeList for (A,) {
+    fn to_type_list() -> Vec<TypeId> {
+        vec![TypeId::of::<A>()]
+    }
+}
+
+impl<A: 'static, B: 'static> TupleToDynTypeList for (A, B) {
+    fn to_type_list() -> Vec<TypeId> {
+        vec![TypeId::of::<A>(), TypeId::of::<B>()]
+    }
+}
+
+impl<A: 'static, B: 'static, C: 'static> TupleToDynTypeList for (A, B, C) {
+    fn to_type_list() -> Vec<TypeId> {
+        vec![TypeId::of::<A>(), TypeId::of::<B>(), TypeId::of::<C>()]
+    }
+}
+
 /**
 A type-checked wrapper around RawSegment that maintains a stack of type information
 to ensure type safety during operation execution.
@@ -11,15 +39,22 @@ that could occur when using RawSegment directly.
 */
 pub struct DynSegment {
     segment: RawSegment,
-    type_ids: Vec<TypeId>,
+    stack_ids: Vec<TypeId>,
+    argument_ids: Vec<TypeId>,
 }
 
 impl DynSegment {
+    /*
+       I'm not certain if new should be a generic function or if the argument
+       types should be passed in as a slice. I'm going to try the generic for now.
+    */
+
     /** Creates a new empty segment with no operations. */
-    pub fn new() -> Self {
+    pub fn new<Args: TupleToDynTypeList>() -> Self {
         DynSegment {
             segment: RawSegment::new(),
-            type_ids: Vec::new(),
+            stack_ids: <Args as TupleToDynTypeList>::to_type_list(),
+            argument_ids: <Args as TupleToDynTypeList>::to_type_list(),
         }
     }
 
@@ -33,7 +68,7 @@ impl DynSegment {
     where
         T: 'static,
     {
-        match self.type_ids.pop() {
+        match self.stack_ids.pop() {
             Some(tid) if tid == TypeId::of::<T>() => {}
             _ => {
                 panic!("Type mismatch: expected {}", std::any::type_name::<T>());
@@ -52,7 +87,7 @@ impl DynSegment {
         R: 'static,
     {
         self.segment.push_op0(op);
-        self.type_ids.push(TypeId::of::<R>());
+        self.stack_ids.push(TypeId::of::<R>());
     }
 
     /**
@@ -69,7 +104,7 @@ impl DynSegment {
     {
         self.pop_type::<T>();
         self.segment.push_op1(op);
-        self.type_ids.push(TypeId::of::<R>());
+        self.stack_ids.push(TypeId::of::<R>());
     }
 
     /**
@@ -88,7 +123,7 @@ impl DynSegment {
         self.pop_type::<U>();
         self.pop_type::<T>();
         self.segment.push_op2(op);
-        self.type_ids.push(TypeId::of::<R>());
+        self.stack_ids.push(TypeId::of::<R>());
     }
 
     /**
@@ -109,7 +144,7 @@ impl DynSegment {
         self.pop_type::<U>();
         self.pop_type::<T>();
         self.segment.push_op3(op);
-        self.type_ids.push(TypeId::of::<R>());
+        self.stack_ids.push(TypeId::of::<R>());
     }
 
     /**
@@ -121,15 +156,42 @@ impl DynSegment {
     Panics if the type stack is empty, the final type doesn't match T, or if
     there are remaining values on the stack after getting the result.
     */
-    pub fn call<T>(&mut self) -> T
+    pub fn call0<T>(&mut self) -> T
     where
         T: 'static,
     {
+        assert!(
+            self.argument_ids.len() == 0,
+            "Expected {} argument(s)",
+            self.argument_ids.len()
+        );
         self.pop_type::<T>();
-        if self.type_ids.len() != 0 {
+        assert!(
+            self.stack_ids.len() == 0,
+            "Value(s) left on execution stack"
+        );
+        unsafe { self.segment.call0() }
+    }
+
+    pub fn call1<A, R>(&mut self, arg: A) -> R
+    where
+        A: 'static,
+        R: 'static,
+    {
+        assert!(
+            self.argument_ids.len() == 1,
+            "Expected {} argument(s)",
+            self.argument_ids.len()
+        );
+        assert!(
+            self.argument_ids[0] == TypeId::of::<A>(),
+            "Argument type mismatch"
+        );
+        self.pop_type::<R>();
+        if self.stack_ids.len() != 0 {
             panic!("Value(s) left on execution stack");
         }
-        unsafe { self.segment.call0() }
+        unsafe { self.segment.call1(arg) }
     }
 }
 
@@ -139,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_segment_operations() {
-        let mut operations = DynSegment::new();
+        let mut operations = DynSegment::new::<()>();
 
         operations.push_op0(|| -> u32 { 30 });
         operations.push_op0(|| -> u32 { 12 });
@@ -149,7 +211,21 @@ mod tests {
         operations.push_op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z });
         operations.push_op1(|x: u32| -> String { format!("result: {}", x.to_string()) });
 
-        let final_result: String = operations.call();
+        let final_result: String = operations.call0();
+        assert_eq!(final_result, "result: 132");
+    }
+    #[test]
+    fn test_segment_with_argument() {
+        let mut operations = DynSegment::new::<(u32,)>();
+
+        operations.push_op0(|| -> u32 { 12 });
+        operations.push_op2(|x: u32, y: u32| -> u32 { x + y });
+        operations.push_op0(|| -> u32 { 100 });
+        operations.push_op0(|| -> u32 { 10 });
+        operations.push_op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z });
+        operations.push_op1(|x: u32| -> String { format!("result: {}", x.to_string()) });
+
+        let final_result: String = operations.call1(30u32);
         assert_eq!(final_result, "result: 132");
     }
 }

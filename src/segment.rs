@@ -56,12 +56,12 @@ on the stack at compile time.
 T is a cons cell that represents the stack of values.
 */
 
-pub struct Segment<Args, T: ConsCell = <Args as TupleToTypeList>::Result> {
+pub struct Segment<Args, Stack: ConsCell = <Args as TupleToTypeList>::Result> {
     segment: RawSegment,
-    _phantom: std::marker::PhantomData<(Args, T)>,
+    _phantom: std::marker::PhantomData<(Args, Stack)>,
 }
 
-impl<Args: TupleToTypeList, T: ConsCell> Segment<Args, T> {
+impl<Args: TupleToTypeList, Stack: ConsCell> Segment<Args, Stack> {
     /** Creates a new empty segment with no operations. */
     pub fn new<Bargs: TupleToTypeList>() -> Segment<Bargs, <Bargs as TupleToTypeList>::Result> {
         Segment {
@@ -71,11 +71,11 @@ impl<Args: TupleToTypeList, T: ConsCell> Segment<Args, T> {
     }
 
     /** Pushes a nullary operation that takes no arguments and returns a value of type R. */
-    pub fn push_op0<R, F>(self, op: F) -> Segment<Args, (R, T)>
+    pub fn push_op0<R, F>(self, op: F) -> Segment<Args, (R, Stack)>
     where
         F: Fn() -> R + 'static,
         R: 'static,
-        T: 'static,
+        Stack: 'static,
     {
         let mut seg = self.segment;
         seg.push_op0(op);
@@ -86,10 +86,10 @@ impl<Args: TupleToTypeList, T: ConsCell> Segment<Args, T> {
     }
 
     /** Pushes a unary operation that takes the current stack value and returns a new value. */
-    pub fn push_op1<R, F>(self, op: F) -> Segment<Args, (R, T::CDR)>
+    pub fn push_op1<R, F>(self, op: F) -> Segment<Args, (R, Stack::CDR)>
     where
-        F: Fn(T::CAR) -> R + 'static,
-        T: 'static,
+        F: Fn(Stack::CAR) -> R + 'static,
+        Stack: 'static,
         R: 'static,
     {
         let mut seg = self.segment;
@@ -100,10 +100,10 @@ impl<Args: TupleToTypeList, T: ConsCell> Segment<Args, T> {
         }
     }
 
-    pub fn push_op2<R, F>(self, op: F) -> Segment<Args, (R, <T::CDR as ConsCell>::CDR)>
+    pub fn push_op2<R, F>(self, op: F) -> Segment<Args, (R, <Stack::CDR as ConsCell>::CDR)>
     where
-        F: Fn(T::CAR, <T::CDR as ConsCell>::CAR) -> R + 'static,
-        T: 'static,
+        F: Fn(Stack::CAR, <Stack::CDR as ConsCell>::CAR) -> R + 'static,
+        Stack: 'static,
         R: 'static,
     {
         let mut seg = self.segment;
@@ -117,14 +117,14 @@ impl<Args: TupleToTypeList, T: ConsCell> Segment<Args, T> {
     /** Executes all operations in the segment and returns the final result. */
     pub(crate) unsafe fn call0<U: 'static>(self) -> U
     where
-        T: 'static,
+        Stack: 'static,
     {
         unsafe { self.segment.call0() }
     }
 
     pub(crate) unsafe fn call1<U: 'static, A>(self, args: A) -> U
     where
-        T: 'static,
+        Stack: 'static,
     {
         unsafe { self.segment.call1(args) }
     }
@@ -186,5 +186,5 @@ mod tests {
             .call((21,));
 
         assert_eq!(result, 42);
-    }   
+    }
 }
