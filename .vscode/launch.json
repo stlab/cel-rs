@@ -15,7 +15,7 @@
         },
         {
             "name": "Run Test Debugger (LLDB)",
-            "type": "lldb",
+            "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/target/debug/deps/cel_rs-1febaf6bc83c09b1",
             "args": [],

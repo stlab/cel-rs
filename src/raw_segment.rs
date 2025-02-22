@@ -1,7 +1,7 @@
 use crate::raw_sequence::RawSequence;
 use crate::raw_stack::RawStack;
-
-type Operation = fn(&RawSequence, usize, &mut RawStack) -> usize;
+use anyhow::Result;
+type Operation = fn(&RawSequence, usize, &mut RawStack) -> Result<usize>;
 
 /**
 A segment represents a sequence of operations that can be executed.
@@ -35,6 +35,20 @@ impl RawSegment {
             .push(|storage, p| unsafe { storage.drop_in_place::<T>(p) });
     }
 
+    pub fn raw0<R, F>(&mut self, op: F)
+    where
+        F: Fn(&mut RawStack) -> Result<R> + 'static,
+        R: 'static,
+    {
+        self.push_storage(op);
+        self.ops.push(|storage, p, stack| {
+            let (f, r) = unsafe { storage.next::<F>(p) };
+            let result = f(stack)?;
+            stack.push(result);
+            Ok(r)
+        });
+    }
+
     /** Pushes a nullary operation (taking no arguments) that returns a value of type R. */
     pub fn push_op0<R, F>(&mut self, op: F)
     where
@@ -45,7 +59,7 @@ impl RawSegment {
         self.ops.push(|storage, p, stack| {
             let (f, r) = unsafe { storage.next::<F>(p) };
             stack.push(f());
-            r
+            Ok(r)
         });
     }
 
@@ -61,7 +75,21 @@ impl RawSegment {
             let (f, r) = unsafe { storage.next::<F>(p) };
             let x: T = unsafe { stack.pop() };
             stack.push(f(x));
-            r
+            Ok(r)
+        });
+    }
+
+    pub fn drop1<T, F>(&mut self, op: F)
+    where
+        F: Fn(T) + 'static,
+        T: 'static,
+    {
+        self.push_storage(op);
+        self.ops.push(|storage, p, stack| {
+            let (f, r) = unsafe { storage.next::<F>(p) };
+            let x: T = unsafe { stack.pop() };
+            f(x); // drop the result
+            Ok(r)
         });
     }
 
@@ -79,7 +107,7 @@ impl RawSegment {
             let y: U = unsafe { stack.pop() };
             let x: T = unsafe { stack.pop() };
             stack.push(f(x, y));
-            r
+            Ok(r)
         });
     }
 
@@ -99,7 +127,7 @@ impl RawSegment {
             let y: U = unsafe { stack.pop() };
             let x: T = unsafe { stack.pop() };
             stack.push(f(x, y, z));
-            r
+            Ok(r)
         });
     }
 
@@ -111,19 +139,19 @@ impl RawSegment {
     popping values from the stack. The caller must ensure that the operations
     were pushed in the correct order and with matching types.
     */
-    pub unsafe fn call0<T>(&self) -> T
+    pub unsafe fn call0<T>(&self) -> Result<T>
     where
         T: 'static,
     {
         let mut stack = RawStack::new();
         let mut p = 0;
         for op in self.ops.iter() {
-            p = op(&self.storage, p, &mut stack);
+            p = op(&self.storage, p, &mut stack)?;
         }
-        stack.pop()
+        Ok(stack.pop())
     }
 
-    pub unsafe fn call1<A, T>(&self, arg: A) -> T
+    pub unsafe fn call1<A, T>(&self, arg: A) -> Result<T>
     where
         T: 'static,
     {
@@ -131,9 +159,23 @@ impl RawSegment {
         stack.push(arg);
         let mut p = 0;
         for op in self.ops.iter() {
-            p = op(&self.storage, p, &mut stack);
+            p = op(&self.storage, p, &mut stack)?;
         }
-        stack.pop()
+        Ok(stack.pop())
+    }
+
+    pub unsafe fn call2<A, B, T>(&self, arg: (A, B)) -> Result<T>
+    where
+        T: 'static,
+    {
+        let mut stack = RawStack::new();
+        stack.push(arg.0);
+        stack.push(arg.1);
+        let mut p = 0;
+        for op in self.ops.iter() {
+            p = op(&self.storage, p, &mut stack)?;
+        }
+        Ok(stack.pop())
     }
 }
 
@@ -143,7 +185,6 @@ impl Drop for RawSegment {
         for e in self.dropper.iter() {
             p = e(&mut self.storage, p);
         }
-        assert!(self.storage.len() == 0, "Storage not empty");
     }
 }
 
@@ -156,7 +197,7 @@ mod tests {
         let mut segment = RawSegment::new();
         segment.push_op0(|| 42);
         unsafe {
-            assert_eq!(segment.call0::<i32>(), 42);
+            assert_eq!(segment.call0::<i32>().unwrap(), 42);
         }
     }
 
@@ -166,7 +207,7 @@ mod tests {
         segment.push_op0(|| 42);
         segment.push_op1(|x: i32| x * 2);
         unsafe {
-            assert_eq!(segment.call0::<i32>(), 84);
+            assert_eq!(segment.call0::<i32>().unwrap(), 84);
         }
     }
 
@@ -177,7 +218,7 @@ mod tests {
         segment.push_op0(|| 5);
         segment.push_op2(|x: i32, y: i32| x + y);
         unsafe {
-            assert_eq!(segment.call0::<i32>(), 15);
+            assert_eq!(segment.call0::<i32>().unwrap(), 15);
         }
     }
 
@@ -189,7 +230,7 @@ mod tests {
         segment.push_op0(|| 4);
         segment.push_op3(|x: i32, y: i32, z: i32| x + y + z);
         unsafe {
-            assert_eq!(segment.call0::<i32>(), 9);
+            assert_eq!(segment.call0::<i32>().unwrap(), 9);
         }
     }
 
@@ -201,7 +242,7 @@ mod tests {
         segment.push_op0(|| 5);
         segment.push_op2(|x: i32, y: i32| x + y);
         unsafe {
-            assert_eq!(segment.call0::<i32>(), 25);
+            assert_eq!(segment.call0::<i32>().unwrap(), 25);
         }
     }
 }

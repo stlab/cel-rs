@@ -81,9 +81,25 @@ impl RawStack {
     */
     pub unsafe fn pop<T>(&mut self) -> T {
         let p: usize = self.buffer.len() - size_of::<T>();
-        let result = std::ptr::read(self.buffer.as_ptr().add(p) as *const T);
+        let result = std::ptr::read_unaligned(self.buffer.as_ptr().add(p) as *const T);
         self.buffer.truncate(p);
         result
+    }
+
+    /**
+    Pops a value of type `T` from the stack and drops it.
+
+    # Safety
+
+    The type `T` must be the same type as the value on the top of the stack.
+    Incorrect usage can lead to undefined behavior.
+
+    # Note
+
+    This cannot use drop_in_place because the type may not be aligned.
+    */
+    pub unsafe fn drop<T>(&mut self) {
+        self.pop::<T>();
     }
 }
 
