@@ -81,7 +81,7 @@ impl RawStack {
     */
     pub unsafe fn pop<T>(&mut self) -> T {
         let p: usize = self.buffer.len() - size_of::<T>();
-        let result = std::ptr::read_unaligned(self.buffer.as_ptr().add(p) as *const T);
+        let result = unsafe { std::ptr::read_unaligned(self.buffer.as_ptr().add(p) as *const T) };
         self.buffer.truncate(p);
         result
     }
@@ -99,7 +99,7 @@ impl RawStack {
     This cannot use drop_in_place because the type may not be aligned.
     */
     pub unsafe fn drop<T>(&mut self) {
-        self.pop::<T>();
+        unsafe { self.pop::<T>() };
     }
 }
 

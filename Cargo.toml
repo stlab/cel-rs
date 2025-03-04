@@ -1,8 +1,8 @@
 [package]
 name = "cel-rs"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
+anyhow = "1.0"
 aligned-vec = "0.6"
-anyhow = "1.0.96"

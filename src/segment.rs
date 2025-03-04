@@ -1,59 +1,59 @@
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
 use anyhow::Result;
-pub trait TupleToTypeList {
+pub trait TupleToTypeStack {
     type Result: ConsCell;
 }
 
-impl TupleToTypeList for () {
+impl TupleToTypeStack for () {
     type Result = ();
 }
 
-impl<A> TupleToTypeList for (A,) {
+impl<A> TupleToTypeStack for (A,) {
     type Result = (A, ());
 }
 
-impl<A, B> TupleToTypeList for (A, B) {
+impl<A, B> TupleToTypeStack for (A, B) {
     type Result = (B, (A, ()));
 }
 
-impl<A, B, C> TupleToTypeList for (A, B, C) {
+impl<A, B, C> TupleToTypeStack for (A, B, C) {
     type Result = (C, (B, (A, ())));
 }
 
-impl<A, B, C, D> TupleToTypeList for (A, B, C, D) {
+impl<A, B, C, D> TupleToTypeStack for (A, B, C, D) {
     type Result = (D, (C, (B, (A, ()))));
 }
 
-impl<A, B, C, D, E> TupleToTypeList for (A, B, C, D, E) {
+impl<A, B, C, D, E> TupleToTypeStack for (A, B, C, D, E) {
     type Result = (E, (D, (C, (B, (A, ())))));
 }
 
-impl<A, B, C, D, E, F> TupleToTypeList for (A, B, C, D, E, F) {
+impl<A, B, C, D, E, F> TupleToTypeStack for (A, B, C, D, E, F) {
     type Result = (F, (E, (D, (C, (B, (A, ()))))));
 }
 
-impl<A, B, C, D, E, F, G> TupleToTypeList for (A, B, C, D, E, F, G) {
+impl<A, B, C, D, E, F, G> TupleToTypeStack for (A, B, C, D, E, F, G) {
     type Result = (G, (F, (E, (D, (C, (B, (A, ())))))));
 }
 
-impl<A, B, C, D, E, F, G, H> TupleToTypeList for (A, B, C, D, E, F, G, H) {
+impl<A, B, C, D, E, F, G, H> TupleToTypeStack for (A, B, C, D, E, F, G, H) {
     type Result = (H, (G, (F, (E, (D, (C, (B, (A, ()))))))));
 }
 
-impl<A, B, C, D, E, F, G, H, I> TupleToTypeList for (A, B, C, D, E, F, G, H, I) {
+impl<A, B, C, D, E, F, G, H, I> TupleToTypeStack for (A, B, C, D, E, F, G, H, I) {
     type Result = (I, (H, (G, (F, (E, (D, (C, (B, (A, ())))))))));
 }
 
-impl<A, B, C, D, E, F, G, H, I, J> TupleToTypeList for (A, B, C, D, E, F, G, H, I, J) {
+impl<A, B, C, D, E, F, G, H, I, J> TupleToTypeStack for (A, B, C, D, E, F, G, H, I, J) {
     type Result = (J, (I, (H, (G, (F, (E, (D, (C, (B, (A, ()))))))))));
 }
 
-impl<A, B, C, D, E, F, G, H, I, J, K> TupleToTypeList for (A, B, C, D, E, F, G, H, I, J, K) {
+impl<A, B, C, D, E, F, G, H, I, J, K> TupleToTypeStack for (A, B, C, D, E, F, G, H, I, J, K) {
     type Result = (K, (J, (I, (H, (G, (F, (E, (D, (C, (B, (A, ())))))))))));
 }
 
-impl<A, B, C, D, E, F, G, H, I, J, K, L> TupleToTypeList for (A, B, C, D, E, F, G, H, I, J, K, L) {
+impl<A, B, C, D, E, F, G, H, I, J, K, L> TupleToTypeStack for (A, B, C, D, E, F, G, H, I, J, K, L) {
     type Result = (L, (K, (J, (I, (H, (G, (F, (E, (D, (C, (B, (A, ()))))))))))));
 }
 
@@ -95,12 +95,12 @@ on the stack at compile time.
 T is a cons cell that represents the stack of values.
 */
 
-pub struct Segment<Args, Stack: ConsCell = <Args as TupleToTypeList>::Result> {
+pub struct Segment<Args, Stack: ConsCell = <Args as TupleToTypeStack>::Result> {
     segment: RawSegment,
     _phantom: std::marker::PhantomData<(Args, Stack)>,
 }
 
-impl<Args: TupleToTypeList, Stack: ConsCell> Segment<Args, Stack> {
+impl<Args: TupleToTypeStack, Stack: ConsCell> Segment<Args, Stack> {
     /** Pushes a nullary operation that takes no arguments and returns a value of type R. */
     pub fn op0<R, F>(self, op: F) -> Segment<Args, (R, Stack)>
     where
@@ -192,7 +192,8 @@ impl<Args: TupleToTypeList, Stack: ConsCell> Segment<Args, Stack> {
 }
 
 /** Creates a new empty segment with no operations. */
-pub fn new_segment<Bargs: TupleToTypeList>() -> Segment<Bargs, <Bargs as TupleToTypeList>::Result> {
+pub fn new_segment<Bargs: TupleToTypeStack>() -> Segment<Bargs, <Bargs as TupleToTypeStack>::Result>
+{
     Segment {
         segment: RawSegment::new(),
         _phantom: std::marker::PhantomData,

@@ -3,31 +3,231 @@ use crate::raw_stack::RawStack;
 use anyhow::Result;
 use std::any::TypeId;
 
-pub trait TupleToDynTypeList {
+pub trait TupleToDynTypeStack {
     fn to_type_list() -> Vec<TypeId>;
 }
 
-impl TupleToDynTypeList for () {
+impl TupleToDynTypeStack for () {
     fn to_type_list() -> Vec<TypeId> {
         Vec::new()
     }
 }
 
-impl<A: 'static> TupleToDynTypeList for (A,) {
+impl<A: 'static> TupleToDynTypeStack for (A,) {
     fn to_type_list() -> Vec<TypeId> {
         vec![TypeId::of::<A>()]
     }
 }
 
-impl<A: 'static, B: 'static> TupleToDynTypeList for (A, B) {
+impl<A: 'static, B: 'static> TupleToDynTypeStack for (A, B) {
     fn to_type_list() -> Vec<TypeId> {
         vec![TypeId::of::<A>(), TypeId::of::<B>()]
     }
 }
 
-impl<A: 'static, B: 'static, C: 'static> TupleToDynTypeList for (A, B, C) {
+impl<A: 'static, B: 'static, C: 'static> TupleToDynTypeStack for (A, B, C) {
     fn to_type_list() -> Vec<TypeId> {
         vec![TypeId::of::<A>(), TypeId::of::<B>(), TypeId::of::<C>()]
+    }
+}
+impl<A: 'static, B: 'static, C: 'static, D: 'static> TupleToDynTypeStack for (A, B, C, D) {
+    fn to_type_list() -> Vec<TypeId> {
+        vec![
+            TypeId::of::<A>(),
+            TypeId::of::<B>(),
+            TypeId::of::<C>(),
+            TypeId::of::<D>(),
+        ]
+    }
+}
+
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static> TupleToDynTypeStack
+    for (A, B, C, D, E)
+{
+    fn to_type_list() -> Vec<TypeId> {
+        vec![
+            TypeId::of::<A>(),
+            TypeId::of::<B>(),
+            TypeId::of::<C>(),
+            TypeId::of::<D>(),
+            TypeId::of::<E>(),
+        ]
+    }
+}
+
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static> TupleToDynTypeStack
+    for (A, B, C, D, E, F)
+{
+    fn to_type_list() -> Vec<TypeId> {
+        vec![
+            TypeId::of::<A>(),
+            TypeId::of::<B>(),
+            TypeId::of::<C>(),
+            TypeId::of::<D>(),
+            TypeId::of::<E>(),
+            TypeId::of::<F>(),
+        ]
+    }
+}
+
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static>
+    TupleToDynTypeStack for (A, B, C, D, E, F, G)
+{
+    fn to_type_list() -> Vec<TypeId> {
+        vec![
+            TypeId::of::<A>(),
+            TypeId::of::<B>(),
+            TypeId::of::<C>(),
+            TypeId::of::<D>(),
+            TypeId::of::<E>(),
+            TypeId::of::<F>(),
+            TypeId::of::<G>(),
+        ]
+    }
+}
+
+impl<
+        A: 'static,
+        B: 'static,
+        C: 'static,
+        D: 'static,
+        E: 'static,
+        F: 'static,
+        G: 'static,
+        H: 'static,
+    > TupleToDynTypeStack for (A, B, C, D, E, F, G, H)
+{
+    fn to_type_list() -> Vec<TypeId> {
+        vec![
+            TypeId::of::<A>(),
+            TypeId::of::<B>(),
+            TypeId::of::<C>(),
+            TypeId::of::<D>(),
+            TypeId::of::<E>(),
+            TypeId::of::<F>(),
+            TypeId::of::<G>(),
+            TypeId::of::<H>(),
+        ]
+    }
+}
+
+impl<
+        A: 'static,
+        B: 'static,
+        C: 'static,
+        D: 'static,
+        E: 'static,
+        F: 'static,
+        G: 'static,
+        H: 'static,
+        I: 'static,
+    > TupleToDynTypeStack for (A, B, C, D, E, F, G, H, I)
+{
+    fn to_type_list() -> Vec<TypeId> {
+        vec![
+            TypeId::of::<A>(),
+            TypeId::of::<B>(),
+            TypeId::of::<C>(),
+            TypeId::of::<D>(),
+            TypeId::of::<E>(),
+            TypeId::of::<F>(),
+            TypeId::of::<G>(),
+            TypeId::of::<H>(),
+            TypeId::of::<I>(),
+        ]
+    }
+}
+
+impl<
+        A: 'static,
+        B: 'static,
+        C: 'static,
+        D: 'static,
+        E: 'static,
+        F: 'static,
+        G: 'static,
+        H: 'static,
+        I: 'static,
+        J: 'static,
+    > TupleToDynTypeStack for (A, B, C, D, E, F, G, H, I, J)
+{
+    fn to_type_list() -> Vec<TypeId> {
+        vec![
+            TypeId::of::<A>(),
+            TypeId::of::<B>(),
+            TypeId::of::<C>(),
+            TypeId::of::<D>(),
+            TypeId::of::<E>(),
+            TypeId::of::<F>(),
+            TypeId::of::<G>(),
+            TypeId::of::<H>(),
+            TypeId::of::<I>(),
+            TypeId::of::<J>(),
+        ]
+    }
+}
+
+impl<
+        A: 'static,
+        B: 'static,
+        C: 'static,
+        D: 'static,
+        E: 'static,
+        F: 'static,
+        G: 'static,
+        H: 'static,
+        I: 'static,
+        J: 'static,
+        K: 'static,
+    > TupleToDynTypeStack for (A, B, C, D, E, F, G, H, I, J, K)
+{
+    fn to_type_list() -> Vec<TypeId> {
+        vec![
+            TypeId::of::<A>(),
+            TypeId::of::<B>(),
+            TypeId::of::<C>(),
+            TypeId::of::<D>(),
+            TypeId::of::<E>(),
+            TypeId::of::<F>(),
+            TypeId::of::<G>(),
+            TypeId::of::<H>(),
+            TypeId::of::<I>(),
+            TypeId::of::<J>(),
+            TypeId::of::<K>(),
+        ]
+    }
+}
+
+impl<
+        A: 'static,
+        B: 'static,
+        C: 'static,
+        D: 'static,
+        E: 'static,
+        F: 'static,
+        G: 'static,
+        H: 'static,
+        I: 'static,
+        J: 'static,
+        K: 'static,
+        L: 'static,
+    > TupleToDynTypeStack for (A, B, C, D, E, F, G, H, I, J, K, L)
+{
+    fn to_type_list() -> Vec<TypeId> {
+        vec![
+            TypeId::of::<A>(),
+            TypeId::of::<B>(),
+            TypeId::of::<C>(),
+            TypeId::of::<D>(),
+            TypeId::of::<E>(),
+            TypeId::of::<F>(),
+            TypeId::of::<G>(),
+            TypeId::of::<H>(),
+            TypeId::of::<I>(),
+            TypeId::of::<J>(),
+            TypeId::of::<K>(),
+            TypeId::of::<L>(),
+        ]
     }
 }
 
@@ -55,11 +255,11 @@ impl DynSegment {
     */
 
     /** Creates a new empty segment with no operations. */
-    pub fn new<Args: TupleToDynTypeList>() -> Self {
+    pub fn new<Args: TupleToDynTypeStack>() -> Self {
         DynSegment {
             segment: RawSegment::new(),
-            argument_ids: <Args as TupleToDynTypeList>::to_type_list(),
-            stack_ids: <Args as TupleToDynTypeList>::to_type_list(),
+            argument_ids: <Args as TupleToDynTypeStack>::to_type_list(),
+            stack_ids: <Args as TupleToDynTypeStack>::to_type_list(),
             stack_unwind: Vec::new(),
         }
     }
@@ -67,17 +267,21 @@ impl DynSegment {
     /*
     Verifies and removes the expected type from the type stack.
 
-    Panics if the type being popped doesn't match the expected type or if
+    Returns an error if the type being popped doesn't match the expected type or if
     the type stack is empty.
     */
-    fn pop_type<T>(&mut self)
+    fn pop_type<T>(&mut self) -> Result<()>
     where
         T: 'static,
     {
         if self.stack_ids.pop() != Some(TypeId::of::<T>()) {
-            panic!("Type mismatch: expected {}", std::any::type_name::<T>());
+            return Err(anyhow::anyhow!(
+                "Type mismatch: expected {}",
+                std::any::type_name::<T>()
+            ));
         }
         self.stack_unwind.pop();
+        Ok(())
     }
 
     fn push_type<T>(&mut self)
@@ -128,15 +332,16 @@ impl DynSegment {
     Verifies that the top of the type stack matches the expected input type T
     before adding the operation.
     */
-    pub fn op1<T, R, F>(&mut self, op: F)
+    pub fn op1<T, R, F>(&mut self, op: F) -> Result<()>
     where
         F: Fn(T) -> R + 'static,
         T: 'static,
         R: 'static,
     {
-        self.pop_type::<T>();
+        self.pop_type::<T>()?;
         self.segment.push_op1(op);
         self.push_type::<R>();
+        Ok(())
     }
 
     /**
@@ -145,17 +350,18 @@ impl DynSegment {
     Verifies that the top two types on the type stack match the expected input types U and T
     (in that order) before adding the operation.
     */
-    pub fn op2<T, U, R, F>(&mut self, op: F)
+    pub fn op2<T, U, R, F>(&mut self, op: F) -> Result<()>
     where
         F: Fn(T, U) -> R + 'static,
         T: 'static,
         U: 'static,
         R: 'static,
     {
-        self.pop_type::<U>();
-        self.pop_type::<T>();
+        self.pop_type::<U>()?;
+        self.pop_type::<T>()?;
         self.segment.push_op2(op);
         self.push_type::<R>();
+        Ok(())
     }
 
     /**
@@ -164,7 +370,7 @@ impl DynSegment {
     Verifies that the top three types on the type stack match the expected input types V, U, and T
     (in that order) before adding the operation.
     */
-    pub fn op3<T, U, V, R, F>(&mut self, op: F)
+    pub fn op3<T, U, V, R, F>(&mut self, op: F) -> Result<()>
     where
         F: Fn(T, U, V) -> R + 'static,
         T: 'static,
@@ -172,56 +378,79 @@ impl DynSegment {
         V: 'static,
         R: 'static,
     {
-        self.pop_type::<V>();
-        self.pop_type::<U>();
-        self.pop_type::<T>();
+        self.pop_type::<V>()?;
+        self.pop_type::<U>()?;
+        self.pop_type::<T>()?;
         self.segment.push_op3(op);
         self.push_type::<R>();
+        Ok(())
     }
 
     /**
     Executes all operations in the segment and returns the final result.
 
-    Verifies that the final type on the stack matches the expected return type T
-    and that no other values remain on the stack.
-
-    Panics if the type stack is empty, the final type doesn't match T, or if
-    there are remaining values on the stack after getting the result.
+    # Returns
+    - `Ok(R)` if execution succeeds and the final value is of type R
+    - `Err` if:
+      - There are unexpected arguments (expected none)
+      - The final type doesn't match R
+      - There are remaining values on the stack after getting the result
     */
     pub fn call0<R>(&mut self) -> Result<R>
     where
         R: 'static,
     {
-        assert!(
-            self.argument_ids.len() == 0,
-            "Expected {} argument(s)",
-            self.argument_ids.len()
-        );
-        self.pop_type::<R>();
-        assert!(
-            self.stack_ids.len() == 0,
-            "Value(s) left on execution stack"
-        );
+        if self.argument_ids.len() != 0 {
+            return Err(anyhow::anyhow!(
+                "Expected no arguments, but segment requires {} argument(s)",
+                self.argument_ids.len()
+            ));
+        }
+        self.pop_type::<R>()?;
+        if self.stack_ids.len() != 0 {
+            return Err(anyhow::anyhow!(
+                "{} value(s) left on execution stack",
+                self.stack_ids.len()
+            ));
+        }
         unsafe { self.segment.call0() }
     }
 
+    /**
+    Executes all operations in the segment with one argument and returns the final result.
+
+    # Returns
+    - `Ok(R)` if execution succeeds and the final value is of type R
+    - `Err` if:
+      - The number of arguments doesn't match (expected one)
+      - The argument type doesn't match the expected type
+      - The final type doesn't match R
+      - There are remaining values on the stack after getting the result
+    */
     pub fn call1<A, R>(&mut self, arg: A) -> Result<R>
     where
         A: 'static,
         R: 'static,
     {
-        assert!(
-            self.argument_ids.len() == 1,
-            "Expected {} argument(s)",
-            self.argument_ids.len()
-        );
-        assert!(
-            self.argument_ids[0] == TypeId::of::<A>(),
-            "Argument type mismatch"
-        );
-        self.pop_type::<R>();
+        if self.argument_ids.len() != 1 {
+            return Err(anyhow::anyhow!(
+                "Expected 1 argument, but segment requires {} argument(s)",
+                self.argument_ids.len()
+            ));
+        }
+        if self.argument_ids[0] != TypeId::of::<A>() {
+            return Err(anyhow::anyhow!(
+                "Argument type mismatch: expected {}, got {}",
+                std::any::type_name::<A>(),
+                std::any::type_name::<A>() // TODO: Need to store type names along with TypeId
+            ));
+        }
+        self.pop_type::<R>()?;
         if self.stack_ids.len() != 0 {
-            panic!("Value(s) left on execution stack");
+            return Err(anyhow::anyhow!(
+                "{} value(s) left on execution stack",
+                self.stack_ids.len()
+            ));
         }
         unsafe { self.segment.call1(arg) }
     }
@@ -248,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn test_drop_on_error() {
+    fn test_drop_on_error() -> Result<(), anyhow::Error> {
         let mut segment = DynSegment::new::<()>();
 
         let drop_count = Arc::new(AtomicUsize::new(0));
@@ -256,41 +485,48 @@ mod tests {
 
         segment.op0(move || tracker.clone());
         segment.op0r(|| -> Result<u32> { Err(anyhow::anyhow!("error")) });
-        segment.op2(|_: DropCounter, _: u32| 42u32);
+        segment.op2(|_: DropCounter, _: u32| 42u32)?;
 
         assert_eq!(drop_count.load(Ordering::SeqCst), 0); // Nothing dropped yet
         let result = segment.call0::<u32>();
         assert!(matches!(result, Err(e) if e.to_string() == "error"));
         assert_eq!(drop_count.load(Ordering::SeqCst), 1); // The DropCounter from op0 was dropped
+
+        Ok(())
     }
 
     #[test]
-    fn test_segment_operations() {
+    fn test_segment_operations() -> Result<(), anyhow::Error> {
         let mut operations = DynSegment::new::<()>();
 
         operations.op0(|| -> u32 { 30 });
         operations.op0(|| -> u32 { 12 });
-        operations.op2(|x: u32, y: u32| -> u32 { x + y });
+        operations.op2(|x: u32, y: u32| -> u32 { x + y })?;
         operations.op0(|| -> u32 { 100 });
         operations.op0(|| -> u32 { 10 });
-        operations.op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z });
-        operations.op1(|x: u32| -> String { format!("result: {}", x.to_string()) });
+        operations.op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z })?;
+        operations.op1(|x: u32| -> String { format!("result: {}", x.to_string()) })?;
 
-        let final_result: String = operations.call0().unwrap();
+        let final_result: String = operations.call0()?;
         assert_eq!(final_result, "result: 132");
+
+        Ok(())
     }
+
     #[test]
-    fn test_segment_with_argument() {
+    fn test_segment_with_argument() -> Result<(), anyhow::Error> {
         let mut operations = DynSegment::new::<(u32,)>();
 
         operations.op0(|| -> u32 { 12 });
-        operations.op2(|x: u32, y: u32| -> u32 { x + y });
+        operations.op2(|x: u32, y: u32| -> u32 { x + y })?;
         operations.op0(|| -> u32 { 100 });
         operations.op0(|| -> u32 { 10 });
-        operations.op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z });
-        operations.op1(|x: u32| -> String { format!("result: {}", x.to_string()) });
+        operations.op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z })?;
+        operations.op1(|x: u32| -> String { format!("result: {}", x.to_string()) })?;
 
-        let final_result: String = operations.call1(30u32).unwrap();
+        let final_result: String = operations.call1(30u32)?;
         assert_eq!(final_result, "result: 132");
+
+        Ok(())
     }
 }

@@ -148,7 +148,7 @@ impl RawSegment {
         for op in self.ops.iter() {
             p = op(&self.storage, p, &mut stack)?;
         }
-        Ok(stack.pop())
+        Ok(unsafe { stack.pop() })
     }
 
     pub unsafe fn call1<A, T>(&self, arg: A) -> Result<T>
@@ -161,7 +161,7 @@ impl RawSegment {
         for op in self.ops.iter() {
             p = op(&self.storage, p, &mut stack)?;
         }
-        Ok(stack.pop())
+        Ok(unsafe { stack.pop() })
     }
 
     pub unsafe fn call2<A, B, T>(&self, arg: (A, B)) -> Result<T>
@@ -175,7 +175,7 @@ impl RawSegment {
         for op in self.ops.iter() {
             p = op(&self.storage, p, &mut stack)?;
         }
-        Ok(stack.pop())
+        Ok(unsafe { stack.pop() })
     }
 }
 
