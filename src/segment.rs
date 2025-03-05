@@ -1,7 +1,9 @@
+use crate::dyn_segment::DynSegment;
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
 use crate::type_list::{IntoList, List, Reverse};
 use anyhow::Result;
+use std::any::TypeId;
 
 pub struct DropTopFn(fn(&mut RawStack) -> Option<DropTopFn>);
 
@@ -43,12 +45,51 @@ where
     type Result = <Args::Result as Reverse>::Result;
 }
 
+pub trait EqListTypeIDList: List {
+    fn equal(ids: &[TypeId]) -> bool;
+}
+
+impl EqListTypeIDList for () {
+    fn equal(_ids: &[TypeId]) -> bool {
+        true
+    }
+}
+
+impl<H1: 'static, T1: EqListTypeIDList + 'static> EqListTypeIDList for (H1, T1) {
+    fn equal(ids: &[TypeId]) -> bool {
+        ids[0] == TypeId::of::<H1>() && T1::equal(&ids[1..])
+    }
+}
+
 pub struct Segment<Args: IntoReverseList, Stack: List = <Args as IntoReverseList>::Result> {
     segment: RawSegment,
     _phantom: std::marker::PhantomData<(Args, Stack)>,
 }
 
 impl<Args: IntoReverseList, Stack: DropTop> Segment<Args, Stack> {
+    pub fn from_dyn_segment(segment: DynSegment) -> Result<Self>
+    where
+        <Args as IntoReverseList>::Result: EqListTypeIDList,
+        Stack: EqListTypeIDList,
+    {
+        type ArgList<Args> = <Args as IntoReverseList>::Result;
+
+        if ArgList::<Args>::LENGTH != segment.argument_ids.len()
+            || !<ArgList<Args> as EqListTypeIDList>::equal(&segment.argument_ids)
+        {
+            return Err(anyhow::anyhow!("argument type ids do not match"));
+        }
+        if Stack::LENGTH != segment.stack_ids.len()
+            || !<Stack as EqListTypeIDList>::equal(&segment.stack_ids)
+        {
+            return Err(anyhow::anyhow!("stack type ids do not match"));
+        }
+        Ok(Segment {
+            segment: segment.segment,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
     /** Pushes a nullary operation that takes no arguments and returns a value of type R. */
     pub fn op0<R, F>(self, op: F) -> Segment<Args, (R, Stack)>
     where
@@ -153,22 +194,31 @@ trait Callable<Args> {
     fn call(&self, args: Args) -> Self::Output;
 }
 
-impl<T: 'static> Callable<()> for Segment<(), (T, ())> {
-    type Output = Result<T>;
+impl<T: DropTop + 'static> Callable<()> for Segment<(), T>
+where
+    T::Tail: List<Tail = ()>,
+{
+    type Output = Result<T::Head>;
     fn call(&self, _args: ()) -> Self::Output {
         self.call0()
     }
 }
 
-impl<T: 'static, A> Callable<(A,)> for Segment<(A,), (T, ())> {
-    type Output = Result<T>;
+impl<T: DropTop + 'static, A> Callable<(A,)> for Segment<(A,), T>
+where
+    T::Tail: List<Tail = ()>,
+{
+    type Output = Result<T::Head>;
     fn call(&self, args: (A,)) -> Self::Output {
         self.call1(args)
     }
 }
 
-impl<T: 'static, A, B> Callable<(A, B)> for Segment<(A, B), (T, ())> {
-    type Output = Result<T>;
+impl<T: DropTop + 'static, A, B> Callable<(A, B)> for Segment<(A, B), T>
+where
+    T::Tail: List<Tail = ()>,
+{
+    type Output = Result<T::Head>;
     fn call(&self, args: (A, B)) -> Self::Output {
         self.call2(args)
     }
@@ -177,9 +227,29 @@ impl<T: 'static, A, B> Callable<(A, B)> for Segment<(A, B), (T, ())> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn test_segment_from_dyn_segment() -> Result<()> {
+        let mut dyn_segment = DynSegment::new::<(i32,)>();
+        dyn_segment.op0(|| 42);
+        dyn_segment.op2(|x: i32, y: i32| x + y)?;
+        let segment = Segment::<(i32,), (i32, ())>::from_dyn_segment(dyn_segment)?;
+
+        assert_eq!(segment.call((10,)).unwrap(), 52);
+        Ok(())
+    }
+
+    #[test]
+    fn test_unit_result() {
+        let segment = new_segment::<()>();
+        let result = segment.call(());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), ());
+    }
 
     #[test]
     fn test_drop_on_error() {

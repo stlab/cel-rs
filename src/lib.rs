@@ -1,9 +1,12 @@
 /*!
-A library for type-safe stack-based operations.
+cel-rs provides a Forth-like runtime for developing domain specific languages. A program is composed of segments, where each segment is a sequence of operations.
 
-This library provides a type-safe way to work with stack-based operations,
-allowing you to build and execute sequences of operations while maintaining
-type safety at compile time.
+Segments can be created in two ways.
+
+1. Using the `DynSegment` struct which validates the type safety of the operations at runtime as the segment is built.
+2. Using the `Segment` struct, which validates the type safety of the operations at compile time.
+
+The two types of segments can be converted to each other [not yet implemented].
 
 # Examples
 
@@ -14,15 +17,9 @@ use cel_rs::type_list::{List, IntoList};
 let list = (1, "hello", 3.14).into_list();
 ```
 */
-mod dyn_segment;
-mod raw_segment;
-mod raw_sequence;
-mod raw_stack;
-mod segment;
+pub mod dyn_segment;
+pub mod raw_segment;
+pub mod raw_sequence;
+pub mod raw_stack;
+pub mod segment;
 pub mod type_list;
-
-pub use dyn_segment::DynSegment;
-pub use raw_segment::RawSegment;
-pub use raw_sequence::RawSequence;
-pub use raw_stack::RawStack;
-pub use segment::Segment;

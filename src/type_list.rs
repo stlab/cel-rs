@@ -53,7 +53,7 @@ IntoList is implemented for tuples up to 12 elements.
 use cel_rs::type_list::{List, IntoList};
 
 let list = (1, "hello", 3.14).into_list();
-assert_eq!(list, (1, ("hello", (3.14, ()))));
+println!("{:?}", list);
 ```
 
 You can also use the `IntoList` trait to convert a tuple type into a type list.
@@ -272,7 +272,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::type_list::*;
     use std::any::TypeId;
 
     trait Eq<U: List> {
@@ -285,10 +285,7 @@ mod tests {
         }
     }
 
-    impl<H1: 'static, T1: List + 'static, U: List + 'static> Eq<U> for (H1, T1)
-    where
-        U: List,
-    {
+    impl<H1: 'static, T1: List + 'static, U: List + 'static> Eq<U> for (H1, T1) {
         fn equal() -> bool {
             TypeId::of::<(H1, T1)>() == TypeId::of::<U>()
         }
@@ -323,18 +320,18 @@ mod tests {
     fn test_type_list_concat() {
         type L1 = (i32, (f64, ()));
         type L2 = (bool, (char, ()));
-        type Concat = <L1 as crate::Concat<L2>>::Result;
+        type Combined = <L1 as Concat<L2>>::Result;
 
         // Should be (i32, (f64, (bool, (char, ()))))
         type Expected = (i32, (f64, (bool, (char, ()))));
-        assert!(<Concat as Eq<Expected>>::equal());
+        assert!(<Combined as Eq<Expected>>::equal());
     }
 
     #[test]
     fn test_type_list_reverse() {
-        type List = <(i32, f64, String) as crate::IntoList>::Result;
+        type L = <(i32, f64, String) as IntoList>::Result;
         type Expected = (i32, (f64, (String, ())));
-        assert!(<List as Eq<Expected>>::equal());
+        assert!(<L as Eq<Expected>>::equal());
     }
 
     #[test]

@@ -32,10 +32,10 @@ that could occur when using RawSegment directly.
 */
 type Dropper = fn(&mut RawStack);
 pub struct DynSegment {
-    segment: RawSegment,
-    argument_ids: Vec<TypeId>,
+    pub(crate) segment: RawSegment,
+    pub(crate) argument_ids: Vec<TypeId>,
     // Invariant: stack_ids.len() == stack_unwind.len(), consider making this a vector of tuples
-    stack_ids: Vec<TypeId>,
+    pub(crate) stack_ids: Vec<TypeId>,
     stack_unwind: Vec<Dropper>,
 }
 pub trait IntoReverseTypeIDList {
