@@ -1,90 +1,27 @@
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
+use crate::type_list::{IntoList, List, Reverse};
 use anyhow::Result;
-pub trait TupleToTypeStack {
-    type Result: ConsCell;
+
+pub struct DropTopFn(fn(&mut RawStack) -> Option<DropTopFn>);
+
+pub trait DropTop: List {
+    fn drop_top(stack: &mut RawStack) -> Option<DropTopFn>;
 }
 
-impl TupleToTypeStack for () {
-    type Result = ();
-}
-
-impl<A> TupleToTypeStack for (A,) {
-    type Result = (A, ());
-}
-
-impl<A, B> TupleToTypeStack for (A, B) {
-    type Result = (B, (A, ()));
-}
-
-impl<A, B, C> TupleToTypeStack for (A, B, C) {
-    type Result = (C, (B, (A, ())));
-}
-
-impl<A, B, C, D> TupleToTypeStack for (A, B, C, D) {
-    type Result = (D, (C, (B, (A, ()))));
-}
-
-impl<A, B, C, D, E> TupleToTypeStack for (A, B, C, D, E) {
-    type Result = (E, (D, (C, (B, (A, ())))));
-}
-
-impl<A, B, C, D, E, F> TupleToTypeStack for (A, B, C, D, E, F) {
-    type Result = (F, (E, (D, (C, (B, (A, ()))))));
-}
-
-impl<A, B, C, D, E, F, G> TupleToTypeStack for (A, B, C, D, E, F, G) {
-    type Result = (G, (F, (E, (D, (C, (B, (A, ())))))));
-}
-
-impl<A, B, C, D, E, F, G, H> TupleToTypeStack for (A, B, C, D, E, F, G, H) {
-    type Result = (H, (G, (F, (E, (D, (C, (B, (A, ()))))))));
-}
-
-impl<A, B, C, D, E, F, G, H, I> TupleToTypeStack for (A, B, C, D, E, F, G, H, I) {
-    type Result = (I, (H, (G, (F, (E, (D, (C, (B, (A, ())))))))));
-}
-
-impl<A, B, C, D, E, F, G, H, I, J> TupleToTypeStack for (A, B, C, D, E, F, G, H, I, J) {
-    type Result = (J, (I, (H, (G, (F, (E, (D, (C, (B, (A, ()))))))))));
-}
-
-impl<A, B, C, D, E, F, G, H, I, J, K> TupleToTypeStack for (A, B, C, D, E, F, G, H, I, J, K) {
-    type Result = (K, (J, (I, (H, (G, (F, (E, (D, (C, (B, (A, ())))))))))));
-}
-
-impl<A, B, C, D, E, F, G, H, I, J, K, L> TupleToTypeStack for (A, B, C, D, E, F, G, H, I, J, K, L) {
-    type Result = (L, (K, (J, (I, (H, (G, (F, (E, (D, (C, (B, (A, ()))))))))))));
-}
-
-pub struct DropFn(fn(&mut RawStack) -> Option<DropFn>);
-pub trait ConsCell {
-    type CAR;
-    type CDR: ConsCell;
-
-    fn drop_head(stack: &mut RawStack) -> Option<DropFn>;
-}
-
-impl ConsCell for () {
-    type CAR = ();
-    type CDR = ();
-    fn drop_head(_: &mut RawStack) -> Option<DropFn> {
+impl DropTop for () {
+    fn drop_top(_: &mut RawStack) -> Option<DropTopFn> {
         None
     }
-    // fn len() -> usize {
-    //    0
-    // }
 }
 
-impl<T, U> ConsCell for (T, U)
+impl<T, U> DropTop for (T, U)
 where
-    U: ConsCell,
+    U: DropTop,
 {
-    type CAR = T;
-    type CDR = U;
-    fn drop_head(stack: &mut RawStack) -> Option<DropFn> {
+    fn drop_top(stack: &mut RawStack) -> Option<DropTopFn> {
         unsafe { stack.drop::<T>() };
-        Some(DropFn(U::drop_head))
+        Some(DropTopFn(U::drop_top))
     }
 }
 
@@ -95,12 +32,23 @@ on the stack at compile time.
 T is a cons cell that represents the stack of values.
 */
 
-pub struct Segment<Args, Stack: ConsCell = <Args as TupleToTypeStack>::Result> {
+pub trait IntoReverseList {
+    type Result: List;
+}
+
+impl<Args: IntoList> IntoReverseList for Args
+where
+    Args::Result: Reverse,
+{
+    type Result = <Args::Result as Reverse>::Result;
+}
+
+pub struct Segment<Args: IntoReverseList, Stack: List = <Args as IntoReverseList>::Result> {
     segment: RawSegment,
     _phantom: std::marker::PhantomData<(Args, Stack)>,
 }
 
-impl<Args: TupleToTypeStack, Stack: ConsCell> Segment<Args, Stack> {
+impl<Args: IntoReverseList, Stack: DropTop> Segment<Args, Stack> {
     /** Pushes a nullary operation that takes no arguments and returns a value of type R. */
     pub fn op0<R, F>(self, op: F) -> Segment<Args, (R, Stack)>
     where
@@ -126,7 +74,7 @@ impl<Args: TupleToTypeStack, Stack: ConsCell> Segment<Args, Stack> {
         seg.raw0(move |stack| match op() {
             Ok(r) => Ok(r),
             Err(e) => {
-                let mut dropper = Stack::drop_head(stack);
+                let mut dropper = Stack::drop_top(stack);
                 while let Some(e) = dropper {
                     dropper = e.0(stack);
                 }
@@ -140,9 +88,9 @@ impl<Args: TupleToTypeStack, Stack: ConsCell> Segment<Args, Stack> {
     }
 
     /** Pushes a unary operation that takes the current stack value and returns a new value. */
-    pub fn op1<R, F>(self, op: F) -> Segment<Args, (R, Stack::CDR)>
+    pub fn op1<R, F>(self, op: F) -> Segment<Args, (R, Stack::Tail)>
     where
-        F: Fn(Stack::CAR) -> R + 'static,
+        F: Fn(Stack::Head) -> R + 'static,
         Stack: 'static,
         R: 'static,
     {
@@ -154,9 +102,9 @@ impl<Args: TupleToTypeStack, Stack: ConsCell> Segment<Args, Stack> {
         }
     }
 
-    pub fn op2<R, F>(self, op: F) -> Segment<Args, (R, <Stack::CDR as ConsCell>::CDR)>
+    pub fn op2<R, F>(self, op: F) -> Segment<Args, (R, <Stack::Tail as List>::Tail)>
     where
-        F: Fn(<Stack::CDR as ConsCell>::CAR, Stack::CAR) -> R + 'static,
+        F: Fn(<Stack::Tail as List>::Head, Stack::Head) -> R + 'static,
         Stack: 'static,
         R: 'static,
     {
@@ -192,8 +140,7 @@ impl<Args: TupleToTypeStack, Stack: ConsCell> Segment<Args, Stack> {
 }
 
 /** Creates a new empty segment with no operations. */
-pub fn new_segment<Bargs: TupleToTypeStack>() -> Segment<Bargs, <Bargs as TupleToTypeStack>::Result>
-{
+pub fn new_segment<Args: IntoReverseList>() -> Segment<Args> {
     Segment {
         segment: RawSegment::new(),
         _phantom: std::marker::PhantomData,
@@ -230,9 +177,9 @@ impl<T: 'static, A, B> Callable<(A, B)> for Segment<(A, B), (T, ())> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
-    use std::sync::Arc;
 
     #[test]
     fn test_drop_on_error() {

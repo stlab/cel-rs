@@ -1,233 +1,24 @@
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
+use crate::type_list::{IntoList, List, Reverse};
 use anyhow::Result;
 use std::any::TypeId;
 
-pub trait TupleToDynTypeStack {
-    fn to_type_list() -> Vec<TypeId>;
+pub trait ToTypeIDList: List {
+    fn to_type_id_list() -> Vec<TypeId>;
 }
 
-impl TupleToDynTypeStack for () {
-    fn to_type_list() -> Vec<TypeId> {
+impl ToTypeIDList for () {
+    fn to_type_id_list() -> Vec<TypeId> {
         Vec::new()
     }
 }
 
-impl<A: 'static> TupleToDynTypeStack for (A,) {
-    fn to_type_list() -> Vec<TypeId> {
-        vec![TypeId::of::<A>()]
-    }
-}
-
-impl<A: 'static, B: 'static> TupleToDynTypeStack for (A, B) {
-    fn to_type_list() -> Vec<TypeId> {
-        vec![TypeId::of::<A>(), TypeId::of::<B>()]
-    }
-}
-
-impl<A: 'static, B: 'static, C: 'static> TupleToDynTypeStack for (A, B, C) {
-    fn to_type_list() -> Vec<TypeId> {
-        vec![TypeId::of::<A>(), TypeId::of::<B>(), TypeId::of::<C>()]
-    }
-}
-impl<A: 'static, B: 'static, C: 'static, D: 'static> TupleToDynTypeStack for (A, B, C, D) {
-    fn to_type_list() -> Vec<TypeId> {
-        vec![
-            TypeId::of::<A>(),
-            TypeId::of::<B>(),
-            TypeId::of::<C>(),
-            TypeId::of::<D>(),
-        ]
-    }
-}
-
-impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static> TupleToDynTypeStack
-    for (A, B, C, D, E)
-{
-    fn to_type_list() -> Vec<TypeId> {
-        vec![
-            TypeId::of::<A>(),
-            TypeId::of::<B>(),
-            TypeId::of::<C>(),
-            TypeId::of::<D>(),
-            TypeId::of::<E>(),
-        ]
-    }
-}
-
-impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static> TupleToDynTypeStack
-    for (A, B, C, D, E, F)
-{
-    fn to_type_list() -> Vec<TypeId> {
-        vec![
-            TypeId::of::<A>(),
-            TypeId::of::<B>(),
-            TypeId::of::<C>(),
-            TypeId::of::<D>(),
-            TypeId::of::<E>(),
-            TypeId::of::<F>(),
-        ]
-    }
-}
-
-impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static>
-    TupleToDynTypeStack for (A, B, C, D, E, F, G)
-{
-    fn to_type_list() -> Vec<TypeId> {
-        vec![
-            TypeId::of::<A>(),
-            TypeId::of::<B>(),
-            TypeId::of::<C>(),
-            TypeId::of::<D>(),
-            TypeId::of::<E>(),
-            TypeId::of::<F>(),
-            TypeId::of::<G>(),
-        ]
-    }
-}
-
-impl<
-        A: 'static,
-        B: 'static,
-        C: 'static,
-        D: 'static,
-        E: 'static,
-        F: 'static,
-        G: 'static,
-        H: 'static,
-    > TupleToDynTypeStack for (A, B, C, D, E, F, G, H)
-{
-    fn to_type_list() -> Vec<TypeId> {
-        vec![
-            TypeId::of::<A>(),
-            TypeId::of::<B>(),
-            TypeId::of::<C>(),
-            TypeId::of::<D>(),
-            TypeId::of::<E>(),
-            TypeId::of::<F>(),
-            TypeId::of::<G>(),
-            TypeId::of::<H>(),
-        ]
-    }
-}
-
-impl<
-        A: 'static,
-        B: 'static,
-        C: 'static,
-        D: 'static,
-        E: 'static,
-        F: 'static,
-        G: 'static,
-        H: 'static,
-        I: 'static,
-    > TupleToDynTypeStack for (A, B, C, D, E, F, G, H, I)
-{
-    fn to_type_list() -> Vec<TypeId> {
-        vec![
-            TypeId::of::<A>(),
-            TypeId::of::<B>(),
-            TypeId::of::<C>(),
-            TypeId::of::<D>(),
-            TypeId::of::<E>(),
-            TypeId::of::<F>(),
-            TypeId::of::<G>(),
-            TypeId::of::<H>(),
-            TypeId::of::<I>(),
-        ]
-    }
-}
-
-impl<
-        A: 'static,
-        B: 'static,
-        C: 'static,
-        D: 'static,
-        E: 'static,
-        F: 'static,
-        G: 'static,
-        H: 'static,
-        I: 'static,
-        J: 'static,
-    > TupleToDynTypeStack for (A, B, C, D, E, F, G, H, I, J)
-{
-    fn to_type_list() -> Vec<TypeId> {
-        vec![
-            TypeId::of::<A>(),
-            TypeId::of::<B>(),
-            TypeId::of::<C>(),
-            TypeId::of::<D>(),
-            TypeId::of::<E>(),
-            TypeId::of::<F>(),
-            TypeId::of::<G>(),
-            TypeId::of::<H>(),
-            TypeId::of::<I>(),
-            TypeId::of::<J>(),
-        ]
-    }
-}
-
-impl<
-        A: 'static,
-        B: 'static,
-        C: 'static,
-        D: 'static,
-        E: 'static,
-        F: 'static,
-        G: 'static,
-        H: 'static,
-        I: 'static,
-        J: 'static,
-        K: 'static,
-    > TupleToDynTypeStack for (A, B, C, D, E, F, G, H, I, J, K)
-{
-    fn to_type_list() -> Vec<TypeId> {
-        vec![
-            TypeId::of::<A>(),
-            TypeId::of::<B>(),
-            TypeId::of::<C>(),
-            TypeId::of::<D>(),
-            TypeId::of::<E>(),
-            TypeId::of::<F>(),
-            TypeId::of::<G>(),
-            TypeId::of::<H>(),
-            TypeId::of::<I>(),
-            TypeId::of::<J>(),
-            TypeId::of::<K>(),
-        ]
-    }
-}
-
-impl<
-        A: 'static,
-        B: 'static,
-        C: 'static,
-        D: 'static,
-        E: 'static,
-        F: 'static,
-        G: 'static,
-        H: 'static,
-        I: 'static,
-        J: 'static,
-        K: 'static,
-        L: 'static,
-    > TupleToDynTypeStack for (A, B, C, D, E, F, G, H, I, J, K, L)
-{
-    fn to_type_list() -> Vec<TypeId> {
-        vec![
-            TypeId::of::<A>(),
-            TypeId::of::<B>(),
-            TypeId::of::<C>(),
-            TypeId::of::<D>(),
-            TypeId::of::<E>(),
-            TypeId::of::<F>(),
-            TypeId::of::<G>(),
-            TypeId::of::<H>(),
-            TypeId::of::<I>(),
-            TypeId::of::<J>(),
-            TypeId::of::<K>(),
-            TypeId::of::<L>(),
-        ]
+impl<T: 'static, U: ToTypeIDList> ToTypeIDList for (T, U) {
+    fn to_type_id_list() -> Vec<TypeId> {
+        let mut list = U::to_type_id_list();
+        list.push(TypeId::of::<T>());
+        list
     }
 }
 
@@ -247,6 +38,19 @@ pub struct DynSegment {
     stack_ids: Vec<TypeId>,
     stack_unwind: Vec<Dropper>,
 }
+pub trait IntoReverseTypeIDList {
+    fn to_type_id_list() -> Vec<TypeId>;
+}
+
+impl<Args: IntoList> IntoReverseTypeIDList for Args
+where
+    Args::Result: Reverse,
+    <Args::Result as Reverse>::Result: ToTypeIDList,
+{
+    fn to_type_id_list() -> Vec<TypeId> {
+        <<Args::Result as Reverse>::Result as ToTypeIDList>::to_type_id_list()
+    }
+}
 
 impl DynSegment {
     /*
@@ -255,11 +59,11 @@ impl DynSegment {
     */
 
     /** Creates a new empty segment with no operations. */
-    pub fn new<Args: TupleToDynTypeStack>() -> Self {
+    pub fn new<Args: IntoReverseTypeIDList>() -> Self {
         DynSegment {
             segment: RawSegment::new(),
-            argument_ids: <Args as TupleToDynTypeStack>::to_type_list(),
-            stack_ids: <Args as TupleToDynTypeStack>::to_type_list(),
+            argument_ids: Args::to_type_id_list(),
+            stack_ids: Args::to_type_id_list(),
             stack_unwind: Vec::new(),
         }
     }
@@ -459,8 +263,8 @@ impl DynSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct DropCounter(Arc<AtomicUsize>);
 

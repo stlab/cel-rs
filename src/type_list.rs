@@ -1,28 +1,20 @@
-use std::usize;
-
-/**
-This module provides type-level list operations using nested tuples.
+/*!
+This module provides type list operations using nested tuples.
 
 # Examples
 
 Here's an example of creating a constrained list that requires all elements to be printable:
 
 ```rust
-use cel_rs::{List, IntoList};
+use cel_rs::type_list::{List, IntoList};
 
 // Define a trait for lists with printable elements
 pub trait PrintableList: List {
-    type Head;
-    type Tail: PrintableList;
-
     fn print(self, i: usize) -> usize;
 }
 
 // Base case: empty list
 impl PrintableList for () {
-    type Head = ();
-    type Tail = ();
-
     fn print(self, i: usize) -> usize {
         i
     }
@@ -30,9 +22,6 @@ impl PrintableList for () {
 
 // Recursive case: head must implement Display
 impl<H: std::fmt::Display, T: PrintableList> PrintableList for (H, T) {
-    type Head = H;
-    type Tail = T;
-
     fn print(self, i: usize) -> usize {
         println!("{}", self.0);
         self.1.print(i + 1)
@@ -53,7 +42,28 @@ a specific trait (in this case `Display`). The trait provides a recursive operat
 that processes each element in the list.
 */
 
-// IntoList is now sealed and cannot be implemented outside this module
+/**
+Converts a tuple into a type list.
+
+IntoList is implemented for tuples up to 12 elements.
+
+# Examples
+
+```rust
+use cel_rs::type_list::{List, IntoList};
+
+let list = (1, "hello", 3.14).into_list();
+assert_eq!(list, (1, ("hello", (3.14, ()))));
+```
+
+You can also use the `IntoList` trait to convert a tuple type into a type list.
+
+```rust
+# use cel_rs::type_list::{List, IntoList};
+type ListType = <(i32, f64, bool) as IntoList>::Result;
+let list: ListType = (1, (2.0, (true, ())));
+```
+*/
 pub trait IntoList {
     type Result: List;
 
@@ -116,119 +126,68 @@ impl<A, B, C, D, E, F> IntoList for (A, B, C, D, E, F) {
     }
 }
 
+#[rustfmt::skip]
 impl<A, B, C, D, E, F, G> IntoList for (A, B, C, D, E, F, G) {
     type Result = (A, (B, (C, (D, (E, (F, (G, ())))))));
 
     fn into_list(self) -> Self::Result {
-        (
-            self.0,
-            (self.1, (self.2, (self.3, (self.4, (self.5, (self.6, ())))))),
-        )
+        (self.0, (self.1, (self.2, (self.3, (self.4, (self.5, (self.6, ())))))))
     }
 }
 
+#[rustfmt::skip]
 impl<A, B, C, D, E, F, G, H> IntoList for (A, B, C, D, E, F, G, H) {
     type Result = (A, (B, (C, (D, (E, (F, (G, (H, ()))))))));
 
     fn into_list(self) -> Self::Result {
-        (
-            self.0,
-            (
-                self.1,
-                (self.2, (self.3, (self.4, (self.5, (self.6, (self.7, ())))))),
-            ),
-        )
+        ( self.0, ( self.1, ( self.2, ( self.3, ( self.4, ( self.5, ( self.6,
+            ( self.7, ()))))))))
     }
 }
+
+#[rustfmt::skip]
 impl<A, B, C, D, E, F, G, H, I> IntoList for (A, B, C, D, E, F, G, H, I) {
     type Result = (A, (B, (C, (D, (E, (F, (G, (H, (I, ())))))))));
 
     fn into_list(self) -> Self::Result {
-        (
-            self.0,
-            (
-                self.1,
-                (
-                    self.2,
-                    (self.3, (self.4, (self.5, (self.6, (self.7, (self.8, ())))))),
-                ),
-            ),
-        )
+        ( self.0, ( self.1, ( self.2, ( self.3, ( self.4, ( self.5, ( self.6,
+            ( self.7, ( self.8, ())))))))))
     }
 }
+
+#[rustfmt::skip]
 impl<A, B, C, D, E, F, G, H, I, J> IntoList for (A, B, C, D, E, F, G, H, I, J) {
     type Result = (A, (B, (C, (D, (E, (F, (G, (H, (I, (J, ()))))))))));
 
     fn into_list(self) -> Self::Result {
-        (
-            self.0,
-            (
-                self.1,
-                (
-                    self.2,
-                    (
-                        self.3,
-                        (self.4, (self.5, (self.6, (self.7, (self.8, (self.9, ())))))),
-                    ),
-                ),
-            ),
-        )
+        ( self.0, ( self.1, ( self.2, ( self.3, ( self.4, ( self.5, ( self.6,
+            ( self.7, ( self.8, ( self.9, ()))))))))))
     }
 }
+
+#[rustfmt::skip]
 impl<A, B, C, D, E, F, G, H, I, J, K> IntoList for (A, B, C, D, E, F, G, H, I, J, K) {
     type Result = (A, (B, (C, (D, (E, (F, (G, (H, (I, (J, (K, ())))))))))));
 
     fn into_list(self) -> Self::Result {
-        (
-            self.0,
-            (
-                self.1,
-                (
-                    self.2,
-                    (
-                        self.3,
-                        (
-                            self.4,
-                            (
-                                self.5,
-                                (self.6, (self.7, (self.8, (self.9, (self.10, ()))))),
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        )
+        ( self.0, ( self.1, ( self.2, ( self.3, ( self.4, ( self.5, ( self.6,
+            ( self.7, ( self.8, ( self.9, ( self.10, ())))))))))))
     }
 }
+
+#[rustfmt::skip]
 impl<A, B, C, D, E, F, G, H, I, J, K, L> IntoList for (A, B, C, D, E, F, G, H, I, J, K, L) {
     type Result = (A, (B, (C, (D, (E, (F, (G, (H, (I, (J, (K, (L, ()))))))))))));
 
     fn into_list(self) -> Self::Result {
-        (
-            self.0,
-            (
-                self.1,
-                (
-                    self.2,
-                    (
-                        self.3,
-                        (
-                            self.4,
-                            (
-                                self.5,
-                                (
-                                    self.6,
-                                    (self.7, (self.8, (self.9, (self.10, (self.11, ()))))),
-                                ),
-                            ),
-                        ),
-                    ),
-                ),
-            ),
-        )
+        (self.0, (self.1, (self.2, (self.3, (self.4, (self.5, (self.6, (self.7, (self.8,
+            (self.9, (self.10, (self.11, ()))))))))))))
     }
 }
 
+/**
+Represents a type list with a head element and a tail.
+*/
 pub trait List {
     type Head;
     type Tail: List;
@@ -250,7 +209,10 @@ where
     const LENGTH: usize = U::LENGTH + 1;
 }
 
-pub trait Concat<U: List> {
+/**
+Concatenates two type lists into a single list.
+*/
+pub trait Concat<U: List>: List {
     type Result: List;
 
     fn concat(self, other: U) -> Self::Result;
@@ -270,14 +232,17 @@ impl<H, T: List, U: List> Concat<U> for (H, T)
 where
     T: Concat<U>,
 {
-    type Result = (H, <T as Concat<U>>::Result);
+    type Result = (H, T::Result);
 
     fn concat(self, other: U) -> Self::Result {
-        (self.0, <T as Concat<U>>::concat(self.1, other))
+        (self.0, T::concat(self.1, other))
     }
 }
 
-pub trait Reverse {
+/**
+Reverses the order of elements in a type list.
+*/
+pub trait Reverse: List {
     type Result: List;
 
     fn reverse(self) -> Self::Result;
@@ -296,12 +261,12 @@ impl Reverse for () {
 impl<H, T: List> Reverse for (H, T)
 where
     T: Reverse,
-    <T as Reverse>::Result: Concat<(H, ())>,
+    T::Result: Concat<(H, ())>,
 {
-    type Result = <<T as Reverse>::Result as Concat<(H, ())>>::Result;
+    type Result = <T::Result as Concat<(H, ())>>::Result;
 
     fn reverse(self) -> Self::Result {
-        <T as Reverse>::reverse(self.1).concat((self.0, ()))
+        T::reverse(self.1).concat((self.0, ()))
     }
 }
 
@@ -327,6 +292,20 @@ mod tests {
         fn equal() -> bool {
             TypeId::of::<(H1, T1)>() == TypeId::of::<U>()
         }
+    }
+
+    #[test]
+    fn test_list_length() {
+        type L0 = <() as IntoList>::Result;
+        type L1 = <(i32,) as IntoList>::Result;
+        type L2 = <(i32, f64) as IntoList>::Result;
+        type L3 = <(f64, i16, bool) as IntoList>::Result;
+
+        assert_eq!(<() as List>::LENGTH, 0);
+        assert_eq!(L0::LENGTH, 0);
+        assert_eq!(L1::LENGTH, 1);
+        assert_eq!(L2::LENGTH, 2);
+        assert_eq!(L3::LENGTH, 3);
     }
 
     #[test]
