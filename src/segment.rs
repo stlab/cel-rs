@@ -48,6 +48,30 @@ impl<T: List> EqListTypeIDList for T {
         result
     }
 }
+/**
+A type-safe segment that represents a sequence of operations.
+
+The segment takes input arguments of type `Args` and maintains a type stack `Stack` that tracks
+the types of values produced by operations.
+
+# Type Parameters
+- `Args`: The input argument types, must implement `IntoList`
+- `Stack`: The type stack tracking operation results, defaults to the reverse of `Args`
+
+# Examples
+
+```rust
+use cel_rs::segment::*;
+
+assert_eq!(new_segment::<(i32, )>() // create a new segment that takes an i32 argument
+    .op1(|x| x * 2)                 // push a unary operation that multiplies the argument by 2
+    .op0(|| 10)                     // push a nullary operation that returns 10
+    .op2(|x, y| x + y)              // push a binary operation that adds two arguments
+    .op1(|x| x.to_string())         // push a unary operation that converts the argument to a string
+    .call((42, )).unwrap(),         // call the segment with an argument 42
+    "94");                          // the result is (42 * 2 + 10).to_string()
+```
+*/
 
 pub struct Segment<Args: IntoList, Stack: List = <<Args as IntoList>::Result as List>::Reverse> {
     segment: RawSegment,
@@ -169,7 +193,7 @@ pub fn new_segment<Args: IntoList>() -> Segment<Args> {
 }
 
 // trait Fn<Args> is currently unstable - so we use a call trait as a temporary workaround.
-trait Callable<Args> {
+pub trait Callable<Args> {
     type Output;
     fn call(&self, args: Args) -> Self::Output;
 }
