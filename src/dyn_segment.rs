@@ -1,6 +1,6 @@
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
-use crate::type_list::{IntoList, List, Reverse};
+use crate::type_list::{IntoList, List};
 use anyhow::Result;
 use std::any::TypeId;
 
@@ -44,11 +44,11 @@ pub trait IntoReverseTypeIDList {
 
 impl<Args: IntoList> IntoReverseTypeIDList for Args
 where
-    Args::Result: Reverse,
-    <Args::Result as Reverse>::Result: ToTypeIDList,
+    Args::Result: List,
+    <Args::Result as List>::Reverse: ToTypeIDList,
 {
     fn to_type_id_list() -> Vec<TypeId> {
-        <<Args::Result as Reverse>::Result as ToTypeIDList>::to_type_id_list()
+        <<Args::Result as List>::Reverse as ToTypeIDList>::to_type_id_list()
     }
 }
 

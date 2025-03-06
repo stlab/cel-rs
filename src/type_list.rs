@@ -78,7 +78,7 @@ impl IntoList for () {
     }
 }
 
-impl<A> IntoList for (A,) {
+impl<A: 'static> IntoList for (A,) {
     type Result = (A, ());
 
     fn into_list(self) -> Self::Result {
@@ -86,7 +86,7 @@ impl<A> IntoList for (A,) {
     }
 }
 
-impl<A, B> IntoList for (A, B) {
+impl<A: 'static, B: 'static> IntoList for (A, B) {
     type Result = (A, (B, ()));
 
     fn into_list(self) -> Self::Result {
@@ -94,7 +94,7 @@ impl<A, B> IntoList for (A, B) {
     }
 }
 
-impl<A, B, C> IntoList for (A, B, C) {
+impl<A: 'static, B: 'static, C: 'static> IntoList for (A, B, C) {
     type Result = (A, (B, (C, ())));
 
     fn into_list(self) -> Self::Result {
@@ -102,7 +102,7 @@ impl<A, B, C> IntoList for (A, B, C) {
     }
 }
 
-impl<A, B, C, D> IntoList for (A, B, C, D) {
+impl<A: 'static, B: 'static, C: 'static, D: 'static> IntoList for (A, B, C, D) {
     type Result = (A, (B, (C, (D, ()))));
 
     fn into_list(self) -> Self::Result {
@@ -110,7 +110,7 @@ impl<A, B, C, D> IntoList for (A, B, C, D) {
     }
 }
 
-impl<A, B, C, D, E> IntoList for (A, B, C, D, E) {
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static> IntoList for (A, B, C, D, E) {
     type Result = (A, (B, (C, (D, (E, ())))));
 
     fn into_list(self) -> Self::Result {
@@ -118,7 +118,9 @@ impl<A, B, C, D, E> IntoList for (A, B, C, D, E) {
     }
 }
 
-impl<A, B, C, D, E, F> IntoList for (A, B, C, D, E, F) {
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static> IntoList
+    for (A, B, C, D, E, F)
+{
     type Result = (A, (B, (C, (D, (E, (F, ()))))));
 
     fn into_list(self) -> Self::Result {
@@ -127,7 +129,7 @@ impl<A, B, C, D, E, F> IntoList for (A, B, C, D, E, F) {
 }
 
 #[rustfmt::skip]
-impl<A, B, C, D, E, F, G> IntoList for (A, B, C, D, E, F, G) {
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static> IntoList for (A, B, C, D, E, F, G) {
     type Result = (A, (B, (C, (D, (E, (F, (G, ())))))));
 
     fn into_list(self) -> Self::Result {
@@ -136,7 +138,7 @@ impl<A, B, C, D, E, F, G> IntoList for (A, B, C, D, E, F, G) {
 }
 
 #[rustfmt::skip]
-impl<A, B, C, D, E, F, G, H> IntoList for (A, B, C, D, E, F, G, H) {
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static, H: 'static> IntoList for (A, B, C, D, E, F, G, H) {
     type Result = (A, (B, (C, (D, (E, (F, (G, (H, ()))))))));
 
     fn into_list(self) -> Self::Result {
@@ -146,7 +148,7 @@ impl<A, B, C, D, E, F, G, H> IntoList for (A, B, C, D, E, F, G, H) {
 }
 
 #[rustfmt::skip]
-impl<A, B, C, D, E, F, G, H, I> IntoList for (A, B, C, D, E, F, G, H, I) {
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static, H: 'static, I: 'static> IntoList for (A, B, C, D, E, F, G, H, I) {
     type Result = (A, (B, (C, (D, (E, (F, (G, (H, (I, ())))))))));
 
     fn into_list(self) -> Self::Result {
@@ -156,7 +158,7 @@ impl<A, B, C, D, E, F, G, H, I> IntoList for (A, B, C, D, E, F, G, H, I) {
 }
 
 #[rustfmt::skip]
-impl<A, B, C, D, E, F, G, H, I, J> IntoList for (A, B, C, D, E, F, G, H, I, J) {
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static, H: 'static, I: 'static, J: 'static> IntoList for (A, B, C, D, E, F, G, H, I, J) {
     type Result = (A, (B, (C, (D, (E, (F, (G, (H, (I, (J, ()))))))))));
 
     fn into_list(self) -> Self::Result {
@@ -166,7 +168,7 @@ impl<A, B, C, D, E, F, G, H, I, J> IntoList for (A, B, C, D, E, F, G, H, I, J) {
 }
 
 #[rustfmt::skip]
-impl<A, B, C, D, E, F, G, H, I, J, K> IntoList for (A, B, C, D, E, F, G, H, I, J, K) {
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static, H: 'static, I: 'static, J: 'static, K: 'static> IntoList for (A, B, C, D, E, F, G, H, I, J, K) {
     type Result = (A, (B, (C, (D, (E, (F, (G, (H, (I, (J, (K, ())))))))))));
 
     fn into_list(self) -> Self::Result {
@@ -176,7 +178,9 @@ impl<A, B, C, D, E, F, G, H, I, J, K> IntoList for (A, B, C, D, E, F, G, H, I, J
 }
 
 #[rustfmt::skip]
-impl<A, B, C, D, E, F, G, H, I, J, K, L> IntoList for (A, B, C, D, E, F, G, H, I, J, K, L) {
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static,
+        H: 'static, I: 'static, J: 'static, K: 'static, L: 'static>
+    IntoList for (A, B, C, D, E, F, G, H, I, J, K, L) {
     type Result = (A, (B, (C, (D, (E, (F, (G, (H, (I, (J, (K, (L, ()))))))))))));
 
     fn into_list(self) -> Self::Result {
@@ -186,7 +190,7 @@ impl<A, B, C, D, E, F, G, H, I, J, K, L> IntoList for (A, B, C, D, E, F, G, H, I
 }
 
 pub trait TypeHandler {
-    fn handle<T>(self: &mut Self);
+    fn handle<T: 'static>(self: &mut Self);
 }
 
 /**
@@ -197,89 +201,58 @@ pub trait List {
     type Tail: List;
     const LENGTH: usize;
 
+    // Add associated type for concatenation result
+    type Concat<U: List>: List;
+    type Reverse: List;
+
     fn for_each_type<H: TypeHandler>(handler: &mut H);
+
+    fn concat<U: List>(self, other: U) -> Self::Concat<U>;
+
+    fn reverse(self) -> Self::Reverse;
 }
 
+// Specialize for empty list
 impl List for () {
     type Head = ();
     type Tail = ();
     const LENGTH: usize = 0;
+    type Concat<U: List> = U;
+    type Reverse = ();
 
     fn for_each_type<H: TypeHandler>(_handler: &mut H) {}
+
+    fn concat<U: List>(self, other: U) -> U {
+        other
+    }
+
+    fn reverse(self) -> Self::Reverse {
+        self
+    }
 }
 
-impl<T, U> List for (T, U)
+// Implement for non-empty lists
+impl<T: 'static, U: List> List for (T, U)
 where
     U: List,
 {
     type Head = T;
     type Tail = U;
     const LENGTH: usize = U::LENGTH + 1;
+    type Concat<V: List> = (T, U::Concat<V>);
+    type Reverse = <U::Reverse as List>::Concat<(T, ())>;
 
     fn for_each_type<H: TypeHandler>(handler: &mut H) {
         handler.handle::<Self::Head>();
         Self::Tail::for_each_type(handler);
     }
-}
 
-/**
-Concatenates two type lists into a single list.
-*/
-pub trait Concat<U: List>: List {
-    type Result: List;
-
-    fn concat(self, other: U) -> Self::Result;
-}
-
-// Base case: concatenating with empty list
-impl<U: List> Concat<U> for () {
-    type Result = U;
-
-    fn concat(self, other: U) -> Self::Result {
-        other
+    fn concat<V: List>(self, other: V) -> Self::Concat<V> {
+        (self.0, self.1.concat(other))
     }
-}
 
-// Recursive case: (H, T) + U = (H, (T + U))
-impl<H, T: List, U: List> Concat<U> for (H, T)
-where
-    T: Concat<U>,
-{
-    type Result = (H, T::Result);
-
-    fn concat(self, other: U) -> Self::Result {
-        (self.0, T::concat(self.1, other))
-    }
-}
-
-/**
-Reverses the order of elements in a type list.
-*/
-pub trait Reverse: List {
-    type Result: List;
-
-    fn reverse(self) -> Self::Result;
-}
-
-// Base case: empty list reverses to itself
-impl Reverse for () {
-    type Result = ();
-
-    fn reverse(self) -> Self::Result {
-        self
-    }
-}
-
-// Recursive case: reverse (H, T) = reverse(T) + (H, ())
-impl<H, T: List> Reverse for (H, T)
-where
-    T: Reverse,
-    T::Result: Concat<(H, ())>,
-{
-    type Result = <T::Result as Concat<(H, ())>>::Result;
-
-    fn reverse(self) -> Self::Result {
-        T::reverse(self.1).concat((self.0, ()))
+    fn reverse(self) -> Self::Reverse {
+        self.1.reverse().concat((self.0, ()))
     }
 }
 
@@ -333,7 +306,7 @@ mod tests {
     fn test_type_list_concat() {
         type L1 = (i32, (f64, ()));
         type L2 = (bool, (char, ()));
-        type Combined = <L1 as Concat<L2>>::Result;
+        type Combined = <L1 as List>::Concat<L2>;
 
         // Should be (i32, (f64, (bool, (char, ()))))
         type Expected = (i32, (f64, (bool, (char, ()))));
@@ -350,9 +323,9 @@ mod tests {
     #[test]
     fn test_type_list_reverse_types() {
         // Original: (i32, (f64, (bool, ())))
-        type List = (i32, (f64, (bool, ())));
+        type L = (i32, (f64, (bool, ())));
         // Should become: (bool, (f64, (i32, ())))
-        type Reversed = <List as Reverse>::Result;
+        type Reversed = <L as List>::Reverse;
         type Expected = (bool, (f64, (i32, ())));
         assert!(<Reversed as Eq<Expected>>::equal());
     }

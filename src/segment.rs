@@ -1,8 +1,8 @@
 use crate::dyn_segment::DynSegment;
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
-use crate::type_list::{IntoList, List, Reverse, TypeHandler};
-use anyhow::Result;
+use crate::type_list::{IntoList, List, TypeHandler};
+use anyhow::{Result, ensure};
 use std::any::TypeId;
 
 // Create a handler for dropping types
@@ -26,63 +26,47 @@ impl<T: List> DropTop for T {
     }
 }
 
-/**
-A type-safe wrapper around RawSegment that tracks the type of the values
-on the stack at compile time.
+struct EqListTypeIDListHandler<'a>(&'a [TypeId], &'a mut usize, &'a mut bool);
 
-T is a cons cell that represents the stack of values.
-*/
-
-pub trait IntoReverseList {
-    type Result: List;
+impl TypeHandler for EqListTypeIDListHandler<'_> {
+    fn handle<T: 'static>(self: &mut Self) {
+        *self.2 = *self.2 && TypeId::of::<T>() == self.0[*self.1];
+        *self.1 += 1;
+    }
 }
 
-impl<Args: IntoList> IntoReverseList for Args
-where
-    Args::Result: Reverse,
-{
-    type Result = <Args::Result as Reverse>::Result;
-}
-
-pub trait EqListTypeIDList: List {
+trait EqListTypeIDList {
     fn equal(ids: &[TypeId]) -> bool;
 }
 
-impl EqListTypeIDList for () {
-    fn equal(_ids: &[TypeId]) -> bool {
-        true
-    }
-}
-
-impl<H1: 'static, T1: EqListTypeIDList + 'static> EqListTypeIDList for (H1, T1) {
+impl<T: List> EqListTypeIDList for T {
     fn equal(ids: &[TypeId]) -> bool {
-        ids[0] == TypeId::of::<H1>() && T1::equal(&ids[1..])
+        let mut index: usize = 0;
+        let mut result: bool = true;
+        let mut handler = EqListTypeIDListHandler(ids, &mut index, &mut result);
+        T::for_each_type(&mut handler);
+        result
     }
 }
 
-pub struct Segment<Args: IntoReverseList, Stack: List = <Args as IntoReverseList>::Result> {
+pub struct Segment<Args: IntoList, Stack: List = <<Args as IntoList>::Result as List>::Reverse> {
     segment: RawSegment,
     _phantom: std::marker::PhantomData<(Args, Stack)>,
 }
 
-impl<Args: IntoReverseList, Stack: List> Segment<Args, Stack> {
-    pub fn from_dyn_segment(segment: DynSegment) -> Result<Self>
-    where
-        <Args as IntoReverseList>::Result: EqListTypeIDList,
-        Stack: EqListTypeIDList,
-    {
-        type ArgList<Args> = <Args as IntoReverseList>::Result;
+impl<Args: IntoList, Stack: List> Segment<Args, Stack> {
+    pub fn from_dyn_segment(segment: DynSegment) -> Result<Self> {
+        type ArgList<Args> = <<Args as IntoList>::Result as List>::Reverse;
 
-        if ArgList::<Args>::LENGTH != segment.argument_ids.len()
-            || !<ArgList<Args> as EqListTypeIDList>::equal(&segment.argument_ids)
-        {
-            return Err(anyhow::anyhow!("argument type ids do not match"));
-        }
-        if Stack::LENGTH != segment.stack_ids.len()
-            || !<Stack as EqListTypeIDList>::equal(&segment.stack_ids)
-        {
-            return Err(anyhow::anyhow!("stack type ids do not match"));
-        }
+        ensure!(
+            ArgList::<Args>::LENGTH == segment.argument_ids.len()
+                && ArgList::<Args>::equal(&segment.argument_ids),
+            "argument type ids do not match"
+        );
+        ensure!(
+            Stack::LENGTH == segment.stack_ids.len() && Stack::equal(&segment.stack_ids),
+            "stack type ids do not match"
+        );
         Ok(Segment {
             segment: segment.segment,
             _phantom: std::marker::PhantomData,
@@ -177,7 +161,7 @@ impl<Args: IntoReverseList, Stack: List> Segment<Args, Stack> {
 }
 
 /** Creates a new empty segment with no operations. */
-pub fn new_segment<Args: IntoReverseList>() -> Segment<Args> {
+pub fn new_segment<Args: IntoList>() -> Segment<Args> {
     Segment {
         segment: RawSegment::new(),
         _phantom: std::marker::PhantomData,
@@ -200,7 +184,7 @@ where
     }
 }
 
-impl<T: List + 'static, A> Callable<(A,)> for Segment<(A,), T>
+impl<T: List + 'static, A: 'static> Callable<(A,)> for Segment<(A,), T>
 where
     T::Tail: List<Tail = ()>,
 {
@@ -210,7 +194,7 @@ where
     }
 }
 
-impl<T: List + 'static, A, B> Callable<(A, B)> for Segment<(A, B), T>
+impl<T: List + 'static, A: 'static, B: 'static> Callable<(A, B)> for Segment<(A, B), T>
 where
     T::Tail: List<Tail = ()>,
 {
