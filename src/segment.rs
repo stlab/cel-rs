@@ -1,29 +1,28 @@
 use crate::dyn_segment::DynSegment;
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
-use crate::type_list::{IntoList, List, Reverse};
+use crate::type_list::{IntoList, List, Reverse, TypeHandler};
 use anyhow::Result;
 use std::any::TypeId;
 
-pub struct DropTopFn(fn(&mut RawStack) -> Option<DropTopFn>);
+// Create a handler for dropping types
+struct DropHandler<'a>(&'a mut RawStack);
 
-pub trait DropTop: List {
-    fn drop_top(stack: &mut RawStack) -> Option<DropTopFn>;
-}
-
-impl DropTop for () {
-    fn drop_top(_: &mut RawStack) -> Option<DropTopFn> {
-        None
+impl TypeHandler for DropHandler<'_> {
+    fn handle<T>(self: &mut Self) {
+        unsafe { self.0.drop::<T>() };
     }
 }
 
-impl<T, U> DropTop for (T, U)
-where
-    U: DropTop,
-{
-    fn drop_top(stack: &mut RawStack) -> Option<DropTopFn> {
-        unsafe { stack.drop::<T>() };
-        Some(DropTopFn(U::drop_top))
+trait DropTop {
+    fn drop_top(stack: &mut RawStack);
+}
+
+// Implement DropTop for List
+impl<T: List> DropTop for T {
+    fn drop_top(stack: &mut RawStack) {
+        let mut handler = DropHandler(stack);
+        T::for_each_type(&mut handler);
     }
 }
 
@@ -66,7 +65,7 @@ pub struct Segment<Args: IntoReverseList, Stack: List = <Args as IntoReverseList
     _phantom: std::marker::PhantomData<(Args, Stack)>,
 }
 
-impl<Args: IntoReverseList, Stack: DropTop> Segment<Args, Stack> {
+impl<Args: IntoReverseList, Stack: List> Segment<Args, Stack> {
     pub fn from_dyn_segment(segment: DynSegment) -> Result<Self>
     where
         <Args as IntoReverseList>::Result: EqListTypeIDList,
@@ -115,10 +114,7 @@ impl<Args: IntoReverseList, Stack: DropTop> Segment<Args, Stack> {
         seg.raw0(move |stack| match op() {
             Ok(r) => Ok(r),
             Err(e) => {
-                let mut dropper = Stack::drop_top(stack);
-                while let Some(e) = dropper {
-                    dropper = e.0(stack);
-                }
+                Stack::drop_top(stack);
                 Err(e)
             }
         });
@@ -194,7 +190,7 @@ trait Callable<Args> {
     fn call(&self, args: Args) -> Self::Output;
 }
 
-impl<T: DropTop + 'static> Callable<()> for Segment<(), T>
+impl<T: List + 'static> Callable<()> for Segment<(), T>
 where
     T::Tail: List<Tail = ()>,
 {
@@ -204,7 +200,7 @@ where
     }
 }
 
-impl<T: DropTop + 'static, A> Callable<(A,)> for Segment<(A,), T>
+impl<T: List + 'static, A> Callable<(A,)> for Segment<(A,), T>
 where
     T::Tail: List<Tail = ()>,
 {
@@ -214,7 +210,7 @@ where
     }
 }
 
-impl<T: DropTop + 'static, A, B> Callable<(A, B)> for Segment<(A, B), T>
+impl<T: List + 'static, A, B> Callable<(A, B)> for Segment<(A, B), T>
 where
     T::Tail: List<Tail = ()>,
 {

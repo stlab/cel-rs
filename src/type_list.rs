@@ -185,6 +185,10 @@ impl<A, B, C, D, E, F, G, H, I, J, K, L> IntoList for (A, B, C, D, E, F, G, H, I
     }
 }
 
+pub trait TypeHandler {
+    fn handle<T>(self: &mut Self);
+}
+
 /**
 Represents a type list with a head element and a tail.
 */
@@ -192,12 +196,16 @@ pub trait List {
     type Head;
     type Tail: List;
     const LENGTH: usize;
+
+    fn for_each_type<H: TypeHandler>(handler: &mut H);
 }
 
 impl List for () {
     type Head = ();
     type Tail = ();
     const LENGTH: usize = 0;
+
+    fn for_each_type<H: TypeHandler>(_handler: &mut H) {}
 }
 
 impl<T, U> List for (T, U)
@@ -207,6 +215,11 @@ where
     type Head = T;
     type Tail = U;
     const LENGTH: usize = U::LENGTH + 1;
+
+    fn for_each_type<H: TypeHandler>(handler: &mut H) {
+        handler.handle::<Self::Head>();
+        Self::Tail::for_each_type(handler);
+    }
 }
 
 /**
