@@ -9,7 +9,6 @@ while maintaining proper alignment requirements for each type. It uses an
 internal buffer that aligns values according to their type's requirements,
 up to a maximum alignment of 4096 bytes.
 */
-#[derive(Debug)]
 pub struct RawSequence {
     buffer: AVec<u8, ConstAlign<4096>>,
 }

@@ -1,7 +1,8 @@
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
-use crate::type_list::{IntoList, List};
+use crate::type_list::{IntoList, List, TypeHandler};
 use anyhow::Result;
+use anyhow::ensure;
 use std::any::TypeId;
 
 pub trait ToTypeIDList: List {
@@ -14,11 +15,35 @@ impl ToTypeIDList for () {
     }
 }
 
-impl<T: 'static, U: ToTypeIDList> ToTypeIDList for (T, U) {
+impl<T: 'static, U: ToTypeIDList + 'static> ToTypeIDList for (T, U) {
     fn to_type_id_list() -> Vec<TypeId> {
         let mut list = U::to_type_id_list();
         list.push(TypeId::of::<T>());
         list
+    }
+}
+
+// Pulled from segment.rs - generalize this and have one copy
+struct EqListTypeIDListHandler<'a>(&'a [TypeId], &'a mut usize, &'a mut bool);
+
+impl TypeHandler for EqListTypeIDListHandler<'_> {
+    fn invoke<T: List + 'static>(self: &mut Self) {
+        *self.2 = *self.2 && TypeId::of::<T::Head>() == self.0[*self.1];
+        *self.1 += 1;
+    }
+}
+
+trait EqListTypeIDList {
+    fn equal(ids: &[TypeId]) -> bool;
+}
+
+impl<T: List> EqListTypeIDList for T {
+    fn equal(ids: &[TypeId]) -> bool {
+        let mut index: usize = 0;
+        let mut result: bool = true;
+        let mut handler = EqListTypeIDListHandler(ids, &mut index, &mut result);
+        T::for_each_type(&mut handler);
+        result
     }
 }
 
@@ -69,25 +94,42 @@ impl DynSegment {
     }
 
     /*
-    Verifies and removes the expected type from the type stack.
+    Removes the expected type from the type and unwind stacks.
 
-    Returns an error if the type being popped doesn't match the expected type or if
-    the type stack is empty.
+    # Preconditions
+
+    The type and unwind stacks must be the same length and at least one type must be present.
     */
-    fn pop_type<T>(&mut self) -> Result<()>
+    fn pop_type<T>(&mut self)
     where
         T: 'static,
     {
-        if self.stack_ids.pop() != Some(TypeId::of::<T>()) {
-            return Err(anyhow::anyhow!(
-                "Type mismatch: expected {}",
-                std::any::type_name::<T>()
-            ));
-        }
+        self.stack_ids.pop();
         self.stack_unwind.pop();
+    }
+
+    /**
+    Verifies that the argument types match the expected types on the type stack.
+
+    Returns an error if the argument types don't match the expected types or if
+    there are too many arguments.
+
+    To avoid reversing the arguments and reversing the slice, this operation
+    is done in argument order, not stack order.
+    */
+    fn type_check_stack<L: List>(&self) -> Result<()> {
+        ensure!(
+            L::LENGTH <= self.stack_ids.len(),
+            "Too many arguments: expected {}, got {}",
+            L::LENGTH,
+            self.stack_ids.len()
+        );
+        let start = self.stack_ids.len() - L::LENGTH;
+        ensure!(L::equal(&self.stack_ids[start..]), "Type mismatch");
         Ok(())
     }
 
+    // Push type to stack and register dropper.
     fn push_type<T>(&mut self)
     where
         T: 'static,
@@ -142,7 +184,8 @@ impl DynSegment {
         T: 'static,
         R: 'static,
     {
-        self.pop_type::<T>()?;
+        self.type_check_stack::<(T, ())>()?;
+        self.pop_type::<T>();
         self.segment.push_op1(op);
         self.push_type::<R>();
         Ok(())
@@ -161,8 +204,9 @@ impl DynSegment {
         U: 'static,
         R: 'static,
     {
-        self.pop_type::<U>()?;
-        self.pop_type::<T>()?;
+        self.type_check_stack::<(T, (U, ()))>()?;
+        self.pop_type::<U>();
+        self.pop_type::<T>();
         self.segment.push_op2(op);
         self.push_type::<R>();
         Ok(())
@@ -182,9 +226,10 @@ impl DynSegment {
         V: 'static,
         R: 'static,
     {
-        self.pop_type::<V>()?;
-        self.pop_type::<U>()?;
-        self.pop_type::<T>()?;
+        self.type_check_stack::<(T, (U, (V, ())))>()?;
+        self.pop_type::<V>();
+        self.pop_type::<U>();
+        self.pop_type::<T>();
         self.segment.push_op3(op);
         self.push_type::<R>();
         Ok(())
@@ -210,7 +255,8 @@ impl DynSegment {
                 self.argument_ids.len()
             ));
         }
-        self.pop_type::<R>()?;
+        self.type_check_stack::<(R, ())>()?;
+        self.pop_type::<R>();
         if self.stack_ids.len() != 0 {
             return Err(anyhow::anyhow!(
                 "{} value(s) left on execution stack",
@@ -249,7 +295,8 @@ impl DynSegment {
                 std::any::type_name::<A>() // TODO: Need to store type names along with TypeId
             ));
         }
-        self.pop_type::<R>()?;
+        self.type_check_stack::<(R, ())>()?;
+        self.pop_type::<R>();
         if self.stack_ids.len() != 0 {
             return Err(anyhow::anyhow!(
                 "{} value(s) left on execution stack",

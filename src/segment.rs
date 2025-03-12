@@ -9,8 +9,8 @@ use std::any::TypeId;
 struct DropHandler<'a>(&'a mut RawStack);
 
 impl TypeHandler for DropHandler<'_> {
-    fn handle<T>(self: &mut Self) {
-        unsafe { self.0.drop::<T>() };
+    fn invoke<T: List + 'static>(self: &mut Self) {
+        unsafe { self.0.drop::<T::Head>() };
     }
 }
 
@@ -29,8 +29,8 @@ impl<T: List> DropTop for T {
 struct EqListTypeIDListHandler<'a>(&'a [TypeId], &'a mut usize, &'a mut bool);
 
 impl TypeHandler for EqListTypeIDListHandler<'_> {
-    fn handle<T: 'static>(self: &mut Self) {
-        *self.2 = *self.2 && TypeId::of::<T>() == self.0[*self.1];
+    fn invoke<T: List + 'static>(self: &mut Self) {
+        *self.2 = *self.2 && TypeId::of::<T::Head>() == self.0[*self.1];
         *self.1 += 1;
     }
 }
@@ -299,8 +299,8 @@ mod tests {
             .op0(|| 42)
             .op0(|| 10)
             .op2(|x, y| x + y)
-            .op1(|x: i32| x * 2)
-            .op1(|x: i32| x.to_string())
+            .op1(|x| x * 2)
+            .op1(|x| x.to_string())
             .call(());
 
         assert_eq!(result.unwrap(), "104");
@@ -310,9 +310,9 @@ mod tests {
     fn test_chain_operations() {
         let result = new_segment::<()>()
             .op0(|| "Hello")
-            .op1(|s: &str| s.len())
-            .op1(|n: usize| n * 2)
-            .op1(|n: usize| format!("Length * 2 = {}", n))
+            .op1(|s| s.len())
+            .op1(|n| n * 2)
+            .op1(|n| format!("Length * 2 = {}", n))
             .call(());
 
         assert_eq!(result.unwrap(), "Length * 2 = 10");

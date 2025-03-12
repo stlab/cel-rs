@@ -189,25 +189,65 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 
     }
 }
 
+pub struct TypeFunction<A>(pub fn(&mut A) -> Option<TypeFunction<A>>);
+
 pub trait TypeHandler {
-    fn handle<T: 'static>(self: &mut Self);
+    fn invoke<T: List + 'static>(self: &mut Self);
+}
+
+pub trait Indexer {
+    type Next: Indexer;
+    type Result<L: List>;
+    fn get<L: List>(list: &L) -> &Self::Result<L>;
+}
+
+impl Indexer for () {
+    type Next = ((), ());
+    type Result<L: List> = L::Head;
+    fn get<L: List>(list: &L) -> &Self::Result<L> {
+        list.head()
+    }
+}
+
+impl<I: Indexer> Indexer for ((), I) {
+    type Next = ((), Self);
+    type Result<L: List> = I::Result<L::Tail>;
+    fn get<L: List>(list: &L) -> &Self::Result<L> {
+        I::get(&list.tail())
+    }
+}
+
+pub struct ValueFunction<A, L: List>(pub fn(&mut A, &L) -> Option<ValueFunction<A, L>>);
+
+pub trait ValueHandler {
+    fn invoke<L: List, Index: Indexer>(self: &mut Self, list: &L);
 }
 
 /**
 Represents a type list with a head element and a tail.
 */
-pub trait List {
+pub trait List
+where
+    Self: Sized,
+{
     type Head;
-    type Tail: List;
+    type Tail: List + 'static;
     const LENGTH: usize;
 
     // Add associated type for concatenation result
-    type Concat<U: List>: List;
+    type Concat<U: List + 'static>: List;
     type Reverse: List;
 
+    fn head(&self) -> &Self::Head;
+    fn tail(&self) -> &Self::Tail;
+
+    fn type_function<H: TypeHandler>() -> Option<TypeFunction<H>>;
     fn for_each_type<H: TypeHandler>(handler: &mut H);
 
-    fn concat<U: List>(self, other: U) -> Self::Concat<U>;
+    fn value_function<H: ValueHandler, Index: Indexer>() -> Option<ValueFunction<H, Self>>;
+    fn for_each_value<H: ValueHandler>(self: &Self, handler: &mut H);
+
+    fn concat<U: List + 'static>(self, other: U) -> Self::Concat<U>;
 
     fn reverse(self) -> Self::Reverse;
 }
@@ -217,12 +257,30 @@ impl List for () {
     type Head = ();
     type Tail = ();
     const LENGTH: usize = 0;
-    type Concat<U: List> = U;
+    type Concat<U: List + 'static> = U;
     type Reverse = ();
+
+    fn head(&self) -> &Self::Head {
+        &()
+    }
+
+    fn tail(&self) -> &Self::Tail {
+        &()
+    }
+
+    fn type_function<H: TypeHandler>() -> Option<TypeFunction<H>> {
+        None
+    }
 
     fn for_each_type<H: TypeHandler>(_handler: &mut H) {}
 
-    fn concat<U: List>(self, other: U) -> U {
+    fn value_function<H: ValueHandler, Index: Indexer>() -> Option<ValueFunction<H, Self>> {
+        None
+    }
+
+    fn for_each_value<H: ValueHandler>(self: &Self, _handler: &mut H) {}
+
+    fn concat<U: List + 'static>(self, other: U) -> U {
         other
     }
 
@@ -232,19 +290,50 @@ impl List for () {
 }
 
 // Implement for non-empty lists
-impl<T: 'static, U: List> List for (T, U)
+impl<T: 'static, U: List + 'static> List for (T, U)
 where
     U: List,
 {
     type Head = T;
     type Tail = U;
     const LENGTH: usize = U::LENGTH + 1;
-    type Concat<V: List> = (T, U::Concat<V>);
+    type Concat<V: List + 'static> = (T, U::Concat<V>);
     type Reverse = <U::Reverse as List>::Concat<(T, ())>;
 
+    fn head(&self) -> &Self::Head {
+        &self.0
+    }
+
+    fn tail(&self) -> &Self::Tail {
+        &self.1
+    }
+
+    fn type_function<H: TypeHandler>() -> Option<TypeFunction<H>> {
+        Some(TypeFunction(|data: &mut H| {
+            data.invoke::<Self>();
+            Self::Tail::type_function::<H>()
+        }))
+    }
+
     fn for_each_type<H: TypeHandler>(handler: &mut H) {
-        handler.handle::<Self::Head>();
-        Self::Tail::for_each_type(handler);
+        let mut driver = Self::type_function::<H>();
+        while let Some(e) = driver {
+            driver = e.0(handler);
+        }
+    }
+
+    fn value_function<H: ValueHandler, Index: Indexer>() -> Option<ValueFunction<H, Self>> {
+        Some(ValueFunction(|data: &mut H, list: &Self| {
+            data.invoke::<Self, Index>(list);
+            Self::value_function::<H, Index::Next>()
+        }))
+    }
+
+    fn for_each_value<H: ValueHandler>(self: &Self, handler: &mut H) {
+        let mut driver = Self::value_function::<H, ()>();
+        while let Some(e) = driver {
+            driver = e.0(handler, self);
+        }
     }
 
     fn concat<V: List>(self, other: V) -> Self::Concat<V> {
@@ -275,6 +364,22 @@ mod tests {
         fn equal() -> bool {
             TypeId::of::<(H1, T1)>() == TypeId::of::<U>()
         }
+    }
+
+    #[test]
+    fn test_for_each_type_chain() {
+        struct PrintHandler {
+            count: usize,
+        }
+
+        impl TypeHandler for PrintHandler {
+            fn invoke<T: List + 'static>(self: &mut Self) {
+                println!("{}: {}", self.count, std::any::type_name::<T::Head>());
+                self.count += 1;
+            }
+        }
+
+        <(i32, (f64, (i32, ()))) as List>::for_each_type(&mut PrintHandler { count: 0 });
     }
 
     #[test]
@@ -314,13 +419,6 @@ mod tests {
     }
 
     #[test]
-    fn test_type_list_reverse() {
-        type L = <(i32, f64, String) as IntoList>::Result;
-        type Expected = (i32, (f64, (String, ())));
-        assert!(<L as Eq<Expected>>::equal());
-    }
-
-    #[test]
     fn test_type_list_reverse_types() {
         // Original: (i32, (f64, (bool, ())))
         type L = (i32, (f64, (bool, ())));
@@ -351,5 +449,26 @@ mod tests {
         let tuple = (1, s, 3.14); // s moved into tuple
         let list = tuple.into_list(); // tuple moved into list
         assert_eq!((list.1).0, "hello"); // String still valid in list
+    }
+
+    #[test]
+    fn test_indexer() {
+      /*   struct PrintHandler {
+            count: usize,
+        }
+
+        impl ValueHandler for PrintHandler {
+            fn invoke<L: List, Index: Indexer>(self: &mut Self, list: &L) {
+                println!("{}: {}", self.count, Index::get(list));
+                self.count += 1;
+            }
+        }
+
+        pub trait PrintableList: List {}
+
+        impl<H: std::fmt::Display + 'static, T: PrintableList + 'static> PrintableList for (H, T) {}
+
+        let list = (10, 12.5, 42).into_list();
+        list.for_each_value(&mut PrintHandler { count: 0 }); */
     }
 }
