@@ -18,6 +18,7 @@ let list = (1, "hello", 3.14).into_list();
 ```
 */
 pub mod dyn_segment;
+pub mod exp_type_list;
 pub mod raw_segment;
 pub mod raw_sequence;
 pub mod raw_stack;
