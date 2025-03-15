@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn test_indexer() {
-      /*   struct PrintHandler {
+        /*   struct PrintHandler {
             count: usize,
         }
 
