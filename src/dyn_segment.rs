@@ -27,7 +27,7 @@ impl<T: 'static, U: ToTypeIDList + 'static> ToTypeIDList for (T, U) {
 struct EqListTypeIDListHandler<'a>(&'a [TypeId], &'a mut usize, &'a mut bool);
 
 impl TypeHandler for EqListTypeIDListHandler<'_> {
-    fn invoke<T: List + 'static>(self: &mut Self) {
+    fn invoke<T: List + 'static>(&mut self) {
         *self.2 = *self.2 && TypeId::of::<T::Head>() == self.0[*self.1];
         *self.1 += 1;
     }
@@ -249,7 +249,7 @@ impl DynSegment {
     where
         R: 'static,
     {
-        if self.argument_ids.len() != 0 {
+        if !self.argument_ids.is_empty() {
             return Err(anyhow::anyhow!(
                 "Expected no arguments, but segment requires {} argument(s)",
                 self.argument_ids.len()
@@ -257,7 +257,7 @@ impl DynSegment {
         }
         self.type_check_stack::<(R, ())>()?;
         self.pop_type::<R>();
-        if self.stack_ids.len() != 0 {
+        if !self.stack_ids.is_empty() {
             return Err(anyhow::anyhow!(
                 "{} value(s) left on execution stack",
                 self.stack_ids.len()
@@ -356,7 +356,7 @@ mod tests {
         operations.op0(|| -> u32 { 100 });
         operations.op0(|| -> u32 { 10 });
         operations.op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z })?;
-        operations.op1(|x: u32| -> String { format!("result: {}", x.to_string()) })?;
+        operations.op1(|x: u32| -> String { format!("result: {}", x) })?;
 
         let final_result: String = operations.call0()?;
         assert_eq!(final_result, "result: 132");
@@ -373,7 +373,7 @@ mod tests {
         operations.op0(|| -> u32 { 100 });
         operations.op0(|| -> u32 { 10 });
         operations.op3(|x: u32, y: u32, z: u32| -> u32 { x + y - z })?;
-        operations.op1(|x: u32| -> String { format!("result: {}", x.to_string()) })?;
+        operations.op1(|x: u32| -> String { format!("result: {}", x) })?;
 
         let final_result: String = operations.call1(30u32)?;
         assert_eq!(final_result, "result: 132");

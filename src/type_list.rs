@@ -192,7 +192,7 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 
 pub struct TypeFunction<A>(pub fn(&mut A) -> Option<TypeFunction<A>>);
 
 pub trait TypeHandler {
-    fn invoke<T: List + 'static>(self: &mut Self);
+    fn invoke<T: List + 'static>(&mut self);
 }
 
 pub trait Indexer {
@@ -213,14 +213,14 @@ impl<I: Indexer> Indexer for ((), I) {
     type Next = ((), Self);
     type Result<L: List> = I::Result<L::Tail>;
     fn get<L: List>(list: &L) -> &Self::Result<L> {
-        I::get(&list.tail())
+        I::get(list.tail())
     }
 }
 
 pub struct ValueFunction<A, L: List>(pub fn(&mut A, &L) -> Option<ValueFunction<A, L>>);
 
 pub trait ValueHandler {
-    fn invoke<L: List, Index: Indexer>(self: &mut Self, list: &L);
+    fn invoke<L: List, Index: Indexer>(&mut self, list: &L);
 }
 
 /**
@@ -245,7 +245,7 @@ where
     fn for_each_type<H: TypeHandler>(handler: &mut H);
 
     fn value_function<H: ValueHandler, Index: Indexer>() -> Option<ValueFunction<H, Self>>;
-    fn for_each_value<H: ValueHandler>(self: &Self, handler: &mut H);
+    fn for_each_value<H: ValueHandler>(&self, handler: &mut H);
 
     fn concat<U: List + 'static>(self, other: U) -> Self::Concat<U>;
 
@@ -278,7 +278,7 @@ impl List for () {
         None
     }
 
-    fn for_each_value<H: ValueHandler>(self: &Self, _handler: &mut H) {}
+    fn for_each_value<H: ValueHandler>(&self, _handler: &mut H) {}
 
     fn concat<U: List + 'static>(self, other: U) -> U {
         other
@@ -329,7 +329,7 @@ where
         }))
     }
 
-    fn for_each_value<H: ValueHandler>(self: &Self, handler: &mut H) {
+    fn for_each_value<H: ValueHandler>(&self, handler: &mut H) {
         let mut driver = Self::value_function::<H, ()>();
         while let Some(e) = driver {
             driver = e.0(handler, self);
@@ -373,7 +373,7 @@ mod tests {
         }
 
         impl TypeHandler for PrintHandler {
-            fn invoke<T: List + 'static>(self: &mut Self) {
+            fn invoke<T: List + 'static>(&mut self) {
                 println!("{}: {}", self.count, std::any::type_name::<T::Head>());
                 self.count += 1;
             }
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn test_indexer() {
-      /*   struct PrintHandler {
+        /*   struct PrintHandler {
             count: usize,
         }
 

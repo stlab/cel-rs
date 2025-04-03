@@ -9,7 +9,7 @@ use std::any::TypeId;
 struct DropHandler<'a>(&'a mut RawStack);
 
 impl TypeHandler for DropHandler<'_> {
-    fn invoke<T: List + 'static>(self: &mut Self) {
+    fn invoke<T: List + 'static>(&mut self) {
         unsafe { self.0.drop::<T::Head>() };
     }
 }
@@ -29,7 +29,7 @@ impl<T: List> DropTop for T {
 struct EqListTypeIDListHandler<'a>(&'a [TypeId], &'a mut usize, &'a mut bool);
 
 impl TypeHandler for EqListTypeIDListHandler<'_> {
-    fn invoke<T: List + 'static>(self: &mut Self) {
+    fn invoke<T: List + 'static>(&mut self) {
         *self.2 = *self.2 && TypeId::of::<T::Head>() == self.0[*self.1];
         *self.1 += 1;
     }
