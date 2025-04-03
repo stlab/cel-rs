@@ -79,6 +79,13 @@ pub struct Segment<Args: IntoList, Stack: List = <<Args as IntoList>::Result as 
 }
 
 impl<Args: IntoList, Stack: List> Segment<Args, Stack> {
+    pub fn into<R: 'static, NewStack: List + 'static>(self) -> Segment<Args, (R, NewStack)> {
+        Segment {
+            segment: self.segment,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
     pub fn from_dyn_segment(segment: DynSegment) -> Result<Self> {
         type ArgList<Args> = <<Args as IntoList>::Result as List>::Reverse;
 
