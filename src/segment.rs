@@ -91,13 +91,9 @@ impl<Args: IntoList + 'static> Segment<Args> {
 }
 
 impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
-    pub fn into<R: 'static, NewStack: List + 'static>(self) -> Segment<Args, (R, NewStack)> {
-        Segment::with_seg(self.segment)
-    }
-
-    pub fn with_seg(raw_seg: RawSegment) -> Self {
+    fn into<R: 'static, NewStack: List + 'static>(self) -> Segment<Args, (R, NewStack)> {
         Segment {
-            segment: raw_seg,
+            segment: self.segment,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -114,7 +110,10 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
             Stack::LENGTH == segment.stack_ids.len() && Stack::equal(&segment.stack_ids),
             "stack type ids do not match"
         );
-        Ok(Segment::with_seg(segment.segment))
+        Ok(Segment {
+            segment: segment.segment,
+            _phantom: std::marker::PhantomData,
+        })
     }
 
     /** Pushes a nullary operation that takes no arguments and returns a value of type R. */
