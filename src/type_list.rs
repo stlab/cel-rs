@@ -290,10 +290,7 @@ impl List for () {
 }
 
 // Implement for non-empty lists
-impl<T: 'static, U: List + 'static> List for (T, U)
-where
-    U: List,
-{
+impl<T: 'static, U: List + 'static> List for (T, U) {
     type Head = T;
     type Tail = U;
     const LENGTH: usize = U::LENGTH + 1;
