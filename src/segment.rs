@@ -63,7 +63,7 @@ the types of values produced by operations.
 ```rust
 use cel_rs::segment::*;
 
-assert_eq!(Segment::new() // create a new segment that takes an i32 argument
+assert_eq!(Segment::<(i32,)>::new() // create a new segment that takes an i32 argument
     .op1(|x| x * 2)                 // push a unary operation that multiplies the argument by 2
     .op0(|| 10)                     // push a nullary operation that returns 10
     .op2(|x, y| x + y)              // push a binary operation that adds two arguments

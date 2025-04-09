@@ -25,7 +25,7 @@ impl RawStack {
     # Examples
 
     ```
-    use cel_rs::RawStack;
+    use cel_rs::raw_stack::RawStack;
     let stack = RawStack::new();
     ```
     */
@@ -46,7 +46,7 @@ impl RawStack {
     # Examples
 
     ```
-    use cel_rs::RawStack;
+    use cel_rs::raw_stack::RawStack;
     let mut stack = RawStack::new();
     stack.push(42u32);
     ```
@@ -79,7 +79,7 @@ impl RawStack {
     # Examples
 
     ```
-    use cel_rs::RawStack;
+    use cel_rs::raw_stack::RawStack;
     let mut stack = RawStack::new();
     stack.push(100u32);
     let value: u32 = unsafe { stack.pop() };
