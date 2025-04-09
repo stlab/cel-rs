@@ -21,6 +21,12 @@ const fn align_index(align: usize, index: usize) -> usize {
     (index + align - 1) & !(align - 1)
 }
 
+impl Default for RawSequence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RawSequence {
     /**
     Creates a new empty RawSequence.

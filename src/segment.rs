@@ -63,7 +63,7 @@ the types of values produced by operations.
 ```rust
 use cel_rs::segment::*;
 
-assert_eq!(new_segment::<(i32, )>() // create a new segment that takes an i32 argument
+assert_eq!(Segment::<(i32,)>::new() // create a new segment that takes an i32 argument
     .op1(|x| x * 2)                 // push a unary operation that multiplies the argument by 2
     .op0(|| 10)                     // push a nullary operation that returns 10
     .op2(|x, y| x + y)              // push a binary operation that adds two arguments
@@ -72,13 +72,37 @@ assert_eq!(new_segment::<(i32, )>() // create a new segment that takes an i32 ar
     "94");                          // the result is (42 * 2 + 10).to_string()
 ```
 */
-
-pub struct Segment<Args: IntoList, Stack: List = <<Args as IntoList>::Result as List>::Reverse> {
+pub struct Segment<
+    Args: IntoList + 'static,
+    Stack: List = <<Args as IntoList>::Result as List>::Reverse,
+> {
     segment: RawSegment,
     _phantom: std::marker::PhantomData<(Args, Stack)>,
 }
 
-impl<Args: IntoList, Stack: List> Segment<Args, Stack> {
+impl<Args: IntoList + 'static> Default for Segment<Args> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Args: IntoList + 'static> Segment<Args> {
+    pub fn new() -> Segment<Args> {
+        Segment {
+            segment: RawSegment::new(),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
+    fn into<R: 'static, NewStack: List + 'static>(self) -> Segment<Args, (R, NewStack)> {
+        Segment {
+            segment: self.segment,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
     pub fn from_dyn_segment(segment: DynSegment) -> Result<Self> {
         type ArgList<Args> = <<Args as IntoList>::Result as List>::Reverse;
 
@@ -98,100 +122,64 @@ impl<Args: IntoList, Stack: List> Segment<Args, Stack> {
     }
 
     /** Pushes a nullary operation that takes no arguments and returns a value of type R. */
-    pub fn op0<R, F>(self, op: F) -> Segment<Args, (R, Stack)>
+    pub fn op0<R, F>(mut self, op: F) -> Segment<Args, (R, Stack)>
     where
         F: Fn() -> R + 'static,
         R: 'static,
-        Stack: 'static,
     {
-        let mut seg = self.segment;
-        seg.push_op0(op);
-        Segment {
-            segment: seg,
-            _phantom: std::marker::PhantomData,
-        }
+        self.segment.push_op0(op);
+        self.into()
     }
 
-    pub fn op0r<R, F>(self, op: F) -> Segment<Args, (R, Stack)>
+    pub fn op0r<R, F>(mut self, op: F) -> Segment<Args, (R, Stack)>
     where
         F: Fn() -> Result<R> + 'static,
         R: 'static,
-        Stack: 'static,
     {
-        let mut seg = self.segment;
-        seg.raw0(move |stack| match op() {
+        self.segment.raw0(move |stack| match op() {
             Ok(r) => Ok(r),
             Err(e) => {
                 Stack::drop_top(stack);
                 Err(e)
             }
         });
-        Segment {
-            segment: seg,
-            _phantom: std::marker::PhantomData,
-        }
+        self.into()
     }
 
     /** Pushes a unary operation that takes the current stack value and returns a new value. */
-    pub fn op1<R, F>(self, op: F) -> Segment<Args, (R, Stack::Tail)>
+    pub fn op1<R, F>(mut self, op: F) -> Segment<Args, (R, Stack::Tail)>
     where
         F: Fn(Stack::Head) -> R + 'static,
-        Stack: 'static,
         R: 'static,
     {
-        let mut seg = self.segment;
-        seg.push_op1(op);
-        Segment {
-            segment: seg,
-            _phantom: std::marker::PhantomData,
-        }
+        self.segment.push_op1(op);
+        self.into()
     }
 
-    pub fn op2<R, F>(self, op: F) -> Segment<Args, (R, <Stack::Tail as List>::Tail)>
+    pub fn op2<R, F>(mut self, op: F) -> Segment<Args, (R, <Stack::Tail as List>::Tail)>
     where
         F: Fn(<Stack::Tail as List>::Head, Stack::Head) -> R + 'static,
-        Stack: 'static,
         R: 'static,
     {
-        let mut seg = self.segment;
-        seg.push_op2(op);
-        Segment {
-            segment: seg,
-            _phantom: std::marker::PhantomData,
-        }
+        self.segment.push_op2(op);
+        self.into()
     }
 
     /** Executes all operations in the segment and returns the final result. */
-    pub(crate) fn call0<U: 'static>(&self) -> Result<U>
-    where
-        Stack: 'static,
-    {
+    pub(crate) fn call0<U: 'static>(&self) -> Result<U> {
         unsafe { self.segment.call0() }
     }
 
-    pub(crate) fn call1<U: 'static, A>(&self, args: A) -> Result<U>
-    where
-        Stack: 'static,
-    {
+    pub(crate) fn call1<U: 'static, A>(&self, args: A) -> Result<U> {
         unsafe { self.segment.call1(args) }
     }
 
-    pub(crate) fn call2<U: 'static, A, B>(&self, args: (A, B)) -> Result<U>
-    where
-        Stack: 'static,
-    {
+    pub(crate) fn call2<U: 'static, A, B>(&self, args: (A, B)) -> Result<U> {
         unsafe { self.segment.call2(args) }
     }
 }
 
 /** Creates a new empty segment with no operations. */
-pub fn new_segment<Args: IntoList>() -> Segment<Args> {
-    Segment {
-        segment: RawSegment::new(),
-        _phantom: std::marker::PhantomData,
-    }
-}
-
 // trait Fn<Args> is currently unstable - so we use a call trait as a temporary workaround.
 pub trait Callable<Args> {
     type Output;
@@ -249,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_unit_result() {
-        let segment = new_segment::<()>();
+        let segment = Segment::new();
         let result = segment.call(());
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), ());
@@ -274,7 +262,7 @@ mod tests {
         let drop_count = Arc::new(AtomicUsize::new(0));
         let tracker = DropCounter(drop_count.clone());
 
-        let segment = new_segment::<()>()
+        let segment = Segment::new()
             .op0(move || tracker.clone())
             .op0r(|| -> Result<u32> { Err(anyhow::anyhow!("error")) })
             .op2(|_: DropCounter, _: u32| 42u32);
@@ -287,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_binary_operation_args_of_different_types() {
-        let result = new_segment::<(&str, i32)>()
+        let result = Segment::new()
             .op2(|x, y| format!("{} {}", x, y))
             .call(("Hello", 12));
 
@@ -295,7 +283,7 @@ mod tests {
     }
     #[test]
     fn test_type_safe_operations() {
-        let result = new_segment::<()>()
+        let result = Segment::new()
             .op0(|| 42)
             .op0(|| 10)
             .op2(|x, y| x + y)
@@ -308,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_chain_operations() {
-        let result = new_segment::<()>()
+        let result = Segment::new()
             .op0(|| "Hello")
             .op1(|s| s.len())
             .op1(|n| n * 2)
@@ -320,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_call_with_args() {
-        let result = new_segment::<(i32,)>().op1(|x: i32| x * 2).call((21,));
+        let result = Segment::new().op1(|x: i32| x * 2).call((21,));
 
         assert_eq!(result.unwrap(), 42);
     }

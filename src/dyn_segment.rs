@@ -7,10 +7,14 @@ use std::any::TypeId;
 
 pub trait ToTypeIDList: List {
     fn to_type_id_list() -> Vec<TypeId>;
+    fn to_drop_list() -> Vec<Dropper>;
 }
 
 impl ToTypeIDList for () {
     fn to_type_id_list() -> Vec<TypeId> {
+        Vec::new()
+    }
+    fn to_drop_list() -> Vec<Dropper> {
         Vec::new()
     }
 }
@@ -19,6 +23,11 @@ impl<T: 'static, U: ToTypeIDList + 'static> ToTypeIDList for (T, U) {
     fn to_type_id_list() -> Vec<TypeId> {
         let mut list = U::to_type_id_list();
         list.push(TypeId::of::<T>());
+        list
+    }
+    fn to_drop_list() -> Vec<Dropper> {
+        let mut list = U::to_drop_list();
+        list.push(|stack| unsafe { stack.drop::<T>() });
         list
     }
 }
@@ -65,6 +74,7 @@ pub struct DynSegment {
 }
 pub trait IntoReverseTypeIDList {
     fn to_type_id_list() -> Vec<TypeId>;
+    fn to_drop_list() -> Vec<Dropper>;
 }
 
 impl<Args: IntoList> IntoReverseTypeIDList for Args
@@ -74,6 +84,9 @@ where
 {
     fn to_type_id_list() -> Vec<TypeId> {
         <<Args::Result as List>::Reverse as ToTypeIDList>::to_type_id_list()
+    }
+    fn to_drop_list() -> Vec<Dropper> {
+        <<Args::Result as List>::Reverse as ToTypeIDList>::to_drop_list()
     }
 }
 
@@ -89,7 +102,7 @@ impl DynSegment {
             segment: RawSegment::new(),
             argument_ids: Args::to_type_id_list(),
             stack_ids: Args::to_type_id_list(),
-            stack_unwind: Vec::new(),
+            stack_unwind: Args::to_drop_list(),
         }
     }
 
@@ -100,12 +113,9 @@ impl DynSegment {
 
     The type and unwind stacks must be the same length and at least one type must be present.
     */
-    fn pop_type<T>(&mut self)
-    where
-        T: 'static,
-    {
-        self.stack_ids.pop();
-        self.stack_unwind.pop();
+    fn pop_types(&mut self, n: usize) {
+        self.stack_ids.truncate(self.stack_ids.len() - n);
+        self.stack_unwind.truncate(self.stack_unwind.len() - n);
     }
 
     /**
@@ -185,7 +195,7 @@ impl DynSegment {
         R: 'static,
     {
         self.type_check_stack::<(T, ())>()?;
-        self.pop_type::<T>();
+        self.pop_types(1);
         self.segment.push_op1(op);
         self.push_type::<R>();
         Ok(())
@@ -205,8 +215,7 @@ impl DynSegment {
         R: 'static,
     {
         self.type_check_stack::<(T, (U, ()))>()?;
-        self.pop_type::<U>();
-        self.pop_type::<T>();
+        self.pop_types(2);
         self.segment.push_op2(op);
         self.push_type::<R>();
         Ok(())
@@ -227,9 +236,7 @@ impl DynSegment {
         R: 'static,
     {
         self.type_check_stack::<(T, (U, (V, ())))>()?;
-        self.pop_type::<V>();
-        self.pop_type::<U>();
-        self.pop_type::<T>();
+        self.pop_types(3);
         self.segment.push_op3(op);
         self.push_type::<R>();
         Ok(())
@@ -256,7 +263,7 @@ impl DynSegment {
             ));
         }
         self.type_check_stack::<(R, ())>()?;
-        self.pop_type::<R>();
+        self.pop_types(1);
         if !self.stack_ids.is_empty() {
             return Err(anyhow::anyhow!(
                 "{} value(s) left on execution stack",
@@ -296,8 +303,8 @@ impl DynSegment {
             ));
         }
         self.type_check_stack::<(R, ())>()?;
-        self.pop_type::<R>();
-        if self.stack_ids.len() != 0 {
+        self.pop_types(1);
+        if !self.stack_ids.is_empty() {
             return Err(anyhow::anyhow!(
                 "{} value(s) left on execution stack",
                 self.stack_ids.len()

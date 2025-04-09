@@ -1,5 +1,5 @@
+use std::mem::MaybeUninit;
 use std::mem::size_of;
-
 /**
 A simple raw stack that stores values as raw bytes.
 
@@ -9,7 +9,13 @@ to ensure that the type parameter matches the value at the top of the stack.
 */
 #[derive(Debug)]
 pub struct RawStack {
-    buffer: Vec<u8>,
+    buffer: Vec<MaybeUninit<u8>>,
+}
+
+impl Default for RawStack {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RawStack {
@@ -19,7 +25,7 @@ impl RawStack {
     # Examples
 
     ```
-    use cel_rs::RawStack;
+    use cel_rs::raw_stack::RawStack;
     let stack = RawStack::new();
     ```
     */
@@ -40,7 +46,7 @@ impl RawStack {
     # Examples
 
     ```
-    use cel_rs::RawStack;
+    use cel_rs::raw_stack::RawStack;
     let mut stack = RawStack::new();
     stack.push(42u32);
     ```
@@ -73,7 +79,7 @@ impl RawStack {
     # Examples
 
     ```
-    use cel_rs::RawStack;
+    use cel_rs::raw_stack::RawStack;
     let mut stack = RawStack::new();
     stack.push(100u32);
     let value: u32 = unsafe { stack.pop() };
