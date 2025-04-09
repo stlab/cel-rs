@@ -21,7 +21,7 @@ impl PrintableList for () {
 }
 
 // Recursive case: head must implement Display
-impl<H: std::fmt::Display, T: PrintableList> PrintableList for (H, T) {
+impl<H: std::fmt::Display + 'static, T: PrintableList + 'static> PrintableList for (H, T) {
     fn print(self, i: usize) -> usize {
         println!("{}", self.0);
         self.1.print(i + 1)

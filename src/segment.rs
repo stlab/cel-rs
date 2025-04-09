@@ -72,13 +72,18 @@ assert_eq!(Segment::new() // create a new segment that takes an i32 argument
     "94");                          // the result is (42 * 2 + 10).to_string()
 ```
 */
-
 pub struct Segment<
     Args: IntoList + 'static,
     Stack: List = <<Args as IntoList>::Result as List>::Reverse,
 > {
     segment: RawSegment,
     _phantom: std::marker::PhantomData<(Args, Stack)>,
+}
+
+impl<Args: IntoList + 'static> Default for Segment<Args> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<Args: IntoList + 'static> Segment<Args> {
@@ -175,7 +180,6 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
 }
 
 /** Creates a new empty segment with no operations. */
-
 // trait Fn<Args> is currently unstable - so we use a call trait as a temporary workaround.
 pub trait Callable<Args> {
     type Output;

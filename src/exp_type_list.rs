@@ -1,9 +1,9 @@
 pub trait TypeHandler {
-    fn invoke<T>(self: &mut Self);
+    fn invoke<T>(&mut self);
 }
 
 pub trait ValueHandler {
-    fn invoke<T: 'static>(self: &mut Self, value: &T);
+    fn invoke<T: 'static>(&mut self, value: &T);
 }
 
 pub trait List {
@@ -24,12 +24,12 @@ pub trait List {
     type Reverse: List;
     fn reverse(self) -> Self::Reverse;
 
-    fn for_each_type<H: TypeHandler>(self: &Self, handler: &mut H) {
+    fn for_each_type<H: TypeHandler>(&self, handler: &mut H) {
         handler.invoke::<Self::Head>();
         self.tail().for_each_type(handler);
     }
 
-    fn for_each_value<H: ValueHandler>(self: &Self, handler: &mut H) {
+    fn for_each_value<H: ValueHandler>(&self, handler: &mut H) {
         handler.invoke(self.head());
         self.tail().for_each_value(handler);
     }
@@ -37,8 +37,8 @@ pub trait List {
 
 pub struct Bottom;
 pub trait EmptyList {
-    type AsList<U: 'static>: List;
-    fn as_list<U: 'static>(self, item: U) -> Self::AsList<U>;
+    type ToList<U: 'static>: List;
+    fn to_list<U: 'static>(self, item: U) -> Self::ToList<U>;
 
     type FromTuple<T: TupleTraits>: List;
     fn from_tuple<T: TupleTraits>(tuple: T) -> Self::FromTuple<T>;
@@ -49,7 +49,7 @@ pub trait EmptyList {
 impl<T: EmptyList> List for T {
     type Head = Bottom;
     type Tail = T; // Satisfy the List trait
-    type PushFront<U: 'static> = T::AsList<U>;
+    type PushFront<U: 'static> = T::ToList<U>;
     type Concat<U: List> = U;
     type Reverse = T;
     const LENGTH: usize = 0;
@@ -63,7 +63,7 @@ impl<T: EmptyList> List for T {
     }
 
     fn push_front<U>(self, item: U) -> Self::PushFront<U> {
-        self.as_list(item)
+        self.to_list(item)
     }
 
     fn concat<U: List>(self, other: U) -> Self::Concat<U> {
@@ -74,8 +74,8 @@ impl<T: EmptyList> List for T {
         self
     }
 
-    fn for_each_type<H: TypeHandler>(self: &Self, _handler: &mut H) {}
-    fn for_each_value<H: ValueHandler>(self: &Self, _handler: &mut H) {}
+    fn for_each_type<H: TypeHandler>(&self, _handler: &mut H) {}
+    fn for_each_value<H: ValueHandler>(&self, _handler: &mut H) {}
 }
 
 pub trait TupleTraits {
@@ -91,21 +91,21 @@ impl TupleTraits for () {
 }
 
 impl<A: 'static> TupleTraits for (A,) {
-    type IntoList<T: EmptyList> = T::AsList<A>;
+    type IntoList<T: EmptyList> = T::ToList<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty().push_front(self.0)
     }
 }
 
 impl<A: 'static, B: 'static> TupleTraits for (A, B) {
-    type IntoList<T: EmptyList> = <T::AsList<B> as List>::PushFront<A>;
+    type IntoList<T: EmptyList> = <T::ToList<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty().push_front(self.1).push_front(self.0)
     }
 }
 
 impl<A: 'static, B: 'static, C: 'static> TupleTraits for (A, B, C) {
-    type IntoList<T: EmptyList> = <<T::AsList<C> as List>::PushFront<B> as List>::PushFront<A>;
+    type IntoList<T: EmptyList> = <<T::ToList<C> as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
             .push_front(self.2)
@@ -115,7 +115,7 @@ impl<A: 'static, B: 'static, C: 'static> TupleTraits for (A, B, C) {
 }
 impl<A: 'static, B: 'static, C: 'static, D: 'static> TupleTraits for (A, B, C, D) {
     type IntoList<T: EmptyList> =
-        <<<T::AsList<D> as List>::PushFront<C> as List>::PushFront<B> as List>::PushFront<A>;
+        <<<T::ToList<D> as List>::PushFront<C> as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
             .push_front(self.3)
@@ -126,7 +126,7 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static> TupleTraits for (A, B, C, D
 }
 
 impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static> TupleTraits for (A, B, C, D, E) {
-    type IntoList<T: EmptyList> = <<<<T::AsList<E> as List>::PushFront<D> as List>::PushFront<
+    type IntoList<T: EmptyList> = <<<<T::ToList<E> as List>::PushFront<D> as List>::PushFront<
         C,
     > as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
@@ -142,7 +142,7 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static> TupleTraits for
 impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static> TupleTraits
     for (A, B, C, D, E, F)
 {
-    type IntoList<T: EmptyList> = <<<<<T::AsList<F> as List>::PushFront<E> as List>::PushFront<
+    type IntoList<T: EmptyList> = <<<<<T::ToList<F> as List>::PushFront<E> as List>::PushFront<
         D,
     > as List>::PushFront<C> as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
@@ -159,7 +159,7 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static> Tup
 impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static> TupleTraits
     for (A, B, C, D, E, F, G)
 {
-    type IntoList<T: EmptyList> = <<<<<<T::AsList<G> as List>::PushFront<F> as List>::PushFront<
+    type IntoList<T: EmptyList> = <<<<<<T::ToList<G> as List>::PushFront<F> as List>::PushFront<
         E,
     > as List>::PushFront<D> as List>::PushFront<C> as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
@@ -178,7 +178,7 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 
     TupleTraits for (A, B, C, D, E, F, G, H)
 {
     type IntoList<T: EmptyList> =
-        <<<<<<<T::AsList<H> as List>::PushFront<G> as List>::PushFront<F> as List>::PushFront<
+        <<<<<<<T::ToList<H> as List>::PushFront<G> as List>::PushFront<F> as List>::PushFront<
             E,
         > as List>::PushFront<D> as List>::PushFront<C> as List>::PushFront<B> as List>::PushFront<
             A,
@@ -209,7 +209,7 @@ impl<
 > TupleTraits for (A, B, C, D, E, F, G, H, I)
 {
     type IntoList<T: EmptyList> =
-        <<<<<<<<T::AsList<I> as List>::PushFront<H> as List>::PushFront<G> as List>::PushFront<
+        <<<<<<<<T::ToList<I> as List>::PushFront<H> as List>::PushFront<G> as List>::PushFront<
             F,
         > as List>::PushFront<E> as List>::PushFront<D> as List>::PushFront<C> as List>::PushFront<
             B,
@@ -242,7 +242,7 @@ impl<
 > TupleTraits for (A, B, C, D, E, F, G, H, I, J)
 {
     type IntoList<T: EmptyList> =
-        <<<<<<<<<T::AsList<J> as List>::PushFront<I> as List>::PushFront<H> as List>::PushFront<
+        <<<<<<<<<T::ToList<J> as List>::PushFront<I> as List>::PushFront<H> as List>::PushFront<
             G,
         > as List>::PushFront<F> as List>::PushFront<E> as List>::PushFront<D> as List>::PushFront<
             C,
@@ -277,7 +277,7 @@ impl<
 > TupleTraits for (A, B, C, D, E, F, G, H, I, J, K)
 {
     type IntoList<T: EmptyList> =
-        <<<<<<<<<<T::AsList<K> as List>::PushFront<J> as List>::PushFront<I> as List>::PushFront<
+        <<<<<<<<<<T::ToList<K> as List>::PushFront<J> as List>::PushFront<I> as List>::PushFront<
             H,
         > as List>::PushFront<G> as List>::PushFront<F> as List>::PushFront<E> as List>::PushFront<
             D,
@@ -314,7 +314,7 @@ impl<
 > TupleTraits for (A, B, C, D, E, F, G, H, I, J, K, L)
 {
     type IntoList<T: EmptyList> =
-        <<<<<<<<<<<T::AsList<L> as List>::PushFront<K> as List>::PushFront<J> as List>::PushFront<
+        <<<<<<<<<<<T::ToList<L> as List>::PushFront<K> as List>::PushFront<J> as List>::PushFront<
             I,
         > as List>::PushFront<H> as List>::PushFront<G> as List>::PushFront<F> as List>::PushFront<
             E,
@@ -339,8 +339,8 @@ impl<
 }
 
 impl EmptyList for () {
-    type AsList<U: 'static> = (U, ());
-    fn as_list<U: 'static>(self, item: U) -> Self::AsList<U> {
+    type ToList<U: 'static> = (U, ());
+    fn to_list<U: 'static>(self, item: U) -> Self::ToList<U> {
         (item, ())
     }
 
@@ -349,9 +349,7 @@ impl EmptyList for () {
         tuple.into_list()
     }
 
-    fn empty() -> Self {
-        ()
-    }
+    fn empty() -> Self {}
 }
 
 impl<H: 'static, T: List> List for (H, T) {
@@ -500,8 +498,8 @@ mod tests {
             }
         }
         impl EmptyList for EmptyDisplayList {
-            type AsList<U: 'static> = DisplayList<U, EmptyDisplayList>;
-            fn as_list<U: 'static>(self, item: U) -> Self::AsList<U> {
+            type ToList<U: 'static> = DisplayList<U, EmptyDisplayList>;
+            fn to_list<U: 'static>(self, item: U) -> Self::ToList<U> {
                 DisplayList(item, EmptyDisplayList())
             }
 

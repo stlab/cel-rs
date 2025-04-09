@@ -15,6 +15,12 @@ pub struct RawSegment {
     dropper: Vec<fn(&mut RawSequence, usize) -> usize>,
 }
 
+impl Default for RawSegment {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RawSegment {
     /** Creates a new empty segment. */
     pub fn new() -> Self {
@@ -135,9 +141,7 @@ impl RawSegment {
     Executes all operations in the segment and returns the final result.
 
     # Safety
-    This function is unsafe because it performs unchecked type conversions when
-    popping values from the stack. The caller must ensure that the operations
-    were pushed in the correct order and with matching types.
+    This function is unsafe if the result type does not match the type returned by the operations in the segment or if the operations expect any initial values on the stack.
     */
     pub unsafe fn call0<T>(&self) -> Result<T>
     where
@@ -151,6 +155,13 @@ impl RawSegment {
         Ok(unsafe { stack.pop() })
     }
 
+    /**
+    Executes all operations in the segment with one argument of type A and returns the final result.
+
+    # Safety
+    This function is unsafe if the argument and result types do not match the types expected or
+    returned by the operations in the segment.
+    */
     pub unsafe fn call1<A, T>(&self, arg: A) -> Result<T>
     where
         T: 'static,
@@ -164,6 +175,13 @@ impl RawSegment {
         Ok(unsafe { stack.pop() })
     }
 
+    /**
+    Executes all operations in the segment with two arguments of types A and B and returns the final result.
+
+    # Safety
+    This function is unsafe if the arguments and result types do not match the types expected or
+    returned by the operations in the segment.
+    */
     pub unsafe fn call2<A, B, T>(&self, arg: (A, B)) -> Result<T>
     where
         T: 'static,
