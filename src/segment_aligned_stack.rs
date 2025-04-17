@@ -1,5 +1,7 @@
 // use crate::dyn_segment::DynSegment;
-use crate::exp_type_list::{CEmptyStackList, EmptyList, List, TupleTraits, TypeHandler};
+use crate::exp_type_list::{
+    CEmptyStackList, CStackList, EmptyList, List, TupleTraits, TypeHandler,
+};
 use crate::raw_aligned_stack::RawAlignedStack;
 use crate::raw_segment_aligned_stack::RawSegmentAlignedStack;
 use anyhow::*;
@@ -100,7 +102,7 @@ impl<Args: TupleTraits + 'static> Segment<Args> {
 }
 
 impl<Args: TupleTraits + 'static, Stack: List + 'static> Segment<Args, Stack> {
-    fn into<R: 'static, NewStack: List + 'static>(self) -> Segment<Args, (R, NewStack)> {
+    fn into<NewStack: List + 'static>(self) -> Segment<Args, NewStack> {
         Segment {
             segment: self.segment,
             _phantom: std::marker::PhantomData,
@@ -128,7 +130,7 @@ impl<Args: TupleTraits + 'static, Stack: List + 'static> Segment<Args, Stack> {
     */
 
     /** Pushes a nullary operation that takes no arguments and returns a value of type R. */
-    pub fn op0<R, F>(mut self, op: F) -> Segment<Args, (R, Stack)>
+    pub fn op0<R, F>(mut self, op: F) -> Segment<Args, Stack::PushFront<R>>
     where
         F: Fn() -> R + 'static,
         R: 'static,
@@ -137,7 +139,7 @@ impl<Args: TupleTraits + 'static, Stack: List + 'static> Segment<Args, Stack> {
         self.into()
     }
 
-    pub fn op0r<R, F>(mut self, op: F) -> Segment<Args, (R, Stack)>
+    pub fn op0r<R, F>(mut self, op: F) -> Segment<Args, Stack::PushFront<R>>
     where
         F: Fn() -> Result<R> + 'static,
         R: 'static,
@@ -153,7 +155,7 @@ impl<Args: TupleTraits + 'static, Stack: List + 'static> Segment<Args, Stack> {
     }
 
     /** Pushes a unary operation that takes the current stack value and returns a new value. */
-    pub fn op1<R, F>(mut self, op: F) -> Segment<Args, (R, Stack::Tail)>
+    pub fn op1<R, F>(mut self, op: F) -> Segment<Args, CStackList<R, Stack::Tail>>
     where
         F: Fn(Stack::Head) -> R + 'static,
         R: 'static,
@@ -162,7 +164,10 @@ impl<Args: TupleTraits + 'static, Stack: List + 'static> Segment<Args, Stack> {
         self.into()
     }
 
-    pub fn op2<R, F>(mut self, op: F) -> Segment<Args, (R, <Stack::Tail as List>::Tail)>
+    pub fn op2<R, F>(
+        mut self,
+        op: F,
+    ) -> Segment<Args, <<Stack::Tail as List>::Tail as List>::PushFront<R>>
     where
         F: Fn(<Stack::Tail as List>::Head, Stack::Head) -> R + 'static,
         R: 'static,
@@ -298,7 +303,7 @@ mod tests {
             .op0(|| 10)
             .op2(|x, y| x + y)
             .op1(|x| x * 2)
-            .op1(|x| x.to_string())
+            .op1(|x| format!("{}", x)) // TODO: Figure out how to avoid this type annotation
             .call(());
 
         assert_eq!(result.unwrap(), "104");

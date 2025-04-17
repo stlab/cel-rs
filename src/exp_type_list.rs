@@ -381,9 +381,11 @@ impl<H: 'static, T: List> List for CStackList<H, T> {
         self.0.concat(other).push_front(self.1)
     }
 
-    type Reverse = <T::Reverse as List>::Concat<(H, ())>;
+    type Reverse = <T::Reverse as List>::Concat<CStackList<H, CEmptyStackList>>;
     fn reverse(self) -> Self::Reverse {
-        self.0.reverse().concat((self.1, ()))
+        self.0
+            .reverse()
+            .concat(CStackList(CEmptyStackList(), self.1))
     }
 }
 
@@ -404,9 +406,9 @@ impl EmptyList for () {
 pub struct CEmptyStackList();
 
 impl EmptyList for CEmptyStackList {
-    type ToList<U: 'static> = CStackList<U, ()>;
+    type ToList<U: 'static> = CStackList<U, CEmptyStackList>;
     fn to_list<U: 'static>(self, item: U) -> Self::ToList<U> {
-        CStackList((), item)
+        CStackList(CEmptyStackList(), item)
     }
 
     type FromTuple<T: TupleTraits> = T::IntoList<CEmptyStackList>;

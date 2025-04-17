@@ -3,12 +3,10 @@ use crate::raw_stack::RawStack;
 use anyhow::Result;
 type Operation = fn(&RawSequence, usize, &mut RawStack) -> Result<usize>;
 
-/**
-A segment represents a sequence of operations that can be executed.
-
-Each operation is stored along with its data in the segment's storage,
-and can manipulate values on a stack during execution.
-*/
+/// A segment represents a sequence of operations that can be executed.
+///
+/// Each operation is stored along with its data in the segment's storage,
+/// and can manipulate values on a stack during execution.
 pub struct RawSegment {
     ops: Vec<Operation>,
     storage: RawSequence,
