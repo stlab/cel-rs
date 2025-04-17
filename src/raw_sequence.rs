@@ -1,5 +1,6 @@
 use crate::memory::align_index;
-use aligned_vec::{AVec, ConstAlign};
+use crate::raw_aligned_vec::RawAlignedVec;
+// use aligned_vec::{AVec, ConstAlign};
 use std::mem;
 
 /**
@@ -11,7 +12,7 @@ internal buffer that aligns values according to their type's requirements,
 up to a maximum alignment of 4096 bytes.
 */
 pub struct RawSequence {
-    buffer: AVec<u8, ConstAlign<4096>>,
+    buffer: RawAlignedVec,
 }
 
 impl Default for RawSequence {
@@ -27,7 +28,7 @@ impl RawSequence {
     */
     pub fn new() -> Self {
         RawSequence {
-            buffer: AVec::new(4096),
+            buffer: RawAlignedVec::with_base_alignment(4096),
         }
     }
 
