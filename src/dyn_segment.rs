@@ -106,18 +106,6 @@ impl DynSegment {
         }
     }
 
-    /*
-    Removes the expected type from the type and unwind stacks.
-
-    # Preconditions
-
-    The type and unwind stacks must be the same length and at least one type must be present.
-    */
-    fn pop_types(&mut self, n: usize) {
-        self.stack_ids.truncate(self.stack_ids.len() - n);
-        self.stack_unwind.truncate(self.stack_unwind.len() - n);
-    }
-
     /**
     Verifies that the argument types match the expected types on the type stack.
 
@@ -127,7 +115,7 @@ impl DynSegment {
     To avoid reversing the arguments and reversing the slice, this operation
     is done in argument order, not stack order.
     */
-    fn type_check_stack<L: List>(&self) -> Result<()> {
+    fn pop_types<L: List>(&mut self) -> Result<()> {
         ensure!(
             L::LENGTH <= self.stack_ids.len(),
             "Too many arguments: expected {}, got {}",
@@ -136,6 +124,9 @@ impl DynSegment {
         );
         let start = self.stack_ids.len() - L::LENGTH;
         ensure!(L::equal(&self.stack_ids[start..]), "Type mismatch");
+
+        self.stack_ids.truncate(start);
+        self.stack_unwind.truncate(start);
         Ok(())
     }
 
@@ -194,8 +185,7 @@ impl DynSegment {
         T: 'static,
         R: 'static,
     {
-        self.type_check_stack::<(T, ())>()?;
-        self.pop_types(1);
+        self.pop_types::<(T, ())>()?;
         self.segment.push_op1(op);
         self.push_type::<R>();
         Ok(())
@@ -214,8 +204,7 @@ impl DynSegment {
         U: 'static,
         R: 'static,
     {
-        self.type_check_stack::<(T, (U, ()))>()?;
-        self.pop_types(2);
+        self.pop_types::<(T, (U, ()))>()?;
         self.segment.push_op2(op);
         self.push_type::<R>();
         Ok(())
@@ -235,8 +224,7 @@ impl DynSegment {
         V: 'static,
         R: 'static,
     {
-        self.type_check_stack::<(T, (U, (V, ())))>()?;
-        self.pop_types(3);
+        self.pop_types::<(T, (U, (V, ())))>()?;
         self.segment.push_op3(op);
         self.push_type::<R>();
         Ok(())
@@ -262,8 +250,7 @@ impl DynSegment {
                 self.argument_ids.len()
             ));
         }
-        self.type_check_stack::<(R, ())>()?;
-        self.pop_types(1);
+        self.pop_types::<(R, ())>()?;
         if !self.stack_ids.is_empty() {
             return Err(anyhow::anyhow!(
                 "{} value(s) left on execution stack",
@@ -302,8 +289,7 @@ impl DynSegment {
                 std::any::type_name::<A>() // TODO: Need to store type names along with TypeId
             ));
         }
-        self.type_check_stack::<(R, ())>()?;
-        self.pop_types(1);
+        self.pop_types::<(R, ())>()?;
         if !self.stack_ids.is_empty() {
             return Err(anyhow::anyhow!(
                 "{} value(s) left on execution stack",

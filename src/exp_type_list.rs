@@ -1,9 +1,11 @@
+use std::mem::offset_of;
+
 pub trait TypeHandler {
-    fn invoke<T>(&mut self);
+    fn invoke<T: List>(&mut self);
 }
 
 pub trait ValueHandler {
-    fn invoke<T: 'static>(&mut self, value: &T);
+    fn invoke<T: List + 'static>(&mut self, value: &T::Head);
 }
 
 pub trait List {
@@ -14,6 +16,8 @@ pub trait List {
     fn tail(&self) -> &Self::Tail;
 
     const LENGTH: usize = 1 + Self::Tail::LENGTH;
+    const HEAD_PADDING: usize;
+    const HEAD_OFFSET: usize;
 
     type PushFront<U: 'static>: List;
     fn push_front<U: 'static>(self, item: U) -> Self::PushFront<U>;
@@ -24,13 +28,19 @@ pub trait List {
     type Reverse: List;
     fn reverse(self) -> Self::Reverse;
 
-    fn for_each_type<H: TypeHandler>(&self, handler: &mut H) {
-        handler.invoke::<Self::Head>();
-        self.tail().for_each_type(handler);
+    fn for_each_type<H: TypeHandler>(handler: &mut H)
+    where
+        Self: Sized + 'static,
+    {
+        handler.invoke::<Self>();
+        Self::Tail::for_each_type(handler);
     }
 
-    fn for_each_value<H: ValueHandler>(&self, handler: &mut H) {
-        handler.invoke(self.head());
+    fn for_each_value<H: ValueHandler>(&self, handler: &mut H)
+    where
+        Self: Sized + 'static,
+    {
+        handler.invoke::<Self>(self.head());
         self.tail().for_each_value(handler);
     }
 }
@@ -53,6 +63,8 @@ impl<T: EmptyList> List for T {
     type Concat<U: List> = U;
     type Reverse = T;
     const LENGTH: usize = 0;
+    const HEAD_PADDING: usize = 0;
+    const HEAD_OFFSET: usize = 0;
 
     fn head(&self) -> &Self::Head {
         unreachable!("EmptyList has no head")
@@ -74,7 +86,7 @@ impl<T: EmptyList> List for T {
         self
     }
 
-    fn for_each_type<H: TypeHandler>(&self, _handler: &mut H) {}
+    fn for_each_type<H: TypeHandler>(_handler: &mut H) {}
     fn for_each_value<H: ValueHandler>(&self, _handler: &mut H) {}
 }
 
@@ -338,6 +350,43 @@ impl<
     }
 }
 
+/// A list using a guaranteed memory layout (`repr(C)`), with tail stored first so appending items
+/// does not change the memory layout of prior items.
+///
+/// See https://doc.rust-lang.org/stable/reference/type-layout.html#r-layout.repr.c.struct
+#[repr(C)]
+pub struct CStackList<H, T>(T, H);
+
+impl<H: 'static, T: List> List for CStackList<H, T> {
+    type Head = H;
+    fn head(&self) -> &Self::Head {
+        &self.1
+    }
+
+    type Tail = T;
+    fn tail(&self) -> &Self::Tail {
+        &self.0
+    }
+
+    const HEAD_PADDING: usize =
+        Self::HEAD_OFFSET - (Self::Tail::HEAD_OFFSET + size_of::<<Self::Tail as List>::Head>());
+    const HEAD_OFFSET: usize = offset_of!(Self, 1);
+    type PushFront<U: 'static> = CStackList<U, Self>;
+    fn push_front<U: 'static>(self, item: U) -> Self::PushFront<U> {
+        CStackList(self, item)
+    }
+
+    type Concat<U: List> = <T::Concat<U> as List>::PushFront<H>;
+    fn concat<U: List>(self, other: U) -> Self::Concat<U> {
+        self.0.concat(other).push_front(self.1)
+    }
+
+    type Reverse = <T::Reverse as List>::Concat<(H, ())>;
+    fn reverse(self) -> Self::Reverse {
+        self.0.reverse().concat((self.1, ()))
+    }
+}
+
 impl EmptyList for () {
     type ToList<U: 'static> = (U, ());
     fn to_list<U: 'static>(self, item: U) -> Self::ToList<U> {
@@ -352,6 +401,24 @@ impl EmptyList for () {
     fn empty() -> Self {}
 }
 
+pub struct CEmptyStackList();
+
+impl EmptyList for CEmptyStackList {
+    type ToList<U: 'static> = CStackList<U, ()>;
+    fn to_list<U: 'static>(self, item: U) -> Self::ToList<U> {
+        CStackList((), item)
+    }
+
+    type FromTuple<T: TupleTraits> = T::IntoList<CEmptyStackList>;
+    fn from_tuple<T: TupleTraits>(tuple: T) -> Self::FromTuple<T> {
+        tuple.into_list()
+    }
+
+    fn empty() -> Self {
+        CEmptyStackList()
+    }
+}
+
 impl<H: 'static, T: List> List for (H, T) {
     type Head = H;
     fn head(&self) -> &Self::Head {
@@ -362,6 +429,9 @@ impl<H: 'static, T: List> List for (H, T) {
     fn tail(&self) -> &Self::Tail {
         &self.1
     }
+
+    const HEAD_PADDING: usize = 0; // undefined
+    const HEAD_OFFSET: usize = offset_of!(Self, 0);
 
     type PushFront<U: 'static> = (U, Self);
     fn push_front<U: 'static>(self, item: U) -> Self::PushFront<U> {
@@ -382,6 +452,21 @@ impl<H: 'static, T: List> List for (H, T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cstack_list() {
+        let list = CStackList((), 32i32).push_front("Hello").push_front(42.5);
+        // Test that we can cast to a C struct and read values
+        #[repr(C)]
+        struct TestStruct(i32, &'static str, f64);
+
+        let test_struct = unsafe { std::mem::transmute::<_, TestStruct>(list) };
+
+        assert_eq!(test_struct.0, 32);
+        assert_eq!(test_struct.1, "Hello");
+        assert_eq!(test_struct.2, 42.5);
+    }
+
     #[test]
     fn test_empty_list() {
         assert_eq!(<()>::empty(), ());
@@ -441,9 +526,9 @@ mod tests {
             }
         }
 
-        (1, 2.5, "Hello")
-            .into_list::<()>()
-            .for_each_type(&mut PrintTypeNames { count: 0 });
+        <(i32, f64, &str) as TupleTraits>::IntoList::<()>::for_each_type(&mut PrintTypeNames {
+            count: 0,
+        });
     }
 
     #[test]
@@ -454,7 +539,7 @@ mod tests {
         }
 
         impl ValueHandler for Log {
-            fn invoke<T: 'static>(self: &mut Self, value: &T) {
+            fn invoke<T: List + 'static>(self: &mut Self, value: &T::Head) {
                 let value_any = value as &dyn Any;
                 if let Some(i) = value_any.downcast_ref::<i32>() {
                     self.output.push_str(&format!("{}: i32\n", i));

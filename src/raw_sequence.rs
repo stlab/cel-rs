@@ -1,3 +1,4 @@
+use crate::memory::align_index;
 use aligned_vec::{AVec, ConstAlign};
 use std::mem;
 
@@ -11,14 +12,6 @@ up to a maximum alignment of 4096 bytes.
 */
 pub struct RawSequence {
     buffer: AVec<u8, ConstAlign<4096>>,
-}
-
-/**
-Aligns an index to the specified alignment boundary.
-Returns the next aligned position that satisfies the alignment requirement.
-*/
-const fn align_index(align: usize, index: usize) -> usize {
-    (index + align - 1) & !(align - 1)
 }
 
 impl Default for RawSequence {
