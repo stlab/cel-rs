@@ -42,7 +42,7 @@ where
 {
     type Of<T: List> = <Sub1<UInt<U, B>> as Element>::Of<T::Tail>;
     fn of<T: List>(list: &T) -> &Self::Of<T> {
-        <Sub1<UInt<U, B>> as Element>::of(&list.tail())
+        <Sub1<UInt<U, B>> as Element>::of(list.tail())
     }
 }
 
