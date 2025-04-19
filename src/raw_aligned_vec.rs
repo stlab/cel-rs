@@ -114,7 +114,7 @@ impl RawAlignedVec {
     ///
     /// This method guarantees that for the purpose of the aliasing model, this method does not
     /// materialize a reference to the underlying slice, and thus the returned pointer will remain
-    /// valid when mixed with other calls to [`as_ptr`], [`as_mut_ptr`], and [`as_non_null`]. Note
+    /// valid when mixed with other calls to [`Self::as_ptr`], [`Self::as_mut_ptr`], and [`Self::as_non_null`]. Note
     /// that calling other methods that materialize references to the slice, or references to
     /// specific elements you are planning on accessing through this pointer, may still invalidate
     /// this pointer.
@@ -131,11 +131,11 @@ impl RawAlignedVec {
     ///
     /// The caller must also ensure that the memory the pointer (non-transitively) points to is
     /// never written to (except inside an `UnsafeCell`) using this pointer or any pointer derived
-    /// from it. If you need to mutate the contents of the slice, use [`as_mut_ptr`].
+    /// from it. If you need to mutate the contents of the slice, use [`Self::as_mut_ptr`].
     ///
     /// This method guarantees that for the purpose of the aliasing model, this method does not
     /// materialize a reference to the underlying slice, and thus the returned pointer will remain
-    /// valid when mixed with other calls to [`as_ptr`], [`as_mut_ptr`], and [`as_non_null`]. Note
+    /// valid when mixed with other calls to [`Self::as_ptr`], [`Self::as_mut_ptr`], and [`Self::as_non_null`]. Note
     /// that calling other methods that materialize mutable references to the slice, or mutable
     /// references to specific elements you are planning on accessing through this pointer, as well
     /// as writing to those elements, may still invalidate this pointer.

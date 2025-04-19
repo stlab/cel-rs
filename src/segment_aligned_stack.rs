@@ -1,12 +1,30 @@
 // use crate::dyn_segment::DynSegment;
-use crate::exp_type_list::{
-    CEmptyStackList, CStackList, EmptyList, List, TupleTraits, TypeHandler,
-};
+use crate::exp_type_list::{CEmptyStackList, CStackList, EmptyList, IntoList, List, TypeHandler};
 use crate::raw_aligned_stack::RawAlignedStack;
 use crate::raw_segment_aligned_stack::RawSegmentAlignedStack;
 use anyhow::*;
+// use std::mem::offset_of;
 use std::result::Result::Ok;
 // use std::any::TypeId;
+
+/* pub trait PaddedList: List {
+    const _HEAD_PADDING: usize;
+    const _HEAD_OFFSET: usize;
+}
+
+impl<H: 'static, T: PaddedList> PaddedList for CStackList<H, T>
+where
+    T::Tail: PaddedList,
+{
+    const _HEAD_PADDING: usize =
+        Self::_HEAD_OFFSET - (T::Tail::_HEAD_OFFSET + size_of::<<T::Tail as List>::Head>());
+    const _HEAD_OFFSET: usize = offset_of!(Self, 1);
+}
+
+impl PaddedList for CEmptyStackList {
+    const _HEAD_PADDING: usize = 0;
+    const _HEAD_OFFSET: usize = 0;
+} */
 
 // Create a handler for dropping types
 struct DropHandler<'a>(&'a mut RawAlignedStack);
@@ -79,20 +97,20 @@ assert_eq!(Segment::<(i32,)>::new() // create a new segment that takes an i32 ar
 ```
 */
 pub struct Segment<
-    Args: TupleTraits + 'static,
-    Stack: List = <<Args as TupleTraits>::IntoList<CEmptyStackList> as List>::Reverse,
+    Args: IntoList + 'static,
+    Stack: List = <<Args as IntoList>::IntoList<CEmptyStackList> as List>::Reverse,
 > {
     segment: RawSegmentAlignedStack,
     _phantom: std::marker::PhantomData<(Args, Stack)>,
 }
 
-impl<Args: TupleTraits + 'static> Default for Segment<Args> {
+impl<Args: IntoList + 'static> Default for Segment<Args> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<Args: TupleTraits + 'static> Segment<Args> {
+impl<Args: IntoList + 'static> Segment<Args> {
     pub fn new() -> Segment<Args> {
         Segment {
             segment: RawSegmentAlignedStack::new(),
@@ -101,7 +119,7 @@ impl<Args: TupleTraits + 'static> Segment<Args> {
     }
 }
 
-impl<Args: TupleTraits + 'static, Stack: List + 'static> Segment<Args, Stack> {
+impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
     fn into<NewStack: List + 'static>(self) -> Segment<Args, NewStack> {
         Segment {
             segment: self.segment,
@@ -128,6 +146,13 @@ impl<Args: TupleTraits + 'static, Stack: List + 'static> Segment<Args, Stack> {
             })
         }
     */
+    /*
+    pub fn indirect<N: 'static, T: 'static>(
+        mut self,
+    ) -> Segment<Args, Stack::PushFront<&'static T>> {
+        self.segment.indirect::<N, T>();
+        self.into()
+    } */
 
     /** Pushes a nullary operation that takes no arguments and returns a value of type R. */
     pub fn op0<R, F>(mut self, op: F) -> Segment<Args, Stack::PushFront<R>>
@@ -303,11 +328,21 @@ mod tests {
             .op0(|| 10)
             .op2(|x, y| x + y)
             .op1(|x| x * 2)
-            .op1(|x| format!("{}", x)) // TODO: Figure out how to avoid this type annotation
+            .op1(|x| format!("{}", x))
             .call(());
 
         assert_eq!(result.unwrap(), "104");
     }
+
+    /*     #[test]
+    fn test_references() {
+        let result = Segment::new()
+            .op0(|| 42)
+            .op0(|| 10)
+            .op1(|&x, y| x + 7)
+            .call(());
+        assert_eq!(result.unwrap(), 84);
+    } */
 
     #[test]
     fn test_chain_operations() {

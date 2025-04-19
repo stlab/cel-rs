@@ -1,4 +1,89 @@
 use std::mem::offset_of;
+use std::ops::Sub;
+use typenum::*;
+
+/// Element is a trait that returns the [`List`] element at a given index. Indexing starts at 0 for
+/// head element.
+/// For an out of bounds index, [`Of`] returns a [`Bottom`] type.
+///
+/// # Panics
+///
+/// [`of`] panics if the index is out of bounds.
+///
+/// # Example
+///
+/// ```rust
+/// use cel_rs::exp_type_list::*;
+/// use std::any::type_name;
+/// use typenum::*;
+///
+/// let list = (1, 2.5, "Hello").into_list::<()>();
+/// assert_eq!(*U1::of(&list), 2.5);
+///
+/// type ListType = <(i32, f64, &'static str) as IntoList>::IntoList<()>;
+/// assert_eq!(type_name::<<U1 as Element>::Of<ListType>>(), "f64");
+/// ```
+pub trait Element {
+    type Of<T: List>: 'static;
+    fn of<T: List>(list: &T) -> &Self::Of<T>;
+}
+
+impl Element for U0 {
+    type Of<T: List> = T::Head;
+    fn of<T: List>(list: &T) -> &Self::Of<T> {
+        list.head()
+    }
+}
+
+impl<U: Unsigned, B: Bit> Element for UInt<U, B>
+where
+    UInt<U, B>: Sub<B1>,
+    Sub1<UInt<U, B>>: Element,
+{
+    type Of<T: List> = <Sub1<UInt<U, B>> as Element>::Of<T::Tail>;
+    fn of<T: List>(list: &T) -> &Self::Of<T> {
+        <Sub1<UInt<U, B>> as Element>::of(&list.tail())
+    }
+}
+
+#[test]
+fn test_of_type() {
+    type ListType = <(i32, f64, &'static str) as IntoList>::IntoList<()>;
+    type ZeroType = <U0 as Element>::Of<ListType>;
+    type OneType = <U1 as Element>::Of<ListType>;
+    type TwoType = <U2 as Element>::Of<ListType>;
+    type ThreeType = <U3 as Element>::Of<ListType>;
+    type HundredType = <U100 as Element>::Of<ListType>;
+    assert_eq!(std::any::type_name::<ZeroType>(), "i32");
+    assert_eq!(std::any::type_name::<OneType>(), "f64");
+    assert_eq!(std::any::type_name::<TwoType>(), "&str");
+    assert_eq!(
+        std::any::type_name::<ThreeType>(),
+        "cel_rs::exp_type_list::Bottom"
+    );
+    assert_eq!(
+        std::any::type_name::<HundredType>(),
+        "cel_rs::exp_type_list::Bottom"
+    );
+}
+
+#[test]
+fn test_of_value() {
+    let list = (1, 2.5, "Hello").into_list::<()>();
+    let zero = U0::of(&list);
+    let one = U1::of(&list);
+    let two = U2::of(&list);
+    assert_eq!(*zero, 1);
+    assert_eq!(*one, 2.5);
+    assert_eq!(*two, "Hello");
+}
+
+#[test]
+#[should_panic(expected = "EmptyList has no head")]
+fn test_of_value_panic() {
+    let list = (1, 2.5, "Hello").into_list::<()>();
+    let _ = U3::of(&list);
+}
 
 pub trait TypeHandler {
     fn invoke<T: List>(&mut self);
@@ -14,6 +99,8 @@ pub trait List {
 
     type Tail: List;
     fn tail(&self) -> &Self::Tail;
+
+    type At<N: List>: 'static;
 
     const LENGTH: usize = 1 + Self::Tail::LENGTH;
     const HEAD_PADDING: usize;
@@ -47,11 +134,11 @@ pub trait List {
 
 pub struct Bottom;
 pub trait EmptyList {
-    type ToList<U: 'static>: List;
-    fn to_list<U: 'static>(self, item: U) -> Self::ToList<U>;
+    type PushFirst<U: 'static>: List;
+    fn push_first<U: 'static>(self, item: U) -> Self::PushFirst<U>;
 
-    type FromTuple<T: TupleTraits>: List;
-    fn from_tuple<T: TupleTraits>(tuple: T) -> Self::FromTuple<T>;
+    type FromTuple<T: IntoList>: List;
+    fn from_tuple<T: IntoList>(tuple: T) -> Self::FromTuple<T>;
 
     fn empty() -> Self;
 }
@@ -59,12 +146,14 @@ pub trait EmptyList {
 impl<T: EmptyList> List for T {
     type Head = Bottom;
     type Tail = T; // Satisfy the List trait
-    type PushFront<U: 'static> = T::ToList<U>;
+    type PushFront<U: 'static> = T::PushFirst<U>;
     type Concat<U: List> = U;
     type Reverse = T;
     const LENGTH: usize = 0;
     const HEAD_PADDING: usize = 0;
     const HEAD_OFFSET: usize = 0;
+
+    type At<N: List> = N::Head;
 
     fn head(&self) -> &Self::Head {
         unreachable!("EmptyList has no head")
@@ -75,7 +164,7 @@ impl<T: EmptyList> List for T {
     }
 
     fn push_front<U>(self, item: U) -> Self::PushFront<U> {
-        self.to_list(item)
+        self.push_first(item)
     }
 
     fn concat<U: List>(self, other: U) -> Self::Concat<U> {
@@ -90,60 +179,60 @@ impl<T: EmptyList> List for T {
     fn for_each_value<H: ValueHandler>(&self, _handler: &mut H) {}
 }
 
-pub trait TupleTraits {
+pub trait IntoList {
     type IntoList<T: EmptyList>: List;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T>;
 }
 
-impl TupleTraits for () {
+impl IntoList for () {
     type IntoList<T: EmptyList> = T;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
     }
 }
 
-impl<A: 'static> TupleTraits for (A,) {
-    type IntoList<T: EmptyList> = T::ToList<A>;
+impl<A: 'static> IntoList for (A,) {
+    type IntoList<T: EmptyList> = T::PushFirst<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
-        T::empty().push_front(self.0)
+        T::empty().push_first(self.0)
     }
 }
 
-impl<A: 'static, B: 'static> TupleTraits for (A, B) {
-    type IntoList<T: EmptyList> = <T::ToList<B> as List>::PushFront<A>;
+impl<A: 'static, B: 'static> IntoList for (A, B) {
+    type IntoList<T: EmptyList> = <T::PushFirst<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
-        T::empty().push_front(self.1).push_front(self.0)
+        T::empty().push_first(self.1).push_front(self.0)
     }
 }
 
-impl<A: 'static, B: 'static, C: 'static> TupleTraits for (A, B, C) {
-    type IntoList<T: EmptyList> = <<T::ToList<C> as List>::PushFront<B> as List>::PushFront<A>;
+impl<A: 'static, B: 'static, C: 'static> IntoList for (A, B, C) {
+    type IntoList<T: EmptyList> = <<T::PushFirst<C> as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
-            .push_front(self.2)
+            .push_first(self.2)
             .push_front(self.1)
             .push_front(self.0)
     }
 }
-impl<A: 'static, B: 'static, C: 'static, D: 'static> TupleTraits for (A, B, C, D) {
+impl<A: 'static, B: 'static, C: 'static, D: 'static> IntoList for (A, B, C, D) {
     type IntoList<T: EmptyList> =
-        <<<T::ToList<D> as List>::PushFront<C> as List>::PushFront<B> as List>::PushFront<A>;
+        <<<T::PushFirst<D> as List>::PushFront<C> as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
-            .push_front(self.3)
+            .push_first(self.3)
             .push_front(self.2)
             .push_front(self.1)
             .push_front(self.0)
     }
 }
 
-impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static> TupleTraits for (A, B, C, D, E) {
-    type IntoList<T: EmptyList> = <<<<T::ToList<E> as List>::PushFront<D> as List>::PushFront<
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static> IntoList for (A, B, C, D, E) {
+    type IntoList<T: EmptyList> = <<<<T::PushFirst<E> as List>::PushFront<D> as List>::PushFront<
         C,
     > as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
-            .push_front(self.4)
+            .push_first(self.4)
             .push_front(self.3)
             .push_front(self.2)
             .push_front(self.1)
@@ -151,15 +240,15 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static> TupleTraits for
     }
 }
 
-impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static> TupleTraits
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static> IntoList
     for (A, B, C, D, E, F)
 {
-    type IntoList<T: EmptyList> = <<<<<T::ToList<F> as List>::PushFront<E> as List>::PushFront<
+    type IntoList<T: EmptyList> = <<<<<T::PushFirst<F> as List>::PushFront<E> as List>::PushFront<
         D,
     > as List>::PushFront<C> as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
-            .push_front(self.5)
+            .push_first(self.5)
             .push_front(self.4)
             .push_front(self.3)
             .push_front(self.2)
@@ -168,15 +257,15 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static> Tup
     }
 }
 
-impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static> TupleTraits
+impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static> IntoList
     for (A, B, C, D, E, F, G)
 {
-    type IntoList<T: EmptyList> = <<<<<<T::ToList<G> as List>::PushFront<F> as List>::PushFront<
+    type IntoList<T: EmptyList> = <<<<<<T::PushFirst<G> as List>::PushFront<F> as List>::PushFront<
         E,
     > as List>::PushFront<D> as List>::PushFront<C> as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
-            .push_front(self.6)
+            .push_first(self.6)
             .push_front(self.5)
             .push_front(self.4)
             .push_front(self.3)
@@ -187,17 +276,17 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 
 }
 
 impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static, H: 'static>
-    TupleTraits for (A, B, C, D, E, F, G, H)
+    IntoList for (A, B, C, D, E, F, G, H)
 {
     type IntoList<T: EmptyList> =
-        <<<<<<<T::ToList<H> as List>::PushFront<G> as List>::PushFront<F> as List>::PushFront<
+        <<<<<<<T::PushFirst<H> as List>::PushFront<G> as List>::PushFront<F> as List>::PushFront<
             E,
         > as List>::PushFront<D> as List>::PushFront<C> as List>::PushFront<B> as List>::PushFront<
             A,
         >;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
-            .push_front(self.7)
+            .push_first(self.7)
             .push_front(self.6)
             .push_front(self.5)
             .push_front(self.4)
@@ -218,17 +307,17 @@ impl<
     G: 'static,
     H: 'static,
     I: 'static,
-> TupleTraits for (A, B, C, D, E, F, G, H, I)
+> IntoList for (A, B, C, D, E, F, G, H, I)
 {
     type IntoList<T: EmptyList> =
-        <<<<<<<<T::ToList<I> as List>::PushFront<H> as List>::PushFront<G> as List>::PushFront<
+        <<<<<<<<T::PushFirst<I> as List>::PushFront<H> as List>::PushFront<G> as List>::PushFront<
             F,
         > as List>::PushFront<E> as List>::PushFront<D> as List>::PushFront<C> as List>::PushFront<
             B,
         > as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
-            .push_front(self.8)
+            .push_first(self.8)
             .push_front(self.7)
             .push_front(self.6)
             .push_front(self.5)
@@ -251,17 +340,17 @@ impl<
     H: 'static,
     I: 'static,
     J: 'static,
-> TupleTraits for (A, B, C, D, E, F, G, H, I, J)
+> IntoList for (A, B, C, D, E, F, G, H, I, J)
 {
     type IntoList<T: EmptyList> =
-        <<<<<<<<<T::ToList<J> as List>::PushFront<I> as List>::PushFront<H> as List>::PushFront<
+        <<<<<<<<<T::PushFirst<J> as List>::PushFront<I> as List>::PushFront<H> as List>::PushFront<
             G,
         > as List>::PushFront<F> as List>::PushFront<E> as List>::PushFront<D> as List>::PushFront<
             C,
         > as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
-            .push_front(self.9)
+            .push_first(self.9)
             .push_front(self.8)
             .push_front(self.7)
             .push_front(self.6)
@@ -286,17 +375,17 @@ impl<
     I: 'static,
     J: 'static,
     K: 'static,
-> TupleTraits for (A, B, C, D, E, F, G, H, I, J, K)
+> IntoList for (A, B, C, D, E, F, G, H, I, J, K)
 {
     type IntoList<T: EmptyList> =
-        <<<<<<<<<<T::ToList<K> as List>::PushFront<J> as List>::PushFront<I> as List>::PushFront<
+        <<<<<<<<<<T::PushFirst<K> as List>::PushFront<J> as List>::PushFront<I> as List>::PushFront<
             H,
         > as List>::PushFront<G> as List>::PushFront<F> as List>::PushFront<E> as List>::PushFront<
             D,
         > as List>::PushFront<C> as List>::PushFront<B> as List>::PushFront<A>;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
-            .push_front(self.10)
+            .push_first(self.10)
             .push_front(self.9)
             .push_front(self.8)
             .push_front(self.7)
@@ -323,10 +412,10 @@ impl<
     J: 'static,
     K: 'static,
     L: 'static,
-> TupleTraits for (A, B, C, D, E, F, G, H, I, J, K, L)
+> IntoList for (A, B, C, D, E, F, G, H, I, J, K, L)
 {
     type IntoList<T: EmptyList> =
-        <<<<<<<<<<<T::ToList<L> as List>::PushFront<K> as List>::PushFront<J> as List>::PushFront<
+        <<<<<<<<<<<T::PushFirst<L> as List>::PushFront<K> as List>::PushFront<J> as List>::PushFront<
             I,
         > as List>::PushFront<H> as List>::PushFront<G> as List>::PushFront<F> as List>::PushFront<
             E,
@@ -335,7 +424,7 @@ impl<
         >;
     fn into_list<T: EmptyList>(self) -> Self::IntoList<T> {
         T::empty()
-            .push_front(self.11)
+            .push_first(self.11)
             .push_front(self.10)
             .push_front(self.9)
             .push_front(self.8)
@@ -355,7 +444,7 @@ impl<
 ///
 /// See https://doc.rust-lang.org/stable/reference/type-layout.html#r-layout.repr.c.struct
 #[repr(C)]
-pub struct CStackList<H, T>(T, H);
+pub struct CStackList<H, T>(pub T, pub H);
 
 impl<H: 'static, T: List> List for CStackList<H, T> {
     type Head = H;
@@ -367,6 +456,8 @@ impl<H: 'static, T: List> List for CStackList<H, T> {
     fn tail(&self) -> &Self::Tail {
         &self.0
     }
+
+    type At<N: List> = <Self::Tail as List>::At<N::Tail>;
 
     const HEAD_PADDING: usize =
         Self::HEAD_OFFSET - (Self::Tail::HEAD_OFFSET + size_of::<<Self::Tail as List>::Head>());
@@ -390,13 +481,13 @@ impl<H: 'static, T: List> List for CStackList<H, T> {
 }
 
 impl EmptyList for () {
-    type ToList<U: 'static> = (U, ());
-    fn to_list<U: 'static>(self, item: U) -> Self::ToList<U> {
+    type PushFirst<U: 'static> = (U, ());
+    fn push_first<U: 'static>(self, item: U) -> Self::PushFirst<U> {
         (item, ())
     }
 
-    type FromTuple<T: TupleTraits> = T::IntoList<()>;
-    fn from_tuple<T: TupleTraits>(tuple: T) -> Self::FromTuple<T> {
+    type FromTuple<T: IntoList> = T::IntoList<()>;
+    fn from_tuple<T: IntoList>(tuple: T) -> Self::FromTuple<T> {
         tuple.into_list()
     }
 
@@ -406,13 +497,13 @@ impl EmptyList for () {
 pub struct CEmptyStackList();
 
 impl EmptyList for CEmptyStackList {
-    type ToList<U: 'static> = CStackList<U, CEmptyStackList>;
-    fn to_list<U: 'static>(self, item: U) -> Self::ToList<U> {
+    type PushFirst<U: 'static> = CStackList<U, CEmptyStackList>;
+    fn push_first<U: 'static>(self, item: U) -> Self::PushFirst<U> {
         CStackList(CEmptyStackList(), item)
     }
 
-    type FromTuple<T: TupleTraits> = T::IntoList<CEmptyStackList>;
-    fn from_tuple<T: TupleTraits>(tuple: T) -> Self::FromTuple<T> {
+    type FromTuple<T: IntoList> = T::IntoList<CEmptyStackList>;
+    fn from_tuple<T: IntoList>(tuple: T) -> Self::FromTuple<T> {
         tuple.into_list()
     }
 
@@ -431,6 +522,8 @@ impl<H: 'static, T: List> List for (H, T) {
     fn tail(&self) -> &Self::Tail {
         &self.1
     }
+
+    type At<N: List> = <Self::Tail as List>::At<N::Tail>;
 
     const HEAD_PADDING: usize = 0; // undefined
     const HEAD_OFFSET: usize = offset_of!(Self, 0);
@@ -486,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_push_front() {
-        assert_eq!(().push_front(1), (1, ()));
+        assert_eq!(().push_first(1), (1, ()));
         assert_eq!(
             (1, 2, 3).into_list::<()>().push_front(4),
             (4, (1, (2, (3, ()))))
@@ -528,7 +621,7 @@ mod tests {
             }
         }
 
-        <(i32, f64, &str) as TupleTraits>::IntoList::<()>::for_each_type(&mut PrintTypeNames {
+        <(i32, f64, &str) as IntoList>::IntoList::<()>::for_each_type(&mut PrintTypeNames {
             count: 0,
         });
     }
@@ -570,79 +663,4 @@ mod tests {
         let list = (1, 2.5, "Hello").into_list::<()>();
         println!("{:?}", list);
     }
-    /*
-    #[test]
-    fn custom_list_type() {
-        use std::fmt::*;
-
-        pub trait DisplayableList: List + Display {}
-
-        struct EmptyDisplayList();
-
-        impl Display for EmptyDisplayList {
-            fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-                write!(f, "()")
-            }
-        }
-        impl EmptyList for EmptyDisplayList {
-            type ToList<U: 'static> = DisplayList<U, EmptyDisplayList>;
-            fn to_list<U: 'static>(self, item: U) -> Self::ToList<U> {
-                DisplayList(item, EmptyDisplayList())
-            }
-
-            type FromTuple<T: TupleTraits> = T::IntoList<EmptyDisplayList>;
-            fn from_tuple<T: TupleTraits>(tuple: T) -> Self::FromTuple<T> {
-                tuple.into_list()
-            }
-
-            fn empty() -> Self {
-                EmptyDisplayList()
-            }
-        }
-
-        struct DisplayList<H: 'static + Display, T: DisplayableList>(H, T);
-
-        impl<H: 'static + Display, T: DisplayableList> Display for DisplayList<H, T> {
-            fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-                write!(f, "({}, {})", self.0, self.1)
-            }
-        }
-
-        impl<H: 'static + Display, T: DisplayableList> List for DisplayList<H, T> {
-            type Head = H;
-            fn head(&self) -> &Self::Head {
-                &self.0
-            }
-
-            type Tail = T;
-            fn tail(&self) -> &Self::Tail {
-                &self.1
-            }
-
-            type PushFront<U: 'static> = DisplayList<U, Self>;
-            fn push_front<U: 'static>(self, item: U) -> Self::PushFront<U> {
-                DisplayList(item, self)
-            }
-
-            type Concat<U: List> = <T::Concat<U> as List>::PushFront<H>;
-            fn concat<U: List>(self, other: U) -> Self::Concat<U> {
-                self.1.concat(other).push_front(self.0)
-            }
-
-            type Reverse = <T::Reverse as List>::Concat<(H, ())>;
-            fn reverse(self) -> Self::Reverse {
-                self.1.reverse().concat((self.0, ()))
-            }
-        }
-
-        impl<H, T> DisplayableList for DisplayList<H, T>
-        where
-            H: 'static + Display,
-            T: DisplayableList,
-        {
-        }
-
-        let list = (1, 2.5, "Hello").into_list::<EmptyDisplayList>();
-        println!("{}", list);
-    } */
 }
