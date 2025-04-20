@@ -1,5 +1,5 @@
 use std::mem::offset_of;
-use std::ops::Sub;
+use std::ops::{Index, Sub};
 use typenum::*;
 
 /// Element is a trait that returns the [`List`] element at a given index. Indexing starts at 0 for
@@ -44,6 +44,43 @@ where
     fn of<T: List>(list: &T) -> &Self::Of<T> {
         <Sub1<UInt<U, B>> as Element>::of(list.tail())
     }
+}
+
+impl<H: 'static, T: List> Index<U0> for CStackList<H, T> {
+    type Output = H;
+    fn index(&self, _index: U0) -> &Self::Output {
+        self.head()
+    }
+}
+
+impl<H: 'static, T: List, U: Unsigned, B: Bit> Index<UInt<U, B>> for CStackList<H, T>
+where
+    T: Index<Sub1<UInt<U, B>>>,
+    UInt<U, B>: Sub<B1>,
+{
+    type Output = <T as Index<Sub1<UInt<U, B>>>>::Output;
+    fn index(&self, _index: UInt<U, B>) -> &Self::Output {
+        self.tail().index(_index - B1)
+    }
+}
+
+#[test]
+fn test_index() {
+    let list = (1, 2.5, "Hello").into_list::<CEmptyStackList>();
+    assert_eq!(list[U0::new()], 1);
+    assert_eq!(list[U1::new()], 2.5);
+    assert_eq!(list[U2::new()], "Hello");
+}
+
+#[test]
+fn test_index_type() {
+    type ListType = <(i32, f64, &'static str) as IntoList>::IntoList<CEmptyStackList>;
+    type ZeroType = <ListType as Index<U0>>::Output;
+    type OneType = <ListType as Index<U1>>::Output;
+    type TwoType = <ListType as Index<U2>>::Output;
+    assert_eq!(std::any::type_name::<ZeroType>(), "i32");
+    assert_eq!(std::any::type_name::<OneType>(), "f64");
+    assert_eq!(std::any::type_name::<TwoType>(), "&str");
 }
 
 #[test]
