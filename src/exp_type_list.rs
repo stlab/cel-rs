@@ -53,6 +53,9 @@ impl<H: 'static, T: List> Index<U0> for CStackList<H, T> {
     }
 }
 
+/// Type alias for getting element type at index N, following std::ops::Index convention
+pub type Item<L, N> = <L as Index<N>>::Output;
+
 impl<H: 'static, T: List, U: Unsigned, B: Bit> Index<UInt<U, B>> for CStackList<H, T>
 where
     T: Index<Sub1<UInt<U, B>>>,
@@ -72,34 +75,37 @@ fn test_index() {
     assert_eq!(list[U2::new()], "Hello");
 }
 
+// Update the test to use Item instead of At
 #[test]
 fn test_index_type() {
-    type ListType = <(i32, f64, &'static str) as IntoList>::IntoList<CEmptyStackList>;
-    type ZeroType = <ListType as Index<U0>>::Output;
-    type OneType = <ListType as Index<U1>>::Output;
-    type TwoType = <ListType as Index<U2>>::Output;
-    assert_eq!(std::any::type_name::<ZeroType>(), "i32");
-    assert_eq!(std::any::type_name::<OneType>(), "f64");
-    assert_eq!(std::any::type_name::<TwoType>(), "&str");
+    use std::any::type_name;
+
+    type List = <(i32, f64, &'static str) as IntoList>::IntoList<CEmptyStackList>;
+    type Zero = Item<List, U0>;
+    type One = Item<List, U1>;
+    type Two = Item<List, U2>;
+    assert_eq!(type_name::<Zero>(), "i32");
+    assert_eq!(type_name::<One>(), "f64");
+    assert_eq!(type_name::<Two>(), "&str");
 }
 
 #[test]
 fn test_of_type() {
-    type ListType = <(i32, f64, &'static str) as IntoList>::IntoList<()>;
-    type ZeroType = <U0 as Element>::Of<ListType>;
-    type OneType = <U1 as Element>::Of<ListType>;
-    type TwoType = <U2 as Element>::Of<ListType>;
-    type ThreeType = <U3 as Element>::Of<ListType>;
-    type HundredType = <U100 as Element>::Of<ListType>;
-    assert_eq!(std::any::type_name::<ZeroType>(), "i32");
-    assert_eq!(std::any::type_name::<OneType>(), "f64");
-    assert_eq!(std::any::type_name::<TwoType>(), "&str");
+    type List = <(i32, f64, &'static str) as IntoList>::IntoList<()>;
+    type Zero = <U0 as Element>::Of<List>;
+    type One = <U1 as Element>::Of<List>;
+    type Two = <U2 as Element>::Of<List>;
+    type Three = <U3 as Element>::Of<List>;
+    type Hundred = <U100 as Element>::Of<List>;
+    assert_eq!(std::any::type_name::<Zero>(), "i32");
+    assert_eq!(std::any::type_name::<One>(), "f64");
+    assert_eq!(std::any::type_name::<Two>(), "&str");
     assert_eq!(
-        std::any::type_name::<ThreeType>(),
+        std::any::type_name::<Three>(),
         "cel_rs::exp_type_list::Bottom"
     );
     assert_eq!(
-        std::any::type_name::<HundredType>(),
+        std::any::type_name::<Hundred>(),
         "cel_rs::exp_type_list::Bottom"
     );
 }
