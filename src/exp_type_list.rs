@@ -1,5 +1,6 @@
+use std::fmt;
 use std::mem::offset_of;
-use std::ops::{Index, Sub};
+use std::ops::{Index, RangeFrom, RangeTo, Sub};
 use typenum::*;
 
 /// Element is a trait that returns the [`List`] element at a given index. Indexing starts at 0 for
@@ -46,10 +47,62 @@ where
     }
 }
 
+impl<H: 'static, T: List> Index<RangeTo<U0>> for CStackList<H, T> {
+    type Output = CStackList<H, T>;
+    fn index(&self, _index: RangeTo<U0>) -> &Self::Output {
+        self
+    }
+}
+
+impl<H: 'static, T: List, U: Unsigned, B: Bit> Index<RangeTo<UInt<U, B>>> for CStackList<H, T>
+where
+    T: Index<RangeTo<Sub1<UInt<U, B>>>>,
+    UInt<U, B>: Sub<B1>,
+{
+    type Output = <T as Index<RangeTo<Sub1<UInt<U, B>>>>>::Output;
+    fn index(&self, index: RangeTo<UInt<U, B>>) -> &Self::Output {
+        self.tail().index(..(index.end - B1))
+    }
+}
+
+impl<H: 'static, T: List> Index<RangeFrom<U0>> for CStackList<H, T> {
+    type Output = CStackList<H, T>;
+    fn index(&self, _index: RangeFrom<U0>) -> &Self::Output {
+        self
+    }
+}
+
+impl<H: 'static, T: List, U: Unsigned, B: Bit> Index<RangeFrom<UInt<U, B>>> for CStackList<H, T>
+where
+    T: Index<RangeFrom<Sub1<UInt<U, B>>>>,
+    UInt<U, B>: Sub<B1>,
+{
+    type Output = <T as Index<RangeFrom<Sub1<UInt<U, B>>>>>::Output;
+    fn index(&self, index: RangeFrom<UInt<U, B>>) -> &Self::Output {
+        self.tail().index((index.start - B1)..)
+    }
+}
+
 impl<H: 'static, T: List> Index<U0> for CStackList<H, T> {
     type Output = H;
     fn index(&self, _index: U0) -> &Self::Output {
         self.head()
+    }
+}
+
+impl fmt::Debug for CEmptyStackList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "()")
+    }
+}
+
+impl<H: 'static, T: List> fmt::Debug for CStackList<H, T>
+where
+    H: fmt::Debug,
+    T: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({:?}, {:?})", self.head(), self.tail())
     }
 }
 
@@ -62,8 +115,8 @@ where
     UInt<U, B>: Sub<B1>,
 {
     type Output = <T as Index<Sub1<UInt<U, B>>>>::Output;
-    fn index(&self, _index: UInt<U, B>) -> &Self::Output {
-        self.tail().index(_index - B1)
+    fn index(&self, index: UInt<U, B>) -> &Self::Output {
+        self.tail().index(index - B1)
     }
 }
 
@@ -73,6 +126,14 @@ fn test_index() {
     assert_eq!(list[U0::new()], 1);
     assert_eq!(list[U1::new()], 2.5);
     assert_eq!(list[U2::new()], "Hello");
+}
+
+#[test]
+fn test_index_range() {
+    let list = (1, 2.5, "Hello").into_list::<CEmptyStackList>();
+    assert_eq!(list[U1::new()..][U1::new()], "Hello");
+    // assert_eq!(list[U1::new()], 2.5);
+    // assert_eq!(list[U2::new()], "Hello");
 }
 
 // Update the test to use Item instead of At
