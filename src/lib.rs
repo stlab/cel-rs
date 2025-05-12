@@ -17,7 +17,9 @@ use cel_rs::type_list::{List, IntoList};
 let list = (1, "hello", 3.14).into_list();
 ```
 */
+pub mod c_stack_list;
 pub mod dyn_segment;
+pub mod dyn_segment_aligned_stack;
 pub mod exp_type_list;
 pub mod memory;
 pub mod raw_aligned_stack;

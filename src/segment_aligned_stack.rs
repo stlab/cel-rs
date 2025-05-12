@@ -1,30 +1,11 @@
-// use crate::dyn_segment::DynSegment;
-use crate::exp_type_list::{CEmptyStackList, CStackList, EmptyList, IntoList, List, TypeHandler};
+use crate::c_stack_list::*;
+use crate::dyn_segment_aligned_stack::DynSegment;
+use crate::exp_type_list::*;
 use crate::raw_aligned_stack::RawAlignedStack;
 use crate::raw_segment_aligned_stack::RawSegmentAlignedStack;
 use anyhow::*;
-// use std::mem::offset_of;
+use std::any::TypeId;
 use std::result::Result::Ok;
-// use std::any::TypeId;
-
-/* pub trait PaddedList: List {
-    const _HEAD_PADDING: usize;
-    const _HEAD_OFFSET: usize;
-}
-
-impl<H: 'static, T: PaddedList> PaddedList for CStackList<H, T>
-where
-    T::Tail: PaddedList,
-{
-    const _HEAD_PADDING: usize =
-        Self::_HEAD_OFFSET - (T::Tail::_HEAD_OFFSET + size_of::<<T::Tail as List>::Head>());
-    const _HEAD_OFFSET: usize = offset_of!(Self, 1);
-}
-
-impl PaddedList for CEmptyStackList {
-    const _HEAD_PADDING: usize = 0;
-    const _HEAD_OFFSET: usize = 0;
-} */
 
 // Create a handler for dropping types
 struct DropHandler<'a>(&'a mut RawAlignedStack);
@@ -98,7 +79,7 @@ assert_eq!(Segment::<(i32,)>::new() // create a new segment that takes an i32 ar
 */
 pub struct Segment<
     Args: IntoList + 'static,
-    Stack: List = <<Args as IntoList>::IntoList<CEmptyStackList> as List>::Reverse,
+    Stack: List = <<Args as IntoList>::Output<CNil<()>> as List>::Reverse,
 > {
     segment: RawSegmentAlignedStack,
     _phantom: std::marker::PhantomData<(Args, Stack)>,
@@ -119,6 +100,34 @@ impl<Args: IntoList + 'static> Segment<Args> {
     }
 }
 
+impl<Args: IntoList + 'static, Stack: List + 'static> TryFrom<DynSegment> for Segment<Args, Stack>
+where
+    <<Args as IntoList>::Output<()> as List>::Reverse: ListTypeIteratorAdvance<TypeId>,
+    Stack: ListTypeIteratorAdvance<TypeId>,
+{
+    type Error = anyhow::Error;
+    fn try_from(value: DynSegment) -> Result<Self, Self::Error> {
+        type ArgList<Args> = <<Args as IntoList>::Output<()> as List>::Reverse;
+
+        ensure!(
+            ArgList::<Args>::LENGTH == value.argument_ids.len()
+                && TypeIdIterator::<ArgList::<Args>>::new()
+                    .eq(value.argument_ids.iter().map(|id| *id)),
+            "argument type ids do not match"
+        );
+        ensure!(
+            Stack::LENGTH == value.stack_ids.len()
+                && TypeIdIterator::<Stack>::new()
+                    .eq(value.stack_ids.iter().map(|info| info.stack_id)),
+            "stack type ids do not match"
+        );
+        Ok(Segment {
+            segment: value.segment,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+}
+
 impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
     fn into<NewStack: List + 'static>(self) -> Segment<Args, NewStack> {
         Segment {
@@ -128,25 +137,6 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
     }
 
     /*
-        pub fn from_dyn_segment(segment: DynSegment) -> Result<Self> {
-            type ArgList<Args> = <<Args as TupleTraits>::IntoList<CEmptyStackList> as List>::Reverse;
-
-            ensure!(
-                ArgList::<Args>::LENGTH == segment.argument_ids.len()
-                    && ArgList::<Args>::equal(&segment.argument_ids),
-                "argument type ids do not match"
-            );
-            ensure!(
-                Stack::LENGTH == segment.stack_ids.len() && Stack::equal(&segment.stack_ids),
-                "stack type ids do not match"
-            );
-            Ok(Segment {
-                segment: segment.segment,
-                _phantom: std::marker::PhantomData,
-            })
-        }
-    */
-    /*
     pub fn indirect<N: 'static, T: 'static>(
         mut self,
     ) -> Segment<Args, Stack::PushFront<&'static T>> {
@@ -155,7 +145,7 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
     } */
 
     /** Pushes a nullary operation that takes no arguments and returns a value of type R. */
-    pub fn op0<R, F>(mut self, op: F) -> Segment<Args, Stack::PushFront<R>>
+    pub fn op0<R, F>(mut self, op: F) -> Segment<Args, Stack::Push<R>>
     where
         F: Fn() -> R + 'static,
         R: 'static,
@@ -164,7 +154,7 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
         self.into()
     }
 
-    pub fn op0r<R, F>(mut self, op: F) -> Segment<Args, Stack::PushFront<R>>
+    pub fn op0r<R, F>(mut self, op: F) -> Segment<Args, Stack::Push<R>>
     where
         F: Fn() -> Result<R> + 'static,
         R: 'static,
@@ -192,7 +182,7 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
     pub fn op2<R, F>(
         mut self,
         op: F,
-    ) -> Segment<Args, <<Stack::Tail as List>::Tail as List>::PushFront<R>>
+    ) -> Segment<Args, <<Stack::Tail as List>::Tail as List>::Push<R>>
     where
         F: Fn(<Stack::Tail as List>::Head, Stack::Head) -> R + 'static,
         R: 'static,
@@ -264,17 +254,16 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
-    /*
     #[test]
     fn test_segment_from_dyn_segment() -> Result<()> {
         let mut dyn_segment = DynSegment::new::<(i32,)>();
         dyn_segment.op0(|| 42);
         dyn_segment.op2(|x: i32, y: i32| x + y)?;
-        let segment = Segment::<(i32,), (i32, ())>::from_dyn_segment(dyn_segment)?;
+        let segment = Segment::<(i32,), (i32, ())>::try_from(dyn_segment)?;
 
         assert_eq!(segment.call((10,)).unwrap(), 52);
         Ok(())
-    } */
+    }
 
     #[test]
     fn test_unit_result() {
