@@ -1,6 +1,6 @@
 use std::{any::TypeId, mem::offset_of};
 
-struct EqListTypeIDListHandler<'a, I: Iterator<Item = &'a TypeId>>(I, bool);
+/* struct EqListTypeIDListHandler<'a, I: Iterator<Item = &'a TypeId>>(I, bool);
 
 impl<'a, I: Iterator<Item = &'a TypeId>> TypeHandler for EqListTypeIDListHandler<'a, I> {
     fn invoke<T: List>(&mut self) {
@@ -23,10 +23,10 @@ impl<T: List + 'static> EqListTypeIDList for T {
         handler.1
     }
 }
-
+ */
 // Iterate a list (not recurse) to implement equal against an iterator.
 
-pub(crate) trait ListTypeProperty {
+pub trait ListTypeProperty {
     type Output;
     fn property<R: List>() -> Self::Output;
 }
@@ -42,7 +42,7 @@ pub struct ListTypeIterator<T: List, P: ListTypeProperty> {
     advance: fn(&mut Self) -> Option<P::Output>,
 }
 
-pub(crate) trait ListTypeIteratorAdvance<P: ListTypeProperty>: List {
+pub trait ListTypeIteratorAdvance<P: ListTypeProperty>: List {
     fn advancer<R: List>(iter: &mut ListTypeIterator<R, P>) -> Option<P::Output>;
 }
 
