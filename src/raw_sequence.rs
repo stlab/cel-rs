@@ -1,5 +1,5 @@
 use crate::memory::align_index;
-use crate::raw_aligned_vec::RawAlignedVec;
+use crate::raw_vec::RawAlignedVec;
 // use aligned_vec::{AVec, ConstAlign};
 use std::mem;
 

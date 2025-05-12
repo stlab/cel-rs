@@ -18,11 +18,11 @@ let list = (1, "hello", 3.14).into_list();
 ```
 */
 pub mod c_stack_list;
-pub mod dyn_segment_aligned_stack;
-pub mod exp_type_list;
+pub mod dyn_sement;
 pub mod memory;
-pub mod raw_aligned_stack;
-pub mod raw_aligned_vec;
-pub mod raw_segment_aligned_stack;
+pub mod raw_segment;
 pub mod raw_sequence;
-pub mod segment_aligned_stack;
+pub mod raw_stack;
+pub mod raw_vec;
+pub mod segment;
+pub mod type_list;

@@ -3,7 +3,7 @@ use std::mem::offset_of;
 use std::ops::{Index, RangeFrom, RangeTo, RangeToInclusive, Sub};
 use typenum::*;
 
-use crate::exp_type_list::*;
+use crate::type_list::*;
 
 /// A list using a guaranteed memory layout (`repr(C)`), with tail stored first so appending items
 /// does not change the memory layout of prior items. The tail may itself contain a list to ensure

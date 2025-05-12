@@ -18,7 +18,7 @@ pub struct ListTypeIterator<T: List, P: ListTypeProperty> {
     advance: fn(&mut Self) -> Option<P::Output>,
 }
 
-pub trait ListTypeIteratorAdvance<P: ListTypeProperty>: List {
+pub trait ListTypeIteratorAdvance<P: ListTypeProperty>: List + Sized {
     fn advancer<R: List>(iter: &mut ListTypeIterator<R, P>) -> Option<P::Output>;
 }
 
@@ -33,7 +33,7 @@ impl<P: ListTypeProperty, H: 'static, T: ListTypeIteratorAdvance<P>> ListTypeIte
 {
     fn advancer<R: List>(iter: &mut ListTypeIterator<R, P>) -> Option<P::Output> {
         iter.advance = T::advancer::<R>;
-        Some(P::property::<R>())
+        Some(P::property::<(H, T)>())
     }
 }
 
@@ -63,17 +63,6 @@ fn test_type_id_iterator() {
         println!("{:?}", id);
     }
 }
-
-/* impl<T: List + 'static> Iterator for TypeIdIterator<T> {
-    type Item = fn(&TypeId) -> bool;
-    fn next(&mut self) -> Option<Self::Item> {
-        Some(|id| {
-            let mut handler = EqListTypeIDListHandler(ids.into_iter(), true);
-            T::for_each_type(&mut handler);
-            handler.1
-        })
-    }
-} */
 
 pub trait TypeHandler {
     fn invoke<T: List>(&mut self);
@@ -119,14 +108,6 @@ pub trait List {
     {
         handler.invoke::<Self>();
         Self::Tail::for_each_type(handler);
-    }
-
-    fn for_each_value<H: ValueHandler>(&self, handler: &mut H)
-    where
-        Self: Sized + 'static,
-    {
-        handler.invoke::<Self>(self.head());
-        self.tail().for_each_value(handler);
     }
 }
 
@@ -174,7 +155,6 @@ impl<T: EmptyList> List for T {
     }
 
     fn for_each_type<H: TypeHandler>(_handler: &mut H) {}
-    fn for_each_value<H: ValueHandler>(&self, _handler: &mut H) {}
 }
 
 pub trait ToList {
@@ -495,6 +475,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_type_id_iterator() {
+        let mut iter = TypeIdIterator::<(u32, (f64, ()))>::new();
+        while let Some(id) = iter.next() {
+            println!("{:?}", id);
+        }
+    }
+
+    #[test]
     fn test_empty_list() {
         assert_eq!(<()>::empty(), ());
     }
@@ -553,38 +541,6 @@ mod tests {
         <(i32, f64, &str) as IntoList>::Output::<()>::for_each_type(&mut PrintTypeNames {
             count: 0,
         });
-    }
-
-    #[test]
-    fn test_for_each_value() {
-        use std::any::Any;
-        struct Log {
-            output: String,
-        }
-
-        impl ValueHandler for Log {
-            fn invoke<T: List + 'static>(self: &mut Self, value: &T::Head) {
-                let value_any = value as &dyn Any;
-                if let Some(i) = value_any.downcast_ref::<i32>() {
-                    self.output.push_str(&format!("{}: i32\n", i));
-                } else if let Some(f) = value_any.downcast_ref::<f64>() {
-                    self.output.push_str(&format!("{}: f64\n", f));
-                } else if let Some(s) = value_any.downcast_ref::<&str>() {
-                    self.output.push_str(&format!("\"{}\": str\n", s));
-                } else {
-                    self.output.push_str("unknown: unknown\n");
-                }
-            }
-        }
-
-        let mut collector = Log {
-            output: String::new(),
-        };
-        (1, 2.5, "Hello")
-            .into_list::<()>()
-            .for_each_value(&mut collector);
-
-        assert_eq!(collector.output, "1: i32\n2.5: f64\n\"Hello\": str\n");
     }
 
     #[test]

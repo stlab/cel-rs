@@ -1,8 +1,8 @@
 use crate::c_stack_list::*;
-use crate::exp_type_list::*;
 use crate::memory::align_index;
-use crate::raw_aligned_stack::RawAlignedStack;
-use crate::raw_segment_aligned_stack::RawSegmentAlignedStack;
+use crate::raw_segment::RawSegmentAlignedStack;
+use crate::raw_stack::RawAlignedStack;
+use crate::type_list::*;
 use anyhow::Result;
 use anyhow::ensure;
 use std::any::TypeId;
@@ -31,31 +31,6 @@ impl<T: 'static, U: ToTypeIDList + 'static> ToTypeIDList for CStackList<T, U> {
             padded: Self::HEAD_PADDING != 0,
         });
         list
-    }
-}
-
-// Pulled from segment.rs - generalize this and have one copy
-struct EqListTypeIDListHandler<'a, I: Iterator<Item = &'a TypeId>>(I, bool);
-
-impl<'a, I: Iterator<Item = &'a TypeId>> TypeHandler for EqListTypeIDListHandler<'a, I> {
-    fn invoke<T: List>(&mut self) {
-        if let Some(id) = self.0.next() {
-            self.1 = self.1 && TypeId::of::<T::Head>() == *id;
-        } else {
-            self.1 = false;
-        }
-    }
-}
-
-trait EqListTypeIDList {
-    fn equal<'a, I: IntoIterator<Item = &'a TypeId>>(ids: I) -> bool;
-}
-
-impl<T: List + 'static> EqListTypeIDList for T {
-    fn equal<'a, I: IntoIterator<Item = &'a TypeId>>(ids: I) -> bool {
-        let mut handler = EqListTypeIDListHandler(ids.into_iter(), true);
-        T::for_each_type(&mut handler);
-        handler.1
     }
 }
 
@@ -98,7 +73,10 @@ impl DynSegment {
     ///
     /// To avoid reversing the arguments and reversing the slice, this operation
     /// is done in argument order, not stack order.
-    fn pop_types<L: List + 'static>(&mut self) -> Result<()> {
+    fn pop_types<L: List + 'static>(&mut self) -> Result<()>
+    where
+        L: ListTypeIteratorAdvance<TypeId>,
+    {
         ensure!(
             L::LENGTH <= self.stack_ids.len(),
             "Too many arguments: expected {}, got {}",
@@ -106,9 +84,17 @@ impl DynSegment {
             self.stack_ids.len()
         );
         let start = self.stack_ids.len() - L::LENGTH;
+        let mut iter = TypeIdIterator::<L>::new();
+        while let Some(id) = iter.next() {
+            println!("id: {:?}", id);
+        }
+        let mut iter2 = self.stack_ids[start..].iter().map(|info| info.stack_id);
+        while let Some(id) = iter2.next() {
+            println!("id: {:?}", id);
+        }
         ensure!(
-            L::equal(self.stack_ids[start..].iter().map(|info| &info.stack_id)),
-            "Type mismatch"
+            TypeIdIterator::<L>::new().eq(self.stack_ids[start..].iter().map(|info| info.stack_id)),
+            "stack type ids do not match"
         );
         self.stack_ids.truncate(start);
         Ok(())

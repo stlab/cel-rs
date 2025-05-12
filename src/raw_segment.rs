@@ -1,5 +1,5 @@
-use crate::raw_aligned_stack::RawAlignedStack;
 use crate::raw_sequence::RawSequence;
+use crate::raw_stack::RawAlignedStack;
 use anyhow::Result;
 use std::cmp::max;
 

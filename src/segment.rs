@@ -1,11 +1,15 @@
 use crate::c_stack_list::*;
-use crate::dyn_segment_aligned_stack::DynSegment;
-use crate::exp_type_list::*;
-use crate::raw_aligned_stack::RawAlignedStack;
-use crate::raw_segment_aligned_stack::RawSegmentAlignedStack;
+use crate::dyn_sement::DynSegment;
+use crate::raw_segment::RawSegmentAlignedStack;
+use crate::raw_stack::RawAlignedStack;
+use crate::type_list::*;
 use anyhow::*;
 use std::any::TypeId;
 use std::result::Result::Ok;
+
+// REVISIT - this is the last use for for_each_type() - which should bre replaced
+// with the ListTypeIterator to do flat iteration but we need additional state for the
+// stack.
 
 // Create a handler for dropping types
 struct DropHandler<'a>(&'a mut RawAlignedStack);
@@ -27,31 +31,6 @@ impl<T: List + 'static> DropTop for T {
         T::for_each_type(&mut handler);
     }
 }
-
-/*
-struct EqListTypeIDListHandler<'a>(&'a [TypeId], &'a mut usize, &'a mut bool);
-
-impl TypeHandler for EqListTypeIDListHandler<'_> {
-    fn invoke<T: List + 'static>(&mut self) {
-        *self.2 = *self.2 && TypeId::of::<T::Head>() == self.0[*self.1];
-        *self.1 += 1;
-    }
-}
-
-trait EqListTypeIDList {
-    fn equal(ids: &[TypeId]) -> bool;
-}
-
-impl<T: List> EqListTypeIDList for T {
-    fn equal(ids: &[TypeId]) -> bool {
-        let mut index: usize = 0;
-        let mut result: bool = true;
-        let mut handler = EqListTypeIDListHandler(ids, &mut index, &mut result);
-        T::for_each_type(&mut handler);
-        result
-    }
-}
-*/
 
 /**
 A type-safe segment that represents a sequence of operations.
