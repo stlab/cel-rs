@@ -134,12 +134,8 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
         F: Fn() -> Result<R> + 'static,
         R: 'static,
     {
-        self.segment.raw0(move |stack| {
-            op().map_err(|e| {
-                Stack::drop_top(stack);
-                e
-            })
-        });
+        self.segment
+            .raw0(move |stack| op().inspect_err(|_| Stack::drop_top(stack)));
         self.into()
     }
 
@@ -159,12 +155,7 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
         R: 'static,
     {
         self.segment.raw1(
-            move |stack, x| {
-                op(x).map_err(|e| {
-                    Stack::drop_top(stack);
-                    e
-                })
-            },
+            move |stack, x| op(x).inspect_err(|_| Stack::drop_top(stack)),
             Stack::HEAD_PADDING != 0,
         );
         self.into()
