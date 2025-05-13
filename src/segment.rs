@@ -45,7 +45,7 @@ the types of values produced by operations.
 # Examples
 
 ```rust
-use cel_rs::segment_aligned_stack::*;
+use cel_rs::segment::*;
 
 assert_eq!(Segment::<(i32,)>::new() // create a new segment that takes an i32 argument
     .op1(|x| x * 2)                 // push a unary operation that multiplies the argument by 2

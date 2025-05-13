@@ -1,5 +1,5 @@
 use crate::memory::align_index;
-use crate::raw_vec::RawAlignedVec;
+use crate::raw_vec::RawVec;
 use std::mem::MaybeUninit;
 use std::mem::size_of;
 /**
@@ -7,7 +7,7 @@ A simple raw stack that stores values as raw bytes. Each value is naturally alig
 */
 #[derive(Debug)]
 pub struct RawAlignedStack {
-    buffer: RawAlignedVec,
+    buffer: RawVec,
 }
 
 impl RawAlignedStack {
@@ -17,13 +17,13 @@ impl RawAlignedStack {
     # Examples
 
     ```
-    use cel_rs::raw_aligned_stack::RawAlignedStack;
+    use cel_rs::raw_stack::RawAlignedStack;
     let stack = RawAlignedStack::with_base_alignment(align_of::<u32>());
     ```
     */
     pub fn with_base_alignment(base_alignment: usize) -> Self {
         RawAlignedStack {
-            buffer: RawAlignedVec::with_base_alignment(base_alignment),
+            buffer: RawVec::with_base_alignment(base_alignment),
         }
     }
 
@@ -40,7 +40,7 @@ impl RawAlignedStack {
     # Examples
 
     ```
-    use cel_rs::raw_aligned_stack::RawAlignedStack;
+    use cel_rs::raw_stack::RawAlignedStack;
     let mut stack = RawAlignedStack::with_base_alignment(align_of::<u32>());
     let _ = stack.push(42u32);
     ```
@@ -83,7 +83,7 @@ impl RawAlignedStack {
     # Examples
 
     ```
-    use cel_rs::raw_aligned_stack::RawAlignedStack;
+    use cel_rs::raw_stack::RawAlignedStack;
     let mut stack = RawAlignedStack::with_base_alignment(align_of::<u32>());
     let padding = stack.push(100u32);
     let value: u32 = unsafe { stack.pop(padding) };

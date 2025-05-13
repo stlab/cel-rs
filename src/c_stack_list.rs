@@ -9,7 +9,7 @@ use crate::type_list::*;
 /// does not change the memory layout of prior items. The tail may itself contain a list to ensure
 /// alignment during [`std::ops::RangeTo`] and [`std::ops::RangeToInclusive`] indexing.
 ///
-/// See https://doc.rust-lang.org/stable/reference/type-layout.html#r-layout.repr.c.struct
+/// See <https://doc.rust-lang.org/stable/reference/type-layout.html#r-layout.repr.c.struct>
 ///
 /// # Indexing
 ///
@@ -20,6 +20,7 @@ use crate::type_list::*;
 /// traits. To Access a range of elements, you can use the syntax `list[..end][start..]`.
 ///
 /// # Example
+///
 ///
 /// ```rust
 /// use cel_rs::c_stack_list::*;

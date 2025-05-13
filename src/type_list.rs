@@ -476,10 +476,12 @@ mod tests {
 
     #[test]
     fn test_type_id_iterator() {
-        let mut iter = TypeIdIterator::<(u32, (f64, ()))>::new();
-        while let Some(id) = iter.next() {
-            println!("{:?}", id);
-        }
+        let ids: [TypeId; 3] = [
+            TypeId::of::<u32>(),
+            TypeId::of::<f64>(),
+            TypeId::of::<&str>(),
+        ];
+        assert!(TypeIdIterator::<(u32, (f64, (&str, ())))>::new().eq(ids.iter().map(|&id| id)));
     }
 
     #[test]

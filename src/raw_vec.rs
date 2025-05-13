@@ -6,13 +6,13 @@ use std::slice::SliceIndex;
 
 /// A vector of bytes aligned to a given value. The alignment can be increase by calling `align`.
 #[derive(Debug)]
-pub struct RawAlignedVec {
+pub struct RawVec {
     buffer: Vec<MaybeUninit<u8>>,
     base_alignment: usize,
     start_offset: usize,
 }
 
-impl<I> Index<I> for RawAlignedVec
+impl<I> Index<I> for RawVec
 where
     I: SliceIndex<[MaybeUninit<u8>]>,
 {
@@ -24,7 +24,7 @@ where
     }
 }
 
-impl<I> IndexMut<I> for RawAlignedVec
+impl<I> IndexMut<I> for RawVec
 where
     I: SliceIndex<[MaybeUninit<u8>]>,
 {
@@ -34,19 +34,19 @@ where
     }
 }
 
-impl RawAlignedVec {
+impl RawVec {
     /**
-    Creates a new `RawAlignedVec` with base alignment.
+    Creates a new `RawVec` with base alignment.
 
     # Examples
 
     ```
-    use cel_rs::raw_aligned_vec::RawAlignedVec;
-    let vec = RawAlignedVec::with_base_alignment(align_of::<u32>());
+    use cel_rs::raw_vec::RawVec;
+    let vec = RawVec::with_base_alignment(align_of::<u32>());
     ```
     */
     pub fn with_base_alignment(base_alignment: usize) -> Self {
-        RawAlignedVec {
+        RawVec {
             base_alignment,
             start_offset: 0,
             buffer: Vec::new(),
@@ -58,7 +58,7 @@ impl RawAlignedVec {
         let ptr_as_index = buffer.as_ptr() as usize;
         let start_offset = align_index(base_alignment, ptr_as_index) - ptr_as_index;
         unsafe { buffer.set_len(start_offset) };
-        RawAlignedVec {
+        RawVec {
             buffer,
             base_alignment,
             start_offset,
@@ -114,7 +114,7 @@ impl RawAlignedVec {
     ///
     /// This method guarantees that for the purpose of the aliasing model, this method does not
     /// materialize a reference to the underlying slice, and thus the returned pointer will remain
-    /// valid when mixed with other calls to [`Self::as_ptr`], [`Self::as_mut_ptr`], and [`Self::as_non_null`]. Note
+    /// valid when mixed with other calls to [`Self::as_ptr`], [`Self::as_mut_ptr`]. Note
     /// that calling other methods that materialize references to the slice, or references to
     /// specific elements you are planning on accessing through this pointer, may still invalidate
     /// this pointer.
@@ -135,7 +135,7 @@ impl RawAlignedVec {
     ///
     /// This method guarantees that for the purpose of the aliasing model, this method does not
     /// materialize a reference to the underlying slice, and thus the returned pointer will remain
-    /// valid when mixed with other calls to [`Self::as_ptr`], [`Self::as_mut_ptr`], and [`Self::as_non_null`]. Note
+    /// valid when mixed with other calls to [`Self::as_ptr`], [`Self::as_mut_ptr`]. Note
     /// that calling other methods that materialize mutable references to the slice, or mutable
     /// references to specific elements you are planning on accessing through this pointer, as well
     /// as writing to those elements, may still invalidate this pointer.
@@ -164,14 +164,14 @@ mod tests {
 
     #[test]
     fn test_with_base_alignment() {
-        let vec = RawAlignedVec::with_base_alignment(align_of::<u32>());
+        let vec = RawVec::with_base_alignment(align_of::<u32>());
         assert_eq!(vec.capacity(), 0);
         assert_eq!(vec.len(), 0);
     }
 
     #[test]
     fn test_with_base_alignment_and_capacity() {
-        let vec = RawAlignedVec::with_base_alignment_and_capacity(align_of::<u32>(), 10);
+        let vec = RawVec::with_base_alignment_and_capacity(align_of::<u32>(), 10);
         assert!(vec.capacity() >= 10);
         assert_eq!(vec.len(), 0);
         assert_eq!(unsafe { vec.as_ptr() as usize } % align_of::<u32>(), 0);
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_reserve() {
-        let mut vec = RawAlignedVec::with_base_alignment(align_of::<u32>());
+        let mut vec = RawVec::with_base_alignment(align_of::<u32>());
         vec.reserve(10);
         assert!(vec.capacity() >= 10);
         assert_eq!(vec.len(), 0);
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_set_len() {
-        let mut vec = RawAlignedVec::with_base_alignment_and_capacity(align_of::<u32>(), 10);
+        let mut vec = RawVec::with_base_alignment_and_capacity(align_of::<u32>(), 10);
         unsafe { vec.set_len(10) };
         assert_eq!(vec.len(), 10);
         assert_eq!(unsafe { vec.as_ptr() as usize } % align_of::<u32>(), 0);
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_index() {
-        let mut vec = RawAlignedVec::with_base_alignment_and_capacity(align_of::<u32>(), 10);
+        let mut vec = RawVec::with_base_alignment_and_capacity(align_of::<u32>(), 10);
         unsafe { vec.set_len(1) };
         vec[0].write(42);
         assert_eq!(unsafe { vec[0].assume_init() }, 42);
