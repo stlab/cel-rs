@@ -3,7 +3,7 @@ use std::mem::offset_of;
 use std::ops::{Index, RangeFrom, RangeTo, RangeToInclusive, Sub};
 use typenum::*;
 
-use crate::type_list::*;
+use crate::list_traits::*;
 
 /// A list using a guaranteed memory layout (`repr(C)`), with tail stored first so appending items
 /// does not change the memory layout of prior items. The tail may itself contain a list to ensure
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_cstack_list() {
-        let list = CStackList((), 32i32).push("Hello").push(42.5);
+        let list = CStackList(CNil(()), 32i32).push("Hello").push(42.5);
         // Test that we can cast to a C struct and read values
         #[repr(C)]
         struct TestStruct(i32, &'static str, f64);

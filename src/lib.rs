@@ -33,10 +33,11 @@
 //! ```
 pub mod c_stack_list;
 pub mod dyn_sement;
+pub mod list_traits;
 pub mod memory;
 pub mod raw_segment;
 pub mod raw_sequence;
 pub mod raw_stack;
 pub mod raw_vec;
 pub mod segment;
-pub mod type_list;
+pub mod tuple_list;
