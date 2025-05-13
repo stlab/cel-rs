@@ -1,7 +1,6 @@
 use std::{any::TypeId, mem::offset_of};
 
 // Iterate a list (not recurse) to implement equal against an iterator.
-
 pub trait ListTypeProperty {
     type Output;
     fn property<R: List>() -> Self::Output;
@@ -15,7 +14,7 @@ impl ListTypeProperty for TypeId {
 }
 
 pub struct ListTypeIterator<T: List, P: ListTypeProperty> {
-    advance: fn(&mut Self) -> Option<P::Output>,
+    pub(crate) advance: fn(&mut Self) -> Option<P::Output>,
 }
 
 pub trait ListTypeIteratorAdvance<P: ListTypeProperty>: List + Sized {
@@ -64,20 +63,8 @@ impl<T: ListTypeIteratorAdvance<P> + 'static, P: ListTypeProperty> Iterator
 
 pub type TypeIdIterator<T> = ListTypeIterator<T, TypeId>;
 
-#[test]
-fn test_type_id_iterator() {
-    let mut iter = TypeIdIterator::<(u32, (f64, ()))>::new();
-    while let Some(id) = iter.next() {
-        println!("{:?}", id);
-    }
-}
-
 pub trait TypeHandler {
     fn invoke<T: List>(&mut self);
-}
-
-pub trait ValueHandler {
-    fn invoke<T: List + 'static>(&mut self, value: &T::Head);
 }
 
 pub trait List {
@@ -106,6 +93,9 @@ pub trait List {
 
     type Append<U: List>: List;
     fn append<U: List>(self, other: U) -> Self::Append<U>;
+
+    type ReverseOnto<U: List>: List;
+    fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U>;
 
     type Reverse: List;
     fn reverse(self) -> Self::Reverse;
@@ -138,6 +128,7 @@ impl<T: EmptyList> List for T {
     type Push<U: 'static> = T::PushFirst<U>;
     type Append<U: List> = U;
     type Reverse = T;
+    type ReverseOnto<U: List> = U;
     const LENGTH: usize = 0;
     const HEAD_PADDING: usize = 0;
     const HEAD_OFFSET: usize = 0;
@@ -155,6 +146,10 @@ impl<T: EmptyList> List for T {
     }
 
     fn append<U: List>(self, other: U) -> Self::Append<U> {
+        other
+    }
+
+    fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U> {
         other
     }
 
@@ -470,9 +465,14 @@ impl<H: 'static, T: List> List for (H, T) {
         self.1.append(other).push(self.0)
     }
 
-    type Reverse = <T::Reverse as List>::Append<(H, ())>;
+    type ReverseOnto<U: List> = T::ReverseOnto<U::Push<H>>;
+    fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U> {
+        self.1.reverse_onto(other.push(self.0))
+    }
+
+    type Reverse = Self::ReverseOnto<()>;
     fn reverse(self) -> Self::Reverse {
-        self.1.reverse().append((self.0, ()))
+        self.reverse_onto(())
     }
 }
 

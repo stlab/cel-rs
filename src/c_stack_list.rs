@@ -42,7 +42,8 @@ use crate::type_list::*;
 #[derive(Clone)]
 pub struct CStackList<H, T>(pub T, pub H);
 
-/* pub trait HeadPadding: List {
+/*
+pub trait HeadPadding: List {
     const _HEAD_PADDING: usize;
     const _HEAD_OFFSET: usize;
 }
@@ -84,9 +85,14 @@ impl<H: 'static, T: List> List for CStackList<H, T> {
         self.0.append(other).push(self.1)
     }
 
-    type Reverse = <T::Reverse as List>::Append<CStackList<H, CNil<()>>>;
+    type ReverseOnto<U: List> = T::ReverseOnto<U::Push<H>>;
+    fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U> {
+        self.0.reverse_onto(other.push(self.1))
+    }
+
+    type Reverse = Self::ReverseOnto<CNil<()>>;
     fn reverse(self) -> Self::Reverse {
-        self.0.reverse().append(CStackList(CNil(()), self.1))
+        self.reverse_onto(CNil(()))
     }
 }
 
@@ -261,6 +267,15 @@ impl<T> EmptyList for CNil<T> {
 impl<T, P: ListTypeProperty> ListTypeIteratorAdvance<P> for CNil<T> {
     fn advancer<R: List>(_iter: &mut ListTypeIterator<R, P>) -> Option<P::Output> {
         None
+    }
+}
+
+impl<P: ListTypeProperty, H: 'static, T: ListTypeIteratorAdvance<P>> ListTypeIteratorAdvance<P>
+    for CStackList<H, T>
+{
+    fn advancer<R: List>(iter: &mut ListTypeIterator<R, P>) -> Option<P::Output> {
+        iter.advance = T::advancer::<R>;
+        Some(P::property::<CStackList<H, T>>())
     }
 }
 

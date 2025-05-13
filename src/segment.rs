@@ -9,7 +9,8 @@ use std::result::Result::Ok;
 
 // REVISIT - this is the last use for for_each_type() - which should bre replaced
 // with the ListTypeIterator to do flat iteration but we need additional state for the
-// stack.
+// stack. If we can get rid of the for_each_type we may be able to move HEAD_PADDING out of List and
+// into CStackList.
 
 // Create a handler for dropping types
 struct DropHandler<'a>(&'a mut RawStack);
@@ -32,30 +33,28 @@ impl<T: List + 'static> DropTop for T {
     }
 }
 
-/**
-A type-safe segment that represents a sequence of operations.
-
-The segment takes input arguments of type `Args` and maintains a type stack `Stack` that tracks
-the types of values produced by operations.
-
-# Type Parameters
-- `Args`: The input argument types, must implement `IntoList`
-- `Stack`: The type stack tracking operation results, defaults to the reverse of `Args`
-
-# Examples
-
-```rust
-use cel_rs::segment::*;
-
-assert_eq!(Segment::<(i32,)>::new() // create a new segment that takes an i32 argument
-    .op1(|x| x * 2)                 // push a unary operation that multiplies the argument by 2
-    .op0(|| 10)                     // push a nullary operation that returns 10
-    .op2(|x, y| x + y)              // push a binary operation that adds two arguments
-    .op1(|x| x.to_string())         // push a unary operation that converts the argument to a string
-    .call((42, )).unwrap(),         // call the segment with an argument 42
-    "94");                          // the result is (42 * 2 + 10).to_string()
-```
-*/
+/// A type-safe segment that represents a sequence of operations.
+///
+/// The segment takes input arguments of type `Args` and maintains a type stack `Stack` that tracks
+/// the types of values produced by operations.
+///
+/// # Type Parameters
+/// - `Args`: The input argument types, must implement `IntoList`
+/// - `Stack`: The type stack tracking operation results, defaults to the reverse of `Args`
+///
+/// # Examples
+///
+/// ```rust
+/// use cel_rs::segment::*;
+///
+/// assert_eq!(Segment::<(i32,)>::new() // create a new segment that takes an i32 argument
+///     .op1(|x| x * 2)                 // push a unary operation that multiplies the argument by 2
+///     .op0(|| 10)                     // push a nullary operation that returns 10
+///     .op2(|x, y| x + y)              // push a binary operation that adds two arguments
+///     .op1(|x| x.to_string())         // push a unary operation returning a string of the argument
+///     .call((42, )).unwrap(),         // call the segment with an argument 42
+///     "94");                          // the result is (42 * 2 + 10).to_string()
+/// ```
 pub struct Segment<
     Args: IntoList + 'static,
     Stack: List = <<Args as IntoList>::Output<CNil<()>> as List>::Reverse,
@@ -81,12 +80,12 @@ impl<Args: IntoList + 'static> Segment<Args> {
 
 impl<Args: IntoList + 'static, Stack: List + 'static> TryFrom<DynSegment> for Segment<Args, Stack>
 where
-    <<Args as IntoList>::Output<()> as List>::Reverse: ListTypeIteratorAdvance<TypeId>,
+    <<Args as IntoList>::Output<CNil<()>> as List>::Reverse: ListTypeIteratorAdvance<TypeId>,
     Stack: ListTypeIteratorAdvance<TypeId>,
 {
     type Error = anyhow::Error;
     fn try_from(value: DynSegment) -> Result<Self, Self::Error> {
-        type ArgList<Args> = <<Args as IntoList>::Output<()> as List>::Reverse;
+        type ArgList<Args> = <<Args as IntoList>::Output<CNil<()>> as List>::Reverse;
 
         ensure!(
             ArgList::<Args>::LENGTH == value.argument_ids.len()
@@ -107,6 +106,7 @@ where
 }
 
 impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
+    /// Private method to change the stack type.
     fn into<NewStack: List + 'static>(self) -> Segment<Args, NewStack> {
         Segment {
             segment: self.segment,
@@ -114,15 +114,12 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
         }
     }
 
-    /*
-    pub fn indirect<N: 'static, T: 'static>(
-        mut self,
-    ) -> Segment<Args, Stack::PushFront<&'static T>> {
+    /*     pub fn indirect<N: 'static>(mut self) -> Segment<Args, Stack::PushFront<&Stack::Index<N>>> {
         self.segment.indirect::<N, T>();
         self.into()
     } */
 
-    /** Pushes a nullary operation that takes no arguments and returns a value of type R. */
+    /// Pushes a nullary operation that takes no arguments and returns a value of type R.
     pub fn op0<R, F>(mut self, op: F) -> Segment<Args, Stack::Push<R>>
     where
         F: Fn() -> R + 'static,
@@ -137,17 +134,16 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
         F: Fn() -> Result<R> + 'static,
         R: 'static,
     {
-        self.segment.raw0(move |stack| match op() {
-            Ok(r) => Ok(r),
-            Err(e) => {
+        self.segment.raw0(move |stack| {
+            op().map_err(|e| {
                 Stack::drop_top(stack);
-                Err(e)
-            }
+                e
+            })
         });
         self.into()
     }
 
-    /** Pushes a unary operation that takes the current stack value and returns a new value. */
+    /// Pushes a unary operation that takes the current stack value and returns a new value.
     pub fn op1<R, F>(mut self, op: F) -> Segment<Args, CStackList<R, Stack::Tail>>
     where
         F: Fn(Stack::Head) -> R + 'static,
@@ -157,6 +153,22 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
         self.into()
     }
 
+    pub fn op1r<R, F>(mut self, op: F) -> Segment<Args, CStackList<R, Stack::Tail>>
+    where
+        F: Fn(Stack::Head) -> Result<R> + 'static,
+        R: 'static,
+    {
+        self.segment.raw1(
+            move |stack, x| {
+                op(x).map_err(|e| {
+                    Stack::drop_top(stack);
+                    e
+                })
+            },
+            Stack::HEAD_PADDING != 0,
+        );
+        self.into()
+    }
     pub fn op2<R, F>(
         mut self,
         op: F,
@@ -237,7 +249,7 @@ mod tests {
         let mut dyn_segment = DynSegment::new::<(i32,)>();
         dyn_segment.op0(|| 42);
         dyn_segment.op2(|x: i32, y: i32| x + y)?;
-        let segment = Segment::<(i32,), (i32, ())>::try_from(dyn_segment)?;
+        let segment = Segment::<(i32,), CStackList<i32, CNil<()>>>::try_from(dyn_segment)?;
 
         assert_eq!(segment.call((10,)).unwrap(), 52);
         Ok(())

@@ -89,6 +89,21 @@ impl RawSegment {
         });
     }
 
+    fn _push_op1r<const PADDING0: bool, T, R, F>(&mut self)
+    where
+        F: Fn(&mut RawStack, T) -> Result<R> + 'static,
+        T: 'static,
+        R: 'static,
+    {
+        self.ops.push(|storage, p, stack| {
+            let (f, r) = unsafe { storage.next::<F>(p) };
+            let x: T = unsafe { stack.pop(PADDING0) };
+            let result = f(stack, x)?;
+            stack.push(result);
+            Ok(r)
+        });
+    }
+
     /** Pushes a unary operation that takes one argument of type T and returns a value of type R. */
     pub fn push_op1<T, R, F>(&mut self, op: F, padding0: bool)
     where
@@ -100,6 +115,20 @@ impl RawSegment {
         match padding0 {
             false => self._push_op1::<false, T, R, F>(),
             true => self._push_op1::<true, T, R, F>(),
+        }
+        self.base_alignment = max(self.base_alignment, align_of::<R>());
+    }
+
+    pub fn raw1<T, R, F>(&mut self, op: F, padding0: bool)
+    where
+        F: Fn(&mut RawStack, T) -> Result<R> + 'static,
+        T: 'static,
+        R: 'static,
+    {
+        self.push_storage(op);
+        match padding0 {
+            false => self._push_op1r::<false, T, R, F>(),
+            true => self._push_op1r::<true, T, R, F>(),
         }
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
