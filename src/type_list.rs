@@ -45,6 +45,14 @@ impl<T: ListTypeIteratorAdvance<P> + 'static, P: ListTypeProperty> ListTypeItera
     }
 }
 
+impl<T: ListTypeIteratorAdvance<P> + 'static, P: ListTypeProperty> Default
+    for ListTypeIterator<T, P>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: ListTypeIteratorAdvance<P> + 'static, P: ListTypeProperty> Iterator
     for ListTypeIterator<T, P>
 {
@@ -433,9 +441,7 @@ impl EmptyList for () {
     }
 
     type Empty = Self;
-    fn empty() -> Self::Empty {
-        ()
-    }
+    fn empty() -> Self::Empty {}
 }
 
 impl<H: 'static, T: List> List for (H, T) {

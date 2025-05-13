@@ -90,8 +90,7 @@ where
 
         ensure!(
             ArgList::<Args>::LENGTH == value.argument_ids.len()
-                && TypeIdIterator::<ArgList::<Args>>::new()
-                    .eq(value.argument_ids.iter().map(|id| *id)),
+                && TypeIdIterator::<ArgList::<Args>>::new().eq(value.argument_ids.iter().copied()),
             "argument type ids do not match"
         );
         ensure!(

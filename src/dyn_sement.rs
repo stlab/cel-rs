@@ -57,10 +57,7 @@ impl DynSegment {
         let stack_ids = <Args::Output as List>::Reverse::to_stack_info_list();
         DynSegment {
             segment: RawSegmentAlignedStack::new(),
-            argument_ids: (&stack_ids)
-                .into_iter()
-                .map(|s| s.stack_id.clone())
-                .collect(),
+            argument_ids: (&stack_ids).iter().map(|s| s.stack_id).collect(),
             stack_ids,
             stack_index: size_of::<<Args::Output as List>::Reverse>(),
         }
@@ -73,10 +70,7 @@ impl DynSegment {
     ///
     /// To avoid reversing the arguments and reversing the slice, this operation
     /// is done in argument order, not stack order.
-    fn pop_types<L: List + 'static>(&mut self) -> Result<()>
-    where
-        L: ListTypeIteratorAdvance<TypeId>,
-    {
+    fn pop_types<L: ListTypeIteratorAdvance<TypeId> + 'static>(&mut self) -> Result<()> {
         ensure!(
             L::LENGTH <= self.stack_ids.len(),
             "Too many arguments: expected {}, got {}",
@@ -84,14 +78,6 @@ impl DynSegment {
             self.stack_ids.len()
         );
         let start = self.stack_ids.len() - L::LENGTH;
-        let mut iter = TypeIdIterator::<L>::new();
-        while let Some(id) = iter.next() {
-            println!("id: {:?}", id);
-        }
-        let mut iter2 = self.stack_ids[start..].iter().map(|info| info.stack_id);
-        while let Some(id) = iter2.next() {
-            println!("id: {:?}", id);
-        }
         ensure!(
             TypeIdIterator::<L>::new().eq(self.stack_ids[start..].iter().map(|info| info.stack_id)),
             "stack type ids do not match"
