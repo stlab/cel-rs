@@ -1,7 +1,7 @@
 use crate::c_stack_list::*;
 use crate::memory::align_index;
-use crate::raw_segment::RawSegmentAlignedStack;
-use crate::raw_stack::RawAlignedStack;
+use crate::raw_segment::RawSegment;
+use crate::raw_stack::RawStack;
 use crate::type_list::*;
 use anyhow::Result;
 use anyhow::ensure;
@@ -40,9 +40,9 @@ impl<T: 'static, U: ToTypeIDList + 'static> ToTypeIDList for CStackList<T, U> {
 /// DynSegment tracks the types of values on the stack at compile time and verifies
 /// that operations receive arguments of the correct type. This prevents type mismatches
 /// that could occur when using RawSegment directly.
-type Dropper = fn(&mut RawAlignedStack);
+type Dropper = fn(&mut RawStack);
 pub struct DynSegment {
-    pub(crate) segment: RawSegmentAlignedStack,
+    pub(crate) segment: RawSegment,
     pub(crate) argument_ids: Vec<TypeId>,
     pub(crate) stack_ids: Vec<StackInfo>,
     stack_index: usize,
@@ -56,8 +56,8 @@ impl DynSegment {
     {
         let stack_ids = <Args::Output as List>::Reverse::to_stack_info_list();
         DynSegment {
-            segment: RawSegmentAlignedStack::new(),
-            argument_ids: (&stack_ids).iter().map(|s| s.stack_id).collect(),
+            segment: RawSegment::new(),
+            argument_ids: stack_ids.iter().map(|s| s.stack_id).collect(),
             stack_ids,
             stack_index: size_of::<<Args::Output as List>::Reverse>(),
         }

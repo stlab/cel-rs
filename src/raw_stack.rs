@@ -6,23 +6,23 @@ use std::mem::size_of;
 A simple raw stack that stores values as raw bytes. Each value is naturally aligned given the base alignment of the stack, which is the maximum alignment of any value stored in the stack.
 */
 #[derive(Debug)]
-pub struct RawAlignedStack {
+pub struct RawStack {
     buffer: RawVec,
 }
 
-impl RawAlignedStack {
+impl RawStack {
     /**
-    Creates a new `RawAlignedStack` with base alignment.
+    Creates a new `RawStack` with base alignment.
 
     # Examples
 
     ```
-    use cel_rs::raw_stack::RawAlignedStack;
-    let stack = RawAlignedStack::with_base_alignment(align_of::<u32>());
+    use cel_rs::raw_stack::RawStack;
+    let stack = RawStack::with_base_alignment(align_of::<u32>());
     ```
     */
     pub fn with_base_alignment(base_alignment: usize) -> Self {
-        RawAlignedStack {
+        RawStack {
             buffer: RawVec::with_base_alignment(base_alignment),
         }
     }
@@ -40,8 +40,8 @@ impl RawAlignedStack {
     # Examples
 
     ```
-    use cel_rs::raw_stack::RawAlignedStack;
-    let mut stack = RawAlignedStack::with_base_alignment(align_of::<u32>());
+    use cel_rs::raw_stack::RawStack;
+    let mut stack = RawStack::with_base_alignment(align_of::<u32>());
     let _ = stack.push(42u32);
     ```
 
@@ -83,8 +83,8 @@ impl RawAlignedStack {
     # Examples
 
     ```
-    use cel_rs::raw_stack::RawAlignedStack;
-    let mut stack = RawAlignedStack::with_base_alignment(align_of::<u32>());
+    use cel_rs::raw_stack::RawStack;
+    let mut stack = RawStack::with_base_alignment(align_of::<u32>());
     let padding = stack.push(100u32);
     let value: u32 = unsafe { stack.pop(padding) };
     ```
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn test_push_pop_u32() {
-        let mut stack = RawAlignedStack::with_base_alignment(align_of::<u32>());
+        let mut stack = RawStack::with_base_alignment(align_of::<u32>());
         let padding = stack.push(10u32);
         let result: u32 = unsafe { stack.pop(padding) };
         assert_eq!(result, 10);
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_multiple_push_pop() {
-        let mut stack = RawAlignedStack::with_base_alignment(align_of::<u32>());
+        let mut stack = RawStack::with_base_alignment(align_of::<u32>());
         let padding1 = stack.push(1u32);
         let padding2 = stack.push(2u32);
         let padding3 = stack.push(3u32);
@@ -154,8 +154,7 @@ mod tests {
 
     #[test]
     fn test_push_pop_different_types() {
-        let mut stack =
-            RawAlignedStack::with_base_alignment(max(align_of::<u32>(), align_of::<f64>()));
+        let mut stack = RawStack::with_base_alignment(max(align_of::<u32>(), align_of::<f64>()));
         let padding1 = stack.push(42u32);
         let padding2 = stack.push(3.14f64);
         let value_f: f64 = unsafe { stack.pop(padding2) };

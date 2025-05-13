@@ -1,9 +1,9 @@
 use crate::raw_sequence::RawSequence;
-use crate::raw_stack::RawAlignedStack;
+use crate::raw_stack::RawStack;
 use anyhow::Result;
 use std::cmp::max;
 
-type Operation = fn(&RawSequence, usize, &mut RawAlignedStack) -> Result<usize>;
+type Operation = fn(&RawSequence, usize, &mut RawStack) -> Result<usize>;
 
 /**
 A segment represents a sequence of operations that can be executed.
@@ -11,23 +11,23 @@ A segment represents a sequence of operations that can be executed.
 Each operation is stored along with its data in the segment's storage,
 and can manipulate values on a stack during execution.
 */
-pub struct RawSegmentAlignedStack {
+pub struct RawSegment {
     ops: Vec<Operation>,
     storage: RawSequence,
     dropper: Vec<fn(&mut RawSequence, usize) -> usize>,
     base_alignment: usize,
 }
 
-impl Default for RawSegmentAlignedStack {
+impl Default for RawSegment {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl RawSegmentAlignedStack {
+impl RawSegment {
     /// Creates a new empty segment.
     pub fn new() -> Self {
-        RawSegmentAlignedStack {
+        RawSegment {
             ops: Vec::new(),
             storage: RawSequence::new(),
             dropper: Vec::new(),
@@ -47,7 +47,7 @@ impl RawSegmentAlignedStack {
 
     pub fn raw0<R, F>(&mut self, op: F)
     where
-        F: Fn(&mut RawAlignedStack) -> Result<R> + 'static,
+        F: Fn(&mut RawStack) -> Result<R> + 'static,
         R: 'static,
     {
         self.push_storage(op);
@@ -217,7 +217,7 @@ impl RawSegmentAlignedStack {
     where
         T: 'static,
     {
-        let mut stack = RawAlignedStack::with_base_alignment(self.base_alignment);
+        let mut stack = RawStack::with_base_alignment(self.base_alignment);
         let mut p = 0;
         for op in self.ops.iter() {
             p = op(&self.storage, p, &mut stack)?;
@@ -237,7 +237,7 @@ impl RawSegmentAlignedStack {
         T: 'static,
     {
         // TODO: where does base alignment come from?
-        let mut stack = RawAlignedStack::with_base_alignment(self.base_alignment);
+        let mut stack = RawStack::with_base_alignment(self.base_alignment);
         stack.push(arg);
         let mut p = 0;
         for op in self.ops.iter() {
@@ -258,7 +258,7 @@ impl RawSegmentAlignedStack {
         T: 'static,
     {
         // TODO: where does base alignment come from?
-        let mut stack = RawAlignedStack::with_base_alignment(self.base_alignment);
+        let mut stack = RawStack::with_base_alignment(self.base_alignment);
         stack.push(arg.0);
         stack.push(arg.1);
         let mut p = 0;
@@ -269,7 +269,7 @@ impl RawSegmentAlignedStack {
     }
 }
 
-impl Drop for RawSegmentAlignedStack {
+impl Drop for RawSegment {
     fn drop(&mut self) {
         let mut p = 0;
         for e in self.dropper.iter() {
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_nullary_operation() {
-        let mut segment = RawSegmentAlignedStack::new();
+        let mut segment = RawSegment::new();
         segment.push_op0(|| 42);
         unsafe {
             assert_eq!(segment.call0::<i32>().unwrap(), 42);
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn test_unary_operation() {
-        let mut segment = RawSegmentAlignedStack::new();
+        let mut segment = RawSegment::new();
         segment.push_op0(|| 42);
         segment.push_op1(|x: i32| x * 2, false);
         unsafe {
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_binary_operation() {
-        let mut segment = RawSegmentAlignedStack::new();
+        let mut segment = RawSegment::new();
         segment.push_op0(|| 10);
         segment.push_op0(|| 5);
         segment.push_op2(|x: i32, y: i32| x + y, false, false);
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_ternary_operation() {
-        let mut segment = RawSegmentAlignedStack::new();
+        let mut segment = RawSegment::new();
         segment.push_op0(|| 2);
         segment.push_op0(|| 3);
         segment.push_op0(|| 4);
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_complex_chain() {
-        let mut segment = RawSegmentAlignedStack::new();
+        let mut segment = RawSegment::new();
         segment.push_op0(|| 10);
         segment.push_op1(|x: i32| x * 2, false);
         segment.push_op0(|| 5);

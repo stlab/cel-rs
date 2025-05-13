@@ -1,7 +1,7 @@
 use crate::c_stack_list::*;
 use crate::dyn_sement::DynSegment;
-use crate::raw_segment::RawSegmentAlignedStack;
-use crate::raw_stack::RawAlignedStack;
+use crate::raw_segment::RawSegment;
+use crate::raw_stack::RawStack;
 use crate::type_list::*;
 use anyhow::*;
 use std::any::TypeId;
@@ -12,7 +12,7 @@ use std::result::Result::Ok;
 // stack.
 
 // Create a handler for dropping types
-struct DropHandler<'a>(&'a mut RawAlignedStack);
+struct DropHandler<'a>(&'a mut RawStack);
 
 impl TypeHandler for DropHandler<'_> {
     fn invoke<T: List>(&mut self) {
@@ -21,12 +21,12 @@ impl TypeHandler for DropHandler<'_> {
 }
 
 trait DropTop {
-    fn drop_top(stack: &mut RawAlignedStack);
+    fn drop_top(stack: &mut RawStack);
 }
 
 // Implement DropTop for List
 impl<T: List + 'static> DropTop for T {
-    fn drop_top(stack: &mut RawAlignedStack) {
+    fn drop_top(stack: &mut RawStack) {
         let mut handler = DropHandler(stack);
         T::for_each_type(&mut handler);
     }
@@ -60,7 +60,7 @@ pub struct Segment<
     Args: IntoList + 'static,
     Stack: List = <<Args as IntoList>::Output<CNil<()>> as List>::Reverse,
 > {
-    segment: RawSegmentAlignedStack,
+    segment: RawSegment,
     _phantom: std::marker::PhantomData<(Args, Stack)>,
 }
 
@@ -73,7 +73,7 @@ impl<Args: IntoList + 'static> Default for Segment<Args> {
 impl<Args: IntoList + 'static> Segment<Args> {
     pub fn new() -> Segment<Args> {
         Segment {
-            segment: RawSegmentAlignedStack::new(),
+            segment: RawSegment::new(),
             _phantom: std::marker::PhantomData,
         }
     }
