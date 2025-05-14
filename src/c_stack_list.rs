@@ -60,8 +60,6 @@ impl<H: 'static, T: HeadPadding> HeadPadding for CStackList<H, T> {
 }
  */
 impl<H: 'static, T: List> List for CStackList<H, T> {
-    type Empty = T::Empty;
-
     type Head = H;
     fn head(&self) -> &Self::Head {
         &self.1

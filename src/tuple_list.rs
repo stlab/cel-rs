@@ -1,6 +1,9 @@
 use crate::list_traits::*;
 use std::mem::offset_of;
 
+//--------------------------------------------------------------------------------------------------
+// ListTypeIteratorAdvance
+
 impl<P: ListTypeProperty> ListTypeIteratorAdvance<P> for () {
     fn advancer<R: List>(_iter: &mut ListTypeIterator<R, P>) -> Option<P::Output> {
         None
@@ -16,6 +19,9 @@ impl<P: ListTypeProperty, H: 'static, T: ListTypeIteratorAdvance<P>> ListTypeIte
     }
 }
 
+//--------------------------------------------------------------------------------------------------
+// EmptyList for ()
+
 impl EmptyList for () {
     type PushFirst<U: 'static> = (U, ());
     fn push_first<U: 'static>(self, item: U) -> Self::PushFirst<U> {
@@ -28,14 +34,13 @@ impl EmptyList for () {
     }
 
     type Empty = Self;
-    fn empty() -> Self::Empty {
-        ()
-    }
+    fn empty() -> Self::Empty {}
 }
 
-impl<H: 'static, T: List> List for (H, T) {
-    type Empty = T::Empty;
+//--------------------------------------------------------------------------------------------------
+// List for (H, T)
 
+impl<H: 'static, T: List> List for (H, T) {
     type Head = H;
     fn head(&self) -> &Self::Head {
         &self.0

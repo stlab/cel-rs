@@ -53,8 +53,6 @@ pub trait TypeHandler {
 }
 
 pub trait List {
-    type Empty: EmptyList;
-
     type Head: 'static;
     fn head(&self) -> &Self::Head;
 
@@ -107,7 +105,6 @@ pub trait EmptyList {
 }
 
 impl<T: EmptyList> List for T {
-    type Empty = Self;
     type Head = Bottom;
     type Tail = T; // Satisfy the List trait
     type Push<U: 'static> = T::PushFirst<U>;
