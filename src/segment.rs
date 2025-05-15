@@ -194,7 +194,6 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
     }
 }
 
-/// Creates a new empty segment with no operations.
 // trait Fn<Args> is currently unstable - so we use a call trait as a temporary workaround.
 pub trait Callable<Args> {
     type Output;
