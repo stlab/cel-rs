@@ -99,7 +99,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sequence_operations() {
+    fn sequence_operations() {
         let mut seq = RawSequence::new();
 
         seq.push(100u32);

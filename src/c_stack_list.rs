@@ -155,6 +155,7 @@ impl<H: 'static, T: List> Index<RangeToInclusive<U0>> for CStackList<H, T> {
 }
 
 type TailRangeToInclusive<T, U, B> = <T as Index<RangeToInclusive<Sub1<UInt<U, B>>>>>::Output;
+
 impl<H: 'static, T: List, U: Unsigned, B: Bit> Index<RangeToInclusive<UInt<U, B>>>
     for CStackList<H, T>
 where
@@ -285,7 +286,7 @@ mod tests {
 
     use super::*;
     #[test]
-    fn test_into_cstack_list() {
+    fn into_cstack_list() {
         let list = (1, 2.5, 3, 4, "world", "Hello").into_cstack_list();
         assert_eq!(
             list,
@@ -304,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn test_index() {
+    fn index() {
         let list = (1, 2.5, "Hello").into_cstack_list();
         assert_eq!(list[U0::new()], 1);
         assert_eq!(list[U1::new()], 2.5);
@@ -312,26 +313,25 @@ mod tests {
     }
 
     #[test]
-    fn test_slice() {
+    fn slice() {
         let list = (1, 2.5, 3, 4, "world", "Hello").into_list::<CNil<()>>();
         println!("{:?}", list[..U5::new()][U2::new()..]);
     }
 
     #[test]
-    fn test_index_range_from() {
+    fn index_range_from() {
         let list = (1, 2.5, "Hello").into_list::<CNil<()>>();
         assert_eq!(list[U1::new()..][U1::new()], "Hello");
     }
 
     #[test]
-    fn test_index_range_to() {
+    fn index_range_to() {
         let list = (1, 2.5, "Hello").into_list::<CNil<()>>();
         assert_eq!(list[..U2::new()][U1::new()], 2.5);
     }
 
-    // Update the test to use Item instead of At
     #[test]
-    fn test_index_type() {
+    fn index_type() {
         use std::any::type_name;
 
         type List = <(i32, f64, &'static str) as IntoList>::Output<CNil<()>>;
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cstack_list() {
+    fn cstack_list() {
         let list = CStackList(CNil(()), 32i32).push("Hello").push(42.5);
         // Test that we can cast to a C struct and read values
         #[repr(C)]

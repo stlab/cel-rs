@@ -240,7 +240,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[test]
-    fn test_segment_from_dyn_segment() -> Result<()> {
+    fn segment_from_dyn_segment() -> Result<()> {
         let mut dyn_segment = DynSegment::new::<(i32,)>();
         dyn_segment.op0(|| 42);
         dyn_segment.op2(|x: i32, y: i32| x + y)?;
@@ -251,14 +251,14 @@ mod tests {
     }
 
     #[test]
-    fn test_unit_result() {
+    fn unit_result() {
         let segment = Segment::new();
         let result = segment.call(());
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_drop_on_error() {
+    fn drop_on_error() {
         struct DropCounter(Arc<AtomicUsize>);
 
         impl Drop for DropCounter {
@@ -288,15 +288,16 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_operation_args_of_different_types() {
+    fn binary_operation_args_of_different_types() {
         let result = Segment::new()
             .op2(|x, y| format!("{} {}", x, y))
             .call(("Hello", 12));
 
         assert_eq!(result.unwrap(), "Hello 12");
     }
+
     #[test]
-    fn test_type_safe_operations() {
+    fn type_safe_operations() {
         let result = Segment::new()
             .op0(|| 42)
             .op0(|| 10)
@@ -308,18 +309,8 @@ mod tests {
         assert_eq!(result.unwrap(), "104");
     }
 
-    /*     #[test]
-    fn test_references() {
-        let result = Segment::new()
-            .op0(|| 42)
-            .op0(|| 10)
-            .op1(|&x, y| x + 7)
-            .call(());
-        assert_eq!(result.unwrap(), 84);
-    } */
-
     #[test]
-    fn test_chain_operations() {
+    fn chain_operations() {
         let result = Segment::<(&str,)>::new()
             .op1(|s| s.len())
             .op1(|n| n * 2)
@@ -330,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn test_call_with_args() {
+    fn call_with_args() {
         let result = Segment::new() //
             .op1(|x: i32| x * 2) //
             .call((21,));

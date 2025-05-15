@@ -127,7 +127,7 @@ mod tests {
     use std::cmp::max;
 
     #[test]
-    fn test_push_pop_u32() {
+    fn push_pop_u32() {
         let mut stack = RawStack::with_base_alignment(align_of::<u32>());
         let padding = stack.push(10u32);
         let result: u32 = unsafe { stack.pop(padding) };
@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_push_pop() {
+    fn multiple_push_pop() {
         let mut stack = RawStack::with_base_alignment(align_of::<u32>());
         let padding1 = stack.push(1u32);
         let padding2 = stack.push(2u32);
@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn test_push_pop_different_types() {
+    fn push_pop_different_types() {
         let mut stack = RawStack::with_base_alignment(max(align_of::<u32>(), align_of::<f64>()));
         let padding1 = stack.push(42u32);
         let padding2 = stack.push(3.14f64);

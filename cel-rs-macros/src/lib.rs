@@ -133,12 +133,14 @@ pub fn expr(input: TokenStream) -> TokenStream {
 /// ```rust
 /// use cel_rs_macros::print_tokens;
 /// print_tokens! {
-///     format hello <=== layout: view,
+///     format < = = hello    <=== layout: /*comment */ view,
+///     // comment
+///     /// doc comment
 /// };
 /// ```
 #[proc_macro]
 pub fn print_tokens(input: TokenStream) -> TokenStream {
-    println!("{}", input.to_string());
+    println!("{}", input);
     for e in input {
         println!("{e}");
     }

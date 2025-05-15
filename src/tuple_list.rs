@@ -1,3 +1,6 @@
+//! Implements [`List`] for tuples where `()` is an empty list and `(H, T)` is a list with a head
+//! and tail.
+
 use crate::list_traits::{
     EmptyList, IntoList, List, ListTypeIterator, ListTypeIteratorAdvance, ListTypeProperty,
 };
@@ -86,7 +89,7 @@ mod tests {
     use std::any::TypeId;
 
     #[test]
-    fn test_type_id_iterator() {
+    fn type_id_iterator() {
         let ids: [TypeId; 3] = [
             TypeId::of::<u32>(),
             TypeId::of::<f64>(),
@@ -96,12 +99,12 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_list() {
+    fn empty_list() {
         assert_eq!(<()>::empty(), ());
     }
 
     #[test]
-    fn test_into_list() {
+    fn into_list() {
         assert_eq!(().into_list::<()>(), ());
         assert_eq!((1, 2, 3).into_list::<()>(), (1, (2, (3, ()))));
         assert_eq!(
@@ -111,13 +114,13 @@ mod tests {
     }
 
     #[test]
-    fn test_push_front() {
+    fn push_front() {
         assert_eq!(().push_first(1), (1, ()));
         assert_eq!((1, 2, 3).into_list::<()>().push(4), (4, (1, (2, (3, ())))));
     }
 
     #[test]
-    fn test_concat() {
+    fn concat() {
         assert_eq!(
             (1, 2, 3)
                 .into_list::<()>()
@@ -127,19 +130,19 @@ mod tests {
     }
 
     #[test]
-    fn test_reverse() {
+    fn reverse() {
         assert_eq!((1, 2, 3).into_list::<()>().reverse(), (3, (2, (1, ()))));
     }
 
     #[test]
-    fn test_list_length() {
+    fn list_length() {
         assert_eq!(<()>::LENGTH, 0);
         assert_eq!(<(i32, ())>::LENGTH, 1);
         assert_eq!(<(i32, (f64, ()))>::LENGTH, 2);
     }
 
     #[test]
-    fn test_for_each_type() {
+    fn for_each_type() {
         struct PrintTypeNames {
             count: usize,
         }
@@ -157,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tuple_list() {
+    fn tuple_list() {
         let list = (1, 2.5, "Hello").into_list::<()>();
         println!("{:?}", list);
     }

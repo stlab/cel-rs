@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn test_drop_on_error() -> Result<(), anyhow::Error> {
+    fn drop_on_error() -> Result<(), anyhow::Error> {
         let mut segment = DynSegment::new::<()>();
 
         let drop_count = Arc::new(AtomicUsize::new(0));
@@ -327,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn test_segment_operations() -> Result<(), anyhow::Error> {
+    fn segment_operations() -> Result<(), anyhow::Error> {
         let mut operations = DynSegment::new::<()>();
 
         operations.op0(|| -> u32 { 30 });
@@ -345,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn test_segment_with_argument() -> Result<(), anyhow::Error> {
+    fn segment_with_argument() -> Result<(), anyhow::Error> {
         let mut operations = DynSegment::new::<(u32,)>();
 
         operations.op0(|| -> u32 { 12 });

@@ -171,14 +171,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_with_base_alignment() {
+    fn with_base_alignment() {
         let vec = RawVec::with_base_alignment(align_of::<u32>());
         assert_eq!(vec.capacity(), 0);
         assert_eq!(vec.len(), 0);
     }
 
     #[test]
-    fn test_with_base_alignment_and_capacity() {
+    fn with_base_alignment_and_capacity() {
         let vec = RawVec::with_base_alignment_and_capacity(align_of::<u32>(), 10);
         assert!(vec.capacity() >= 10);
         assert_eq!(vec.len(), 0);
@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reserve() {
+    fn reserve() {
         let mut vec = RawVec::with_base_alignment(align_of::<u32>());
         vec.reserve(10);
         assert!(vec.capacity() >= 10);
@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_len() {
+    fn set_len() {
         let mut vec = RawVec::with_base_alignment_and_capacity(align_of::<u32>(), 10);
         unsafe { vec.set_len(10) };
         assert_eq!(vec.len(), 10);
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn test_index() {
+    fn index() {
         let mut vec = RawVec::with_base_alignment_and_capacity(align_of::<u32>(), 10);
         unsafe { vec.set_len(1) };
         vec[0].write(42);

@@ -323,7 +323,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_nullary_operation() {
+    fn nullary_operation() {
         let mut segment = RawSegment::new();
         segment.push_op0(|| 42);
         unsafe {
@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unary_operation() {
+    fn unary_operation() {
         let mut segment = RawSegment::new();
         segment.push_op0(|| 42);
         segment.push_op1(|x: i32| x * 2, false);
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_operation() {
+    fn binary_operation() {
         let mut segment = RawSegment::new();
         segment.push_op0(|| 10);
         segment.push_op0(|| 5);
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ternary_operation() {
+    fn ternary_operation() {
         let mut segment = RawSegment::new();
         segment.push_op0(|| 2);
         segment.push_op0(|| 3);
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn test_complex_chain() {
+    fn complex_chain() {
         let mut segment = RawSegment::new();
         segment.push_op0(|| 10);
         segment.push_op1(|x: i32| x * 2, false);
