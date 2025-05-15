@@ -1,5 +1,5 @@
-use crate::c_stack_list::*;
-use crate::list_traits::*;
+use crate::c_stack_list::{CNil, CStackList, IntoCStackList};
+use crate::list_traits::{List, ListTypeIteratorAdvance, TypeIdIterator};
 use crate::memory::align_index;
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
@@ -22,24 +22,24 @@ impl ToTypeIDList for CNil<()> {
     }
 }
 
-impl<T: 'static, U: ToTypeIDList + 'static> ToTypeIDList for CStackList<T, U> {
+impl<H: 'static, T: ToTypeIDList + 'static> ToTypeIDList for CStackList<H, T> {
     fn to_stack_info_list() -> Vec<StackInfo> {
-        let mut list = U::to_stack_info_list();
+        let mut list = T::to_stack_info_list();
         list.push(StackInfo {
-            stack_id: TypeId::of::<T>(),
-            stack_unwind: |stack| unsafe { stack.drop::<T>(Self::HEAD_PADDING != 0) },
+            stack_id: TypeId::of::<H>(),
+            stack_unwind: |stack| unsafe { stack.drop::<H>(Self::HEAD_PADDING != 0) },
             padded: Self::HEAD_PADDING != 0,
         });
         list
     }
 }
 
-/// A type-checked wrapper around RawSegmentAlignedStack that maintains a stack of type information
+/// A type-checked wrapper around [`RawSegment`] that maintains a stack of type information
 /// to ensure type safety during operation execution.
 ///
-/// DynSegment tracks the types of values on the stack at compile time and verifies
+/// [`DynSegment`] tracks the types of values on the stack at compile time and verifies
 /// that operations receive arguments of the correct type. This prevents type mismatches
-/// that could occur when using RawSegment directly.
+/// that could occur when using [`RawSegment`] directly.
 type Dropper = fn(&mut RawStack);
 pub struct DynSegment {
     pub(crate) segment: RawSegment,
@@ -50,6 +50,7 @@ pub struct DynSegment {
 
 impl DynSegment {
     /// Creates a new empty segment with no operations.
+    #[must_use]
     pub fn new<Args: IntoCStackList>() -> Self
     where
         <Args::Output as List>::Reverse: ToTypeIDList,
@@ -96,9 +97,10 @@ impl DynSegment {
 
         self.stack_ids.push(StackInfo {
             stack_id: TypeId::of::<T>(),
-            stack_unwind: match padded {
-                true => |stack| unsafe { stack.drop::<T>(true) },
-                false => |stack| unsafe { stack.drop::<T>(false) },
+            stack_unwind: if padded {
+                |stack| unsafe { stack.drop::<T>(true) }
+            } else {
+                |stack| unsafe { stack.drop::<T>(false) }
             },
             padded,
         });
@@ -152,6 +154,10 @@ impl DynSegment {
     ///
     /// Verifies that the top of the type stack matches the expected input type T
     /// before adding the operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the argument type doesn't match the expected type.
     pub fn op1<T, R, F>(&mut self, op: F) -> Result<()>
     where
         F: Fn(T) -> R + 'static,
@@ -169,6 +175,10 @@ impl DynSegment {
     ///
     /// Verifies that the top two types on the type stack match the expected input types U and T
     /// (in that order) before adding the operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the argument types do not match the expected types.
     pub fn op2<T, U, R, F>(&mut self, op: F) -> Result<()>
     where
         F: Fn(T, U) -> R + 'static,
@@ -187,6 +197,10 @@ impl DynSegment {
     ///
     /// Verifies that the top three types on the type stack match the expected input types V, U, and T
     /// (in that order) before adding the operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the argument types do not match the expected types.
     pub fn op3<T, U, V, R, F>(&mut self, op: F) -> Result<()>
     where
         F: Fn(T, U, V) -> R + 'static,
@@ -206,10 +220,14 @@ impl DynSegment {
     ///
     /// # Returns
     /// - `Ok(R)` if execution succeeds and the final value is of type R
-    /// - `Err` if:
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
     ///   - There are unexpected arguments (expected none)
     ///   - The final type doesn't match R
     ///   - There are remaining values on the stack after getting the result
+    ///
     pub fn call0<R>(&mut self) -> Result<R>
     where
         R: 'static,
@@ -232,13 +250,14 @@ impl DynSegment {
 
     /// Executes all operations in the segment with one argument and returns the final result.
     ///
-    /// # Returns
-    /// - `Ok(R)` if execution succeeds and the final value is of type R
-    /// - `Err` if:
+    /// # Errors
+    ///
+    /// Returns an error if:
     ///   - The number of arguments doesn't match (expected one)
     ///   - The argument type doesn't match the expected type
     ///   - The final type doesn't match R
     ///   - There are remaining values on the stack after getting the result
+    ///
     pub fn call1<A, R>(&mut self, arg: A) -> Result<R>
     where
         A: 'static,

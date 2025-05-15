@@ -22,6 +22,7 @@ pub trait ListTypeIteratorAdvance<P: ListTypeProperty>: List + Sized {
 }
 
 impl<T: ListTypeIteratorAdvance<P> + 'static, P: ListTypeProperty> ListTypeIterator<T, P> {
+    #[must_use]
     pub fn new() -> Self {
         ListTypeIterator {
             advance: T::advancer::<T>,

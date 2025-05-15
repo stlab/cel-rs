@@ -35,16 +35,15 @@ where
 }
 
 impl RawVec {
-    /**
-    Creates a new `RawVec` with base alignment.
-
-    # Examples
-
-    ```
-    use cel_rs::raw_vec::RawVec;
-    let vec = RawVec::with_base_alignment(align_of::<u32>());
-    ```
-    */
+    /// Creates a new `RawVec` with base alignment.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_rs::raw_vec::RawVec;
+    /// let vec = RawVec::with_base_alignment(align_of::<u32>());
+    /// ```
+    #[must_use]
     pub fn with_base_alignment(base_alignment: usize) -> Self {
         RawVec {
             base_alignment,
@@ -53,6 +52,7 @@ impl RawVec {
         }
     }
 
+    #[must_use]
     pub fn with_base_alignment_and_capacity(base_alignment: usize, capacity: usize) -> Self {
         let mut buffer = Vec::with_capacity(capacity + base_alignment - 1);
         let ptr_as_index = buffer.as_ptr() as usize;
@@ -65,14 +65,17 @@ impl RawVec {
         }
     }
 
+    #[must_use]
     pub fn capacity(&self) -> usize {
         self.buffer.capacity() - self.start_offset
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.buffer.len() - self.start_offset
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -101,9 +104,13 @@ impl RawVec {
 
     /// Sets the length of the vector.
     ///
+    /// # Panics
+    ///
+    /// - The length must be less than or equal to the capacity.
+    ///
     /// # Safety
     ///
-    /// The length must be less than or equal to the capacity of the vector.
+    /// - The elements at `old_len..new_len` must be initialized.
     pub unsafe fn set_len(&mut self, len: usize) {
         assert!(len <= self.capacity());
         unsafe { self.buffer.set_len(self.start_offset + len) };
@@ -143,6 +150,7 @@ impl RawVec {
     /// # Safety
     ///
     /// The pointer is valid until the vector buffer is reallocated or the vector's lifetime ends.
+    #[must_use]
     pub unsafe fn as_ptr(&self) -> *const MaybeUninit<u8> {
         unsafe { self.buffer.as_ptr().add(self.start_offset) }
     }

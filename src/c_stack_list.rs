@@ -1,9 +1,11 @@
-use std::fmt;
 use std::mem::offset_of;
 use std::ops::{Index, RangeFrom, RangeTo, RangeToInclusive, Sub};
-use typenum::*;
+use std::{fmt, ptr};
+use typenum::{B1, Bit, Sub1, U0, UInt, Unsigned};
 
-use crate::list_traits::*;
+use crate::list_traits::{
+    EmptyList, IntoList, List, ListTypeIterator, ListTypeIteratorAdvance, ListTypeProperty,
+};
 
 /// A list using a guaranteed memory layout (`repr(C)`), with tail stored first so appending items
 /// does not change the memory layout of prior items. The tail may itself contain a list to ensure
@@ -127,7 +129,7 @@ where
 impl<H: 'static, T: List> Index<RangeTo<U0>> for CStackList<H, T> {
     type Output = CNil<CStackList<H, T>>;
     fn index(&self, _index: RangeTo<U0>) -> &Self::Output {
-        unsafe { std::mem::transmute::<&Self, &Self::Output>(self) }
+        unsafe { &*ptr::from_ref(self).cast::<Self::Output>() }
     }
 }
 
@@ -141,14 +143,14 @@ where
 {
     type Output = <TailRangeTo<T, U, B> as List>::Push<H>;
     fn index(&self, _index: RangeTo<UInt<U, B>>) -> &Self::Output {
-        unsafe { std::mem::transmute::<&Self, &Self::Output>(self) }
+        unsafe { &*ptr::from_ref(self).cast::<Self::Output>() }
     }
 }
 
 impl<H: 'static, T: List> Index<RangeToInclusive<U0>> for CStackList<H, T> {
     type Output = CStackList<H, CNil<T>>;
     fn index(&self, _index: RangeToInclusive<U0>) -> &Self::Output {
-        unsafe { std::mem::transmute::<&Self, &Self::Output>(self) }
+        unsafe { &*ptr::from_ref(self).cast::<Self::Output>() }
     }
 }
 
@@ -162,7 +164,7 @@ where
 {
     type Output = <TailRangeToInclusive<T, U, B> as List>::Push<H>;
     fn index(&self, _index: RangeToInclusive<UInt<U, B>>) -> &Self::Output {
-        unsafe { std::mem::transmute::<&Self, &Self::Output>(self) }
+        unsafe { &*ptr::from_ref(self).cast::<Self::Output>() }
     }
 }
 
@@ -228,7 +230,7 @@ where
     }
 }
 
-/// Type alias for getting element type at index N, following std::ops::Index convention
+/// Type alias for getting element type at index `N`, following [`std::ops::Index`] convention
 pub type Item<L, N> = <L as Index<N>>::Output;
 
 impl<H: 'static, T: List, U: Unsigned, B: Bit> Index<UInt<U, B>> for CStackList<H, T>
@@ -279,6 +281,8 @@ impl<P: ListTypeProperty, H: 'static, T: ListTypeIteratorAdvance<P>> ListTypeIte
 
 #[cfg(test)]
 mod tests {
+    use typenum::{U1, U2, U5};
+
     use super::*;
     #[test]
     fn test_into_cstack_list() {

@@ -5,12 +5,10 @@ use std::cmp::max;
 
 type Operation = fn(&RawSequence, usize, &mut RawStack) -> Result<usize>;
 
-/**
-A segment represents a sequence of operations that can be executed.
-
-Each operation is stored along with its data in the segment's storage,
-and can manipulate values on a stack during execution.
-*/
+/// A segment represents a sequence of operations that can be executed.
+///
+/// Each operation is stored along with its data in the segment's storage,
+/// and can manipulate values on a stack during execution.
 pub struct RawSegment {
     ops: Vec<Operation>,
     storage: RawSequence,
@@ -26,6 +24,7 @@ impl Default for RawSegment {
 
 impl RawSegment {
     /// Creates a new empty segment.
+    #[must_use]
     pub fn new() -> Self {
         RawSegment {
             ops: Vec::new(),
@@ -35,7 +34,7 @@ impl RawSegment {
         }
     }
 
-    /* Pushes a value into the segment's storage and registers its dropper. */
+    /// Pushes a value into the segment's storage and registers its dropper.
     fn push_storage<T>(&mut self, value: T)
     where
         T: 'static,
@@ -60,7 +59,7 @@ impl RawSegment {
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
-    /// Pushes a nullary operation (taking no arguments) that returns a value of type R.
+    /// Pushes a unary operation that takes one argument of type T and returns a value of type R.
     pub fn push_op0<R, F>(&mut self, op: F)
     where
         F: Fn() -> R + 'static,
@@ -75,7 +74,7 @@ impl RawSegment {
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
-    fn _push_op1<const PADDING0: bool, T, R, F>(&mut self)
+    fn push_op1_<const PADDING0: bool, T, R, F>(&mut self)
     where
         F: Fn(T) -> R + 'static,
         T: 'static,
@@ -89,7 +88,7 @@ impl RawSegment {
         });
     }
 
-    fn _push_op1r<const PADDING0: bool, T, R, F>(&mut self)
+    fn push_op1r_<const PADDING0: bool, T, R, F>(&mut self)
     where
         F: Fn(&mut RawStack, T) -> Result<R> + 'static,
         T: 'static,
@@ -104,7 +103,7 @@ impl RawSegment {
         });
     }
 
-    /** Pushes a unary operation that takes one argument of type T and returns a value of type R. */
+    /// Pushes a unary operation that takes one argument of type T and returns a value of type R.
     pub fn push_op1<T, R, F>(&mut self, op: F, padding0: bool)
     where
         F: Fn(T) -> R + 'static,
@@ -112,9 +111,10 @@ impl RawSegment {
         R: 'static,
     {
         self.push_storage(op);
-        match padding0 {
-            false => self._push_op1::<false, T, R, F>(),
-            true => self._push_op1::<true, T, R, F>(),
+        if padding0 {
+            self.push_op1_::<true, T, R, F>();
+        } else {
+            self.push_op1_::<false, T, R, F>();
         }
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
@@ -126,14 +126,15 @@ impl RawSegment {
         R: 'static,
     {
         self.push_storage(op);
-        match padding0 {
-            false => self._push_op1r::<false, T, R, F>(),
-            true => self._push_op1r::<true, T, R, F>(),
+        if padding0 {
+            self.push_op1r_::<true, T, R, F>();
+        } else {
+            self.push_op1r_::<false, T, R, F>();
         }
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
-    fn _drop1<const PADDING0: bool, T, F>(&mut self)
+    fn drop1_<const PADDING0: bool, T, F>(&mut self)
     where
         F: Fn(T) + 'static,
         T: 'static,
@@ -152,13 +153,14 @@ impl RawSegment {
         T: 'static,
     {
         self.push_storage(op);
-        match padding0 {
-            false => self._drop1::<false, T, F>(),
-            true => self._drop1::<true, T, F>(),
+        if padding0 {
+            self.drop1_::<true, T, F>();
+        } else {
+            self.drop1_::<false, T, F>();
         }
     }
 
-    fn _push_op2<const PADDING0: bool, const PADDING1: bool, T, U, R, F>(&mut self)
+    fn push_op2_<const PADDING0: bool, const PADDING1: bool, T, U, R, F>(&mut self)
     where
         F: Fn(T, U) -> R + 'static,
         T: 'static,
@@ -174,7 +176,8 @@ impl RawSegment {
         });
     }
 
-    /// Pushes a binary operation that takes two arguments of types T and U and returns a value of type R.
+    /// Pushes a binary operation that takes two arguments of types T and U and returns a value of
+    /// type R.
     pub fn push_op2<T, U, R, F>(&mut self, op: F, padding0: bool, padding1: bool)
     where
         F: Fn(T, U) -> R + 'static,
@@ -184,16 +187,18 @@ impl RawSegment {
     {
         self.push_storage(op);
         match (padding0, padding1) {
-            (false, false) => self._push_op2::<false, false, T, U, R, F>(),
-            (false, true) => self._push_op2::<false, true, T, U, R, F>(),
-            (true, false) => self._push_op2::<true, false, T, U, R, F>(),
-            (true, true) => self._push_op2::<true, true, T, U, R, F>(),
+            (false, false) => self.push_op2_::<false, false, T, U, R, F>(),
+            (false, true) => self.push_op2_::<false, true, T, U, R, F>(),
+            (true, false) => self.push_op2_::<true, false, T, U, R, F>(),
+            (true, true) => self.push_op2_::<true, true, T, U, R, F>(),
         }
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
-    /// Pushes a ternary operation that takes three arguments of types T, U, and V and returns a value of type R.
-    fn _push_op3<const PADDING0: bool, const PADDING1: bool, const PADDING2: bool, T, U, V, R, F>(
+    /// Pushes a ternary operation that takes three arguments of types T, U, and V and returns a
+    /// value of type R.
+    #[expect(clippy::many_single_char_names, reason = "patterned code")]
+    fn push_op3_<const PADDING0: bool, const PADDING1: bool, const PADDING2: bool, T, U, V, R, F>(
         &mut self,
     ) where
         F: Fn(T, U, V) -> R + 'static,
@@ -224,43 +229,47 @@ impl RawSegment {
         self.push_storage(op);
 
         match (padding0, padding1, padding2) {
-            (false, false, false) => self._push_op3::<false, false, false, T, U, V, R, F>(),
-            (false, false, true) => self._push_op3::<false, false, true, T, U, V, R, F>(),
-            (false, true, false) => self._push_op3::<false, true, false, T, U, V, R, F>(),
-            (false, true, true) => self._push_op3::<false, true, true, T, U, V, R, F>(),
-            (true, false, false) => self._push_op3::<true, false, false, T, U, V, R, F>(),
-            (true, false, true) => self._push_op3::<true, false, true, T, U, V, R, F>(),
-            (true, true, false) => self._push_op3::<true, true, false, T, U, V, R, F>(),
-            (true, true, true) => self._push_op3::<true, true, true, T, U, V, R, F>(),
+            (false, false, false) => self.push_op3_::<false, false, false, T, U, V, R, F>(),
+            (false, false, true) => self.push_op3_::<false, false, true, T, U, V, R, F>(),
+            (false, true, false) => self.push_op3_::<false, true, false, T, U, V, R, F>(),
+            (false, true, true) => self.push_op3_::<false, true, true, T, U, V, R, F>(),
+            (true, false, false) => self.push_op3_::<true, false, false, T, U, V, R, F>(),
+            (true, false, true) => self.push_op3_::<true, false, true, T, U, V, R, F>(),
+            (true, true, false) => self.push_op3_::<true, true, false, T, U, V, R, F>(),
+            (true, true, true) => self.push_op3_::<true, true, true, T, U, V, R, F>(),
         }
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
-    /**
-    Executes all operations in the segment and returns the final result.
-
-    # Safety
-    This function is unsafe if the result type does not match the type returned by the operations in the segment or if the operations expect any initial values on the stack.
-    */
+    /// Executes all operations in the segment and returns the final result.
+    ///
+    /// # Errors
+    /// Halts execution and returns an error if any operation returns an error.
+    ///
+    /// # Safety
+    /// This function is unsafe if the result type does not match the type returned by the
+    /// operations in the segment or if the operations expect any initial values on the stack.
     pub unsafe fn call0<T>(&self) -> Result<T>
     where
         T: 'static,
     {
         let mut stack = RawStack::with_base_alignment(self.base_alignment);
         let mut p = 0;
-        for op in self.ops.iter() {
+        for op in &self.ops {
             p = op(&self.storage, p, &mut stack)?;
         }
         Ok(unsafe { stack.pop(false) })
     }
 
-    /**
-    Executes all operations in the segment with one argument of type A and returns the final result.
-
-    # Safety
-    This function is unsafe if the argument and result types do not match the types expected or
-    returned by the operations in the segment.
-    */
+    /// Executes all operations in the segment with one argument of type A and returns the final
+    /// result.
+    ///
+    /// # Errors
+    /// Halts execution and returns an error if any operation returns an error.
+    ///
+    /// # Safety
+    /// This function is unsafe if the argument and result types do not match the types expected or
+    /// returned by the operations in the segment.
     pub unsafe fn call1<A, T>(&self, arg: A) -> Result<T>
     where
         T: 'static,
@@ -269,19 +278,21 @@ impl RawSegment {
         let mut stack = RawStack::with_base_alignment(self.base_alignment);
         stack.push(arg);
         let mut p = 0;
-        for op in self.ops.iter() {
+        for op in &self.ops {
             p = op(&self.storage, p, &mut stack)?;
         }
         Ok(unsafe { stack.pop(false) })
     }
 
-    /**
-    Executes all operations in the segment with two arguments of types A and B and returns the final result.
-
-    # Safety
-    This function is unsafe if the arguments and result types do not match the types expected or
-    returned by the operations in the segment.
-    */
+    /// Executes all operations in the segment with two arguments of types A and B and returns the
+    /// final result.
+    ///
+    /// # Errors
+    /// Halts execution and returns an error if any operation returns an error.
+    ///
+    /// # Safety
+    /// This function is unsafe if the arguments and result types do not match the types expected or
+    /// returned by the operations in the segment.
     pub unsafe fn call2<A, B, T>(&self, arg: (A, B)) -> Result<T>
     where
         T: 'static,
@@ -291,7 +302,7 @@ impl RawSegment {
         stack.push(arg.0);
         stack.push(arg.1);
         let mut p = 0;
-        for op in self.ops.iter() {
+        for op in &self.ops {
             p = op(&self.storage, p, &mut stack)?;
         }
         Ok(unsafe { stack.pop(false) })
@@ -301,7 +312,7 @@ impl RawSegment {
 impl Drop for RawSegment {
     fn drop(&mut self) {
         let mut p = 0;
-        for e in self.dropper.iter() {
+        for e in &self.dropper {
             p = e(&mut self.storage, p);
         }
     }

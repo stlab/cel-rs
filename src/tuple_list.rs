@@ -1,4 +1,6 @@
-use crate::list_traits::*;
+use crate::list_traits::{
+    EmptyList, IntoList, List, ListTypeIterator, ListTypeIteratorAdvance, ListTypeProperty,
+};
 use std::mem::offset_of;
 
 //--------------------------------------------------------------------------------------------------
@@ -80,6 +82,7 @@ impl<H: 'static, T: List> List for (H, T) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::list_traits::{TypeHandler, TypeIdIterator};
     use std::any::TypeId;
 
     #[test]

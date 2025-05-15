@@ -1,9 +1,11 @@
-use crate::c_stack_list::*;
+use crate::c_stack_list::{CNil, CStackList};
 use crate::dyn_sement::DynSegment;
-use crate::list_traits::*;
+use crate::list_traits::{
+    EmptyList, IntoList, List, ListTypeIteratorAdvance, TypeHandler, TypeIdIterator,
+};
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
-use anyhow::*;
+use anyhow::{Result, ensure};
 use std::any::TypeId;
 use std::result::Result::Ok;
 
@@ -70,6 +72,8 @@ impl<Args: IntoList + 'static> Default for Segment<Args> {
 }
 
 impl<Args: IntoList + 'static> Segment<Args> {
+    /// Creates a new empty segment with no operations.
+    #[must_use]
     pub fn new() -> Segment<Args> {
         Segment {
             segment: RawSegment::new(),
@@ -176,7 +180,7 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
         self.into()
     }
 
-    /** Executes all operations in the segment and returns the final result. */
+    /// Executes all operations in the segment and returns the final result.
     pub(crate) fn call0<U: 'static>(&self) -> Result<U> {
         unsafe { self.segment.call0() }
     }
@@ -190,7 +194,7 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
     }
 }
 
-/** Creates a new empty segment with no operations. */
+/// Creates a new empty segment with no operations.
 // trait Fn<Args> is currently unstable - so we use a call trait as a temporary workaround.
 pub trait Callable<Args> {
     type Output;

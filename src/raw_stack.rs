@@ -2,53 +2,50 @@ use crate::memory::align_index;
 use crate::raw_vec::RawVec;
 use std::mem::MaybeUninit;
 use std::mem::size_of;
-/**
-A simple raw stack that stores values as raw bytes. Each value is naturally aligned given the base alignment of the stack, which is the maximum alignment of any value stored in the stack.
-*/
+
+/// A simple raw stack that stores values as raw bytes. Each value is naturally aligned given the
+/// base alignment of the stack, which is the maximum alignment of any value stored in the stack.
 #[derive(Debug)]
 pub struct RawStack {
     buffer: RawVec,
 }
 
 impl RawStack {
-    /**
-    Creates a new `RawStack` with base alignment.
-
-    # Examples
-
-    ```
-    use cel_rs::raw_stack::RawStack;
-    let stack = RawStack::with_base_alignment(align_of::<u32>());
-    ```
-    */
+    /// Creates a new `RawStack` with base alignment.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_rs::raw_stack::RawStack;
+    /// let stack = RawStack::with_base_alignment(align_of::<u32>());
+    /// ```
+    #[must_use]
     pub fn with_base_alignment(base_alignment: usize) -> Self {
         RawStack {
             buffer: RawVec::with_base_alignment(base_alignment),
         }
     }
 
-    /**
-    Pushes a value of type `T` onto the stack.
-
-    The value is stored as raw bytes in the internal buffer. The pushed value must be
-    later popped using the correct type.
-
-    # Type Parameters
-
-    * `T`: The type of the value to push.
-
-    # Examples
-
-    ```
-    use cel_rs::raw_stack::RawStack;
-    let mut stack = RawStack::with_base_alignment(align_of::<u32>());
-    let _ = stack.push(42u32);
-    ```
-
-    # Complexity
-
-    The function has an amortized O(1) time complexity.
-    */
+    /// Pushes a value of type `T` onto the stack.
+    ///
+    /// The value is stored as raw bytes in the internal buffer. The pushed value must be
+    /// later popped using the correct type.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T`: The type of the value to push.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_rs::raw_stack::RawStack;
+    /// let mut stack = RawStack::with_base_alignment(align_of::<u32>());
+    /// let _ = stack.push(42u32);
+    /// ```
+    ///
+    /// # Complexity
+    ///
+    /// The function has an amortized O(1) time complexity.
     pub fn push<T>(&mut self, value: T) -> bool {
         let len = self.buffer.len();
         let aligned_index = align_index(align_of::<T>(), len);
@@ -63,35 +60,36 @@ impl RawStack {
                 self.buffer[len + 1..aligned_index].fill(MaybeUninit::new(0));
             }
 
-            std::ptr::write(self.buffer.as_mut_ptr().add(aligned_index) as *mut T, value);
+            std::ptr::write(
+                self.buffer.as_mut_ptr().add(aligned_index).cast::<T>(),
+                value,
+            );
         }
         aligned_index - len > 0
     }
 
-    /**
-    Pops a value of type `T` from the stack. Does not change the stack capacity.
-
-    # Safety
-
-    The type `T` must be the same type as the value on the top of the stack.
-    Incorrect usage can lead to undefined behavior.
-
-    # Type Parameters
-
-    * `T`: The type of the value to pop.
-
-    # Examples
-
-    ```
-    use cel_rs::raw_stack::RawStack;
-    let mut stack = RawStack::with_base_alignment(align_of::<u32>());
-    let padding = stack.push(100u32);
-    let value: u32 = unsafe { stack.pop(padding) };
-    ```
-    */
+    /// Pops a value of type `T` from the stack. Does not change the stack capacity.
+    ///
+    /// # Safety
+    ///
+    /// The type `T` must be the same type as the value on the top of the stack.
+    /// Incorrect usage can lead to undefined behavior.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T`: The type of the value to pop.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_rs::raw_stack::RawStack;
+    /// let mut stack = RawStack::with_base_alignment(align_of::<u32>());
+    /// let padding = stack.push(100u32);
+    /// let value: u32 = unsafe { stack.pop(padding) };
+    /// ```
     pub unsafe fn pop<T>(&mut self, padding: bool) -> T {
         let p: usize = self.buffer.len() - size_of::<T>();
-        let result = unsafe { std::ptr::read(self.buffer.as_ptr().add(p) as *const T) };
+        let result = unsafe { std::ptr::read(self.buffer.as_ptr().add(p).cast::<T>()) };
         // count the number of trailing 0s in the buffer before the result
         let padding_count = if padding {
             self.buffer[..p]
@@ -107,18 +105,16 @@ impl RawStack {
         result
     }
 
-    /**
-    Pops a value of type `T` from the stack and drops it.
-
-    # Safety
-
-    The type `T` must be the same type as the value on the top of the stack.
-    Incorrect usage can lead to undefined behavior.
-
-    # Note
-
-    This cannot use drop_in_place because the type may not be aligned.
-    */
+    /// Pops a value of type `T` from the stack and drops it.
+    ///
+    /// # Safety
+    ///
+    /// The type `T` must be the same type as the value on the top of the stack.
+    /// Incorrect usage can lead to undefined behavior.
+    ///
+    /// # Note
+    ///
+    /// This cannot use `drop_in_place` because the type may not be aligned.
     pub unsafe fn drop<T>(&mut self, padding: bool) {
         unsafe { self.pop::<T>(padding) };
     }
