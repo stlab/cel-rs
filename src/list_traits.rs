@@ -143,6 +143,11 @@ impl<T: EmptyList> List for T {
     fn for_each_type<H: TypeHandler>(_handler: &mut H) {}
 }
 
+pub trait ListIndex<Idx: ?Sized> {
+    type Output;
+    fn index(&self, index: Idx) -> &Self::Output;
+}
+
 pub trait ToList {
     type ToList<T: EmptyList>: List;
     fn to_list<T: EmptyList>(&self) -> Self::ToList<T>;

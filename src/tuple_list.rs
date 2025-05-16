@@ -1,10 +1,16 @@
 //! Implements [`List`] for tuples where `()` is an empty list and `(H, T)` is a list with a head
 //! and tail.
 
+use typenum::{B1, Bit, Sub1, U0, UInt, Unsigned};
+
 use crate::list_traits::{
-    EmptyList, IntoList, List, ListTypeIterator, ListTypeIteratorAdvance, ListTypeProperty,
+    EmptyList, IntoList, List, ListIndex, ListTypeIterator, ListTypeIteratorAdvance,
+    ListTypeProperty,
 };
-use std::mem::offset_of;
+use std::{
+    mem::offset_of,
+    ops::{RangeFrom, Sub},
+};
 
 //--------------------------------------------------------------------------------------------------
 // ListTypeIteratorAdvance
@@ -77,6 +83,24 @@ impl<H: 'static, T: List> List for (H, T) {
     type Reverse = Self::ReverseOnto<()>;
     fn reverse(self) -> Self::Reverse {
         self.reverse_onto(())
+    }
+}
+
+impl<H: 'static, T: List> ListIndex<RangeFrom<U0>> for (H, T) {
+    type Output = (H, T);
+    fn index(&self, _index: RangeFrom<U0>) -> &Self::Output {
+        self
+    }
+}
+
+impl<H: 'static, T: List, U: Unsigned, B: Bit> ListIndex<RangeFrom<UInt<U, B>>> for (H, T)
+where
+    T: ListIndex<RangeFrom<Sub1<UInt<U, B>>>>,
+    UInt<U, B>: Sub<B1>,
+{
+    type Output = <T as ListIndex<RangeFrom<Sub1<UInt<U, B>>>>>::Output;
+    fn index(&self, index: RangeFrom<UInt<U, B>>) -> &Self::Output {
+        self.tail().index((index.start - B1)..)
     }
 }
 

@@ -4,7 +4,8 @@ use std::{fmt, ptr};
 use typenum::{B1, Bit, Sub1, U0, UInt, Unsigned};
 
 use crate::list_traits::{
-    EmptyList, IntoList, List, ListTypeIterator, ListTypeIteratorAdvance, ListTypeProperty,
+    EmptyList, IntoList, List, ListIndex, ListTypeIterator, ListTypeIteratorAdvance,
+    ListTypeProperty,
 };
 
 /// A list using a guaranteed memory layout (`repr(C)`), with tail stored first so appending items
@@ -108,36 +109,36 @@ impl<T: IntoList> IntoCStackList for T {
     }
 }
 
-impl<H: 'static, T: List> Index<RangeFrom<U0>> for CStackList<H, T> {
+impl<H: 'static, T: List> ListIndex<RangeFrom<U0>> for CStackList<H, T> {
     type Output = CStackList<H, T>;
     fn index(&self, _index: RangeFrom<U0>) -> &Self::Output {
         self
     }
 }
 
-impl<H: 'static, T: List, U: Unsigned, B: Bit> Index<RangeFrom<UInt<U, B>>> for CStackList<H, T>
+impl<H: 'static, T: List, U: Unsigned, B: Bit> ListIndex<RangeFrom<UInt<U, B>>> for CStackList<H, T>
 where
-    T: Index<RangeFrom<Sub1<UInt<U, B>>>>,
+    T: ListIndex<RangeFrom<Sub1<UInt<U, B>>>>,
     UInt<U, B>: Sub<B1>,
 {
-    type Output = <T as Index<RangeFrom<Sub1<UInt<U, B>>>>>::Output;
+    type Output = <T as ListIndex<RangeFrom<Sub1<UInt<U, B>>>>>::Output;
     fn index(&self, index: RangeFrom<UInt<U, B>>) -> &Self::Output {
         self.tail().index((index.start - B1)..)
     }
 }
 
-impl<H: 'static, T: List> Index<RangeTo<U0>> for CStackList<H, T> {
+impl<H: 'static, T: List> ListIndex<RangeTo<U0>> for CStackList<H, T> {
     type Output = CNil<CStackList<H, T>>;
     fn index(&self, _index: RangeTo<U0>) -> &Self::Output {
         unsafe { &*ptr::from_ref(self).cast::<Self::Output>() }
     }
 }
 
-type TailRangeTo<T, U, B> = <T as Index<RangeTo<Sub1<UInt<U, B>>>>>::Output;
+type TailRangeTo<T, U, B> = <T as ListIndex<RangeTo<Sub1<UInt<U, B>>>>>::Output;
 
-impl<H: 'static, T: List, U: Unsigned, B: Bit> Index<RangeTo<UInt<U, B>>> for CStackList<H, T>
+impl<H: 'static, T: List, U: Unsigned, B: Bit> ListIndex<RangeTo<UInt<U, B>>> for CStackList<H, T>
 where
-    T: Index<RangeTo<Sub1<UInt<U, B>>>>,
+    T: ListIndex<RangeTo<Sub1<UInt<U, B>>>>,
     TailRangeTo<T, U, B>: List,
     UInt<U, B>: Sub<B1>,
 {
@@ -147,19 +148,19 @@ where
     }
 }
 
-impl<H: 'static, T: List> Index<RangeToInclusive<U0>> for CStackList<H, T> {
+impl<H: 'static, T: List> ListIndex<RangeToInclusive<U0>> for CStackList<H, T> {
     type Output = CStackList<H, CNil<T>>;
     fn index(&self, _index: RangeToInclusive<U0>) -> &Self::Output {
         unsafe { &*ptr::from_ref(self).cast::<Self::Output>() }
     }
 }
 
-type TailRangeToInclusive<T, U, B> = <T as Index<RangeToInclusive<Sub1<UInt<U, B>>>>>::Output;
+type TailRangeToInclusive<T, U, B> = <T as ListIndex<RangeToInclusive<Sub1<UInt<U, B>>>>>::Output;
 
-impl<H: 'static, T: List, U: Unsigned, B: Bit> Index<RangeToInclusive<UInt<U, B>>>
+impl<H: 'static, T: List, U: Unsigned, B: Bit> ListIndex<RangeToInclusive<UInt<U, B>>>
     for CStackList<H, T>
 where
-    T: Index<RangeToInclusive<Sub1<UInt<U, B>>>>,
+    T: ListIndex<RangeToInclusive<Sub1<UInt<U, B>>>>,
     TailRangeToInclusive<T, U, B>: List,
     UInt<U, B>: Sub<B1>,
 {
@@ -169,7 +170,7 @@ where
     }
 }
 
-impl<H: 'static, T: List> Index<U0> for CStackList<H, T> {
+impl<H: 'static, T: List> ListIndex<U0> for CStackList<H, T> {
     type Output = H;
     fn index(&self, _index: U0) -> &Self::Output {
         self.head()
@@ -232,16 +233,28 @@ where
 }
 
 /// Type alias for getting element type at index `N`, following [`std::ops::Index`] convention
-pub type Item<L, N> = <L as Index<N>>::Output;
+pub type Item<L, N> = <L as ListIndex<N>>::Output;
 
-impl<H: 'static, T: List, U: Unsigned, B: Bit> Index<UInt<U, B>> for CStackList<H, T>
+impl<H: 'static, T: List, U: Unsigned, B: Bit> ListIndex<UInt<U, B>> for CStackList<H, T>
 where
-    T: Index<Sub1<UInt<U, B>>>,
+    T: ListIndex<Sub1<UInt<U, B>>>,
     UInt<U, B>: Sub<B1>,
 {
-    type Output = <T as Index<Sub1<UInt<U, B>>>>::Output;
+    type Output = <T as ListIndex<Sub1<UInt<U, B>>>>::Output;
     fn index(&self, index: UInt<U, B>) -> &Self::Output {
         self.tail().index(index - B1)
+    }
+}
+
+// Implement Index in terms of ListIndex for CStackList
+impl<H: 'static, T: List, Idx> Index<Idx> for CStackList<H, T>
+where
+    Self: ListIndex<Idx>,
+    <Self as ListIndex<Idx>>::Output: Sized,
+{
+    type Output = <Self as ListIndex<Idx>>::Output;
+    fn index(&self, index: Idx) -> &Self::Output {
+        ListIndex::index(self, index)
     }
 }
 
