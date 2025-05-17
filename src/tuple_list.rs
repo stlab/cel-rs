@@ -104,6 +104,24 @@ where
     }
 }
 
+impl<H: 'static, T: List> ListIndex<U0> for (H, T) {
+    type Output = H;
+    fn index(&self, _index: U0) -> &Self::Output {
+        self.head()
+    }
+}
+
+impl<H: 'static, T: List, U: Unsigned, B: Bit> ListIndex<UInt<U, B>> for (H, T)
+where
+    T: ListIndex<Sub1<UInt<U, B>>>,
+    UInt<U, B>: Sub<B1>,
+{
+    type Output = <T as ListIndex<Sub1<UInt<U, B>>>>::Output;
+    fn index(&self, index: UInt<U, B>) -> &Self::Output {
+        self.tail().index(index - B1)
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 
 #[cfg(test)]

@@ -1,5 +1,45 @@
 use std::any::TypeId;
 
+pub trait List {
+    type Head: 'static;
+    fn head(&self) -> &Self::Head;
+
+    type Tail: List;
+    fn tail(&self) -> &Self::Tail;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn len(&self) -> usize {
+        Self::LENGTH
+    }
+
+    const LENGTH: usize = Self::Tail::LENGTH + 1;
+    const HEAD_PADDING: usize;
+    const HEAD_OFFSET: usize;
+
+    type Push<U: 'static>: List;
+    fn push<U: 'static>(self, item: U) -> Self::Push<U>;
+
+    type Append<U: List>: List;
+    fn append<U: List>(self, other: U) -> Self::Append<U>;
+
+    type ReverseOnto<U: List>: List;
+    fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U>;
+
+    type Reverse: List;
+    fn reverse(self) -> Self::Reverse;
+
+    fn for_each_type<H: TypeHandler>(handler: &mut H)
+    where
+        Self: Sized + 'static,
+    {
+        handler.invoke::<Self>();
+        Self::Tail::for_each_type(handler);
+    }
+}
+
 // Iterate a list (not recurse) to implement equal against an iterator.
 pub trait ListTypeProperty {
     type Output;
@@ -51,46 +91,6 @@ pub type TypeIdIterator<T> = ListTypeIterator<T, TypeId>;
 
 pub trait TypeHandler {
     fn invoke<T: List>(&mut self);
-}
-
-pub trait List {
-    type Head: 'static;
-    fn head(&self) -> &Self::Head;
-
-    type Tail: List;
-    fn tail(&self) -> &Self::Tail;
-
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    fn len(&self) -> usize {
-        Self::LENGTH
-    }
-
-    const LENGTH: usize = Self::Tail::LENGTH + 1;
-    const HEAD_PADDING: usize;
-    const HEAD_OFFSET: usize;
-
-    type Push<U: 'static>: List;
-    fn push<U: 'static>(self, item: U) -> Self::Push<U>;
-
-    type Append<U: List>: List;
-    fn append<U: List>(self, other: U) -> Self::Append<U>;
-
-    type ReverseOnto<U: List>: List;
-    fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U>;
-
-    type Reverse: List;
-    fn reverse(self) -> Self::Reverse;
-
-    fn for_each_type<H: TypeHandler>(handler: &mut H)
-    where
-        Self: Sized + 'static,
-    {
-        handler.invoke::<Self>();
-        Self::Tail::for_each_type(handler);
-    }
 }
 
 pub struct Bottom;
@@ -148,6 +148,9 @@ pub trait ListIndex<Idx: ?Sized> {
     fn index(&self, index: Idx) -> &Self::Output;
 }
 
+/// Type alias for getting element type at index `N`, following [`std::ops::Index`] convention
+pub type Item<L, N> = <L as ListIndex<N>>::Output;
+
 pub trait ToList {
     type ToList<T: EmptyList>: List;
     fn to_list<T: EmptyList>(&self) -> Self::ToList<T>;
@@ -166,51 +169,37 @@ impl IntoList for () {
 }
 
 impl<A: 'static> IntoList for (A,) {
-    type Output<T: EmptyList> = <T::Empty as EmptyList>::PushFirst<A>;
+    type Output<T: EmptyList> = <T::Empty as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty().push_first(self.0)
+        ().into_list::<T>().push(self.0)
     }
 }
 
 impl<A: 'static, B: 'static> IntoList for (A, B) {
-    type Output<T: EmptyList> = <<T::Empty as EmptyList>::PushFirst<B> as List>::Push<A>;
+    type Output<T: EmptyList> = <<(B,) as IntoList>::Output<T> as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty().push_first(self.1).push(self.0)
+        (self.1,).into_list::<T>().push(self.0)
     }
 }
 
 impl<A: 'static, B: 'static, C: 'static> IntoList for (A, B, C) {
-    type Output<T: EmptyList> =
-        <<<T::Empty as EmptyList>::PushFirst<C> as List>::Push<B> as List>::Push<A>;
+    type Output<T: EmptyList> = <<(B, C) as IntoList>::Output<T> as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty().push_first(self.2).push(self.1).push(self.0)
+        (self.1, self.2).into_list::<T>().push(self.0)
     }
 }
 impl<A: 'static, B: 'static, C: 'static, D: 'static> IntoList for (A, B, C, D) {
-    type Output<T: EmptyList> =
-        <<<<T::Empty as EmptyList>::PushFirst<D> as List>::Push<C> as List>::Push<B> as List>::Push<
-            A,
-        >;
+    type Output<T: EmptyList> = <<(B, C, D) as IntoList>::Output<T> as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty()
-            .push_first(self.3)
-            .push(self.2)
-            .push(self.1)
-            .push(self.0)
+        (self.1, self.2, self.3).into_list::<T>().push(self.0)
     }
 }
 
 impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static> IntoList for (A, B, C, D, E) {
-    type Output<T: EmptyList> =
-        <<<<<T::Empty as EmptyList>::PushFirst<E> as List>::Push<D> as List>::Push<C> as List>::Push<
-            B,
-        > as List>::Push<A>;
+    type Output<T: EmptyList> = <<(B, C, D, E) as IntoList>::Output<T> as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty()
-            .push_first(self.4)
-            .push(self.3)
-            .push(self.2)
-            .push(self.1)
+        (self.1, self.2, self.3, self.4)
+            .into_list::<T>()
             .push(self.0)
     }
 }
@@ -218,17 +207,10 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static> IntoList for (A
 impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static> IntoList
     for (A, B, C, D, E, F)
 {
-    type Output<T: EmptyList> =
-        <<<<<<T::Empty as EmptyList>::PushFirst<F> as List>::Push<E> as List>::Push<D> as List>::Push<
-            C,
-        > as List>::Push<B> as List>::Push<A>;
+    type Output<T: EmptyList> = <<(B, C, D, E, F) as IntoList>::Output<T> as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty()
-            .push_first(self.5)
-            .push(self.4)
-            .push(self.3)
-            .push(self.2)
-            .push(self.1)
+        (self.1, self.2, self.3, self.4, self.5)
+            .into_list::<T>()
             .push(self.0)
     }
 }
@@ -236,18 +218,10 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static> Int
 impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static> IntoList
     for (A, B, C, D, E, F, G)
 {
-    type Output<T: EmptyList> =
-        <<<<<<<T::Empty as EmptyList>::PushFirst<G> as List>::Push<F> as List>::Push<E> as List>::Push<
-            D,
-        > as List>::Push<C> as List>::Push<B> as List>::Push<A>;
+    type Output<T: EmptyList> = <<(B, C, D, E, F, G) as IntoList>::Output<T> as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty()
-            .push_first(self.6)
-            .push(self.5)
-            .push(self.4)
-            .push(self.3)
-            .push(self.2)
-            .push(self.1)
+        (self.1, self.2, self.3, self.4, self.5, self.6)
+            .into_list::<T>()
             .push(self.0)
     }
 }
@@ -255,19 +229,10 @@ impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 
 impl<A: 'static, B: 'static, C: 'static, D: 'static, E: 'static, F: 'static, G: 'static, H: 'static>
     IntoList for (A, B, C, D, E, F, G, H)
 {
-    type Output<T: EmptyList> =
-        <<<<<<<<T::Empty as EmptyList>::PushFirst<H> as List>::Push<G> as List>::Push<F> as List>::Push<
-            E,
-        > as List>::Push<D> as List>::Push<C> as List>::Push<B> as List>::Push<A>;
+    type Output<T: EmptyList> = <<(B, C, D, E, F, G, H) as IntoList>::Output<T> as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty()
-            .push_first(self.7)
-            .push(self.6)
-            .push(self.5)
-            .push(self.4)
-            .push(self.3)
-            .push(self.2)
-            .push(self.1)
+        (self.1, self.2, self.3, self.4, self.5, self.6, self.7)
+            .into_list::<T>()
             .push(self.0)
     }
 }
@@ -285,19 +250,12 @@ impl<
 > IntoList for (A, B, C, D, E, F, G, H, I)
 {
     type Output<T: EmptyList> =
-        <<<<<<<<<T::Empty as EmptyList>::PushFirst<I> as List>::Push<H> as List>::Push<G> as List>::Push<
-            F,
-        > as List>::Push<E> as List>::Push<D> as List>::Push<C> as List>::Push<B> as List>::Push<A>;
+        <<(B, C, D, E, F, G, H, I) as IntoList>::Output<T> as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty()
-            .push_first(self.8)
-            .push(self.7)
-            .push(self.6)
-            .push(self.5)
-            .push(self.4)
-            .push(self.3)
-            .push(self.2)
-            .push(self.1)
+        (
+            self.1, self.2, self.3, self.4, self.5, self.6, self.7, self.8,
+        )
+            .into_list::<T>()
             .push(self.0)
     }
 }
@@ -316,22 +274,12 @@ impl<
 > IntoList for (A, B, C, D, E, F, G, H, I, J)
 {
     type Output<T: EmptyList> =
-        <<<<<<<<<<T::Empty as EmptyList>::PushFirst<J> as List>::Push<I> as List>::Push<H> as List>::Push<
-            G,
-        > as List>::Push<F> as List>::Push<E> as List>::Push<D> as List>::Push<
-            C,
-        > as List>::Push<B> as List>::Push<A>;
+        <<(B, C, D, E, F, G, H, I, J) as IntoList>::Output<T> as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty()
-            .push_first(self.9)
-            .push(self.8)
-            .push(self.7)
-            .push(self.6)
-            .push(self.5)
-            .push(self.4)
-            .push(self.3)
-            .push(self.2)
-            .push(self.1)
+        (
+            self.1, self.2, self.3, self.4, self.5, self.6, self.7, self.8, self.9,
+        )
+            .into_list::<T>()
             .push(self.0)
     }
 }
@@ -351,23 +299,12 @@ impl<
 > IntoList for (A, B, C, D, E, F, G, H, I, J, K)
 {
     type Output<T: EmptyList> =
-        <<<<<<<<<<<T::Empty as EmptyList>::PushFirst<K> as List>::Push<J> as List>::Push<I> as List>::Push<
-            H,
-        > as List>::Push<G> as List>::Push<F> as List>::Push<E> as List>::Push<
-            D,
-        > as List>::Push<C> as List>::Push<B> as List>::Push<A>;
+        <<(B, C, D, E, F, G, H, I, J, K) as IntoList>::Output<T> as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty()
-            .push_first(self.10)
-            .push(self.9)
-            .push(self.8)
-            .push(self.7)
-            .push(self.6)
-            .push(self.5)
-            .push(self.4)
-            .push(self.3)
-            .push(self.2)
-            .push(self.1)
+        (
+            self.1, self.2, self.3, self.4, self.5, self.6, self.7, self.8, self.9, self.10,
+        )
+            .into_list::<T>()
             .push(self.0)
     }
 }
@@ -388,26 +325,13 @@ impl<
 > IntoList for (A, B, C, D, E, F, G, H, I, J, K, L)
 {
     type Output<T: EmptyList> =
-        <<<<<<<<<<<<T::Empty as EmptyList>::PushFirst<L> as List>::Push<K> as List>::Push<J> as List>::Push<
-            I,
-        > as List>::Push<H> as List>::Push<G> as List>::Push<F> as List>::Push<
-            E,
-        > as List>::Push<D> as List>::Push<C> as List>::Push<B> as List>::Push<
-            A,
-        >;
+        <<(B, C, D, E, F, G, H, I, J, K, L) as IntoList>::Output<T> as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
-        T::empty()
-            .push_first(self.11)
-            .push(self.10)
-            .push(self.9)
-            .push(self.8)
-            .push(self.7)
-            .push(self.6)
-            .push(self.5)
-            .push(self.4)
-            .push(self.3)
-            .push(self.2)
-            .push(self.1)
+        (
+            self.1, self.2, self.3, self.4, self.5, self.6, self.7, self.8, self.9, self.10,
+            self.11,
+        )
+            .into_list::<T>()
             .push(self.0)
     }
 }

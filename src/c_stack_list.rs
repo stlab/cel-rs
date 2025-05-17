@@ -177,6 +177,29 @@ impl<H: 'static, T: List> ListIndex<U0> for CStackList<H, T> {
     }
 }
 
+impl<H: 'static, T: List, U: Unsigned, B: Bit> ListIndex<UInt<U, B>> for CStackList<H, T>
+where
+    T: ListIndex<Sub1<UInt<U, B>>>,
+    UInt<U, B>: Sub<B1>,
+{
+    type Output = <T as ListIndex<Sub1<UInt<U, B>>>>::Output;
+    fn index(&self, index: UInt<U, B>) -> &Self::Output {
+        self.tail().index(index - B1)
+    }
+}
+
+// Implement Index in terms of ListIndex for CStackList
+impl<H: 'static, T: List, Idx> Index<Idx> for CStackList<H, T>
+where
+    Self: ListIndex<Idx>,
+    <Self as ListIndex<Idx>>::Output: Sized,
+{
+    type Output = <Self as ListIndex<Idx>>::Output;
+    fn index(&self, index: Idx) -> &Self::Output {
+        ListIndex::index(self, index)
+    }
+}
+
 // Move this to an #[derive(DebugList)] macro
 trait DebugHelper {
     fn fmt_helper(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -232,32 +255,6 @@ where
     }
 }
 
-/// Type alias for getting element type at index `N`, following [`std::ops::Index`] convention
-pub type Item<L, N> = <L as ListIndex<N>>::Output;
-
-impl<H: 'static, T: List, U: Unsigned, B: Bit> ListIndex<UInt<U, B>> for CStackList<H, T>
-where
-    T: ListIndex<Sub1<UInt<U, B>>>,
-    UInt<U, B>: Sub<B1>,
-{
-    type Output = <T as ListIndex<Sub1<UInt<U, B>>>>::Output;
-    fn index(&self, index: UInt<U, B>) -> &Self::Output {
-        self.tail().index(index - B1)
-    }
-}
-
-// Implement Index in terms of ListIndex for CStackList
-impl<H: 'static, T: List, Idx> Index<Idx> for CStackList<H, T>
-where
-    Self: ListIndex<Idx>,
-    <Self as ListIndex<Idx>>::Output: Sized,
-{
-    type Output = <Self as ListIndex<Idx>>::Output;
-    fn index(&self, index: Idx) -> &Self::Output {
-        ListIndex::index(self, index)
-    }
-}
-
 #[repr(C)]
 pub struct CNil<T>(T);
 
@@ -296,6 +293,8 @@ impl<P: ListTypeProperty, H: 'static, T: ListTypeIteratorAdvance<P>> ListTypeIte
 #[cfg(test)]
 mod tests {
     use typenum::{U1, U2, U5};
+
+    use crate::list_traits::Item;
 
     use super::*;
     #[test]
