@@ -1,25 +1,42 @@
+//! A collection of traits for homegenous lists (cons cells), similar to tuples.
+
 use std::any::TypeId;
 
+/// A trait representing a homogeneous list (cons cell) with a head and tail.
+///
+/// The `List` trait provides a type-safe way to work with lists where each node
+/// contains a value (head) and the remainder of the list (tail). This trait
+/// is implemented for both empty lists and non-empty lists.
 pub trait List {
     type Head: 'static;
+    /// Returns a reference to the head.
     fn head(&self) -> &Self::Head;
 
+    /// The type of the rest of the list.
     type Tail: List;
+    /// Returns a reference to the rest of the list.
     fn tail(&self) -> &Self::Tail;
 
+    /// Returns true if the list is empty.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// The length of the list, computed at compile time.
+    const LENGTH: usize = Self::Tail::LENGTH + 1;
+    /// Returns the length of the list.
     fn len(&self) -> usize {
         Self::LENGTH
     }
 
-    const LENGTH: usize = Self::Tail::LENGTH + 1;
-    const HEAD_PADDING: usize;
-
+    /// The type of the list after pushing a new value.
     type Push<U: 'static>: List;
+    /// Pushes a new value onto the front of the list, returning a new list.
     fn push<U: 'static>(self, item: U) -> Self::Push<U>;
+
+    // ---
+
+    const HEAD_PADDING: usize;
 
     type Append<U: List>: List;
     fn append<U: List>(self, other: U) -> Self::Append<U>;
@@ -80,7 +97,7 @@ impl<T: ListTypeIteratorAdvance<P> + 'static, P: ListTypeProperty> Iterator
 
 pub type TypeIdIterator<T> = ListTypeIterator<T, TypeId>;
 
-pub struct Bottom;
+pub struct Undefined;
 pub trait EmptyList {
     type PushFirst<U: 'static>: List;
     fn push_first<U: 'static>(self, item: U) -> Self::PushFirst<U>;
@@ -92,36 +109,38 @@ pub trait EmptyList {
     fn empty() -> Self::Empty;
 }
 
+/// A blanket implementation for EmptyList.
 impl<T: EmptyList> List for T {
-    type Head = Bottom;
-    type Tail = T; // Satisfy the List trait
-    type Push<U: 'static> = T::PushFirst<U>;
-    type Append<U: List> = U;
-    type Reverse = T;
-    type ReverseOnto<U: List> = U;
-    const LENGTH: usize = 0;
-    const HEAD_PADDING: usize = 0;
 
+    type Head = Undefined;
     fn head(&self) -> &Self::Head {
         unreachable!("EmptyList has no head")
     }
 
+    type Tail = T; // Satisfy the List trait
     fn tail(&self) -> &Self::Tail {
         unreachable!("EmptyList has no tail")
     }
 
+    type Push<U: 'static> = T::PushFirst<U>;
     fn push<U>(self, item: U) -> Self::Push<U> {
         self.push_first(item)
     }
+    const LENGTH: usize = 0;
 
+    const HEAD_PADDING: usize = 0;
+
+    type Append<U: List> = U;
     fn append<U: List>(self, other: U) -> Self::Append<U> {
         other
     }
 
+    type ReverseOnto<U: List> = U;
     fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U> {
         other
     }
 
+    type Reverse = T;
     fn reverse(self) -> Self::Reverse {
         self
     }

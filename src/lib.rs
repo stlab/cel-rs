@@ -32,7 +32,7 @@
 //! assert_eq!(segment.call((1u32, "2")).unwrap(), "3");
 //! ```
 
-#![warn(missing_docs)]
+// #![warn(missing_docs)]
 pub mod c_stack_list;
 pub mod dyn_sement;
 pub mod list_traits;
@@ -53,4 +53,4 @@ pub use raw_sequence::*;
 pub use raw_stack::*;
 pub use raw_vec::*;
 pub use segment::*;
-pub use tuple_list::*;
+// pub use tuple_list::*;
