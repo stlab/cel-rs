@@ -45,23 +45,18 @@ use crate::list_traits::{
 #[derive(Clone)]
 pub struct CStackList<H, T>(pub T, pub H);
 
-/*
-pub trait HeadPadding: List {
+/* pub trait HeadPadding: List {
     const _HEAD_PADDING: usize;
-    const _HEAD_OFFSET: usize;
 }
 
 impl<T: List> HeadPadding for CNil<T> {
     const _HEAD_PADDING: usize = 0;
-    const _HEAD_OFFSET: usize = 0;
 }
 
 impl<H: 'static, T: HeadPadding> HeadPadding for CStackList<H, T> {
-    const _HEAD_PADDING: usize =
-        Self::_HEAD_OFFSET - (Self::Tail::_HEAD_OFFSET + size_of::<<Self::Tail as List>::Head>());
-    const _HEAD_OFFSET: usize = offset_of!(Self, 1);
-}
- */
+    const _HEAD_PADDING: usize = offset_of!(Self, 1) - size_of::<Self::Tail>();
+} */
+
 impl<H: 'static, T: List> List for CStackList<H, T> {
     type Head = H;
     fn head(&self) -> &Self::Head {
@@ -73,9 +68,8 @@ impl<H: 'static, T: List> List for CStackList<H, T> {
         &self.0
     }
 
-    const HEAD_PADDING: usize =
-        Self::HEAD_OFFSET - (Self::Tail::HEAD_OFFSET + size_of::<<Self::Tail as List>::Head>());
-    const HEAD_OFFSET: usize = offset_of!(Self, 1);
+    const HEAD_PADDING: usize = offset_of!(Self, 1) - size_of::<Self::Tail>();
+
     type Push<U: 'static> = CStackList<U, Self>;
     fn push<U: 'static>(self, item: U) -> Self::Push<U> {
         CStackList(self, item)

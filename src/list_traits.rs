@@ -17,7 +17,6 @@ pub trait List {
 
     const LENGTH: usize = Self::Tail::LENGTH + 1;
     const HEAD_PADDING: usize;
-    const HEAD_OFFSET: usize;
 
     type Push<U: 'static>: List;
     fn push<U: 'static>(self, item: U) -> Self::Push<U>;
@@ -114,7 +113,6 @@ impl<T: EmptyList> List for T {
     type ReverseOnto<U: List> = U;
     const LENGTH: usize = 0;
     const HEAD_PADDING: usize = 0;
-    const HEAD_OFFSET: usize = 0;
 
     fn head(&self) -> &Self::Head {
         unreachable!("EmptyList has no head")

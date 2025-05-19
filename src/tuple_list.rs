@@ -7,10 +7,7 @@ use crate::list_traits::{
     EmptyList, IntoList, List, ListIndex, ListTypeIterator, ListTypeIteratorAdvance,
     ListTypeProperty,
 };
-use std::{
-    mem::offset_of,
-    ops::{RangeFrom, Sub},
-};
+use std::ops::{RangeFrom, Sub};
 
 //--------------------------------------------------------------------------------------------------
 // ListTypeIteratorAdvance
@@ -62,8 +59,7 @@ impl<H: 'static, T: List> List for (H, T) {
         &self.1
     }
 
-    const HEAD_PADDING: usize = 0; // undefined
-    const HEAD_OFFSET: usize = offset_of!(Self, 0);
+    const HEAD_PADDING: usize = usize::MAX; // undefined
 
     type Push<U: 'static> = (U, Self);
     fn push<U: 'static>(self, item: U) -> Self::Push<U> {
