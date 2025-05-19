@@ -8,6 +8,7 @@ use std::any::TypeId;
 /// contains a value (head) and the remainder of the list (tail). This trait
 /// is implemented for both empty lists and non-empty lists.
 pub trait List {
+    /// The type of head.
     type Head: 'static;
     /// Returns a reference to the head.
     fn head(&self) -> &Self::Head;
