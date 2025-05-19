@@ -123,7 +123,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::list_traits::{TypeHandler, TypeIdIterator};
+    use crate::list_traits::TypeIdIterator;
     use std::any::TypeId;
 
     #[test]
@@ -177,24 +177,6 @@ mod tests {
         assert_eq!(<()>::LENGTH, 0);
         assert_eq!(<(i32, ())>::LENGTH, 1);
         assert_eq!(<(i32, (f64, ()))>::LENGTH, 2);
-    }
-
-    #[test]
-    fn for_each_type() {
-        struct PrintTypeNames {
-            count: usize,
-        }
-
-        impl TypeHandler for PrintTypeNames {
-            fn invoke<T>(self: &mut Self) {
-                println!("{}: {}", self.count, std::any::type_name::<T>());
-                self.count += 1;
-            }
-        }
-
-        <(i32, f64, &str) as IntoList>::Output::<()>::for_each_type(&mut PrintTypeNames {
-            count: 0,
-        });
     }
 
     #[test]

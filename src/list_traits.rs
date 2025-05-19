@@ -29,14 +29,6 @@ pub trait List {
 
     type Reverse: List;
     fn reverse(self) -> Self::Reverse;
-
-    fn for_each_type<H: TypeHandler>(handler: &mut H)
-    where
-        Self: Sized + 'static,
-    {
-        handler.invoke::<Self>();
-        Self::Tail::for_each_type(handler);
-    }
 }
 
 // Iterate a list (not recurse) to implement equal against an iterator.
@@ -88,10 +80,6 @@ impl<T: ListTypeIteratorAdvance<P> + 'static, P: ListTypeProperty> Iterator
 
 pub type TypeIdIterator<T> = ListTypeIterator<T, TypeId>;
 
-pub trait TypeHandler {
-    fn invoke<T: List>(&mut self);
-}
-
 pub struct Bottom;
 pub trait EmptyList {
     type PushFirst<U: 'static>: List;
@@ -137,8 +125,6 @@ impl<T: EmptyList> List for T {
     fn reverse(self) -> Self::Reverse {
         self
     }
-
-    fn for_each_type<H: TypeHandler>(_handler: &mut H) {}
 }
 
 pub trait ListIndex<Idx: ?Sized> {

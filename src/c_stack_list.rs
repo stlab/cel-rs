@@ -1,6 +1,41 @@
+//! A `CStackList` is a List with a guaranteed memory layout (`repr(C)`). The tail stored first so
+//! appending items does not change the memory layout of prior items. The tail may itself contain a
+//! list to ensure alignment during [`std::ops::RangeTo`] and [`std::ops::RangeToInclusive`]
+//! indexing.
+//!
+//! See <https://doc.rust-lang.org/stable/reference/type-layout.html#r-layout.repr.c.struct>
+//!
+//! # Indexing
+//!
+//! Indexing is done using the [`typenum::uint::UInt`] type integral constants.
+//!
+//! Because the [`std::ops::Range`] trait requires a `start` and `end` that are the same type,
+//! it cannot be implemented for `List` types. Instead we use the [`RangeFrom`] and [`RangeTo`]
+//! traits. To Access a range of elements, you can use the syntax `list[..end][start..]`.
+//!
+//! # Example
+//!
+//!
+//! ```rust
+//! use cel_rs::c_stack_list::*;
+//! use typenum::*;
+//!
+//! let list = (1, 2.5, 3, 4, "world", "Hello").into_cstack_list();
+//! assert_eq!(list[..U5::new()][U2::new()..], (3, 4, "world").into_cstack_list());
+//! ```
+//!
+//! Indexing out of bounds will result in a compile error.
+//!
+//! ```compile_fail,E0277
+//! use cel_rs::c_stack_list::*;
+//! use typenum::*;
+//!
+//! let list = (1, 2.5, 3, 4, "world", "Hello").into_cstack_list()[U6::new()];
+//! ```
 use std::mem::offset_of;
 use std::ops::{Index, RangeFrom, RangeTo, RangeToInclusive, Sub};
 use std::{fmt, ptr};
+
 use typenum::{B1, Bit, Sub1, U0, UInt, Unsigned};
 
 use crate::list_traits::{

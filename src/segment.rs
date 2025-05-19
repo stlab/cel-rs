@@ -1,37 +1,24 @@
 use crate::c_stack_list::{CNil, CStackList};
 use crate::dyn_sement::DynSegment;
-use crate::list_traits::{
-    EmptyList, IntoList, List, ListTypeIteratorAdvance, TypeHandler, TypeIdIterator,
-};
+use crate::list_traits::{EmptyList, IntoList, List, ListTypeIteratorAdvance, TypeIdIterator};
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
 use anyhow::{Result, ensure};
 use std::any::TypeId;
 use std::result::Result::Ok;
 
-// REVISIT - this is the last use for for_each_type() - which should bre replaced
-// with the ListTypeIterator to do flat iteration but we need additional state for the
-// stack. If we can get rid of the for_each_type we may be able to move HEAD_PADDING out of List and
-// into CStackList.
-
-// Create a handler for dropping types
-struct DropHandler<'a>(&'a mut RawStack);
-
-impl TypeHandler for DropHandler<'_> {
-    fn invoke<T: List>(&mut self) {
-        unsafe { self.0.drop::<T::Head>(T::HEAD_PADDING != 0) };
-    }
+pub trait DropStack: List {
+    fn drop_stack(stack: &mut RawStack);
 }
 
-trait DropTop {
-    fn drop_top(stack: &mut RawStack);
+impl DropStack for CNil<()> {
+    fn drop_stack(_stack: &mut RawStack) {}
 }
 
-// Implement DropTop for List
-impl<T: List + 'static> DropTop for T {
-    fn drop_top(stack: &mut RawStack) {
-        let mut handler = DropHandler(stack);
-        T::for_each_type(&mut handler);
+impl<H: 'static, T: DropStack> DropStack for CStackList<H, T> {
+    fn drop_stack(stack: &mut RawStack) {
+        unsafe { stack.drop::<H>(Self::HEAD_PADDING != 0) };
+        T::drop_stack(stack);
     }
 }
 
@@ -109,7 +96,7 @@ where
     }
 }
 
-impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
+impl<Args: IntoList + 'static, Stack: DropStack + 'static> Segment<Args, Stack> {
     /// Private method to change the stack type.
     fn into<NewStack: List + 'static>(self) -> Segment<Args, NewStack> {
         Segment {
@@ -139,7 +126,7 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
         R: 'static,
     {
         self.segment
-            .raw0(move |stack| op().inspect_err(|_| Stack::drop_top(stack)));
+            .raw0(move |stack| op().inspect_err(|_| Stack::drop_stack(stack)));
         self.into()
     }
 
@@ -159,7 +146,7 @@ impl<Args: IntoList + 'static, Stack: List + 'static> Segment<Args, Stack> {
         R: 'static,
     {
         self.segment.raw1(
-            move |stack, x| op(x).inspect_err(|_| Stack::drop_top(stack)),
+            move |stack, x| op(x).inspect_err(|_| Stack::drop_stack(stack)),
             Stack::HEAD_PADDING != 0,
         );
         self.into()
@@ -200,7 +187,7 @@ pub trait Callable<Args> {
     fn call(&self, args: Args) -> Self::Output;
 }
 
-impl<T: List + 'static> Callable<()> for Segment<(), T>
+impl<T: DropStack + 'static> Callable<()> for Segment<(), T>
 where
     T::Tail: EmptyList,
 {
@@ -210,7 +197,7 @@ where
     }
 }
 
-impl<T: List + 'static, A: 'static> Callable<(A,)> for Segment<(A,), T>
+impl<T: DropStack + 'static, A: 'static> Callable<(A,)> for Segment<(A,), T>
 where
     T::Tail: EmptyList,
 {
@@ -220,7 +207,7 @@ where
     }
 }
 
-impl<T: List + 'static, A: 'static, B: 'static> Callable<(A, B)> for Segment<(A, B), T>
+impl<T: DropStack + 'static, A: 'static, B: 'static> Callable<(A, B)> for Segment<(A, B), T>
 where
     T::Tail: EmptyList,
 {
