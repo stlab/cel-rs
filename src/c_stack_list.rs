@@ -62,6 +62,11 @@ impl<H: 'static, T: HeadPadding> HeadPadding for CStackList<H, T> {
 } */
 
 impl<H: 'static, T: List> List for CStackList<H, T> {
+    type Empty = CNil<()>;
+    fn empty() -> Self::Empty {
+        CNil(())
+    }
+
     type Head = H;
     fn head(&self) -> &Self::Head {
         &self.1
@@ -87,11 +92,6 @@ impl<H: 'static, T: List> List for CStackList<H, T> {
     type ReverseOnto<U: List> = T::ReverseOnto<U::Push<H>>;
     fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U> {
         self.0.reverse_onto(other.push(self.1))
-    }
-
-    type Reverse = Self::ReverseOnto<CNil<()>>;
-    fn reverse(self) -> Self::Reverse {
-        self.reverse_onto(CNil(()))
     }
 }
 
@@ -267,8 +267,8 @@ impl<T> EmptyList for CNil<T> {
         tuple.into_list()
     }
 
-    type Empty = CNil<()>;
-    fn empty() -> Self::Empty {
+    type RootEmpty = CNil<()>;
+    fn root_empty() -> Self::RootEmpty {
         CNil(())
     }
 }

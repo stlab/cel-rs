@@ -1,3 +1,4 @@
+use crate::ReverseList;
 use crate::c_stack_list::{CNil, CStackList, IntoCStackList};
 use crate::list_traits::{List, ListTypeIteratorAdvance, TypeIdIterator};
 use crate::memory::align_index;
@@ -53,14 +54,14 @@ impl DynSegment {
     #[must_use]
     pub fn new<Args: IntoCStackList>() -> Self
     where
-        <Args::Output as List>::Reverse: ToTypeIDList,
+        ReverseList<Args::Output>: ToTypeIDList,
     {
-        let stack_ids = <Args::Output as List>::Reverse::to_stack_info_list();
+        let stack_ids = ReverseList::<Args::Output>::to_stack_info_list();
         DynSegment {
             segment: RawSegment::new(),
             argument_ids: stack_ids.iter().map(|s| s.stack_id).collect(),
             stack_ids,
-            stack_index: size_of::<<Args::Output as List>::Reverse>(),
+            stack_index: size_of::<ReverseList<Args::Output>>(),
         }
     }
 

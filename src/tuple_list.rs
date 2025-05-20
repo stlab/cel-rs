@@ -41,14 +41,17 @@ impl EmptyList for () {
         tuple.into_list()
     }
 
-    type Empty = Self;
-    fn empty() -> Self::Empty {}
+    type RootEmpty = Self;
+    fn root_empty() -> Self::RootEmpty {}
 }
 
 //--------------------------------------------------------------------------------------------------
 // List for (H, T)
 
 impl<H: 'static, T: List> List for (H, T) {
+    type Empty = ();
+    fn empty() -> Self::Empty {}
+
     type Head = H;
     fn head(&self) -> &Self::Head {
         &self.0
@@ -74,11 +77,6 @@ impl<H: 'static, T: List> List for (H, T) {
     type ReverseOnto<U: List> = T::ReverseOnto<U::Push<H>>;
     fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U> {
         self.1.reverse_onto(other.push(self.0))
-    }
-
-    type Reverse = Self::ReverseOnto<()>;
-    fn reverse(self) -> Self::Reverse {
-        self.reverse_onto(())
     }
 }
 

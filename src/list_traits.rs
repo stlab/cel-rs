@@ -8,6 +8,9 @@ use std::any::TypeId;
 /// contains a value (head) and the remainder of the list (tail). This trait
 /// is implemented for both empty lists and non-empty lists.
 pub trait List {
+    type Empty: EmptyList;
+    fn empty() -> Self::Empty;
+
     /// The type of head.
     type Head: 'static;
     /// Returns a reference to the head.
@@ -45,9 +48,15 @@ pub trait List {
     type ReverseOnto<U: List>: List;
     fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U>;
 
-    type Reverse: List;
-    fn reverse(self) -> Self::Reverse;
+    fn reverse(self) -> Self::ReverseOnto<Self::Empty>
+    where
+        Self: Sized,
+    {
+        self.reverse_onto(Self::empty())
+    }
 }
+
+pub type ReverseList<T> = <T as List>::ReverseOnto<<T as List>::Empty>;
 
 // Iterate a list (not recurse) to implement equal against an iterator.
 pub trait ListTypeProperty {
@@ -106,12 +115,16 @@ pub trait EmptyList {
     type FromTuple<T: IntoList>: List;
     fn from_tuple<T: IntoList>(tuple: T) -> Self::FromTuple<T>;
 
-    type Empty: EmptyList;
-    fn empty() -> Self::Empty;
+    type RootEmpty: EmptyList;
+    fn root_empty() -> Self::RootEmpty;
 }
 
 /// A blanket implementation for EmptyList.
 impl<T: EmptyList> List for T {
+    type Empty = T::RootEmpty;
+    fn empty() -> Self::Empty {
+        T::root_empty()
+    }
 
     type Head = Undefined;
     fn head(&self) -> &Self::Head {
@@ -127,8 +140,8 @@ impl<T: EmptyList> List for T {
     fn push<U>(self, item: U) -> Self::Push<U> {
         self.push_first(item)
     }
-    const LENGTH: usize = 0;
 
+    const LENGTH: usize = 0;
     const HEAD_PADDING: usize = 0;
 
     type Append<U: List> = U;
@@ -139,11 +152,6 @@ impl<T: EmptyList> List for T {
     type ReverseOnto<U: List> = U;
     fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U> {
         other
-    }
-
-    type Reverse = T;
-    fn reverse(self) -> Self::Reverse {
-        self
     }
 }
 
@@ -166,14 +174,14 @@ pub trait IntoList {
 }
 
 impl IntoList for () {
-    type Output<T: EmptyList> = T::Empty;
+    type Output<T: EmptyList> = <T as List>::Empty;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
         T::empty()
     }
 }
 
 impl<A: 'static> IntoList for (A,) {
-    type Output<T: EmptyList> = <T::Empty as List>::Push<A>;
+    type Output<T: EmptyList> = <<T as List>::Empty as List>::Push<A>;
     fn into_list<T: EmptyList>(self) -> Self::Output<T> {
         ().into_list::<T>().push(self.0)
     }

@@ -1,3 +1,4 @@
+use crate::ReverseList;
 use crate::c_stack_list::{CNil, CStackList};
 use crate::dyn_sement::DynSegment;
 use crate::list_traits::{EmptyList, IntoList, List, ListTypeIteratorAdvance, TypeIdIterator};
@@ -46,7 +47,7 @@ impl<H: 'static, T: DropStack> DropStack for CStackList<H, T> {
 /// ```
 pub struct Segment<
     Args: IntoList + 'static,
-    Stack: List = <<Args as IntoList>::Output<CNil<()>> as List>::Reverse,
+    Stack: List = ReverseList<<Args as IntoList>::Output<CNil<()>>>,
 > {
     segment: RawSegment,
     _phantom: std::marker::PhantomData<(Args, Stack)>,
@@ -71,12 +72,12 @@ impl<Args: IntoList + 'static> Segment<Args> {
 
 impl<Args: IntoList + 'static, Stack: List + 'static> TryFrom<DynSegment> for Segment<Args, Stack>
 where
-    <<Args as IntoList>::Output<CNil<()>> as List>::Reverse: ListTypeIteratorAdvance<TypeId>,
+    ReverseList<<Args as IntoList>::Output<CNil<()>>>: ListTypeIteratorAdvance<TypeId>,
     Stack: ListTypeIteratorAdvance<TypeId>,
 {
     type Error = anyhow::Error;
     fn try_from(value: DynSegment) -> Result<Self, Self::Error> {
-        type ArgList<Args> = <<Args as IntoList>::Output<CNil<()>> as List>::Reverse;
+        type ArgList<Args> = ReverseList<<Args as IntoList>::Output<CNil<()>>>;
 
         ensure!(
             ArgList::<Args>::LENGTH == value.argument_ids.len()
