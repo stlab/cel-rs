@@ -9,6 +9,18 @@ use crate::list_traits::{
 };
 use std::ops::{RangeFrom, Sub};
 
+pub trait IntoTupleList {
+    type Output: List;
+    fn into_tuple_list(self) -> Self::Output;
+}
+
+impl<T: IntoList> IntoTupleList for T {
+    type Output = T::Output<()>;
+    fn into_tuple_list(self) -> Self::Output {
+        self.into_list()
+    }
+}
+
 //--------------------------------------------------------------------------------------------------
 // ListTypeIteratorAdvance
 
@@ -34,11 +46,6 @@ impl EmptyList for () {
     type PushFirst<U: 'static> = (U, ());
     fn push_first<U: 'static>(self, item: U) -> Self::PushFirst<U> {
         (item, ())
-    }
-
-    type FromTuple<T: IntoList> = T::Output<()>;
-    fn from_tuple<T: IntoList>(tuple: T) -> Self::FromTuple<T> {
-        tuple.into_list()
     }
 
     type RootEmpty = Self;
@@ -141,33 +148,33 @@ mod tests {
 
     #[test]
     fn into_list() {
-        assert_eq!(().into_list::<()>(), ());
-        assert_eq!((1, 2, 3).into_list::<()>(), (1, (2, (3, ()))));
+        assert_eq!(().into_tuple_list(), ());
+        assert_eq!((1, 2, 3).into_tuple_list(), (1, (2, (3, ()))));
         assert_eq!(
-            (1, 2.5, "Hello").into_list::<()>(),
+            (1, 2.5, "Hello").into_tuple_list(),
             (1, (2.5, ("Hello", ())))
         );
     }
 
     #[test]
-    fn push_front() {
+    fn push() {
         assert_eq!(().push_first(1), (1, ()));
-        assert_eq!((1, 2, 3).into_list::<()>().push(4), (4, (1, (2, (3, ())))));
+        assert_eq!((1, 2, 3).into_tuple_list().push(4), (4, (1, (2, (3, ())))));
     }
 
     #[test]
-    fn concat() {
+    fn append() {
         assert_eq!(
             (1, 2, 3)
-                .into_list::<()>()
-                .append((4, 5, 6).into_list::<()>()),
+                .into_tuple_list()
+                .append((4, 5, 6).into_tuple_list()),
             (1, (2, (3, (4, (5, (6, ()))))))
         );
     }
 
     #[test]
     fn reverse() {
-        assert_eq!((1, 2, 3).into_list::<()>().reverse(), (3, (2, (1, ()))));
+        assert_eq!((1, 2, 3).into_tuple_list().reverse(), (3, (2, (1, ()))));
     }
 
     #[test]
@@ -179,7 +186,7 @@ mod tests {
 
     #[test]
     fn tuple_list() {
-        let list = (1, 2.5, "Hello").into_list::<()>();
+        let list = (1, 2.5, "Hello").into_tuple_list();
         println!("{:?}", list);
     }
 }

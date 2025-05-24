@@ -262,11 +262,6 @@ impl<T> EmptyList for CNil<T> {
         CStackList(self, item)
     }
 
-    type FromTuple<L: IntoList> = L::Output<CNil<T>>;
-    fn from_tuple<L: IntoList>(tuple: L) -> Self::FromTuple<L> {
-        tuple.into_list()
-    }
-
     type RootEmpty = CNil<()>;
     fn root_empty() -> Self::RootEmpty {
         CNil(())
@@ -324,19 +319,19 @@ mod tests {
 
     #[test]
     fn slice() {
-        let list = (1, 2.5, 3, 4, "world", "Hello").into_list::<CNil<()>>();
+        let list = (1, 2.5, 3, 4, "world", "Hello").into_cstack_list();
         println!("{:?}", list[..U5::new()][U2::new()..]);
     }
 
     #[test]
     fn index_range_from() {
-        let list = (1, 2.5, "Hello").into_list::<CNil<()>>();
+        let list = (1, 2.5, "Hello").into_cstack_list();
         assert_eq!(list[U1::new()..][U1::new()], "Hello");
     }
 
     #[test]
     fn index_range_to() {
-        let list = (1, 2.5, "Hello").into_list::<CNil<()>>();
+        let list = (1, 2.5, "Hello").into_cstack_list();
         assert_eq!(list[..U2::new()][U1::new()], 2.5);
     }
 

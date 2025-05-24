@@ -8,7 +8,9 @@ use std::any::TypeId;
 /// contains a value (head) and the remainder of the list (tail). This trait
 /// is implemented for both empty lists and non-empty lists.
 pub trait List {
+    /// The type returned by [`empty`].
     type Empty: EmptyList;
+    /// Returns a new empty list that can be used to create a list with the same characteristics.
     fn empty() -> Self::Empty;
 
     /// The type of head.
@@ -40,9 +42,25 @@ pub trait List {
 
     // ---
 
+    /// For a [`CStackList`], the number of padding bytes between Tail and Head.
+    /// This property will be moved to `CStackList` once I figure out a clean way to do it.
     const HEAD_PADDING: usize;
 
+    /// The style of `List` appended to `Self`
     type Append<U: List>: List;
+
+    /// Append `U` as the tail of `Self`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cel_rs::*;
+    ///
+    /// assert_eq!(
+    ///     (1, (2, (3, ()))).append((4, (5, (6, ())))),
+    ///     (1, (2, (3, (4, (5, (6, ()))))))
+    /// );
+    /// ```
     fn append<U: List>(self, other: U) -> Self::Append<U>;
 
     type ReverseOnto<U: List>: List;
@@ -111,9 +129,6 @@ pub struct Undefined;
 pub trait EmptyList {
     type PushFirst<U: 'static>: List;
     fn push_first<U: 'static>(self, item: U) -> Self::PushFirst<U>;
-
-    type FromTuple<T: IntoList>: List;
-    fn from_tuple<T: IntoList>(tuple: T) -> Self::FromTuple<T>;
 
     type RootEmpty: EmptyList;
     fn root_empty() -> Self::RootEmpty;
