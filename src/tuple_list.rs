@@ -87,6 +87,13 @@ impl<H: 'static, T: List> List for (H, T) {
     }
 }
 
+impl ListIndex<RangeFrom<U0>> for () {
+    type Output = ();
+    fn index(&self, _index: RangeFrom<U0>) -> &Self::Output {
+        self
+    }
+}
+
 impl<H: 'static, T: List> ListIndex<RangeFrom<U0>> for (H, T) {
     type Output = (H, T);
     fn index(&self, _index: RangeFrom<U0>) -> &Self::Output {
@@ -130,6 +137,7 @@ mod tests {
     use super::*;
     use crate::list_traits::TypeIdIterator;
     use std::any::TypeId;
+    use typenum::{U0, U1, U2, U3};
 
     #[test]
     fn type_id_iterator() {
@@ -188,5 +196,23 @@ mod tests {
     fn tuple_list() {
         let list = (1, 2.5, "Hello").into_tuple_list();
         println!("{:?}", list);
+    }
+
+    #[test]
+    fn list_index() {
+        let list = (1, 2.5, "Hello").into_tuple_list();
+        assert_eq!(*list.index(U0::new()), 1);
+        assert_eq!(*list.index(U1::new()), 2.5);
+        assert_eq!(*list.index(U2::new()), "Hello");
+    }
+
+    #[test]
+    fn list_range_from_index() {
+        let list = (1, 2.5, "Hello").into_tuple_list();
+        assert_eq!(*list.index(U0::new()..), (1, (2.5, ("Hello", ()))));
+        assert_eq!(*list.index(U1::new()..), (2.5, ("Hello", ())));
+        assert_eq!(*list.index(U2::new()..), ("Hello", ()));
+        assert_eq!(*list.index(U3::new()..), ());
+        // assert_eq!(*list.index(U4::new()..), ()); // Compiler error: index out of bounds
     }
 }
