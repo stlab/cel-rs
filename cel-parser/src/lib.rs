@@ -1,20 +1,23 @@
 use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 use quote::quote_spanned;
 
-/// A recursive descent parser for arithmetic expressions.
+/// A recursive descent parser for expressions.
 ///
-/// For our arithmetic expression grammar:
+/// Grammar:
 /// ```text
-/// expr = term {("+" | "-") term}.
-/// term = factor {("*" | "/") factor}.
-/// factor = NUMBER | IDENTIFIER | "(" expr ")".
+/// expression = or_expression <EOF>.
+/// or_expression = and_expression { "||" and_expression }.
+/// and_expression = comparison_expression { "&&" comparison_expression }.
+/// comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
+/// bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.
+/// bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.
+/// bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
+/// bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.
+/// additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
+/// multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
+/// unary_expression = (("-" | "!") unary_expression) | primary_expression.
+/// primary_expression = literal | identifier | "(" expression ")".
 /// ```
-///
-/// Where:
-/// - NUMBER is any numeric literal
-/// - IDENTIFIER is any valid Rust identifier
-/// - Operators have standard precedence: * and / bind tighter than + and -
-/// - Parentheses can be used to override precedence
 ///
 /// # Example
 ///
@@ -52,12 +55,13 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         self.current = self.tokens.next();
     }
 
-    pub fn report_error(&mut self, message: &str) {
+    pub fn report_error(&mut self, message: &str) -> bool {
         let span = self
             .current
             .as_ref()
             .map_or_else(|| proc_macro2::Span::call_site(), |token| token.span());
         self.output = quote_spanned!(span => compile_error!(#message));
+        false
     }
 
     fn is_punctuation(&mut self, string: &str) -> bool {
@@ -79,6 +83,9 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
                 _ => return false,
             }
         }
+        if spacing == Spacing::Joint {
+            return false;
+        }
         self.tokens = tmp;
         self.current = current;
         true
@@ -93,9 +100,15 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         false
     }
 
-    /// expression = or_expression.
+    /// expression = or_expression <EOF>.
     pub fn is_expression(&mut self) -> bool {
-        self.is_or_expression()
+        if !self.is_or_expression() {
+            return false;
+        }
+        if !self.current.is_none() {
+            return self.report_error("Unexpected token");
+        }
+        true
     }
 
     /// or_expression = and_expression { "||" and_expression }.
@@ -103,7 +116,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_and_expression() {
             while self.is_one_of_punctuation(&["||"]) {
                 if !self.is_and_expression() {
-                    self.report_error("Expected and_expression");
+                    return self.report_error("Expected and_expression");
                 }
             }
             true
@@ -112,12 +125,12 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// and_expression = equality_expression { "&&" equality_expression }.
+    /// and_expression = comparison_expression { "&&" comparison_expression }.
     fn is_and_expression(&mut self) -> bool {
         if self.is_comparison_expression() {
             while self.is_one_of_punctuation(&["&&"]) {
                 if !self.is_comparison_expression() {
-                    self.report_error("Expected comparison_expression");
+                    return self.report_error("Expected comparison_expression");
                 }
             }
             true
@@ -126,12 +139,12 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// comparison_expression = bitwise_or_expression { ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression }.
+    /// comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
     fn is_comparison_expression(&mut self) -> bool {
         if self.is_bitwise_or_expression() {
-            while self.is_one_of_punctuation(&["==", "!=", "<", ">", "<=", ">="]) {
+            if self.is_one_of_punctuation(&["==", "!=", "<", ">", "<=", ">="]) {
                 if !self.is_bitwise_or_expression() {
-                    self.report_error("Expected bitwise_or_expression");
+                    return self.report_error("Expected bitwise_or_expression");
                 }
             }
             true
@@ -145,7 +158,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_bitwise_xor_expression() {
             while self.is_one_of_punctuation(&["|"]) {
                 if !self.is_bitwise_xor_expression() {
-                    self.report_error("Expected bitwise_xor_expression");
+                    return self.report_error("Expected bitwise_xor_expression");
                 }
             }
             true
@@ -159,7 +172,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_bitwise_and_expression() {
             while self.is_one_of_punctuation(&["^"]) {
                 if !self.is_bitwise_and_expression() {
-                    self.report_error("Expected bitwise_and_expression");
+                    return self.report_error("Expected bitwise_and_expression");
                 }
             }
             true
@@ -173,7 +186,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_bitwise_shift_expression() {
             while self.is_one_of_punctuation(&["&"]) {
                 if !self.is_bitwise_shift_expression() {
-                    self.report_error("Expected bitwise_shift_expression");
+                    return self.report_error("Expected bitwise_shift_expression");
                 }
             }
             true
@@ -182,12 +195,12 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// bitwise_shift_expression = add_expression { ("<<" | ">>") add_expression }.
+    /// bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.
     fn is_bitwise_shift_expression(&mut self) -> bool {
         if self.is_additive_expression() {
             while self.is_one_of_punctuation(&["<<", ">>"]) {
                 if !self.is_additive_expression() {
-                    self.report_error("Expected additive_expression");
+                    return self.report_error("Expected additive_expression");
                 }
             }
             true
@@ -201,7 +214,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_multiplicative_expression() {
             while self.is_one_of_punctuation(&["+", "-"]) {
                 if !self.is_multiplicative_expression() {
-                    self.report_error("Expected multiplicative_expression");
+                    return self.report_error("Expected multiplicative_expression");
                 }
             }
             true
@@ -215,7 +228,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_unary_expression() {
             while self.is_one_of_punctuation(&["*", "/", "%"]) {
                 if !self.is_unary_expression() {
-                    self.report_error("Expected unary_expression");
+                    return self.report_error("Expected unary_expression");
                 }
             }
             true
@@ -224,11 +237,11 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// unary_expression = ("-" | "!") primary_expression.
+    /// unary_expression = (("-" | "!") unary_expression) | primary_expression.
     fn is_unary_expression(&mut self) -> bool {
         if self.is_one_of_punctuation(&["-", "!"]) {
-            if !self.is_primary_expression() {
-                self.report_error("Expected primary_expression");
+            if !self.is_unary_expression() {
+                return self.report_error("Expected unary_expression");
             }
             true
         } else {
@@ -272,6 +285,13 @@ mod tests {
         let input = TokenStream::from_str("10").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
+    }
+
+    #[test]
+    fn test_incomplete_expression() {
+        let input = TokenStream::from_str("10 +").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        assert!(!parser.is_expression());
     }
 
     #[test]
@@ -326,6 +346,13 @@ mod tests {
     #[test]
     fn test_unary_expression() {
         let input = TokenStream::from_str("-a + !b").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        assert!(parser.is_expression());
+    }
+
+    #[test]
+    fn test_chained_unary_expression() {
+        let input = TokenStream::from_str("!!a + --b").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
     }
