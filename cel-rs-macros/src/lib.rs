@@ -1,6 +1,8 @@
-use proc_macro::{Delimiter, TokenStream, TokenTree};
+use cel_parser::CELParser;
+use proc_macro::TokenStream as ProcMacroTokenStream;
+use proc_macro2::TokenStream;
 
-/// A recursive descent parser for arithmetic expressions.
+/// Validates that the input contains a valid CEL expression.
 ///
 /// For our arithmetic expression grammar:
 /// ```text
@@ -18,8 +20,8 @@ use proc_macro::{Delimiter, TokenStream, TokenTree};
 /// # Example
 ///
 /// ```rust
-/// use cel_rs_macros::expr;
-/// expr! {
+/// use cel_rs_macros::expression;
+/// expression! {
 ///     54 + 25 * (11 + 5)
 /// };
 /// ```
@@ -38,111 +40,44 @@ use proc_macro::{Delimiter, TokenStream, TokenTree};
 /// term: factor * factor
 /// expr: term + term
 /// ```
-struct Parser<I: Iterator<Item = TokenTree>> {
-    tokens: I,
-    current: Option<TokenTree>,
-}
-
-impl<I: Iterator<Item = TokenTree>> Parser<I> {
-    fn new(mut tokens: I) -> Self {
-        let current = tokens.next();
-        Parser { tokens, current }
-    }
-
-    fn advance(&mut self) {
-        self.current = self.tokens.next();
-    }
-
-    fn parse_expr(&mut self) {
-        self.parse_term();
-
-        let mut result = String::from("expr: term");
-
-        while let Some(TokenTree::Punct(punct)) = &self.current {
-            match punct.as_char() {
-                '+' | '-' => {
-                    let op = punct.as_char();
-                    self.advance();
-                    self.parse_term();
-                    result.push_str(&format!(" {} term", op));
-                }
-                _ => break,
-            }
-        }
-        println!("{}", result);
-    }
-
-    fn parse_term(&mut self) {
-        self.parse_factor();
-
-        let mut result = String::from("term: factor");
-
-        while let Some(TokenTree::Punct(punct)) = &self.current {
-            match punct.as_char() {
-                '*' | '/' => {
-                    let op = punct.as_char();
-                    self.advance();
-                    self.parse_factor();
-                    result.push_str(&format!(" {} factor", op));
-                }
-                _ => break,
-            }
-        }
-        println!("{}", result);
-    }
-
-    fn parse_factor(&mut self) {
-        match self.current.take() {
-            Some(TokenTree::Literal(lit)) => {
-                println!("factor: {}", lit);
-                self.advance();
-            }
-            Some(TokenTree::Ident(ident)) => {
-                println!("factor: {}", ident);
-                self.advance();
-            }
-            Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis => {
-                let mut parser = Parser::new(group.stream().into_iter());
-                parser.parse_expr();
-                println!("factor: ( expr )");
-                self.advance();
-            }
-            _ => panic!("Unexpected token in factor"),
-        }
-    }
-}
-
-/// Macro that parses an expression and prints the productions
-///
-/// # Example
-/// ```rust
-/// use cel_rs_macros::expr;
-/// expr! {
-///     54 + 25 * (11 + 5)
-/// };
-/// ```
 #[proc_macro]
-pub fn expr(input: TokenStream) -> TokenStream {
-    let mut parser = Parser::new(input.into_iter());
-    parser.parse_expr();
-    parser.tokens.collect()
+pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
+    let input = TokenStream::from(input);
+    let mut parser = CELParser::new(input.into_iter());
+    if !parser.is_expression() {
+        parser.report_error("Expected expression");
+    }
+    parser.get_output().clone().into()
 }
 
+/// Prints the tokens for debugging purposes.
 ///
 /// # Example
 /// ```rust
 /// use cel_rs_macros::print_tokens;
 /// print_tokens! {
-///     format < = = hello    <=== layout: /*comment */ view,
-///     // comment
-///     /// doc comment
+///     10
 /// };
 /// ```
 #[proc_macro]
-pub fn print_tokens(input: TokenStream) -> TokenStream {
+pub fn print_tokens(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
     println!("{}", input);
+    let input = TokenStream::from(input);
     for e in input {
-        println!("{e}");
+        match e {
+            proc_macro2::TokenTree::Punct(punct) => {
+                println!("punct: {:?}", punct);
+            }
+            proc_macro2::TokenTree::Ident(ident) => {
+                println!("ident: {:?}", ident);
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                println!("group: {:?}", group);
+            }
+            proc_macro2::TokenTree::Literal(lit) => {
+                println!("literal: {:?}", lit);
+            }
+        }
     }
-    TokenStream::new()
+    ProcMacroTokenStream::new()
 }

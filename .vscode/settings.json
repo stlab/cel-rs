@@ -1,3 +1,7 @@
 {
-    "editor.formatOnSave": true
+    "editor.formatOnSave": true,
+    "rust-analyzer.debug.engine": "vadimcn.vscode-lldb",
+    "rust-analyzer.lens.debug.enable": true,
+    "rust-analyzer.lens.enable": true,
+    "rust-analyzer.lens.run.enable": true
 }

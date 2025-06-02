@@ -12,5 +12,6 @@ cel-rs-macros = { path = "./cel-rs-macros" }
 [workspace]
 members = [
     ".",
-    "cel-rs-macros"
+    "cel-rs-macros",
+    "cel-parser"
 ]

@@ -1,0 +1,10 @@
+[package]
+name = "cel-parser"
+version = "0.1.0"
+edition = "2024"
+description = "Parser for Common Expression Language (CEL) expressions"
+license = "MIT"
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
