@@ -1,3 +1,5 @@
+use std::iter::Peekable;
+
 use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 use quote::quote_spanned;
 
@@ -31,18 +33,15 @@ use quote::quote_spanned;
 /// assert!(parser.is_expression());
 /// ```
 pub struct CELParser<I: Iterator<Item = TokenTree>> {
-    tokens: I,
-    current: Option<TokenTree>,
+    tokens: Peekable<I>,
     output: TokenStream,
 }
 
 impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
-    pub fn new(mut tokens: I) -> Self {
-        let current = tokens.next();
+    pub fn new(tokens: I) -> Self {
         let output = TokenStream::new();
         CELParser {
-            tokens,
-            current,
+            tokens: tokens.peekable(),
             output,
         }
     }
@@ -52,42 +51,60 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
     }
 
     fn advance(&mut self) {
-        self.current = self.tokens.next();
+        self.tokens.next();
     }
 
     pub fn report_error(&mut self, message: &str) -> bool {
         let span = self
-            .current
-            .as_ref()
+            .tokens
+            .peek()
             .map_or_else(proc_macro2::Span::call_site, |token| token.span());
         self.output = quote_spanned!(span => compile_error!(#message));
         false
     }
 
+    fn is_one_of_punc(token: Option<&TokenTree>, sequence: &[char]) -> bool {
+        match token {
+            Some(TokenTree::Punct(punct)) => sequence.contains(&punct.as_char()),
+            _ => false,
+        }
+    }
+
     fn is_punctuation(&mut self, string: &str) -> bool {
         let mut tmp = self.tokens.clone();
-        let mut current = self.current.clone();
         let mut spacing = Spacing::Joint;
         for c in string.chars() {
             if spacing == Spacing::Alone {
                 return false;
             }
-            match &current {
+            match tmp.peek() {
                 Some(TokenTree::Punct(punct)) => {
                     if punct.as_char() != c {
                         return false;
                     }
                     spacing = punct.spacing();
-                    current = tmp.next();
+                    tmp.next();
                 }
                 _ => return false,
             }
         }
-        if spacing == Spacing::Joint {
-            return false;
+        // filter false positives for compound operators
+        if spacing == Spacing::Joint && string.len() == 1 {
+            let compound_chars = [
+                ('&', &['&'][..]),
+                ('|', &['|'][..]),
+                ('<', &['<', '='][..]),
+                ('>', &['>', '='][..]),
+            ];
+            let c = string.chars().next().unwrap(); // safe since string.len() == 1
+
+            if let Some((_, next_chars)) = compound_chars.iter().find(|(ch, _)| *ch == c) {
+                if Self::is_one_of_punc(tmp.peek(), next_chars) {
+                    return false;
+                }
+            }
         }
         self.tokens = tmp;
-        self.current = current;
         true
     }
 
@@ -105,7 +122,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if !self.is_or_expression() {
             return false;
         }
-        if self.current.is_some() {
+        if self.tokens.peek().is_some() {
             return self.report_error("Unexpected token");
         }
         true
@@ -251,7 +268,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
 
     /// primary_expression = literal | identifier | "(" expression ")".
     fn is_primary_expression(&mut self) -> bool {
-        match &self.current {
+        match self.tokens.peek() {
             Some(TokenTree::Literal(_)) => {
                 self.advance();
                 true
