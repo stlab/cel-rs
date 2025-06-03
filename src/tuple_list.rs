@@ -146,7 +146,7 @@ mod tests {
             TypeId::of::<f64>(),
             TypeId::of::<&str>(),
         ];
-        assert!(TypeIdIterator::<(u32, (f64, (&str, ())))>::new().eq(ids.iter().map(|&id| id)));
+        assert!(TypeIdIterator::<(u32, (f64, (&str, ())))>::new().eq(ids.iter().copied()));
     }
 
     #[test]
