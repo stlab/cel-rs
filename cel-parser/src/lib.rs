@@ -59,7 +59,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         let span = self
             .current
             .as_ref()
-            .map_or_else(|| proc_macro2::Span::call_site(), |token| token.span());
+            .map_or_else(proc_macro2::Span::call_site, |token| token.span());
         self.output = quote_spanned!(span => compile_error!(#message));
         false
     }
@@ -105,7 +105,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if !self.is_or_expression() {
             return false;
         }
-        if !self.current.is_none() {
+        if self.current.is_some() {
             return self.report_error("Unexpected token");
         }
         true
@@ -142,10 +142,10 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
     /// comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
     fn is_comparison_expression(&mut self) -> bool {
         if self.is_bitwise_or_expression() {
-            if self.is_one_of_punctuation(&["==", "!=", "<", ">", "<=", ">="]) {
-                if !self.is_bitwise_or_expression() {
-                    return self.report_error("Expected bitwise_or_expression");
-                }
+            if self.is_one_of_punctuation(&["==", "!=", "<", ">", "<=", ">="])
+                && !self.is_bitwise_or_expression()
+            {
+                return self.report_error("Expected bitwise_or_expression");
             }
             true
         } else {
