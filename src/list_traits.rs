@@ -8,7 +8,7 @@ use std::any::TypeId;
 /// contains a value (head) and the remainder of the list (tail). This trait
 /// is implemented for both empty lists and non-empty lists.
 pub trait List {
-    /// The type returned by [`empty`].
+    /// The type returned by [`List::empty()`].
     type Empty: EmptyList;
     /// Returns a new empty list that can be used to create a list with the same characteristics.
     fn empty() -> Self::Empty;
@@ -42,7 +42,7 @@ pub trait List {
 
     // ---
 
-    /// For a [`CStackList`], the number of padding bytes between Tail and Head.
+    /// For a `CStackList`, the number of padding bytes between Tail and Head.
     /// This property will be moved to `CStackList` once I figure out a clean way to do it.
     const HEAD_PADDING: usize;
 
