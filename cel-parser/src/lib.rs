@@ -1,6 +1,6 @@
 use std::iter::Peekable;
 
-use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 use quote::quote_spanned;
 
 /// A recursive descent parser for expressions.
@@ -21,7 +21,9 @@ use quote::quote_spanned;
 /// primary_expression = literal | identifier | "(" expression ")".
 /// ```
 ///
-/// # Example
+/// # Examples
+///
+/// ## Basic Usage
 ///
 /// ```rust
 /// use cel_parser::CELParser;
@@ -32,12 +34,166 @@ use quote::quote_spanned;
 /// let mut parser = CELParser::new(input.into_iter());
 /// assert!(parser.is_expression());
 /// ```
+///
+/// ## Error Formatting
+///
+/// ```rust
+/// use cel_parser::CELParser;
+/// use proc_macro2::TokenStream;
+/// use std::str::FromStr;
+///
+/// let line = line!() + 1;
+/// let source = r#"
+///   10 + 20 30
+/// "#; // Invalid: missing operator
+/// let input = TokenStream::from_str(source).unwrap();
+/// let mut parser = CELParser::new(input.into_iter());
+///
+/// if !parser.is_expression() {
+///     // Format error starting at line 1
+///     if let Some(formatted_error) = parser.format_error(source, file!(), line) {
+///         println!("{}", formatted_error);
+///         // Output:
+///         // error: Unexpected token
+///         //  --> example.cel:1:8
+///         //   |
+///         // 1 | 10 + 20 30
+///         //   |         ^^
+///     }
+/// }
+/// ```
 pub struct CELParser<I: Iterator<Item = TokenTree>> {
     tokens: Peekable<I>,
     output: TokenStream,
 }
 
 impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
+    pub fn extract_error_message(&self) -> Option<String> {
+        let output_str = self.output.to_string();
+
+        // Look for compile_error ! ("message") - note the spaces
+        if let Some(start) = output_str.find("compile_error ! (\"") {
+            let start = start + "compile_error ! (\"".len();
+            if let Some(end) = output_str[start..].find("\")") {
+                return Some(output_str[start..start + end].to_string());
+            }
+        }
+        None
+    }
+
+    pub fn format_error(
+        &self,
+        source_code: &str,
+        filename: &str,
+        start_line: u32,
+    ) -> Option<String> {
+        if let Some(error_msg) = self.extract_error_message() {
+            if let Some(span) = self.get_error_span() {
+                return Some(self.format_rustc_style(
+                    &error_msg,
+                    span,
+                    source_code,
+                    filename,
+                    start_line,
+                ));
+            }
+        }
+        None
+    }
+
+    fn format_rustc_style(
+        &self,
+        message: &str,
+        span: Span,
+        source: &str,
+        filename: &str,
+        start_line: u32,
+    ) -> String {
+        let start = span.start();
+        let end = span.end();
+
+        let lines: Vec<&str> = source.lines().collect();
+
+        let mut output = String::new();
+
+        // Calculate offset line numbers (start_line is 1-based)
+        let error_line = start_line + (start.line as u32) - 1;
+        let error_column = start.column + 1; // +1 because the column is 0-based but the error is 1-based
+
+        // Calculate the width needed for line numbers
+        // end.line is the last line within the source span (1-based)
+        // start_line is the offset to get actual file line numbers
+        // The maximum displayed line number will be: start_line + end.line - 1
+        let max_line_num = start_line + (end.line as u32) - 1;
+        let line_width = max_line_num.to_string().len();
+
+        // Error header
+        output.push_str(&format!("error: {}\n", message));
+        output.push_str(&format!(
+            " --> {}:{}:{}\n",
+            filename, error_line, error_column
+        ));
+        output.push_str(&format!("{:width$} |\n", "", width = line_width));
+
+        // Show the problematic line(s)
+        for line_num in start.line..=end.line {
+            if let Some(line_content) = lines.get(line_num.saturating_sub(1)) {
+                let display_line_num = start_line + (line_num as u32) - 1;
+                output.push_str(&format!(
+                    "{:width$} | {}\n",
+                    display_line_num,
+                    line_content,
+                    width = line_width
+                ));
+
+                // Add caret indicators
+                if line_num == start.line {
+                    output.push_str(&format!("{:width$} | ", "", width = line_width));
+
+                    // Add spaces up to start column
+                    output.push_str(&" ".repeat(start.column));
+
+                    // Add carets
+                    let caret_len = if start.line == end.line {
+                        end.column.saturating_sub(start.column).max(1)
+                    } else {
+                        line_content
+                            .len()
+                            .saturating_sub(start.column.saturating_sub(1))
+                    };
+
+                    output.push_str(&"^".repeat(caret_len));
+                    output.push('\n');
+                }
+            }
+        }
+
+        output
+    }
+
+    fn get_error_span(&self) -> Option<Span> {
+        // The compile_error! TokenStream structure is:
+        // TokenTree::Ident("compile_error") - with the span we want
+        // TokenTree::Punct('!')
+        // TokenTree::Group(...) - containing the message, also with the span
+
+        let mut tokens = self.output.clone().into_iter();
+
+        // Look for the first token (should be "compile_error" ident)
+        if let Some(first_token) = tokens.next() {
+            match first_token {
+                TokenTree::Ident(ident) if ident == "compile_error" => {
+                    return Some(ident.span());
+                }
+                _ => {
+                    // Fallback: try to get span from any token in the stream
+                    return Some(first_token.span());
+                }
+            }
+        }
+        None
+    }
+
     pub fn new(tokens: I) -> Self {
         let output = TokenStream::new();
         CELParser {
@@ -117,7 +273,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         false
     }
 
-    /// expression = or_expression <EOF>.
+    /// `expression = or_expression <EOF>.`
     pub fn is_expression(&mut self) -> bool {
         if !self.is_or_expression() {
             return false;
@@ -128,7 +284,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         true
     }
 
-    /// or_expression = and_expression { "||" and_expression }.
+    /// `or_expression = and_expression { "||" and_expression }.`
     fn is_or_expression(&mut self) -> bool {
         if self.is_and_expression() {
             while self.is_one_of_punctuation(&["||"]) {
@@ -142,7 +298,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// and_expression = comparison_expression { "&&" comparison_expression }.
+    /// `and_expression = comparison_expression { "&&" comparison_expression }.`
     fn is_and_expression(&mut self) -> bool {
         if self.is_comparison_expression() {
             while self.is_one_of_punctuation(&["&&"]) {
@@ -156,7 +312,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
+    /// `comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].`
     fn is_comparison_expression(&mut self) -> bool {
         if self.is_bitwise_or_expression() {
             if self.is_one_of_punctuation(&["==", "!=", "<", ">", "<=", ">="])
@@ -170,7 +326,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.
+    /// `bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.`
     fn is_bitwise_or_expression(&mut self) -> bool {
         if self.is_bitwise_xor_expression() {
             while self.is_one_of_punctuation(&["|"]) {
@@ -184,7 +340,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.
+    /// `bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.`
     fn is_bitwise_xor_expression(&mut self) -> bool {
         if self.is_bitwise_and_expression() {
             while self.is_one_of_punctuation(&["^"]) {
@@ -198,7 +354,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
+    /// `bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.`
     fn is_bitwise_and_expression(&mut self) -> bool {
         if self.is_bitwise_shift_expression() {
             while self.is_one_of_punctuation(&["&"]) {
@@ -212,7 +368,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.
+    /// `bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.`
     fn is_bitwise_shift_expression(&mut self) -> bool {
         if self.is_additive_expression() {
             while self.is_one_of_punctuation(&["<<", ">>"]) {
@@ -226,7 +382,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
+    /// `additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.`
     fn is_additive_expression(&mut self) -> bool {
         if self.is_multiplicative_expression() {
             while self.is_one_of_punctuation(&["+", "-"]) {
@@ -240,7 +396,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
+    /// `multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.`
     fn is_multiplicative_expression(&mut self) -> bool {
         if self.is_unary_expression() {
             while self.is_one_of_punctuation(&["*", "/", "%"]) {
@@ -254,7 +410,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// unary_expression = (("-" | "!") unary_expression) | primary_expression.
+    /// `unary_expression = (("-" | "!") unary_expression) | primary_expression.`
     fn is_unary_expression(&mut self) -> bool {
         if self.is_one_of_punctuation(&["-", "!"]) {
             if !self.is_unary_expression() {
@@ -266,7 +422,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
-    /// primary_expression = literal | identifier | "(" expression ")".
+    /// `primary_expression = literal | identifier | "(" expression ")".`
     fn is_primary_expression(&mut self) -> bool {
         match self.tokens.peek() {
             Some(TokenTree::Literal(_)) => {
@@ -306,9 +462,13 @@ mod tests {
 
     #[test]
     fn test_incomplete_expression() {
-        let input = TokenStream::from_str("10 +").unwrap();
+        let input = TokenStream::from_str("10 + 25 25").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(!parser.is_expression());
+        assert_eq!(
+            parser.output.to_string(),
+            "compile_error ! (\"Unexpected token\")"
+        );
     }
 
     #[test]
@@ -379,5 +539,72 @@ mod tests {
         let input = TokenStream::from_str("+").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(!parser.is_expression());
+    }
+
+    #[test]
+    fn test_error_formatting() {
+        let source = "10 + 20 30"; // Missing operator between 20 and 30
+        let input = TokenStream::from_str(source).unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+
+        // This should fail parsing
+        assert!(!parser.is_expression());
+
+        // Test error message extraction
+        let error_msg = parser.extract_error_message();
+        assert!(error_msg.is_some());
+        assert_eq!(error_msg.unwrap(), "Unexpected token");
+
+        // Test error formatting
+        let formatted_error = parser.format_error(source, "test.cel", 1u32);
+        assert!(formatted_error.is_some());
+
+        let formatted = formatted_error.unwrap();
+        assert!(formatted.contains("error: Unexpected token"));
+        assert!(formatted.contains("test.cel:1:")); // Should include line number
+        assert!(formatted.contains("1 | 10 + 20 30")); // Should show the line with line number
+        assert!(formatted.contains("^")); // Should have carets pointing to the error
+    }
+
+    #[test]
+    fn test_error_formatting_with_line_offset() {
+        let source = "a + b c"; // Missing operator between b and c
+        let input = TokenStream::from_str(source).unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+
+        // This should fail parsing
+        assert!(!parser.is_expression());
+
+        // Test error formatting with line offset (as if expression starts at line 42)
+        let formatted_error = parser.format_error(source, "large_file.rs", 42u32);
+        assert!(formatted_error.is_some());
+
+        let formatted = formatted_error.unwrap();
+        assert!(formatted.contains("error: Unexpected token"));
+        assert!(formatted.contains("large_file.rs:42:")); // Should show offset line number
+        assert!(formatted.contains("42 | a + b c")); // Should show the line with offset line number
+        assert!(formatted.contains("^")); // Should have carets pointing to the error
+    }
+
+    #[test]
+    fn print_error_formatting() {
+        let line = line!() + 1;
+        let source = r#"
+            10 + 20 30 // Unexpected token
+        "#;
+        let input = TokenStream::from_str(source).unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+
+        if !parser.is_expression() {
+            // Format error starting at line 1
+            if let Some(formatted_error) = parser.format_error(source, file!(), line) {
+                println!("{}", formatted_error);
+                // error: Unexpected token
+                // --> cel-parser/src/lib.rs:593:21
+                //     |
+                // 593 |             10 + 20 30 // Unexpected token
+                //     |                     ^^
+            }
+        }
     }
 }

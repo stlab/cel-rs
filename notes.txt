@@ -8,9 +8,9 @@ Need to normalize naming. `push` doesn't read well.
 
 Building the docs
 ```
-cargo doc --lib --no-deps --open
-cargo test --doc
-cargo clippy
+cargo doc --lib --no-deps --open --workspace
+cargo test --doc --workspace
+cargo clippy --workspace
 ```
 
 Figure out if the call operators should be able to reuse the same stack.

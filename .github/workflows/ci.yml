@@ -23,11 +23,11 @@ jobs:
     - name: Cache dependencies
       uses: Swatinem/rust-cache@v2
     
-    - name: Build
-      run: cargo build --verbose
+    - name: Build all workspace members
+      run: cargo build --workspace --verbose
     
-    - name: Run tests
-      run: cargo test --verbose -- --nocapture
+    - name: Run tests for all workspace members
+      run: cargo test --workspace --verbose -- --nocapture
     
-    - name: Run clippy
-      run: cargo clippy -- -D warnings 
+    - name: Run clippy on all workspace members
+      run: cargo clippy --workspace -- -D warnings

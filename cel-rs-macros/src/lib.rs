@@ -22,7 +22,7 @@ use proc_macro2::TokenStream;
 /// ```rust
 /// use cel_rs_macros::expression;
 /// expression! {
-///     54 + 25 * (11 + 5)
+///     54 + 25 * (11 + 6 * 6)
 /// };
 /// ```
 ///
@@ -33,8 +33,9 @@ use proc_macro2::TokenStream;
 /// factor: 25
 /// factor: 11
 /// term: factor
-/// factor: 5
-/// term: factor
+/// factor: 6
+/// factor: 6
+/// term: factor * factor
 /// expr: term + term
 /// factor: ( expr )
 /// term: factor * factor
