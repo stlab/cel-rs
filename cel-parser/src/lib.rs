@@ -81,6 +81,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         None
     }
 
+    /// https://github.com/rust-lang/rustc-dev-guide/blob/master/src/diagnostics.md
     pub fn format_error(
         &self,
         source_code: &str,

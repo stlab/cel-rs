@@ -361,4 +361,41 @@ mod tests {
 
         Ok(())
     }
+
+    /*     #[test]
+    fn example_conditional_expression() -> Result<(), anyhow::Error> {
+        let mut segment1 = DynSegment::new::<()>();
+        let mut segment2 = DynSegment::new::<()>();
+
+        segment1.op0(|| -> u32 { 12 });
+        segment1.op0(|| -> u32 { 100 });
+        segment1.op2(|x: u32, y: u32| -> u32 { x + y })?;
+
+        segment2.op0(|| -> u32 { 42 });
+        segment2.op0(|| -> u32 { 56 });
+        segment2.op2(|x: u32, y: u32| -> u32 { x * y })?;
+
+        let mut root_segment = DynSegment::new::<()>();
+        root_segment.op0(|| true);
+        root_segment.op0(|| false);
+        root_segment.op2(|x: bool, y: bool| x || y);
+
+        root_segment.op0(move || segment1);
+        root_segment.op0(move || segment2);
+
+        root_segment.op3(
+            |conditional: bool, mut seg1: DynSegment, mut seg2: DynSegment| {
+                if conditional {
+                    seg1.call0::<u32>().unwrap()
+                } else {
+                    seg2.call0::<u32>().unwrap()
+                }
+            },
+        );
+
+        let result = root_segment.call0::<u32>()?;
+        println!("Result: {}", result);
+
+        Ok(())
+    } */
 }
