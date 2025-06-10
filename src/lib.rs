@@ -54,3 +54,15 @@ pub use raw_stack::*;
 pub use raw_vec::*;
 pub use segment::*;
 //pub use tuple_list::*;
+
+#[cfg(test)]
+mod tests {
+    use cel_rs_macros::expression;
+
+    #[test]
+    fn test_expression_macro() {
+        expression! {
+            10 + 20 * 30
+        };
+    }
+}

@@ -1,5 +1,6 @@
 use std::iter::Peekable;
 
+use owo_colors::OwoColorize;
 use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 use quote::quote_spanned;
 
@@ -128,33 +129,46 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         let max_line_num = start_line + (end.line as u32) - 1;
         let line_width = max_line_num.to_string().len();
 
-        // Error header
-        output.push_str(&format!("error: {}\n", message));
+        // Error header with red and bold "error:"
+        output.push_str(&format!("{}: {}\n", "error".red().bold(), message));
         output.push_str(&format!(
-            " --> {}:{}:{}\n",
-            filename, error_line, error_column
+            " {} {}:{}:{}\n",
+            "-->".blue().bold(),
+            filename.blue(),
+            error_line.to_string().blue(),
+            error_column.to_string().blue()
         ));
-        output.push_str(&format!("{:width$} |\n", "", width = line_width));
+        output.push_str(&format!(
+            "{:width$} {}\n",
+            "",
+            "|".blue().bold(),
+            width = line_width
+        ));
 
         // Show the problematic line(s)
         for line_num in start.line..=end.line {
             if let Some(line_content) = lines.get(line_num.saturating_sub(1)) {
                 let display_line_num = start_line + (line_num as u32) - 1;
                 output.push_str(&format!(
-                    "{:width$} | {}\n",
-                    display_line_num,
-                    line_content,
-                    width = line_width
+                    "{} {} {}\n",
+                    display_line_num.to_string().blue().bold(),
+                    "|".blue().bold(),
+                    line_content
                 ));
 
                 // Add caret indicators
                 if line_num == start.line {
-                    output.push_str(&format!("{:width$} | ", "", width = line_width));
+                    output.push_str(&format!(
+                        "{:width$} {} ",
+                        "",
+                        "|".blue().bold(),
+                        width = line_width
+                    ));
 
                     // Add spaces up to start column
                     output.push_str(&" ".repeat(start.column));
 
-                    // Add carets
+                    // Add carets in red
                     let caret_len = if start.line == end.line {
                         end.column.saturating_sub(start.column).max(1)
                     } else {
@@ -163,7 +177,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
                             .saturating_sub(start.column.saturating_sub(1))
                     };
 
-                    output.push_str(&"^".repeat(caret_len));
+                    output.push_str(&"^".repeat(caret_len).red().bold().to_string());
                     output.push('\n');
                 }
             }
@@ -280,7 +294,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
             return false;
         }
         if self.tokens.peek().is_some() {
-            return self.report_error("Unexpected token");
+            return self.report_error("unexpected token");
         }
         true
     }
@@ -290,7 +304,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_and_expression() {
             while self.is_one_of_punctuation(&["||"]) {
                 if !self.is_and_expression() {
-                    return self.report_error("Expected and_expression");
+                    return self.report_error("expected and_expression");
                 }
             }
             true
@@ -304,7 +318,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_comparison_expression() {
             while self.is_one_of_punctuation(&["&&"]) {
                 if !self.is_comparison_expression() {
-                    return self.report_error("Expected comparison_expression");
+                    return self.report_error("expected comparison_expression");
                 }
             }
             true
@@ -319,7 +333,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
             if self.is_one_of_punctuation(&["==", "!=", "<", ">", "<=", ">="])
                 && !self.is_bitwise_or_expression()
             {
-                return self.report_error("Expected bitwise_or_expression");
+                return self.report_error("expected bitwise_or_expression");
             }
             true
         } else {
@@ -332,7 +346,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_bitwise_xor_expression() {
             while self.is_one_of_punctuation(&["|"]) {
                 if !self.is_bitwise_xor_expression() {
-                    return self.report_error("Expected bitwise_xor_expression");
+                    return self.report_error("expected bitwise_xor_expression");
                 }
             }
             true
@@ -346,7 +360,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_bitwise_and_expression() {
             while self.is_one_of_punctuation(&["^"]) {
                 if !self.is_bitwise_and_expression() {
-                    return self.report_error("Expected bitwise_and_expression");
+                    return self.report_error("expected bitwise_and_expression");
                 }
             }
             true
@@ -360,7 +374,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_bitwise_shift_expression() {
             while self.is_one_of_punctuation(&["&"]) {
                 if !self.is_bitwise_shift_expression() {
-                    return self.report_error("Expected bitwise_shift_expression");
+                    return self.report_error("expected bitwise_shift_expression");
                 }
             }
             true
@@ -374,7 +388,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_additive_expression() {
             while self.is_one_of_punctuation(&["<<", ">>"]) {
                 if !self.is_additive_expression() {
-                    return self.report_error("Expected additive_expression");
+                    return self.report_error("expected additive_expression");
                 }
             }
             true
@@ -388,7 +402,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_multiplicative_expression() {
             while self.is_one_of_punctuation(&["+", "-"]) {
                 if !self.is_multiplicative_expression() {
-                    return self.report_error("Expected multiplicative_expression");
+                    return self.report_error("expected multiplicative_expression");
                 }
             }
             true
@@ -402,7 +416,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         if self.is_unary_expression() {
             while self.is_one_of_punctuation(&["*", "/", "%"]) {
                 if !self.is_unary_expression() {
-                    return self.report_error("Expected unary_expression");
+                    return self.report_error("expected unary_expression");
                 }
             }
             true
@@ -415,7 +429,7 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
     fn is_unary_expression(&mut self) -> bool {
         if self.is_one_of_punctuation(&["-", "!"]) {
             if !self.is_unary_expression() {
-                return self.report_error("Expected unary_expression");
+                return self.report_error("expected unary_expression");
             }
             true
         } else {
@@ -542,6 +556,35 @@ mod tests {
         assert!(!parser.is_expression());
     }
 
+    /// Helper function to strip ANSI escape codes from a string for testing purposes
+    fn strip_ansi_codes(input: &str) -> String {
+        // Basic regex to remove ANSI escape sequences
+        // ANSI escape sequences start with ESC (0x1B) followed by '[' and end with a letter
+        let mut result = String::new();
+        let mut chars = input.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\x1B' {
+                // Found ESC, check if it's followed by '['
+                if chars.peek() == Some(&'[') {
+                    chars.next(); // consume '['
+                    // Skip until we find a letter (which ends the escape sequence)
+                    while let Some(ch) = chars.next() {
+                        if ch.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else {
+                    result.push(ch);
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+
+        result
+    }
+
     #[test]
     fn test_error_formatting() {
         let source = "10 + 20 30"; // Missing operator between 20 and 30
@@ -560,7 +603,8 @@ mod tests {
         let formatted_error = parser.format_error(source, "test.cel", 1u32);
         assert!(formatted_error.is_some());
 
-        let formatted = formatted_error.unwrap();
+        // Strip ANSI codes for testing
+        let formatted = strip_ansi_codes(&formatted_error.unwrap());
         assert!(formatted.contains("error: Unexpected token"));
         assert!(formatted.contains("test.cel:1:")); // Should include line number
         assert!(formatted.contains("1 | 10 + 20 30")); // Should show the line with line number
@@ -580,7 +624,8 @@ mod tests {
         let formatted_error = parser.format_error(source, "large_file.rs", 42u32);
         assert!(formatted_error.is_some());
 
-        let formatted = formatted_error.unwrap();
+        // Strip ANSI codes for testing
+        let formatted = strip_ansi_codes(&formatted_error.unwrap());
         assert!(formatted.contains("error: Unexpected token"));
         assert!(formatted.contains("large_file.rs:42:")); // Should show offset line number
         assert!(formatted.contains("42 | a + b c")); // Should show the line with offset line number
@@ -591,20 +636,17 @@ mod tests {
     fn print_error_formatting() {
         let line = line!() + 1;
         let source = r#"
-            10 + 20 30 // Unexpected token
+
+            10 + 20 * 30 // Unexpected token
+
         "#;
+
         let input = TokenStream::from_str(source).unwrap();
         let mut parser = CELParser::new(input.into_iter());
 
         if !parser.is_expression() {
-            // Format error starting at line 1
             if let Some(formatted_error) = parser.format_error(source, file!(), line) {
                 println!("{}", formatted_error);
-                // error: Unexpected token
-                // --> cel-parser/src/lib.rs:593:21
-                //     |
-                // 593 |             10 + 20 30 // Unexpected token
-                //     |                     ^^
             }
         }
     }
