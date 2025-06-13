@@ -85,7 +85,6 @@ impl DynSegment {
     ///
     /// To avoid reversing the arguments and reversing the slice, this operation
     /// is done in argument order, not stack order.
-
     // REVISIT: pop_types should just return the last n padding values
     fn pop_types<L: ListTypeIteratorAdvance<TypeId> + 'static>(&mut self) -> Result<()> {
         ensure!(
@@ -258,15 +257,15 @@ impl DynSegment {
         /*
            - pass the stack to call0
         */
-        self.segment.raw0_(move |mut stack| {
+        self.segment.raw0_(move |stack| {
             let conditional = unsafe { stack.pop(p0) };
             if conditional {
                 unsafe {
-                    raw_segment_0.call0_stack(&mut stack)?;
+                    raw_segment_0.call0_stack(stack)?;
                 }
             } else {
                 unsafe {
-                    raw_segment_1.call0_stack(&mut stack)?;
+                    raw_segment_1.call0_stack(stack)?;
                 }
             }
             Ok(())

@@ -265,6 +265,15 @@ impl RawSegment {
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
+    /// Executes all operations in the segment on the supplied stack.
+    ///
+    /// # Errors
+    /// Halts execution and returns an error if any operation returns an error.
+    ///
+    /// # Safety
+    ///
+    /// Precondition: The stack must be in the correct state (base alignment, index, and values)
+    /// for the operations in the segment.
     pub unsafe fn call0_stack(&self, stack: &mut RawStack) -> Result<()> {
         let mut p = 0;
         for op in &self.ops {
