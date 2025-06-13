@@ -482,7 +482,7 @@ mod tests {
         assert!(!parser.is_expression());
         assert_eq!(
             parser.output.to_string(),
-            "compile_error ! (\"Unexpected token\")"
+            "compile_error ! (\"unexpected token\")"
         );
     }
 
@@ -597,7 +597,7 @@ mod tests {
         // Test error message extraction
         let error_msg = parser.extract_error_message();
         assert!(error_msg.is_some());
-        assert_eq!(error_msg.unwrap(), "Unexpected token");
+        assert_eq!(error_msg.unwrap(), "unexpected token");
 
         // Test error formatting
         let formatted_error = parser.format_error(source, "test.cel", 1u32);
@@ -605,7 +605,7 @@ mod tests {
 
         // Strip ANSI codes for testing
         let formatted = strip_ansi_codes(&formatted_error.unwrap());
-        assert!(formatted.contains("error: Unexpected token"));
+        assert!(formatted.contains("error: unexpected token"));
         assert!(formatted.contains("test.cel:1:")); // Should include line number
         assert!(formatted.contains("1 | 10 + 20 30")); // Should show the line with line number
         assert!(formatted.contains("^")); // Should have carets pointing to the error
@@ -626,7 +626,7 @@ mod tests {
 
         // Strip ANSI codes for testing
         let formatted = strip_ansi_codes(&formatted_error.unwrap());
-        assert!(formatted.contains("error: Unexpected token"));
+        assert!(formatted.contains("error: unexpected token"));
         assert!(formatted.contains("large_file.rs:42:")); // Should show offset line number
         assert!(formatted.contains("42 | a + b c")); // Should show the line with offset line number
         assert!(formatted.contains("^")); // Should have carets pointing to the error

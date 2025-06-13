@@ -34,6 +34,14 @@ impl RawSegment {
         }
     }
 
+    pub(crate) fn base_alignment(&self) -> usize {
+        self.base_alignment
+    }
+
+    pub(crate) fn update_base_alignment(&mut self, alignment: usize) {
+        self.base_alignment = max(self.base_alignment, alignment);
+    }
+
     /// Pushes a value into the segment's storage and registers its dropper.
     fn push_storage<T>(&mut self, value: T)
     where
@@ -42,6 +50,22 @@ impl RawSegment {
         self.storage.push(value);
         self.dropper
             .push(|storage, p| unsafe { storage.drop_in_place::<T>(p) });
+    }
+
+    /// [Need a better name for this] raw0_ pushes an operation that takes the stack as the only
+    /// argument and handles pushing its result to the stack directly. This can probably be merged
+    /// with raw0. It is used in join2 in dyn_segment.rs, and some of that implementation should be
+    /// lowered into this file.
+    pub fn raw0_<F>(&mut self, op: F)
+    where
+        F: Fn(&mut RawStack) -> Result<()> + 'static,
+    {
+        self.push_storage(op);
+        self.ops.push(|storage, p, stack| {
+            let (f, r) = unsafe { storage.next::<F>(p) };
+            f(stack)?;
+            Ok(r)
+        });
     }
 
     pub fn raw0<R, F>(&mut self, op: F)
@@ -241,6 +265,14 @@ impl RawSegment {
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
+    pub unsafe fn call0_stack(&self, stack: &mut RawStack) -> Result<()> {
+        let mut p = 0;
+        for op in &self.ops {
+            p = op(&self.storage, p, stack)?;
+        }
+        Ok(())
+    }
+
     /// Executes all operations in the segment and returns the final result.
     ///
     /// # Errors
@@ -254,9 +286,8 @@ impl RawSegment {
         T: 'static,
     {
         let mut stack = RawStack::with_base_alignment(self.base_alignment);
-        let mut p = 0;
-        for op in &self.ops {
-            p = op(&self.storage, p, &mut stack)?;
+        unsafe {
+            self.call0_stack(&mut stack)?;
         }
         Ok(unsafe { stack.pop(false) })
     }

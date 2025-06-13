@@ -7,23 +7,24 @@ use crate::raw_stack::RawStack;
 use anyhow::Result;
 use anyhow::ensure;
 use std::any::TypeId;
+use std::cmp::max;
 pub struct StackInfo {
     pub(crate) stack_id: TypeId,
     stack_unwind: Dropper,
     padded: bool,
 }
 
-pub trait ToTypeIDList: List {
+pub trait ToTypeIdList: List {
     fn to_stack_info_list() -> Vec<StackInfo>;
 }
 
-impl ToTypeIDList for CNil<()> {
+impl ToTypeIdList for CNil<()> {
     fn to_stack_info_list() -> Vec<StackInfo> {
         Vec::new()
     }
 }
 
-impl<H: 'static, T: ToTypeIDList + 'static> ToTypeIDList for CStackList<H, T> {
+impl<H: 'static, T: ToTypeIdList + 'static> ToTypeIdList for CStackList<H, T> {
     fn to_stack_info_list() -> Vec<StackInfo> {
         let mut list = T::to_stack_info_list();
         list.push(StackInfo {
@@ -54,7 +55,7 @@ impl DynSegment {
     #[must_use]
     pub fn new<Args: IntoCStackList>() -> Self
     where
-        ReverseList<Args::Output>: ToTypeIDList,
+        ReverseList<Args::Output>: ToTypeIdList,
     {
         let stack_ids = ReverseList::<Args::Output>::to_stack_info_list();
         DynSegment {
@@ -65,6 +66,18 @@ impl DynSegment {
         }
     }
 
+    /// Create a DynSegment that is a fragment of a larger segment, it may
+    /// be used to implement conditional execution.
+    #[must_use]
+    pub fn new_fragment(&self) -> Self {
+        DynSegment {
+            segment: RawSegment::new(),
+            argument_ids: Vec::<TypeId>::new(), // should be optional?
+            stack_ids: Vec::<StackInfo>::new(),
+            stack_index: self.stack_index,
+        }
+    }
+
     /// Verifies that the argument types match the expected types on the type stack.
     ///
     /// Returns an error if the argument types don't match the expected types or if
@@ -72,6 +85,8 @@ impl DynSegment {
     ///
     /// To avoid reversing the arguments and reversing the slice, this operation
     /// is done in argument order, not stack order.
+
+    // REVISIT: pop_types should just return the last n padding values
     fn pop_types<L: ListTypeIteratorAdvance<TypeId> + 'static>(&mut self) -> Result<()> {
         ensure!(
             L::LENGTH <= self.stack_ids.len(),
@@ -214,6 +229,48 @@ impl DynSegment {
         self.pop_types::<(T, (U, (V, ())))>()?;
         self.segment.push_op3(op, p0, p1, p2);
         self.push_type::<R>();
+        Ok(())
+    }
+
+    pub fn join2(&mut self, mut fragment_0: DynSegment, fragment_1: DynSegment) -> Result<()> {
+        let [p0] = self.get_last_n_padded::<1>();
+        self.pop_types::<(bool, ())>()?;
+
+        // fragment results must match and cannot take arguments.
+        assert!(fragment_0.argument_ids.is_empty());
+        assert!(fragment_1.argument_ids.is_empty());
+        assert_eq!(fragment_0.stack_ids.len(), 1);
+        assert_eq!(fragment_1.stack_ids.len(), 1);
+        assert_eq!(
+            fragment_0.stack_ids[0].stack_id,
+            fragment_1.stack_ids[0].stack_id
+        );
+
+        self.stack_ids.push(fragment_0.stack_ids.pop().unwrap());
+        self.segment.update_base_alignment(max(
+            fragment_0.segment.base_alignment(),
+            fragment_1.segment.base_alignment(),
+        ));
+
+        let raw_segment_0 = fragment_0.segment;
+        let raw_segment_1 = fragment_1.segment;
+
+        /*
+           - pass the stack to call0
+        */
+        self.segment.raw0_(move |mut stack| {
+            let conditional = unsafe { stack.pop(p0) };
+            if conditional {
+                unsafe {
+                    raw_segment_0.call0_stack(&mut stack)?;
+                }
+            } else {
+                unsafe {
+                    raw_segment_1.call0_stack(&mut stack)?;
+                }
+            }
+            Ok(())
+        });
         Ok(())
     }
 
@@ -362,40 +419,24 @@ mod tests {
         Ok(())
     }
 
-    /*     #[test]
+    #[test]
     fn example_conditional_expression() -> Result<(), anyhow::Error> {
-        let mut segment1 = DynSegment::new::<()>();
-        let mut segment2 = DynSegment::new::<()>();
-
-        segment1.op0(|| -> u32 { 12 });
-        segment1.op0(|| -> u32 { 100 });
-        segment1.op2(|x: u32, y: u32| -> u32 { x + y })?;
-
-        segment2.op0(|| -> u32 { 42 });
-        segment2.op0(|| -> u32 { 56 });
-        segment2.op2(|x: u32, y: u32| -> u32 { x * y })?;
-
         let mut root_segment = DynSegment::new::<()>();
         root_segment.op0(|| true);
         root_segment.op0(|| false);
-        root_segment.op2(|x: bool, y: bool| x || y);
+        root_segment.op2(|x: bool, y: bool| x && y)?;
 
-        root_segment.op0(move || segment1);
-        root_segment.op0(move || segment2);
+        let mut segment_1 = root_segment.new_fragment();
+        segment_1.op0(|| 42u32);
 
-        root_segment.op3(
-            |conditional: bool, mut seg1: DynSegment, mut seg2: DynSegment| {
-                if conditional {
-                    seg1.call0::<u32>().unwrap()
-                } else {
-                    seg2.call0::<u32>().unwrap()
-                }
-            },
-        );
+        let mut segment_2 = root_segment.new_fragment();
+        segment_2.op0(|| 2u32);
+
+        root_segment.join2(segment_1, segment_2)?;
 
         let result = root_segment.call0::<u32>()?;
         println!("Result: {}", result);
 
         Ok(())
-    } */
+    }
 }
