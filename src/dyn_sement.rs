@@ -89,7 +89,7 @@ impl DynSegment {
     fn pop_types<L: ListTypeIteratorAdvance<TypeId> + 'static>(&mut self) -> Result<()> {
         ensure!(
             L::LENGTH <= self.stack_ids.len(),
-            "Too many arguments: expected {}, got {}",
+            "too many arguments: expected {}, got {}",
             L::LENGTH,
             self.stack_ids.len()
         );
@@ -236,13 +236,29 @@ impl DynSegment {
         self.pop_types::<(bool, ())>()?;
 
         // fragment results must match and cannot take arguments.
-        assert!(fragment_0.argument_ids.is_empty());
-        assert!(fragment_1.argument_ids.is_empty());
-        assert_eq!(fragment_0.stack_ids.len(), 1);
-        assert_eq!(fragment_1.stack_ids.len(), 1);
-        assert_eq!(
-            fragment_0.stack_ids[0].stack_id,
-            fragment_1.stack_ids[0].stack_id
+        ensure!(
+            fragment_0.argument_ids.is_empty(),
+            "fragment 0 cannot take arguments, but has {} argument(s)",
+            fragment_0.argument_ids.len()
+        );
+        ensure!(
+            fragment_1.argument_ids.is_empty(),
+            "fragment 1 cannot take arguments, but has {} argument(s)",
+            fragment_1.argument_ids.len()
+        );
+        ensure!(
+            fragment_0.stack_ids.len() == 1,
+            "fragment 0 must have exactly 1 result, but has {}",
+            fragment_0.stack_ids.len()
+        );
+        ensure!(
+            fragment_1.stack_ids.len() == 1,
+            "fragment 1 must have exactly 1 result, but has {}",
+            fragment_1.stack_ids.len()
+        );
+        ensure!(
+            fragment_0.stack_ids[0].stack_id == fragment_1.stack_ids[0].stack_id,
+            "fragment result types must match"
         );
 
         self.stack_ids.push(fragment_0.stack_ids.pop().unwrap());
@@ -291,7 +307,7 @@ impl DynSegment {
     {
         if !self.argument_ids.is_empty() {
             return Err(anyhow::anyhow!(
-                "Expected no arguments, but segment requires {} argument(s)",
+                "expected no arguments, but segment requires {} argument(s)",
                 self.argument_ids.len()
             ));
         }
@@ -322,13 +338,13 @@ impl DynSegment {
     {
         if self.argument_ids.len() != 1 {
             return Err(anyhow::anyhow!(
-                "Expected 1 argument, but segment requires {} argument(s)",
+                "expected 1 argument, but segment requires {} argument(s)",
                 self.argument_ids.len()
             ));
         }
         if self.argument_ids[0] != TypeId::of::<A>() {
             return Err(anyhow::anyhow!(
-                "Argument type mismatch: expected {}, got {}",
+                "argument type mismatch: expected {}, got {}",
                 std::any::type_name::<A>(),
                 std::any::type_name::<A>() // TODO: Need to store type names along with TypeId
             ));
