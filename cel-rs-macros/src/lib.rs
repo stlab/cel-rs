@@ -62,21 +62,21 @@ pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
 /// ```
 #[proc_macro]
 pub fn print_tokens(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
-    println!("{}", input);
+    println!("{input}");
     let input = TokenStream::from(input);
     for e in input {
         match e {
             proc_macro2::TokenTree::Punct(punct) => {
-                println!("punct: {:?}", punct);
+                println!("punct: {punct:?}");
             }
             proc_macro2::TokenTree::Ident(ident) => {
-                println!("ident: {:?}", ident);
+                println!("ident: {ident:?}");
             }
             proc_macro2::TokenTree::Group(group) => {
-                println!("group: {:?}", group);
+                println!("group: {group:?}");
             }
             proc_macro2::TokenTree::Literal(lit) => {
-                println!("literal: {:?}", lit);
+                println!("literal: {lit:?}");
             }
         }
     }

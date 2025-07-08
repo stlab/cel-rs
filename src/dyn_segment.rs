@@ -3,7 +3,7 @@ use crate::list_traits::{List, ListTypeIteratorAdvance, TypeIdIterator};
 use crate::memory::align_index;
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
-use crate::{CStackListMemoryLayout, ReverseList};
+use crate::{CStackListHeadLimit, CStackListHeadPadded, ReverseList};
 use anyhow::Result;
 use anyhow::ensure;
 use std::any::TypeId;
@@ -24,7 +24,7 @@ impl ToTypeIdList for CNil<()> {
     }
 }
 
-impl<H: 'static, T: ToTypeIdList + 'static + CStackListMemoryLayout> ToTypeIdList
+impl<H: 'static, T: ToTypeIdList + 'static + CStackListHeadLimit> ToTypeIdList
     for CStackList<H, T>
 {
     fn to_stack_info_list() -> Vec<StackInfo> {

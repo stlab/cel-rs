@@ -3,12 +3,12 @@ use crate::dyn_segment::DynSegment;
 use crate::list_traits::{EmptyList, IntoList, List, ListTypeIteratorAdvance, TypeIdIterator};
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
-use crate::{CStackListMemoryLayout, ReverseList};
+use crate::{CStackListHeadLimit, CStackListHeadPadded, ReverseList};
 use anyhow::{Result, ensure};
 use std::any::TypeId;
 use std::result::Result::Ok;
 
-pub trait DropStack: List + CStackListMemoryLayout {
+pub trait DropStack: List {
     fn drop_stack(stack: &mut RawStack);
 }
 
@@ -16,7 +16,7 @@ impl DropStack for CNil<()> {
     fn drop_stack(_stack: &mut RawStack) {}
 }
 
-impl<H: 'static, T: DropStack + CStackListMemoryLayout> DropStack for CStackList<H, T> {
+impl<H: 'static, T: DropStack + CStackListHeadLimit> DropStack for CStackList<H, T> {
     fn drop_stack(stack: &mut RawStack) {
         unsafe { stack.drop::<H>(Self::HEAD_PADDED) };
         T::drop_stack(stack);
@@ -99,8 +99,8 @@ where
 
 impl<Args: IntoList + 'static, Stack> Segment<Args, Stack>
 where
-    Stack: DropStack + 'static + CStackListMemoryLayout,
-    Stack::Tail: CStackListMemoryLayout,
+    Stack: DropStack + 'static,
+    Stack::Tail: CStackListHeadLimit,
 {
     /// Private method to change the stack type.
     fn into<NewStack: List + 'static>(self) -> Segment<Args, NewStack> {
@@ -138,6 +138,7 @@ where
     /// Pushes a unary operation that takes the current stack value and returns a new value.
     pub fn op1<R, F>(mut self, op: F) -> Segment<Args, CStackList<R, Stack::Tail>>
     where
+        Stack: CStackListHeadPadded,
         F: Fn(Stack::Head) -> R + 'static,
         R: 'static,
     {
@@ -147,6 +148,7 @@ where
 
     pub fn op1r<R, F>(mut self, op: F) -> Segment<Args, CStackList<R, Stack::Tail>>
     where
+        Stack: CStackListHeadPadded,
         F: Fn(Stack::Head) -> Result<R> + 'static,
         R: 'static,
     {
@@ -161,12 +163,14 @@ where
         op: F,
     ) -> Segment<Args, <<Stack::Tail as List>::Tail as List>::Push<R>>
     where
+        Stack: CStackListHeadPadded,
+        Stack::Tail: CStackListHeadPadded,
         F: Fn(<Stack::Tail as List>::Head, Stack::Head) -> R + 'static,
         R: 'static,
     {
         self.segment.push_op2(
             op,
-            <Stack::Tail as CStackListMemoryLayout>::HEAD_PADDED,
+            <Stack::Tail as CStackListHeadPadded>::HEAD_PADDED,
             Stack::HEAD_PADDED,
         );
         self.into()
@@ -194,7 +198,7 @@ pub trait Callable<Args> {
 
 impl<T: DropStack + 'static> Callable<()> for Segment<(), T>
 where
-    T::Tail: EmptyList + CStackListMemoryLayout,
+    T::Tail: EmptyList + CStackListHeadLimit,
 {
     type Output = Result<T::Head>;
     fn call(&self, _args: ()) -> Self::Output {
@@ -204,7 +208,7 @@ where
 
 impl<T: DropStack + 'static, A: 'static> Callable<(A,)> for Segment<(A,), T>
 where
-    T::Tail: EmptyList + CStackListMemoryLayout,
+    T::Tail: EmptyList + CStackListHeadLimit,
 {
     type Output = Result<T::Head>;
     fn call(&self, args: (A,)) -> Self::Output {
@@ -214,7 +218,7 @@ where
 
 impl<T: DropStack + 'static, A: 'static, B: 'static> Callable<(A, B)> for Segment<(A, B), T>
 where
-    T::Tail: EmptyList + CStackListMemoryLayout,
+    T::Tail: EmptyList + CStackListHeadLimit,
 {
     type Output = Result<T::Head>;
     fn call(&self, args: (A, B)) -> Self::Output {

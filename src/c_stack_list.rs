@@ -47,32 +47,36 @@ use crate::list_traits::{
 /// does not change the memory layout of prior items.
 #[repr(C)]
 #[derive(Clone)]
-pub struct CStackList<H, T: CStackListMemoryLayout>(pub T, pub H);
+pub struct CStackList<H, T: CStackListHeadLimit>(pub T, pub H);
 
 /// A trait describing the memory layout of a [`CStackList`].
-pub trait CStackListMemoryLayout {
+pub trait CStackListHeadLimit {
     /// The offset to the _end_ of the head element.
     const HEAD_LIMIT: usize;
+}
+
+pub trait CStackListHeadPadded {
     /// Whether the head element is padded to the next alignment boundary.
     const HEAD_PADDED: bool;
 }
 
-impl<H: 'static, T: CStackListMemoryLayout> CStackListMemoryLayout for CStackList<H, T> {
-    const HEAD_LIMIT: usize = offset_of!(Self, 1) + size_of::<H>();
+impl<H: 'static, T: CStackListHeadLimit> CStackListHeadPadded for CStackList<H, T> {
     const HEAD_PADDED: bool = offset_of!(Self, 1) != T::HEAD_LIMIT;
 }
 
-impl<T: CStackListMemoryLayout> CStackListMemoryLayout for CNil<T> {
+impl<H: 'static, T: CStackListHeadLimit> CStackListHeadLimit for CStackList<H, T> {
+    const HEAD_LIMIT: usize = offset_of!(Self, 1) + size_of::<H>();
+}
+
+impl<T: CStackListHeadLimit> CStackListHeadLimit for CNil<T> {
     const HEAD_LIMIT: usize = T::HEAD_LIMIT;
-    const HEAD_PADDED: bool = T::HEAD_PADDED;
 }
 
-impl CStackListMemoryLayout for () {
+impl CStackListHeadLimit for () {
     const HEAD_LIMIT: usize = 0;
-    const HEAD_PADDED: bool = false;
 }
 
-impl<H: 'static, T: List + CStackListMemoryLayout> List for CStackList<H, T> {
+impl<H: 'static, T: List + CStackListHeadLimit> List for CStackList<H, T> {
     type Empty = CNil<()>;
     fn empty() -> Self::Empty {
         CNil(())
@@ -116,14 +120,14 @@ impl<T: IntoList> IntoCStackList for T {
     }
 }
 
-impl<H: 'static, T: List + CStackListMemoryLayout> ListIndex<RangeFrom<U0>> for CStackList<H, T> {
+impl<H: 'static, T: List + CStackListHeadLimit> ListIndex<RangeFrom<U0>> for CStackList<H, T> {
     type Output = CStackList<H, T>;
     fn index(&self, _index: RangeFrom<U0>) -> &Self::Output {
         self
     }
 }
 
-impl<H: 'static, T: List + CStackListMemoryLayout, U: Unsigned, B: Bit>
+impl<H: 'static, T: List + CStackListHeadLimit, U: Unsigned, B: Bit>
     ListIndex<RangeFrom<UInt<U, B>>> for CStackList<H, T>
 where
     T: ListIndex<RangeFrom<Sub1<UInt<U, B>>>>,
@@ -135,7 +139,7 @@ where
     }
 }
 
-impl<H: 'static, T: List + CStackListMemoryLayout> ListIndex<RangeTo<U0>> for CStackList<H, T> {
+impl<H: 'static, T: List + CStackListHeadLimit> ListIndex<RangeTo<U0>> for CStackList<H, T> {
     type Output = CNil<CStackList<H, T>>;
     fn index(&self, _index: RangeTo<U0>) -> &Self::Output {
         unsafe { &*ptr::from_ref(self).cast::<Self::Output>() }
@@ -144,8 +148,8 @@ impl<H: 'static, T: List + CStackListMemoryLayout> ListIndex<RangeTo<U0>> for CS
 
 type TailRangeTo<T, U, B> = <T as ListIndex<RangeTo<Sub1<UInt<U, B>>>>>::Output;
 
-impl<H: 'static, T: List + CStackListMemoryLayout, U: Unsigned, B: Bit>
-    ListIndex<RangeTo<UInt<U, B>>> for CStackList<H, T>
+impl<H: 'static, T: List + CStackListHeadLimit, U: Unsigned, B: Bit> ListIndex<RangeTo<UInt<U, B>>>
+    for CStackList<H, T>
 where
     T: ListIndex<RangeTo<Sub1<UInt<U, B>>>>,
     TailRangeTo<T, U, B>: List,
@@ -157,7 +161,7 @@ where
     }
 }
 
-impl<H: 'static, T: List + CStackListMemoryLayout> ListIndex<RangeToInclusive<U0>>
+impl<H: 'static, T: List + CStackListHeadLimit> ListIndex<RangeToInclusive<U0>>
     for CStackList<H, T>
 {
     type Output = CStackList<H, CNil<T>>;
@@ -168,7 +172,7 @@ impl<H: 'static, T: List + CStackListMemoryLayout> ListIndex<RangeToInclusive<U0
 
 type TailRangeToInclusive<T, U, B> = <T as ListIndex<RangeToInclusive<Sub1<UInt<U, B>>>>>::Output;
 
-impl<H: 'static, T: List + CStackListMemoryLayout, U: Unsigned, B: Bit>
+impl<H: 'static, T: List + CStackListHeadLimit, U: Unsigned, B: Bit>
     ListIndex<RangeToInclusive<UInt<U, B>>> for CStackList<H, T>
 where
     T: ListIndex<RangeToInclusive<Sub1<UInt<U, B>>>>,
@@ -181,14 +185,14 @@ where
     }
 }
 
-impl<H: 'static, T: List + CStackListMemoryLayout> ListIndex<U0> for CStackList<H, T> {
+impl<H: 'static, T: List + CStackListHeadLimit> ListIndex<U0> for CStackList<H, T> {
     type Output = H;
     fn index(&self, _index: U0) -> &Self::Output {
         self.head()
     }
 }
 
-impl<H: 'static, T: List + CStackListMemoryLayout, U: Unsigned, B: Bit> ListIndex<UInt<U, B>>
+impl<H: 'static, T: List + CStackListHeadLimit, U: Unsigned, B: Bit> ListIndex<UInt<U, B>>
     for CStackList<H, T>
 where
     T: ListIndex<Sub1<UInt<U, B>>>,
@@ -201,7 +205,7 @@ where
 }
 
 // Implement Index in terms of ListIndex for CStackList
-impl<H: 'static, T: List + CStackListMemoryLayout, Idx> Index<Idx> for CStackList<H, T>
+impl<H: 'static, T: List + CStackListHeadLimit, Idx> Index<Idx> for CStackList<H, T>
 where
     Self: ListIndex<Idx>,
     <Self as ListIndex<Idx>>::Output: Sized,
@@ -217,13 +221,13 @@ trait DebugHelper {
     fn fmt_helper(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 
-impl<T: CStackListMemoryLayout> DebugHelper for CNil<T> {
+impl<T: CStackListHeadLimit> DebugHelper for CNil<T> {
     fn fmt_helper(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, ")")
     }
 }
 
-impl<H: 'static, T: List + CStackListMemoryLayout> DebugHelper for CStackList<H, T>
+impl<H: 'static, T: List + CStackListHeadLimit> DebugHelper for CStackList<H, T>
 where
     H: fmt::Debug,
     T: DebugHelper,
@@ -234,13 +238,13 @@ where
     }
 }
 
-impl<T: CStackListMemoryLayout> fmt::Debug for CNil<T> {
+impl<T: CStackListHeadLimit> fmt::Debug for CNil<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "()")
     }
 }
 
-impl<H: 'static, T: List + CStackListMemoryLayout> fmt::Debug for CStackList<H, T>
+impl<H: 'static, T: List + CStackListHeadLimit> fmt::Debug for CStackList<H, T>
 where
     H: fmt::Debug,
     T: DebugHelper,
@@ -251,14 +255,13 @@ where
     }
 }
 
-impl<T: List + CStackListMemoryLayout, O: List> std::cmp::PartialEq<O> for CNil<T> {
+impl<T: List + CStackListHeadLimit, O: List> std::cmp::PartialEq<O> for CNil<T> {
     fn eq(&self, other: &O) -> bool {
         other.is_empty()
     }
 }
 
-impl<H: 'static, T: List + CStackListMemoryLayout, O: List> std::cmp::PartialEq<O>
-    for CStackList<H, T>
+impl<H: 'static, T: List + CStackListHeadLimit, O: List> std::cmp::PartialEq<O> for CStackList<H, T>
 where
     H: PartialEq<O::Head>,
     T: PartialEq<O::Tail>,
@@ -269,9 +272,9 @@ where
 }
 
 #[repr(C)]
-pub struct CNil<T: CStackListMemoryLayout>(T);
+pub struct CNil<T: CStackListHeadLimit>(T);
 
-impl<T: CStackListMemoryLayout> EmptyList for CNil<T> {
+impl<T: CStackListHeadLimit> EmptyList for CNil<T> {
     type PushFirst<U: 'static> = CStackList<U, CNil<T>>;
     fn push_first<U: 'static>(self, item: U) -> Self::PushFirst<U> {
         CStackList(self, item)
@@ -283,13 +286,13 @@ impl<T: CStackListMemoryLayout> EmptyList for CNil<T> {
     }
 }
 
-impl<T: CStackListMemoryLayout, P: ListTypeProperty> ListTypeIteratorAdvance<P> for CNil<T> {
+impl<T: CStackListHeadLimit, P: ListTypeProperty> ListTypeIteratorAdvance<P> for CNil<T> {
     fn advancer<R: List>(_iter: &mut ListTypeIterator<R, P>) -> Option<P::Output> {
         None
     }
 }
 
-impl<P: ListTypeProperty, H: 'static, T: ListTypeIteratorAdvance<P> + CStackListMemoryLayout>
+impl<P: ListTypeProperty, H: 'static, T: ListTypeIteratorAdvance<P> + CStackListHeadLimit>
     ListTypeIteratorAdvance<P> for CStackList<H, T>
 {
     fn advancer<R: List>(iter: &mut ListTypeIterator<R, P>) -> Option<P::Output> {
