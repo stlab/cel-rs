@@ -1,5 +1,6 @@
 use std::iter::Peekable;
 
+use litrs::StringLit;
 use owo_colors::OwoColorize;
 use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 use quote::quote_spanned;
@@ -70,13 +71,27 @@ pub struct CELParser<I: Iterator<Item = TokenTree>> {
 
 impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
     pub fn extract_error_message(&self) -> Option<String> {
-        let output_str = self.output.to_string();
+        let mut tokens = self.output.clone().into_iter();
 
-        // Look for compile_error ! ("message") - note the spaces
-        if let Some(start) = output_str.find("compile_error ! (\"") {
-            let start = start + "compile_error ! (\"".len();
-            if let Some(end) = output_str[start..].find("\")") {
-                return Some(output_str[start..start + end].to_string());
+        while let Some(token) = tokens.next() {
+            if let TokenTree::Ident(ident) = token {
+                if ident == "compile_error" {
+                    if let Some(TokenTree::Punct(punct)) = tokens.next() {
+                        if punct.as_char() == '!' {
+                            if let Some(TokenTree::Group(group)) = tokens.next() {
+                                if group.delimiter() == Delimiter::Parenthesis {
+                                    let mut group_tokens = group.stream().into_iter();
+                                    if let Some(TokenTree::Literal(lit)) = group_tokens.next() {
+                                        // Clean extraction using litrs
+                                        if let Ok(string_lit) = StringLit::try_from(lit) {
+                                            return Some(string_lit.value());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         None
@@ -637,7 +652,7 @@ mod tests {
         let line = line!() + 1;
         let source = r#"
 
-            10 + 20 * 30 // Unexpected token
+            10 + 20  30 // Unexpected token
 
         "#;
 
