@@ -1,9 +1,9 @@
-use crate::ReverseList;
 use crate::c_stack_list::{CNil, CStackList, IntoCStackList};
 use crate::list_traits::{List, ListTypeIteratorAdvance, TypeIdIterator};
 use crate::memory::align_index;
 use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
+use crate::{CStackListMemoryLayout, ReverseList};
 use anyhow::Result;
 use anyhow::ensure;
 use std::any::TypeId;
@@ -24,13 +24,15 @@ impl ToTypeIdList for CNil<()> {
     }
 }
 
-impl<H: 'static, T: ToTypeIdList + 'static> ToTypeIdList for CStackList<H, T> {
+impl<H: 'static, T: ToTypeIdList + 'static + CStackListMemoryLayout> ToTypeIdList
+    for CStackList<H, T>
+{
     fn to_stack_info_list() -> Vec<StackInfo> {
         let mut list = T::to_stack_info_list();
         list.push(StackInfo {
             stack_id: TypeId::of::<H>(),
-            stack_unwind: |stack| unsafe { stack.drop::<H>(Self::HEAD_PADDING != 0) },
-            padded: Self::HEAD_PADDING != 0,
+            stack_unwind: |stack| unsafe { stack.drop::<H>(Self::HEAD_PADDED) },
+            padded: Self::HEAD_PADDED,
         });
         list
     }

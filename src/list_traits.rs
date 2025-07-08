@@ -42,10 +42,6 @@ pub trait List {
 
     // ---
 
-    /// For a `CStackList`, the number of padding bytes between Tail and Head.
-    /// This property will be moved to `CStackList` once I figure out a clean way to do it.
-    const HEAD_PADDING: usize;
-
     /// The style of `List` appended to `Self`
     type Append<U: List>: List;
 
@@ -157,7 +153,6 @@ impl<T: EmptyList> List for T {
     }
 
     const LENGTH: usize = 0;
-    const HEAD_PADDING: usize = 0;
 
     type Append<U: List> = U;
     fn append<U: List>(self, other: U) -> Self::Append<U> {

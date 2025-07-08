@@ -14,7 +14,6 @@ cargo clippy --workspace
 ```
 
 Figure out if the call operators should be able to reuse the same stack.
-Move HEAD_PADDING trait to separate trait for C Lists
 Rename TupeTraits to something meaningful
 Need to implement adding a segment to a segment - accumulate base alignments - can you add an incomplete segment?
 

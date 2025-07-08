@@ -1,7 +1,7 @@
 //! cel-rs provides a stack-based runtime for developing domain specific languages, including
-//! concative languages to describe concurrent processes. A sequence is a list of operations (the
-//! machine instructions). Each operation is a closure that takes it's arguments from the stack and
-//! the result is pushed back onto the stack.
+//! concatenative languages to describe concurrent processes. A sequence is a list of operations
+//! (the machine instructions). Each operation is a closure that takes it's arguments from the stack
+//! and the result is pushed back onto the stack.
 //!
 //! Segments can be created in two ways.
 //!
@@ -34,7 +34,7 @@
 
 // #![warn(missing_docs)]
 pub mod c_stack_list;
-pub mod dyn_sement;
+pub mod dyn_segment;
 pub mod list_traits;
 pub mod memory;
 pub mod raw_segment;
@@ -45,7 +45,7 @@ pub mod segment;
 pub mod tuple_list;
 
 pub use c_stack_list::*;
-pub use dyn_sement::*;
+pub use dyn_segment::*;
 pub use list_traits::*;
 pub use memory::*;
 pub use raw_segment::*;
