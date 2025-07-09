@@ -1,5 +1,6 @@
 use std::iter::Peekable;
 
+use litrs::StringLit;
 use owo_colors::OwoColorize;
 use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 use quote::quote_spanned;
@@ -70,13 +71,27 @@ pub struct CELParser<I: Iterator<Item = TokenTree>> {
 
 impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
     pub fn extract_error_message(&self) -> Option<String> {
-        let output_str = self.output.to_string();
+        let mut tokens = self.output.clone().into_iter();
 
-        // Look for compile_error ! ("message") - note the spaces
-        if let Some(start) = output_str.find("compile_error ! (\"") {
-            let start = start + "compile_error ! (\"".len();
-            if let Some(end) = output_str[start..].find("\")") {
-                return Some(output_str[start..start + end].to_string());
+        while let Some(token) = tokens.next() {
+            if let TokenTree::Ident(ident) = token {
+                if ident == "compile_error" {
+                    if let Some(TokenTree::Punct(punct)) = tokens.next() {
+                        if punct.as_char() == '!' {
+                            if let Some(TokenTree::Group(group)) = tokens.next() {
+                                if group.delimiter() == Delimiter::Parenthesis {
+                                    let mut group_tokens = group.stream().into_iter();
+                                    if let Some(TokenTree::Literal(lit)) = group_tokens.next() {
+                                        // Clean extraction using litrs
+                                        if let Ok(string_lit) = StringLit::try_from(lit) {
+                                            return Some(string_lit.value().to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         None
@@ -469,14 +484,14 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    fn test_simple_expression() {
+    fn simple_expression() {
         let input = TokenStream::from_str("10").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
     }
 
     #[test]
-    fn test_incomplete_expression() {
+    fn incomplete_expression() {
         let input = TokenStream::from_str("10 + 25 25").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(!parser.is_expression());
@@ -487,70 +502,70 @@ mod tests {
     }
 
     #[test]
-    fn test_arithmetic_expression() {
+    fn arithmetic_expression() {
         let input = TokenStream::from_str("10 + 20 * 30").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
     }
 
     #[test]
-    fn test_parenthesized_expression() {
+    fn parenthesized_expression() {
         let input = TokenStream::from_str("(10 + 20) * 30").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
     }
 
     #[test]
-    fn test_complex_expression() {
+    fn complex_expression() {
         let input = TokenStream::from_str("10 + 20 * (30 - 5) / 2").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
     }
 
     #[test]
-    fn test_logical_expression() {
+    fn logical_expression() {
         let input = TokenStream::from_str("a && b || c").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
     }
 
     #[test]
-    fn test_comparison_expression() {
+    fn comparison_expression() {
         let input = TokenStream::from_str("a == b && c > d").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
     }
 
     #[test]
-    fn test_bitwise_expression() {
+    fn bitwise_expression() {
         let input = TokenStream::from_str("a | b & c ^ d").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
     }
 
     #[test]
-    fn test_shift_expression() {
+    fn shift_expression() {
         let input = TokenStream::from_str("a << 2 + b >> 1").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
     }
 
     #[test]
-    fn test_unary_expression() {
+    fn unary_expression() {
         let input = TokenStream::from_str("-a + !b").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
     }
 
     #[test]
-    fn test_chained_unary_expression() {
+    fn chained_unary_expression() {
         let input = TokenStream::from_str("!!a + --b").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression());
     }
 
     #[test]
-    fn test_invalid_expression() {
+    fn invalid_expression() {
         let input = TokenStream::from_str("+").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(!parser.is_expression());
@@ -586,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn test_error_formatting() {
+    fn error_formatting() {
         let source = "10 + 20 30"; // Missing operator between 20 and 30
         let input = TokenStream::from_str(source).unwrap();
         let mut parser = CELParser::new(input.into_iter());
@@ -612,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn test_error_formatting_with_line_offset() {
+    fn error_formatting_with_line_offset() {
         let source = "a + b c"; // Missing operator between b and c
         let input = TokenStream::from_str(source).unwrap();
         let mut parser = CELParser::new(input.into_iter());
@@ -637,7 +652,7 @@ mod tests {
         let line = line!() + 1;
         let source = r#"
 
-            10 + 20 * 30 // Unexpected token
+            10 + 20  30 // Unexpected token
 
         "#;
 

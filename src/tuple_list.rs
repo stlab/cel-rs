@@ -69,8 +69,6 @@ impl<H: 'static, T: List> List for (H, T) {
         &self.1
     }
 
-    const HEAD_PADDING: usize = usize::MAX; // undefined
-
     type Push<U: 'static> = (U, Self);
     fn push<U: 'static>(self, item: U) -> Self::Push<U> {
         (item, self)

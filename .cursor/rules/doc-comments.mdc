@@ -3,16 +3,17 @@ description:
 globs: *.rs
 alwaysApply: false
 ---
-This rule provides a standard for Rust doc comment.
+This rule provides a standard for Rust doc comments.
 
 Doc comments should be formatted with line comments in accordance with the [Rust Style
 Guide](https://doc.rust-lang.org/stable/style-guide/#doc-comments).
 
-All public components should have documentation following the convensions defined in [The RustDoc Book](mdc:https:/doc.rust-lang.org/rustdoc/how-to-write-documentation.html).
+All public components should have documentation following the conventions defined in [The RustDoc
+Book](https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html).
 
 Documentation for functions should always start with a short summary that describes what the
 function does. Additional exposition is usually not necessary unless the function has preconditions
-that may lead to a error result or panic.
+that may lead to an erroneous result or panic.
 
 For functions that recognize a grammar production, the production is a sufficient comment.
 
