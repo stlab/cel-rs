@@ -38,11 +38,11 @@ impl<H: 'static, T: ToTypeIdList + 'static + CStackListHeadLimit> ToTypeIdList
     }
 }
 
-/// A type-checked wrapper around [`RawSegment`] that maintains a stack of type information
-/// to ensure type safety during operation execution.
+/// A type-checked wrapper around [`RawSegment`] that maintains a stack of type information to
+/// ensure type safety during operation execution.
 ///
-/// [`DynSegment`] tracks the types of values on the stack at compile time and verifies
-/// that operations receive arguments of the correct type. This prevents type mismatches
+/// [`DynSegment`] tracks the types of values on the stack as the DynSegment is constructedand
+/// verifies that operations receive arguments of the correct type. This prevents type mismatches
 /// that could occur when using [`RawSegment`] directly.
 type Dropper = fn(&mut RawStack);
 pub struct DynSegment {

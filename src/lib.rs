@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! cel-rs provides a stack-based runtime for developing domain specific languages, including
 //! concatenative languages to describe concurrent processes. A sequence is a list of operations
 //! (the machine instructions). Each operation is a closure that takes it's arguments from the stack
