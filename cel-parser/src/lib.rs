@@ -12,7 +12,7 @@ use quote::quote_spanned;
 /// expression = or_expression <EOF>.
 /// or_expression = and_expression { "||" and_expression }.
 /// and_expression = comparison_expression { "&&" comparison_expression }.
-/// comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
+/// comparison_expression = bitwise_or_expression { ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression }.
 /// bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.
 /// bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.
 /// bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
