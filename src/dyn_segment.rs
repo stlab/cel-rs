@@ -91,7 +91,7 @@ impl DynSegment {
     fn pop_types<L: ListTypeIteratorAdvance<TypeId> + 'static>(&mut self) -> Result<()> {
         ensure!(
             L::LENGTH <= self.stack_ids.len(),
-            "too many arguments: expected {}, got {}",
+            "wrong number of arguments: expected {}, got {}",
             L::LENGTH,
             self.stack_ids.len()
         );
@@ -165,6 +165,11 @@ impl DynSegment {
             }
         });
         self.push_type::<R>();
+    }
+
+    /// Pushes a value to the stack without any operations.
+    pub fn just<T: 'static + Clone>(&mut self, value: T) {
+        self.op0(move || value.clone());
     }
 
     /// Pushes a unary operation that takes one argument of type T and returns a value of type R.
@@ -419,6 +424,17 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn segment_with_just() -> Result<(), anyhow::Error> {
+        let mut operations = DynSegment::new::<()>();
+        operations.just(42u32);
+        let result: u32 = operations.call0()?;
+        assert_eq!(result, 42);
+        operations.just("hello".to_string());
+        let result: String = operations.call0()?;
+        assert_eq!(result, "hello");
+        Ok(())
+    }
     #[test]
     fn segment_with_argument() -> Result<(), anyhow::Error> {
         let mut operations = DynSegment::new::<(u32,)>();
