@@ -35,7 +35,7 @@ impl<H: 'static, T: DropStack + CStackListHeadLimit> DropStack for CStackList<H,
 /// # Examples
 ///
 /// ```rust
-/// use cel_rs::segment::*;
+/// use cel_runtime::segment::*;
 ///
 /// assert_eq!(Segment::<(i32,)>::new() // create a new segment that takes an i32 argument
 ///     .op1(|x| x * 2)                 // push a unary operation that multiplies the argument by 2

@@ -22,9 +22,10 @@ dependencies = [
 name = "cel-rs"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "cel-parser",
  "cel-rs-macros",
- "typenum",
+ "cel-runtime",
+ "proc-macro2",
 ]
 
 [[package]]
@@ -34,6 +35,15 @@ dependencies = [
  "cel-parser",
  "proc-macro2",
  "quote",
+]
+
+[[package]]
+name = "cel-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cel-rs-macros",
+ "typenum",
 ]
 
 [[package]]
@@ -67,9 +77,9 @@ checksum = "1171693293099992e19cddea4e8b849964e9846f4acee11b3948bcc337be8776"
 
 [[package]]
 name = "litrs"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ce301924b7887e9d637144fdade93f9dfff9b60981d4ac161db09720d39aa5"
+checksum = "f5e54036fe321fd421e10d732f155734c4e4afd610dd556d9a82833ab3ee0bed"
 dependencies = [
  "proc-macro2",
 ]

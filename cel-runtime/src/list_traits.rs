@@ -50,7 +50,7 @@ pub trait List {
     /// # Example
     ///
     /// ```rust
-    /// use cel_rs::*;
+    /// use cel_runtime::*;
     ///
     /// assert_eq!(
     ///     (1, (2, (3, ()))).append((4, (5, (6, ())))),

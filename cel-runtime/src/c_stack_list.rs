@@ -17,7 +17,7 @@
 //!
 //!
 //! ```rust
-//! use cel_rs::*;
+//! use cel_runtime::*;
 //! use typenum::*;
 //!
 //! let list = (1, 2.5, 3, 4, "world", "Hello").into_c_stack_list();
@@ -27,7 +27,7 @@
 //! Indexing out of bounds will result in a compile error.
 //!
 //! ```compile_fail,E0277
-//! use cel_rs::c_stack_list::*;
+//! use cel_runtime::c_stack_list::*;
 //! use typenum::*;
 //!
 //! let list = (1, 2.5, 3, 4, "world", "Hello").into_c_stack_list()[U6::new()];
