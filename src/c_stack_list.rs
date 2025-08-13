@@ -50,11 +50,13 @@ use crate::list_traits::{
 pub struct CStackList<H, T: CStackListHeadLimit>(pub T, pub H);
 
 /// A trait describing the memory layout of a [`CStackList`].
+/// Describes the memory layout of a [`CStackList`]'s head and tail boundary.
 pub trait CStackListHeadLimit {
     /// The offset to the _end_ of the head element.
     const HEAD_LIMIT: usize;
 }
 
+/// Indicates whether the head element is padded to satisfy alignment.
 pub trait CStackListHeadPadded {
     /// Whether the head element is padded to the next alignment boundary.
     const HEAD_PADDED: bool;
@@ -108,8 +110,11 @@ impl<H: 'static, T: List + CStackListHeadLimit> List for CStackList<H, T> {
     }
 }
 
+/// Converts tuples and list-like values into a [`CStackList`].
 pub trait IntoCStackList {
+    /// The resulting list type.
     type Output: List;
+    /// Convert into a `CStackList` preserving element order.
     fn into_c_stack_list(self) -> Self::Output;
 }
 
@@ -271,6 +276,7 @@ where
     }
 }
 
+/// Empty `repr(C)` list used as the tail sentinel for [`CStackList`].
 #[repr(C)]
 pub struct CNil<T: CStackListHeadLimit>(T);
 

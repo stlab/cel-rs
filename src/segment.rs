@@ -8,7 +8,9 @@ use anyhow::{Result, ensure};
 use std::any::TypeId;
 use std::result::Result::Ok;
 
+/// Drops the head of a type-level stack from a [`RawStack`] during unwinding.
 pub trait DropStack: List {
+    /// Drops values corresponding to `Self` from the supplied [`RawStack`].
     fn drop_stack(stack: &mut RawStack);
 }
 
@@ -125,6 +127,7 @@ where
         self.into()
     }
 
+    /// Pushes a fallible nullary operation that returns `Result<R>`.
     pub fn op0r<R, F>(mut self, op: F) -> Segment<Args, Stack::Push<R>>
     where
         F: Fn() -> Result<R> + 'static,
@@ -146,6 +149,7 @@ where
         self.into()
     }
 
+    /// Pushes a fallible unary operation that takes the current stack value and returns `Result<R>`.
     pub fn op1r<R, F>(mut self, op: F) -> Segment<Args, CStackList<R, Stack::Tail>>
     where
         Stack: CStackListHeadPadded,
@@ -158,6 +162,7 @@ where
         );
         self.into()
     }
+    /// Pushes a binary operation that takes the top two stack values and returns a new value.
     pub fn op2<R, F>(
         mut self,
         op: F,
@@ -191,8 +196,11 @@ where
 }
 
 // trait Fn<Args> is currently unstable - so we use a call trait as a temporary workaround.
+/// Callable segment abstraction for uniform invocation across arities.
 pub trait Callable<Args> {
+    /// The result type produced by calling with `Args`.
     type Output;
+    /// Invoke the segment with the supplied `args`.
     fn call(&self, args: Args) -> Self::Output;
 }
 

@@ -74,22 +74,18 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         let mut tokens = self.output.clone().into_iter();
 
         while let Some(token) = tokens.next() {
-            if let TokenTree::Ident(ident) = token {
-                if ident == "compile_error" {
-                    if let Some(TokenTree::Punct(punct)) = tokens.next() {
-                        if punct.as_char() == '!' {
-                            if let Some(TokenTree::Group(group)) = tokens.next() {
-                                if group.delimiter() == Delimiter::Parenthesis {
-                                    let mut group_tokens = group.stream().into_iter();
-                                    if let Some(TokenTree::Literal(lit)) = group_tokens.next() {
-                                        // Clean extraction using litrs
-                                        if let Ok(string_lit) = StringLit::try_from(lit) {
-                                            return Some(string_lit.value().to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
+            if let TokenTree::Ident(ident) = token
+                && ident == "compile_error"
+                && let Some(TokenTree::Punct(punct)) = tokens.next()
+                && punct.as_char() == '!'
+                && let Some(TokenTree::Group(group)) = tokens.next()
+                && group.delimiter() == Delimiter::Parenthesis
+            {
+                let mut group_tokens = group.stream().into_iter();
+                if let Some(TokenTree::Literal(lit)) = group_tokens.next() {
+                    // Clean extraction using litrs
+                    if let Ok(string_lit) = StringLit::try_from(lit) {
+                        return Some(string_lit.value().to_string());
                     }
                 }
             }
@@ -97,24 +93,25 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         None
     }
 
-    /// https://github.com/rust-lang/rustc-dev-guide/blob/master/src/diagnostics.md
+    /// <https://github.com/rust-lang/rustc-dev-guide/blob/master/src/diagnostics.md>
     pub fn format_error(
         &self,
         source_code: &str,
         filename: &str,
         start_line: u32,
     ) -> Option<String> {
-        if let Some(error_msg) = self.extract_error_message() {
-            if let Some(span) = self.get_error_span() {
-                return Some(self.format_rustc_style(
-                    &error_msg,
-                    span,
-                    source_code,
-                    filename,
-                    start_line,
-                ));
-            }
+        if let Some(error_msg) = self.extract_error_message()
+            && let Some(span) = self.get_error_span()
+        {
+            return Some(self.format_rustc_style(
+                &error_msg,
+                span,
+                source_code,
+                filename,
+                start_line,
+            ));
         }
+
         None
     }
 
@@ -284,10 +281,10 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
             ];
             let c = string.chars().next().unwrap(); // safe since string.len() == 1
 
-            if let Some((_, next_chars)) = compound_chars.iter().find(|(ch, _)| *ch == c) {
-                if Self::is_one_of_punc(tmp.peek(), next_chars) {
-                    return false;
-                }
+            if let Some((_, next_chars)) = compound_chars.iter().find(|(ch, _)| *ch == c)
+                && Self::is_one_of_punc(tmp.peek(), next_chars)
+            {
+                return false;
             }
         }
         self.tokens = tmp;

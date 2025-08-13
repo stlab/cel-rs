@@ -37,13 +37,21 @@
 // #![warn(missing_docs)]
 pub mod c_stack_list;
 pub mod dyn_segment;
+/// Traits and utilities for type-level list representations used throughout the crate.
 pub mod list_traits;
+/// Helpers for alignment and memory calculations.
 pub mod memory;
+/// Low-level segment implementation with untyped operations.
 pub mod raw_segment;
+/// Storage for closures and data used by segments.
 pub mod raw_sequence;
+/// Untyped aligned stack used by raw segments during execution.
 pub mod raw_stack;
+/// Aligned byte vector used as the backing store for raw structures.
 pub mod raw_vec;
+/// Statically typed segment builder and executor.
 pub mod segment;
+/// Tuple-based list implementation mirroring the `List` traits.
 pub mod tuple_list;
 
 pub use c_stack_list::*;
