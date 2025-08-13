@@ -1,3 +1,99 @@
+//! Dynamic, runtime-checked segment builder.
+//!
+//! This module defines [`DynSegment`], a builder for stack-based programs whose
+//! type-safety is verified as the segment is constructed. Each operation takes
+//! its arguments from an execution stack and pushes its result back on the
+//! stack. [`DynSegment`] tracks the logical type stack using `TypeId`s and
+//! refuses to append an operation whose input types do not match the current
+//! stack state. This provides strong guarantees when assembling programs
+//! dynamically (e.g., from parsed input) while still executing with zero-copy
+//! primitives underneath.
+//!
+//! Operations are added with `op#[r]`, where `#` is the arity (0–3 in this
+//! module) and the optional `r` suffix means the closure returns a
+//! `Result` and can fail. When a fallible operation fails at runtime, any values
+//! that were previously pushed and would be leaked are dropped in LIFO order
+//! before the error is propagated.
+//!
+//! A segment is created with [`DynSegment::new`], parameterized by the input
+//! argument list. Use [`DynSegment::call0`] or [`DynSegment::call1`] to execute
+//! the segment. You can also build conditional fragments with
+//! [`DynSegment::new_fragment`] and join them with [`DynSegment::join2`].
+//!
+//! If you later want compile-time typing, a [`DynSegment`] can be converted into
+//! a statically-typed [`crate::segment::Segment`] via `Segment::try_from` (see
+//! that module for details).
+//!
+//! # Examples
+//!
+//! ## Build and run a simple pipeline
+//! ```rust
+//! use cel_rs::DynSegment;
+//!
+//! let mut ops = DynSegment::new::<()>();
+//! ops.op0(|| 30u32);
+//! ops.op0(|| 12u32);
+//! ops.op2(|x: u32, y: u32| x + y).unwrap();
+//! ops.op0(|| 100u32);
+//! ops.op0(|| 10u32);
+//! ops.op3(|x: u32, y: u32, z: u32| x + y - z).unwrap();
+//! ops.op1(|x: u32| format!("result: {}", x)).unwrap();
+//!
+//! let out: String = ops.call0().unwrap();
+//! assert_eq!(out, "result: 132");
+//! ```
+//!
+//! ## Taking an argument
+//! ```rust
+//! use cel_rs::DynSegment;
+//!
+//! let mut ops = DynSegment::new::<(u32,)>();
+//! ops.op0(|| 12u32);
+//! ops.op2(|x: u32, y: u32| x + y).unwrap();
+//! ops.op0(|| 100u32);
+//! ops.op0(|| 10u32);
+//! ops.op3(|x: u32, y: u32, z: u32| x + y - z).unwrap();
+//! ops.op1(|x: u32| format!("result: {}", x)).unwrap();
+//!
+//! let out: String = ops.call1(30u32).unwrap();
+//! assert_eq!(out, "result: 132");
+//! ```
+//!
+//! ## Error handling and automatic drop
+//! ```rust
+//! use cel_rs::DynSegment;
+//! use anyhow::Result;
+//!
+//! let mut s = DynSegment::new::<()>();
+//! s.op0(|| String::from("keep-me-safe"));
+//! s.op0r(|| -> Result<u32> { Err(anyhow::anyhow!("boom")) });
+//! s.op2(|_s: String, _n: u32| 42u32).unwrap();
+//!
+//! // The fallible op fails; previously pushed values are dropped and the error is returned.
+//! let r = s.call0::<u32>();
+//! assert!(r.is_err());
+//! ```
+//!
+//! ## Conditional fragments
+//! ```rust
+//! use cel_rs::DynSegment;
+//!
+//! let mut root = DynSegment::new::<()>();
+//! root.op0(|| true);
+//! root.op0(|| false);
+//! root.op2(|x: bool, y: bool| x && y).unwrap();
+//!
+//! let mut then_branch = root.new_fragment();
+//! then_branch.op0(|| 42u32);
+//!
+//! let mut else_branch = root.new_fragment();
+//! else_branch.op0(|| 2u32);
+//!
+//! root.join2(then_branch, else_branch).unwrap();
+//! let result: u32 = root.call0().unwrap();
+//! assert_eq!(result, 2);
+//! ```
+
 use crate::c_stack_list::{CNil, CStackList, IntoCStackList};
 use crate::list_traits::{List, ListTypeIteratorAdvance, TypeIdIterator};
 use crate::memory::align_index;
@@ -8,13 +104,22 @@ use anyhow::Result;
 use anyhow::ensure;
 use std::any::TypeId;
 use std::cmp::max;
+/// Metadata for an entry on the logical type stack tracked by [`DynSegment`].
+///
+/// This includes the [`TypeId`] of the value, whether padding was inserted to
+/// satisfy alignment, and a function used to unwind (drop) the value if needed
+/// while handling errors.
 pub struct StackInfo {
     pub(crate) stack_id: TypeId,
     stack_unwind: Dropper,
     padded: bool,
 }
 
+/// Converts a type-level list into runtime stack metadata used by
+/// [`DynSegment`] for checking and unwinding.
 pub trait ToTypeIdList: List {
+    /// Build a vector of [`StackInfo`] entries that mirrors the order of the
+    /// runtime execution stack.
     fn to_stack_info_list() -> Vec<StackInfo>;
 }
 
@@ -38,13 +143,11 @@ impl<H: 'static, T: ToTypeIdList + 'static + CStackListHeadLimit> ToTypeIdList
     }
 }
 
-/// A type-checked wrapper around [`RawSegment`] that maintains a stack of type information
-/// to ensure type safety during operation execution.
-///
-/// [`DynSegment`] tracks the types of values on the stack at compile time and verifies
-/// that operations receive arguments of the correct type. This prevents type mismatches
-/// that could occur when using [`RawSegment`] directly.
 type Dropper = fn(&mut RawStack);
+/// A dynamic segment that validates operation types at construction time.
+///
+/// See the module-level documentation for a high-level overview and
+/// examples of how to construct and execute segments.
 pub struct DynSegment {
     pub(crate) segment: RawSegment,
     pub(crate) argument_ids: Vec<TypeId>,
@@ -145,6 +248,11 @@ impl DynSegment {
         self.push_type::<R>();
     }
 
+    /// Pushes a fallible nullary operation returning `Result<R>`.
+    ///
+    /// If the operation returns an error, values that were previously pushed
+    /// and would otherwise be leaked are dropped in LIFO order, then the error
+    /// is propagated.
     pub fn op0r<R, F>(&mut self, op: F)
     where
         F: Fn() -> anyhow::Result<R> + 'static,
@@ -238,6 +346,11 @@ impl DynSegment {
         Ok(())
     }
 
+    /// Joins two fragments under a boolean condition.
+    ///
+    /// Pops a `bool` from the stack. If `true`, executes `fragment_0`; otherwise
+    /// executes `fragment_1`. Both fragments must take no arguments and each
+    /// must produce exactly one result, and those result types must match.
     pub fn join2(&mut self, mut fragment_0: DynSegment, fragment_1: DynSegment) -> Result<()> {
         let [p0] = self.get_last_n_padded::<1>();
         self.pop_types::<(bool, ())>()?;

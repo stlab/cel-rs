@@ -9,8 +9,11 @@ use crate::list_traits::{
 };
 use std::ops::{RangeFrom, Sub};
 
+/// Converts tuples into a `List` representation where `()` is empty and `(H, T)` is a cons cell.
 pub trait IntoTupleList {
+    /// The resulting list type.
     type Output: List;
+    /// Convert into a `List` where `(H, T)` models a cons cell.
     fn into_tuple_list(self) -> Self::Output;
 }
 

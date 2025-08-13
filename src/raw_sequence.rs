@@ -77,11 +77,13 @@ impl RawSequence {
         unsafe { (&*ptr, aligned + mem::size_of::<T>()) }
     }
 
+    /// Returns the number of bytes in the RawSequence, also referred to as its ‘length’.
     #[must_use]
     pub fn len(&self) -> usize {
         self.buffer.len()
     }
 
+    /// Returns true if the RawSequence has no elements.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
