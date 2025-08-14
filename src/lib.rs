@@ -54,14 +54,17 @@ pub use cel_rs_macros;
 pub use cel_runtime;
 
 // Re-export commonly used items for convenience
+/// Re-exports from the cel-runtime crate for convenient access.
 pub mod runtime {
     pub use cel_runtime::*;
 }
 
+/// Re-exports from the cel-parser crate for convenient access.
 pub mod parser {
     pub use cel_parser::*;
 }
 
+/// Re-exports from the cel-rs-macros crate for convenient access.
 pub mod macros {
     pub use cel_rs_macros::*;
 }

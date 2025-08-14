@@ -40,7 +40,7 @@ impl RawVec {
     /// # Examples
     ///
     /// ```
-    /// use cel_rs::raw_vec::RawVec;
+    /// use cel_runtime::RawVec;
     /// use std::mem::align_of;
     /// let vec = RawVec::with_base_alignment(align_of::<u32>());
     /// ```

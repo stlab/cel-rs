@@ -1,3 +1,35 @@
+#![warn(missing_docs)]
+
+//! Procedural macros for the cel-rs crate.
+//!
+//! This crate provides procedural macros for working with CEL (Common Expression Language)
+//! expressions in Rust. It includes macros for validating CEL expressions at compile time
+//! and debugging token parsing.
+//!
+//! # Examples
+//!
+//! ## Validating CEL expressions
+//!
+//! ```rust
+//! use cel_rs_macros::expression;
+//!
+//! // This will compile only if the expression is valid CEL
+//! expression! {
+//!     54 + 25 * (11 + 6 * 6)
+//! };
+//! ```
+//!
+//! ## Debugging token parsing
+//!
+//! ```rust
+//! use cel_rs_macros::print_tokens;
+//!
+//! // This will print the parsed tokens to stdout during compilation
+//! print_tokens! {
+//!     10 + 20
+//! };
+//! ```
+
 use cel_parser::CELParser;
 use proc_macro::TokenStream as ProcMacroTokenStream;
 use proc_macro2::TokenStream;

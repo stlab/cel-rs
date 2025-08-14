@@ -8,13 +8,26 @@ use anyhow::Result;
 use anyhow::ensure;
 use std::any::TypeId;
 use std::cmp::max;
+
+/// Information about a type on the stack, including its cleanup function.
+///
+/// This struct holds metadata about a type that has been pushed onto the stack,
+/// including how to properly drop it when the stack is unwound.
 pub struct StackInfo {
     pub(crate) stack_id: TypeId,
     stack_unwind: Dropper,
     padded: bool,
 }
 
+/// Trait for converting a type list into a list of stack information.
+///
+/// This trait allows compile-time type lists to be converted into runtime
+/// stack information that can be used for type checking and cleanup.
 pub trait ToTypeIdList: List {
+    /// Converts the type list into a vector of stack information.
+    ///
+    /// This method creates `StackInfo` entries for each type in the list,
+    /// including the necessary cleanup functions and padding information.
     fn to_stack_info_list() -> Vec<StackInfo>;
 }
 
@@ -45,6 +58,31 @@ impl<H: 'static, T: ToTypeIdList + 'static + CStackListHeadLimit> ToTypeIdList
 /// that operations receive arguments of the correct type. This prevents type mismatches
 /// that could occur when using [`RawSegment`] directly.
 type Dropper = fn(&mut RawStack);
+
+/// A dynamic segment that provides runtime type checking for stack operations.
+///
+/// This struct wraps a [`RawSegment`] and maintains type information about the stack
+/// to ensure type safety during operation execution. It validates that operations
+/// receive arguments of the correct type and manages stack cleanup.
+///
+/// # Type Safety
+///
+/// The segment tracks the types of values on the stack and verifies that operations
+/// receive arguments of the expected type. This prevents runtime type mismatches
+/// that could occur when using [`RawSegment`] directly.
+///
+/// # Examples
+///
+/// ```rust
+/// use cel_runtime::DynSegment;
+///
+/// let mut segment = DynSegment::new::<()>();
+/// segment.op0(|| 42u32);
+/// segment.op1(|n: u32| n.to_string()).unwrap();
+///
+/// let result: String = segment.call0().unwrap();
+/// assert_eq!(result, "42");
+/// ```
 pub struct DynSegment {
     pub(crate) segment: RawSegment,
     pub(crate) argument_ids: Vec<TypeId>,
@@ -145,6 +183,19 @@ impl DynSegment {
         self.push_type::<R>();
     }
 
+    /// Pushes a nullary operation that takes no arguments and returns a `Result<R>`.
+    ///
+    /// If the operation succeeds, the result is pushed onto the stack. If it fails,
+    /// the stack is unwound to its previous state and the error is propagated.
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - A closure that returns a `Result<R>`
+    ///
+    /// # Type Parameters
+    ///
+    /// * `R` - The return type of the operation
+    /// * `F` - The closure type
     pub fn op0r<R, F>(&mut self, op: F)
     where
         F: Fn() -> anyhow::Result<R> + 'static,
@@ -238,6 +289,24 @@ impl DynSegment {
         Ok(())
     }
 
+    /// Joins two conditional fragments into a conditional execution operation.
+    ///
+    /// This method creates a conditional operation that executes one of two fragments
+    /// based on a boolean value on the stack. Both fragments must have no arguments
+    /// and return the same type.
+    ///
+    /// # Arguments
+    ///
+    /// * `fragment_0` - The fragment to execute when the condition is true
+    /// * `fragment_1` - The fragment to execute when the condition is false
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * Either fragment takes arguments
+    /// * Either fragment doesn't return exactly one value
+    /// * The fragments return different types
+    /// * The top of the stack is not a boolean value
     pub fn join2(&mut self, mut fragment_0: DynSegment, fragment_1: DynSegment) -> Result<()> {
         let [p0] = self.get_last_n_padded::<1>();
         self.pop_types::<(bool, ())>()?;

@@ -10,7 +10,8 @@
 //! Indexing is done using the [`typenum::uint::UInt`] type integral constants.
 //!
 //! Because the [`std::ops::Range`] trait requires a `start` and `end` that are the same type,
-//! it cannot be implemented for `List` types. Instead we use the [`RangeFrom`] and [`RangeTo`]
+//! it cannot be implemented for `List` types. Instead we use the [`std::ops::RangeFrom`] and
+//! [`std::ops::RangeTo`]
 //! traits. To Access a range of elements, you can use the syntax `list[..end][start..]`.
 //!
 //! # Example

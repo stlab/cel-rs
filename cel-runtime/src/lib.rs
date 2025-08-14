@@ -32,16 +32,26 @@
 //! assert_eq!(segment.call((1u32, "2")).unwrap(), "3");
 //! ```
 
-// #![warn(missing_docs)]
+#![warn(missing_docs)]
+/// Compile-time stack list implementation for type-safe stack operations.
 pub mod c_stack_list;
+/// Dynamic segment implementation with runtime type checking.
 pub mod dyn_segment;
+/// Traits for working with type lists and type information.
 pub mod list_traits;
+/// Memory management and alignment utilities for the runtime.
 pub mod memory;
+/// Raw segment implementation without type safety.
 pub mod raw_segment;
+/// Raw sequence implementation for operation sequences.
 pub mod raw_sequence;
+/// Raw stack implementation for low-level stack operations.
 pub mod raw_stack;
+/// Raw vector implementation for dynamic memory allocation.
 pub mod raw_vec;
+/// Type-safe segment implementation with compile-time validation.
 pub mod segment;
+/// Tuple list implementation for type-safe tuple operations.
 pub mod tuple_list;
 
 pub use c_stack_list::*;
