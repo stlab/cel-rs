@@ -65,11 +65,14 @@
 //! }
 //! ```
 
+use std::iter::Peekable;
 use litrs::StringLit;
 use owo_colors::OwoColorize;
 use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 use quote::quote_spanned;
 use std::iter::Peekable;
+use anyhow::Result;
+use cel_rs::DynSegment;
 
 /// A recursive descent parser for expressions.
 ///
@@ -133,6 +136,7 @@ use std::iter::Peekable;
 pub struct CELParser<I: Iterator<Item = TokenTree>> {
     tokens: Peekable<I>,
     output: TokenStream,
+    context: DynSegment,
 }
 
 impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
@@ -310,18 +314,8 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         CELParser {
             tokens: tokens.peekable(),
             output,
+            context: DynSegment::new::<()>(),
         }
-    }
-
-    /// Returns a reference to the parser's output token stream.
-    ///
-    /// This contains the parsed tokens or error information if parsing failed.
-    ///
-    /// # Returns
-    ///
-    /// A reference to the output `TokenStream`.
-    pub fn get_output(&self) -> &TokenStream {
-        &self.output
     }
 
     fn advance(&mut self) {
@@ -404,14 +398,16 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
     }
 
     /// `expression = or_expression <EOF>.`
-    pub fn is_expression(&mut self) -> bool {
-        if !self.is_or_expression() {
-            return false;
+    pub fn is_expression(&mut self) -> Result<PrimaryProbe> {
+        let result = self.is_primary_expression()?;
+        // if result is NoMatch return NoMatch
+        if result == PrimaryProbe::NoMatch {
+            return Ok(PrimaryProbe::NoMatch);
         }
         if self.tokens.peek().is_some() {
             return self.report_error("unexpected token");
         }
-        true
+        Ok(result)
     }
 
     /// `or_expression = and_expression { "||" and_expression }.`
@@ -552,27 +548,33 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
+    enum PrimaryExpression {
+        Literal(Literal),
+        Identifier(Identifier)
+    }
+
+    enum Probe<T> {
+        NoMatch,
+        Match,
+        Value(T),
+    }
+
+    type PrimaryProbe = Probe<PrimaryExpression>;
+
     /// `primary_expression = literal | identifier | "(" expression ")".`
-    fn is_primary_expression(&mut self) -> bool {
+    fn is_primary_expression(&mut self) -> Result<PrimaryProbe> {
         match self.tokens.peek() {
             Some(TokenTree::Literal(_)) => {
-                self.advance();
-                true
+                Ok(PrimaryProbe::Value(PrimaryExpression::Literal(self.tokens.next().unwrap())))
             }
             Some(TokenTree::Ident(_)) => {
-                self.advance();
-                true
+                Ok(PrimaryProbe::Value(PrimaryExpression::Identifier(self.tokens.next().unwrap())))
             }
             Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis => {
-                let mut parser = CELParser::new(group.stream().into_iter());
-                if parser.is_expression() {
-                    self.advance();
-                    true
-                } else {
-                    false
-                }
+                let mut parser = CELParser::new(self.tokens.next().unwrap().stream().into_iter());
+                parser.is_expression()
             }
-            _ => false,
+            _ => Ok(PrimaryProbe::NoMatch)
         }
     }
 }
