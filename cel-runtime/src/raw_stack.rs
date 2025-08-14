@@ -16,7 +16,7 @@ impl RawStack {
     /// # Examples
     ///
     /// ```
-    /// use cel_rs::raw_stack::RawStack;
+    /// use cel_runtime::raw_stack::RawStack;
     /// let stack = RawStack::with_base_alignment(align_of::<u32>());
     /// ```
     #[must_use]
@@ -38,7 +38,7 @@ impl RawStack {
     /// # Examples
     ///
     /// ```
-    /// use cel_rs::raw_stack::RawStack;
+    /// use cel_runtime::raw_stack::RawStack;
     /// let mut stack = RawStack::with_base_alignment(align_of::<u32>());
     /// let _ = stack.push(42u32);
     /// ```
@@ -82,7 +82,7 @@ impl RawStack {
     /// # Examples
     ///
     /// ```
-    /// use cel_rs::raw_stack::RawStack;
+    /// use cel_runtime::raw_stack::RawStack;
     /// let mut stack = RawStack::with_base_alignment(align_of::<u32>());
     /// let padding = stack.push(100u32);
     /// let value: u32 = unsafe { stack.pop(padding) };

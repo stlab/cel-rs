@@ -10,14 +10,15 @@
 //! Indexing is done using the [`typenum::uint::UInt`] type integral constants.
 //!
 //! Because the [`std::ops::Range`] trait requires a `start` and `end` that are the same type,
-//! it cannot be implemented for `List` types. Instead we use the [`RangeFrom`] and [`RangeTo`]
+//! it cannot be implemented for `List` types. Instead we use the [`std::ops::RangeFrom`] and
+//! [`std::ops::RangeTo`]
 //! traits. To Access a range of elements, you can use the syntax `list[..end][start..]`.
 //!
 //! # Example
 //!
 //!
 //! ```rust
-//! use cel_rs::*;
+//! use cel_runtime::*;
 //! use typenum::*;
 //!
 //! let list = (1, 2.5, 3, 4, "world", "Hello").into_c_stack_list();
@@ -27,7 +28,7 @@
 //! Indexing out of bounds will result in a compile error.
 //!
 //! ```compile_fail,E0277
-//! use cel_rs::c_stack_list::*;
+//! use cel_runtime::c_stack_list::*;
 //! use typenum::*;
 //!
 //! let list = (1, 2.5, 3, 4, "world", "Hello").into_c_stack_list()[U6::new()];

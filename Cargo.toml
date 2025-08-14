@@ -5,13 +5,18 @@ edition = "2024"
 description = "A stack-based runtime for developing domain specific languages"
 
 [dependencies]
-anyhow = "1.0"
-typenum = "1.18.0"
+cel-runtime = { path = "./cel-runtime" }
+cel-parser = { path = "./cel-parser" }
 cel-rs-macros = { path = "./cel-rs-macros" }
+proc-macro2 = "1.0"
 
 [workspace]
 members = [
-    ".",
+    "cel-runtime",
     "cel-rs-macros",
     "cel-parser"
 ]
+
+[lib]
+name = "cel_rs"
+path = "src/lib.rs" 

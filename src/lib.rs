@@ -1,27 +1,20 @@
 #![warn(missing_docs)]
 
 //! cel-rs provides a stack-based runtime for developing domain specific languages, including
-//! concatenative languages to describe concurrent processes. A sequence is a list of operations
-//! (the machine instructions). Each operation is a closure that takes it's arguments from the stack
-//! and the result is pushed back onto the stack.
+//! concatenative languages to describe concurrent processes.
 //!
-//! Segments can be created in two ways.
+//! This crate exposes three main components:
 //!
-//! 1. Using the [`DynSegment`] struct which validates the type safety of the
-//!    operations at runtime as the segment is built.
-//! 2. Using the [`Segment`] struct, which validates the type safety of the
-//!    operations at compile time.
-//!
-//! The two types of segments can be converted to each other [not yet implemented from `Segment` to
-//! `DynSegment`].
-//!
-//! Operations are added using the form `op#[r]` where # is the arity of the operation and the
-//! optional `r` signifies that the operation returns a [`std::result::Result`] type and may fail.
+//! - **cel-runtime**: The core stack-based runtime for developing domain specific languages
+//! - **cel-parser**: A recursive descent parser for CEL expressions
+//! - **cel-rs-macros**: Procedural macros for CEL expressions
 //!
 //! # Examples
 //!
+//! ## Using the Runtime
+//!
 //! ```rust
-//! use cel_rs::*;
+//! use cel_rs::cel_runtime::*;
 //!
 //! // Create a segment that takes a u32 and &str as arguments
 //! let segment = Segment::<(u32, &str)>::new()
@@ -33,46 +26,45 @@
 //!     .op1(|r| r.to_string());
 //! assert_eq!(segment.call((1u32, "2")).unwrap(), "3");
 //! ```
+//!
+//! ## Using the Parser
+//!
+//! ```rust
+//! use cel_rs::cel_parser::CELParser;
+//! use proc_macro2::TokenStream;
+//! use std::str::FromStr;
+//!
+//! let input = TokenStream::from_str("10 + 20").unwrap();
+//! let mut parser = CELParser::new(input.into_iter());
+//! assert!(parser.is_expression());
+//! ```
+//!
+//! ## Using the Macros
+//!
+//! ```rust
+//! use cel_rs::cel_rs_macros::expression;
+//!
+//! expression! {
+//!     54 + 25 * (11 + 6 * 6)
+//! };
+//! ```
 
-// #![warn(missing_docs)]
-pub mod c_stack_list;
-pub mod dyn_segment;
-/// Traits and utilities for type-level list representations used throughout the crate.
-pub mod list_traits;
-/// Helpers for alignment and memory calculations.
-pub mod memory;
-/// Low-level segment implementation with untyped operations.
-pub mod raw_segment;
-/// Storage for closures and data used by segments.
-pub mod raw_sequence;
-/// Untyped aligned stack used by raw segments during execution.
-pub mod raw_stack;
-/// Aligned byte vector used as the backing store for raw structures.
-pub mod raw_vec;
-/// Statically typed segment builder and executor.
-pub mod segment;
-/// Tuple-based list implementation mirroring the `List` traits.
-pub mod tuple_list;
+pub use cel_parser;
+pub use cel_rs_macros;
+pub use cel_runtime;
 
-pub use c_stack_list::*;
-pub use dyn_segment::*;
-pub use list_traits::*;
-pub use memory::*;
-pub use raw_segment::*;
-pub use raw_sequence::*;
-pub use raw_stack::*;
-pub use raw_vec::*;
-pub use segment::*;
-//pub use tuple_list::*;
+// Re-export commonly used items for convenience
+/// Re-exports from the cel-runtime crate for convenient access.
+pub mod runtime {
+    pub use cel_runtime::*;
+}
 
-#[cfg(test)]
-mod tests {
-    use cel_rs_macros::expression;
+/// Re-exports from the cel-parser crate for convenient access.
+pub mod parser {
+    pub use cel_parser::*;
+}
 
-    #[test]
-    fn test_expression_macro() {
-        expression! {
-            10 + 20 * 30
-        };
-    }
+/// Re-exports from the cel-rs-macros crate for convenient access.
+pub mod macros {
+    pub use cel_rs_macros::*;
 }

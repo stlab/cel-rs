@@ -1,9 +1,75 @@
-use std::iter::Peekable;
+#![warn(missing_docs)]
+
+//! A recursive descent parser for CEL (Common Expression Language) expressions.
+//!
+//! This crate provides a parser that can parse CEL expressions into token streams
+//! suitable for use in procedural macros. The parser follows the CEL grammar
+//! specification and provides detailed error reporting with source location information.
+//!
+//! # Grammar
+//!
+//! ```text
+//! expression = or_expression <EOF>.
+//! or_expression = and_expression { "||" and_expression }.
+//! and_expression = comparison_expression { "&&" comparison_expression }.
+//! comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
+//! bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.
+//! bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.
+//! bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
+//! bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.
+//! additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
+//! multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
+//! unary_expression = (("-" | "!") unary_expression) | primary_expression.
+//! primary_expression = literal | identifier | "(" expression ")".
+//! ```
+//!
+//! # Examples
+//!
+//! ## Basic Usage
+//!
+//! ```rust
+//! use cel_parser::CELParser;
+//! use proc_macro2::TokenStream;
+//! use std::str::FromStr;
+//!
+//! let input = TokenStream::from_str("10 + 20").unwrap();
+//! let mut parser = CELParser::new(input.into_iter());
+//! assert!(parser.is_expression());
+//! ```
+//!
+//! ## Error Formatting
+//!
+//! ```rust
+//! use cel_parser::CELParser;
+//! use proc_macro2::TokenStream;
+//! use std::str::FromStr;
+//!
+//! let line = line!() + 1;
+//! let source = r#"
+//!   10 + 20 30
+//! "#; // Invalid: missing operator
+//! let input = TokenStream::from_str(source).unwrap();
+//! let mut parser = CELParser::new(input.into_iter());
+//!
+//! if !parser.is_expression() {
+//!     // Format error starting at line 1
+//!     if let Some(formatted_error) = parser.format_error(source, file!(), line) {
+//!         println!("{}", formatted_error);
+//!         // Output:
+//!         // error: Unexpected token
+//!         //  --> example.cel:1:8
+//!         //   |
+//!         // 1 | 10 + 20 30
+//!         //   |         ^^
+//!     }
+//! }
+//! ```
 
 use litrs::StringLit;
 use owo_colors::OwoColorize;
 use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
 use quote::quote_spanned;
+use std::iter::Peekable;
 
 /// A recursive descent parser for expressions.
 ///
@@ -70,6 +136,15 @@ pub struct CELParser<I: Iterator<Item = TokenTree>> {
 }
 
 impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
+    /// Extracts the error message from the parser's output token stream.
+    ///
+    /// This method searches for a `compile_error!` macro call in the output
+    /// and extracts the string literal argument as the error message.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(message)` if an error message was found, or `None` if
+    /// no error was present in the output.
     pub fn extract_error_message(&self) -> Option<String> {
         let mut tokens = self.output.clone().into_iter();
 
@@ -221,6 +296,15 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         None
     }
 
+    /// Creates a new CEL parser with the given token iterator.
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - An iterator over `TokenTree` items to parse
+    ///
+    /// # Returns
+    ///
+    /// A new `CELParser` instance ready to parse the tokens.
     pub fn new(tokens: I) -> Self {
         let output = TokenStream::new();
         CELParser {
@@ -229,6 +313,13 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         }
     }
 
+    /// Returns a reference to the parser's output token stream.
+    ///
+    /// This contains the parsed tokens or error information if parsing failed.
+    ///
+    /// # Returns
+    ///
+    /// A reference to the output `TokenStream`.
     pub fn get_output(&self) -> &TokenStream {
         &self.output
     }
@@ -237,6 +328,18 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         self.tokens.next();
     }
 
+    /// Reports a parsing error by adding a `compile_error!` macro to the output.
+    ///
+    /// This method creates a compile-time error with the given message at the
+    /// current token's span location.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The error message to report
+    ///
+    /// # Returns
+    ///
+    /// Always returns `false` to indicate parsing failure.
     pub fn report_error(&mut self, message: &str) -> bool {
         let span = self
             .tokens
