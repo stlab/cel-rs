@@ -59,9 +59,12 @@ pub trait List {
     /// ```
     fn append<U: List>(self, other: U) -> Self::Append<U>;
 
+    /// The resulting list when reversing `Self` onto `U`.
     type ReverseOnto<U: List>: List;
+    /// Reverse `Self` and append the result to `other`.
     fn reverse_onto<U: List>(self, other: U) -> Self::ReverseOnto<U>;
 
+    /// Reverse this list, returning a new list with elements in opposite order.
     fn reverse(self) -> Self::ReverseOnto<Self::Empty>
     where
         Self: Sized,
@@ -70,11 +73,15 @@ pub trait List {
     }
 }
 
+/// Convenience alias for reversing a `List` onto its empty counterpart.
 pub type ReverseList<T> = <T as List>::ReverseOnto<<T as List>::Empty>;
 
 // Iterate a list (not recurse) to implement equal against an iterator.
+/// Property generator for iterating over type-level lists.
 pub trait ListTypeProperty {
+    /// The per-element property type produced during iteration.
     type Output;
+    /// Compute the property for the current list head in `R`.
     fn property<R: List>() -> Self::Output;
 }
 
@@ -85,15 +92,19 @@ impl ListTypeProperty for TypeId {
     }
 }
 
+/// Iterator over type-level `List` values producing properties via `P`.
 pub struct ListTypeIterator<T: List, P: ListTypeProperty> {
     pub(crate) advance: fn(&mut Self) -> Option<P::Output>,
 }
 
+/// Advance function provider used by [`ListTypeIterator`].
 pub trait ListTypeIteratorAdvance<P: ListTypeProperty>: List + Sized {
+    /// Advance the iterator, returning the next property value.
     fn advancer<R: List>(iter: &mut ListTypeIterator<R, P>) -> Option<P::Output>;
 }
 
 impl<T: ListTypeIteratorAdvance<P> + 'static, P: ListTypeProperty> ListTypeIterator<T, P> {
+    /// Construct a new `ListTypeIterator` over `T` producing properties via `P`.
     #[must_use]
     pub fn new() -> Self {
         ListTypeIterator {
@@ -119,14 +130,22 @@ impl<T: ListTypeIteratorAdvance<P> + 'static, P: ListTypeProperty> Iterator
     }
 }
 
+/// Iterator that yields the [`TypeId`] of each head in the `List`.
 pub type TypeIdIterator<T> = ListTypeIterator<T, TypeId>;
 
+/// Marker type representing the head of an empty list.
 pub struct Undefined;
+
+/// Trait implemented by empty lists to support list construction.
 pub trait EmptyList {
+    /// The result of pushing the first element onto an empty list.
     type PushFirst<U: 'static>: List;
+    /// Push the first element onto an empty list.
     fn push_first<U: 'static>(self, item: U) -> Self::PushFirst<U>;
 
+    /// The canonical empty list type for this family.
     type RootEmpty: EmptyList;
+    /// Return the canonical empty list.
     fn root_empty() -> Self::RootEmpty;
 }
 
@@ -165,21 +184,31 @@ impl<T: EmptyList> List for T {
     }
 }
 
+/// Indexing for lists using typenum-based indices and ranges.
 pub trait ListIndex<Idx: ?Sized> {
+    /// The output reference type when indexing with `Idx`.
     type Output;
+    /// Return a reference to the element or sublist selected by `index`.
     fn index(&self, index: Idx) -> &Self::Output;
 }
 
 /// Type alias for getting element type at index `N`, following [`std::ops::Index`] convention
+/// Element type at index `N` of list `L`.
 pub type Item<L, N> = <L as ListIndex<N>>::Output;
 
+/// Convert to a type-level `List` without consuming `self`.
 pub trait ToList {
+    /// The resulting `List` type using `T` as the empty list type family.
     type ToList<T: EmptyList>: List;
+    /// Convert to a `List` using `T` as the empty list type family.
     fn to_list<T: EmptyList>(&self) -> Self::ToList<T>;
 }
 
+/// Convert into a type-level `List`, consuming `self`.
 pub trait IntoList {
+    /// The resulting `List` type using `T` as the empty list type family.
     type Output<T: EmptyList>: List;
+    /// Convert into a `List` using `T` as the empty list type family.
     fn into_list<T: EmptyList>(self) -> Self::Output<T>;
 }
 

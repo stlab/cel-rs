@@ -40,7 +40,8 @@ impl RawVec {
     /// # Examples
     ///
     /// ```
-    /// use cel_runtime::raw_vec::RawVec;
+    /// use cel_rs::raw_vec::RawVec;
+    /// use std::mem::align_of;
     /// let vec = RawVec::with_base_alignment(align_of::<u32>());
     /// ```
     #[must_use]
@@ -52,6 +53,7 @@ impl RawVec {
         }
     }
 
+    /// Creates a new `RawVec` with base alignment and initial capacity.
     #[must_use]
     pub fn with_base_alignment_and_capacity(base_alignment: usize, capacity: usize) -> Self {
         let mut buffer = Vec::with_capacity(capacity + base_alignment - 1);
@@ -65,16 +67,19 @@ impl RawVec {
         }
     }
 
+    /// Returns the capacity of the vector in bytes.
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.buffer.capacity() - self.start_offset
     }
 
+    /// Returns the current length of the vector in bytes.
     #[must_use]
     pub fn len(&self) -> usize {
         self.buffer.len() - self.start_offset
     }
 
+    /// Returns true if the vector contains no bytes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0

@@ -56,6 +56,7 @@ impl RawSegment {
     /// argument and handles pushing its result to the stack directly. This can probably be merged
     /// with raw0. It is used in join2 in dyn_segment.rs, and some of that implementation should be
     /// lowered into this file.
+    /// Push a closure that manipulates the stack directly and returns `()`.
     pub fn raw0_<F>(&mut self, op: F)
     where
         F: Fn(&mut RawStack) -> Result<()> + 'static,
@@ -68,6 +69,7 @@ impl RawSegment {
         });
     }
 
+    /// Push a closure that manipulates the stack and returns a value `R`.
     pub fn raw0<R, F>(&mut self, op: F)
     where
         F: Fn(&mut RawStack) -> Result<R> + 'static,
@@ -143,6 +145,7 @@ impl RawSegment {
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
+    /// Push a fallible unary operation that can manipulate the stack.
     pub fn raw1<T, R, F>(&mut self, op: F, padding0: bool)
     where
         F: Fn(&mut RawStack, T) -> Result<R> + 'static,
@@ -171,6 +174,7 @@ impl RawSegment {
         });
     }
 
+    /// Push an operation that consumes and drops one value produced by `op`.
     pub fn drop1<T, F>(&mut self, op: F, padding0: bool)
     where
         F: Fn(T) + 'static,

@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! cel-rs provides a stack-based runtime for developing domain specific languages, including
 //! concatenative languages to describe concurrent processes.
 //!
