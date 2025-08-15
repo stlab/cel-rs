@@ -68,3 +68,34 @@ pub mod parser {
 pub mod macros {
     pub use cel_rs_macros::*;
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Experiment {
+        a: u32,
+        b: u32,
+    }
+
+    struct Segment<T, F: Fn(&mut T) -> String> {
+        context: T,
+        f: F,
+    }
+
+    impl<T, F: Fn(&mut T) -> String> Segment<T, F> {
+        fn new(context: T, f: F) -> Self {
+            Self { context, f }
+        }
+
+        fn call(&mut self) -> String {
+            (self.f)(&mut self.context)
+        }
+    }
+
+    #[test]
+    fn experiment() {
+        let experiment = Experiment { a: 1, b: 2 };
+        let mut segment = Segment::new(experiment, |e| e.a.to_string());
+        assert_eq!(segment.call(), "1");
+    }
+}

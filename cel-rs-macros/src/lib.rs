@@ -46,7 +46,7 @@ use proc_macro2::TokenStream;
 pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
     let input = TokenStream::from(input);
     let mut parser = CELParser::new(input.into_iter());
-    if !parser.is_expression() {
+    if let Err(_) = parser.is_expression() {
         parser.report_error("Expected expression");
     }
     parser.get_output().clone().into()

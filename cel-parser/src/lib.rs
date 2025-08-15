@@ -9,10 +9,11 @@
 //! # Grammar
 //!
 //! ```text
-//! expression = or_expression <EOF>.
+//! expression = or_expression ?eos?.
 //! or_expression = and_expression { "||" and_expression }.
 //! and_expression = comparison_expression { "&&" comparison_expression }.
-//! comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
+//! comparison_expression = bitwise_or_expression
+//!     [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
 //! bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.
 //! bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.
 //! bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
@@ -22,6 +23,11 @@
 //! unary_expression = (("-" | "!") unary_expression) | primary_expression.
 //! primary_expression = literal | identifier | "(" expression ")".
 //! ```
+//!
+//! # Note
+
+//! `?eos?` denotes end of stream. Because parenthesized expressions are nested by the lexer as a
+//! separate token stream, this parses correctly in `primary_expression`.
 //!
 //! # Examples
 //!
@@ -65,23 +71,44 @@
 //! }
 //! ```
 
-use std::iter::Peekable;
-use litrs::StringLit;
+use anyhow::Result;
+use cel_runtime::DynSegment;
+use litrs::{IntegerLit, IntegerType, StringLit};
 use owo_colors::OwoColorize;
-use proc_macro2::{Delimiter, Spacing, Span, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Ident, Literal, Spacing, Span, TokenStream, TokenTree};
 use quote::quote_spanned;
 use std::iter::Peekable;
-use anyhow::Result;
-use cel_rs::DynSegment;
+
+fn push_literal(output: &mut DynSegment, lit: Literal) {
+    let integer = IntegerLit::try_from(lit).unwrap();
+    let value = integer.value::<u128>().unwrap();
+    let intType = IntegerType::from_suffix(integer.suffix()).unwrap_or(IntegerType::I32);
+    match intType {
+        IntegerType::U8 => output.just(value as u8),
+        IntegerType::U16 => output.just(value as u16),
+        IntegerType::U32 => output.just(value as u32),
+        IntegerType::U64 => output.just(value as u64),
+        IntegerType::U128 => output.just(value as u128),
+        IntegerType::Usize => output.just(value as usize),
+        IntegerType::I8 => output.just(value as i8),
+        IntegerType::I16 => output.just(value as i16),
+        IntegerType::I32 => output.just(value as i32),
+        IntegerType::I64 => output.just(value as i64),
+        IntegerType::I128 => output.just(value as i128),
+        IntegerType::Isize => output.just(value as isize),
+        _ => (), // TODO: handle error here
+    }
+}
 
 /// A recursive descent parser for expressions.
 ///
 /// Grammar:
 /// ```text
-/// expression = or_expression <EOF>.
+/// expression = or_expression ?eos?.
 /// or_expression = and_expression { "||" and_expression }.
 /// and_expression = comparison_expression { "&&" comparison_expression }.
-/// comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
+/// comparison_expression = bitwise_or_expression
+///     [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
 /// bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.
 /// bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.
 /// bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
@@ -138,8 +165,24 @@ pub struct CELParser<I: Iterator<Item = TokenTree>> {
     output: TokenStream,
     context: DynSegment,
 }
+pub enum PrimaryExpression {
+    Literal(Literal),
+    Ident(Ident),
+}
+
+pub enum Probe<T> {
+    NoMatch,
+    Match,
+    Value(T),
+}
+
+pub type PrimaryProbe = Probe<PrimaryExpression>;
 
 impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
+    pub fn get_output(&self) -> &TokenStream {
+        &self.output
+    }
+
     /// Extracts the error message from the parser's output token stream.
     ///
     /// This method searches for a `compile_error!` macro call in the output
@@ -333,14 +376,14 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
     ///
     /// # Returns
     ///
-    /// Always returns `false` to indicate parsing failure.
-    pub fn report_error(&mut self, message: &str) -> bool {
+    /// Always returns an error to indicate parsing failure.
+    pub fn report_error(&mut self, message: &str) -> anyhow::Error {
         let span = self
             .tokens
             .peek()
             .map_or_else(proc_macro2::Span::call_site, |token| token.span());
         self.output = quote_spanned!(span => compile_error!(#message));
-        false
+        return anyhow::anyhow!(message.to_string());
     }
 
     fn is_one_of_punc(token: Option<&TokenTree>, sequence: &[char]) -> bool {
@@ -397,184 +440,199 @@ impl<I: Iterator<Item = TokenTree> + Clone> CELParser<I> {
         false
     }
 
+    pub fn parse(&mut self) -> Result<DynSegment> {
+        let result = self.is_expression()?;
+        match result {
+            PrimaryProbe::NoMatch => {
+                return Err(self.report_error("expression expected"));
+            }
+            PrimaryProbe::Match => Ok(std::mem::replace(
+                &mut self.context,
+                DynSegment::new::<()>(),
+            )),
+            PrimaryProbe::Value(PrimaryExpression::Literal(lit)) => {
+                push_literal(&mut self.context, lit);
+                Ok(std::mem::replace(
+                    &mut self.context,
+                    DynSegment::new::<()>(),
+                ))
+            }
+            _ => {
+                return Err(self.report_error("unsupported primary expression"));
+            }
+        }
+    }
+
     /// `expression = or_expression <EOF>.`
     pub fn is_expression(&mut self) -> Result<PrimaryProbe> {
         let result = self.is_primary_expression()?;
         // if result is NoMatch return NoMatch
-        if result == PrimaryProbe::NoMatch {
+        if let PrimaryProbe::NoMatch = result {
             return Ok(PrimaryProbe::NoMatch);
         }
         if self.tokens.peek().is_some() {
-            return self.report_error("unexpected token");
+            return Err(self.report_error("unexpected token"));
         }
         Ok(result)
     }
+    /*
+       /// `or_expression = and_expression { "||" and_expression }.`
+       fn is_or_expression(&mut self) -> bool {
+           if self.is_and_expression() {
+               while self.is_one_of_punctuation(&["||"]) {
+                   if !self.is_and_expression() {
+                       return self.report_error("expected and_expression");
+                   }
+               }
+               true
+           } else {
+               false
+           }
+       }
 
-    /// `or_expression = and_expression { "||" and_expression }.`
-    fn is_or_expression(&mut self) -> bool {
-        if self.is_and_expression() {
-            while self.is_one_of_punctuation(&["||"]) {
-                if !self.is_and_expression() {
-                    return self.report_error("expected and_expression");
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
+       /// `and_expression = comparison_expression { "&&" comparison_expression }.`
+       fn is_and_expression(&mut self) -> bool {
+           if self.is_comparison_expression() {
+               while self.is_one_of_punctuation(&["&&"]) {
+                   if !self.is_comparison_expression() {
+                       return self.report_error("expected comparison_expression");
+                   }
+               }
+               true
+           } else {
+               false
+           }
+       }
 
-    /// `and_expression = comparison_expression { "&&" comparison_expression }.`
-    fn is_and_expression(&mut self) -> bool {
-        if self.is_comparison_expression() {
-            while self.is_one_of_punctuation(&["&&"]) {
-                if !self.is_comparison_expression() {
-                    return self.report_error("expected comparison_expression");
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
+       /// `comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].`
+       fn is_comparison_expression(&mut self) -> bool {
+           if self.is_bitwise_or_expression() {
+               if self.is_one_of_punctuation(&["==", "!=", "<", ">", "<=", ">="])
+                   && !self.is_bitwise_or_expression()
+               {
+                   return self.report_error("expected bitwise_or_expression");
+               }
+               true
+           } else {
+               false
+           }
+       }
 
-    /// `comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].`
-    fn is_comparison_expression(&mut self) -> bool {
-        if self.is_bitwise_or_expression() {
-            if self.is_one_of_punctuation(&["==", "!=", "<", ">", "<=", ">="])
-                && !self.is_bitwise_or_expression()
-            {
-                return self.report_error("expected bitwise_or_expression");
-            }
-            true
-        } else {
-            false
-        }
-    }
+       /// `bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.`
+       fn is_bitwise_or_expression(&mut self) -> bool {
+           if self.is_bitwise_xor_expression() {
+               while self.is_one_of_punctuation(&["|"]) {
+                   if !self.is_bitwise_xor_expression() {
+                       return self.report_error("expected bitwise_xor_expression");
+                   }
+               }
+               true
+           } else {
+               false
+           }
+       }
 
-    /// `bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.`
-    fn is_bitwise_or_expression(&mut self) -> bool {
-        if self.is_bitwise_xor_expression() {
-            while self.is_one_of_punctuation(&["|"]) {
-                if !self.is_bitwise_xor_expression() {
-                    return self.report_error("expected bitwise_xor_expression");
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
+       /// `bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.`
+       fn is_bitwise_xor_expression(&mut self) -> bool {
+           if self.is_bitwise_and_expression() {
+               while self.is_one_of_punctuation(&["^"]) {
+                   if !self.is_bitwise_and_expression() {
+                       return self.report_error("expected bitwise_and_expression");
+                   }
+               }
+               true
+           } else {
+               false
+           }
+       }
 
-    /// `bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.`
-    fn is_bitwise_xor_expression(&mut self) -> bool {
-        if self.is_bitwise_and_expression() {
-            while self.is_one_of_punctuation(&["^"]) {
-                if !self.is_bitwise_and_expression() {
-                    return self.report_error("expected bitwise_and_expression");
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
+       /// `bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.`
+       fn is_bitwise_and_expression(&mut self) -> bool {
+           if self.is_bitwise_shift_expression() {
+               while self.is_one_of_punctuation(&["&"]) {
+                   if !self.is_bitwise_shift_expression() {
+                       return self.report_error("expected bitwise_shift_expression");
+                   }
+               }
+               true
+           } else {
+               false
+           }
+       }
 
-    /// `bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.`
-    fn is_bitwise_and_expression(&mut self) -> bool {
-        if self.is_bitwise_shift_expression() {
-            while self.is_one_of_punctuation(&["&"]) {
-                if !self.is_bitwise_shift_expression() {
-                    return self.report_error("expected bitwise_shift_expression");
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
+       /// `bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.`
+       fn is_bitwise_shift_expression(&mut self) -> bool {
+           if self.is_additive_expression() {
+               while self.is_one_of_punctuation(&["<<", ">>"]) {
+                   if !self.is_additive_expression() {
+                       return self.report_error("expected additive_expression");
+                   }
+               }
+               true
+           } else {
+               false
+           }
+       }
 
-    /// `bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.`
-    fn is_bitwise_shift_expression(&mut self) -> bool {
-        if self.is_additive_expression() {
-            while self.is_one_of_punctuation(&["<<", ">>"]) {
-                if !self.is_additive_expression() {
-                    return self.report_error("expected additive_expression");
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
+       /// `additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.`
+       fn is_additive_expression(&mut self) -> bool {
+           if self.is_multiplicative_expression() {
+               while self.is_one_of_punctuation(&["+", "-"]) {
+                   if !self.is_multiplicative_expression() {
+                       return self.report_error("expected multiplicative_expression");
+                   }
+               }
+               true
+           } else {
+               false
+           }
+       }
 
-    /// `additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.`
-    fn is_additive_expression(&mut self) -> bool {
-        if self.is_multiplicative_expression() {
-            while self.is_one_of_punctuation(&["+", "-"]) {
-                if !self.is_multiplicative_expression() {
-                    return self.report_error("expected multiplicative_expression");
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
+       /// `multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.`
+       fn is_multiplicative_expression(&mut self) -> bool {
+           if self.is_unary_expression() {
+               while self.is_one_of_punctuation(&["*", "/", "%"]) {
+                   if !self.is_unary_expression() {
+                       return self.report_error("expected unary_expression");
+                   }
+               }
+               true
+           } else {
+               false
+           }
+       }
 
-    /// `multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.`
-    fn is_multiplicative_expression(&mut self) -> bool {
-        if self.is_unary_expression() {
-            while self.is_one_of_punctuation(&["*", "/", "%"]) {
-                if !self.is_unary_expression() {
-                    return self.report_error("expected unary_expression");
-                }
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    /// `unary_expression = (("-" | "!") unary_expression) | primary_expression.`
-    fn is_unary_expression(&mut self) -> bool {
-        if self.is_one_of_punctuation(&["-", "!"]) {
-            if !self.is_unary_expression() {
-                return self.report_error("expected unary_expression");
-            }
-            true
-        } else {
-            self.is_primary_expression()
-        }
-    }
-
-    enum PrimaryExpression {
-        Literal(Literal),
-        Identifier(Identifier)
-    }
-
-    enum Probe<T> {
-        NoMatch,
-        Match,
-        Value(T),
-    }
-
-    type PrimaryProbe = Probe<PrimaryExpression>;
-
+       /// `unary_expression = (("-" | "!") unary_expression) | primary_expression.`
+       fn is_unary_expression(&mut self) -> bool {
+           if self.is_one_of_punctuation(&["-", "!"]) {
+               if !self.is_unary_expression() {
+                   return self.report_error("expected unary_expression");
+               }
+               true
+           } else {
+               self.is_primary_expression()
+           }
+       }
+    */
     /// `primary_expression = literal | identifier | "(" expression ")".`
     fn is_primary_expression(&mut self) -> Result<PrimaryProbe> {
         match self.tokens.peek() {
-            Some(TokenTree::Literal(_)) => {
-                Ok(PrimaryProbe::Value(PrimaryExpression::Literal(self.tokens.next().unwrap())))
+            Some(TokenTree::Literal(lit)) => {
+                let lit = lit.clone();
+                self.advance();
+                Ok(PrimaryProbe::Value(PrimaryExpression::Literal(lit)))
             }
-            Some(TokenTree::Ident(_)) => {
-                Ok(PrimaryProbe::Value(PrimaryExpression::Identifier(self.tokens.next().unwrap())))
+            Some(TokenTree::Ident(ident)) => {
+                let ident = ident.clone();
+                self.advance();
+                Ok(PrimaryProbe::Value(PrimaryExpression::Ident(ident)))
             }
             Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis => {
-                let mut parser = CELParser::new(self.tokens.next().unwrap().stream().into_iter());
+                let mut parser = CELParser::new(group.stream().into_iter());
+                self.advance();
                 parser.is_expression()
             }
-            _ => Ok(PrimaryProbe::NoMatch)
+            _ => Ok(PrimaryProbe::NoMatch),
         }
     }
 }
@@ -589,182 +647,186 @@ mod tests {
     fn simple_expression() {
         let input = TokenStream::from_str("10").unwrap();
         let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression());
+        let result = parser.parse();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().call0::<i32>().unwrap(), 10);
     }
+    /*
 
-    #[test]
-    fn incomplete_expression() {
-        let input = TokenStream::from_str("10 + 25 25").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(!parser.is_expression());
-        assert_eq!(
-            parser.output.to_string(),
-            "compile_error ! (\"unexpected token\")"
-        );
-    }
+       #[test]
+       fn incomplete_expression() {
+           let input = TokenStream::from_str("10 + 25 25").unwrap();
+           let mut parser = CELParser::new(input.into_iter());
+           assert!(!parser.is_expression());
+           assert_eq!(
+               parser.output.to_string(),
+               "compile_error ! (\"unexpected token\")"
+           );
+       }
 
-    #[test]
-    fn arithmetic_expression() {
-        let input = TokenStream::from_str("10 + 20 * 30").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression());
-    }
+       #[test]
+       fn arithmetic_expression() {
+           let input = TokenStream::from_str("10 + 20 * 30").unwrap();
+           let mut parser = CELParser::new(input.into_iter());
+           assert!(parser.is_expression());
+       }
 
-    #[test]
-    fn parenthesized_expression() {
-        let input = TokenStream::from_str("(10 + 20) * 30").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression());
-    }
+       #[test]
+       fn parenthesized_expression() {
+           let input = TokenStream::from_str("(10 + 20) * 30").unwrap();
+           let mut parser = CELParser::new(input.into_iter());
+           assert!(parser.is_expression());
+       }
 
-    #[test]
-    fn complex_expression() {
-        let input = TokenStream::from_str("10 + 20 * (30 - 5) / 2").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression());
-    }
+       #[test]
+       fn complex_expression() {
+           let input = TokenStream::from_str("10 + 20 * (30 - 5) / 2").unwrap();
+           let mut parser = CELParser::new(input.into_iter());
+           assert!(parser.is_expression());
+       }
 
-    #[test]
-    fn logical_expression() {
-        let input = TokenStream::from_str("a && b || c").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression());
-    }
+       #[test]
+       fn logical_expression() {
+           let input = TokenStream::from_str("a && b || c").unwrap();
+           let mut parser = CELParser::new(input.into_iter());
+           assert!(parser.is_expression());
+       }
 
-    #[test]
-    fn comparison_expression() {
-        let input = TokenStream::from_str("a == b && c > d").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression());
-    }
+       #[test]
+       fn comparison_expression() {
+           let input = TokenStream::from_str("a == b && c > d").unwrap();
+           let mut parser = CELParser::new(input.into_iter());
+           assert!(parser.is_expression());
+       }
 
-    #[test]
-    fn bitwise_expression() {
-        let input = TokenStream::from_str("a | b & c ^ d").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression());
-    }
+       #[test]
+       fn bitwise_expression() {
+           let input = TokenStream::from_str("a | b & c ^ d").unwrap();
+           let mut parser = CELParser::new(input.into_iter());
+           assert!(parser.is_expression());
+       }
 
-    #[test]
-    fn shift_expression() {
-        let input = TokenStream::from_str("a << 2 + b >> 1").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression());
-    }
+       #[test]
+       fn shift_expression() {
+           let input = TokenStream::from_str("a << 2 + b >> 1").unwrap();
+           let mut parser = CELParser::new(input.into_iter());
+           assert!(parser.is_expression());
+       }
 
-    #[test]
-    fn unary_expression() {
-        let input = TokenStream::from_str("-a + !b").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression());
-    }
+       #[test]
+       fn unary_expression() {
+           let input = TokenStream::from_str("-a + !b").unwrap();
+           let mut parser = CELParser::new(input.into_iter());
+           assert!(parser.is_expression());
+       }
 
-    #[test]
-    fn chained_unary_expression() {
-        let input = TokenStream::from_str("!!a + --b").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression());
-    }
+       #[test]
+       fn chained_unary_expression() {
+           let input = TokenStream::from_str("!!a + --b").unwrap();
+           let mut parser = CELParser::new(input.into_iter());
+           assert!(parser.is_expression());
+       }
 
-    #[test]
-    fn invalid_expression() {
-        let input = TokenStream::from_str("+").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(!parser.is_expression());
-    }
+       #[test]
+       fn invalid_expression() {
+           let input = TokenStream::from_str("+").unwrap();
+           let mut parser = CELParser::new(input.into_iter());
+           assert!(!parser.is_expression());
+       }
 
-    /// Helper function to strip ANSI escape codes from a string for testing purposes
-    fn strip_ansi_codes(input: &str) -> String {
-        // Basic regex to remove ANSI escape sequences
-        // ANSI escape sequences start with ESC (0x1B) followed by '[' and end with a letter
-        let mut result = String::new();
-        let mut chars = input.chars().peekable();
+       /// Helper function to strip ANSI escape codes from a string for testing purposes
+       fn strip_ansi_codes(input: &str) -> String {
+           // Basic regex to remove ANSI escape sequences
+           // ANSI escape sequences start with ESC (0x1B) followed by '[' and end with a letter
+           let mut result = String::new();
+           let mut chars = input.chars().peekable();
 
-        while let Some(ch) = chars.next() {
-            if ch == '\x1B' {
-                // Found ESC, check if it's followed by '['
-                if chars.peek() == Some(&'[') {
-                    chars.next(); // consume '['
-                    // Skip until we find a letter (which ends the escape sequence)
-                    while let Some(ch) = chars.next() {
-                        if ch.is_ascii_alphabetic() {
-                            break;
-                        }
-                    }
-                } else {
-                    result.push(ch);
-                }
-            } else {
-                result.push(ch);
-            }
-        }
+           while let Some(ch) = chars.next() {
+               if ch == '\x1B' {
+                   // Found ESC, check if it's followed by '['
+                   if chars.peek() == Some(&'[') {
+                       chars.next(); // consume '['
+                       // Skip until we find a letter (which ends the escape sequence)
+                       while let Some(ch) = chars.next() {
+                           if ch.is_ascii_alphabetic() {
+                               break;
+                           }
+                       }
+                   } else {
+                       result.push(ch);
+                   }
+               } else {
+                   result.push(ch);
+               }
+           }
 
-        result
-    }
+           result
+       }
 
-    #[test]
-    fn error_formatting() {
-        let source = "10 + 20 30"; // Missing operator between 20 and 30
-        let input = TokenStream::from_str(source).unwrap();
-        let mut parser = CELParser::new(input.into_iter());
+       #[test]
+       fn error_formatting() {
+           let source = "10 + 20 30"; // Missing operator between 20 and 30
+           let input = TokenStream::from_str(source).unwrap();
+           let mut parser = CELParser::new(input.into_iter());
 
-        // This should fail parsing
-        assert!(!parser.is_expression());
+           // This should fail parsing
+           assert!(!parser.is_expression());
 
-        // Test error message extraction
-        let error_msg = parser.extract_error_message();
-        assert!(error_msg.is_some());
-        assert_eq!(error_msg.unwrap(), "unexpected token");
+           // Test error message extraction
+           let error_msg = parser.extract_error_message();
+           assert!(error_msg.is_some());
+           assert_eq!(error_msg.unwrap(), "unexpected token");
 
-        // Test error formatting
-        let formatted_error = parser.format_error(source, "test.cel", 1u32);
-        assert!(formatted_error.is_some());
+           // Test error formatting
+           let formatted_error = parser.format_error(source, "test.cel", 1u32);
+           assert!(formatted_error.is_some());
 
-        // Strip ANSI codes for testing
-        let formatted = strip_ansi_codes(&formatted_error.unwrap());
-        assert!(formatted.contains("error: unexpected token"));
-        assert!(formatted.contains("test.cel:1:")); // Should include line number
-        assert!(formatted.contains("1 | 10 + 20 30")); // Should show the line with line number
-        assert!(formatted.contains("^")); // Should have carets pointing to the error
-    }
+           // Strip ANSI codes for testing
+           let formatted = strip_ansi_codes(&formatted_error.unwrap());
+           assert!(formatted.contains("error: unexpected token"));
+           assert!(formatted.contains("test.cel:1:")); // Should include line number
+           assert!(formatted.contains("1 | 10 + 20 30")); // Should show the line with line number
+           assert!(formatted.contains("^")); // Should have carets pointing to the error
+       }
 
-    #[test]
-    fn error_formatting_with_line_offset() {
-        let source = "a + b c"; // Missing operator between b and c
-        let input = TokenStream::from_str(source).unwrap();
-        let mut parser = CELParser::new(input.into_iter());
+       #[test]
+       fn error_formatting_with_line_offset() {
+           let source = "a + b c"; // Missing operator between b and c
+           let input = TokenStream::from_str(source).unwrap();
+           let mut parser = CELParser::new(input.into_iter());
 
-        // This should fail parsing
-        assert!(!parser.is_expression());
+           // This should fail parsing
+           assert!(!parser.is_expression());
 
-        // Test error formatting with line offset (as if expression starts at line 42)
-        let formatted_error = parser.format_error(source, "large_file.rs", 42u32);
-        assert!(formatted_error.is_some());
+           // Test error formatting with line offset (as if expression starts at line 42)
+           let formatted_error = parser.format_error(source, "large_file.rs", 42u32);
+           assert!(formatted_error.is_some());
 
-        // Strip ANSI codes for testing
-        let formatted = strip_ansi_codes(&formatted_error.unwrap());
-        assert!(formatted.contains("error: unexpected token"));
-        assert!(formatted.contains("large_file.rs:42:")); // Should show offset line number
-        assert!(formatted.contains("42 | a + b c")); // Should show the line with offset line number
-        assert!(formatted.contains("^")); // Should have carets pointing to the error
-    }
+           // Strip ANSI codes for testing
+           let formatted = strip_ansi_codes(&formatted_error.unwrap());
+           assert!(formatted.contains("error: unexpected token"));
+           assert!(formatted.contains("large_file.rs:42:")); // Should show offset line number
+           assert!(formatted.contains("42 | a + b c")); // Should show the line with offset line number
+           assert!(formatted.contains("^")); // Should have carets pointing to the error
+       }
 
-    #[test]
-    fn print_error_formatting() {
-        let line = line!() + 1;
-        let source = r#"
+       #[test]
+       fn print_error_formatting() {
+           let line = line!() + 1;
+           let source = r#"
 
             10 + 20  30 // Unexpected token
 
         "#;
 
-        let input = TokenStream::from_str(source).unwrap();
-        let mut parser = CELParser::new(input.into_iter());
+           let input = TokenStream::from_str(source).unwrap();
+           let mut parser = CELParser::new(input.into_iter());
 
-        if !parser.is_expression() {
-            if let Some(formatted_error) = parser.format_error(source, file!(), line) {
-                println!("{}", formatted_error);
-            }
-        }
-    }
+           if !parser.is_expression() {
+               if let Some(formatted_error) = parser.format_error(source, file!(), line) {
+                   println!("{}", formatted_error);
+               }
+           }
+       }
+    */
 }

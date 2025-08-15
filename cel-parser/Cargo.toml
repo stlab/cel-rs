@@ -11,3 +11,4 @@ quote = "1.0"
 owo-colors = { version = "4.2", features = ["supports-colors"] }
 litrs = "0.4.1"
 cel-runtime = { path = "../cel-runtime" }
+anyhow = "1.0"
