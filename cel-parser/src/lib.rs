@@ -71,6 +71,9 @@
 //! }
 //! ```
 
+mod lex_lexer;
+use lex_lexer::*;
+
 use anyhow::Result;
 use cel_runtime::DynSegment;
 use litrs::{IntegerLit, IntegerType, StringLit};

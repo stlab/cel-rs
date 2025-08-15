@@ -17,5 +17,5 @@ that may lead to an erroneous result or panic.
 
 For functions that recognize a grammar production, the production is a sufficient comment.
 
-Module comments should contain more exposition and examples and serve as a tutorial for how to use
+Module comments should contain more exposition and examples, and serve as a tutorial for how to use
 the components in the module.

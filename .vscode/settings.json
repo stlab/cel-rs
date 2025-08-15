@@ -5,6 +5,7 @@
     "rust-analyzer.lens.enable": true,
     "rust-analyzer.lens.run.enable": true,
     "cSpell.words": [
-        "concatenative"
+        "concatenative",
+        "Peekable"
     ]
 }

@@ -58,7 +58,7 @@ pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
 /// ```rust
 /// use cel_rs_macros::print_tokens;
 /// print_tokens! {
-///     10
+///     "hello"_key
 /// };
 /// ```
 #[proc_macro]
