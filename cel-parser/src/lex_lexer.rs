@@ -33,9 +33,9 @@ pub(crate) enum Token {
 }
 
 impl<I: Iterator<Item = TokenTree>> Iterator for LexLexer<I> {
-    type Item = TokenTree;
+    type Item = Result<Token, anyhow::Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.input.next()
+        self.parse_one()?;
     }
 }
