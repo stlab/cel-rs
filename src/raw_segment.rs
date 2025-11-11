@@ -20,19 +20,21 @@ impl RawSegment {
     pub fn new() -> Self {
         RawSegment {
             ops: Vec::new(),
+            // invariant: storage.len() == dropper.len() && for every element stored in the RawSequence the type matches the dropper function type
             storage: RawSequence::new(),
             dropper: Vec::new(),
         }
     }
 
-    /* Pushes a value into the segment's storage and registers its dropper. */
-    fn push_storage<T>(&mut self, value: T)
-    where
-        T: 'static,
-    {
+    /// Pushes a value into the segment's storage and registers its dropper.
+    fn push_storage<T: 'static>(&mut self, value: T) {
         self.storage.push(value);
-        self.dropper
-            .push(|storage, p| unsafe { storage.drop_in_place::<T>(p) });
+
+        self.dropper.push(|storage, p| unsafe {
+            // `drop_in_place` is only invoked with the corresponding value
+            // in `storage` - see invariants.
+            storage.drop_in_place::<T>(p)
+        });
     }
 
     /** Pushes a nullary operation (taking no arguments) that returns a value of type R. */
