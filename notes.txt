@@ -1,0 +1,36 @@
+@raw_segment.rs
+Need to normalize naming. `push` doesn't read well.
+
+`op#()` where # is arity. Empty results with push `()`
+`drop()` drops the top item on the stack (without pushing `()`)
+
+? Do we need `drop#`
+
+Building the docs
+```
+cargo doc --lib --no-deps --open --workspace
+cargo test --doc --workspace
+cargo clippy --workspace
+```
+
+Figure out if the call operators should be able to reuse the same stack.
+Need to implement adding a segment to a segment - accumulate base alignments - can you add an incomplete segment?
+
+To build with asam - must be on nightly build of rust
+
+```
+RUST_BACKTRACE=1 RUSTFLAGS=-Zsanitizer=address cargo +nightly test -Zbuild-std --target
+x86_64-apple-darwin --lib  --workspace
+```
+With rustdocs:
+```
+RUST_BACKTRACE=1 RUSTDOCFLAGS=-Zsanitizer=address RUSTFLAGS=-Zsanitizer=address cargo +nightly \
+  test -Zbuild-std --target x86_64-apple-darwin --workspace
+
+
+RUST_BACKTRACE=1 RUSTDOCFLAGS=-Zsanitizer=leak RUSTFLAGS=-Zsanitizer=leak cargo +nightly \
+  test -Zbuild-std --target x86_64-apple-darwin  --workspace
+
+RUST_BACKTRACE=1 RUSTDOCFLAGS=-Zsanitizer=thread RUSTFLAGS=-Zsanitizer=thread cargo +nightly \
+  test -Zbuild-std --target x86_64-apple-darwin  --workspace
+```

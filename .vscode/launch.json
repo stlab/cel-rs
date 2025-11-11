@@ -1,37 +1,4 @@
 {
     "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "Run Test Debugger (Windows)",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/target/debug/deps/cel_rs-1febaf6bc83c09b1.exe",
-            "args": [],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [],
-            "externalConsole": true,
-            "preLaunchTask": "cargo test build",
-        },
-        {
-            "name": "Run Test Debugger (LLDB)",
-            "type": "lldb",
-            "request": "launch",
-            "program": "${workspaceFolder}/target/debug/deps/cel_rs-1febaf6bc83c09b1",
-            "args": [],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [],
-            "preLaunchTask": "cargo test build",
-        }
-    ],
-    "compounds": [
-        {
-            "name": "Debug Tests",
-            "configurations": [
-                "Run Test Debugger (Windows)",
-                "Run Test Debugger (LLDB)"
-            ]
-        }
-    ]
+    "configurations": []
 }

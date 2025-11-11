@@ -1,0 +1,12 @@
+[package]
+name = "cel-parser"
+version = "0.1.0"
+edition = "2024"
+description = "Parser for Common Expression Language (CEL) expressions"
+license = "MIT"
+
+[dependencies]
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
+quote = "1.0"
+owo-colors = { version = "4.2", features = ["supports-colors"] }
+litrs = "0.4.1"

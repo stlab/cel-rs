@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+    
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+    
+    - name: Build all workspace members
+      run: cargo build --workspace --verbose
+    
+    - name: Run tests for all workspace members
+      run: cargo test --workspace --verbose -- --nocapture
+    
+    - name: Run clippy on all workspace members
+      run: cargo clippy --workspace -- -D warnings
