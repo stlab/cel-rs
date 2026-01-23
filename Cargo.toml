@@ -19,4 +19,10 @@ members = [
 
 [lib]
 name = "cel_rs"
-path = "src/lib.rs" 
+path = "src/lib.rs"
+
+[profile.dev]
+incremental = false
+
+[profile.test]
+incremental = false 
