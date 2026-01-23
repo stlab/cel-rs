@@ -4,6 +4,8 @@
     "rust-analyzer.lens.debug.enable": true,
     "rust-analyzer.lens.enable": true,
     "rust-analyzer.lens.run.enable": true,
+    "rust-analyzer.testExplorer": true,
+    "testing.automaticallyOpenPeekView": "failureInVisibleDocument",
     "cSpell.words": [
         "concatenative"
     ]
