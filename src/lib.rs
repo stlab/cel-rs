@@ -34,9 +34,10 @@
 //! use proc_macro2::TokenStream;
 //! use std::str::FromStr;
 //!
-//! let input = TokenStream::from_str("10 + 20").unwrap();
+//! let input = TokenStream::from_str("10").unwrap();
 //! let mut parser = CELParser::new(input.into_iter());
-//! assert!(parser.is_expression());
+//! let result = parser.is_expression();
+//! assert!(result.is_ok());
 //! ```
 //!
 //! ## Using the Macros

@@ -13,7 +13,7 @@ Book](https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html).
 
 Documentation for functions should always start with a short summary that describes what the
 function does. Additional exposition is usually not necessary unless the function has preconditions
-that may lead to an erroneous result or panic.
+that may lead to an erroneous result or panic. Follow the recommendations made in [this document](https://github.com/stlab/better-code/blob/main/better-code/src/chapter-2-contracts.md) but adapted to Rust conventions.
 
 For functions that recognize a grammar production, the production is a sufficient comment.
 

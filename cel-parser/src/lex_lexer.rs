@@ -3,39 +3,511 @@
 //! token stream. The goal, however, is to be able to specify with a grammar how to process a token
 //! stream.
 
-use proc_macro2::TokenTree;
-use std::iter::Peekable;
+use proc_macro2::{Delimiter, Ident, Spacing, Span, TokenTree};
+use syn::{Lit, LitFloat, LitInt, LitStr};
 
-pub(crate) struct LexLexer<I: Iterator<Item = TokenTree>> {
-    input: Peekable<I>,
+/// A trait for token types that provides access to span information for error reporting.
+///
+/// This trait is minimal by design - token type discrimination is done through pattern
+/// matching on enum variants, not through trait methods. This keeps the trait simple
+/// and allows different token types to have their own specific fields and methods.
+pub trait HasSpan {
+    /// Get the span for error reporting.
+    fn span(&self) -> Span;
+}
+
+/// A group iterator with its associated close delimiter information.
+struct GroupLevel {
+    iter: proc_macro2::token_stream::IntoIter,
+    delimiter: Delimiter,
+    span: Span,
+}
+
+/// A lexer that transforms a `TokenTree` stream into a flattened `Token` stream.
+///
+/// Groups are flattened into OpenDelim and CloseDelim tokens, and literals are
+/// eagerly discriminated into specific types. Flattening is lazy - group iterators
+/// are pushed onto a stack and processed one token at a time.
+///
+/// Multi-character operators are combined at this level (e.g., `&` + `&` -> `&&`).
+pub struct LexLexer<I: Iterator<Item = TokenTree>> {
+    input: I,
+    /// Stack of iterators for nested groups - allows lazy flattening.
+    /// Each entry tracks the iterator and its close delimiter info.
+    group_stack: Vec<GroupLevel>,
+    /// Pending close delimiter to emit when we've just exhausted a group iterator.
+    pending_close: Option<(Delimiter, Span)>,
+    /// Pending token that was consumed while looking ahead.
+    pending_token: Option<TokenTree>,
 }
 
 impl<I: Iterator<Item = TokenTree>> LexLexer<I> {
-    pub(crate) fn new(input: I) -> Self {
+    pub fn new(input: I) -> Self {
         Self {
-            input: input.peekable(),
+            input,
+            group_stack: Vec::new(),
+            pending_close: None,
+            pending_token: None,
+        }
+    }
+
+    /// Convert a single TokenTree into a Token (except Punct and Group which are handled specially).
+    ///
+    /// This handles Literal and Identifier tokens. Punct tokens need special handling for
+    /// combining multi-char operators, and Groups are handled by the iterator.
+    fn convert_token(token: TokenTree) -> Result<Token, anyhow::Error> {
+        match token {
+            TokenTree::Literal(lit) => {
+                let literal = Literal::from_proc_macro_literal(lit)?;
+                Ok(Token::Literal(literal))
+            }
+            TokenTree::Ident(ident) => {
+                let span = ident.span();
+                Ok(Token::Identifier { ident, span })
+            }
+            TokenTree::Punct(_) | TokenTree::Group(_) => {
+                // These should be handled by the iterator
+                Err(anyhow::anyhow!("Unexpected Punct or Group token in convert_token"))
+            }
+        }
+    }
+    
+    /// Check if two characters form a known multi-character operator.
+    fn is_compound_operator(first: char, second: char) -> bool {
+        matches!(
+            (first, second),
+            ('&', '&') | ('|', '|') | ('=', '=') | ('!', '=') |
+            ('<', '=') | ('>', '=') | ('<', '<') | ('>', '>')
+        )
+    }
+
+    /// Get the next TokenTree from the current iterator (top of stack or main input).
+    /// Returns None and sets pending_close when an iterator is exhausted.
+    fn next_token_tree(&mut self) -> Option<TokenTree> {
+        // Check if we have a pending token from lookahead
+        if let Some(token) = self.pending_token.take() {
+            return Some(token);
+        }
+
+        // Try to get from the top of the group stack first
+        if let Some(level) = self.group_stack.last_mut() {
+            if let Some(tt) = level.iter.next() {
+                return Some(tt);
+            }
+            // Current iterator exhausted, pop it and set pending close
+            let level = self.group_stack.pop().unwrap();
+            self.pending_close = Some((level.delimiter, level.span));
+            return None; // Signal that we need to emit close delimiter
+        }
+        
+        // Stack is empty, get from main input
+        self.input.next()
+    }
+}
+
+/// Literal token that stores both the pre-parsed syn value and the span
+/// for error reporting. Each variant is discriminated once at parse time.
+///
+/// Note: Boolean literals (true/false) are not included here because in proc_macro2,
+/// they appear as identifiers, not literals. The parser handles them separately.
+#[derive(Debug)]
+pub enum Literal {
+    Integer {
+        /// Pre-parsed integer literal with value, suffix, etc.
+        parsed: LitInt,
+        /// Span for error reporting (lightweight Copy type)
+        span: proc_macro2::Span,
+    },
+    String {
+        parsed: LitStr,
+        span: proc_macro2::Span,
+    },
+    Float {
+        parsed: LitFloat,
+        span: proc_macro2::Span,
+    },
+}
+
+impl Literal {
+    /// Create a Literal from a proc_macro2::Literal.
+    /// Uses syn to parse and discriminate the literal type.
+    ///
+    /// Note: This will return an error for boolean literals because true/false
+    /// are identifiers in proc_macro2, not literals.
+    pub fn from_proc_macro_literal(lit: proc_macro2::Literal) -> Result<Self, anyhow::Error> {
+        // Extract span once upfront (Span is Copy, so this is cheap)
+        let span = lit.span();
+        
+        // Parse using syn - it handles all literal discrimination
+        let syn_lit: Lit = syn::parse_str(&lit.to_string())?;
+        
+        match syn_lit {
+            Lit::Int(parsed) => Ok(Literal::Integer { parsed, span }),
+            Lit::Str(parsed) => Ok(Literal::String { parsed, span }),
+            Lit::Float(parsed) => Ok(Literal::Float { parsed, span }),
+            Lit::Bool(_) => Err(anyhow::anyhow!(
+                "Boolean literals should not appear here - true/false are identifiers in proc_macro2"
+            )),
+            other => Err(anyhow::anyhow!("Unsupported literal type: {}", 
+                match other {
+                    Lit::Byte(_) => "byte",
+                    Lit::ByteStr(_) => "byte string",
+                    Lit::Char(_) => "char",
+                    Lit::CStr(_) => "C string",
+                    Lit::Verbatim(_) => "verbatim",
+                    _ => "unknown",
+                }
+            )),
+        }
+    }
+    
+    /// Get the span for error reporting
+    pub fn span(&self) -> proc_macro2::Span {
+        match self {
+            Literal::Integer { span, .. }
+            | Literal::String { span, .. }
+            | Literal::Float { span, .. } => *span,
         }
     }
 }
 
-pub(crate) enum Literal {
-    Integer(IntegerLit),
-    String(StringLit),
-    Boolean(BooleanLit),
-    Float(FloatLit),
+/// A flattened token that represents elements from a TokenTree stream.
+///
+/// Groups are flattened into OpenDelim and CloseDelim tokens, making parsing
+/// simpler by removing nesting from the token stream.
+#[derive(Debug)]
+pub enum Token {
+    /// A literal value (integer, string, boolean, or float) with eager discrimination.
+    Literal(Literal),
+    
+    /// An identifier.
+    Identifier {
+        /// The identifier from the source.
+        ident: Ident,
+        /// Span for error reporting.
+        span: Span,
+    },
+    
+    /// A punctuation operator (single or multi-character).
+    Punct {
+        /// The operator string (e.g., "+", "&&", "<=").
+        op: String,
+        /// Span for error reporting.
+        span: Span,
+    },
+    
+    /// Opening delimiter (flattened from Group).
+    OpenDelim {
+        /// The type of delimiter (Parenthesis, Brace, Bracket).
+        delimiter: Delimiter,
+        /// Span for error reporting.
+        span: Span,
+    },
+    
+    /// Closing delimiter (flattened from Group).
+    CloseDelim {
+        /// The type of delimiter (Parenthesis, Brace, Bracket).
+        delimiter: Delimiter,
+        /// Span for error reporting.
+        span: Span,
+    },
 }
 
-pub(crate) enum Token {
-    Literal(Literal),
-    Identifier(Ident),
-    Punct(Punct),
-    Group(Group),
+impl HasSpan for Token {
+    fn span(&self) -> Span {
+        match self {
+            Token::Literal(lit) => lit.span(),
+            Token::Identifier { span, .. } => *span,
+            Token::Punct { span, .. } => *span,
+            Token::OpenDelim { span, .. } => *span,
+            Token::CloseDelim { span, .. } => *span,
+        }
+    }
+}
+
+impl HasSpan for TokenTree {
+    fn span(&self) -> Span {
+        match self {
+            TokenTree::Group(g) => g.span(),
+            TokenTree::Ident(i) => i.span(),
+            TokenTree::Punct(p) => p.span(),
+            TokenTree::Literal(l) => l.span(),
+        }
+    }
 }
 
 impl<I: Iterator<Item = TokenTree>> Iterator for LexLexer<I> {
     type Item = Result<Token, anyhow::Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.parse_one()?;
+        // Check if we have a pending close delimiter to emit
+        if let Some((delimiter, span)) = self.pending_close.take() {
+            return Some(Ok(Token::CloseDelim { delimiter, span }));
+        }
+
+        // Get next token tree from current iterator
+        let token = loop {
+            match self.next_token_tree() {
+                Some(tt) => break tt,
+                None if self.pending_close.is_some() => {
+                    // An iterator was exhausted and pending_close was set
+                    // Emit the close delimiter on the next call (recursive call)
+                    return self.next();
+                }
+                None => {
+                    // All iterators exhausted, no more tokens
+                    return None;
+                }
+            }
+        };
+
+        // Handle Groups by pushing their iterator onto the stack
+        if let TokenTree::Group(group) = token {
+            let delimiter = group.delimiter();
+            let span = group.span();
+            
+            // Push the group's iterator and close info onto the stack
+            self.group_stack.push(GroupLevel {
+                iter: group.stream().into_iter(),
+                delimiter,
+                span,
+            });
+            
+            // Return OpenDelim immediately
+            return Some(Ok(Token::OpenDelim { delimiter, span }));
+        }
+        
+        // Handle Punct tokens with potential combining
+        if let TokenTree::Punct(punct) = token {
+            let ch = punct.as_char();
+            let spacing = punct.spacing();
+            let span = punct.span();
+            
+            // If spacing is Joint, try to combine with next punct
+            if spacing == Spacing::Joint {
+                // Get next token to see if we can combine
+                match self.next_token_tree() {
+                    Some(TokenTree::Punct(next_punct)) => {
+                        let next_ch = next_punct.as_char();
+                        
+                        // Check if they form a compound operator
+                        if Self::is_compound_operator(ch, next_ch) {
+                            // Combine them
+                            let mut op = String::new();
+                            op.push(ch);
+                            op.push(next_ch);
+                            return Some(Ok(Token::Punct { op, span }));
+                        } else {
+                            // Can't combine - emit first and save second for next iteration
+                            self.pending_token = Some(TokenTree::Punct(next_punct));
+                            return Some(Ok(Token::Punct { 
+                                op: ch.to_string(), 
+                                span 
+                            }));
+                        }
+                    }
+                    Some(other_token) => {
+                        // Next token is not punct - emit our punct and save other for next iteration
+                        self.pending_token = Some(other_token);
+                        return Some(Ok(Token::Punct { 
+                            op: ch.to_string(), 
+                            span 
+                        }));
+                    }
+                    None => {
+                        // No next token - emit single punct
+                        return Some(Ok(Token::Punct { 
+                            op: ch.to_string(), 
+                            span 
+                        }));
+                    }
+                }
+            } else {
+                // Spacing is Alone - emit single character operator
+                return Some(Ok(Token::Punct { 
+                    op: ch.to_string(), 
+                    span 
+                }));
+            }
+        }
+        
+        // Not a group or punct, convert directly (Literal or Ident)
+        Some(Self::convert_token(token))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proc_macro2::TokenStream;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_literal_integer() {
+        let input = TokenStream::from_str("42").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        
+        let token = lexer.next().unwrap().unwrap();
+        match token {
+            Token::Literal(Literal::Integer { .. }) => {}
+            _ => panic!("Expected integer literal, got {:?}", token),
+        }
+    }
+
+    #[test]
+    fn test_literal_string() {
+        let input = TokenStream::from_str(r#""hello""#).unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        
+        let token = lexer.next().unwrap().unwrap();
+        match token {
+            Token::Literal(Literal::String { .. }) => {}
+            _ => panic!("Expected string literal"),
+        }
+    }
+
+    #[test]
+    fn test_literal_boolean() {
+        // Note: In proc_macro2, 'true' and 'false' are identifiers, not literals.
+        // Boolean literals only exist when parsing actual boolean literal syntax
+        // from source code. For testing, we verify identifiers work correctly.
+        let input = TokenStream::from_str("true").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        
+        let token = lexer.next().unwrap().unwrap();
+        match token {
+            Token::Identifier { ident, .. } => {
+                assert_eq!(ident.to_string(), "true");
+            }
+            _ => panic!("Expected identifier for 'true'"),
+        }
+    }
+
+    #[test]
+    fn test_literal_float() {
+        let input = TokenStream::from_str("3.14").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        
+        let token = lexer.next().unwrap().unwrap();
+        match token {
+            Token::Literal(Literal::Float { .. }) => {}
+            _ => panic!("Expected float literal"),
+        }
+    }
+
+    #[test]
+    fn test_identifier() {
+        let input = TokenStream::from_str("foo").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        
+        let token = lexer.next().unwrap().unwrap();
+        match token {
+            Token::Identifier { ident, .. } => {
+                assert_eq!(ident.to_string(), "foo");
+            }
+            _ => panic!("Expected identifier"),
+        }
+    }
+
+    #[test]
+    fn test_punct() {
+        let input = TokenStream::from_str("+").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        
+        let token = lexer.next().unwrap().unwrap();
+        match token {
+            Token::Punct { op, .. } => {
+                assert_eq!(op, "+");
+            }
+            _ => panic!("Expected punctuation"),
+        }
+    }
+
+    #[test]
+    fn test_compound_operator() {
+        let input = TokenStream::from_str("a && b").unwrap();
+        let lexer = LexLexer::new(input.into_iter());
+        
+        let tokens: Vec<_> = lexer.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(tokens.len(), 3);
+        
+        match &tokens[1] {
+            Token::Punct { op, .. } => {
+                assert_eq!(op, "&&");
+            }
+            _ => panic!("Expected && operator"),
+        }
+    }
+
+    #[test]
+    fn test_group_flattening() {
+        let input = TokenStream::from_str("(10 + 20)").unwrap();
+        let lexer = LexLexer::new(input.into_iter());
+        
+        // Should get: OpenDelim, Integer, Punct, Integer, CloseDelim
+        let tokens: Vec<_> = lexer.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(tokens.len(), 5);
+        
+        matches!(tokens[0], Token::OpenDelim { delimiter: Delimiter::Parenthesis, .. });
+        matches!(tokens[1], Token::Literal(Literal::Integer { .. }));
+        assert!(matches!(&tokens[2], Token::Punct { op, .. } if op == "+"));
+        matches!(tokens[3], Token::Literal(Literal::Integer { .. }));
+        matches!(tokens[4], Token::CloseDelim { delimiter: Delimiter::Parenthesis, .. });
+    }
+
+    #[test]
+    fn test_nested_groups() {
+        let input = TokenStream::from_str("(10 + (20 * 30))").unwrap();
+        let lexer = LexLexer::new(input.into_iter());
+        
+        let tokens: Vec<_> = lexer.collect::<Result<Vec<_>, _>>().unwrap();
+        
+        // Should have: OpenDelim, 10, +, OpenDelim, 20, *, 30, CloseDelim, CloseDelim
+        assert_eq!(tokens.len(), 9);
+        
+        // Verify structure
+        matches!(tokens[0], Token::OpenDelim { .. });
+        matches!(tokens[1], Token::Literal(Literal::Integer { .. }));
+        assert!(matches!(&tokens[2], Token::Punct { op, .. } if op == "+"));
+        matches!(tokens[3], Token::OpenDelim { .. });
+        matches!(tokens[4], Token::Literal(Literal::Integer { .. }));
+        assert!(matches!(&tokens[5], Token::Punct { op, .. } if op == "*"));
+        matches!(tokens[6], Token::Literal(Literal::Integer { .. }));
+        matches!(tokens[7], Token::CloseDelim { .. });
+        matches!(tokens[8], Token::CloseDelim { .. });
+    }
+
+    #[test]
+    fn test_span_preservation() {
+        let input = TokenStream::from_str("foo").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        
+        let token = lexer.next().unwrap().unwrap();
+        
+        // HasSpan trait should provide span
+        let span = HasSpan::span(&token);
+        assert!(!span.source_text().unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn test_haspan_trait_for_tokentree() {
+        let input = TokenStream::from_str("42").unwrap();
+        let tt = input.into_iter().next().unwrap();
+        
+        // TokenTree implements HasSpan trait
+        let _span = HasSpan::span(&tt);
+    }
+
+    #[test]
+    fn test_mixed_tokens() {
+        let input = TokenStream::from_str("foo + 42").unwrap();
+        let lexer = LexLexer::new(input.into_iter());
+        
+        let tokens: Vec<_> = lexer.collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(tokens.len(), 3);
+        
+        matches!(tokens[0], Token::Identifier { .. });
+        assert!(matches!(&tokens[1], Token::Punct { op, .. } if op == "+"));
+        matches!(tokens[2], Token::Literal(Literal::Integer { .. }));
     }
 }
