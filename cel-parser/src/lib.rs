@@ -73,7 +73,10 @@
 //! ```
 
 mod lex_lexer;
+pub mod op_table;
+
 use lex_lexer::{LexLexer, Literal as CelLiteral, Token};
+use op_table::OpLookup;
 
 use anyhow::Result;
 use cel_runtime::DynSegment;
@@ -81,12 +84,11 @@ use owo_colors::OwoColorize;
 use proc_macro2::{Delimiter, Ident, Literal, Span, TokenStream, TokenTree};
 use quote::quote_spanned;
 use std::iter::Peekable;
+use syn::Lit;
 
 fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
     match lit {
-        CelLiteral::Integer {
-            parsed: integer, ..
-        } => {
+        CelLiteral::Int(integer) => {
             // Use syn's suffix() to determine the type
             match integer.suffix() {
                 "u8" => output.just(
@@ -154,7 +156,7 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
                 }
             }
         }
-        CelLiteral::Float { parsed: float, .. } => {
+        CelLiteral::Float(float) => {
             // Use syn's suffix() to determine the type
             match float.suffix() {
                 "f32" => output.just(
@@ -172,9 +174,35 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
                 }
             }
         }
-        CelLiteral::String { parsed: string, .. } => {
+        CelLiteral::Str(string) => {
             // Store the string value (without quotes)
             output.just(string.value());
+        }
+        CelLiteral::Bool(lit_bool) => {
+            // Push the boolean value directly
+            output.just(lit_bool.value);
+        }
+        CelLiteral::Char(ch) => {
+            // Push character literal
+            output.just(ch.value());
+        }
+        CelLiteral::Byte(byte) => {
+            // Push byte literal (u8)
+            output.just(byte.value());
+        }
+        CelLiteral::ByteStr(byte_str) => {
+            // Push byte string as Vec<u8>
+            output.just(byte_str.value());
+        }
+        CelLiteral::CStr(c_str) => {
+            // Push C string directly
+            output.just(c_str.value());
+        }
+        CelLiteral::Verbatim(_) => {
+            unreachable!("Verbatim literals should never occur")
+        }
+        _ => {
+            // Future literal types not yet handled
         }
     }
 }
@@ -244,6 +272,7 @@ pub struct CELParser<I: Iterator<Item = TokenTree>> {
     tokens: Peekable<LexLexer<I>>,
     output: TokenStream,
     context: DynSegment,
+    op_lookup: OpLookup,
     last_error_span: Option<Span>,
 }
 pub enum PrimaryExpression {
@@ -286,9 +315,9 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
             {
                 let mut group_tokens = group.stream().into_iter();
                 if let Some(TokenTree::Literal(lit)) = group_tokens.next() {
-                    // Clean extraction using syn
-                    if let Ok(cel_lit) = CelLiteral::from_proc_macro_literal(lit) {
-                        if let CelLiteral::String { parsed, .. } = cel_lit {
+                    // Parse the literal using syn
+                    if let Ok(syn_lit) = syn::parse_str::<Lit>(&lit.to_string()) {
+                        if let Lit::Str(parsed) = syn_lit {
                             return Some(parsed.value());
                         }
                     }
@@ -306,7 +335,7 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
         start_line: u32,
     ) -> Option<String> {
         if let Some(error_msg) = self.extract_error_message()
-            && let Some(span) = self.get_error_span()
+            && let Some(span) = self.last_error_span
         {
             return Some(self.format_rustc_style(
                 &error_msg,
@@ -403,29 +432,6 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
         output
     }
 
-    fn get_error_span(&self) -> Option<Span> {
-        // The compile_error! TokenStream structure is:
-        // TokenTree::Ident("compile_error") - with the span we want
-        // TokenTree::Punct('!')
-        // TokenTree::Group(...) - containing the message, also with the span
-
-        let mut tokens = self.output.clone().into_iter();
-
-        // Look for the first token (should be "compile_error" ident)
-        if let Some(first_token) = tokens.next() {
-            match first_token {
-                TokenTree::Ident(ident) if ident == "compile_error" => {
-                    return Some(ident.span());
-                }
-                _ => {
-                    // Fallback: try to get span from any token in the stream
-                    return Some(first_token.span());
-                }
-            }
-        }
-        None
-    }
-
     /// Creates a new CEL parser with the given token iterator.
     ///
     /// # Arguments
@@ -442,8 +448,40 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
             tokens: lexer.peekable(),
             output,
             context: DynSegment::new::<()>(),
+            op_lookup: OpLookup::new(),
             last_error_span: None,
         }
+    }
+
+    /// Returns a mutable reference to the operation lookup.
+    ///
+    /// This allows customization of the operations available during parsing,
+    /// such as adding new scopes for custom operations or identifiers.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::CELParser;
+    /// use cel_runtime::DynSegment;
+    /// use proc_macro2::TokenStream;
+    /// use std::any::TypeId;
+    /// use std::str::FromStr;
+    ///
+    /// let input = TokenStream::from_str("10 + 20").unwrap();
+    /// let mut parser = CELParser::new(input.into_iter());
+    ///
+    /// // Add a custom scope
+    /// parser.op_lookup_mut().push_scope(Box::new(|name, types, segment| {
+    ///     if name == "+" && types.len() == 2 && types[0] == TypeId::of::<i32>() {
+    ///         segment.op2(|a: i32, b: i32| a + b + 1)?; // Custom addition
+    ///         Ok(true)
+    ///     } else {
+    ///         Ok(false)
+    ///     }
+    /// }));
+    /// ```
+    pub fn op_lookup_mut(&mut self) -> &mut OpLookup {
+        &mut self.op_lookup
     }
 
     fn advance(&mut self) -> Result<()> {
@@ -460,7 +498,7 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     fn peek_token(&mut self) -> Result<Option<&Token>> {
         // Check if peek returns an error without consuming
         let has_error = matches!(self.tokens.peek(), Some(Err(_)));
-        
+
         if has_error {
             // Now we can consume the error
             if let Some(Err(e)) = self.tokens.next() {
@@ -469,7 +507,7 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 unreachable!()
             }
         }
-        
+
         // Safe to peek now - we know it's either Some(Ok) or None
         match self.tokens.peek() {
             Some(Ok(token)) => Ok(Some(token)),
@@ -477,7 +515,6 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
             Some(Err(_)) => unreachable!("Error should have been handled above"),
         }
     }
-
 
     /// Reports a parsing error by adding a `compile_error!` macro to the output.
     ///
@@ -499,10 +536,9 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 self.last_error_span = Some(span);
                 span
             }
-            _ => self
-                .last_error_span
-                .unwrap_or_else(proc_macro2::Span::call_site),
+            _ => proc_macro2::Span::call_site(),
         };
+        // Only set output for proc macro usage, but we don't actually use it for format_error
         self.output = quote_spanned!(span => compile_error!(#message));
         anyhow::anyhow!(message.to_string())
     }
@@ -516,15 +552,6 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
             }
             _ => Ok(false),
         }
-    }
-
-    fn is_one_of_punctuation(&mut self, sequence: &[&str]) -> Result<bool> {
-        for s in sequence {
-            if self.is_punctuation(s)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     pub fn parse(&mut self) -> Result<DynSegment> {
@@ -551,9 +578,18 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `or_expression = and_expression { "||" and_expression }.`
     fn is_or_expression(&mut self) -> Result<bool> {
         if self.is_and_expression()? {
-            while self.is_one_of_punctuation(&["||"])? {
+            while self.is_punctuation("||")? {
                 if !self.is_and_expression()? {
                     return Err(self.report_error("expected and_expression"));
+                }
+                let types = self.context.peek_types_vec(2);
+                if !types.is_empty() {
+                    if let Err(e) = self
+                        .op_lookup
+                        .lookup("||", &types, &mut self.context)
+                    {
+                        return Err(self.report_error(&format!("operation error: {}", e)));
+                    }
                 }
             }
             Ok(true)
@@ -565,9 +601,18 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `and_expression = comparison_expression { "&&" comparison_expression }.`
     fn is_and_expression(&mut self) -> Result<bool> {
         if self.is_comparison_expression()? {
-            while self.is_one_of_punctuation(&["&&"])? {
+            while self.is_punctuation("&&")? {
                 if !self.is_comparison_expression()? {
                     return Err(self.report_error("expected comparison_expression"));
+                }
+                let types = self.context.peek_types_vec(2);
+                if !types.is_empty() {
+                    if let Err(e) = self
+                        .op_lookup
+                        .lookup("&&", &types, &mut self.context)
+                    {
+                        return Err(self.report_error(&format!("operation error: {}", e)));
+                    }
                 }
             }
             Ok(true)
@@ -579,11 +624,33 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].`
     fn is_comparison_expression(&mut self) -> Result<bool> {
         if self.is_bitwise_or_expression()? {
-            // Check longer operators first to avoid matching "<" when we have "<="
-            if self.is_one_of_punctuation(&["==", "!=", "<=", ">=", "<", ">"])? 
-                && !self.is_bitwise_or_expression()? 
-            {
-                return Err(self.report_error("expected bitwise_or_expression"));
+            // Check which operator we have (check longer operators first)
+            let op_name = if self.is_punctuation("==")? {
+                Some("==")
+            } else if self.is_punctuation("!=")? {
+                Some("!=")
+            } else if self.is_punctuation("<=")? {
+                Some("<=")
+            } else if self.is_punctuation(">=")? {
+                Some(">=")
+            } else if self.is_punctuation("<")? {
+                Some("<")
+            } else if self.is_punctuation(">")? {
+                Some(">")
+            } else {
+                None
+            };
+
+            if let Some(op_name) = op_name {
+                if !self.is_bitwise_or_expression()? {
+                    return Err(self.report_error("expected bitwise_or_expression"));
+                }
+                let types = self.context.peek_types_vec(2);
+                if !types.is_empty() {
+                    if let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
+                        return Err(self.report_error(&format!("operation error: {}", e)));
+                    }
+                }
             }
             Ok(true)
         } else {
@@ -594,9 +661,18 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.`
     fn is_bitwise_or_expression(&mut self) -> Result<bool> {
         if self.is_bitwise_xor_expression()? {
-            while self.is_one_of_punctuation(&["|"])? {
+            while self.is_punctuation("|")? {
                 if !self.is_bitwise_xor_expression()? {
                     return Err(self.report_error("expected bitwise_xor_expression"));
+                }
+                let types = self.context.peek_types_vec(2);
+                if !types.is_empty() {
+                    if let Err(e) = self
+                        .op_lookup
+                        .lookup("|", &types, &mut self.context)
+                    {
+                        return Err(self.report_error(&format!("operation error: {}", e)));
+                    }
                 }
             }
             Ok(true)
@@ -608,9 +684,18 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.`
     fn is_bitwise_xor_expression(&mut self) -> Result<bool> {
         if self.is_bitwise_and_expression()? {
-            while self.is_one_of_punctuation(&["^"])? {
+            while self.is_punctuation("^")? {
                 if !self.is_bitwise_and_expression()? {
                     return Err(self.report_error("expected bitwise_and_expression"));
+                }
+                let types = self.context.peek_types_vec(2);
+                if !types.is_empty() {
+                    if let Err(e) = self
+                        .op_lookup
+                        .lookup("^", &types, &mut self.context)
+                    {
+                        return Err(self.report_error(&format!("operation error: {}", e)));
+                    }
                 }
             }
             Ok(true)
@@ -622,9 +707,18 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.`
     fn is_bitwise_and_expression(&mut self) -> Result<bool> {
         if self.is_bitwise_shift_expression()? {
-            while self.is_one_of_punctuation(&["&"])? {
+            while self.is_punctuation("&")? {
                 if !self.is_bitwise_shift_expression()? {
                     return Err(self.report_error("expected bitwise_shift_expression"));
+                }
+                let types = self.context.peek_types_vec(2);
+                if !types.is_empty() {
+                    if let Err(e) = self
+                        .op_lookup
+                        .lookup("&", &types, &mut self.context)
+                    {
+                        return Err(self.report_error(&format!("operation error: {}", e)));
+                    }
                 }
             }
             Ok(true)
@@ -636,9 +730,27 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.`
     fn is_bitwise_shift_expression(&mut self) -> Result<bool> {
         if self.is_additive_expression()? {
-            while self.is_one_of_punctuation(&["<<", ">>"])? {
-                if !self.is_additive_expression()? {
-                    return Err(self.report_error("expected additive_expression"));
+            loop {
+                let op_name = if self.is_punctuation("<<")? {
+                    Some("<<")
+                } else if self.is_punctuation(">>")? {
+                    Some(">>")
+                } else {
+                    None
+                };
+
+                if let Some(op_name) = op_name {
+                    if !self.is_additive_expression()? {
+                        return Err(self.report_error("expected additive_expression"));
+                    }
+                    let types = self.context.peek_types_vec(2);
+                    if !types.is_empty() {
+                        if let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
+                            return Err(self.report_error(&format!("operation error: {}", e)));
+                        }
+                    }
+                } else {
+                    break;
                 }
             }
             Ok(true)
@@ -650,9 +762,33 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.`
     fn is_additive_expression(&mut self) -> Result<bool> {
         if self.is_multiplicative_expression()? {
-            while self.is_one_of_punctuation(&["+", "-"])? {
-                if !self.is_multiplicative_expression()? {
-                    return Err(self.report_error("expected multiplicative_expression"));
+            loop {
+                // Check which operator we have
+                let op_name = if self.is_punctuation("+")? {
+                    Some("+")
+                } else if self.is_punctuation("-")? {
+                    Some("-")
+                } else {
+                    None
+                };
+
+                // If we found an operator, parse the right operand and apply the operation
+                if let Some(op_name) = op_name {
+                    if !self.is_multiplicative_expression()? {
+                        return Err(self.report_error("expected multiplicative_expression"));
+                    }
+
+                    // Get the top two types from the stack
+                    let types = self.context.peek_types_vec(2);
+
+                    // Apply the operation using the table (only if we have types)
+                    if !types.is_empty() {
+                        if let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
+                            return Err(self.report_error(&format!("operation error: {}", e)));
+                        }
+                    }
+                } else {
+                    break;
                 }
             }
             Ok(true)
@@ -664,9 +800,35 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.`
     fn is_multiplicative_expression(&mut self) -> Result<bool> {
         if self.is_unary_expression()? {
-            while self.is_one_of_punctuation(&["*", "/", "%"])? {
-                if !self.is_unary_expression()? {
-                    return Err(self.report_error("expected unary_expression"));
+            loop {
+                // Check which operator we have
+                let op_name = if self.is_punctuation("*")? {
+                    Some("*")
+                } else if self.is_punctuation("/")? {
+                    Some("/")
+                } else if self.is_punctuation("%")? {
+                    Some("%")
+                } else {
+                    None
+                };
+
+                // If we found an operator, parse the right operand and apply the operation
+                if let Some(op_name) = op_name {
+                    if !self.is_unary_expression()? {
+                        return Err(self.report_error("expected unary_expression"));
+                    }
+
+                    // Get the top two types from the stack
+                    let types = self.context.peek_types_vec(2);
+
+                    // Apply the operation using the table (only if we have types)
+                    if !types.is_empty() {
+                        if let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
+                            return Err(self.report_error(&format!("operation error: {}", e)));
+                        }
+                    }
+                } else {
+                    break;
                 }
             }
             Ok(true)
@@ -677,9 +839,25 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
 
     /// `unary_expression = (("-" | "!") unary_expression) | primary_expression.`
     fn is_unary_expression(&mut self) -> Result<bool> {
-        if self.is_one_of_punctuation(&["-", "!"])? {
+        // Check for unary operators
+        let op_name = if self.is_punctuation("-")? {
+            Some("-")
+        } else if self.is_punctuation("!")? {
+            Some("!")
+        } else {
+            None
+        };
+
+        if let Some(op_name) = op_name {
             if !self.is_unary_expression()? {
                 return Err(self.report_error("expected unary_expression"));
+            }
+            // Apply the unary operation (only if we have types)
+            let types = self.context.peek_types_vec(1);
+            if !types.is_empty() {
+                if let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
+                    return Err(self.report_error(&format!("operation error: {}", e)));
+                }
             }
             Ok(true)
         } else {
@@ -691,42 +869,25 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     fn is_primary_expression(&mut self) -> Result<bool> {
         match self.peek_token()? {
             Some(Token::Literal(lit)) => {
-                // Clone the literal data we need before advancing
-                let lit_clone = match lit {
-                    CelLiteral::Integer { parsed, .. } => CelLiteral::Integer { 
-                        parsed: parsed.clone(), 
-                        span: parsed.span() 
-                    },
-                    CelLiteral::String { parsed, .. } => CelLiteral::String {
-                        parsed: parsed.clone(),
-                        span: parsed.span()
-                    },
-                    CelLiteral::Float { parsed, .. } => CelLiteral::Float {
-                        parsed: parsed.clone(),
-                        span: parsed.span()
-                    },
-                };
+                // Clone the literal - syn's Lit types are Clone
+                let lit_clone = lit.clone();
                 self.advance()?;
                 // Push the literal to the context
                 push_literal(&mut self.context, lit_clone);
                 Ok(true)
             }
-            Some(Token::Identifier { ident, .. }) => {
-                // Check if this is a boolean identifier (true/false)
-                let ident_str = ident.to_string();
-                if ident_str == "true" {
-                    self.advance()?;
-                    self.context.just(true);
-                    Ok(true)
-                } else if ident_str == "false" {
-                    self.advance()?;
-                    self.context.just(false);
-                    Ok(true)
-                } else {
-                    // Regular identifier - just advance for now
-                    self.advance()?;
-                    Ok(true)
-                }
+            Some(Token::Identifier(ident)) => {
+                // Look up identifier as 0-ary operation
+                let ident_name = ident.to_string();
+                self.advance()?;
+                
+                // Try to lookup the identifier (0-ary operation with empty type list)
+                self.op_lookup.lookup(&ident_name, &[], &mut self.context)
+                    .map_err(|_| {
+                        self.report_error(&format!("Undefined identifier: {}", ident_name))
+                    })?;
+                
+                Ok(true)
             }
             Some(Token::OpenDelim {
                 delimiter: Delimiter::Parenthesis,
@@ -831,60 +992,60 @@ mod tests {
 
     #[test]
     fn logical_expression() {
-        let input = TokenStream::from_str("a && b || c").unwrap();
+        let input = TokenStream::from_str("true && false || true").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression().unwrap());
     }
 
     #[test]
     fn comparison_expression() {
-        let input = TokenStream::from_str("a == b && c > d").unwrap();
+        let input = TokenStream::from_str("10 == 20 && 30 > 40").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression().unwrap());
     }
 
     #[test]
     fn bitwise_expression() {
-        let input = TokenStream::from_str("a | b & c ^ d").unwrap();
+        let input = TokenStream::from_str("1 | 2 & 3 ^ 4").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression().unwrap());
     }
 
     #[test]
     fn shift_expression() {
-        let input = TokenStream::from_str("a << 2 + b >> 1").unwrap();
+        let input = TokenStream::from_str("8 << 2 + 16 >> 1").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression().unwrap());
     }
 
     #[test]
     fn unary_expression() {
-        let input = TokenStream::from_str("-a + !b").unwrap();
+        let input = TokenStream::from_str("-10 + -20").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         assert!(parser.is_expression().unwrap());
     }
 
     #[test]
     fn double_negation() {
-        let input = TokenStream::from_str("!!a").unwrap();
+        let input = TokenStream::from_str("!!true").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         let result = parser.is_expression();
-        assert!(result.is_ok(), "Failed to parse !!a: {:?}", result);
-        assert!(result.unwrap(), "!!a returned false");
+        assert!(result.is_ok(), "Failed to parse !!true: {:?}", result);
+        assert!(result.unwrap(), "!!true returned false");
     }
 
     #[test]
     fn double_minus() {
-        let input = TokenStream::from_str("--b").unwrap();
+        let input = TokenStream::from_str("--5").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         let result = parser.is_expression();
-        assert!(result.is_ok(), "Failed to parse --b: {:?}", result);
-        assert!(result.unwrap(), "--b returned false");
+        assert!(result.is_ok(), "Failed to parse --5: {:?}", result);
+        assert!(result.unwrap(), "--5 returned false");
     }
 
     #[test]
     fn chained_unary_expression() {
-        let input = TokenStream::from_str("!!a + --b").unwrap();
+        let input = TokenStream::from_str("!!false || !!true").unwrap();
         let mut parser = CELParser::new(input.into_iter());
         let result = parser.is_expression();
         if let Err(ref e) = result {
@@ -963,7 +1124,7 @@ mod tests {
 
     #[test]
     fn error_formatting_with_line_offset() {
-        let source = "a + b c"; // Missing operator between b and c
+        let source = "10 + 20 30"; // Missing operator between 20 and 30
         let input = TokenStream::from_str(source).unwrap();
         let mut parser = CELParser::new(input.into_iter());
 
@@ -978,7 +1139,7 @@ mod tests {
         let formatted = strip_ansi_codes(&formatted_error.unwrap());
         assert!(formatted.contains("error: unexpected token"));
         assert!(formatted.contains("large_file.rs:42:")); // Should show offset line number
-        assert!(formatted.contains("42 | a + b c")); // Should show the line with offset line number
+        assert!(formatted.contains("42 | 10 + 20 30")); // Should show the line with offset line number
         assert!(formatted.contains("^")); // Should have carets pointing to the error
     }
 
@@ -999,5 +1160,168 @@ mod tests {
                 println!("{}", formatted_error);
             }
         }
+    }
+
+    #[test]
+    fn test_addition_execution() -> Result<()> {
+        let input = TokenStream::from_str("10 + 20").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        let mut segment = parser.parse()?;
+        let result = segment.call0::<i32>()?;
+        assert_eq!(result, 30);
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiplication_execution() -> Result<()> {
+        let input = TokenStream::from_str("3 * 7").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        let mut segment = parser.parse()?;
+        let result = segment.call0::<i32>()?;
+        assert_eq!(result, 21);
+        Ok(())
+    }
+
+    #[test]
+    fn test_complex_arithmetic_execution() -> Result<()> {
+        let input = TokenStream::from_str("10 + 20 * 3").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        let mut segment = parser.parse()?;
+        let result = segment.call0::<i32>()?;
+        assert_eq!(result, 70); // 10 + (20 * 3) = 10 + 60 = 70
+        Ok(())
+    }
+
+    #[test]
+    fn test_parenthesized_arithmetic_execution() -> Result<()> {
+        let input = TokenStream::from_str("(10 + 20) * 3").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        let mut segment = parser.parse()?;
+        let result = segment.call0::<i32>()?;
+        assert_eq!(result, 90); // (10 + 20) * 3 = 30 * 3 = 90
+        Ok(())
+    }
+
+    #[test]
+    fn test_comparison_execution() -> Result<()> {
+        let input = TokenStream::from_str("10 < 20").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        let mut segment = parser.parse()?;
+        let result = segment.call0::<bool>()?;
+        assert_eq!(result, true);
+        Ok(())
+    }
+
+    #[test]
+    fn test_logical_and_execution() -> Result<()> {
+        let input = TokenStream::from_str("true && false").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        let mut segment = parser.parse()?;
+        let result = segment.call0::<bool>()?;
+        assert_eq!(result, false);
+        Ok(())
+    }
+
+    #[test]
+    fn test_unary_negation_execution() -> Result<()> {
+        let input = TokenStream::from_str("-42").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        let mut segment = parser.parse()?;
+        let result = segment.call0::<i32>()?;
+        assert_eq!(result, -42);
+        Ok(())
+    }
+
+    #[test]
+    fn test_logical_not_execution() -> Result<()> {
+        let input = TokenStream::from_str("!true").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        let mut segment = parser.parse()?;
+        let result = segment.call0::<bool>()?;
+        assert_eq!(result, false);
+        Ok(())
+    }
+
+    #[test]
+    fn test_u32_addition_execution() -> Result<()> {
+        let input = TokenStream::from_str("10u32 + 20u32").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        let mut segment = parser.parse()?;
+        let result = segment.call0::<u32>()?;
+        assert_eq!(result, 30);
+        Ok(())
+    }
+
+    #[test]
+    fn test_identifier_with_scope() -> Result<()> {
+        let input = TokenStream::from_str("x + y").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        
+        // Add a scope that provides variable values
+        parser.op_lookup_mut().push_scope(Box::new(|name, types, segment| {
+            // 0-ary lookup means identifier
+            if types.is_empty() {
+                match name {
+                    "x" => {
+                        segment.op0(|| 10i32);
+                        Ok(true)
+                    }
+                    "y" => {
+                        segment.op0(|| 20i32);
+                        Ok(true)
+                    }
+                    _ => Ok(false)
+                }
+            } else {
+                Ok(false)
+            }
+        }));
+        
+        let mut segment = parser.parse()?;
+        let result = segment.call0::<i32>()?;
+        assert_eq!(result, 30);
+        Ok(())
+    }
+
+    #[test]
+    fn test_undefined_identifier_error() {
+        let input = TokenStream::from_str("undefined_var + 10").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        let result = parser.parse();
+        
+        assert!(result.is_err());
+        if let Err(e) = result {
+            let error_msg = format!("{:?}", e);
+            assert!(error_msg.contains("Undefined identifier: undefined_var"), 
+                "Error message should contain 'Undefined identifier: undefined_var', got: {}", error_msg);
+        }
+    }
+
+    #[test]
+    fn test_undefined_identifier_error_formatting() {
+        let input = "undefined_var + 10";
+        let token_stream = TokenStream::from_str(input).unwrap();
+        let mut parser = CELParser::new(token_stream.into_iter());
+        let result = parser.parse();
+        
+        assert!(result.is_err());
+        if let Err(_) = result {
+            // Test that format_error works correctly
+            if let Some(formatted_error) = parser.format_error(input, "test.cel", 1) {
+                assert!(formatted_error.contains("Undefined identifier"));
+                assert!(formatted_error.contains("undefined_var"));
+                assert!(formatted_error.contains("test.cel"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_float_arithmetic_execution() -> Result<()> {
+        let input = TokenStream::from_str("3.5 * 2.0").unwrap();
+        let mut parser = CELParser::new(input.into_iter());
+        let mut segment = parser.parse()?;
+        let result = segment.call0::<f64>()?;
+        assert_eq!(result, 7.0);
+        Ok(())
     }
 }

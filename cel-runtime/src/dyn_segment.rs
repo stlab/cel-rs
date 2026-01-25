@@ -171,6 +171,21 @@ impl DynSegment {
         result
     }
 
+    /// Returns a vector of the TypeIds of the top N values on the stack.
+    ///
+    /// Returns an empty vector if N is greater than the stack size.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The number of TypeIds to retrieve from the top of the stack
+    pub fn peek_types_vec(&self, n: usize) -> Vec<TypeId> {
+        if n > self.stack_ids.len() {
+            return Vec::new();
+        }
+        let start = self.stack_ids.len() - n;
+        self.stack_ids[start..].iter().map(|info| info.stack_id).collect()
+    }
+
     /// Pushes a nullary operation that takes no arguments and returns a value of type R.
     ///
     /// The return type is tracked in the type stack for subsequent operations.

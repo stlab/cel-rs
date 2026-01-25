@@ -71,11 +71,9 @@ pub mod macros {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     struct Experiment {
         a: u32,
-        b: u32,
     }
 
     struct Segment<T, F: Fn(&mut T) -> String> {
@@ -95,7 +93,7 @@ mod tests {
 
     #[test]
     fn experiment() {
-        let experiment = Experiment { a: 1, b: 2 };
+        let experiment = Experiment { a: 1 };
         let mut segment = Segment::new(experiment, |e| e.a.to_string());
         assert_eq!(segment.call(), "1");
     }

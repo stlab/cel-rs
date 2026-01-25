@@ -4,7 +4,7 @@
 //! stream.
 
 use proc_macro2::{Delimiter, Ident, Spacing, Span, TokenTree};
-use syn::{Lit, LitFloat, LitInt, LitStr};
+use syn::{Lit, LitBool};
 
 /// A trait for token types that provides access to span information for error reporting.
 ///
@@ -51,19 +51,35 @@ impl<I: Iterator<Item = TokenTree>> LexLexer<I> {
         }
     }
 
-    /// Convert a single TokenTree into a Token (except Punct and Group which are handled specially).
+    /// Converts a single TokenTree into a Token (except Punct and Group which are handled specially).
     ///
-    /// This handles Literal and Identifier tokens. Punct tokens need special handling for
-    /// combining multi-char operators, and Groups are handled by the iterator.
+    /// This handles Literal and Identifier tokens. Boolean identifiers (`true`, `false`) are
+    /// converted to Boolean literals. Punct tokens need special handling for combining
+    /// multi-char operators, and Groups are handled by the iterator.
     fn convert_token(token: TokenTree) -> Result<Token, anyhow::Error> {
         match token {
             TokenTree::Literal(lit) => {
-                let literal = Literal::from_proc_macro_literal(lit)?;
-                Ok(Token::Literal(literal))
+                // Parse using syn - it handles all literal discrimination
+                let syn_lit: Lit = syn::parse_str(&lit.to_string())?;
+                
+                // Verbatim literals should never occur when parsing proc_macro2::Literal
+                debug_assert!(
+                    !matches!(syn_lit, Lit::Verbatim(_)),
+                    "Unexpected Verbatim literal from proc_macro2::Literal"
+                );
+                
+                Ok(Token::Literal(syn_lit))
             }
             TokenTree::Ident(ident) => {
+                let ident_str = ident.to_string();
                 let span = ident.span();
-                Ok(Token::Identifier { ident, span })
+                
+                // Check if this is a boolean literal
+                match ident_str.as_str() {
+                    "true" => Ok(Token::Literal(Lit::Bool(LitBool { value: true, span }))),
+                    "false" => Ok(Token::Literal(Lit::Bool(LitBool { value: false, span }))),
+                    _ => Ok(Token::Identifier(ident)),
+                }
             }
             TokenTree::Punct(_) | TokenTree::Group(_) => {
                 // These should be handled by the iterator
@@ -105,68 +121,25 @@ impl<I: Iterator<Item = TokenTree>> LexLexer<I> {
     }
 }
 
-/// Literal token that stores both the pre-parsed syn value and the span
-/// for error reporting. Each variant is discriminated once at parse time.
+/// A parsed literal value using syn's Lit enum.
 ///
-/// Note: Boolean literals (true/false) are not included here because in proc_macro2,
-/// they appear as identifiers, not literals. The parser handles them separately.
-#[derive(Debug)]
-pub enum Literal {
-    Integer {
-        /// Pre-parsed integer literal with value, suffix, etc.
-        parsed: LitInt,
-        /// Span for error reporting (lightweight Copy type)
-        span: proc_macro2::Span,
-    },
-    String {
-        parsed: LitStr,
-        span: proc_macro2::Span,
-    },
-    Float {
-        parsed: LitFloat,
-        span: proc_macro2::Span,
-    },
-}
+/// This is a simple wrapper around syn's `Lit` type that includes boolean literals
+/// even though they appear as identifiers in proc_macro2 (converted during lexing).
+pub type Literal = Lit;
 
-impl Literal {
-    /// Create a Literal from a proc_macro2::Literal.
-    /// Uses syn to parse and discriminate the literal type.
-    ///
-    /// Note: This will return an error for boolean literals because true/false
-    /// are identifiers in proc_macro2, not literals.
-    pub fn from_proc_macro_literal(lit: proc_macro2::Literal) -> Result<Self, anyhow::Error> {
-        // Extract span once upfront (Span is Copy, so this is cheap)
-        let span = lit.span();
-        
-        // Parse using syn - it handles all literal discrimination
-        let syn_lit: Lit = syn::parse_str(&lit.to_string())?;
-        
-        match syn_lit {
-            Lit::Int(parsed) => Ok(Literal::Integer { parsed, span }),
-            Lit::Str(parsed) => Ok(Literal::String { parsed, span }),
-            Lit::Float(parsed) => Ok(Literal::Float { parsed, span }),
-            Lit::Bool(_) => Err(anyhow::anyhow!(
-                "Boolean literals should not appear here - true/false are identifiers in proc_macro2"
-            )),
-            other => Err(anyhow::anyhow!("Unsupported literal type: {}", 
-                match other {
-                    Lit::Byte(_) => "byte",
-                    Lit::ByteStr(_) => "byte string",
-                    Lit::Char(_) => "char",
-                    Lit::CStr(_) => "C string",
-                    Lit::Verbatim(_) => "verbatim",
-                    _ => "unknown",
-                }
-            )),
-        }
-    }
-    
-    /// Get the span for error reporting
-    pub fn span(&self) -> proc_macro2::Span {
+impl HasSpan for Literal {
+    fn span(&self) -> Span {
         match self {
-            Literal::Integer { span, .. }
-            | Literal::String { span, .. }
-            | Literal::Float { span, .. } => *span,
+            Lit::Str(lit) => lit.span(),
+            Lit::ByteStr(lit) => lit.span(),
+            Lit::CStr(lit) => lit.span(),
+            Lit::Byte(lit) => lit.span(),
+            Lit::Char(lit) => lit.span(),
+            Lit::Int(lit) => lit.span(),
+            Lit::Float(lit) => lit.span(),
+            Lit::Bool(lit) => lit.span(),
+            Lit::Verbatim(_) => unreachable!("Verbatim literals should never occur"),
+            _ => Span::call_site(),
         }
     }
 }
@@ -181,12 +154,7 @@ pub enum Token {
     Literal(Literal),
     
     /// An identifier.
-    Identifier {
-        /// The identifier from the source.
-        ident: Ident,
-        /// Span for error reporting.
-        span: Span,
-    },
+    Identifier(Ident),
     
     /// A punctuation operator (single or multi-character).
     Punct {
@@ -217,7 +185,7 @@ impl HasSpan for Token {
     fn span(&self) -> Span {
         match self {
             Token::Literal(lit) => lit.span(),
-            Token::Identifier { span, .. } => *span,
+            Token::Identifier(ident) => ident.span(),
             Token::Punct { span, .. } => *span,
             Token::OpenDelim { span, .. } => *span,
             Token::CloseDelim { span, .. } => *span,
@@ -349,7 +317,7 @@ mod tests {
         
         let token = lexer.next().unwrap().unwrap();
         match token {
-            Token::Literal(Literal::Integer { .. }) => {}
+            Token::Literal(Lit::Int(..)) => {}
             _ => panic!("Expected integer literal, got {:?}", token),
         }
     }
@@ -361,25 +329,35 @@ mod tests {
         
         let token = lexer.next().unwrap().unwrap();
         match token {
-            Token::Literal(Literal::String { .. }) => {}
+            Token::Literal(Lit::Str(..)) => {}
             _ => panic!("Expected string literal"),
         }
     }
 
     #[test]
     fn test_literal_boolean() {
-        // Note: In proc_macro2, 'true' and 'false' are identifiers, not literals.
-        // Boolean literals only exist when parsing actual boolean literal syntax
-        // from source code. For testing, we verify identifiers work correctly.
+        // Test 'true' boolean literal
         let input = TokenStream::from_str("true").unwrap();
         let mut lexer = LexLexer::new(input.into_iter());
         
         let token = lexer.next().unwrap().unwrap();
         match token {
-            Token::Identifier { ident, .. } => {
-                assert_eq!(ident.to_string(), "true");
+            Token::Literal(Lit::Bool(lit_bool)) => {
+                assert_eq!(lit_bool.value, true);
             }
-            _ => panic!("Expected identifier for 'true'"),
+            _ => panic!("Expected boolean literal for 'true', got {:?}", token),
+        }
+        
+        // Test 'false' boolean literal
+        let input = TokenStream::from_str("false").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        
+        let token = lexer.next().unwrap().unwrap();
+        match token {
+            Token::Literal(Lit::Bool(lit_bool)) => {
+                assert_eq!(lit_bool.value, false);
+            }
+            _ => panic!("Expected boolean literal for 'false', got {:?}", token),
         }
     }
 
@@ -390,7 +368,7 @@ mod tests {
         
         let token = lexer.next().unwrap().unwrap();
         match token {
-            Token::Literal(Literal::Float { .. }) => {}
+            Token::Literal(Lit::Float(..)) => {}
             _ => panic!("Expected float literal"),
         }
     }
@@ -402,7 +380,7 @@ mod tests {
         
         let token = lexer.next().unwrap().unwrap();
         match token {
-            Token::Identifier { ident, .. } => {
+            Token::Identifier(ident) => {
                 assert_eq!(ident.to_string(), "foo");
             }
             _ => panic!("Expected identifier"),
@@ -449,9 +427,9 @@ mod tests {
         assert_eq!(tokens.len(), 5);
         
         matches!(tokens[0], Token::OpenDelim { delimiter: Delimiter::Parenthesis, .. });
-        matches!(tokens[1], Token::Literal(Literal::Integer { .. }));
+        matches!(tokens[1], Token::Literal(Lit::Int(..)));
         assert!(matches!(&tokens[2], Token::Punct { op, .. } if op == "+"));
-        matches!(tokens[3], Token::Literal(Literal::Integer { .. }));
+        matches!(tokens[3], Token::Literal(Lit::Int(..)));
         matches!(tokens[4], Token::CloseDelim { delimiter: Delimiter::Parenthesis, .. });
     }
 
@@ -467,12 +445,12 @@ mod tests {
         
         // Verify structure
         matches!(tokens[0], Token::OpenDelim { .. });
-        matches!(tokens[1], Token::Literal(Literal::Integer { .. }));
+        matches!(tokens[1], Token::Literal(Lit::Int(..)));
         assert!(matches!(&tokens[2], Token::Punct { op, .. } if op == "+"));
         matches!(tokens[3], Token::OpenDelim { .. });
-        matches!(tokens[4], Token::Literal(Literal::Integer { .. }));
+        matches!(tokens[4], Token::Literal(Lit::Int(..)));
         assert!(matches!(&tokens[5], Token::Punct { op, .. } if op == "*"));
-        matches!(tokens[6], Token::Literal(Literal::Integer { .. }));
+        matches!(tokens[6], Token::Literal(Lit::Int(..)));
         matches!(tokens[7], Token::CloseDelim { .. });
         matches!(tokens[8], Token::CloseDelim { .. });
     }
@@ -506,8 +484,8 @@ mod tests {
         let tokens: Vec<_> = lexer.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(tokens.len(), 3);
         
-        matches!(tokens[0], Token::Identifier { .. });
+        matches!(tokens[0], Token::Identifier(_));
         assert!(matches!(&tokens[1], Token::Punct { op, .. } if op == "+"));
-        matches!(tokens[2], Token::Literal(Literal::Integer { .. }));
+        matches!(tokens[2], Token::Literal(Lit::Int(..)));
     }
 }

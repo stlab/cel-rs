@@ -12,3 +12,5 @@ owo-colors = { version = "4.2", features = ["supports-colors"] }
 syn = { version = "2.0", features = ["extra-traits"] }
 cel-runtime = { path = "../cel-runtime" }
 anyhow = "1.0"
+phf = { version = "0.11", features = ["macros"] }
+once_cell = "1.19"
