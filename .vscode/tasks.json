@@ -99,13 +99,10 @@
         },
         {
             "label": "cargo clippy --fix",
-            "type": "shell",
-            "command": "cargo",
+            "type": "cargo",
+            "command": "clippy",
             "args": [
-                "clippy",
                 "--fix",
-                "--allow-dirty",
-                "--allow-staged",
                 "--workspace"
             ],
             "problemMatcher": [
@@ -148,13 +145,13 @@
                 "-Zbuild-std",
                 "--target",
                 "x86_64-apple-darwin",
-                "--lib",
                 "--workspace"
             ],
             "options": {
                 "env": {
                     "RUST_BACKTRACE": "1",
-                    "RUSTFLAGS": "-Zsanitizer=address"
+                    "RUSTFLAGS": "-Zsanitizer=address",
+                    "RUSTDOCFLAGS": "-Zsanitizer=address"
                 }
             },
             "problemMatcher": [
@@ -166,7 +163,7 @@
             }
         },
         {
-            "label": "sanitizer: address with docs (macOS)",
+            "label": "sanitizer: address lib only (macOS)",
             "type": "shell",
             "command": "cargo",
             "args": [
@@ -175,13 +172,13 @@
                 "-Zbuild-std",
                 "--target",
                 "x86_64-apple-darwin",
+                "--lib",
                 "--workspace"
             ],
             "options": {
                 "env": {
                     "RUST_BACKTRACE": "1",
-                    "RUSTFLAGS": "-Zsanitizer=address",
-                    "RUSTDOCFLAGS": "-Zsanitizer=address"
+                    "RUSTFLAGS": "-Zsanitizer=address"
                 }
             },
             "problemMatcher": [
@@ -249,7 +246,7 @@
         {
             "label": "sanitizer: address (Linux/WSL2)",
             "type": "shell",
-            "command": "cargo",
+            "command": "${env:HOME}/.cargo/bin/cargo",
             "args": [
                 "+nightly",
                 "test",
@@ -276,7 +273,7 @@
         {
             "label": "sanitizer: address lib only (Linux/WSL2)",
             "type": "shell",
-            "command": "cargo",
+            "command": "${env:HOME}/.cargo/bin/cargo",
             "args": [
                 "+nightly",
                 "test",
@@ -303,7 +300,7 @@
         {
             "label": "sanitizer: leak (Linux/WSL2)",
             "type": "shell",
-            "command": "cargo",
+            "command": "${env:HOME}/.cargo/bin/cargo",
             "args": [
                 "+nightly",
                 "test",
@@ -330,7 +327,7 @@
         {
             "label": "sanitizer: thread (Linux/WSL2)",
             "type": "shell",
-            "command": "cargo",
+            "command": "${env:HOME}/.cargo/bin/cargo",
             "args": [
                 "+nightly",
                 "test",
@@ -344,80 +341,6 @@
                     "RUST_BACKTRACE": "1",
                     "RUSTFLAGS": "-Zsanitizer=thread",
                     "RUSTDOCFLAGS": "-Zsanitizer=thread"
-                }
-            },
-            "problemMatcher": [
-                "$rustc"
-            ],
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated"
-            }
-        },
-        // ============ Sanitizers - Windows ============
-        // NOTE: AddressSanitizer support on Windows is experimental and limited.
-        // For reliable memory testing, use WSL2, macOS, or Linux.
-        {
-            "label": "cargo test (Windows - comprehensive)",
-            "type": "cargo",
-            "command": "test",
-            "args": [
-                "--workspace",
-                "--all-targets"
-            ],
-            "options": {
-                "env": {
-                    "RUST_BACKTRACE": "1"
-                }
-            },
-            "problemMatcher": [
-                "$rustc"
-            ]
-        },
-        {
-            "label": "sanitizer: address (Windows - experimental)",
-            "type": "shell",
-            "command": "cargo",
-            "args": [
-                "+nightly",
-                "test",
-                "-Zbuild-std",
-                "--target",
-                "x86_64-pc-windows-msvc",
-                "--workspace"
-            ],
-            "options": {
-                "env": {
-                    "RUST_BACKTRACE": "1",
-                    "RUSTFLAGS": "-Zsanitizer=address",
-                    "RUSTDOCFLAGS": "-Zsanitizer=address"
-                }
-            },
-            "problemMatcher": [
-                "$rustc"
-            ],
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "label": "sanitizer: address lib only (Windows)",
-            "type": "shell",
-            "command": "cargo",
-            "args": [
-                "+nightly",
-                "test",
-                "-Zbuild-std",
-                "--target",
-                "x86_64-pc-windows-msvc",
-                "--lib",
-                "--workspace"
-            ],
-            "options": {
-                "env": {
-                    "RUST_BACKTRACE": "1",
-                    "RUSTFLAGS": "-Zsanitizer=address -Clink-arg=/wholearchive:clang_rt.asan-x86_64.lib"
                 }
             },
             "problemMatcher": [
