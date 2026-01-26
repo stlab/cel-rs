@@ -223,18 +223,16 @@ impl<I: Iterator<Item = TokenTree>> Iterator for LexLexer<I> {
         }
 
         // Get next token tree from current iterator
-        let token = loop {
-            match self.next_token_tree() {
-                Some(tt) => break tt,
-                None if self.pending_close.is_some() => {
-                    // An iterator was exhausted and pending_close was set
-                    // Emit the close delimiter on the next call (recursive call)
-                    return self.next();
-                }
-                None => {
-                    // All iterators exhausted, no more tokens
-                    return None;
-                }
+        let token = match self.next_token_tree() {
+            Some(tt) => tt,
+            None if self.pending_close.is_some() => {
+                // An iterator was exhausted and pending_close was set
+                // Emit the close delimiter on the next call (recursive call)
+                return self.next();
+            }
+            None => {
+                // All iterators exhausted, no more tokens
+                return None;
             }
         };
 

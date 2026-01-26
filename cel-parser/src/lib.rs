@@ -335,11 +335,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 let mut group_tokens = group.stream().into_iter();
                 if let Some(TokenTree::Literal(lit)) = group_tokens.next() {
                     // Parse the literal using syn
-                    if let Ok(syn_lit) = syn::parse_str::<Lit>(&lit.to_string()) {
-                        if let Lit::Str(parsed) = syn_lit {
+                    if let Ok(syn_lit) = syn::parse_str::<Lit>(&lit.to_string())
+                        && let Lit::Str(parsed) = syn_lit {
                             return Some(parsed.value());
                         }
-                    }
                 }
             }
         }
@@ -630,14 +629,13 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                     return Err(self.report_error("expected and_expression"));
                 }
                 let types = self.context.peek_types_vec(2);
-                if !types.is_empty() {
-                    if let Err(e) = self
+                if !types.is_empty()
+                    && let Err(e) = self
                         .op_lookup
                         .lookup("||", &types, &mut self.context)
                     {
                         return Err(self.report_error(&format!("operation error: {}", e)));
                     }
-                }
             }
             Ok(true)
         } else {
@@ -653,14 +651,13 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                     return Err(self.report_error("expected comparison_expression"));
                 }
                 let types = self.context.peek_types_vec(2);
-                if !types.is_empty() {
-                    if let Err(e) = self
+                if !types.is_empty()
+                    && let Err(e) = self
                         .op_lookup
                         .lookup("&&", &types, &mut self.context)
                     {
                         return Err(self.report_error(&format!("operation error: {}", e)));
                     }
-                }
             }
             Ok(true)
         } else {
@@ -693,11 +690,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                     return Err(self.report_error("expected bitwise_or_expression"));
                 }
                 let types = self.context.peek_types_vec(2);
-                if !types.is_empty() {
-                    if let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
+                if !types.is_empty()
+                    && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
                         return Err(self.report_error(&format!("operation error: {}", e)));
                     }
-                }
             }
             Ok(true)
         } else {
@@ -713,14 +709,13 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                     return Err(self.report_error("expected bitwise_xor_expression"));
                 }
                 let types = self.context.peek_types_vec(2);
-                if !types.is_empty() {
-                    if let Err(e) = self
+                if !types.is_empty()
+                    && let Err(e) = self
                         .op_lookup
                         .lookup("|", &types, &mut self.context)
                     {
                         return Err(self.report_error(&format!("operation error: {}", e)));
                     }
-                }
             }
             Ok(true)
         } else {
@@ -736,14 +731,13 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                     return Err(self.report_error("expected bitwise_and_expression"));
                 }
                 let types = self.context.peek_types_vec(2);
-                if !types.is_empty() {
-                    if let Err(e) = self
+                if !types.is_empty()
+                    && let Err(e) = self
                         .op_lookup
                         .lookup("^", &types, &mut self.context)
                     {
                         return Err(self.report_error(&format!("operation error: {}", e)));
                     }
-                }
             }
             Ok(true)
         } else {
@@ -759,14 +753,13 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                     return Err(self.report_error("expected bitwise_shift_expression"));
                 }
                 let types = self.context.peek_types_vec(2);
-                if !types.is_empty() {
-                    if let Err(e) = self
+                if !types.is_empty()
+                    && let Err(e) = self
                         .op_lookup
                         .lookup("&", &types, &mut self.context)
                     {
                         return Err(self.report_error(&format!("operation error: {}", e)));
                     }
-                }
             }
             Ok(true)
         } else {
@@ -791,11 +784,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                         return Err(self.report_error("expected additive_expression"));
                     }
                     let types = self.context.peek_types_vec(2);
-                    if !types.is_empty() {
-                        if let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
+                    if !types.is_empty()
+                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
                             return Err(self.report_error(&format!("operation error: {}", e)));
                         }
-                    }
                 } else {
                     break;
                 }
@@ -829,11 +821,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                     let types = self.context.peek_types_vec(2);
 
                     // Apply the operation using the table (only if we have types)
-                    if !types.is_empty() {
-                        if let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
+                    if !types.is_empty()
+                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
                             return Err(self.report_error(&format!("operation error: {}", e)));
                         }
-                    }
                 } else {
                     break;
                 }
@@ -869,11 +860,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                     let types = self.context.peek_types_vec(2);
 
                     // Apply the operation using the table (only if we have types)
-                    if !types.is_empty() {
-                        if let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
+                    if !types.is_empty()
+                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
                             return Err(self.report_error(&format!("operation error: {}", e)));
                         }
-                    }
                 } else {
                     break;
                 }
@@ -901,11 +891,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
             }
             // Apply the unary operation (only if we have types)
             let types = self.context.peek_types_vec(1);
-            if !types.is_empty() {
-                if let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
+            if !types.is_empty()
+                && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
                     return Err(self.report_error(&format!("operation error: {}", e)));
                 }
-            }
             Ok(true)
         } else {
             self.is_primary_expression()
