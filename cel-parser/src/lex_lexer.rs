@@ -4,7 +4,7 @@
 //! stream.
 
 use proc_macro2::{Delimiter, Ident, Spacing, Span, TokenTree};
-use syn::{Lit, LitBool};
+use syn::Lit;
 
 /// A trait for token types that provides access to span information for error reporting.
 ///
@@ -42,6 +42,11 @@ pub struct LexLexer<I: Iterator<Item = TokenTree>> {
 }
 
 impl<I: Iterator<Item = TokenTree>> LexLexer<I> {
+    /// Creates a new lexer from a token tree iterator.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - An iterator over `TokenTree` items to be lexed into `Token`s
     pub fn new(input: I) -> Self {
         Self {
             input,
@@ -59,8 +64,9 @@ impl<I: Iterator<Item = TokenTree>> LexLexer<I> {
     fn convert_token(token: TokenTree) -> Result<Token, anyhow::Error> {
         match token {
             TokenTree::Literal(lit) => {
-                // Parse using syn - it handles all literal discrimination
-                let syn_lit: Lit = syn::parse_str(&lit.to_string())?;
+                // Wrap in TokenTree and convert to TokenStream to preserve span information
+                let token_stream: proc_macro2::TokenStream = TokenTree::Literal(lit).into();
+                let syn_lit: Lit = syn::parse2(token_stream)?;
                 
                 // Verbatim literals should never occur when parsing proc_macro2::Literal
                 debug_assert!(
@@ -72,12 +78,15 @@ impl<I: Iterator<Item = TokenTree>> LexLexer<I> {
             }
             TokenTree::Ident(ident) => {
                 let ident_str = ident.to_string();
-                let span = ident.span();
                 
                 // Check if this is a boolean literal
                 match ident_str.as_str() {
-                    "true" => Ok(Token::Literal(Lit::Bool(LitBool { value: true, span }))),
-                    "false" => Ok(Token::Literal(Lit::Bool(LitBool { value: false, span }))),
+                    "true" | "false" => {
+                        // Wrap in TokenTree and convert to TokenStream to preserve span information
+                        let token_stream: proc_macro2::TokenStream = TokenTree::Ident(ident).into();
+                        let syn_lit: Lit = syn::parse2(token_stream)?;
+                        Ok(Token::Literal(syn_lit))
+                    }
                     _ => Ok(Token::Identifier(ident)),
                 }
             }
