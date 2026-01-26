@@ -11,6 +11,7 @@ Building the docs
 cargo doc --lib --no-deps --open --workspace
 cargo test --doc --workspace
 cargo clippy --workspace
+cargo clippy --fix --workspace
 ```
 
 Figure out if the call operators should be able to reuse the same stack.
