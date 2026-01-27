@@ -2,8 +2,16 @@
 
 //! A recursive descent parser for CEL (Common Expression Language) expressions.
 //!
-//! This crate provides a parser that can parse CEL expressions into . The parser follows the CEL grammar
-//! specification and provides detailed error reporting with source location information.
+//! This crate provides a parser that can parse CEL expressions into executable segments. 
+//! The parser follows the CEL grammar specification and provides detailed error reporting 
+//! with source location information.
+//!
+//! # Error Handling
+//!
+//! Parse errors are returned as `anyhow::Error` to keep the interface flexible as the 
+//! grammar evolves. All errors result from malformed input (syntax errors, type mismatches, 
+//! undefined identifiers). The lexer itself cannot produce errors since input is pre-validated 
+//! by `proc_macro2` before reaching the parser.
 //!
 //! # Grammar
 //!
@@ -522,36 +530,15 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
         &mut self.op_lookup
     }
 
-    fn advance(&mut self) -> Result<()> {
-        match self.tokens.next() {
-            Some(Ok(_)) => Ok(()),
-            Some(Err(e)) => Err(e),
-            None => Ok(()),
-        }
+    fn advance(&mut self) {
+        self.tokens.next();
     }
 
-    /// Peek at the current token, handling any lexer errors.
-    /// Returns an error if the lexer encountered an error.
-    /// Returns Ok(None) if there are no more tokens.
-    fn peek_token(&mut self) -> Result<Option<&Token>> {
-        // Check if peek returns an error without consuming
-        let has_error = matches!(self.tokens.peek(), Some(Err(_)));
-
-        if has_error {
-            // Now we can consume the error
-            if let Some(Err(e)) = self.tokens.next() {
-                return Err(e);
-            } else {
-                unreachable!()
-            }
-        }
-
-        // Safe to peek now - we know it's either Some(Ok) or None
-        match self.tokens.peek() {
-            Some(Ok(token)) => Ok(Some(token)),
-            None => Ok(None),
-            Some(Err(_)) => unreachable!("Error should have been handled above"),
-        }
+    /// Peeks at the current token without consuming it.
+    /// 
+    /// Returns `None` if there are no more tokens.
+    fn peek_token(&mut self) -> Option<&Token> {
+        self.tokens.peek()
     }
 
     /// Reports a parsing error by adding a `compile_error!` macro to the output.
@@ -568,11 +555,11 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// Always returns an error to indicate parsing failure.
     pub fn report_error(&mut self, message: &str) -> anyhow::Error {
         let span = match self.peek_token() {
-            Ok(Some(token)) => {
+            Some(token) => {
                 use lex_lexer::HasSpan;
                 token.span()
             }
-            _ => proc_macro2::Span::call_site(),
+            None => proc_macro2::Span::call_site(),
         };
         // Store span for format_error to use
         self.last_error_span = Some(span);
@@ -581,14 +568,14 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
         anyhow::anyhow!(message.to_string())
     }
 
-    fn is_punctuation(&mut self, target: &str) -> Result<bool> {
+    fn is_punctuation(&mut self, target: &str) -> bool {
         // Simply check if the current token is a Punct with the target operator
-        match self.peek_token()? {
+        match self.peek_token() {
             Some(Token::Punct { op, .. }) if op == target => {
-                self.advance()?;
-                Ok(true)
+                self.advance();
+                true
             }
-            _ => Ok(false),
+            _ => false,
         }
     }
 
@@ -615,7 +602,7 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
         if !self.is_or_expression()? {
             return Ok(false);
         }
-        if self.peek_token()?.is_some() {
+        if self.peek_token().is_some() {
             return Err(self.report_error("unexpected token"));
         }
         Ok(true)
@@ -624,7 +611,7 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `or_expression = and_expression { "||" and_expression }.`
     fn is_or_expression(&mut self) -> Result<bool> {
         if self.is_and_expression()? {
-            while self.is_punctuation("||")? {
+            while self.is_punctuation("||") {
                 if !self.is_and_expression()? {
                     return Err(self.report_error("expected and_expression"));
                 }
@@ -646,7 +633,7 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `and_expression = comparison_expression { "&&" comparison_expression }.`
     fn is_and_expression(&mut self) -> Result<bool> {
         if self.is_comparison_expression()? {
-            while self.is_punctuation("&&")? {
+            while self.is_punctuation("&&") {
                 if !self.is_comparison_expression()? {
                     return Err(self.report_error("expected comparison_expression"));
                 }
@@ -669,17 +656,17 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     fn is_comparison_expression(&mut self) -> Result<bool> {
         if self.is_bitwise_or_expression()? {
             // Check which operator we have (check longer operators first)
-            let op_name = if self.is_punctuation("==")? {
+            let op_name = if self.is_punctuation("==") {
                 Some("==")
-            } else if self.is_punctuation("!=")? {
+            } else if self.is_punctuation("!=") {
                 Some("!=")
-            } else if self.is_punctuation("<=")? {
+            } else if self.is_punctuation("<=") {
                 Some("<=")
-            } else if self.is_punctuation(">=")? {
+            } else if self.is_punctuation(">=") {
                 Some(">=")
-            } else if self.is_punctuation("<")? {
+            } else if self.is_punctuation("<") {
                 Some("<")
-            } else if self.is_punctuation(">")? {
+            } else if self.is_punctuation(">") {
                 Some(">")
             } else {
                 None
@@ -704,7 +691,7 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.`
     fn is_bitwise_or_expression(&mut self) -> Result<bool> {
         if self.is_bitwise_xor_expression()? {
-            while self.is_punctuation("|")? {
+            while self.is_punctuation("|") {
                 if !self.is_bitwise_xor_expression()? {
                     return Err(self.report_error("expected bitwise_xor_expression"));
                 }
@@ -726,7 +713,7 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.`
     fn is_bitwise_xor_expression(&mut self) -> Result<bool> {
         if self.is_bitwise_and_expression()? {
-            while self.is_punctuation("^")? {
+            while self.is_punctuation("^") {
                 if !self.is_bitwise_and_expression()? {
                     return Err(self.report_error("expected bitwise_and_expression"));
                 }
@@ -748,7 +735,7 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.`
     fn is_bitwise_and_expression(&mut self) -> Result<bool> {
         if self.is_bitwise_shift_expression()? {
-            while self.is_punctuation("&")? {
+            while self.is_punctuation("&") {
                 if !self.is_bitwise_shift_expression()? {
                     return Err(self.report_error("expected bitwise_shift_expression"));
                 }
@@ -771,9 +758,9 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     fn is_bitwise_shift_expression(&mut self) -> Result<bool> {
         if self.is_additive_expression()? {
             loop {
-                let op_name = if self.is_punctuation("<<")? {
+                let op_name = if self.is_punctuation("<<") {
                     Some("<<")
-                } else if self.is_punctuation(">>")? {
+                } else if self.is_punctuation(">>") {
                     Some(">>")
                 } else {
                     None
@@ -803,9 +790,9 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
         if self.is_multiplicative_expression()? {
             loop {
                 // Check which operator we have
-                let op_name = if self.is_punctuation("+")? {
+                let op_name = if self.is_punctuation("+") {
                     Some("+")
-                } else if self.is_punctuation("-")? {
+                } else if self.is_punctuation("-") {
                     Some("-")
                 } else {
                     None
@@ -840,11 +827,11 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
         if self.is_unary_expression()? {
             loop {
                 // Check which operator we have
-                let op_name = if self.is_punctuation("*")? {
+                let op_name = if self.is_punctuation("*") {
                     Some("*")
-                } else if self.is_punctuation("/")? {
+                } else if self.is_punctuation("/") {
                     Some("/")
-                } else if self.is_punctuation("%")? {
+                } else if self.is_punctuation("%") {
                     Some("%")
                 } else {
                     None
@@ -877,9 +864,9 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// `unary_expression = (("-" | "!") unary_expression) | primary_expression.`
     fn is_unary_expression(&mut self) -> Result<bool> {
         // Check for unary operators
-        let op_name = if self.is_punctuation("-")? {
+        let op_name = if self.is_punctuation("-") {
             Some("-")
-        } else if self.is_punctuation("!")? {
+        } else if self.is_punctuation("!") {
             Some("!")
         } else {
             None
@@ -903,11 +890,11 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
 
     /// `primary_expression = literal | identifier | "(" expression ")".`
     fn is_primary_expression(&mut self) -> Result<bool> {
-        match self.peek_token()? {
+        match self.peek_token() {
             Some(Token::Literal(lit)) => {
                 // Clone the literal - syn's Lit types are Clone
                 let lit_clone = lit.clone();
-                self.advance()?;
+                self.advance();
                 // Push the literal to the context
                 push_literal(&mut self.context, lit_clone);
                 Ok(true)
@@ -915,7 +902,7 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
             Some(Token::Identifier(ident)) => {
                 // Look up identifier as 0-ary operation
                 let ident_name = ident.to_string();
-                self.advance()?;
+                self.advance();
                 
                 // Try to lookup the identifier (0-ary operation with empty type list)
                 self.op_lookup.lookup(&ident_name, &[], &mut self.context)
@@ -929,18 +916,18 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 delimiter: Delimiter::Parenthesis,
                 ..
             }) => {
-                self.advance()?; // consume OpenDelim
+                self.advance(); // consume OpenDelim
                 // Recursively parse the expression inside parentheses
                 if !self.is_or_expression()? {
                     return Err(self.report_error("expected expression"));
                 }
                 // Expect CloseDelim
-                match self.peek_token()? {
+                match self.peek_token() {
                     Some(Token::CloseDelim {
                         delimiter: Delimiter::Parenthesis,
                         ..
                     }) => {
-                        self.advance()?; // consume CloseDelim
+                        self.advance(); // consume CloseDelim
                         Ok(true)
                     }
                     _ => Err(self.report_error("expected closing parenthesis")),

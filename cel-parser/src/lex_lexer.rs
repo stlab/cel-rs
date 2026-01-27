@@ -2,6 +2,14 @@
 //! type. Initially this is used to convert the TokenTree from Rust's proc_macro into a higher level
 //! token stream. The goal, however, is to be able to specify with a grammar how to process a token
 //! stream.
+//!
+//! # Error Handling
+//!
+//! This lexer does not produce errors. All input `TokenTree` items come pre-validated from 
+//! `proc_macro2`, which has already verified correct Rust lexical syntax. The lexer only 
+//! transforms and flattens tokens, operations that cannot fail on valid input. Any impossible 
+//! states (like receiving a `Punct` or `Group` in `convert_token`) use `unreachable!()` since 
+//! they represent programming errors, not malformed input.
 
 use proc_macro2::{Delimiter, Ident, Spacing, Span, TokenTree};
 use syn::Lit;
@@ -61,12 +69,13 @@ impl<I: Iterator<Item = TokenTree>> LexLexer<I> {
     /// This handles Literal and Identifier tokens. Boolean identifiers (`true`, `false`) are
     /// converted to Boolean literals. Punct tokens need special handling for combining
     /// multi-char operators, and Groups are handled by the iterator.
-    fn convert_token(token: TokenTree) -> Result<Token, anyhow::Error> {
+    fn convert_token(token: TokenTree) -> Token {
         match token {
             TokenTree::Literal(lit) => {
                 // Wrap in TokenTree and convert to TokenStream to preserve span information
                 let token_stream: proc_macro2::TokenStream = TokenTree::Literal(lit).into();
-                let syn_lit: Lit = syn::parse2(token_stream)?;
+                let syn_lit: Lit = syn::parse2(token_stream)
+                    .expect("proc_macro2 Literal should parse as syn::Lit");
                 
                 // Verbatim literals should never occur when parsing proc_macro2::Literal
                 debug_assert!(
@@ -74,7 +83,7 @@ impl<I: Iterator<Item = TokenTree>> LexLexer<I> {
                     "Unexpected Verbatim literal from proc_macro2::Literal"
                 );
                 
-                Ok(Token::Literal(syn_lit))
+                Token::Literal(syn_lit)
             }
             TokenTree::Ident(ident) => {
                 let ident_str = ident.to_string();
@@ -84,15 +93,16 @@ impl<I: Iterator<Item = TokenTree>> LexLexer<I> {
                     "true" | "false" => {
                         // Wrap in TokenTree and convert to TokenStream to preserve span information
                         let token_stream: proc_macro2::TokenStream = TokenTree::Ident(ident).into();
-                        let syn_lit: Lit = syn::parse2(token_stream)?;
-                        Ok(Token::Literal(syn_lit))
+                        let syn_lit: Lit = syn::parse2(token_stream)
+                            .expect("boolean identifier should parse as syn::Lit::Bool");
+                        Token::Literal(syn_lit)
                     }
-                    _ => Ok(Token::Identifier(ident)),
+                    _ => Token::Identifier(ident),
                 }
             }
             TokenTree::Punct(_) | TokenTree::Group(_) => {
                 // These should be handled by the iterator
-                Err(anyhow::anyhow!("Unexpected Punct or Group token in convert_token"))
+                unreachable!("Punct and Group tokens should be handled by the iterator, not convert_token")
             }
         }
     }
@@ -214,12 +224,12 @@ impl HasSpan for TokenTree {
 }
 
 impl<I: Iterator<Item = TokenTree>> Iterator for LexLexer<I> {
-    type Item = Result<Token, anyhow::Error>;
+    type Item = Token;
 
     fn next(&mut self) -> Option<Self::Item> {
         // Check if we have a pending close delimiter to emit
         if let Some((delimiter, span)) = self.pending_close.take() {
-            return Some(Ok(Token::CloseDelim { delimiter, span }));
+            return Some(Token::CloseDelim { delimiter, span });
         }
 
         // Get next token tree from current iterator
@@ -249,7 +259,7 @@ impl<I: Iterator<Item = TokenTree>> Iterator for LexLexer<I> {
             });
             
             // Return OpenDelim immediately
-            return Some(Ok(Token::OpenDelim { delimiter, span }));
+            return Some(Token::OpenDelim { delimiter, span });
         }
         
         // Handle Punct tokens with potential combining
@@ -271,38 +281,38 @@ impl<I: Iterator<Item = TokenTree>> Iterator for LexLexer<I> {
                             let mut op = String::new();
                             op.push(ch);
                             op.push(next_ch);
-                            return Some(Ok(Token::Punct { op, span }));
+                            return Some(Token::Punct { op, span });
                         } else {
                             // Can't combine - emit first and save second for next iteration
                             self.pending_token = Some(TokenTree::Punct(next_punct));
-                            return Some(Ok(Token::Punct { 
+                            return Some(Token::Punct { 
                                 op: ch.to_string(), 
                                 span 
-                            }));
+                            });
                         }
                     }
                     Some(other_token) => {
                         // Next token is not punct - emit our punct and save other for next iteration
                         self.pending_token = Some(other_token);
-                        return Some(Ok(Token::Punct { 
+                        return Some(Token::Punct { 
                             op: ch.to_string(), 
                             span 
-                        }));
+                        });
                     }
                     None => {
                         // No next token - emit single punct
-                        return Some(Ok(Token::Punct { 
+                        return Some(Token::Punct { 
                             op: ch.to_string(), 
                             span 
-                        }));
+                        });
                     }
                 }
             } else {
                 // Spacing is Alone - emit single character operator
-                return Some(Ok(Token::Punct { 
+                return Some(Token::Punct { 
                     op: ch.to_string(), 
                     span 
-                }));
+                });
             }
         }
         
@@ -322,7 +332,7 @@ mod tests {
         let input = TokenStream::from_str("42").unwrap();
         let mut lexer = LexLexer::new(input.into_iter());
         
-        let token = lexer.next().unwrap().unwrap();
+        let token = lexer.next().unwrap();
         match token {
             Token::Literal(Lit::Int(..)) => {}
             _ => panic!("Expected integer literal, got {:?}", token),
@@ -334,7 +344,7 @@ mod tests {
         let input = TokenStream::from_str(r#""hello""#).unwrap();
         let mut lexer = LexLexer::new(input.into_iter());
         
-        let token = lexer.next().unwrap().unwrap();
+        let token = lexer.next().unwrap();
         match token {
             Token::Literal(Lit::Str(..)) => {}
             _ => panic!("Expected string literal"),
@@ -347,7 +357,7 @@ mod tests {
         let input = TokenStream::from_str("true").unwrap();
         let mut lexer = LexLexer::new(input.into_iter());
         
-        let token = lexer.next().unwrap().unwrap();
+        let token = lexer.next().unwrap();
         match token {
             Token::Literal(Lit::Bool(lit_bool)) => {
                 assert_eq!(lit_bool.value, true);
@@ -359,7 +369,7 @@ mod tests {
         let input = TokenStream::from_str("false").unwrap();
         let mut lexer = LexLexer::new(input.into_iter());
         
-        let token = lexer.next().unwrap().unwrap();
+        let token = lexer.next().unwrap();
         match token {
             Token::Literal(Lit::Bool(lit_bool)) => {
                 assert_eq!(lit_bool.value, false);
@@ -373,7 +383,7 @@ mod tests {
         let input = TokenStream::from_str("3.14").unwrap();
         let mut lexer = LexLexer::new(input.into_iter());
         
-        let token = lexer.next().unwrap().unwrap();
+        let token = lexer.next().unwrap();
         match token {
             Token::Literal(Lit::Float(..)) => {}
             _ => panic!("Expected float literal"),
@@ -385,7 +395,7 @@ mod tests {
         let input = TokenStream::from_str("foo").unwrap();
         let mut lexer = LexLexer::new(input.into_iter());
         
-        let token = lexer.next().unwrap().unwrap();
+        let token = lexer.next().unwrap();
         match token {
             Token::Identifier(ident) => {
                 assert_eq!(ident.to_string(), "foo");
@@ -399,7 +409,7 @@ mod tests {
         let input = TokenStream::from_str("+").unwrap();
         let mut lexer = LexLexer::new(input.into_iter());
         
-        let token = lexer.next().unwrap().unwrap();
+        let token = lexer.next().unwrap();
         match token {
             Token::Punct { op, .. } => {
                 assert_eq!(op, "+");
@@ -413,7 +423,7 @@ mod tests {
         let input = TokenStream::from_str("a && b").unwrap();
         let lexer = LexLexer::new(input.into_iter());
         
-        let tokens: Vec<_> = lexer.collect::<Result<Vec<_>, _>>().unwrap();
+        let tokens: Vec<_> = lexer.collect();
         assert_eq!(tokens.len(), 3);
         
         match &tokens[1] {
@@ -430,7 +440,7 @@ mod tests {
         let lexer = LexLexer::new(input.into_iter());
         
         // Should get: OpenDelim, Integer, Punct, Integer, CloseDelim
-        let tokens: Vec<_> = lexer.collect::<Result<Vec<_>, _>>().unwrap();
+        let tokens: Vec<_> = lexer.collect();
         assert_eq!(tokens.len(), 5);
         
         matches!(tokens[0], Token::OpenDelim { delimiter: Delimiter::Parenthesis, .. });
@@ -445,7 +455,7 @@ mod tests {
         let input = TokenStream::from_str("(10 + (20 * 30))").unwrap();
         let lexer = LexLexer::new(input.into_iter());
         
-        let tokens: Vec<_> = lexer.collect::<Result<Vec<_>, _>>().unwrap();
+        let tokens: Vec<_> = lexer.collect();
         
         // Should have: OpenDelim, 10, +, OpenDelim, 20, *, 30, CloseDelim, CloseDelim
         assert_eq!(tokens.len(), 9);
@@ -467,7 +477,7 @@ mod tests {
         let input = TokenStream::from_str("foo").unwrap();
         let mut lexer = LexLexer::new(input.into_iter());
         
-        let token = lexer.next().unwrap().unwrap();
+        let token = lexer.next().unwrap();
         
         // HasSpan trait should provide span
         let span = HasSpan::span(&token);
@@ -488,7 +498,7 @@ mod tests {
         let input = TokenStream::from_str("foo + 42").unwrap();
         let lexer = LexLexer::new(input.into_iter());
         
-        let tokens: Vec<_> = lexer.collect::<Result<Vec<_>, _>>().unwrap();
+        let tokens: Vec<_> = lexer.collect();
         assert_eq!(tokens.len(), 3);
         
         matches!(tokens[0], Token::Identifier(_));
