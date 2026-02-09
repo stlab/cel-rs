@@ -2,16 +2,14 @@
 
 //! A recursive descent parser for CEL (Common Expression Language) expressions.
 //!
-//! This crate provides a parser that can parse CEL expressions into executable segments. 
-//! The parser follows the CEL grammar specification and provides detailed error reporting 
+//! This crate provides a parser that can parse CEL expressions into executable segments.
+//! The parser follows the CEL grammar specification and provides detailed error reporting
 //! with source location information.
 //!
 //! # Error Handling
 //!
-//! Parse errors are returned as `anyhow::Error` to keep the interface flexible as the 
-//! grammar evolves. All errors result from malformed input (syntax errors, type mismatches, 
-//! undefined identifiers). The lexer itself cannot produce errors since input is pre-validated 
-//! by `proc_macro2` before reaching the parser.
+//! Parse errors are returned as `anyhow::Error`. All errors result from malformed input (syntax errors, type mismatches,
+//! undefined identifiers).
 //!
 //! # Grammar
 //!
@@ -27,26 +25,39 @@
 //! bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.
 //! additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
 //! multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
-//! unary_expression = (("-" | "!") unary_expression) | primary_expression.
+//! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
+//! postfix_expression = primary_expression { "(" [ call_params ] ")" }.
 //! primary_expression = literal | identifier | "(" expression ")".
+//! call_params = [ expression { "," expression } [ "," ] ].
 //! ```
 //!
 //! # Note
 
-//! `?eos?` denotes end of stream. Because parenthesized expressions are nested by the lexer as a
-//! separate token stream, this parses correctly in `primary_expression`.
+//! `?eos?` denotes end of stream.
 //!
 //! # Examples
+//!
+//! ```rust
+//! use cel_runtime::DynSegment;
+//! use std::str::FromStr;
+//!
+//! let mut segment: DynSegment = "10u32 + 20u32 * 5u32".parse().unwrap();
+//! let result = segment.call0::<u32>();
+//! assert!(result.is_ok());
+//! assert_eq!(result.unwrap(), 110); // 10 + 20 * 5 = 10 + 100
+//! ```
 //!
 //! ## Basic Usage
 //!
 //! ```rust
-//! use cel_parser::CELParser;
+//! use cel_runtime::parser::CELParser;
+//! use cel_runtime::OpLookup;
 //! use proc_macro2::TokenStream;
 //! use std::str::FromStr;
 //!
 //! let input = TokenStream::from_str("10").unwrap();
-//! let mut parser = CELParser::new(input.into_iter());
+//! let mut parser = CELParser::new(OpLookup::new());
+//! parser.set_tokens(input.into_iter());
 //! let result = parser.is_expression();
 //! assert!(result.is_ok());
 //! ```
@@ -54,7 +65,8 @@
 //! ## Error Formatting
 //!
 //! ```rust
-//! use cel_parser::CELParser;
+//! use cel_runtime::parser::CELParser;
+//! use cel_runtime::OpLookup;
 //! use proc_macro2::TokenStream;
 //! use std::str::FromStr;
 //!
@@ -63,7 +75,8 @@
 //!   10 20
 //! "#; // Invalid: missing operator
 //! let input = TokenStream::from_str(source).unwrap();
-//! let mut parser = CELParser::new(input.into_iter());
+//! let mut parser = CELParser::new(OpLookup::new());
+//! parser.set_tokens(input.into_iter());
 //!
 //! if parser.is_expression().is_err() {
 //!     // Format error starting at line 1
@@ -82,15 +95,16 @@
 mod lex_lexer;
 pub mod op_table;
 
-use lex_lexer::{LexLexer, Literal as CelLiteral, Token};
+use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};
 use op_table::OpLookup;
 
+use crate::DynSegment;
 use anyhow::Result;
-use cel_runtime::DynSegment;
 use owo_colors::OwoColorize;
 use proc_macro2::{Delimiter, Ident, Literal, Span, TokenStream, TokenTree};
 use quote::quote_spanned;
 use std::iter::Peekable;
+use std::str::FromStr;
 use syn::Lit;
 
 fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
@@ -229,8 +243,10 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
 /// bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.
 /// additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
 /// multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
-/// unary_expression = (("-" | "!") unary_expression) | primary_expression.
+/// unary_expression = (("-" | "!") unary_expression) | postfix_expression.
+/// postfix_expression = primary_expression { "(" [ call_params ] ")" }.
 /// primary_expression = literal | identifier | "(" expression ")".
+/// call_params = [ expression { "," expression } [ "," ] ].
 /// ```
 ///
 /// # Examples
@@ -238,12 +254,14 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
 /// ## Basic Usage
 ///
 /// ```rust
-/// use cel_parser::CELParser;
+/// use cel_runtime::OpLookup;
+/// use cel_runtime::parser::CELParser;
 /// use proc_macro2::TokenStream;
 /// use std::str::FromStr;
 ///
 /// let input = TokenStream::from_str("10").unwrap();
-/// let mut parser = CELParser::new(input.into_iter());
+/// let mut parser = CELParser::new(OpLookup::new());
+/// parser.set_tokens(input.into_iter());
 /// let result = parser.is_expression();
 /// assert!(result.is_ok());
 /// ```
@@ -251,7 +269,8 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
 /// ## Error Formatting
 ///
 /// ```rust
-/// use cel_parser::CELParser;
+/// use cel_runtime::OpLookup;
+/// use cel_runtime::parser::CELParser;
 /// use proc_macro2::TokenStream;
 /// use std::str::FromStr;
 ///
@@ -260,7 +279,8 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
 ///   10 + 20 30
 /// "#; // Invalid: missing operator
 /// let input = TokenStream::from_str(source).unwrap();
-/// let mut parser = CELParser::new(input.into_iter());
+/// let mut parser = CELParser::new(OpLookup::new());
+/// parser.set_tokens(input.into_iter());
 ///
 /// if parser.is_expression().is_err() {
 ///     // Format error starting at line 1
@@ -275,12 +295,13 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
 ///     }
 /// }
 /// ```
-pub struct CELParser<I: Iterator<Item = TokenTree>> {
-    tokens: Peekable<LexLexer<I>>,
+pub struct CELParser {
+    tokens: Option<Peekable<LexLexer>>,
     output: TokenStream,
     context: DynSegment,
     op_lookup: OpLookup,
-    last_error_span: Option<Span>,
+    /// Span of the last reported error (for format_error). Public for tests.
+    pub(crate) last_error_span: Option<Span>,
 }
 
 /// A primary expression representing the most basic expression types.
@@ -311,7 +332,7 @@ pub enum Probe<T> {
 /// A probe result for primary expression parsing.
 pub type PrimaryProbe = Probe<PrimaryExpression>;
 
-impl<I: Iterator<Item = TokenTree>> CELParser<I> {
+impl CELParser {
     /// Returns the output token stream generated by the parser.
     ///
     /// The output contains either the successfully parsed expression or a
@@ -344,9 +365,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 if let Some(TokenTree::Literal(lit)) = group_tokens.next() {
                     // Parse the literal using syn
                     if let Ok(syn_lit) = syn::parse_str::<Lit>(&lit.to_string())
-                        && let Lit::Str(parsed) = syn_lit {
-                            return Some(parsed.value());
-                        }
+                        && let Lit::Str(parsed) = syn_lit
+                    {
+                        return Some(parsed.value());
+                    }
                 }
             }
         }
@@ -478,25 +500,67 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
         output
     }
 
-    /// Creates a new CEL parser with the given token iterator.
+    /// Creates a new CEL parser with the given operation lookup.
+    ///
+    /// No tokens are set at construction; use [`set_tokens`](Self::set_tokens),
+    /// [`parse_tokens`](Self::parse_tokens), or [`parse_str`](Self::parse_str) to parse.
     ///
     /// # Arguments
     ///
-    /// * `tokens` - An iterator over `TokenTree` items to parse
-    ///
-    /// # Returns
-    ///
-    /// A new `CELParser` instance ready to parse the tokens.
-    pub fn new(tokens: I) -> Self {
-        let lexer = LexLexer::new(tokens);
-        let output = TokenStream::new();
+    /// * `op_lookup` - Operation lookup for resolving operators and identifiers
+    pub fn new(op_lookup: OpLookup) -> Self {
         CELParser {
-            tokens: lexer.peekable(),
-            output,
+            tokens: None,
+            output: TokenStream::new(),
             context: DynSegment::new::<()>(),
-            op_lookup: OpLookup::new(),
+            op_lookup,
             last_error_span: None,
         }
+    }
+
+    /// Sets the token stream for parsing.
+    ///
+    /// Call before [`is_expression`](Self::is_expression) or use [`parse_tokens`](Self::parse_tokens)
+    /// which sets tokens and parses in one step.
+    pub fn set_tokens(&mut self, tokens: TokenStreamIter) {
+        self.tokens = Some(LexLexer::new(tokens).peekable());
+        self.context = DynSegment::new::<()>();
+        self.output = TokenStream::new();
+    }
+
+    /// Parses a token stream into a [`DynSegment`].
+    ///
+    /// Sets the token source, runs the expression grammar, and returns the segment on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input does not contain a valid CEL expression.
+    pub fn parse_tokens(&mut self, tokens: TokenStreamIter) -> Result<DynSegment> {
+        self.set_tokens(tokens);
+        if !self.is_expression()? {
+            return Err(self.report_error("expression expected"));
+        }
+        Ok(std::mem::replace(
+            &mut self.context,
+            DynSegment::new::<()>(),
+        ))
+    }
+
+    /// Parses a string into a [`DynSegment`].
+    ///
+    /// Tokenizes the string then parses; equivalent to `parse_tokens(TokenStream::from_str(s)?.into_iter())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
+    pub fn parse_str(&mut self, s: &str) -> Result<DynSegment> {
+        let input = TokenStream::from_str(s).map_err(|e| {
+            let msg = format!("lex: {}", e);
+            self.last_error_span = Some(e.span());
+            self.output = quote_spanned!(e.span() => compile_error!(#msg));
+            anyhow::anyhow!(msg)
+        })?;
+        self.parse_tokens(input.into_iter())
     }
 
     /// Returns a mutable reference to the operation lookup.
@@ -507,38 +571,39 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
     /// # Examples
     ///
     /// ```rust
-    /// use cel_parser::CELParser;
+    /// use cel_runtime::parser::op_table::OpLookup;
+    /// use cel_runtime::parser::CELParser;
     /// use cel_runtime::DynSegment;
     /// use proc_macro2::TokenStream;
     /// use std::any::TypeId;
     /// use std::str::FromStr;
     ///
     /// let input = TokenStream::from_str("10 + 20").unwrap();
-    /// let mut parser = CELParser::new(input.into_iter());
-    ///
-    /// // Add a custom scope
-    /// parser.op_lookup_mut().push_scope(Box::new(|name, types, segment| {
+    /// let mut lookup = OpLookup::new();
+    /// lookup.push_scope(|name, types, segment| {
     ///     if name == "+" && types.len() == 2 && types[0] == TypeId::of::<i32>() {
     ///         segment.op2(|a: i32, b: i32| a + b + 1)?; // Custom addition
     ///         Ok(true)
     ///     } else {
     ///         Ok(false)
     ///     }
-    /// }));
+    /// });
+    /// let mut parser = CELParser::new(lookup);
+    /// parser.set_tokens(input.into_iter());
     /// ```
     pub fn op_lookup_mut(&mut self) -> &mut OpLookup {
         &mut self.op_lookup
     }
 
     fn advance(&mut self) {
-        self.tokens.next();
+        self.tokens.as_mut().expect("tokens set").next();
     }
 
     /// Peeks at the current token without consuming it.
-    /// 
+    ///
     /// Returns `None` if there are no more tokens.
     fn peek_token(&mut self) -> Option<&Token> {
-        self.tokens.peek()
+        self.tokens.as_mut().expect("tokens set").peek()
     }
 
     /// Reports a parsing error by adding a `compile_error!` macro to the output.
@@ -579,24 +644,6 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
         }
     }
 
-    /// Parses a complete CEL expression and returns the resulting segment.
-    ///
-    /// This is the main entry point for parsing. It attempts to parse a full
-    /// expression and returns the dynamic segment containing the parsed result.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the input does not contain a valid CEL expression.
-    pub fn parse(&mut self) -> Result<DynSegment> {
-        if !self.is_expression()? {
-            return Err(self.report_error("expression expected"));
-        }
-        Ok(std::mem::replace(
-            &mut self.context,
-            DynSegment::new::<()>(),
-        ))
-    }
-
     /// `expression = or_expression <EOF>.`
     pub fn is_expression(&mut self) -> Result<bool> {
         if !self.is_or_expression()? {
@@ -617,12 +664,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 }
                 let types = self.context.peek_types_vec(2);
                 if !types.is_empty()
-                    && let Err(e) = self
-                        .op_lookup
-                        .lookup("||", &types, &mut self.context)
-                    {
-                        return Err(self.report_error(&format!("operation error: {}", e)));
-                    }
+                    && let Err(e) = self.op_lookup.lookup("||", &types, &mut self.context)
+                {
+                    return Err(self.report_error(&format!("operation error: {}", e)));
+                }
             }
             Ok(true)
         } else {
@@ -639,12 +684,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 }
                 let types = self.context.peek_types_vec(2);
                 if !types.is_empty()
-                    && let Err(e) = self
-                        .op_lookup
-                        .lookup("&&", &types, &mut self.context)
-                    {
-                        return Err(self.report_error(&format!("operation error: {}", e)));
-                    }
+                    && let Err(e) = self.op_lookup.lookup("&&", &types, &mut self.context)
+                {
+                    return Err(self.report_error(&format!("operation error: {}", e)));
+                }
             }
             Ok(true)
         } else {
@@ -678,9 +721,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 }
                 let types = self.context.peek_types_vec(2);
                 if !types.is_empty()
-                    && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
-                        return Err(self.report_error(&format!("operation error: {}", e)));
-                    }
+                    && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context)
+                {
+                    return Err(self.report_error(&format!("operation error: {}", e)));
+                }
             }
             Ok(true)
         } else {
@@ -697,12 +741,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 }
                 let types = self.context.peek_types_vec(2);
                 if !types.is_empty()
-                    && let Err(e) = self
-                        .op_lookup
-                        .lookup("|", &types, &mut self.context)
-                    {
-                        return Err(self.report_error(&format!("operation error: {}", e)));
-                    }
+                    && let Err(e) = self.op_lookup.lookup("|", &types, &mut self.context)
+                {
+                    return Err(self.report_error(&format!("operation error: {}", e)));
+                }
             }
             Ok(true)
         } else {
@@ -719,12 +761,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 }
                 let types = self.context.peek_types_vec(2);
                 if !types.is_empty()
-                    && let Err(e) = self
-                        .op_lookup
-                        .lookup("^", &types, &mut self.context)
-                    {
-                        return Err(self.report_error(&format!("operation error: {}", e)));
-                    }
+                    && let Err(e) = self.op_lookup.lookup("^", &types, &mut self.context)
+                {
+                    return Err(self.report_error(&format!("operation error: {}", e)));
+                }
             }
             Ok(true)
         } else {
@@ -741,12 +781,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 }
                 let types = self.context.peek_types_vec(2);
                 if !types.is_empty()
-                    && let Err(e) = self
-                        .op_lookup
-                        .lookup("&", &types, &mut self.context)
-                    {
-                        return Err(self.report_error(&format!("operation error: {}", e)));
-                    }
+                    && let Err(e) = self.op_lookup.lookup("&", &types, &mut self.context)
+                {
+                    return Err(self.report_error(&format!("operation error: {}", e)));
+                }
             }
             Ok(true)
         } else {
@@ -772,9 +810,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                     }
                     let types = self.context.peek_types_vec(2);
                     if !types.is_empty()
-                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
-                            return Err(self.report_error(&format!("operation error: {}", e)));
-                        }
+                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context)
+                    {
+                        return Err(self.report_error(&format!("operation error: {}", e)));
+                    }
                 } else {
                     break;
                 }
@@ -809,9 +848,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
 
                     // Apply the operation using the table (only if we have types)
                     if !types.is_empty()
-                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
-                            return Err(self.report_error(&format!("operation error: {}", e)));
-                        }
+                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context)
+                    {
+                        return Err(self.report_error(&format!("operation error: {}", e)));
+                    }
                 } else {
                     break;
                 }
@@ -848,9 +888,10 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
 
                     // Apply the operation using the table (only if we have types)
                     if !types.is_empty()
-                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
-                            return Err(self.report_error(&format!("operation error: {}", e)));
-                        }
+                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context)
+                    {
+                        return Err(self.report_error(&format!("operation error: {}", e)));
+                    }
                 } else {
                     break;
                 }
@@ -879,16 +920,72 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
             // Apply the unary operation (only if we have types)
             let types = self.context.peek_types_vec(1);
             if !types.is_empty()
-                && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context) {
-                    return Err(self.report_error(&format!("operation error: {}", e)));
-                }
+                && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context)
+            {
+                return Err(self.report_error(&format!("operation error: {}", e)));
+            }
             Ok(true)
         } else {
-            self.is_primary_expression()
+            self.is_postfix_expression()
         }
     }
 
-    /// `primary_expression = literal | identifier | "(" expression ")".`
+    /// `postfix_expression = primary_expression { "(" [ call_params ] ")" }.`
+    fn is_postfix_expression(&mut self) -> Result<bool> {
+        if !self.is_primary_expression()? {
+            return Ok(false);
+        }
+        while matches!(
+            self.peek_token(),
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            self.advance(); // consume "("
+            let arg_count = self.parse_call_params()?;
+            match self.peek_token() {
+                Some(Token::CloseDelim {
+                    delimiter: Delimiter::Parenthesis,
+                    ..
+                }) => {
+                    self.advance(); // consume ")"
+                }
+                _ => return Err(self.report_error("expected closing parenthesis")),
+            }
+            // Push the call operation: pops argument(s) then callee, invokes callee, pushes result.
+            // Stack order is [callee, arg1, arg2, ...] so peek_types_vec gives [argN..arg1, callee].
+            let types = self.context.peek_types_vec(arg_count + 1);
+            if !types.is_empty()
+                && let Err(e) = self.op_lookup.lookup("()", &types, &mut self.context)
+            {
+                return Err(self.report_error(&format!("call: {}", e)));
+            }
+        }
+        Ok(true)
+    }
+
+    /// `call_params = [ expression { "," expression } [ "," ] ].`
+    ///
+    /// Parses the contents of a call argument list (after the opening `(` has been consumed).
+    /// Pushes each argument expression onto the context. Returns the number of arguments parsed.
+    fn parse_call_params(&mut self) -> Result<usize> {
+        let mut count = 0;
+        if self.is_or_expression()? {
+            count += 1;
+            while self.is_punctuation(",") {
+                if !self.is_or_expression()? {
+                    return Err(self.report_error("expected expression after comma"));
+                }
+                count += 1;
+            }
+            // Optional trailing comma
+            let _ = self.is_punctuation(",");
+        }
+        Ok(count)
+    }
+
+    /// `primary_expression = literal | identifier | "(" expression ")" | call_expression.`
     fn is_primary_expression(&mut self) -> Result<bool> {
         match self.peek_token() {
             Some(Token::Literal(lit)) => {
@@ -900,16 +997,16 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
                 Ok(true)
             }
             Some(Token::Identifier(ident)) => {
-                // Look up identifier as 0-ary operation
                 let ident_name = ident.to_string();
                 self.advance();
-                
-                // Try to lookup the identifier (0-ary operation with empty type list)
-                self.op_lookup.lookup(&ident_name, &[], &mut self.context)
+
+                // Look up identifier (variable/0-ary); value is pushed and may be a function.
+                self.op_lookup
+                    .lookup(&ident_name, &[], &mut self.context)
                     .map_err(|_| {
                         self.report_error(&format!("Undefined identifier: {}", ident_name))
                     })?;
-                
+
                 Ok(true)
             }
             Some(Token::OpenDelim {
@@ -941,23 +1038,42 @@ impl<I: Iterator<Item = TokenTree>> CELParser<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proc_macro2::TokenStream;
-    use std::str::FromStr;
+    #[test]
+    fn experiments() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, _, segment| {
+            if name == "constant" {
+                segment.just(42i64);
+                return Ok(true);
+            }
+            Ok(false)
+        });
+        let mut parser = CELParser::new(lookup);
+        let line = line!() + 1;
+        let source = r#"
+            (("hello" + " world") == constant) && (15i64 < constant)
+        "#;
+        // assert!(parser.parse_str(source)?.call0::<bool>()?);
+
+        //println!("{}", parser.format_error(source, file!(), line)?);
+        if let Err(e) = parser.parse_str(source) {
+            println!("{}", parser.format_error(source, file!(), line).ok_or(e)?);
+        }
+        Ok(())
+    }
 
     #[test]
     fn simple_expression() {
-        let input = TokenStream::from_str("10").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let result = parser.parse();
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("10");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().call0::<i32>().unwrap(), 10);
     }
 
     #[test]
     fn float_literal() {
-        let input = TokenStream::from_str("3.14").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let result = parser.parse();
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("3.14");
         assert!(result.is_ok());
         let value = result.unwrap().call0::<f64>().unwrap();
         assert!((value - 3.14).abs() < 1e-10);
@@ -965,27 +1081,33 @@ mod tests {
 
     #[test]
     fn boolean_literal() {
-        let input = TokenStream::from_str("true").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let result = parser.parse();
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("true");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().call0::<bool>().unwrap(), true);
     }
 
     #[test]
     fn string_literal() {
-        let input = TokenStream::from_str(r#""hello""#).unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let result = parser.parse();
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str(r#""hello""#);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().call0::<String>().unwrap(), "hello");
     }
 
     #[test]
+    fn string_concatenation() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str(r#""a" + "b""#);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().call0::<String>().unwrap(), "ab");
+    }
+
+    #[test]
     fn incomplete_expression() {
-        let input = TokenStream::from_str("10 + 25 25").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression().is_err());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("10 + 25 25");
+        assert!(result.is_err());
         assert_eq!(
             parser.output.to_string(),
             "compile_error ! (\"unexpected token\")"
@@ -994,100 +1116,103 @@ mod tests {
 
     #[test]
     fn arithmetic_expression() {
-        let input = TokenStream::from_str("10 + 20 * 30").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression().unwrap());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("10 + 20 * 30");
+        assert!(result.is_ok());
     }
 
     #[test]
     fn parenthesized_expression() {
-        let input = TokenStream::from_str("(10 + 20) * 30").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression().unwrap());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(10 + 20) * 30");
+        assert!(result.is_ok());
     }
 
     #[test]
     fn complex_expression() {
-        let input = TokenStream::from_str("10 + 20 * (30 - 5) / 2").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression().unwrap());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("10 + 20 * (30 - 5) / 2");
+        assert!(result.is_ok());
     }
 
     #[test]
     fn logical_expression() {
-        let input = TokenStream::from_str("true && false || true").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression().unwrap());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("true && false || true");
+        assert!(result.is_ok());
     }
 
     #[test]
     fn comparison_expression() {
-        let input = TokenStream::from_str("10 == 20 && 30 > 40").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression().unwrap());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("10 == 20 && 30 > 40");
+        assert!(result.is_ok());
     }
 
     #[test]
     fn bitwise_expression() {
-        let input = TokenStream::from_str("1 | 2 & 3 ^ 4").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression().unwrap());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("1 | 2 & 3 ^ 4");
+        assert!(result.is_ok());
     }
 
     #[test]
     fn shift_expression() {
-        let input = TokenStream::from_str("8 << 2 + 16 >> 1").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression().unwrap());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("8 << 2 + 16 >> 1");
+        assert!(result.is_ok());
     }
 
     #[test]
     fn unary_expression() {
-        let input = TokenStream::from_str("-10 + -20").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        assert!(parser.is_expression().unwrap());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("-10 + -20");
+        assert!(result.is_ok());
     }
 
     #[test]
     fn double_negation() {
-        let input = TokenStream::from_str("!!true").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let result = parser.is_expression();
-        assert!(result.is_ok(), "Failed to parse !!true: {:?}", result);
-        assert!(result.unwrap(), "!!true returned false");
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("!!true");
+        assert!(
+            result.is_ok(),
+            "Failed to parse !!true: {}",
+            result.err().unwrap()
+        );
+        assert_eq!(result.unwrap().call0::<bool>().unwrap(), true); // !!true = true
     }
 
     #[test]
     fn double_minus() {
-        let input = TokenStream::from_str("--5").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let result = parser.is_expression();
-        assert!(result.is_ok(), "Failed to parse --5: {:?}", result);
-        assert!(result.unwrap(), "--5 returned false");
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("--5");
+        assert!(
+            result.is_ok(),
+            "Failed to parse --5: {}",
+            result.err().unwrap()
+        );
+        assert_eq!(result.unwrap().call0::<i32>().unwrap(), 5);
     }
 
     #[test]
     fn chained_unary_expression() {
-        let input = TokenStream::from_str("!!false || !!true").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let result = parser.is_expression();
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("!!false || !!true");
         if let Err(ref e) = result {
             eprintln!("Error: {:?}", e);
             if let Some(msg) = parser.extract_error_message() {
                 eprintln!("Error message: {}", msg);
             }
         }
-        assert!(result.is_ok(), "Failed to parse: {:?}", result);
-        assert!(result.unwrap(), "Expression returned false");
+        assert!(result.is_ok(), "Failed to parse: {}", result.err().unwrap());
+        assert_eq!(result.unwrap().call0::<bool>().unwrap(), true);
     }
 
     #[test]
     fn invalid_expression() {
-        let input = TokenStream::from_str("+").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let result = parser.is_expression();
-        assert!(result.is_ok());
-        assert!(!result.unwrap());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("+");
+        assert!(result.is_err());
     }
 
     /// Helper function to strip ANSI escape codes from a string for testing purposes
@@ -1122,11 +1247,11 @@ mod tests {
     #[test]
     fn error_formatting() {
         let source = "10 + 20 30"; // Missing operator between 20 and 30
-        let input = TokenStream::from_str(source).unwrap();
-        let mut parser = CELParser::new(input.into_iter());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str(source);
 
         // This should fail parsing
-        assert!(parser.is_expression().is_err());
+        assert!(result.is_err());
 
         // Test error message extraction
         let error_msg = parser.extract_error_message();
@@ -1148,11 +1273,11 @@ mod tests {
     #[test]
     fn error_formatting_with_line_offset() {
         let source = "10 + 20 30"; // Missing operator between 20 and 30
-        let input = TokenStream::from_str(source).unwrap();
-        let mut parser = CELParser::new(input.into_iter());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str(source);
 
         // This should fail parsing
-        assert!(parser.is_expression().is_err());
+        assert!(result.is_err());
 
         // Test error formatting with line offset (as if expression starts at line 42)
         let formatted_error = parser.format_error(source, "large_file.rs", 42u32);
@@ -1175,40 +1300,56 @@ mod tests {
 
      "#;
 
-        let input = TokenStream::from_str(source).unwrap();
-        let mut parser = CELParser::new(input.into_iter());
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str(source);
 
         // Parse should fail due to unexpected token
-        assert!(parser.is_expression().is_err(), "Expected parsing to fail");
-        
+        assert!(result.is_err(), "Expected parsing to fail");
+
         // Debug: print the stored span
         if let Some(span) = parser.last_error_span {
-            eprintln!("DEBUG: span.start().line = {}, span.start().column = {}", 
-                span.start().line, span.start().column);
+            eprintln!(
+                "DEBUG: span.start().line = {}, span.start().column = {}",
+                span.start().line,
+                span.start().column
+            );
         }
-        
+
         // Format the error
         if let Some(formatted_error) = parser.format_error(source, file!(), line) {
             println!("{}", formatted_error);
-            
+
             // Strip ANSI codes for testing
             let formatted = strip_ansi_codes(&formatted_error);
-            
+
             // The source string has 3 lines:
             // Line 0: empty
-            // Line 1: empty  
+            // Line 1: empty
             // Line 2: "         10 + 20  30 // Unexpected token"
             // So the error should be on line + 2
             let expected_line = line + 2;
-            
-            assert!(formatted.contains("error: unexpected token"), 
-                "Should contain error message, got: {}", formatted);
-            assert!(formatted.contains(&format!("{}:", expected_line)),
-                "Should show error on line {}, got: {}", expected_line, formatted);
-            assert!(formatted.contains("30"),
-                "Should show the source line with '30', got: {}", formatted);
-            assert!(formatted.contains("^"),
-                "Should have carets pointing to error, got: {}", formatted);
+
+            assert!(
+                formatted.contains("error: unexpected token"),
+                "Should contain error message, got: {}",
+                formatted
+            );
+            assert!(
+                formatted.contains(&format!("{}:", expected_line)),
+                "Should show error on line {}, got: {}",
+                expected_line,
+                formatted
+            );
+            assert!(
+                formatted.contains("30"),
+                "Should show the source line with '30', got: {}",
+                formatted
+            );
+            assert!(
+                formatted.contains("^"),
+                "Should have carets pointing to error, got: {}",
+                formatted
+            );
         } else {
             panic!("format_error returned None");
         }
@@ -1216,9 +1357,8 @@ mod tests {
 
     #[test]
     fn test_addition_execution() -> Result<()> {
-        let input = TokenStream::from_str("10 + 20").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let mut segment = parser.parse()?;
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser.parse_str("10 + 20")?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, 30);
         Ok(())
@@ -1226,9 +1366,8 @@ mod tests {
 
     #[test]
     fn test_multiplication_execution() -> Result<()> {
-        let input = TokenStream::from_str("3 * 7").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let mut segment = parser.parse()?;
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser.parse_str("3 * 7")?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, 21);
         Ok(())
@@ -1236,9 +1375,8 @@ mod tests {
 
     #[test]
     fn test_complex_arithmetic_execution() -> Result<()> {
-        let input = TokenStream::from_str("10 + 20 * 3").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let mut segment = parser.parse()?;
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser.parse_str("10 + 20 * 3")?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, 70); // 10 + (20 * 3) = 10 + 60 = 70
         Ok(())
@@ -1246,9 +1384,8 @@ mod tests {
 
     #[test]
     fn test_parenthesized_arithmetic_execution() -> Result<()> {
-        let input = TokenStream::from_str("(10 + 20) * 3").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let mut segment = parser.parse()?;
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser.parse_str("(10 + 20) * 3")?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, 90); // (10 + 20) * 3 = 30 * 3 = 90
         Ok(())
@@ -1256,9 +1393,8 @@ mod tests {
 
     #[test]
     fn test_comparison_execution() -> Result<()> {
-        let input = TokenStream::from_str("10 < 20").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let mut segment = parser.parse()?;
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser.parse_str("10 < 20")?;
         let result = segment.call0::<bool>()?;
         assert_eq!(result, true);
         Ok(())
@@ -1266,9 +1402,8 @@ mod tests {
 
     #[test]
     fn test_logical_and_execution() -> Result<()> {
-        let input = TokenStream::from_str("true && false").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let mut segment = parser.parse()?;
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser.parse_str("true && false")?;
         let result = segment.call0::<bool>()?;
         assert_eq!(result, false);
         Ok(())
@@ -1276,9 +1411,8 @@ mod tests {
 
     #[test]
     fn test_unary_negation_execution() -> Result<()> {
-        let input = TokenStream::from_str("-42").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let mut segment = parser.parse()?;
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser.parse_str("-42")?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, -42);
         Ok(())
@@ -1286,9 +1420,8 @@ mod tests {
 
     #[test]
     fn test_logical_not_execution() -> Result<()> {
-        let input = TokenStream::from_str("!true").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let mut segment = parser.parse()?;
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser.parse_str("!true")?;
         let result = segment.call0::<bool>()?;
         assert_eq!(result, false);
         Ok(())
@@ -1296,9 +1429,8 @@ mod tests {
 
     #[test]
     fn test_u32_addition_execution() -> Result<()> {
-        let input = TokenStream::from_str("10u32 + 20u32").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let mut segment = parser.parse()?;
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser.parse_str("10u32 + 20u32")?;
         let result = segment.call0::<u32>()?;
         assert_eq!(result, 30);
         Ok(())
@@ -1306,11 +1438,8 @@ mod tests {
 
     #[test]
     fn test_identifier_with_scope() -> Result<()> {
-        let input = TokenStream::from_str("x + y").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        
-        // Add a scope that provides variable values
-        parser.op_lookup_mut().push_scope(Box::new(|name, types, segment| {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, types, segment| {
             // 0-ary lookup means identifier
             if types.is_empty() {
                 match name {
@@ -1322,14 +1451,14 @@ mod tests {
                         segment.op0(|| 20i32);
                         Ok(true)
                     }
-                    _ => Ok(false)
+                    _ => Ok(false),
                 }
             } else {
                 Ok(false)
             }
-        }));
-        
-        let mut segment = parser.parse()?;
+        });
+        let mut parser = CELParser::new(lookup);
+        let mut segment = parser.parse_str("x + y")?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, 30);
         Ok(())
@@ -1337,25 +1466,26 @@ mod tests {
 
     #[test]
     fn test_undefined_identifier_error() {
-        let input = TokenStream::from_str("undefined_var + 10").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let result = parser.parse();
-        
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("undefined_var + 10");
+
         assert!(result.is_err());
         if let Err(e) = result {
             let error_msg = format!("{:?}", e);
-            assert!(error_msg.contains("Undefined identifier: undefined_var"), 
-                "Error message should contain 'Undefined identifier: undefined_var', got: {}", error_msg);
+            assert!(
+                error_msg.contains("Undefined identifier: undefined_var"),
+                "Error message should contain 'Undefined identifier: undefined_var', got: {}",
+                error_msg
+            );
         }
     }
 
     #[test]
     fn test_undefined_identifier_error_formatting() {
         let input = "undefined_var + 10";
-        let token_stream = TokenStream::from_str(input).unwrap();
-        let mut parser = CELParser::new(token_stream.into_iter());
-        let result = parser.parse();
-        
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str(input);
+
         assert!(result.is_err());
         if let Err(_) = result {
             // Test that format_error works correctly
@@ -1369,9 +1499,8 @@ mod tests {
 
     #[test]
     fn test_float_arithmetic_execution() -> Result<()> {
-        let input = TokenStream::from_str("3.5 * 2.0").unwrap();
-        let mut parser = CELParser::new(input.into_iter());
-        let mut segment = parser.parse()?;
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser.parse_str("3.5 * 2.0")?;
         let result = segment.call0::<f64>()?;
         assert_eq!(result, 7.0);
         Ok(())

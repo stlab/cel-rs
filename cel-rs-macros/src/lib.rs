@@ -30,7 +30,7 @@
 //! };
 //! ```
 
-use cel_parser::CELParser;
+use cel_runtime::{CELParser, OpLookup};
 use proc_macro::TokenStream as ProcMacroTokenStream;
 use proc_macro2::TokenStream;
 
@@ -45,7 +45,8 @@ use proc_macro2::TokenStream;
 #[proc_macro]
 pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
     let input = TokenStream::from(input);
-    let mut parser = CELParser::new(input.into_iter());
+    let mut parser = CELParser::new(OpLookup::new());
+    parser.set_tokens(input.into_iter());
     // Only report error if is_expression returns Ok(false) (no match)
     // If Err, the error is already set in output stream
     if matches!(parser.is_expression(), Ok(false)) {

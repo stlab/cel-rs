@@ -33,6 +33,7 @@
 //! ```
 
 #![warn(missing_docs)]
+
 /// Compile-time stack list implementation for type-safe stack operations.
 pub mod c_stack_list;
 /// Dynamic segment implementation with runtime type checking.
@@ -53,6 +54,8 @@ pub mod raw_vec;
 pub mod segment;
 /// Tuple list implementation for type-safe tuple operations.
 pub mod tuple_list;
+/// Recursive descent parser for CEL expressions.
+pub mod parser;
 
 pub use c_stack_list::*;
 pub use dyn_segment::*;
@@ -64,3 +67,15 @@ pub use raw_stack::*;
 pub use raw_vec::*;
 pub use segment::*;
 //pub use tuple_list::*;
+
+pub use parser::op_table::OpLookup;
+pub use parser::CELParser;
+
+impl std::str::FromStr for DynSegment {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parser = parser::CELParser::new(OpLookup::new());
+        parser.parse_str(s)
+    }
+}

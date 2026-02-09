@@ -17,7 +17,7 @@
 //!   signatures store a single `TypeId` plus arity rather than arrays.
 
 use anyhow::{anyhow, Result};
-use cel_runtime::DynSegment;
+use crate::DynSegment;
 use once_cell::sync::Lazy;
 use phf::phf_map;
 use std::any::TypeId;
@@ -75,6 +75,7 @@ static TYPE_IDS: Lazy<Vec<TypeId>> = Lazy::new(|| {
         TypeId::of::<f32>(),
         TypeId::of::<f64>(),
         TypeId::of::<bool>(),
+        TypeId::of::<String>(),
     ]
 });
 
@@ -94,6 +95,7 @@ const TYPE_ISIZE: usize = 11;
 const TYPE_F32: usize = 12;
 const TYPE_F64: usize = 13;
 const TYPE_BOOL: usize = 14;
+const TYPE_STR: usize = 15;
 
 // Helper macro to reduce boilerplate in signature definitions
 macro_rules! sig {
@@ -114,14 +116,15 @@ static ADD_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a.wrapping_add(b))),
     sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a.wrapping_add(b))),
     sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a.wrapping_add(b))),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a.wrapping_add(b))),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a.wrapping_add(b))),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a.wrapping_add(b))),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a.wrapping_add(b))),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a.wrapping_add(b))),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a.wrapping_add(b))),
+    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a.checked_add(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a.checked_add(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a.checked_add(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a.checked_add(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a.checked_add(b).expect("arithmetic overflow"))),
+    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a.checked_add(b).expect("arithmetic overflow"))),
     sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a + b)),
     sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a + b)),
+    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a + &b)),
 ];
 
 // Subtraction signatures (both binary and unary)
@@ -133,21 +136,21 @@ static SUB_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a.wrapping_sub(b))),
     sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a.wrapping_sub(b))),
     sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a.wrapping_sub(b))),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a.wrapping_sub(b))),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a.wrapping_sub(b))),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a.wrapping_sub(b))),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a.wrapping_sub(b))),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a.wrapping_sub(b))),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a.wrapping_sub(b))),
+    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a.checked_sub(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a.checked_sub(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a.checked_sub(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a.checked_sub(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a.checked_sub(b).expect("arithmetic overflow"))),
+    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a.checked_sub(b).expect("arithmetic overflow"))),
     sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a - b)),
     sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a - b)),
     // Unary negation
-    sig!(TYPE_I8, 1, |seg| seg.op1(|a: i8| a.wrapping_neg())),
-    sig!(TYPE_I16, 1, |seg| seg.op1(|a: i16| a.wrapping_neg())),
-    sig!(TYPE_I32, 1, |seg| seg.op1(|a: i32| a.wrapping_neg())),
-    sig!(TYPE_I64, 1, |seg| seg.op1(|a: i64| a.wrapping_neg())),
-    sig!(TYPE_I128, 1, |seg| seg.op1(|a: i128| a.wrapping_neg())),
-    sig!(TYPE_ISIZE, 1, |seg| seg.op1(|a: isize| a.wrapping_neg())),
+    sig!(TYPE_I8, 1, |seg| seg.op1(|a: i8| a.checked_neg().expect("arithmetic overflow"))),
+    sig!(TYPE_I16, 1, |seg| seg.op1(|a: i16| a.checked_neg().expect("arithmetic overflow"))),
+    sig!(TYPE_I32, 1, |seg| seg.op1(|a: i32| a.checked_neg().expect("arithmetic overflow"))),
+    sig!(TYPE_I64, 1, |seg| seg.op1(|a: i64| a.checked_neg().expect("arithmetic overflow"))),
+    sig!(TYPE_I128, 1, |seg| seg.op1(|a: i128| a.checked_neg().expect("arithmetic overflow"))),
+    sig!(TYPE_ISIZE, 1, |seg| seg.op1(|a: isize| a.checked_neg().expect("arithmetic overflow"))),
     sig!(TYPE_F32, 1, |seg| seg.op1(|a: f32| -a)),
     sig!(TYPE_F64, 1, |seg| seg.op1(|a: f64| -a)),
 ];
@@ -160,12 +163,12 @@ static MUL_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a.wrapping_mul(b))),
     sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a.wrapping_mul(b))),
     sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a.wrapping_mul(b))),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a.wrapping_mul(b))),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a.wrapping_mul(b))),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a.wrapping_mul(b))),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a.wrapping_mul(b))),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a.wrapping_mul(b))),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a.wrapping_mul(b))),
+    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a.checked_mul(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a.checked_mul(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a.checked_mul(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a.checked_mul(b).expect("arithmetic overflow"))),
+    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a.checked_mul(b).expect("arithmetic overflow"))),
+    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a.checked_mul(b).expect("arithmetic overflow"))),
     sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a * b)),
     sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a * b)),
 ];
@@ -262,12 +265,12 @@ static LEFT_SHIFT_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a << b)),
     sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a << b)),
     sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a << b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a << b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a << b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a << b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a << b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a << b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a << b)),
+    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a.checked_shl(b as u32).expect("shift overflow"))),
+    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a.checked_shl(b as u32).expect("shift overflow"))),
+    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a.checked_shl(b as u32).expect("shift overflow"))),
+    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a.checked_shl(b as u32).expect("shift overflow"))),
+    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a.checked_shl(b as u32).expect("shift overflow"))),
+    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a.checked_shl(b as u32).expect("shift overflow"))),
 ];
 
 // Right shift signatures
@@ -278,12 +281,12 @@ static RIGHT_SHIFT_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a >> b)),
     sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a >> b)),
     sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a >> b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a >> b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a >> b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a >> b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a >> b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a >> b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a >> b)),
+    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a.checked_shr(b as u32).expect("shift overflow"))),
+    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a.checked_shr(b as u32).expect("shift overflow"))),
+    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a.checked_shr(b as u32).expect("shift overflow"))),
+    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a.checked_shr(b as u32).expect("shift overflow"))),
+    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a.checked_shr(b as u32).expect("shift overflow"))),
+    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a.checked_shr(b as u32).expect("shift overflow"))),
 ];
 
 // Logical AND signatures
@@ -318,6 +321,7 @@ static EQUAL_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a == b)),
     sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a == b)),
     sig!(TYPE_BOOL, 2, |seg| seg.op2(|a: bool, b: bool| a == b)),
+    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a == b)),
 ];
 
 // Inequality signatures
@@ -337,6 +341,7 @@ static NOT_EQUAL_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a != b)),
     sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a != b)),
     sig!(TYPE_BOOL, 2, |seg| seg.op2(|a: bool, b: bool| a != b)),
+    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a != b)),
 ];
 
 // Less than signatures
@@ -355,6 +360,7 @@ static LESS_THAN_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a < b)),
     sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a < b)),
     sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a < b)),
+    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a < b)),
 ];
 
 // Less than or equal signatures
@@ -373,6 +379,7 @@ static LESS_THAN_OR_EQUAL_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a <= b)),
     sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a <= b)),
     sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a <= b)),
+    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a <= b)),
 ];
 
 // Greater than signatures
@@ -391,6 +398,7 @@ static GREATER_THAN_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a > b)),
     sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a > b)),
     sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a > b)),
+    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a > b)),
 ];
 
 // Greater than or equal signatures
@@ -409,6 +417,7 @@ static GREATER_THAN_OR_EQUAL_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a >= b)),
     sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a >= b)),
     sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a >= b)),
+    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a >= b)),
 ];
 
 /// Compile-time perfect hash map for built-in operations.
@@ -471,7 +480,7 @@ impl BuiltinScope {
 /// # Examples
 ///
 /// ```rust
-/// use cel_parser::op_table::OpLookup;
+/// use cel_runtime::parser::op_table::OpLookup;
 /// use cel_runtime::DynSegment;
 /// use std::any::TypeId;
 ///
@@ -501,10 +510,14 @@ impl OpLookup {
 
     /// Pushes a new scope onto the stack.
     ///
-    /// The scope function should return `Ok(true)` if it handled the operation,
-    /// `Ok(false)` to pass to the next scope, or `Err` on error.
-    pub fn push_scope(&mut self, scope: ScopeFn) {
-        self.scopes.push(scope);
+    /// Accepts a closure directly; it is boxed internally. The scope should return
+    /// `Ok(true)` if it handled the operation, `Ok(false)` to pass to the next scope,
+    /// or `Err` on error.
+    pub fn push_scope<F>(&mut self, scope: F)
+    where
+        F: Fn(&str, &[TypeId], &mut DynSegment) -> Result<bool> + Send + Sync + 'static,
+    {
+        self.scopes.push(Box::new(scope));
     }
 
     /// Pops the most recent scope from the stack.
@@ -669,14 +682,14 @@ mod tests {
         let mut lookup = OpLookup::new();
 
         // Add a custom scope that handles "double"
-        lookup.push_scope(Box::new(|name, types, segment| {
+        lookup.push_scope(|name, types, segment| {
             if name == "double" && types.len() == 1 && types[0] == TypeId::of::<u32>() {
                 segment.op1(|a: u32| a * 2)?;
                 Ok(true)
             } else {
                 Ok(false)
             }
-        }));
+        });
 
         let mut segment = DynSegment::new::<()>();
         segment.just(21u32);
@@ -692,14 +705,14 @@ mod tests {
         let mut lookup = OpLookup::new();
 
         // Override addition to always return 100
-        lookup.push_scope(Box::new(|name, types, segment| {
+        lookup.push_scope(|name, types, segment| {
             if name == "+" && types.len() == 2 && types[0] == TypeId::of::<u32>() {
                 segment.op2(|_a: u32, _b: u32| 100u32)?;
                 Ok(true)
             } else {
                 Ok(false)
             }
-        }));
+        });
 
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
@@ -716,14 +729,14 @@ mod tests {
         let mut lookup = OpLookup::new();
 
         // Add override
-        lookup.push_scope(Box::new(|name, types, segment| {
+        lookup.push_scope(|name, types, segment| {
             if name == "+" && types.len() == 2 && types[0] == TypeId::of::<u32>() {
                 segment.op2(|_a: u32, _b: u32| 100u32)?;
                 Ok(true)
             } else {
                 Ok(false)
             }
-        }));
+        });
 
         // Test with override
         let mut segment = DynSegment::new::<()>();

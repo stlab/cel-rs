@@ -3,10 +3,9 @@
 //! cel-rs provides a stack-based runtime for developing domain specific languages, including
 //! concatenative languages to describe concurrent processes.
 //!
-//! This crate exposes three main components:
+//! This crate exposes two main components:
 //!
-//! - **cel-runtime**: The core stack-based runtime for developing domain specific languages
-//! - **cel-parser**: A recursive descent parser for CEL expressions
+//! - **cel-runtime**: The core stack-based runtime and CEL parser
 //! - **cel-rs-macros**: Procedural macros for CEL expressions
 //!
 //! # Examples
@@ -30,12 +29,13 @@
 //! ## Using the Parser
 //!
 //! ```rust
-//! use cel_rs::cel_parser::CELParser;
+//! use cel_rs::cel_runtime::{CELParser, OpLookup};
 //! use proc_macro2::TokenStream;
 //! use std::str::FromStr;
 //!
 //! let input = TokenStream::from_str("10").unwrap();
-//! let mut parser = CELParser::new(input.into_iter());
+//! let mut parser = CELParser::new(OpLookup::new());
+//! parser.set_tokens(input.into_iter());
 //! let result = parser.is_expression();
 //! assert!(result.is_ok());
 //! ```
@@ -50,7 +50,6 @@
 //! };
 //! ```
 
-pub use cel_parser;
 pub use cel_rs_macros;
 pub use cel_runtime;
 
@@ -60,9 +59,9 @@ pub mod runtime {
     pub use cel_runtime::*;
 }
 
-/// Re-exports from the cel-parser crate for convenient access.
+/// Re-exports for the CEL parser (part of cel-runtime).
 pub mod parser {
-    pub use cel_parser::*;
+    pub use cel_runtime::parser::{op_table::OpLookup, CELParser};
 }
 
 /// Re-exports from the cel-rs-macros crate for convenient access.
