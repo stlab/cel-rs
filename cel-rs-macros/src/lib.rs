@@ -30,9 +30,10 @@
 //! };
 //! ```
 
-use cel_runtime::{CELParser, OpLookup};
+use cel_runtime::{CELError, CELParser, OpLookup};
 use proc_macro::TokenStream as ProcMacroTokenStream;
-use proc_macro2::TokenStream;
+use proc_macro2::{Literal, TokenStream};
+use quote::quote_spanned;
 
 /// Validates that the input contains a valid CEL expression.
 ///
@@ -47,12 +48,18 @@ pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
     let input = TokenStream::from(input);
     let mut parser = CELParser::new(OpLookup::new());
     parser.set_tokens(input.into_iter());
-    // Only report error if is_expression returns Ok(false) (no match)
-    // If Err, the error is already set in output stream
-    if matches!(parser.is_expression(), Ok(false)) {
-        parser.report_error("Expected expression");
+    match parser.is_expression() {
+        Ok(true) => ProcMacroTokenStream::new(),
+        Ok(false) => {
+            let e = CELError::new("Expected expression", proc_macro2::Span::call_site());
+            let msg_lit = Literal::string(&e.to_string());
+            quote_spanned!(e.span() => compile_error!(#msg_lit)).into()
+        }
+        Err(e) => {
+            let msg_lit = Literal::string(&e.to_string());
+            quote_spanned!(e.span() => compile_error!(#msg_lit)).into()
+        }
     }
-    parser.get_output().clone().into()
 }
 
 /// Prints the tokens for debugging purposes.

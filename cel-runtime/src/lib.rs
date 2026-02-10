@@ -70,11 +70,12 @@ pub use segment::*;
 
 pub use parser::op_table::OpLookup;
 pub use parser::CELParser;
+pub use parser::CELError;
 
 impl std::str::FromStr for DynSegment {
-    type Err = anyhow::Error;
+    type Err = parser::CELError;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let mut parser = parser::CELParser::new(OpLookup::new());
         parser.parse_str(s)
     }
