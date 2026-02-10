@@ -40,6 +40,33 @@ struct GroupLevel {
 /// Iterator type used for token streams (from `TokenStream::into_iter()`).
 pub type TokenStreamIter = proc_macro2::token_stream::IntoIter;
 
+/// Punctuation operator (1 or 2 chars) without heap allocation.
+#[derive(Clone, Debug)]
+pub enum PunctOp {
+    /// Single character (e.g. `+`, `-`).
+    One(char),
+    /// Two characters (e.g. `&&`, `<=`).
+    Two([char; 2]),
+}
+
+impl PartialEq<str> for PunctOp {
+    fn eq(&self, other: &str) -> bool {
+        match self {
+            PunctOp::One(c) => other.len() == 1 && other.chars().next() == Some(*c),
+            PunctOp::Two([a, b]) => {
+                let mut it = other.chars();
+                it.next() == Some(*a) && it.next() == Some(*b) && it.next().is_none()
+            }
+        }
+    }
+}
+
+impl PartialEq<&str> for PunctOp {
+    fn eq(&self, other: &&str) -> bool {
+        self.eq(*other)
+    }
+}
+
 /// Multi-character operators are combined at this level (e.g., `&` + `&` -> `&&`).
 pub struct LexLexer {
     input: TokenStreamIter,
@@ -178,10 +205,10 @@ pub enum Token {
     /// An identifier.
     Identifier(Ident),
 
-    /// A punctuation operator (single or multi-character).
+    /// A punctuation operator (single or multi-character; no heap for 1–2 chars).
     Punct {
-        /// The operator string (e.g., "+", "&&", "<=").
-        op: String,
+        /// The operator (e.g., "+", "&&", "<=").
+        op: PunctOp,
         /// Span for error reporting.
         span: Span,
     },
@@ -280,40 +307,35 @@ impl Iterator for LexLexer {
 
                         // Check if they form a compound operator
                         if Self::is_compound_operator(ch, next_ch) {
-                            // Combine them
-                            let mut op = String::new();
-                            op.push(ch);
-                            op.push(next_ch);
-                            return Some(Token::Punct { op, span });
+                            return Some(Token::Punct {
+                                op: PunctOp::Two([ch, next_ch]),
+                                span,
+                            });
                         } else {
-                            // Can't combine - emit first and save second for next iteration
                             self.pending_token = Some(TokenTree::Punct(next_punct));
                             return Some(Token::Punct {
-                                op: ch.to_string(),
+                                op: PunctOp::One(ch),
                                 span,
                             });
                         }
                     }
                     Some(other_token) => {
-                        // Next token is not punct - emit our punct and save other for next iteration
                         self.pending_token = Some(other_token);
                         return Some(Token::Punct {
-                            op: ch.to_string(),
+                            op: PunctOp::One(ch),
                             span,
                         });
                     }
                     None => {
-                        // No next token - emit single punct
                         return Some(Token::Punct {
-                            op: ch.to_string(),
+                            op: PunctOp::One(ch),
                             span,
                         });
                     }
                 }
             } else {
-                // Spacing is Alone - emit single character operator
                 return Some(Token::Punct {
-                    op: ch.to_string(),
+                    op: PunctOp::One(ch),
                     span,
                 });
             }
@@ -415,7 +437,7 @@ mod tests {
         let token = lexer.next().unwrap();
         match token {
             Token::Punct { op, .. } => {
-                assert_eq!(op, "+");
+                assert!(op == "+");
             }
             _ => panic!("Expected punctuation"),
         }
@@ -431,7 +453,7 @@ mod tests {
 
         match &tokens[1] {
             Token::Punct { op, .. } => {
-                assert_eq!(op, "&&");
+                assert!(op == "&&");
             }
             _ => panic!("Expected && operator"),
         }

@@ -580,8 +580,12 @@ impl CELParser {
     ///
     /// let input = TokenStream::from_str("10 + 20").unwrap();
     /// let mut lookup = OpLookup::new();
-    /// lookup.push_scope(|name, types, segment| {
-    ///     if name == "+" && types.len() == 2 && types[0] == TypeId::of::<i32>() {
+    /// lookup.push_scope(|name, segment, num_operands| {
+    ///     let matches = {
+    ///         let top = segment.peek_stack_infos(num_operands);
+    ///         name == "+" && top.len() == 2 && top[0].type_id == TypeId::of::<i32>()
+    ///     };
+    ///     if matches {
     ///         segment.op2(|a: i32, b: i32| a + b + 1)?; // Custom addition
     ///         Ok(true)
     ///     } else {
@@ -662,9 +666,8 @@ impl CELParser {
                 if !self.is_and_expression()? {
                     return Err(self.report_error("expected and_expression"));
                 }
-                let types = self.context.peek_types_vec(2);
-                if !types.is_empty()
-                    && let Err(e) = self.op_lookup.lookup("||", &types, &mut self.context)
+                if self.context.stack_ids.len() >= 2
+                    && let Err(e) = self.op_lookup.lookup("||", &mut self.context, 2)
                 {
                     return Err(self.report_error(&format!("operation error: {}", e)));
                 }
@@ -682,9 +685,8 @@ impl CELParser {
                 if !self.is_comparison_expression()? {
                     return Err(self.report_error("expected comparison_expression"));
                 }
-                let types = self.context.peek_types_vec(2);
-                if !types.is_empty()
-                    && let Err(e) = self.op_lookup.lookup("&&", &types, &mut self.context)
+                if self.context.stack_ids.len() >= 2
+                    && let Err(e) = self.op_lookup.lookup("&&", &mut self.context, 2)
                 {
                     return Err(self.report_error(&format!("operation error: {}", e)));
                 }
@@ -719,9 +721,8 @@ impl CELParser {
                 if !self.is_bitwise_or_expression()? {
                     return Err(self.report_error("expected bitwise_or_expression"));
                 }
-                let types = self.context.peek_types_vec(2);
-                if !types.is_empty()
-                    && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context)
+                if self.context.stack_ids.len() >= 2
+                    && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 2)
                 {
                     return Err(self.report_error(&format!("operation error: {}", e)));
                 }
@@ -739,9 +740,8 @@ impl CELParser {
                 if !self.is_bitwise_xor_expression()? {
                     return Err(self.report_error("expected bitwise_xor_expression"));
                 }
-                let types = self.context.peek_types_vec(2);
-                if !types.is_empty()
-                    && let Err(e) = self.op_lookup.lookup("|", &types, &mut self.context)
+                if self.context.stack_ids.len() >= 2
+                    && let Err(e) = self.op_lookup.lookup("|", &mut self.context, 2)
                 {
                     return Err(self.report_error(&format!("operation error: {}", e)));
                 }
@@ -759,9 +759,8 @@ impl CELParser {
                 if !self.is_bitwise_and_expression()? {
                     return Err(self.report_error("expected bitwise_and_expression"));
                 }
-                let types = self.context.peek_types_vec(2);
-                if !types.is_empty()
-                    && let Err(e) = self.op_lookup.lookup("^", &types, &mut self.context)
+                if self.context.stack_ids.len() >= 2
+                    && let Err(e) = self.op_lookup.lookup("^", &mut self.context, 2)
                 {
                     return Err(self.report_error(&format!("operation error: {}", e)));
                 }
@@ -779,9 +778,8 @@ impl CELParser {
                 if !self.is_bitwise_shift_expression()? {
                     return Err(self.report_error("expected bitwise_shift_expression"));
                 }
-                let types = self.context.peek_types_vec(2);
-                if !types.is_empty()
-                    && let Err(e) = self.op_lookup.lookup("&", &types, &mut self.context)
+                if self.context.stack_ids.len() >= 2
+                    && let Err(e) = self.op_lookup.lookup("&", &mut self.context, 2)
                 {
                     return Err(self.report_error(&format!("operation error: {}", e)));
                 }
@@ -808,9 +806,8 @@ impl CELParser {
                     if !self.is_additive_expression()? {
                         return Err(self.report_error("expected additive_expression"));
                     }
-                    let types = self.context.peek_types_vec(2);
-                    if !types.is_empty()
-                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context)
+                    if self.context.stack_ids.len() >= 2
+                        && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 2)
                     {
                         return Err(self.report_error(&format!("operation error: {}", e)));
                     }
@@ -843,12 +840,8 @@ impl CELParser {
                         return Err(self.report_error("expected multiplicative_expression"));
                     }
 
-                    // Get the top two types from the stack
-                    let types = self.context.peek_types_vec(2);
-
-                    // Apply the operation using the table (only if we have types)
-                    if !types.is_empty()
-                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context)
+                    if self.context.stack_ids.len() >= 2
+                        && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 2)
                     {
                         return Err(self.report_error(&format!("operation error: {}", e)));
                     }
@@ -883,12 +876,8 @@ impl CELParser {
                         return Err(self.report_error("expected unary_expression"));
                     }
 
-                    // Get the top two types from the stack
-                    let types = self.context.peek_types_vec(2);
-
-                    // Apply the operation using the table (only if we have types)
-                    if !types.is_empty()
-                        && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context)
+                    if self.context.stack_ids.len() >= 2
+                        && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 2)
                     {
                         return Err(self.report_error(&format!("operation error: {}", e)));
                     }
@@ -918,9 +907,8 @@ impl CELParser {
                 return Err(self.report_error("expected unary_expression"));
             }
             // Apply the unary operation (only if we have types)
-            let types = self.context.peek_types_vec(1);
-            if !types.is_empty()
-                && let Err(e) = self.op_lookup.lookup(op_name, &types, &mut self.context)
+            if self.context.stack_ids.len() >= 1
+                && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 1)
             {
                 return Err(self.report_error(&format!("operation error: {}", e)));
             }
@@ -954,10 +942,9 @@ impl CELParser {
                 _ => return Err(self.report_error("expected closing parenthesis")),
             }
             // Push the call operation: pops argument(s) then callee, invokes callee, pushes result.
-            // Stack order is [callee, arg1, arg2, ...] so peek_types_vec gives [argN..arg1, callee].
-            let types = self.context.peek_types_vec(arg_count + 1);
-            if !types.is_empty()
-                && let Err(e) = self.op_lookup.lookup("()", &types, &mut self.context)
+            // Stack order is [callee, arg1, arg2, ...]; lookup peeks top (arg_count + 1) entries.
+            if self.context.stack_ids.len() >= arg_count + 1
+                && let Err(e) = self.op_lookup.lookup("()", &mut self.context, arg_count + 1)
             {
                 return Err(self.report_error(&format!("call: {}", e)));
             }
@@ -1002,7 +989,7 @@ impl CELParser {
 
                 // Look up identifier (variable/0-ary); value is pushed and may be a function.
                 self.op_lookup
-                    .lookup(&ident_name, &[], &mut self.context)
+                    .lookup(&ident_name, &mut self.context, 0)
                     .map_err(|_| {
                         self.report_error(&format!("Undefined identifier: {}", ident_name))
                     })?;
@@ -1041,7 +1028,7 @@ mod tests {
     #[test]
     fn experiments() -> Result<()> {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, _, segment| {
+        lookup.push_scope(|name, segment, _num_operands| {
             if name == "constant" {
                 segment.just(42i64);
                 return Ok(true);
@@ -1439,9 +1426,8 @@ mod tests {
     #[test]
     fn test_identifier_with_scope() -> Result<()> {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, types, segment| {
-            // 0-ary lookup means identifier
-            if types.is_empty() {
+        lookup.push_scope(|name, segment, num_operands| {
+            if num_operands == 0 {
                 match name {
                     "x" => {
                         segment.op0(|| 10i32);

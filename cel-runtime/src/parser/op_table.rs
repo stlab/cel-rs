@@ -29,9 +29,10 @@ pub type OpFn = fn(&mut DynSegment) -> Result<()>;
 
 /// A scope function that attempts to resolve and apply an operation.
 ///
-/// Takes an operation name, type signature, and segment. Returns `Ok(true)` if the
-/// operation was handled, `Ok(false)` if not found, or `Err` on error.
-pub type ScopeFn = Box<dyn Fn(&str, &[TypeId], &mut DynSegment) -> Result<bool> + Send + Sync>;
+/// Receives the operation name, the segment, and the number of operands on top of the stack.
+/// The scope may call `segment.peek_stack_infos(num_operands)` to inspect types. Returns
+/// `Ok(true)` if handled, `Ok(false)` if not found, or `Err` on error.
+pub type ScopeFn = Box<dyn Fn(&str, &mut DynSegment, usize) -> Result<bool> + Send + Sync>;
 
 /// A signature for an operation with matching operand types.
 ///
@@ -454,13 +455,17 @@ impl BuiltinScope {
     /// Attempts to find and apply a built-in operation.
     ///
     /// Returns `Ok(true)` if found and applied, `Ok(false)` if not found.
-    fn lookup(&self, name: &str, types: &[TypeId], segment: &mut DynSegment) -> Result<bool> {
+    fn lookup(
+        &self,
+        name: &str,
+        segment: &mut DynSegment,
+        num_operands: usize,
+    ) -> Result<bool> {
+        let stack_infos = segment.peek_stack_infos(num_operands);
         if let Some(signatures) = BUILTINS.get(name) {
-            // Linear search through signatures (typically very few per operation)
             for sig in *signatures {
-                // Check if signature matches the provided types
-                let matches = sig.arity as usize == types.len()
-                    && types.iter().all(|t| *t == sig.type_id());
+                let matches = sig.arity as usize == stack_infos.len()
+                    && stack_infos.iter().all(|info| info.type_id == sig.type_id());
 
                 if matches {
                     (sig.op_fn)(segment)?;
@@ -468,7 +473,7 @@ impl BuiltinScope {
                 }
             }
         }
-        Ok(false) // Operation name not found or no matching signature
+        Ok(false)
     }
 }
 
@@ -490,8 +495,7 @@ impl BuiltinScope {
 /// let mut segment = DynSegment::new::<()>();
 /// segment.just(10u32);
 /// segment.just(20u32);
-/// let types = segment.peek_types_vec(2);
-/// lookup.lookup("+", &types, &mut segment).unwrap();
+/// lookup.lookup("+", &mut segment, 2).unwrap();
 /// assert_eq!(segment.call0::<u32>().unwrap(), 30);
 /// ```
 pub struct OpLookup {
@@ -515,7 +519,7 @@ impl OpLookup {
     /// or `Err` on error.
     pub fn push_scope<F>(&mut self, scope: F)
     where
-        F: Fn(&str, &[TypeId], &mut DynSegment) -> Result<bool> + Send + Sync + 'static,
+        F: Fn(&str, &mut DynSegment, usize) -> Result<bool> + Send + Sync + 'static,
     {
         self.scopes.push(Box::new(scope));
     }
@@ -530,33 +534,46 @@ impl OpLookup {
     /// Looks up and applies an operation.
     ///
     /// Searches scopes in LIFO order, then falls back to built-in operations.
+    /// Pass the top N [`StackInfo`] entries from the segment (e.g. `segment.peek_stack_infos(n)`).
     ///
     /// # Arguments
     ///
     /// * `name` - The operation name (e.g., `"+"`, `"-"`, or a custom identifier)
-    /// * `types` - The TypeIds of the operands in order
     /// * `segment` - The DynSegment to apply the operation to
+    /// * `num_operands` - Number of top stack entries that are operands (e.g. 2 for binary ops)
     ///
     /// # Errors
     ///
     /// Returns an error if no scope or built-in operation can handle the request.
-    pub fn lookup(&self, name: &str, types: &[TypeId], segment: &mut DynSegment) -> Result<()> {
-        // Try scopes in reverse order (most recent first)
+    /// Error messages report type names from the top stack entries, not raw type ids.
+    pub fn lookup(
+        &self,
+        name: &str,
+        segment: &mut DynSegment,
+        num_operands: usize,
+    ) -> Result<()> {
         for scope in self.scopes.iter().rev() {
-            if scope(name, types, segment)? {
+            if scope(name, segment, num_operands)? {
                 return Ok(());
             }
         }
 
-        // Fall back to built-in scope
-        if self.builtin_scope.lookup(name, types, segment)? {
+        if self.builtin_scope.lookup(name, segment, num_operands)? {
             return Ok(());
         }
 
+        let infos = segment.peek_stack_infos(num_operands);
+        let mut type_names = String::new();
+        for (i, info) in infos.iter().enumerate() {
+            if i > 0 {
+                type_names.push_str(", ");
+            }
+            type_names.push_str(info.type_name.as_ref());
+        }
         Err(anyhow!(
-            "Operation '{}' not found for types {:?}",
+            "Operation '{}' not found for types [{}]",
             name,
-            types
+            type_names
         ))
     }
 }
@@ -577,8 +594,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        let types = segment.peek_types_vec(2);
-        lookup.lookup("+", &types, &mut segment)?;
+        lookup.lookup("+", &mut segment, 2)?;
         assert_eq!(segment.call0::<u32>()?, 30);
         Ok(())
     }
@@ -589,8 +605,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(50i32);
         segment.just(20i32);
-        let types = segment.peek_types_vec(2);
-        lookup.lookup("-", &types, &mut segment)?;
+        lookup.lookup("-", &mut segment, 2)?;
         assert_eq!(segment.call0::<i32>()?, 30);
         Ok(())
     }
@@ -601,8 +616,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(3.5f64);
         segment.just(2.0f64);
-        let types = segment.peek_types_vec(2);
-        lookup.lookup("*", &types, &mut segment)?;
+        lookup.lookup("*", &mut segment, 2)?;
         assert_eq!(segment.call0::<f64>()?, 7.0);
         Ok(())
     }
@@ -613,8 +627,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        let types = segment.peek_types_vec(2);
-        lookup.lookup("<", &types, &mut segment)?;
+        lookup.lookup("<", &mut segment, 2)?;
         assert_eq!(segment.call0::<bool>()?, true);
         Ok(())
     }
@@ -625,8 +638,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(true);
         segment.just(false);
-        let types = segment.peek_types_vec(2);
-        lookup.lookup("&&", &types, &mut segment)?;
+        lookup.lookup("&&", &mut segment, 2)?;
         assert_eq!(segment.call0::<bool>()?, false);
         Ok(())
     }
@@ -637,8 +649,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(0b1010u32);
         segment.just(0b1100u32);
-        let types = segment.peek_types_vec(2);
-        lookup.lookup("&", &types, &mut segment)?;
+        lookup.lookup("&", &mut segment, 2)?;
         assert_eq!(segment.call0::<u32>()?, 0b1000);
         Ok(())
     }
@@ -648,8 +659,7 @@ mod tests {
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         segment.just(42i32);
-        let types = segment.peek_types_vec(1);
-        lookup.lookup("-", &types, &mut segment)?;
+        lookup.lookup("-", &mut segment, 1)?;
         assert_eq!(segment.call0::<i32>()?, -42);
         Ok(())
     }
@@ -659,8 +669,7 @@ mod tests {
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         segment.just(true);
-        let types = segment.peek_types_vec(1);
-        lookup.lookup("!", &types, &mut segment)?;
+        lookup.lookup("!", &mut segment, 1)?;
         assert_eq!(segment.call0::<bool>()?, false);
         Ok(())
     }
@@ -671,9 +680,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        let types = segment.peek_types_vec(2);
-
-        let result = lookup.lookup("unknown_op", &types, &mut segment);
+        let result = lookup.lookup("unknown_op", &mut segment, 2);
         assert!(result.is_err());
     }
 
@@ -682,8 +689,14 @@ mod tests {
         let mut lookup = OpLookup::new();
 
         // Add a custom scope that handles "double"
-        lookup.push_scope(|name, types, segment| {
-            if name == "double" && types.len() == 1 && types[0] == TypeId::of::<u32>() {
+        lookup.push_scope(|name, segment, num_operands| {
+            let matches = {
+                let top = segment.peek_stack_infos(num_operands);
+                name == "double"
+                    && top.len() == 1
+                    && top[0].type_id == TypeId::of::<u32>()
+            };
+            if matches {
                 segment.op1(|a: u32| a * 2)?;
                 Ok(true)
             } else {
@@ -693,8 +706,7 @@ mod tests {
 
         let mut segment = DynSegment::new::<()>();
         segment.just(21u32);
-        let types = segment.peek_types_vec(1);
-        lookup.lookup("double", &types, &mut segment)?;
+        lookup.lookup("double", &mut segment, 1)?;
         assert_eq!(segment.call0::<u32>()?, 42);
 
         Ok(())
@@ -705,8 +717,14 @@ mod tests {
         let mut lookup = OpLookup::new();
 
         // Override addition to always return 100
-        lookup.push_scope(|name, types, segment| {
-            if name == "+" && types.len() == 2 && types[0] == TypeId::of::<u32>() {
+        lookup.push_scope(|name, segment, num_operands| {
+            let matches = {
+                let top = segment.peek_stack_infos(num_operands);
+                name == "+"
+                    && top.len() == 2
+                    && top[0].type_id == TypeId::of::<u32>()
+            };
+            if matches {
                 segment.op2(|_a: u32, _b: u32| 100u32)?;
                 Ok(true)
             } else {
@@ -717,8 +735,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        let types = segment.peek_types_vec(2);
-        lookup.lookup("+", &types, &mut segment)?;
+        lookup.lookup("+", &mut segment, 2)?;
         assert_eq!(segment.call0::<u32>()?, 100);
 
         Ok(())
@@ -728,9 +745,14 @@ mod tests {
     fn test_scope_pop() -> Result<()> {
         let mut lookup = OpLookup::new();
 
-        // Add override
-        lookup.push_scope(|name, types, segment| {
-            if name == "+" && types.len() == 2 && types[0] == TypeId::of::<u32>() {
+        lookup.push_scope(|name, segment, num_operands| {
+            let matches = {
+                let top = segment.peek_stack_infos(num_operands);
+                name == "+"
+                    && top.len() == 2
+                    && top[0].type_id == TypeId::of::<u32>()
+            };
+            if matches {
                 segment.op2(|_a: u32, _b: u32| 100u32)?;
                 Ok(true)
             } else {
@@ -742,8 +764,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        let types = segment.peek_types_vec(2);
-        lookup.lookup("+", &types, &mut segment)?;
+        lookup.lookup("+", &mut segment, 2)?;
         assert_eq!(segment.call0::<u32>()?, 100);
 
         // Pop scope and test normal behavior
@@ -751,8 +772,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        let types = segment.peek_types_vec(2);
-        lookup.lookup("+", &types, &mut segment)?;
+        lookup.lookup("+", &mut segment, 2)?;
         assert_eq!(segment.call0::<u32>()?, 30);
 
         Ok(())

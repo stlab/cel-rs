@@ -6,17 +6,39 @@ use crate::raw_stack::RawStack;
 use crate::{CStackListHeadLimit, CStackListHeadPadded, ReverseList};
 use anyhow::Result;
 use anyhow::ensure;
+use std::borrow::Cow;
 use std::any::TypeId;
 use std::cmp::max;
 
+/// Recursive type node carrying a [`TypeId`], display name, and optional associated types.
+///
+/// Used for function parameter/return types, tuple elements, and similar structure.
+/// Not yet used; reserved for parse-time call checking and richer error reporting.
+#[derive(Clone, Debug)]
+pub struct AssociatedType {
+    /// Runtime type id for this node.
+    pub type_id: TypeId,
+    /// Human-readable name for error reporting (borrowed when from `type_name::<T>()`).
+    pub type_name: Cow<'static, str>,
+    /// Child types (e.g. function parameters, tuple elements).
+    pub associated: Vec<AssociatedType>,
+}
+
 /// Information about a type on the stack, including its cleanup function.
 ///
-/// This struct holds metadata about a type that has been pushed onto the stack,
-/// including how to properly drop it when the stack is unwound.
+/// Holds metadata for a value pushed onto the stack: runtime type id, display name
+/// for errors, padding, dropper, and an optional list of associated types.
 pub struct StackInfo {
-    pub(crate) stack_id: TypeId,
-    stack_unwind: Dropper,
-    padded: bool,
+    /// Runtime type id for this stack slot (e.g. for scope matching).
+    pub type_id: TypeId,
+    /// Human-readable type name for error reporting (borrowed when from `type_name::<T>()`).
+    pub type_name: Cow<'static, str>,
+    /// Whether padding was inserted before this value for alignment.
+    pub(crate) padding: bool,
+    /// Dropper used when unwinding the stack.
+    dropper: Dropper,
+    /// Associated types (e.g. function params, tuple elements). Unused for now.
+    pub associated: Vec<AssociatedType>,
 }
 
 /// Trait for converting a type list into a list of stack information.
@@ -43,9 +65,11 @@ impl<H: 'static, T: ToTypeIdList + 'static + CStackListHeadLimit> ToTypeIdList
     fn to_stack_info_list() -> Vec<StackInfo> {
         let mut list = T::to_stack_info_list();
         list.push(StackInfo {
-            stack_id: TypeId::of::<H>(),
-            stack_unwind: |stack| unsafe { stack.drop::<H>(Self::HEAD_PADDED) },
-            padded: Self::HEAD_PADDED,
+            type_id: TypeId::of::<H>(),
+            type_name: Cow::Borrowed(std::any::type_name::<H>()),
+            padding: Self::HEAD_PADDED,
+            dropper: |stack| unsafe { stack.drop::<H>(Self::HEAD_PADDED) },
+            associated: Vec::new(),
         });
         list
     }
@@ -86,6 +110,8 @@ type Dropper = fn(&mut RawStack);
 pub struct DynSegment {
     pub(crate) segment: RawSegment,
     pub(crate) argument_ids: Vec<TypeId>,
+    /// Type names for each argument slot, for error reporting (parallel to `argument_ids`).
+    pub(crate) argument_names: Vec<Cow<'static, str>>,
     pub(crate) stack_ids: Vec<StackInfo>,
     stack_index: usize,
 }
@@ -100,7 +126,8 @@ impl DynSegment {
         let stack_ids = ReverseList::<Args::Output>::to_stack_info_list();
         DynSegment {
             segment: RawSegment::new(),
-            argument_ids: stack_ids.iter().map(|s| s.stack_id).collect(),
+            argument_ids: stack_ids.iter().map(|s| s.type_id).collect(),
+            argument_names: stack_ids.iter().map(|s| s.type_name.clone()).collect(),
             stack_ids,
             stack_index: size_of::<ReverseList<Args::Output>>(),
         }
@@ -112,8 +139,9 @@ impl DynSegment {
     pub fn new_fragment(&self) -> Self {
         DynSegment {
             segment: RawSegment::new(),
-            argument_ids: Vec::<TypeId>::new(), // should be optional?
-            stack_ids: Vec::<StackInfo>::new(),
+            argument_ids: Vec::new(),
+            argument_names: Vec::new(),
+            stack_ids: Vec::new(),
             stack_index: self.stack_index,
         }
     }
@@ -135,7 +163,7 @@ impl DynSegment {
         );
         let start = self.stack_ids.len() - L::LENGTH;
         ensure!(
-            TypeIdIterator::<L>::new().eq(self.stack_ids[start..].iter().map(|info| info.stack_id)),
+            TypeIdIterator::<L>::new().eq(self.stack_ids[start..].iter().map(|info| info.type_id)),
             "stack type ids do not match"
         );
         self.stack_ids.truncate(start);
@@ -151,13 +179,15 @@ impl DynSegment {
         let padded = aligned_index != self.stack_index;
 
         self.stack_ids.push(StackInfo {
-            stack_id: TypeId::of::<T>(),
-            stack_unwind: if padded {
+            type_id: TypeId::of::<T>(),
+            type_name: Cow::Borrowed(std::any::type_name::<T>()),
+            padding: padded,
+            dropper: if padded {
                 |stack| unsafe { stack.drop::<T>(true) }
             } else {
                 |stack| unsafe { stack.drop::<T>(false) }
             },
-            padded,
+            associated: Vec::new(),
         });
         self.stack_index = aligned_index + size_of::<T>();
     }
@@ -166,24 +196,22 @@ impl DynSegment {
         let mut result = [false; N];
         let start = self.stack_ids.len().saturating_sub(N);
         for (i, info) in self.stack_ids[start..].iter().enumerate() {
-            result[i] = info.padded;
+            result[i] = info.padding;
         }
         result
     }
 
-    /// Returns a vector of the TypeIds of the top N values on the stack.
+    /// Returns a slice of the top N [`StackInfo`] entries (stack order: oldest first in the slice).
     ///
-    /// Returns an empty vector if N is greater than the stack size.
-    ///
-    /// # Arguments
-    ///
-    /// * `n` - The number of TypeIds to retrieve from the top of the stack
-    pub fn peek_types_vec(&self, n: usize) -> Vec<TypeId> {
+    /// Use this for operation lookup so errors can report type names. Returns an empty slice
+    /// if `n` is 0 or greater than the current stack size.
+    #[must_use]
+    pub fn peek_stack_infos(&self, n: usize) -> &[StackInfo] {
         if n > self.stack_ids.len() {
-            return Vec::new();
+            return &[];
         }
         let start = self.stack_ids.len() - n;
-        self.stack_ids[start..].iter().map(|info| info.stack_id).collect()
+        &self.stack_ids[start..]
     }
 
     /// Pushes a nullary operation that takes no arguments and returns a value of type R.
@@ -219,7 +247,7 @@ impl DynSegment {
         let unwind: Vec<_> = self
             .stack_ids
             .iter()
-            .map(|info| info.stack_unwind)
+            .map(|info| info.dropper)
             .collect();
         self.segment.raw0(move |stack| match op() {
             Ok(r) => Ok(r),
@@ -348,7 +376,7 @@ impl DynSegment {
             fragment_1.stack_ids.len()
         );
         ensure!(
-            fragment_0.stack_ids[0].stack_id == fragment_1.stack_ids[0].stack_id,
+            fragment_0.stack_ids[0].type_id == fragment_1.stack_ids[0].type_id,
             "fragment result types must match"
         );
 
@@ -434,10 +462,15 @@ impl DynSegment {
             ));
         }
         if self.argument_ids[0] != TypeId::of::<A>() {
+            let got = self
+                .argument_names
+                .first()
+                .map(Cow::as_ref)
+                .unwrap_or("?");
             return Err(anyhow::anyhow!(
                 "argument type mismatch: expected {}, got {}",
                 std::any::type_name::<A>(),
-                std::any::type_name::<A>() // TODO: Need to store type names along with TypeId
+                got
             ));
         }
         self.pop_types::<(R, ())>()?;
