@@ -1,25 +1,97 @@
 //! Parse error type with message and source span for CEL.
+//!
+//! Uses a [`SourceSpan`] (line/column only) so errors are `Send + Sync` and can
+//! be used from async execution. Use [`SourceSpan::from_proc_macro2`] to extract
+//! location from a `proc_macro2::Span` when building errors in the parser.
 
 use owo_colors::OwoColorize;
-use proc_macro2::Span;
+use proc_macro2::LineColumn;
+
+/// Source region as start/end line and column.
+///
+/// Uses [`proc_macro2::LineColumn`] for positions (1-based line, 0-based column).
+/// This type is `Send + Sync`. Build it from a `proc_macro2::Span` via
+/// [`SourceSpan::from_proc_macro2`] when you have one (e.g. in the parser).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceSpan {
+    /// Start position (inclusive).
+    pub start: LineColumn,
+    /// End position (inclusive).
+    pub end: LineColumn,
+}
+
+impl Default for SourceSpan {
+    fn default() -> Self {
+        SourceSpan {
+            start: LineColumn { line: 0, column: 0 },
+            end: LineColumn { line: 0, column: 0 },
+        }
+    }
+}
+
+impl SourceSpan {
+    /// Builds a span from raw line/column values.
+    ///
+    /// Lines are 1-based, columns are 0-based (matching [`proc_macro2::LineColumn`]).
+    pub fn new(
+        start_line: usize,
+        start_column: usize,
+        end_line: usize,
+        end_column: usize,
+    ) -> Self {
+        SourceSpan {
+            start: LineColumn {
+                line: start_line,
+                column: start_column,
+            },
+            end: LineColumn {
+                line: end_line,
+                column: end_column,
+            },
+        }
+    }
+
+    /// Extracts start/end line and column from a `proc_macro2::Span`.
+    ///
+    /// Use this when creating errors in the parser or other code that has a
+    /// `proc_macro2::Span`; the result is `Send + Sync` and can be stored in
+    /// [`CELError`] for use from async or other threads.
+    pub fn from_proc_macro2(span: proc_macro2::Span) -> Self {
+        SourceSpan {
+            start: span.start(),
+            end: span.end(),
+        }
+    }
+}
+
+// SourceSpan holds only LineColumn (Send + Sync); safe to send across threads.
+unsafe impl Send for SourceSpan {}
+unsafe impl Sync for SourceSpan {}
 
 /// A CEL parse error with a message and source location.
 ///
-/// Carries the error message and a `proc_macro2::Span` so diagnostics can be
-/// formatted with source context (e.g. rustc-style output).
+/// Uses a [`SourceSpan`] (line/column only) so the error is `Send + Sync` and
+/// can be used from async execution or reported across thread boundaries.
 #[derive(Clone, Debug)]
 pub struct CELError {
     message: String,
-    span: Span,
+    span: SourceSpan,
 }
 
 impl CELError {
-    /// Creates a new error with the given message and span.
-    pub fn new(message: impl Into<String>, span: Span) -> Self {
+    /// Creates a new error with the given message and source span.
+    pub fn new(message: impl Into<String>, span: SourceSpan) -> Self {
         CELError {
             message: message.into(),
             span,
         }
+    }
+
+    /// Creates a new error from a message and a `proc_macro2::Span`.
+    ///
+    /// Extracts line/column from the span so the resulting error is `Send + Sync`.
+    pub fn with_proc_macro_span(message: impl Into<String>, span: proc_macro2::Span) -> Self {
+        CELError::new(message, SourceSpan::from_proc_macro2(span))
     }
 
     /// Returns the error message.
@@ -28,7 +100,7 @@ impl CELError {
     }
 
     /// Returns the source span for this error.
-    pub fn span(&self) -> Span {
+    pub fn span(&self) -> SourceSpan {
         self.span
     }
 
@@ -53,8 +125,8 @@ impl CELError {
         filename: &str,
         start_line: u32,
     ) -> String {
-        let start = self.span.start();
-        let end = self.span.end();
+        let start = self.span.start;
+        let end = self.span.end;
         let lines: Vec<&str> = source_code.lines().collect();
 
         let mut output = String::new();
@@ -120,3 +192,7 @@ impl std::fmt::Display for CELError {
 }
 
 impl std::error::Error for CELError {}
+
+// CELError is Send + Sync because it only holds String and SourceSpan.
+unsafe impl Send for CELError {}
+unsafe impl Sync for CELError {}

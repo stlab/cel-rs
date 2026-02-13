@@ -223,6 +223,41 @@ impl RawSegment {
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
+    fn push_op2r_<const PADDING0: bool, const PADDING1: bool, T, U, R, F>(&mut self)
+    where
+        F: Fn(&mut RawStack, T, U) -> Result<R> + 'static,
+        T: 'static,
+        U: 'static,
+        R: 'static,
+    {
+        self.ops.push(|storage, p, stack| {
+            let (f, r) = unsafe { storage.next::<F>(p) };
+            let y: U = unsafe { stack.pop(PADDING1) };
+            let x: T = unsafe { stack.pop(PADDING0) };
+            let result = f(stack, x, y)?;
+            stack.push(result);
+            Ok(r)
+        });
+    }
+
+    /// Push a fallible binary operation that can manipulate the stack.
+    pub fn raw2<T, U, R, F>(&mut self, op: F, padding0: bool, padding1: bool)
+    where
+        F: Fn(&mut RawStack, T, U) -> Result<R> + 'static,
+        T: 'static,
+        U: 'static,
+        R: 'static,
+    {
+        self.push_storage(op);
+        match (padding0, padding1) {
+            (false, false) => self.push_op2r_::<false, false, T, U, R, F>(),
+            (false, true) => self.push_op2r_::<false, true, T, U, R, F>(),
+            (true, false) => self.push_op2r_::<true, false, T, U, R, F>(),
+            (true, true) => self.push_op2r_::<true, true, T, U, R, F>(),
+        }
+        self.base_alignment = max(self.base_alignment, align_of::<R>());
+    }
+
     /// Pushes a ternary operation that takes three arguments of types T, U, and V and returns a
     /// value of type R.
     #[expect(clippy::many_single_char_names, reason = "patterned code")]

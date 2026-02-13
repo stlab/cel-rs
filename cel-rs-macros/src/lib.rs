@@ -51,13 +51,16 @@ pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
     match parser.is_expression() {
         Ok(true) => ProcMacroTokenStream::new(),
         Ok(false) => {
-            let e = CELError::new("Expected expression", proc_macro2::Span::call_site());
+            let e = CELError::new(
+                "Expected expression",
+                cel_runtime::parser::SourceSpan::default(),
+            );
             let msg_lit = Literal::string(&e.to_string());
-            quote_spanned!(e.span() => compile_error!(#msg_lit)).into()
+            quote_spanned!(proc_macro2::Span::call_site() => compile_error!(#msg_lit)).into()
         }
         Err(e) => {
             let msg_lit = Literal::string(&e.to_string());
-            quote_spanned!(e.span() => compile_error!(#msg_lit)).into()
+            quote_spanned!(proc_macro2::Span::call_site() => compile_error!(#msg_lit)).into()
         }
     }
 }

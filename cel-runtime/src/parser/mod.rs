@@ -94,7 +94,8 @@ mod error;
 mod lex_lexer;
 pub mod op_table;
 
-pub use error::CELError;
+pub use error::{CELError, SourceSpan};
+pub use proc_macro2::LineColumn;
 
 use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};
 use op_table::OpLookup;
@@ -380,7 +381,7 @@ impl CELParser {
     /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
     pub fn parse_str(&mut self, s: &str) -> Result<DynSegment> {
         let input = TokenStream::from_str(s)
-            .map_err(|e| CELError::new(format!("lex: {}", e), e.span()))?;
+            .map_err(|e| CELError::with_proc_macro_span(format!("lex: {}", e), e.span()))?;
         self.parse_tokens(input.into_iter())
     }
 
@@ -440,7 +441,7 @@ impl CELParser {
             }
             None => Span::call_site(),
         };
-        CELError::new(message, span)
+        CELError::new(message, SourceSpan::from_proc_macro2(span))
     }
 
     fn is_punctuation(&mut self, target: &str) -> bool {
@@ -1107,9 +1108,9 @@ mod tests {
             Err(e) => e,
         };
         eprintln!(
-            "DEBUG: span.start().line = {}, span.start().column = {}",
-            err.span().start().line,
-            err.span().start().column
+            "DEBUG: span.start.line = {}, span.start.column = {}",
+            err.span().start.line,
+            err.span().start.column
         );
 
         // Format the error
