@@ -238,37 +238,91 @@ static MUL_SIGNATURES: &[OpSignature] = &[
 ];
 
 // Division signatures
+//
+// Integer division uses `checked_div` via `op2r` so that division by zero returns an error
+// instead of panicking. Float division keeps `op2` (IEEE 754 defines x/0.0 as inf/nan).
 static DIV_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a / b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a / b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a / b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a / b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a / b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a / b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a / b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a / b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a / b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a / b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a / b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a / b)),
+    sig!(TYPE_U8, 2, |seg| seg.op2r(|a: u8, b: u8| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_U16, 2, |seg| seg.op2r(|a: u16, b: u16| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_U32, 2, |seg| seg.op2r(|a: u32, b: u32| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_U64, 2, |seg| seg.op2r(|a: u64, b: u64| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_U128, 2, |seg| seg.op2r(|a: u128, b: u128| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_USIZE, 2, |seg| seg.op2r(|a: usize, b: usize| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_I8, 2, |seg| seg.op2r(|a: i8, b: i8| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_I16, 2, |seg| seg.op2r(|a: i16, b: i16| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_I32, 2, |seg| seg.op2r(|a: i32, b: i32| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_I64, 2, |seg| seg.op2r(|a: i64, b: i64| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_I128, 2, |seg| seg.op2r(|a: i128, b: i128| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_ISIZE, 2, |seg| seg.op2r(|a: isize, b: isize| a
+        .checked_div(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
     sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a / b)),
     sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a / b)),
 ];
 
 // Modulo signatures
+//
+// Integer modulo uses `checked_rem` via `op2r` so that division by zero returns an error
+// instead of panicking. Float modulo keeps `op2` (x % 0.0 yields NaN without panicking).
 static MOD_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a % b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a % b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a % b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a % b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a % b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a % b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a % b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a % b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a % b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a % b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a % b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a % b)),
+    sig!(TYPE_U8, 2, |seg| seg.op2r(|a: u8, b: u8| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_U16, 2, |seg| seg.op2r(|a: u16, b: u16| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_U32, 2, |seg| seg.op2r(|a: u32, b: u32| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_U64, 2, |seg| seg.op2r(|a: u64, b: u64| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_U128, 2, |seg| seg.op2r(|a: u128, b: u128| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_USIZE, 2, |seg| seg.op2r(|a: usize, b: usize| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_I8, 2, |seg| seg.op2r(|a: i8, b: i8| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_I16, 2, |seg| seg.op2r(|a: i16, b: i16| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_I32, 2, |seg| seg.op2r(|a: i32, b: i32| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_I64, 2, |seg| seg.op2r(|a: i64, b: i64| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_I128, 2, |seg| seg.op2r(|a: i128, b: i128| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
+    sig!(TYPE_ISIZE, 2, |seg| seg.op2r(|a: isize, b: isize| a
+        .checked_rem(b)
+        .ok_or_else(|| anyhow!("division by zero")))),
     sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a % b)),
     sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a % b)),
 ];
@@ -612,7 +666,6 @@ impl OpLookup {
     /// Looks up and applies an operation.
     ///
     /// Searches scopes in LIFO order, then falls back to built-in operations.
-    /// Pass the top N [`StackInfo`] entries from the segment (e.g. `segment.peek_stack_infos(n)`).
     ///
     /// # Arguments
     ///
@@ -698,6 +751,38 @@ mod tests {
                 .to_string()
                 .contains("arithmetic overflow"),
             "error message should mention arithmetic overflow"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_division_by_zero() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(10i32);
+        segment.just(0i32);
+        lookup.lookup("/", &mut segment, 2)?;
+        let result = segment.call0::<i32>();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("division by zero"),
+            "error message should mention division by zero"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_modulo_by_zero() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(10u32);
+        segment.just(0u32);
+        lookup.lookup("%", &mut segment, 2)?;
+        let result = segment.call0::<u32>();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("division by zero"),
+            "error message should mention division by zero"
         );
         Ok(())
     }
