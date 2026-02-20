@@ -26,9 +26,9 @@
 //! additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
 //! multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
-//! postfix_expression = primary_expression { "(" [ call_params ] ")" }.
-//! primary_expression = literal | identifier | "(" expression ")".
-//! call_params = [ expression { "," expression } [ "," ] ].
+//! postfix_expression = primary_expression { "(" parameter_list ")" }.
+//! primary_expression = literal | identifier | "(" or_expression ")".
+//! parameter_list = [ or_expression { "," or_expression } ].
 //! ```
 //!
 //! # Note
@@ -230,25 +230,6 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
 }
 
 /// A recursive descent parser for expressions.
-///
-/// Grammar:
-/// ```text
-/// expression = or_expression ?eos?.
-/// or_expression = and_expression { "||" and_expression }.
-/// and_expression = comparison_expression { "&&" comparison_expression }.
-/// comparison_expression = bitwise_or_expression
-///     [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
-/// bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.
-/// bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.
-/// bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
-/// bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.
-/// additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
-/// multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
-/// unary_expression = (("-" | "!") unary_expression) | postfix_expression.
-/// postfix_expression = primary_expression { "(" [ call_params ] ")" }.
-/// primary_expression = literal | identifier | "(" expression ")".
-/// call_params = [ expression { "," expression } [ "," ] ].
-/// ```
 ///
 /// # Examples
 ///
@@ -725,7 +706,7 @@ impl CELParser {
         }
     }
 
-    /// `postfix_expression = primary_expression { "(" [ call_params ] ")" }.`
+    /// `postfix_expression = primary_expression { "(" parameter_list ")" }.`
     fn is_postfix_expression(&mut self) -> Result<bool> {
         if !self.is_primary_expression()? {
             return Ok(false);
@@ -738,7 +719,7 @@ impl CELParser {
             })
         ) {
             self.advance(); // consume "("
-            let arg_count = self.parse_call_params()?;
+            let arg_count = self.parameter_list()?;
             match self.peek_token() {
                 Some(Token::CloseDelim {
                     delimiter: Delimiter::Parenthesis,
@@ -751,7 +732,9 @@ impl CELParser {
             // Push the call operation: pops argument(s) then callee, invokes callee, pushes result.
             // Stack order is [callee, arg1, arg2, ...]; lookup peeks top (arg_count + 1) entries.
             if self.context.stack_ids.len() >= arg_count + 1
-                && let Err(e) = self.op_lookup.lookup("()", &mut self.context, arg_count + 1)
+                && let Err(e) = self
+                    .op_lookup
+                    .lookup("()", &mut self.context, arg_count + 1)
             {
                 return Err(self.error_at(&format!("call: {}", e)));
             }
@@ -759,11 +742,10 @@ impl CELParser {
         Ok(true)
     }
 
-    /// `call_params = [ expression { "," expression } [ "," ] ].`
+    /// `parameter_list = [ or_expression { "," or_expression } ].`
     ///
-    /// Parses the contents of a call argument list (after the opening `(` has been consumed).
-    /// Pushes each argument expression onto the context. Returns the number of arguments parsed.
-    fn parse_call_params(&mut self) -> Result<usize> {
+    /// Returns the argument count.
+    fn parameter_list(&mut self) -> Result<usize> {
         let mut count = 0;
         if self.is_or_expression()? {
             count += 1;
@@ -773,13 +755,11 @@ impl CELParser {
                 }
                 count += 1;
             }
-            // Optional trailing comma
-            let _ = self.is_punctuation(",");
         }
         Ok(count)
     }
 
-    /// `primary_expression = literal | identifier | "(" expression ")" | call_expression.`
+    /// `primary_expression = literal | identifier | "(" or_expression ")".`
     fn is_primary_expression(&mut self) -> Result<bool> {
         match self.peek_token() {
             Some(Token::Literal(lit)) => {
@@ -797,9 +777,7 @@ impl CELParser {
                 // Look up identifier (variable/0-ary); value is pushed and may be a function.
                 self.op_lookup
                     .lookup(&ident_name, &mut self.context, 0)
-                    .map_err(|_| {
-                        self.error_at(&format!("Undefined identifier: {}", ident_name))
-                    })?;
+                    .map_err(|_| self.error_at(&format!("Undefined identifier: {}", ident_name)))?;
 
                 Ok(true)
             }
@@ -1153,7 +1131,9 @@ mod tests {
     #[test]
     fn test_addition_execution() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("10 + 20").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut segment = parser
+            .parse_str("10 + 20")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, 30);
         Ok(())
@@ -1162,7 +1142,9 @@ mod tests {
     #[test]
     fn test_multiplication_execution() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("3 * 7").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut segment = parser
+            .parse_str("3 * 7")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, 21);
         Ok(())
@@ -1171,7 +1153,9 @@ mod tests {
     #[test]
     fn test_complex_arithmetic_execution() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("10 + 20 * 3").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut segment = parser
+            .parse_str("10 + 20 * 3")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, 70); // 10 + (20 * 3) = 10 + 60 = 70
         Ok(())
@@ -1180,7 +1164,9 @@ mod tests {
     #[test]
     fn test_parenthesized_arithmetic_execution() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("(10 + 20) * 3").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut segment = parser
+            .parse_str("(10 + 20) * 3")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, 90); // (10 + 20) * 3 = 30 * 3 = 90
         Ok(())
@@ -1189,7 +1175,9 @@ mod tests {
     #[test]
     fn test_comparison_execution() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("10 < 20").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut segment = parser
+            .parse_str("10 < 20")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<bool>()?;
         assert_eq!(result, true);
         Ok(())
@@ -1198,7 +1186,9 @@ mod tests {
     #[test]
     fn test_logical_and_execution() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("true && false").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut segment = parser
+            .parse_str("true && false")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<bool>()?;
         assert_eq!(result, false);
         Ok(())
@@ -1207,7 +1197,9 @@ mod tests {
     #[test]
     fn test_unary_negation_execution() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("-42").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut segment = parser
+            .parse_str("-42")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, -42);
         Ok(())
@@ -1216,7 +1208,9 @@ mod tests {
     #[test]
     fn test_logical_not_execution() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("!true").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut segment = parser
+            .parse_str("!true")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<bool>()?;
         assert_eq!(result, false);
         Ok(())
@@ -1225,7 +1219,9 @@ mod tests {
     #[test]
     fn test_u32_addition_execution() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("10u32 + 20u32").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut segment = parser
+            .parse_str("10u32 + 20u32")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<u32>()?;
         assert_eq!(result, 30);
         Ok(())
@@ -1252,7 +1248,9 @@ mod tests {
             }
         });
         let mut parser = CELParser::new(lookup);
-        let mut segment = parser.parse_str("x + y").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut segment = parser
+            .parse_str("x + y")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<i32>()?;
         assert_eq!(result, 30);
         Ok(())
@@ -1292,7 +1290,9 @@ mod tests {
     #[test]
     fn test_float_arithmetic_execution() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("3.5 * 2.0").map_err(|e| anyhow::anyhow!("{}", e))?;
+        let mut segment = parser
+            .parse_str("3.5 * 2.0")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<f64>()?;
         assert_eq!(result, 7.0);
         Ok(())
