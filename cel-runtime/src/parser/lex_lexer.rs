@@ -468,11 +468,11 @@ mod tests {
         let tokens: Vec<_> = lexer.collect();
         assert_eq!(tokens.len(), 5);
 
-        matches!(tokens[0], Token::OpenDelim { delimiter: Delimiter::Parenthesis, .. });
-        matches!(tokens[1], Token::Literal(Lit::Int(..)));
+        assert!(matches!(tokens[0], Token::OpenDelim { delimiter: Delimiter::Parenthesis, .. }));
+        assert!(matches!(tokens[1], Token::Literal(Lit::Int(..))));
         assert!(matches!(&tokens[2], Token::Punct { op, .. } if op == "+"));
-        matches!(tokens[3], Token::Literal(Lit::Int(..)));
-        matches!(tokens[4], Token::CloseDelim { delimiter: Delimiter::Parenthesis, .. });
+        assert!(matches!(tokens[3], Token::Literal(Lit::Int(..))));
+        assert!(matches!(tokens[4], Token::CloseDelim { delimiter: Delimiter::Parenthesis, .. }));
     }
 
     #[test]
@@ -486,15 +486,15 @@ mod tests {
         assert_eq!(tokens.len(), 9);
 
         // Verify structure
-        matches!(tokens[0], Token::OpenDelim { .. });
-        matches!(tokens[1], Token::Literal(Lit::Int(..)));
+        assert!(matches!(tokens[0], Token::OpenDelim { .. }));
+        assert!(matches!(tokens[1], Token::Literal(Lit::Int(..))));
         assert!(matches!(&tokens[2], Token::Punct { op, .. } if op == "+"));
-        matches!(tokens[3], Token::OpenDelim { .. });
-        matches!(tokens[4], Token::Literal(Lit::Int(..)));
+        assert!(matches!(tokens[3], Token::OpenDelim { .. }));
+        assert!(matches!(tokens[4], Token::Literal(Lit::Int(..))));
         assert!(matches!(&tokens[5], Token::Punct { op, .. } if op == "*"));
-        matches!(tokens[6], Token::Literal(Lit::Int(..)));
-        matches!(tokens[7], Token::CloseDelim { .. });
-        matches!(tokens[8], Token::CloseDelim { .. });
+        assert!(matches!(tokens[6], Token::Literal(Lit::Int(..))));
+        assert!(matches!(tokens[7], Token::CloseDelim { .. }));
+        assert!(matches!(tokens[8], Token::CloseDelim { .. }));
     }
 
     #[test]
@@ -526,8 +526,8 @@ mod tests {
         let tokens: Vec<_> = lexer.collect();
         assert_eq!(tokens.len(), 3);
 
-        matches!(tokens[0], Token::Identifier(_));
+        assert!(matches!(tokens[0], Token::Identifier(_)));
         assert!(matches!(&tokens[1], Token::Punct { op, .. } if op == "+"));
-        matches!(tokens[2], Token::Literal(Lit::Int(..)));
+        assert!(matches!(tokens[2], Token::Literal(Lit::Int(..))));
     }
 }
