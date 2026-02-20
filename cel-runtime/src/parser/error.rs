@@ -64,10 +64,6 @@ impl SourceSpan {
     }
 }
 
-// SourceSpan holds only LineColumn (Send + Sync); safe to send across threads.
-unsafe impl Send for SourceSpan {}
-unsafe impl Sync for SourceSpan {}
-
 /// A CEL parse error with a message and source location.
 ///
 /// Uses a [`SourceSpan`] (line/column only) so the error is `Send + Sync` and
@@ -192,7 +188,3 @@ impl std::fmt::Display for CELError {
 }
 
 impl std::error::Error for CELError {}
-
-// CELError is Send + Sync because it only holds String and SourceSpan.
-unsafe impl Send for CELError {}
-unsafe impl Sync for CELError {}
