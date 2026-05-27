@@ -6,8 +6,8 @@ use crate::raw_stack::RawStack;
 use crate::{CStackListHeadLimit, CStackListHeadPadded, ReverseList};
 use anyhow::Result;
 use anyhow::ensure;
-use std::borrow::Cow;
 use std::any::TypeId;
+use std::borrow::Cow;
 use std::cmp::max;
 
 /// Recursive type node carrying a [`TypeId`], display name, and optional associated types.
@@ -207,11 +207,7 @@ impl DynSegment {
     }
 
     /// Runs the captured droppers in reverse order on error, then propagates the error.
-    fn unwind_on_err<R>(
-        unwind: &[Dropper],
-        stack: &mut RawStack,
-        result: Result<R>,
-    ) -> Result<R> {
+    fn unwind_on_err<R>(unwind: &[Dropper], stack: &mut RawStack, result: Result<R>) -> Result<R> {
         match result {
             Ok(r) => Ok(r),
             Err(e) => {
@@ -525,11 +521,7 @@ impl DynSegment {
             ));
         }
         if self.argument_ids[0] != TypeId::of::<A>() {
-            let got = self
-                .argument_names
-                .first()
-                .map(Cow::as_ref)
-                .unwrap_or("?");
+            let got = self.argument_names.first().map(Cow::as_ref).unwrap_or("?");
             return Err(anyhow::anyhow!(
                 "argument type mismatch: expected {}, got {}",
                 std::any::type_name::<A>(),
@@ -633,7 +625,9 @@ mod tests {
         segment.op0(move || tracker.clone());
         segment.op0(|| 7u32);
         segment.op0(|| 8u32);
-        segment.op2r(|_a: u32, _b: u32| -> Result<DropCounter> { Err(anyhow::anyhow!("op2r error")) })?;
+        segment.op2r(|_a: u32, _b: u32| -> Result<DropCounter> {
+            Err(anyhow::anyhow!("op2r error"))
+        })?;
         segment.op1(|_: DropCounter| 0u32)?;
         segment.op2(|_: DropCounter, x: u32| x)?; // consume to single u32 for call0
         let result = segment.call0::<u32>();

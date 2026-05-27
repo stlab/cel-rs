@@ -695,7 +695,7 @@ impl CELParser {
                 return Err(self.error_at("expected unary_expression"));
             }
             // Apply the unary operation (only if we have types)
-            if self.context.stack_ids.len() >= 1
+            if !self.context.stack_ids.is_empty()
                 && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 1)
             {
                 return Err(self.error_at(&format!("operation error: {}", e)));
@@ -731,7 +731,7 @@ impl CELParser {
             }
             // Push the call operation: pops argument(s) then callee, invokes callee, pushes result.
             // Stack order is [callee, arg1, arg2, ...]; lookup peeks top (arg_count + 1) entries.
-            if self.context.stack_ids.len() >= arg_count + 1
+            if self.context.stack_ids.len() > arg_count
                 && let Err(e) = self
                     .op_lookup
                     .lookup("()", &mut self.context, arg_count + 1)

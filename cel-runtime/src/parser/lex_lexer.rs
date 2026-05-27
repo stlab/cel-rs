@@ -52,7 +52,7 @@ pub enum PunctOp {
 impl PartialEq<str> for PunctOp {
     fn eq(&self, other: &str) -> bool {
         match self {
-            PunctOp::One(c) => other.len() == 1 && other.chars().next() == Some(*c),
+            PunctOp::One(c) => other.starts_with(*c) && other.len() == 1,
             PunctOp::Two([a, b]) => {
                 let mut it = other.chars();
                 it.next() == Some(*a) && it.next() == Some(*b) && it.next().is_none()
@@ -132,7 +132,9 @@ impl LexLexer {
             }
             TokenTree::Punct(_) | TokenTree::Group(_) => {
                 // These should be handled by the iterator
-                unreachable!("Punct and Group tokens should be handled by the iterator, not convert_token")
+                unreachable!(
+                    "Punct and Group tokens should be handled by the iterator, not convert_token"
+                )
             }
         }
     }
@@ -141,8 +143,14 @@ impl LexLexer {
     fn is_compound_operator(first: char, second: char) -> bool {
         matches!(
             (first, second),
-            ('&', '&') | ('|', '|') | ('=', '=') | ('!', '=') |
-            ('<', '=') | ('>', '=') | ('<', '<') | ('>', '>')
+            ('&', '&')
+                | ('|', '|')
+                | ('=', '=')
+                | ('!', '=')
+                | ('<', '=')
+                | ('>', '=')
+                | ('<', '<')
+                | ('>', '>')
         )
     }
 
@@ -468,11 +476,23 @@ mod tests {
         let tokens: Vec<_> = lexer.collect();
         assert_eq!(tokens.len(), 5);
 
-        assert!(matches!(tokens[0], Token::OpenDelim { delimiter: Delimiter::Parenthesis, .. }));
+        assert!(matches!(
+            tokens[0],
+            Token::OpenDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            }
+        ));
         assert!(matches!(tokens[1], Token::Literal(Lit::Int(..))));
         assert!(matches!(&tokens[2], Token::Punct { op, .. } if op == "+"));
         assert!(matches!(tokens[3], Token::Literal(Lit::Int(..))));
-        assert!(matches!(tokens[4], Token::CloseDelim { delimiter: Delimiter::Parenthesis, .. }));
+        assert!(matches!(
+            tokens[4],
+            Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            }
+        ));
     }
 
     #[test]

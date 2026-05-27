@@ -33,12 +33,7 @@ impl SourceSpan {
     /// Builds a span from raw line/column values.
     ///
     /// Lines are 1-based, columns are 0-based (matching [`proc_macro2::LineColumn`]).
-    pub fn new(
-        start_line: usize,
-        start_column: usize,
-        end_line: usize,
-        end_column: usize,
-    ) -> Self {
+    pub fn new(start_line: usize, start_column: usize, end_line: usize, end_column: usize) -> Self {
         SourceSpan {
             start: LineColumn {
                 line: start_line,
@@ -115,12 +110,7 @@ impl CELError {
     /// # References
     ///
     /// See the [rustc diagnostic formatting guide](https://github.com/rust-lang/rustc-dev-guide/blob/master/src/diagnostics.md).
-    pub fn format_rustc_style(
-        &self,
-        source_code: &str,
-        filename: &str,
-        start_line: u32,
-    ) -> String {
+    pub fn format_rustc_style(&self, source_code: &str, filename: &str, start_line: u32) -> String {
         let start = self.span.start;
         let end = self.span.end;
         let lines: Vec<&str> = source_code.lines().collect();

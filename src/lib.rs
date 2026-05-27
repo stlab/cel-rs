@@ -61,7 +61,7 @@ pub mod runtime {
 
 /// Re-exports for the CEL parser (part of cel-runtime).
 pub mod parser {
-    pub use cel_runtime::parser::{op_table::OpLookup, CELParser};
+    pub use cel_runtime::parser::{CELParser, op_table::OpLookup};
 }
 
 /// Re-exports from the cel-rs-macros crate for convenient access.
