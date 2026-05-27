@@ -108,11 +108,15 @@ use std::str::FromStr;
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, CELError>;
 
-fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
+fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
     match lit {
         CelLiteral::Int(integer) => {
-            // Use syn's suffix() to determine the type
             match integer.suffix() {
+                "" | "i32" => output.just(
+                    integer
+                        .base10_parse::<i32>()
+                        .expect("failed to parse i32 literal"),
+                ),
                 "u8" => output.just(
                     integer
                         .base10_parse::<u8>()
@@ -168,33 +172,33 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
                         .base10_parse::<isize>()
                         .expect("failed to parse isize literal"),
                 ),
-                _ => {
-                    // No suffix means i32 by default
-                    output.just(
-                        integer
-                            .base10_parse::<i32>()
-                            .expect("failed to parse i32 literal"),
-                    )
+                suffix => {
+                    return Err(CELError::with_proc_macro_span(
+                        format!("invalid integer literal suffix: `{suffix}`"),
+                        integer.span(),
+                    ));
                 }
-            }
+            };
         }
         CelLiteral::Float(float) => {
-            // Use syn's suffix() to determine the type
             match float.suffix() {
+                "" | "f64" => output.just(
+                    float
+                        .base10_parse::<f64>()
+                        .expect("failed to parse f64 literal"),
+                ),
                 "f32" => output.just(
                     float
                         .base10_parse::<f32>()
                         .expect("failed to parse f32 literal"),
                 ),
-                _ => {
-                    // No suffix or "f64" means f64 by default
-                    output.just(
-                        float
-                            .base10_parse::<f64>()
-                            .expect("failed to parse f64 literal"),
-                    )
+                suffix => {
+                    return Err(CELError::with_proc_macro_span(
+                        format!("invalid float literal suffix: `{suffix}`"),
+                        float.span(),
+                    ));
                 }
-            }
+            };
         }
         CelLiteral::Str(string) => {
             // Store the string value (without quotes)
@@ -227,6 +231,7 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) {
             // Future literal types not yet handled
         }
     }
+    Ok(())
 }
 
 /// A recursive descent parser for expressions.
@@ -766,8 +771,7 @@ impl CELParser {
                 // Clone the literal - syn's Lit types are Clone
                 let lit_clone = lit.clone();
                 self.advance();
-                // Push the literal to the context
-                push_literal(&mut self.context, lit_clone);
+                push_literal(&mut self.context, lit_clone)?;
                 Ok(true)
             }
             Some(Token::Identifier(ident)) => {
@@ -844,12 +848,60 @@ mod tests {
     }
 
     #[test]
+    fn integer_literal_i32_suffix() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("10i32");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().call0::<i32>().unwrap(), 10);
+    }
+
+    #[test]
+    fn invalid_integer_suffix() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = match parser.parse_str("10xyz") {
+            Err(e) => e,
+            Ok(_) => panic!("expected parse error for invalid integer suffix"),
+        };
+        assert!(err.message().contains("invalid integer literal suffix"));
+        assert!(err.message().contains("xyz"));
+    }
+
+    #[test]
     fn float_literal() {
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str("3.14");
         assert!(result.is_ok());
         let value = result.unwrap().call0::<f64>().unwrap();
         assert!((value - 3.14).abs() < 1e-10);
+    }
+
+    #[test]
+    fn float_literal_f64_suffix() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("3.14f64");
+        assert!(result.is_ok());
+        let value = result.unwrap().call0::<f64>().unwrap();
+        assert!((value - 3.14).abs() < 1e-10);
+    }
+
+    #[test]
+    fn float_literal_f32_suffix() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("3.14f32");
+        assert!(result.is_ok());
+        let value = result.unwrap().call0::<f32>().unwrap();
+        assert!((value - 3.14f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn invalid_float_suffix() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = match parser.parse_str("3.14xyz") {
+            Err(e) => e,
+            Ok(_) => panic!("expected parse error for invalid float suffix"),
+        };
+        assert!(err.message().contains("invalid float literal suffix"));
+        assert!(err.message().contains("xyz"));
     }
 
     #[test]
