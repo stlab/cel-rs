@@ -405,12 +405,25 @@ static LEFT_SHIFT_SIGNATURES: &[OpSignature] = &[
 
 // Right shift signatures
 static RIGHT_SHIFT_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a >> b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a >> b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a >> b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a >> b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a >> b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a >> b)),
+    sig!(TYPE_U8, 2, |seg| seg.op2r(|a: u8, b: u8| a
+        .checked_shr(b as u32)
+        .ok_or_else(|| anyhow!("shift overflow")))),
+    sig!(TYPE_U16, 2, |seg| seg.op2r(|a: u16, b: u16| a
+        .checked_shr(b as u32)
+        .ok_or_else(|| anyhow!("shift overflow")))),
+    sig!(TYPE_U32, 2, |seg| seg.op2r(|a: u32, b: u32| a
+        .checked_shr(b as u32)
+        .ok_or_else(|| anyhow!("shift overflow")))),
+    sig!(TYPE_U64, 2, |seg| seg.op2r(|a: u64, b: u64| a
+        .checked_shr(b as u32)
+        .ok_or_else(|| anyhow!("shift overflow")))),
+    sig!(TYPE_U128, 2, |seg| seg.op2r(|a: u128, b: u128| a
+        .checked_shr(b as u32)
+        .ok_or_else(|| anyhow!("shift overflow")))),
+    sig!(TYPE_USIZE, 2, |seg| seg.op2r(|a: usize, b: usize| a
+        .checked_shr(b as u32)
+        .ok_or_else(|| anyhow!("shift overflow")))),
+
     sig!(TYPE_I8, 2, |seg| seg.op2r(|a: i8, b: i8| a
         .checked_shr(b as u32)
         .ok_or_else(|| anyhow!("shift overflow")))),
