@@ -23,8 +23,8 @@ pub struct SourceSpan {
 impl Default for SourceSpan {
     fn default() -> Self {
         SourceSpan {
-            start: LineColumn { line: 0, column: 0 },
-            end: LineColumn { line: 0, column: 0 },
+            start: LineColumn { line: 1, column: 0 },
+            end: LineColumn { line: 1, column: 0 },
         }
     }
 }
@@ -157,9 +157,7 @@ impl CELError {
                     let caret_len = if start.line == end.line {
                         end.column.saturating_sub(start.column).max(1)
                     } else {
-                        line_content
-                            .len()
-                            .saturating_sub(start.column.saturating_sub(1))
+                        line_content.len().saturating_sub(start.column)
                     };
                     output.push_str(&"^".repeat(caret_len).red().bold().to_string());
                     output.push('\n');

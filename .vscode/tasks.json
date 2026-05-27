@@ -116,7 +116,7 @@
             "command": "test",
             "args": [
                 "--package",
-                "cel-parser"
+                "cel-runtime"
             ],
             "problemMatcher": [
                 "$rustc"

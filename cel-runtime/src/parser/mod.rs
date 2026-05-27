@@ -112,66 +112,78 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
     match lit {
         CelLiteral::Int(integer) => {
             match integer.suffix() {
-                "" | "i32" => output.just(
-                    integer
-                        .base10_parse::<i32>()
-                        .expect("failed to parse i32 literal"),
-                ),
-                "u8" => output.just(
-                    integer
-                        .base10_parse::<u8>()
-                        .expect("failed to parse u8 literal"),
-                ),
-                "u16" => output.just(
-                    integer
-                        .base10_parse::<u16>()
-                        .expect("failed to parse u16 literal"),
-                ),
-                "u32" => output.just(
-                    integer
-                        .base10_parse::<u32>()
-                        .expect("failed to parse u32 literal"),
-                ),
-                "u64" => output.just(
-                    integer
-                        .base10_parse::<u64>()
-                        .expect("failed to parse u64 literal"),
-                ),
-                "u128" => output.just(
-                    integer
-                        .base10_parse::<u128>()
-                        .expect("failed to parse u128 literal"),
-                ),
-                "usize" => output.just(
-                    integer
-                        .base10_parse::<usize>()
-                        .expect("failed to parse usize literal"),
-                ),
-                "i8" => output.just(
-                    integer
-                        .base10_parse::<i8>()
-                        .expect("failed to parse i8 literal"),
-                ),
-                "i16" => output.just(
-                    integer
-                        .base10_parse::<i16>()
-                        .expect("failed to parse i16 literal"),
-                ),
-                "i64" => output.just(
-                    integer
-                        .base10_parse::<i64>()
-                        .expect("failed to parse i64 literal"),
-                ),
-                "i128" => output.just(
-                    integer
-                        .base10_parse::<i128>()
-                        .expect("failed to parse i128 literal"),
-                ),
-                "isize" => output.just(
-                    integer
-                        .base10_parse::<isize>()
-                        .expect("failed to parse isize literal"),
-                ),
+                "" | "i32" => output.just(integer.base10_parse::<i32>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid i32 literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
+                "u8" => output.just(integer.base10_parse::<u8>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid u8 literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
+                "u16" => output.just(integer.base10_parse::<u16>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid u16 literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
+                "u32" => output.just(integer.base10_parse::<u32>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid u32 literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
+                "u64" => output.just(integer.base10_parse::<u64>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid u64 literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
+                "u128" => output.just(integer.base10_parse::<u128>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid u128 literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
+                "usize" => output.just(integer.base10_parse::<usize>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid usize literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
+                "i8" => output.just(integer.base10_parse::<i8>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid i8 literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
+                "i16" => output.just(integer.base10_parse::<i16>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid i16 literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
+                "i64" => output.just(integer.base10_parse::<i64>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid i64 literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
+                "i128" => output.just(integer.base10_parse::<i128>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid i128 literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
+                "isize" => output.just(integer.base10_parse::<isize>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid isize literal `{integer}`: {e}"),
+                        integer.span(),
+                    )
+                })?),
                 suffix => {
                     return Err(CELError::with_proc_macro_span(
                         format!("invalid integer literal suffix: `{suffix}`"),
@@ -182,16 +194,18 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
         }
         CelLiteral::Float(float) => {
             match float.suffix() {
-                "" | "f64" => output.just(
-                    float
-                        .base10_parse::<f64>()
-                        .expect("failed to parse f64 literal"),
-                ),
-                "f32" => output.just(
-                    float
-                        .base10_parse::<f32>()
-                        .expect("failed to parse f32 literal"),
-                ),
+                "" | "f64" => output.just(float.base10_parse::<f64>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid f64 literal `{float}`: {e}"),
+                        float.span(),
+                    )
+                })?),
+                "f32" => output.just(float.base10_parse::<f32>().map_err(|e| {
+                    CELError::with_proc_macro_span(
+                        format!("invalid f32 literal `{float}`: {e}"),
+                        float.span(),
+                    )
+                })?),
                 suffix => {
                     return Err(CELError::with_proc_macro_span(
                         format!("invalid float literal suffix: `{suffix}`"),
