@@ -238,13 +238,13 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
             // Push C string directly
             output.just(c_str.value());
         }
-        CelLiteral::Verbatim(_) => {
-            unreachable!("Verbatim literals should never occur")
+        other => {
+            use lex_lexer::HasSpan;
+            return Err(CELError::with_proc_macro_span(
+                format!("unsupported literal: {other:?}"),
+                other.span(),
+            ));
         }
-        _ => {
-            // Future literal types not yet handled
-        }
-    }
     Ok(())
 }
 
