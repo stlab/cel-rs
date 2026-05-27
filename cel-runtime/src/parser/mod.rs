@@ -790,13 +790,19 @@ impl CELParser {
             }
             Some(Token::Identifier(ident)) => {
                 let ident_name = ident.to_string();
+                let ident_span = ident.span();
                 self.advance();
 
                 // Look up identifier (variable/0-ary); value is pushed and may be a function.
-                self.op_lookup
-                    .lookup(&ident_name, &mut self.context, 0)
-                    .map_err(|_| self.error_at(&format!("Undefined identifier: {}", ident_name)))?;
+                self.op_lookup.lookup(&ident_name, &mut self.context, 0).map_err(|_| {
+                    CELError::with_proc_macro_span(
+                        format!("Undefined identifier: {ident_name}"),
+                        ident_span,
+                    )
+                })?;
 
+                Ok(true)
+            }
                 Ok(true)
             }
             Some(Token::OpenDelim {
