@@ -416,35 +416,145 @@ static BITWISE_XOR_SIGNATURES: &[OpSignature] = &[
 //   debug-mode panic for shift-with-overflow.
 macro_rules! shl_push {
     ($v:ident, $lhs_idx:expr, $lhs_ty:ty) => {
-        $v.push(sig_het!($lhs_idx, TYPE_U8,    |seg| seg.op2r(|a: $lhs_ty, b: u8|    a.checked_shl(u32::from(b))                          .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_U16,   |seg| seg.op2r(|a: $lhs_ty, b: u16|   a.checked_shl(u32::from(b))                          .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_U32,   |seg| seg.op2r(|a: $lhs_ty, b: u32|   a.checked_shl(b)                                     .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_U64,   |seg| seg.op2r(|a: $lhs_ty, b: u64|   u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_U128,  |seg| seg.op2r(|a: $lhs_ty, b: u128|  u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_USIZE, |seg| seg.op2r(|a: $lhs_ty, b: usize| u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_I8,    |seg| seg.op2r(|a: $lhs_ty, b: i8|    u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_I16,   |seg| seg.op2r(|a: $lhs_ty, b: i16|   u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_I32,   |seg| seg.op2r(|a: $lhs_ty, b: i32|   u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_I64,   |seg| seg.op2r(|a: $lhs_ty, b: i64|   u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_I128,  |seg| seg.op2r(|a: $lhs_ty, b: i128|  u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_ISIZE, |seg| seg.op2r(|a: $lhs_ty, b: isize| u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_U8, |seg| seg.op2r(
+            |a: $lhs_ty, b: u8| a
+                .checked_shl(u32::from(b))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_U16, |seg| seg.op2r(
+            |a: $lhs_ty, b: u16| a
+                .checked_shl(u32::from(b))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_U32, |seg| seg.op2r(
+            |a: $lhs_ty, b: u32| a.checked_shl(b).ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_U64, |seg| seg.op2r(
+            |a: $lhs_ty, b: u64| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shl(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_U128, |seg| seg.op2r(
+            |a: $lhs_ty, b: u128| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shl(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_USIZE, |seg| seg.op2r(
+            |a: $lhs_ty, b: usize| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shl(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_I8, |seg| seg.op2r(
+            |a: $lhs_ty, b: i8| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shl(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_I16, |seg| seg.op2r(
+            |a: $lhs_ty, b: i16| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shl(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_I32, |seg| seg.op2r(
+            |a: $lhs_ty, b: i32| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shl(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_I64, |seg| seg.op2r(
+            |a: $lhs_ty, b: i64| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shl(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_I128, |seg| seg.op2r(
+            |a: $lhs_ty, b: i128| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shl(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_ISIZE, |seg| seg.op2r(
+            |a: $lhs_ty, b: isize| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shl(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
     };
 }
 
 macro_rules! shr_push {
     ($v:ident, $lhs_idx:expr, $lhs_ty:ty) => {
-        $v.push(sig_het!($lhs_idx, TYPE_U8,    |seg| seg.op2r(|a: $lhs_ty, b: u8|    a.checked_shr(u32::from(b))                          .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_U16,   |seg| seg.op2r(|a: $lhs_ty, b: u16|   a.checked_shr(u32::from(b))                          .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_U32,   |seg| seg.op2r(|a: $lhs_ty, b: u32|   a.checked_shr(b)                                     .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_U64,   |seg| seg.op2r(|a: $lhs_ty, b: u64|   u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_U128,  |seg| seg.op2r(|a: $lhs_ty, b: u128|  u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_USIZE, |seg| seg.op2r(|a: $lhs_ty, b: usize| u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_I8,    |seg| seg.op2r(|a: $lhs_ty, b: i8|    u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_I16,   |seg| seg.op2r(|a: $lhs_ty, b: i16|   u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_I32,   |seg| seg.op2r(|a: $lhs_ty, b: i32|   u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_I64,   |seg| seg.op2r(|a: $lhs_ty, b: i64|   u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_I128,  |seg| seg.op2r(|a: $lhs_ty, b: i128|  u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
-        $v.push(sig_het!($lhs_idx, TYPE_ISIZE, |seg| seg.op2r(|a: $lhs_ty, b: isize| u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_U8, |seg| seg.op2r(
+            |a: $lhs_ty, b: u8| a
+                .checked_shr(u32::from(b))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_U16, |seg| seg.op2r(
+            |a: $lhs_ty, b: u16| a
+                .checked_shr(u32::from(b))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_U32, |seg| seg.op2r(
+            |a: $lhs_ty, b: u32| a.checked_shr(b).ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_U64, |seg| seg.op2r(
+            |a: $lhs_ty, b: u64| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shr(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_U128, |seg| seg.op2r(
+            |a: $lhs_ty, b: u128| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shr(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_USIZE, |seg| seg.op2r(
+            |a: $lhs_ty, b: usize| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shr(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_I8, |seg| seg.op2r(
+            |a: $lhs_ty, b: i8| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shr(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_I16, |seg| seg.op2r(
+            |a: $lhs_ty, b: i16| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shr(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_I32, |seg| seg.op2r(
+            |a: $lhs_ty, b: i32| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shr(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_I64, |seg| seg.op2r(
+            |a: $lhs_ty, b: i64| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shr(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_I128, |seg| seg.op2r(
+            |a: $lhs_ty, b: i128| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shr(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
+        $v.push(sig_het!($lhs_idx, TYPE_ISIZE, |seg| seg.op2r(
+            |a: $lhs_ty, b: isize| u32::try_from(b)
+                .ok()
+                .and_then(|r| a.checked_shr(r))
+                .ok_or_else(|| anyhow!("shift overflow"))
+        )));
     };
 }
 
@@ -452,17 +562,17 @@ macro_rules! shr_push {
 // Stored as Lazy<Vec<_>> because the shl_push! macro expands to statements, not array items.
 static LEFT_SHIFT_SIGNATURES: Lazy<Vec<OpSignature>> = Lazy::new(|| {
     let mut v = Vec::with_capacity(144);
-    shl_push!(v, TYPE_U8,    u8);
-    shl_push!(v, TYPE_U16,   u16);
-    shl_push!(v, TYPE_U32,   u32);
-    shl_push!(v, TYPE_U64,   u64);
-    shl_push!(v, TYPE_U128,  u128);
+    shl_push!(v, TYPE_U8, u8);
+    shl_push!(v, TYPE_U16, u16);
+    shl_push!(v, TYPE_U32, u32);
+    shl_push!(v, TYPE_U64, u64);
+    shl_push!(v, TYPE_U128, u128);
     shl_push!(v, TYPE_USIZE, usize);
-    shl_push!(v, TYPE_I8,    i8);
-    shl_push!(v, TYPE_I16,   i16);
-    shl_push!(v, TYPE_I32,   i32);
-    shl_push!(v, TYPE_I64,   i64);
-    shl_push!(v, TYPE_I128,  i128);
+    shl_push!(v, TYPE_I8, i8);
+    shl_push!(v, TYPE_I16, i16);
+    shl_push!(v, TYPE_I32, i32);
+    shl_push!(v, TYPE_I64, i64);
+    shl_push!(v, TYPE_I128, i128);
     shl_push!(v, TYPE_ISIZE, isize);
     v
 });
@@ -470,17 +580,17 @@ static LEFT_SHIFT_SIGNATURES: Lazy<Vec<OpSignature>> = Lazy::new(|| {
 // Right shift: all 144 combinations T >> U for integer T and U (mirrors Rust's Shr implementations).
 static RIGHT_SHIFT_SIGNATURES: Lazy<Vec<OpSignature>> = Lazy::new(|| {
     let mut v = Vec::with_capacity(144);
-    shr_push!(v, TYPE_U8,    u8);
-    shr_push!(v, TYPE_U16,   u16);
-    shr_push!(v, TYPE_U32,   u32);
-    shr_push!(v, TYPE_U64,   u64);
-    shr_push!(v, TYPE_U128,  u128);
+    shr_push!(v, TYPE_U8, u8);
+    shr_push!(v, TYPE_U16, u16);
+    shr_push!(v, TYPE_U32, u32);
+    shr_push!(v, TYPE_U64, u64);
+    shr_push!(v, TYPE_U128, u128);
     shr_push!(v, TYPE_USIZE, usize);
-    shr_push!(v, TYPE_I8,    i8);
-    shr_push!(v, TYPE_I16,   i16);
-    shr_push!(v, TYPE_I32,   i32);
-    shr_push!(v, TYPE_I64,   i64);
-    shr_push!(v, TYPE_I128,  i128);
+    shr_push!(v, TYPE_I8, i8);
+    shr_push!(v, TYPE_I16, i16);
+    shr_push!(v, TYPE_I32, i32);
+    shr_push!(v, TYPE_I64, i64);
+    shr_push!(v, TYPE_I128, i128);
     shr_push!(v, TYPE_ISIZE, isize);
     v
 });
