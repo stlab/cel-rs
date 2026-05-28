@@ -353,7 +353,6 @@ impl RawSegment {
     where
         T: 'static,
     {
-        // TODO: where does base alignment come from?
         let mut stack = RawStack::with_base_alignment(self.base_alignment);
         stack.push(arg);
         let mut p = 0;
@@ -376,7 +375,6 @@ impl RawSegment {
     where
         T: 'static,
     {
-        // TODO: where does base alignment come from?
         let mut stack = RawStack::with_base_alignment(self.base_alignment);
         stack.push(arg.0);
         stack.push(arg.1);

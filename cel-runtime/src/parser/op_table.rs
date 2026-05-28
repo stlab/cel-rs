@@ -13,8 +13,18 @@
 //!   zero-allocation dispatch.
 //! - **Scope stack**: Custom operations are handled through a stack of scope functions
 //!   that can be pushed and popped as needed.
-//! - **Type optimization**: Since all built-in operations have matching operand types,
-//!   signatures store a single `TypeId` plus arity rather than arrays.
+//! - **Type optimization**: Most built-in operations are homogeneous (both operands share
+//!   a type), so signatures store a primary `TypeId` plus arity. Heterogeneous binary ops
+//!   (e.g. shifts, where the RHS is always `u32`) additionally store an RHS `TypeId` index.
+//!
+//! # Semantics
+//!
+//! Built-in operations follow Rust language semantics. Deviations are:
+//!
+//! - **Signed integer overflow**: CEL returns `Err` rather than panicking (debug) or wrapping
+//!   (release). Use wrapping arithmetic explicitly if overflow is intended.
+//! - **Bit-shift with out-of-range count**: CEL returns `Err` rather than panicking (debug)
+//!   or masking the shift count (release).
 
 use crate::DynSegment;
 use anyhow::{Result, anyhow};
@@ -34,25 +44,30 @@ pub type OpFn = fn(&mut DynSegment) -> Result<()>;
 /// `Ok(true)` if handled, `Ok(false)` if not found, or `Err` on error.
 pub type ScopeFn = Box<dyn Fn(&str, &mut DynSegment, usize) -> Result<bool> + Send + Sync>;
 
-/// A signature for an operation with matching operand types.
+/// A signature for a built-in operation.
 ///
-/// For example, `u32 + u32 -> u32` would have `type_id_index = TYPE_U32`
-/// and `arity = 2`. This optimization reduces memory usage by ~50% compared to
-/// storing full type arrays.
+/// Homogeneous ops (e.g. `u32 + u32`) leave `rhs_type_id_index` as `None`; all operands
+/// must match `type_id_index`. Heterogeneous binary ops (e.g. `u64 << u32`) set
+/// `rhs_type_id_index` to the RHS type, leaving `type_id_index` for the LHS.
 #[derive(Clone, Copy)]
 struct OpSignature {
-    /// Index into TYPE_IDS vector for the TypeId that all operands must match
+    /// Index into TYPE_IDS for the LHS (or sole) operand type.
     type_id_index: usize,
-    /// Number of operands this operation accepts
+    /// Index into TYPE_IDS for the RHS operand type; `None` means same as LHS.
+    rhs_type_id_index: Option<usize>,
+    /// Number of operands this operation accepts.
     arity: u8,
-    /// Function pointer to the operation implementation
+    /// Function pointer to the operation implementation.
     op_fn: OpFn,
 }
 
 impl OpSignature {
-    /// Returns the TypeId for this signature.
-    fn type_id(&self) -> TypeId {
+    fn lhs_type_id(&self) -> TypeId {
         TYPE_IDS[self.type_id_index]
+    }
+
+    fn rhs_type_id(&self) -> TypeId {
+        TYPE_IDS[self.rhs_type_id_index.unwrap_or(self.type_id_index)]
     }
 }
 
@@ -98,12 +113,25 @@ const TYPE_F64: usize = 13;
 const TYPE_BOOL: usize = 14;
 const TYPE_STR: usize = 15;
 
-// Helper macro to reduce boilerplate in signature definitions
+// Helper macros to reduce boilerplate in signature definitions.
+// `sig!` builds a homogeneous signature; `sig_het!` a heterogeneous binary one.
 macro_rules! sig {
     ($type_idx:expr, $arity:expr, $closure:expr) => {
         OpSignature {
             type_id_index: $type_idx,
+            rhs_type_id_index: None,
             arity: $arity,
+            op_fn: $closure,
+        }
+    };
+}
+
+macro_rules! sig_het {
+    ($lhs_idx:expr, $rhs_idx:expr, $closure:expr) => {
+        OpSignature {
+            type_id_index: $lhs_idx,
+            rhs_type_id_index: Some($rhs_idx),
+            arity: 2,
             op_fn: $closure,
         }
     };
@@ -375,87 +403,87 @@ static BITWISE_XOR_SIGNATURES: &[OpSignature] = &[
     sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a ^ b)),
 ];
 
-// Left shift signatures
-static LEFT_SHIFT_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2r(|a: u8, b: u8| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_U16, 2, |seg| seg.op2r(|a: u16, b: u16| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_U32, 2, |seg| seg.op2r(|a: u32, b: u32| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_U64, 2, |seg| seg.op2r(|a: u64, b: u64| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_U128, 2, |seg| seg.op2r(|a: u128, b: u128| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2r(|a: usize, b: usize| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
+// Macros that push shift signatures onto a Vec as statements.
+// Rust macros may not expand to multiple comma-separated expressions in a static
+// array initialiser, so we use Lazy<Vec<_>> with push statements instead.
+//
+// RHS → u32 conversion (required by checked_shl / checked_shr):
+//   u8, u16              : u32::from  (infallible widening)
+//   u32                  : identity
+//   u64 / u128 / usize   : u32::try_from; fails if value > u32::MAX
+//   all signed types     : u32::try_from; fails if value < 0 or > u32::MAX
+//   In all failure cases the error is "shift overflow", matching Rust's
+//   debug-mode panic for shift-with-overflow.
+macro_rules! shl_push {
+    ($v:ident, $lhs_idx:expr, $lhs_ty:ty) => {
+        $v.push(sig_het!($lhs_idx, TYPE_U8,    |seg| seg.op2r(|a: $lhs_ty, b: u8|    a.checked_shl(u32::from(b))                          .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_U16,   |seg| seg.op2r(|a: $lhs_ty, b: u16|   a.checked_shl(u32::from(b))                          .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_U32,   |seg| seg.op2r(|a: $lhs_ty, b: u32|   a.checked_shl(b)                                     .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_U64,   |seg| seg.op2r(|a: $lhs_ty, b: u64|   u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_U128,  |seg| seg.op2r(|a: $lhs_ty, b: u128|  u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_USIZE, |seg| seg.op2r(|a: $lhs_ty, b: usize| u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_I8,    |seg| seg.op2r(|a: $lhs_ty, b: i8|    u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_I16,   |seg| seg.op2r(|a: $lhs_ty, b: i16|   u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_I32,   |seg| seg.op2r(|a: $lhs_ty, b: i32|   u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_I64,   |seg| seg.op2r(|a: $lhs_ty, b: i64|   u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_I128,  |seg| seg.op2r(|a: $lhs_ty, b: i128|  u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_ISIZE, |seg| seg.op2r(|a: $lhs_ty, b: isize| u32::try_from(b).ok().and_then(|r| a.checked_shl(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+    };
+}
 
-    sig!(TYPE_I8, 2, |seg| seg.op2r(|a: i8, b: i8| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_I16, 2, |seg| seg.op2r(|a: i16, b: i16| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_I32, 2, |seg| seg.op2r(|a: i32, b: i32| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_I64, 2, |seg| seg.op2r(|a: i64, b: i64| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_I128, 2, |seg| seg.op2r(|a: i128, b: i128| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2r(|a: isize, b: isize| a
-        .checked_shl(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-];
+macro_rules! shr_push {
+    ($v:ident, $lhs_idx:expr, $lhs_ty:ty) => {
+        $v.push(sig_het!($lhs_idx, TYPE_U8,    |seg| seg.op2r(|a: $lhs_ty, b: u8|    a.checked_shr(u32::from(b))                          .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_U16,   |seg| seg.op2r(|a: $lhs_ty, b: u16|   a.checked_shr(u32::from(b))                          .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_U32,   |seg| seg.op2r(|a: $lhs_ty, b: u32|   a.checked_shr(b)                                     .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_U64,   |seg| seg.op2r(|a: $lhs_ty, b: u64|   u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_U128,  |seg| seg.op2r(|a: $lhs_ty, b: u128|  u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_USIZE, |seg| seg.op2r(|a: $lhs_ty, b: usize| u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_I8,    |seg| seg.op2r(|a: $lhs_ty, b: i8|    u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_I16,   |seg| seg.op2r(|a: $lhs_ty, b: i16|   u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_I32,   |seg| seg.op2r(|a: $lhs_ty, b: i32|   u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_I64,   |seg| seg.op2r(|a: $lhs_ty, b: i64|   u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_I128,  |seg| seg.op2r(|a: $lhs_ty, b: i128|  u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+        $v.push(sig_het!($lhs_idx, TYPE_ISIZE, |seg| seg.op2r(|a: $lhs_ty, b: isize| u32::try_from(b).ok().and_then(|r| a.checked_shr(r)) .ok_or_else(|| anyhow!("shift overflow")))));
+    };
+}
 
-// Right shift signatures
-static RIGHT_SHIFT_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2r(|a: u8, b: u8| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_U16, 2, |seg| seg.op2r(|a: u16, b: u16| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_U32, 2, |seg| seg.op2r(|a: u32, b: u32| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_U64, 2, |seg| seg.op2r(|a: u64, b: u64| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_U128, 2, |seg| seg.op2r(|a: u128, b: u128| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2r(|a: usize, b: usize| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
+// Left shift: all 144 combinations T << U for integer T and U (mirrors Rust's Shl implementations).
+// Stored as Lazy<Vec<_>> because the shl_push! macro expands to statements, not array items.
+static LEFT_SHIFT_SIGNATURES: Lazy<Vec<OpSignature>> = Lazy::new(|| {
+    let mut v = Vec::with_capacity(144);
+    shl_push!(v, TYPE_U8,    u8);
+    shl_push!(v, TYPE_U16,   u16);
+    shl_push!(v, TYPE_U32,   u32);
+    shl_push!(v, TYPE_U64,   u64);
+    shl_push!(v, TYPE_U128,  u128);
+    shl_push!(v, TYPE_USIZE, usize);
+    shl_push!(v, TYPE_I8,    i8);
+    shl_push!(v, TYPE_I16,   i16);
+    shl_push!(v, TYPE_I32,   i32);
+    shl_push!(v, TYPE_I64,   i64);
+    shl_push!(v, TYPE_I128,  i128);
+    shl_push!(v, TYPE_ISIZE, isize);
+    v
+});
 
-    sig!(TYPE_I8, 2, |seg| seg.op2r(|a: i8, b: i8| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_I16, 2, |seg| seg.op2r(|a: i16, b: i16| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_I32, 2, |seg| seg.op2r(|a: i32, b: i32| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_I64, 2, |seg| seg.op2r(|a: i64, b: i64| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_I128, 2, |seg| seg.op2r(|a: i128, b: i128| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2r(|a: isize, b: isize| a
-        .checked_shr(b as u32)
-        .ok_or_else(|| anyhow!("shift overflow")))),
-];
+// Right shift: all 144 combinations T >> U for integer T and U (mirrors Rust's Shr implementations).
+static RIGHT_SHIFT_SIGNATURES: Lazy<Vec<OpSignature>> = Lazy::new(|| {
+    let mut v = Vec::with_capacity(144);
+    shr_push!(v, TYPE_U8,    u8);
+    shr_push!(v, TYPE_U16,   u16);
+    shr_push!(v, TYPE_U32,   u32);
+    shr_push!(v, TYPE_U64,   u64);
+    shr_push!(v, TYPE_U128,  u128);
+    shr_push!(v, TYPE_USIZE, usize);
+    shr_push!(v, TYPE_I8,    i8);
+    shr_push!(v, TYPE_I16,   i16);
+    shr_push!(v, TYPE_I32,   i32);
+    shr_push!(v, TYPE_I64,   i64);
+    shr_push!(v, TYPE_I128,  i128);
+    shr_push!(v, TYPE_ISIZE, isize);
+    v
+});
 
 // Logical AND signatures
 static LOGICAL_AND_SIGNATURES: &[OpSignature] =
@@ -596,8 +624,6 @@ static BUILTINS: phf::Map<&'static str, &'static [OpSignature]> = phf_map! {
     "&" => BITWISE_AND_SIGNATURES,
     "|" => BITWISE_OR_SIGNATURES,
     "^" => BITWISE_XOR_SIGNATURES,
-    "<<" => LEFT_SHIFT_SIGNATURES,
-    ">>" => RIGHT_SHIFT_SIGNATURES,
     "&&" => LOGICAL_AND_SIGNATURES,
     "||" => LOGICAL_OR_SIGNATURES,
     "!" => LOGICAL_NOT_SIGNATURES,
@@ -620,15 +646,22 @@ impl BuiltinScope {
     /// Returns `Ok(true)` if found and applied, `Ok(false)` if not found.
     fn lookup(&self, name: &str, segment: &mut DynSegment, num_operands: usize) -> Result<bool> {
         let stack_infos = segment.peek_stack_infos(num_operands);
-        if let Some(signatures) = BUILTINS.get(name) {
-            for sig in *signatures {
-                let matches = sig.arity as usize == stack_infos.len()
-                    && stack_infos.iter().all(|info| info.type_id == sig.type_id());
-
-                if matches {
-                    (sig.op_fn)(segment)?;
-                    return Ok(true);
-                }
+        let signatures: &[OpSignature] = match name {
+            "<<" => &LEFT_SHIFT_SIGNATURES,
+            ">>" => &RIGHT_SHIFT_SIGNATURES,
+            _ => match BUILTINS.get(name) {
+                Some(s) => s,
+                None => return Ok(false),
+            },
+        };
+        for sig in signatures {
+            let arity = sig.arity as usize;
+            let matches = arity == stack_infos.len()
+                && stack_infos[0].type_id == sig.lhs_type_id()
+                && (arity < 2 || stack_infos[1].type_id == sig.rhs_type_id());
+            if matches {
+                (sig.op_fn)(segment)?;
+                return Ok(true);
             }
         }
         Ok(false)
@@ -938,6 +971,90 @@ mod tests {
         assert_eq!(segment.call0::<u32>()?, 100);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_left_shift_u64() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1u64);
+        segment.just(3u32);
+        lookup.lookup("<<", &mut segment, 2)?;
+        assert_eq!(segment.call0::<u64>()?, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn test_right_shift_i32() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(16i32);
+        segment.just(2u32);
+        lookup.lookup(">>", &mut segment, 2)?;
+        assert_eq!(segment.call0::<i32>()?, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_shift_overflow() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1u32);
+        segment.just(32u32);
+        lookup.lookup("<<", &mut segment, 2)?;
+        let result = segment.call0::<u32>();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("shift overflow"),
+            "error message should mention shift overflow"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_shift_i32_rhs() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1u32);
+        segment.just(3i32);
+        lookup.lookup("<<", &mut segment, 2)?;
+        assert_eq!(segment.call0::<u32>()?, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn test_shift_negative_rhs_errors() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1u32);
+        segment.just(-1i32);
+        lookup.lookup("<<", &mut segment, 2)?;
+        let result = segment.call0::<u32>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("shift overflow"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_shift_wide_rhs_overflow_errors() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1u32);
+        segment.just(u32::MAX as u64 + 1);
+        lookup.lookup("<<", &mut segment, 2)?;
+        let result = segment.call0::<u32>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("shift overflow"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_shift_rejects_float_rhs() {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1u32);
+        segment.just(3.0f64);
+        assert!(lookup.lookup("<<", &mut segment, 2).is_err());
     }
 
     #[test]

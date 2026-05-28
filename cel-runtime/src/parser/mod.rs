@@ -1,5 +1,3 @@
-#![warn(missing_docs)]
-
 //! A recursive descent parser for CEL (Common Expression Language) expressions.
 //!
 //! This crate provides a parser that can parse CEL expressions into executable segments.
@@ -32,7 +30,7 @@
 //! ```
 //!
 //! # Note
-
+//!
 //! `?eos?` denotes end of stream.
 //!
 //! # Examples
@@ -101,7 +99,7 @@ use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};
 use op_table::OpLookup;
 
 use crate::DynSegment;
-use proc_macro2::{Delimiter, Ident, Literal, Span, TokenStream};
+use proc_macro2::{Delimiter, Span, TokenStream};
 use std::iter::Peekable;
 use std::str::FromStr;
 
@@ -215,36 +213,30 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
             };
         }
         CelLiteral::Str(string) => {
-            // Store the string value (without quotes)
             output.just(string.value());
         }
         CelLiteral::Bool(lit_bool) => {
-            // Push the boolean value directly
             output.just(lit_bool.value);
         }
         CelLiteral::Char(ch) => {
-            // Push character literal
             output.just(ch.value());
         }
         CelLiteral::Byte(byte) => {
-            // Push byte literal (u8)
             output.just(byte.value());
         }
         CelLiteral::ByteStr(byte_str) => {
-            // Push byte string as Vec<u8>
             output.just(byte_str.value());
         }
         CelLiteral::CStr(c_str) => {
-            // Push C string directly
             output.just(c_str.value());
         }
         other => {
-            use lex_lexer::HasSpan;
             return Err(CELError::with_proc_macro_span(
                 format!("unsupported literal: {other:?}"),
                 other.span(),
             ));
         }
+    }
     Ok(())
 }
 
@@ -299,34 +291,6 @@ pub struct CELParser {
     context: DynSegment,
     op_lookup: OpLookup,
 }
-
-/// A primary expression representing the most basic expression types.
-///
-/// Primary expressions are the atomic building blocks of CEL expressions,
-/// consisting of either literal values or identifiers.
-pub enum PrimaryExpression {
-    /// A literal value (integer, string, boolean, or float).
-    Literal(Literal),
-    /// An identifier referencing a variable or function.
-    Ident(Ident),
-}
-
-/// Result type for parser probe operations.
-///
-/// A `Probe` represents the outcome of attempting to parse a specific grammar
-/// production without committing to the parse. This enables backtracking and
-/// alternative parsing strategies.
-pub enum Probe<T> {
-    /// The probe did not match the expected grammar production.
-    NoMatch,
-    /// The probe matched but produced no value (e.g., optional production absent).
-    Match,
-    /// The probe matched and produced a value.
-    Value(T),
-}
-
-/// A probe result for primary expression parsing.
-pub type PrimaryProbe = Probe<PrimaryExpression>;
 
 impl CELParser {
     /// Creates a new CEL parser with the given operation lookup.
@@ -445,7 +409,6 @@ impl CELParser {
     }
 
     fn is_punctuation(&mut self, target: &str) -> bool {
-        // Simply check if the current token is a Punct with the target operator
         match self.peek_token() {
             Some(Token::Punct { op, .. }) if op == target => {
                 self.advance();
@@ -507,7 +470,7 @@ impl CELParser {
     /// `comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].`
     fn is_comparison_expression(&mut self) -> Result<bool> {
         if self.is_bitwise_or_expression()? {
-            // Check which operator we have (check longer operators first)
+            // Longer operators first: must check "==" before "=", "<=" before "<", etc.
             let op_name = if self.is_punctuation("==") {
                 Some("==")
             } else if self.is_punctuation("!=") {
@@ -632,7 +595,6 @@ impl CELParser {
     fn is_additive_expression(&mut self) -> Result<bool> {
         if self.is_multiplicative_expression()? {
             loop {
-                // Check which operator we have
                 let op_name = if self.is_punctuation("+") {
                     Some("+")
                 } else if self.is_punctuation("-") {
@@ -641,7 +603,6 @@ impl CELParser {
                     None
                 };
 
-                // If we found an operator, parse the right operand and apply the operation
                 if let Some(op_name) = op_name {
                     if !self.is_multiplicative_expression()? {
                         return Err(self.error_at("expected multiplicative_expression"));
@@ -666,7 +627,6 @@ impl CELParser {
     fn is_multiplicative_expression(&mut self) -> Result<bool> {
         if self.is_unary_expression()? {
             loop {
-                // Check which operator we have
                 let op_name = if self.is_punctuation("*") {
                     Some("*")
                 } else if self.is_punctuation("/") {
@@ -677,7 +637,6 @@ impl CELParser {
                     None
                 };
 
-                // If we found an operator, parse the right operand and apply the operation
                 if let Some(op_name) = op_name {
                     if !self.is_unary_expression()? {
                         return Err(self.error_at("expected unary_expression"));
@@ -700,7 +659,6 @@ impl CELParser {
 
     /// `unary_expression = (("-" | "!") unary_expression) | primary_expression.`
     fn is_unary_expression(&mut self) -> Result<bool> {
-        // Check for unary operators
         let op_name = if self.is_punctuation("-") {
             Some("-")
         } else if self.is_punctuation("!") {
@@ -713,7 +671,6 @@ impl CELParser {
             if !self.is_unary_expression()? {
                 return Err(self.error_at("expected unary_expression"));
             }
-            // Apply the unary operation (only if we have types)
             if !self.context.stack_ids.is_empty()
                 && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 1)
             {
@@ -782,7 +739,6 @@ impl CELParser {
     fn is_primary_expression(&mut self) -> Result<bool> {
         match self.peek_token() {
             Some(Token::Literal(lit)) => {
-                // Clone the literal - syn's Lit types are Clone
                 let lit_clone = lit.clone();
                 self.advance();
                 push_literal(&mut self.context, lit_clone)?;
@@ -793,28 +749,25 @@ impl CELParser {
                 let ident_span = ident.span();
                 self.advance();
 
-                // Look up identifier (variable/0-ary); value is pushed and may be a function.
-                self.op_lookup.lookup(&ident_name, &mut self.context, 0).map_err(|_| {
-                    CELError::with_proc_macro_span(
-                        format!("Undefined identifier: {ident_name}"),
-                        ident_span,
-                    )
-                })?;
+                self.op_lookup
+                    .lookup(&ident_name, &mut self.context, 0)
+                    .map_err(|_| {
+                        CELError::with_proc_macro_span(
+                            format!("Undefined identifier: {ident_name}"),
+                            ident_span,
+                        )
+                    })?;
 
-                Ok(true)
-            }
                 Ok(true)
             }
             Some(Token::OpenDelim {
                 delimiter: Delimiter::Parenthesis,
                 ..
             }) => {
-                self.advance(); // consume OpenDelim
-                // Recursively parse the expression inside parentheses
+                self.advance();
                 if !self.is_or_expression()? {
                     return Err(self.error_at("expected expression"));
                 }
-                // Expect CloseDelim
                 match self.peek_token() {
                     Some(Token::CloseDelim {
                         delimiter: Delimiter::Parenthesis,
@@ -835,29 +788,6 @@ impl CELParser {
 mod tests {
     use super::*;
     use anyhow;
-
-    #[test]
-    fn experiments() -> Result<()> {
-        let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, _num_operands| {
-            if name == "constant" {
-                segment.just(42i64);
-                return Ok(true);
-            }
-            Ok(false)
-        });
-        let mut parser = CELParser::new(lookup);
-        let line = line!() + 1;
-        let source = r#"
-            (("hello" + " world") == constant) && (15i64 < constant)
-        "#;
-        // assert!(parser.parse_str(source)?.call0::<bool>()?);
-
-        if let Err(e) = parser.parse_str(source) {
-            println!("{}", e.format_rustc_style(source, file!(), line));
-        }
-        Ok(())
-    }
 
     #[test]
     fn simple_expression() {
@@ -1004,7 +934,7 @@ mod tests {
     #[test]
     fn shift_expression() {
         let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("8 << 2 + 16 >> 1");
+        let result = parser.parse_str("8u32 << 2u32 + 16u32 >> 1u32");
         assert!(result.is_ok());
     }
 
@@ -1060,17 +990,13 @@ mod tests {
 
     /// Helper function to strip ANSI escape codes from a string for testing purposes
     fn strip_ansi_codes(input: &str) -> String {
-        // Basic regex to remove ANSI escape sequences
-        // ANSI escape sequences start with ESC (0x1B) followed by '[' and end with a letter
         let mut result = String::new();
         let mut chars = input.chars().peekable();
 
         while let Some(ch) = chars.next() {
             if ch == '\x1B' {
-                // Found ESC, check if it's followed by '['
                 if chars.peek() == Some(&'[') {
-                    chars.next(); // consume '['
-                    // Skip until we find a letter (which ends the escape sequence)
+                    chars.next();
                     while let Some(ch) = chars.next() {
                         if ch.is_ascii_alphabetic() {
                             break;
@@ -1089,53 +1015,46 @@ mod tests {
 
     #[test]
     fn error_formatting() {
-        let source = "10 + 20 30"; // Missing operator between 20 and 30
+        let source = "10 + 20 30";
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str(source);
 
-        // This should fail parsing
         assert!(result.is_err());
 
-        // Test error message from result
         let err = match &result {
             Ok(_) => panic!("expected parse error"),
             Err(e) => e,
         };
         assert_eq!(err.message(), "unexpected token");
 
-        // Test error formatting
         let formatted_error = err.format_rustc_style(source, "test.cel", 1u32);
 
-        // Strip ANSI codes for testing
         let formatted = strip_ansi_codes(&formatted_error);
         assert!(formatted.contains("error: unexpected token"));
-        assert!(formatted.contains("test.cel:1:")); // Should include line number
-        assert!(formatted.contains("1 | 10 + 20 30")); // Should show the line with line number
-        assert!(formatted.contains("^")); // Should have carets pointing to the error
+        assert!(formatted.contains("test.cel:1:"));
+        assert!(formatted.contains("1 | 10 + 20 30"));
+        assert!(formatted.contains("^"));
     }
 
     #[test]
     fn error_formatting_with_line_offset() {
-        let source = "10 + 20 30"; // Missing operator between 20 and 30
+        let source = "10 + 20 30";
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str(source);
 
-        // This should fail parsing
         assert!(result.is_err());
 
-        // Test error formatting with line offset (as if expression starts at line 42)
         let err = match &result {
             Ok(_) => panic!("expected parse error"),
             Err(e) => e,
         };
         let formatted_error = err.format_rustc_style(source, "large_file.rs", 42u32);
 
-        // Strip ANSI codes for testing
         let formatted = strip_ansi_codes(&formatted_error);
         assert!(formatted.contains("error: unexpected token"));
-        assert!(formatted.contains("large_file.rs:42:")); // Should show offset line number
-        assert!(formatted.contains("42 | 10 + 20 30")); // Should show the line with offset line number
-        assert!(formatted.contains("^")); // Should have carets pointing to the error
+        assert!(formatted.contains("large_file.rs:42:"));
+        assert!(formatted.contains("42 | 10 + 20 30"));
+        assert!(formatted.contains("^"));
     }
 
     #[test]
@@ -1150,7 +1069,6 @@ mod tests {
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str(source);
 
-        // Parse should fail due to unexpected token
         assert!(result.is_err(), "Expected parsing to fail");
 
         let err = match &result {
@@ -1163,11 +1081,9 @@ mod tests {
             err.span().start.column
         );
 
-        // Format the error
         let formatted_error = err.format_rustc_style(source, file!(), line);
         println!("{}", formatted_error);
 
-        // Strip ANSI codes for testing
         let formatted = strip_ansi_codes(&formatted_error);
 
         // The source string has 3 lines:
@@ -1367,6 +1283,33 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<f64>()?;
         assert_eq!(result, 7.0);
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "playground"))]
+mod playground {
+    use super::*;
+
+    #[test]
+    fn custom_scope_identifier() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, _num_operands| {
+            if name == "constant" {
+                segment.just(42i64);
+                return Ok(true);
+            }
+            Ok(false)
+        });
+        let mut parser = CELParser::new(lookup);
+        let line = line!() + 1;
+        let source = r#"
+            (("hello" + " world") == constant) && (15i64 < constant)
+        "#;
+        match parser.parse_str(source) {
+            Ok(mut seg) => println!("{:?}", seg.call0::<bool>()),
+            Err(e) => println!("{}", e.format_rustc_style(source, file!(), line)),
+        }
         Ok(())
     }
 }

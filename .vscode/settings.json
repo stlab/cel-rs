@@ -9,5 +9,6 @@
     "cSpell.words": [
         "concatenative",
         "Peekable"
-    ]
+    ],
+    "rust-analyzer.cargo.features": ["playground"]
 }

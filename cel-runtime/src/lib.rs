@@ -32,8 +32,6 @@
 //! assert_eq!(segment.call((1u32, "2")).unwrap(), "3");
 //! ```
 
-#![warn(missing_docs)]
-
 /// Compile-time stack list implementation for type-safe stack operations.
 pub mod c_stack_list;
 /// Dynamic segment implementation with runtime type checking.

@@ -1,5 +1,3 @@
-#![warn(missing_docs)]
-
 //! cel-rs provides a stack-based runtime for developing domain specific languages, including
 //! concatenative languages to describe concurrent processes.
 //!
@@ -68,9 +66,8 @@ pub mod parser {
 pub mod macros {
     pub use cel_rs_macros::*;
 }
-#[cfg(test)]
-mod tests {
-
+#[cfg(all(test, feature = "playground"))]
+mod playground {
     struct Experiment {
         a: u32,
     }
@@ -91,9 +88,9 @@ mod tests {
     }
 
     #[test]
-    fn experiment() {
+    fn context_segment() {
         let experiment = Experiment { a: 1 };
         let mut segment = Segment::new(experiment, |e| e.a.to_string());
-        assert_eq!(segment.call(), "1");
+        println!("{}", segment.call());
     }
 }

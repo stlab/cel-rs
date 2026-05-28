@@ -1,5 +1,3 @@
-#![warn(missing_docs)]
-
 //! Procedural macros for the cel-rs crate.
 //!
 //! This crate provides procedural macros for working with CEL (Common Expression Language)

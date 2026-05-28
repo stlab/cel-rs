@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"^\\(test |FAILED|error|ok$|running\\)\")",
+      "Bash(grep -v \"^$\")"
+    ]
+  }
+}
