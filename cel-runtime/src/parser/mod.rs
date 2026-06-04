@@ -63,6 +63,7 @@
 //! ## Error Formatting
 //!
 //! ```rust
+//! use annotate_snippets::Renderer;
 //! use cel_runtime::parser::CELParser;
 //! use cel_runtime::OpLookup;
 //! use proc_macro2::TokenStream;
@@ -78,13 +79,7 @@
 //!
 //! if let Err(e) = parser.is_expression() {
 //!     // Format error starting at line 1
-//!     println!("{}", e.format_rustc_style(source, file!(), line));
-//!     // Output:
-//!     // error: unexpected token
-//!     //  --> example.cel:1:4
-//!     //   |
-//!     // 1 | 10 20
-//!     //   |    ^^
+//!     println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::plain()));
 //! }
 //! ```
 
@@ -262,6 +257,7 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
 /// ## Error Formatting
 ///
 /// ```rust
+/// use annotate_snippets::Renderer;
 /// use cel_runtime::OpLookup;
 /// use cel_runtime::parser::CELParser;
 /// use proc_macro2::TokenStream;
@@ -277,13 +273,7 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
 ///
 /// if let Err(e) = parser.is_expression() {
 ///     // Format error starting at line 1
-///     println!("{}", e.format_rustc_style(source, file!(), line));
-///     // Output:
-///     // error: unexpected token
-///     //  --> example.cel:1:8
-///     //   |
-///     // 1 | 10 + 20 30
-///     //   |         ^^
+///     println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::plain()));
 /// }
 /// ```
 pub struct CELParser {
@@ -787,6 +777,7 @@ impl CELParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use annotate_snippets::Renderer;
     use anyhow;
 
     #[test]
@@ -988,31 +979,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Helper function to strip ANSI escape codes from a string for testing purposes
-    fn strip_ansi_codes(input: &str) -> String {
-        let mut result = String::new();
-        let mut chars = input.chars().peekable();
-
-        while let Some(ch) = chars.next() {
-            if ch == '\x1B' {
-                if chars.peek() == Some(&'[') {
-                    chars.next();
-                    while let Some(ch) = chars.next() {
-                        if ch.is_ascii_alphabetic() {
-                            break;
-                        }
-                    }
-                } else {
-                    result.push(ch);
-                }
-            } else {
-                result.push(ch);
-            }
-        }
-
-        result
-    }
-
     #[test]
     fn error_formatting() {
         let source = "10 + 20 30";
@@ -1027,9 +993,7 @@ mod tests {
         };
         assert_eq!(err.message(), "unexpected token");
 
-        let formatted_error = err.format_rustc_style(source, "test.cel", 1u32);
-
-        let formatted = strip_ansi_codes(&formatted_error);
+        let formatted = err.format_rustc_style(source, "test.cel", 1u32, &Renderer::plain());
         assert!(formatted.contains("error: unexpected token"));
         assert!(formatted.contains("test.cel:1:"));
         assert!(formatted.contains("1 | 10 + 20 30"));
@@ -1048,9 +1012,7 @@ mod tests {
             Ok(_) => panic!("expected parse error"),
             Err(e) => e,
         };
-        let formatted_error = err.format_rustc_style(source, "large_file.rs", 42u32);
-
-        let formatted = strip_ansi_codes(&formatted_error);
+        let formatted = err.format_rustc_style(source, "large_file.rs", 42u32, &Renderer::plain());
         assert!(formatted.contains("error: unexpected token"));
         assert!(formatted.contains("large_file.rs:42:"));
         assert!(formatted.contains("42 | 10 + 20 30"));
@@ -1081,10 +1043,10 @@ mod tests {
             err.span().start.column
         );
 
-        let formatted_error = err.format_rustc_style(source, file!(), line);
+        let formatted_error = err.format_rustc_style(source, file!(), line, &Renderer::plain());
         println!("{}", formatted_error);
 
-        let formatted = strip_ansi_codes(&formatted_error);
+        let formatted = formatted_error;
 
         // The source string has 3 lines:
         // Line 0: empty
@@ -1268,7 +1230,7 @@ mod tests {
 
         assert!(result.is_err());
         if let Err(e) = result {
-            let formatted_error = e.format_rustc_style(input, "test.cel", 1);
+            let formatted_error = e.format_rustc_style(input, "test.cel", 1, &Renderer::plain());
             assert!(formatted_error.contains("Undefined identifier"));
             assert!(formatted_error.contains("undefined_var"));
             assert!(formatted_error.contains("test.cel"));
@@ -1290,6 +1252,7 @@ mod tests {
 #[cfg(all(test, feature = "playground"))]
 mod playground {
     use super::*;
+    use annotate_snippets::Renderer;
 
     #[test]
     fn custom_scope_identifier() -> Result<()> {
@@ -1308,7 +1271,7 @@ mod playground {
         "#;
         match parser.parse_str(source) {
             Ok(mut seg) => println!("{:?}", seg.call0::<bool>()),
-            Err(e) => println!("{}", e.format_rustc_style(source, file!(), line)),
+            Err(e) => println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::styled())),
         }
         Ok(())
     }

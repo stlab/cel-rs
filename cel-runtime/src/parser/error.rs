@@ -4,7 +4,7 @@
 //! be used from async execution. Use [`SourceSpan::from_proc_macro2`] to extract
 //! location from a `proc_macro2::Span` when building errors in the parser.
 
-use owo_colors::OwoColorize;
+use annotate_snippets::{AnnotationKind, Group, Level, Renderer, Snippet};
 use proc_macro2::LineColumn;
 
 /// Source region as start/end line and column.
@@ -69,6 +69,29 @@ pub struct CELError {
     span: SourceSpan,
 }
 
+/// Converts a 1-based `line` and 0-based character-count `col` to a byte offset in `source`.
+///
+/// Returns `source.len()` if the position is past the end of the source.
+///
+/// - Complexity: O(n) in the length of `source`.
+fn line_col_to_byte_offset(source: &str, line: usize, col: usize) -> usize {
+    let mut current_line = 1;
+    let mut pos = 0;
+    for c in source.chars() {
+        if current_line == line {
+            break;
+        }
+        if c == '\n' {
+            current_line += 1;
+        }
+        pos += c.len_utf8();
+    }
+    for c in source[pos..].chars().take(col) {
+        pos += c.len_utf8();
+    }
+    pos
+}
+
 impl CELError {
     /// Creates a new error with the given message and source span.
     pub fn new(message: impl Into<String>, span: SourceSpan) -> Self {
@@ -97,75 +120,46 @@ impl CELError {
 
     /// Formats this error in rustc diagnostic style with source context.
     ///
-    /// Produces a multi-line string similar to Rust compiler diagnostics,
-    /// including the source file location, error message, and a caret
-    /// indicating the error position.
+    /// Produces a multi-line string matching Rust compiler diagnostic output,
+    /// including the source file location, error message, and a caret indicating
+    /// the error position. Uses [annotate-snippets](https://docs.rs/annotate-snippets)
+    /// for rendering.
     ///
-    /// # Arguments
+    /// Pass [`Renderer::plain`] for tests and non-ANSI contexts; pass
+    /// [`Renderer::styled`] for terminal output.
     ///
-    /// * `source_code` - The original source code being parsed
-    /// * `filename` - The name of the file (for display)
-    /// * `start_line` - The starting line number in the original file (1-based)
+    /// # Examples
     ///
-    /// # References
+    /// ```no_run
+    /// use annotate_snippets::Renderer;
+    /// use cel_runtime::parser::CELParser;
+    /// use cel_runtime::parser::op_table::OpLookup;
     ///
-    /// See the [rustc diagnostic formatting guide](https://github.com/rust-lang/rustc-dev-guide/blob/master/src/diagnostics.md).
-    pub fn format_rustc_style(&self, source_code: &str, filename: &str, start_line: u32) -> String {
-        let start = self.span.start;
-        let end = self.span.end;
-        let lines: Vec<&str> = source_code.lines().collect();
-
-        let mut output = String::new();
-        let error_line = start_line + (start.line as u32) - 1;
-        let error_column = start.column + 1;
-        let max_line_num = start_line + (end.line as u32) - 1;
-        let line_width = max_line_num.to_string().len();
-
-        output.push_str(&format!("{}: {}\n", "error".red().bold(), self.message));
-        output.push_str(&format!(
-            " {} {}:{}:{}\n",
-            "-->".blue().bold(),
-            filename.blue(),
-            error_line.to_string().blue(),
-            error_column.to_string().blue()
-        ));
-        output.push_str(&format!(
-            "{:width$} {}\n",
-            "",
-            "|".blue().bold(),
-            width = line_width
-        ));
-
-        for line_num in start.line..=end.line {
-            if let Some(line_content) = lines.get(line_num.saturating_sub(1)) {
-                let display_line_num = start_line + (line_num as u32) - 1;
-                output.push_str(&format!(
-                    "{} {} {}\n",
-                    display_line_num.to_string().blue().bold(),
-                    "|".blue().bold(),
-                    line_content
-                ));
-
-                if line_num == start.line {
-                    output.push_str(&format!(
-                        "{:width$} {} ",
-                        "",
-                        "|".blue().bold(),
-                        width = line_width
-                    ));
-                    output.push_str(&" ".repeat(start.column));
-                    let caret_len = if start.line == end.line {
-                        end.column.saturating_sub(start.column).max(1)
-                    } else {
-                        line_content.len().saturating_sub(start.column)
-                    };
-                    output.push_str(&"^".repeat(caret_len).red().bold().to_string());
-                    output.push('\n');
-                }
-            }
-        }
-
-        output
+    /// let source = "10 + 20 30";
+    /// let mut parser = CELParser::new(OpLookup::new());
+    /// if let Err(e) = parser.parse_str(source) {
+    ///     println!("{}", e.format_rustc_style(source, "example.cel", 1, &Renderer::styled()));
+    /// }
+    /// ```
+    pub fn format_rustc_style(
+        &self,
+        source_code: &str,
+        filename: &str,
+        start_line: u32,
+        renderer: &Renderer,
+    ) -> String {
+        let start_byte =
+            line_col_to_byte_offset(source_code, self.span.start.line, self.span.start.column);
+        let end_byte =
+            line_col_to_byte_offset(source_code, self.span.end.line, self.span.end.column)
+                .max(start_byte + 1);
+        let report = [Group::with_title(Level::ERROR.primary_title(self.message.as_str())).element(
+            Snippet::source(source_code)
+                .path(filename)
+                .line_start(start_line as usize)
+                .annotation(AnnotationKind::Primary.span(start_byte..end_byte)),
+        )];
+        renderer.render(&report)
     }
 }
 
