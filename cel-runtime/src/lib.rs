@@ -68,6 +68,7 @@ pub use segment::*;
 
 pub use parser::CELError;
 pub use parser::CELParser;
+pub use parser::ParseError;
 pub use parser::op_table::OpLookup;
 
 impl std::str::FromStr for DynSegment {

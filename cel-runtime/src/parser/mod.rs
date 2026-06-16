@@ -87,7 +87,7 @@ mod error;
 mod lex_lexer;
 pub mod op_table;
 
-pub use error::{CELError, SourceSpan};
+pub use error::{CELError, ParseError, SourceSpan};
 pub use proc_macro2::LineColumn;
 
 use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};

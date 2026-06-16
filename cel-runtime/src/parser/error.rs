@@ -190,3 +190,133 @@ impl std::fmt::Display for CELError {
 }
 
 impl std::error::Error for CELError {}
+
+/// A parse error carrying the original `proc_macro2::Span` of the offending token.
+///
+/// Used as the return type of all parser methods. Not `Send + Sync` because
+/// `proc_macro2::Span` wraps a compiler-internal handle that is only valid on
+/// the proc-macro thread. Convert to [`CELError`] via `From` when the error
+/// must cross thread boundaries or be stored for async reporting.
+#[derive(Clone, Debug)]
+pub struct ParseError {
+    message: String,
+    span: proc_macro2::Span,
+}
+
+impl ParseError {
+    /// Creates a new parse error with the given message and token span.
+    pub fn new(message: impl Into<String>, span: proc_macro2::Span) -> Self {
+        ParseError {
+            message: message.into(),
+            span,
+        }
+    }
+
+    /// Returns the error message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns the `proc_macro2::Span` of the offending token.
+    ///
+    /// Use this span with `quote_spanned!` in proc-macro code to attach the
+    /// `compile_error!` to the exact source location.
+    pub fn span(&self) -> proc_macro2::Span {
+        self.span
+    }
+
+    /// Formats this error in rustc diagnostic style with source context.
+    ///
+    /// Identical contract to [`CELError::format_rustc_style`]; prefer calling
+    /// this directly on a `ParseError` rather than converting to `CELError`
+    /// first when you have the source text at hand.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use annotate_snippets::Renderer;
+    /// use cel_runtime::parser::CELParser;
+    /// use cel_runtime::OpLookup;
+    ///
+    /// let line = line!() + 1;
+    /// let source = "10 + 20 30";
+    /// let mut parser = CELParser::new(OpLookup::new());
+    /// if let Err(e) = parser.parse_str(source) {
+    ///     println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::plain()));
+    /// }
+    /// ```
+    pub fn format_rustc_style(
+        &self,
+        source_code: &str,
+        filename: &str,
+        start_line: u32,
+        renderer: &Renderer,
+    ) -> String {
+        let source_span = SourceSpan::from_proc_macro2(self.span);
+        let byte_range = span_to_byte_range(source_code, source_span);
+        let report = [
+            Group::with_title(Level::ERROR.primary_title(self.message.as_str())).element(
+                Snippet::source(source_code)
+                    .path(filename)
+                    .line_start(start_line as usize)
+                    .annotation(AnnotationKind::Primary.span(byte_range)),
+            ),
+        ];
+        renderer.render(&report)
+    }
+}
+
+impl From<ParseError> for CELError {
+    /// Converts a [`ParseError`] to a [`CELError`] by extracting the
+    /// [`SourceSpan`] from the token span.
+    ///
+    /// Use this at async/runtime boundaries where `Send + Sync` is required.
+    fn from(e: ParseError) -> Self {
+        CELError::new(e.message, SourceSpan::from_proc_macro2(e.span))
+    }
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use annotate_snippets::Renderer;
+    use proc_macro2::Span;
+
+    #[test]
+    fn parse_error_message() {
+        let e = ParseError::new("bad token", Span::call_site());
+        assert_eq!(e.message(), "bad token");
+    }
+
+    #[test]
+    fn parse_error_display() {
+        let e = ParseError::new("bad token", Span::call_site());
+        assert_eq!(e.to_string(), "bad token");
+    }
+
+    #[test]
+    fn parse_error_into_cel_error() {
+        let e = ParseError::new("bad token", Span::call_site());
+        let cel: CELError = e.into();
+        assert_eq!(cel.message(), "bad token");
+    }
+
+    #[test]
+    fn parse_error_format_rustc_style() {
+        let source = "10 + 20 30";
+        // We can only use call_site() in unit tests; the caret position
+        // won't be meaningful, but the message and file path must appear.
+        let e = ParseError::new("unexpected token", Span::call_site());
+        let formatted = e.format_rustc_style(source, "test.cel", 1, &Renderer::plain());
+        assert!(formatted.contains("error: unexpected token"));
+        assert!(formatted.contains("test.cel"));
+    }
+}
