@@ -1247,6 +1247,153 @@ mod tests {
         assert_eq!(result, 7.0);
         Ok(())
     }
+
+    #[test]
+    fn call_empty_arg_list() -> anyhow::Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
+            ("f", 0) => {
+                segment.op0(|| 0i32);
+                Ok(true)
+            }
+            ("()", 1) => {
+                segment.op1(|_callee: i32| 99i32)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        });
+        let mut parser = CELParser::new(lookup);
+        let mut segment = parser
+            .parse_str("f()")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(segment.call0::<i32>()?, 99);
+        Ok(())
+    }
+
+    #[test]
+    fn call_single_arg() -> anyhow::Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
+            ("f", 0) => {
+                segment.op0(|| 0i32);
+                Ok(true)
+            }
+            ("()", 2) => {
+                segment.op2(|_callee: i32, arg: i32| arg)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        });
+        let mut parser = CELParser::new(lookup);
+        let mut segment = parser
+            .parse_str("f(42)")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(segment.call0::<i32>()?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn call_multiple_args() -> anyhow::Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
+            ("f", 0) => {
+                segment.op0(|| 0i32);
+                Ok(true)
+            }
+            ("()", 3) => {
+                // callee T (bottom), arg1 U, arg2 V (top)
+                segment.op3(|_callee: i32, arg1: i32, arg2: i32| arg1 + arg2)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        });
+        let mut parser = CELParser::new(lookup);
+        let mut segment = parser
+            .parse_str("f(10, 32)")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(segment.call0::<i32>()?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn call_missing_closing_paren() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
+            ("f", 0) => {
+                segment.op0(|| 0i32);
+                Ok(true)
+            }
+            _ => Ok(false),
+        });
+        let mut parser = CELParser::new(lookup);
+        let err = match parser.parse_str("f(42 43)") {
+            Err(e) => e,
+            Ok(_) => panic!("expected parse error for missing closing parenthesis"),
+        };
+        assert_eq!(err.message(), "expected closing parenthesis");
+    }
+
+    #[test]
+    fn call_trailing_comma() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
+            ("f", 0) => {
+                segment.op0(|| 0i32);
+                Ok(true)
+            }
+            _ => Ok(false),
+        });
+        let mut parser = CELParser::new(lookup);
+        let err = match parser.parse_str("f(42,)") {
+            Err(e) => e,
+            Ok(_) => panic!("expected parse error for trailing comma"),
+        };
+        assert_eq!(err.message(), "expected expression after comma");
+    }
+
+    #[test]
+    fn call_undefined_call_op() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
+            ("f", 0) => {
+                segment.op0(|| 0i32);
+                Ok(true)
+            }
+            _ => Ok(false),
+        });
+        let mut parser = CELParser::new(lookup);
+        let err = match parser.parse_str("f()") {
+            Err(e) => e,
+            Ok(_) => panic!("expected error when () operator is not registered"),
+        };
+        assert!(
+            err.message().starts_with("call:"),
+            "error should report call failure, got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn call_chained() -> anyhow::Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
+            ("f", 0) => {
+                segment.op0(|| 0i32);
+                Ok(true)
+            }
+            ("()", 1) => {
+                segment.op1(|_callee: i32| 7i32)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        });
+        let mut parser = CELParser::new(lookup);
+        let mut segment = parser
+            .parse_str("f()()")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(segment.call0::<i32>()?, 7);
+        Ok(())
+    }
 }
 
 #[cfg(all(test, feature = "playground"))]

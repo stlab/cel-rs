@@ -69,27 +69,46 @@ pub struct CELError {
     span: SourceSpan,
 }
 
-/// Converts a 1-based `line` and 0-based character-count `col` to a byte offset in `source`.
+/// Converts a [`SourceSpan`] (1-based lines, 0-based character columns) to a byte-offset
+/// range within `source`.
 ///
-/// Returns `source.len()` if the position is past the end of the source.
+/// Returns `source.len()..source.len()` if the span lies past the end of `source`.
 ///
 /// - Complexity: O(n) in the length of `source`.
-fn line_col_to_byte_offset(source: &str, line: usize, col: usize) -> usize {
-    let mut current_line = 1;
-    let mut pos = 0;
-    for c in source.chars() {
-        if current_line == line {
-            break;
-        }
-        if c == '\n' {
-            current_line += 1;
-        }
-        pos += c.len_utf8();
-    }
-    for c in source[pos..].chars().take(col) {
-        pos += c.len_utf8();
-    }
-    pos
+fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Range<usize> {
+    let start_line_byte: usize = source
+        .split_inclusive('\n')
+        .take(span.start.line - 1)
+        .map(str::len)
+        .sum();
+    let start_byte = start_line_byte
+        + source[start_line_byte..]
+            .chars()
+            .take(span.start.column)
+            .map(char::len_utf8)
+            .sum::<usize>();
+    let end_byte = if span.end.line == span.start.line {
+        start_byte
+            + source[start_byte..]
+                .chars()
+                .take(span.end.column - span.start.column)
+                .map(char::len_utf8)
+                .sum::<usize>()
+    } else {
+        let end_line_byte = start_byte
+            + source[start_byte..]
+                .split_inclusive('\n')
+                .take(span.end.line - span.start.line)
+                .map(str::len)
+                .sum::<usize>();
+        end_line_byte
+            + source[end_line_byte..]
+                .chars()
+                .take(span.end.column)
+                .map(char::len_utf8)
+                .sum::<usize>()
+    };
+    start_byte..end_byte
 }
 
 impl CELError {
@@ -130,15 +149,18 @@ impl CELError {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```rust
     /// use annotate_snippets::Renderer;
     /// use cel_runtime::parser::CELParser;
     /// use cel_runtime::parser::op_table::OpLookup;
     ///
-    /// let source = "10 + 20 30";
+    /// let line = line!() + 1;
+    /// let source = r#"
+    ///     10 + 20 30
+    /// "#;
     /// let mut parser = CELParser::new(OpLookup::new());
     /// if let Err(e) = parser.parse_str(source) {
-    ///     println!("{}", e.format_rustc_style(source, "example.cel", 1, &Renderer::styled()));
+    ///     println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::styled()));
     /// }
     /// ```
     pub fn format_rustc_style(
@@ -148,17 +170,15 @@ impl CELError {
         start_line: u32,
         renderer: &Renderer,
     ) -> String {
-        let start_byte =
-            line_col_to_byte_offset(source_code, self.span.start.line, self.span.start.column);
-        let end_byte =
-            line_col_to_byte_offset(source_code, self.span.end.line, self.span.end.column)
-                .max(start_byte + 1);
-        let report = [Group::with_title(Level::ERROR.primary_title(self.message.as_str())).element(
-            Snippet::source(source_code)
-                .path(filename)
-                .line_start(start_line as usize)
-                .annotation(AnnotationKind::Primary.span(start_byte..end_byte)),
-        )];
+        let byte_range = span_to_byte_range(source_code, self.span);
+        let report = [
+            Group::with_title(Level::ERROR.primary_title(self.message.as_str())).element(
+                Snippet::source(source_code)
+                    .path(filename)
+                    .line_start(start_line as usize)
+                    .annotation(AnnotationKind::Primary.span(byte_range)),
+            ),
+        ];
         renderer.render(&report)
     }
 }
