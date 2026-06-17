@@ -275,6 +275,7 @@ pub struct CELParser {
     tokens: Option<Peekable<LexLexer>>,
     context: DynSegment,
     op_lookup: OpLookup,
+    last_span: Span,
 }
 
 impl CELParser {
@@ -291,16 +292,18 @@ impl CELParser {
             tokens: None,
             context: DynSegment::new::<()>(),
             op_lookup,
+            last_span: Span::call_site(),
         }
     }
 
-    /// Sets the token stream for parsing.
+    /// Sets the token stream for parsing, resetting internal state.
     ///
     /// Call before [`is_expression`](Self::is_expression) or use [`parse_tokens`](Self::parse_tokens)
     /// which sets tokens and parses in one step.
     pub fn set_tokens(&mut self, tokens: TokenStreamIter) {
         self.tokens = Some(LexLexer::new(tokens).peekable());
         self.context = DynSegment::new::<()>();
+        self.last_span = Span::call_site();
     }
 
     /// Parses a token stream into a [`DynSegment`].
@@ -370,8 +373,28 @@ impl CELParser {
         &mut self.op_lookup
     }
 
+    /// Advances past the current token, recording its span in `last_span`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no token stream has been set or if there is no current token.
     fn advance(&mut self) {
-        self.tokens.as_mut().expect("tokens set").next();
+        use lex_lexer::HasSpan;
+        self.last_span = self
+            .tokens
+            .as_mut()
+            .expect("tokens set")
+            .next()
+            .expect("token required to advance")
+            .span();
+    }
+
+    /// Returns the span of the next token without consuming it, or `None` if exhausted.
+    fn peek_span(&mut self) -> Option<Span> {
+        self.peek_token().map(|token| {
+            use lex_lexer::HasSpan;
+            token.span()
+        })
     }
 
     /// Peeks at the current token without consuming it.
@@ -403,21 +426,6 @@ impl CELParser {
         }
     }
 
-    /// Consumes a matching punctuation token and returns its span.
-    ///
-    /// Returns `Some(span)` if the current token is punctuation matching `target`,
-    /// or `None` if it does not match (token is not consumed in that case).
-    fn consume_punctuation(&mut self, target: &str) -> Option<Span> {
-        match self.peek_token() {
-            Some(Token::Punct { op, span, .. }) if op == target => {
-                let span = *span;
-                self.advance();
-                Some(span)
-            }
-            _ => None,
-        }
-    }
-
     /// `expression = or_expression <EOF>.`
     pub fn is_expression(&mut self) -> Result<bool> {
         if !self.is_or_expression()? {
@@ -431,16 +439,17 @@ impl CELParser {
 
     /// `or_expression = and_expression { "||" and_expression }.`
     fn is_or_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if self.is_and_expression()? {
-            while let Some(op_span) = self.consume_punctuation("||") {
+            while self.is_punctuation("||") {
                 if !self.is_and_expression()? {
                     return Err(self.error_at("expected and_expression"));
                 }
-                if self.context.stack_ids.len() >= 2
-                    && let Err(e) = self.op_lookup.lookup("||", &mut self.context, 2, op_span)
-                {
-                    return Err(e);
-                }
+                let expr_span = start_span
+                    .expect("production has token at start")
+                    .join(self.last_span)
+                    .unwrap_or(self.last_span);
+                self.op_lookup.lookup("||", &mut self.context, 2, expr_span)?;
             }
             Ok(true)
         } else {
@@ -450,16 +459,17 @@ impl CELParser {
 
     /// `and_expression = comparison_expression { "&&" comparison_expression }.`
     fn is_and_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if self.is_comparison_expression()? {
-            while let Some(op_span) = self.consume_punctuation("&&") {
+            while self.is_punctuation("&&") {
                 if !self.is_comparison_expression()? {
                     return Err(self.error_at("expected comparison_expression"));
                 }
-                if self.context.stack_ids.len() >= 2
-                    && let Err(e) = self.op_lookup.lookup("&&", &mut self.context, 2, op_span)
-                {
-                    return Err(e);
-                }
+                let expr_span = start_span
+                    .expect("production has token at start")
+                    .join(self.last_span)
+                    .unwrap_or(self.last_span);
+                self.op_lookup.lookup("&&", &mut self.context, 2, expr_span)?;
             }
             Ok(true)
         } else {
@@ -469,31 +479,34 @@ impl CELParser {
 
     /// `comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].`
     fn is_comparison_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if self.is_bitwise_or_expression()? {
             // Longer operators first: must check "==" before "=", "<=" before "<", etc.
-            let op = if let Some(s) = self.consume_punctuation("==") {
-                Some(("==", s))
-            } else if let Some(s) = self.consume_punctuation("!=") {
-                Some(("!=", s))
-            } else if let Some(s) = self.consume_punctuation("<=") {
-                Some(("<=", s))
-            } else if let Some(s) = self.consume_punctuation(">=") {
-                Some((">=", s))
-            } else if let Some(s) = self.consume_punctuation("<") {
-                Some(("<", s))
+            let op_name = if self.is_punctuation("==") {
+                Some("==")
+            } else if self.is_punctuation("!=") {
+                Some("!=")
+            } else if self.is_punctuation("<=") {
+                Some("<=")
+            } else if self.is_punctuation(">=") {
+                Some(">=")
+            } else if self.is_punctuation("<") {
+                Some("<")
+            } else if self.is_punctuation(">") {
+                Some(">")
             } else {
-                self.consume_punctuation(">").map(|s| (">", s))
+                None
             };
 
-            if let Some((op_name, op_span)) = op {
+            if let Some(op_name) = op_name {
                 if !self.is_bitwise_or_expression()? {
                     return Err(self.error_at("expected bitwise_or_expression"));
                 }
-                if self.context.stack_ids.len() >= 2
-                    && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 2, op_span)
-                {
-                    return Err(e);
-                }
+                let expr_span = start_span
+                    .expect("production has token at start")
+                    .join(self.last_span)
+                    .unwrap_or(self.last_span);
+                self.op_lookup.lookup(op_name, &mut self.context, 2, expr_span)?;
             }
             Ok(true)
         } else {
@@ -503,16 +516,17 @@ impl CELParser {
 
     /// `bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.`
     fn is_bitwise_or_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if self.is_bitwise_xor_expression()? {
-            while let Some(op_span) = self.consume_punctuation("|") {
+            while self.is_punctuation("|") {
                 if !self.is_bitwise_xor_expression()? {
                     return Err(self.error_at("expected bitwise_xor_expression"));
                 }
-                if self.context.stack_ids.len() >= 2
-                    && let Err(e) = self.op_lookup.lookup("|", &mut self.context, 2, op_span)
-                {
-                    return Err(e);
-                }
+                let expr_span = start_span
+                    .expect("production has token at start")
+                    .join(self.last_span)
+                    .unwrap_or(self.last_span);
+                self.op_lookup.lookup("|", &mut self.context, 2, expr_span)?;
             }
             Ok(true)
         } else {
@@ -522,16 +536,17 @@ impl CELParser {
 
     /// `bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.`
     fn is_bitwise_xor_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if self.is_bitwise_and_expression()? {
-            while let Some(op_span) = self.consume_punctuation("^") {
+            while self.is_punctuation("^") {
                 if !self.is_bitwise_and_expression()? {
                     return Err(self.error_at("expected bitwise_and_expression"));
                 }
-                if self.context.stack_ids.len() >= 2
-                    && let Err(e) = self.op_lookup.lookup("^", &mut self.context, 2, op_span)
-                {
-                    return Err(e);
-                }
+                let expr_span = start_span
+                    .expect("production has token at start")
+                    .join(self.last_span)
+                    .unwrap_or(self.last_span);
+                self.op_lookup.lookup("^", &mut self.context, 2, expr_span)?;
             }
             Ok(true)
         } else {
@@ -541,16 +556,17 @@ impl CELParser {
 
     /// `bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.`
     fn is_bitwise_and_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if self.is_bitwise_shift_expression()? {
-            while let Some(op_span) = self.consume_punctuation("&") {
+            while self.is_punctuation("&") {
                 if !self.is_bitwise_shift_expression()? {
                     return Err(self.error_at("expected bitwise_shift_expression"));
                 }
-                if self.context.stack_ids.len() >= 2
-                    && let Err(e) = self.op_lookup.lookup("&", &mut self.context, 2, op_span)
-                {
-                    return Err(e);
-                }
+                let expr_span = start_span
+                    .expect("production has token at start")
+                    .join(self.last_span)
+                    .unwrap_or(self.last_span);
+                self.op_lookup.lookup("&", &mut self.context, 2, expr_span)?;
             }
             Ok(true)
         } else {
@@ -560,23 +576,26 @@ impl CELParser {
 
     /// `bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.`
     fn is_bitwise_shift_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if self.is_additive_expression()? {
             loop {
-                let op = if let Some(s) = self.consume_punctuation("<<") {
-                    Some(("<<", s))
+                let op_name = if self.is_punctuation("<<") {
+                    Some("<<")
+                } else if self.is_punctuation(">>") {
+                    Some(">>")
                 } else {
-                    self.consume_punctuation(">>").map(|s| (">>", s))
+                    None
                 };
 
-                if let Some((op_name, op_span)) = op {
+                if let Some(op_name) = op_name {
                     if !self.is_additive_expression()? {
                         return Err(self.error_at("expected additive_expression"));
                     }
-                    if self.context.stack_ids.len() >= 2
-                        && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 2, op_span)
-                    {
-                        return Err(e);
-                    }
+                    let expr_span = start_span
+                        .expect("production has token at start")
+                        .join(self.last_span)
+                        .unwrap_or(self.last_span);
+                    self.op_lookup.lookup(op_name, &mut self.context, 2, expr_span)?;
                 } else {
                     break;
                 }
@@ -589,24 +608,26 @@ impl CELParser {
 
     /// `additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.`
     fn is_additive_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if self.is_multiplicative_expression()? {
             loop {
-                let op = if let Some(s) = self.consume_punctuation("+") {
-                    Some(("+", s))
+                let op_name = if self.is_punctuation("+") {
+                    Some("+")
+                } else if self.is_punctuation("-") {
+                    Some("-")
                 } else {
-                    self.consume_punctuation("-").map(|s| ("-", s))
+                    None
                 };
 
-                if let Some((op_name, op_span)) = op {
+                if let Some(op_name) = op_name {
                     if !self.is_multiplicative_expression()? {
                         return Err(self.error_at("expected multiplicative_expression"));
                     }
-
-                    if self.context.stack_ids.len() >= 2
-                        && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 2, op_span)
-                    {
-                        return Err(e);
-                    }
+                    let expr_span = start_span
+                        .expect("production has token at start")
+                        .join(self.last_span)
+                        .unwrap_or(self.last_span);
+                    self.op_lookup.lookup(op_name, &mut self.context, 2, expr_span)?;
                 } else {
                     break;
                 }
@@ -619,26 +640,28 @@ impl CELParser {
 
     /// `multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.`
     fn is_multiplicative_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if self.is_unary_expression()? {
             loop {
-                let op = if let Some(s) = self.consume_punctuation("*") {
-                    Some(("*", s))
-                } else if let Some(s) = self.consume_punctuation("/") {
-                    Some(("/", s))
+                let op_name = if self.is_punctuation("*") {
+                    Some("*")
+                } else if self.is_punctuation("/") {
+                    Some("/")
+                } else if self.is_punctuation("%") {
+                    Some("%")
                 } else {
-                    self.consume_punctuation("%").map(|s| ("%", s))
+                    None
                 };
 
-                if let Some((op_name, op_span)) = op {
+                if let Some(op_name) = op_name {
                     if !self.is_unary_expression()? {
                         return Err(self.error_at("expected unary_expression"));
                     }
-
-                    if self.context.stack_ids.len() >= 2
-                        && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 2, op_span)
-                    {
-                        return Err(e);
-                    }
+                    let expr_span = start_span
+                        .expect("production has token at start")
+                        .join(self.last_span)
+                        .unwrap_or(self.last_span);
+                    self.op_lookup.lookup(op_name, &mut self.context, 2, expr_span)?;
                 } else {
                     break;
                 }
@@ -651,21 +674,24 @@ impl CELParser {
 
     /// `unary_expression = (("-" | "!") unary_expression) | primary_expression.`
     fn is_unary_expression(&mut self) -> Result<bool> {
-        let op = if let Some(s) = self.consume_punctuation("-") {
-            Some(("-", s))
+        let start_span = self.peek_span();
+        let op_name = if self.is_punctuation("-") {
+            Some("-")
+        } else if self.is_punctuation("!") {
+            Some("!")
         } else {
-            self.consume_punctuation("!").map(|s| ("!", s))
+            None
         };
 
-        if let Some((op_name, op_span)) = op {
+        if let Some(op_name) = op_name {
             if !self.is_unary_expression()? {
                 return Err(self.error_at("expected unary_expression"));
             }
-            if !self.context.stack_ids.is_empty()
-                && let Err(e) = self.op_lookup.lookup(op_name, &mut self.context, 1, op_span)
-            {
-                return Err(e);
-            }
+            let expr_span = start_span
+                .expect("production has token at start")
+                .join(self.last_span)
+                .unwrap_or(self.last_span);
+            self.op_lookup.lookup(op_name, &mut self.context, 1, expr_span)?;
             Ok(true)
         } else {
             self.is_postfix_expression()
@@ -674,6 +700,7 @@ impl CELParser {
 
     /// `postfix_expression = primary_expression { "(" parameter_list ")" }.`
     fn is_postfix_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if !self.is_primary_expression()? {
             return Ok(false);
         }
@@ -695,15 +722,13 @@ impl CELParser {
                 }
                 _ => return Err(self.error_at("expected closing parenthesis")),
             }
-            // Push the call operation: pops argument(s) then callee, invokes callee, pushes result.
             // Stack order is [callee, arg1, arg2, ...]; lookup peeks top (arg_count + 1) entries.
-            if self.context.stack_ids.len() > arg_count
-                && let Err(e) = self
-                    .op_lookup
-                    .lookup("()", &mut self.context, arg_count + 1, Span::call_site())
-            {
-                return Err(ParseError::new(format!("call: {}", e), e.span()));
-            }
+            let expr_span = start_span
+                .expect("production has token at start")
+                .join(self.last_span)
+                .unwrap_or(self.last_span);
+            self.op_lookup
+                .lookup("()", &mut self.context, arg_count + 1, expr_span)?;
         }
         Ok(true)
     }
@@ -1364,8 +1389,8 @@ mod tests {
             Ok(_) => panic!("expected error when () operator is not registered"),
         };
         assert!(
-            err.message().starts_with("call:"),
-            "error should report call failure, got: {}",
+            err.message().starts_with("operation error:"),
+            "error should report operation failure, got: {}",
             err.message()
         );
     }
@@ -1390,6 +1415,30 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         assert_eq!(segment.call0::<i32>()?, 7);
         Ok(())
+    }
+
+    #[test]
+    fn op_type_mismatch_error_spans_full_expression() {
+        // Source: "Hello" at cols 0-6, + at col 8, 32.0 at cols 10-13 (end col 14 exclusive)
+        let source = r#""Hello" + 32.0"#;
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = match parser.parse_str(source) {
+            Err(e) => e,
+            Ok(_) => panic!("expected parse error for type mismatch"),
+        };
+        assert!(
+            err.message().starts_with("operation error:"),
+            "expected 'operation error:' prefix, got: {}",
+            err.message()
+        );
+        // After the fix the joined span runs from col 0 ("Hello") to col 14 (past 32.0).
+        // Before the fix error_at() at EOF produces call_site() whose end.column is 0.
+        let end_col = err.span().end().column;
+        assert!(
+            end_col >= 14,
+            "span should reach the end of 32.0 (expected end.column >= 14, got {})",
+            end_col
+        );
     }
 }
 

@@ -1226,7 +1226,6 @@ mod tests {
 
     #[test]
     fn lookup_not_found_error_carries_span() {
-        use proc_macro2::Span;
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
