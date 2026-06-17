@@ -796,7 +796,7 @@ impl BuiltinScope {
 /// let mut segment = DynSegment::new::<()>();
 /// segment.just(10u32);
 /// segment.just(20u32);
-/// lookup.lookup("+", &mut segment, 2).unwrap();
+/// lookup.lookup("+", &mut segment, 2, proc_macro2::Span::call_site()).unwrap();
 /// assert_eq!(segment.call0::<u32>().unwrap(), 30);
 /// ```
 pub struct OpLookup {
@@ -832,29 +832,46 @@ impl OpLookup {
         self.scopes.pop()
     }
 
-    /// Looks up and applies an operation.
+    /// Looks up and applies an operation, binding the expression span to the registered op.
     ///
     /// Searches scopes in LIFO order, then falls back to built-in operations.
     ///
-    /// # Arguments
-    ///
-    /// * `name` - The operation name (e.g., `"+"`, `"-"`, or a custom identifier)
-    /// * `segment` - The DynSegment to apply the operation to
-    /// * `num_operands` - Number of top stack entries that are operands (e.g. 2 for binary ops)
-    ///
     /// # Errors
     ///
-    /// Returns an error if no scope or built-in operation can handle the request.
-    /// Error messages report type names from the top stack entries, not raw type ids.
-    pub fn lookup(&self, name: &str, segment: &mut DynSegment, num_operands: usize) -> Result<()> {
+    /// Returns a [`super::ParseError`] carrying `span` if no scope or built-in handles the
+    /// request, or if a scope itself returns an error.
+    ///
+    /// - Complexity: O(k) in the number of registered scopes, plus O(s) for the built-in
+    ///   signature scan where s is the number of signatures for the operator.
+    pub fn lookup(
+        &self,
+        name: &str,
+        segment: &mut DynSegment,
+        num_operands: usize,
+        span: proc_macro2::Span,
+    ) -> std::result::Result<(), super::ParseError> {
         for scope in self.scopes.iter().rev() {
-            if scope(name, segment, num_operands)? {
-                return Ok(());
+            match scope(name, segment, num_operands) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(e) => {
+                    return Err(super::ParseError::new(
+                        format!("operation error: {}", e),
+                        span,
+                    ))
+                }
             }
         }
 
-        if self.builtin_scope.lookup(name, segment, num_operands)? {
-            return Ok(());
+        match self.builtin_scope.lookup(name, segment, num_operands) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(e) => {
+                return Err(super::ParseError::new(
+                    format!("operation error: {}", e),
+                    span,
+                ))
+            }
         }
 
         let infos = segment.peek_stack_infos(num_operands);
@@ -865,10 +882,12 @@ impl OpLookup {
             }
             type_names.push_str(info.type_name.as_ref());
         }
-        Err(anyhow!(
-            "Operation '{}' not found for types [{}]",
-            name,
-            type_names
+        Err(super::ParseError::new(
+            format!(
+                "operation error: Operation '{}' not found for types [{}]",
+                name, type_names
+            ),
+            span,
         ))
     }
 }
@@ -882,6 +901,9 @@ impl Default for OpLookup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proc_macro2::Span;
+
+    type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
     #[test]
     fn test_addition_u32() -> Result<()> {
@@ -889,7 +911,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        lookup.lookup("+", &mut segment, 2)?;
+        lookup.lookup("+", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<u32>()?, 30);
         Ok(())
     }
@@ -900,7 +922,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(50i32);
         segment.just(20i32);
-        lookup.lookup("-", &mut segment, 2)?;
+        lookup.lookup("-", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<i32>()?, 30);
         Ok(())
     }
@@ -911,7 +933,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(i32::MAX);
         segment.just(1i32);
-        lookup.lookup("+", &mut segment, 2)?;
+        lookup.lookup("+", &mut segment, 2, Span::call_site())?;
         let result = segment.call0::<i32>();
         assert!(result.is_err());
         assert!(
@@ -930,7 +952,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10i32);
         segment.just(0i32);
-        lookup.lookup("/", &mut segment, 2)?;
+        lookup.lookup("/", &mut segment, 2, Span::call_site())?;
         let result = segment.call0::<i32>();
         assert!(result.is_err());
         assert!(
@@ -946,7 +968,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(0u32);
-        lookup.lookup("%", &mut segment, 2)?;
+        lookup.lookup("%", &mut segment, 2, Span::call_site())?;
         let result = segment.call0::<u32>();
         assert!(result.is_err());
         assert!(
@@ -962,7 +984,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(3.5f64);
         segment.just(2.0f64);
-        lookup.lookup("*", &mut segment, 2)?;
+        lookup.lookup("*", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<f64>()?, 7.0);
         Ok(())
     }
@@ -973,7 +995,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        lookup.lookup("<", &mut segment, 2)?;
+        lookup.lookup("<", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<bool>()?, true);
         Ok(())
     }
@@ -984,7 +1006,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(true);
         segment.just(false);
-        lookup.lookup("&&", &mut segment, 2)?;
+        lookup.lookup("&&", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<bool>()?, false);
         Ok(())
     }
@@ -995,7 +1017,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(0b1010u32);
         segment.just(0b1100u32);
-        lookup.lookup("&", &mut segment, 2)?;
+        lookup.lookup("&", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<u32>()?, 0b1000);
         Ok(())
     }
@@ -1005,7 +1027,7 @@ mod tests {
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         segment.just(42i32);
-        lookup.lookup("-", &mut segment, 1)?;
+        lookup.lookup("-", &mut segment, 1, Span::call_site())?;
         assert_eq!(segment.call0::<i32>()?, -42);
         Ok(())
     }
@@ -1015,7 +1037,7 @@ mod tests {
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         segment.just(true);
-        lookup.lookup("!", &mut segment, 1)?;
+        lookup.lookup("!", &mut segment, 1, Span::call_site())?;
         assert_eq!(segment.call0::<bool>()?, false);
         Ok(())
     }
@@ -1026,7 +1048,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        let result = lookup.lookup("unknown_op", &mut segment, 2);
+        let result = lookup.lookup("unknown_op", &mut segment, 2, Span::call_site());
         assert!(result.is_err());
     }
 
@@ -1050,7 +1072,7 @@ mod tests {
 
         let mut segment = DynSegment::new::<()>();
         segment.just(21u32);
-        lookup.lookup("double", &mut segment, 1)?;
+        lookup.lookup("double", &mut segment, 1, Span::call_site())?;
         assert_eq!(segment.call0::<u32>()?, 42);
 
         Ok(())
@@ -1077,7 +1099,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        lookup.lookup("+", &mut segment, 2)?;
+        lookup.lookup("+", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<u32>()?, 100);
 
         Ok(())
@@ -1089,7 +1111,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(1u64);
         segment.just(3u32);
-        lookup.lookup("<<", &mut segment, 2)?;
+        lookup.lookup("<<", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<u64>()?, 8);
         Ok(())
     }
@@ -1100,7 +1122,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(16i32);
         segment.just(2u32);
-        lookup.lookup(">>", &mut segment, 2)?;
+        lookup.lookup(">>", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<i32>()?, 4);
         Ok(())
     }
@@ -1111,7 +1133,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(1u32);
         segment.just(32u32);
-        lookup.lookup("<<", &mut segment, 2)?;
+        lookup.lookup("<<", &mut segment, 2, Span::call_site())?;
         let result = segment.call0::<u32>();
         assert!(result.is_err());
         assert!(
@@ -1127,7 +1149,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(1u32);
         segment.just(3i32);
-        lookup.lookup("<<", &mut segment, 2)?;
+        lookup.lookup("<<", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<u32>()?, 8);
         Ok(())
     }
@@ -1138,7 +1160,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(1u32);
         segment.just(-1i32);
-        lookup.lookup("<<", &mut segment, 2)?;
+        lookup.lookup("<<", &mut segment, 2, Span::call_site())?;
         let result = segment.call0::<u32>();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("shift overflow"));
@@ -1151,7 +1173,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(1u32);
         segment.just(u32::MAX as u64 + 1);
-        lookup.lookup("<<", &mut segment, 2)?;
+        lookup.lookup("<<", &mut segment, 2, Span::call_site())?;
         let result = segment.call0::<u32>();
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("shift overflow"));
@@ -1164,7 +1186,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(1u32);
         segment.just(3.0f64);
-        assert!(lookup.lookup("<<", &mut segment, 2).is_err());
+        assert!(lookup.lookup("<<", &mut segment, 2, Span::call_site()).is_err());
     }
 
     #[test]
@@ -1188,7 +1210,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        lookup.lookup("+", &mut segment, 2)?;
+        lookup.lookup("+", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<u32>()?, 100);
 
         // Pop scope and test normal behavior
@@ -1196,9 +1218,27 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        lookup.lookup("+", &mut segment, 2)?;
+        lookup.lookup("+", &mut segment, 2, Span::call_site())?;
         assert_eq!(segment.call0::<u32>()?, 30);
 
         Ok(())
+    }
+
+    #[test]
+    fn lookup_not_found_error_carries_span() {
+        use proc_macro2::Span;
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(10u32);
+        segment.just(20.0f64);
+        let err = lookup.lookup("+", &mut segment, 2, Span::call_site()).unwrap_err();
+        assert!(
+            err.message().starts_with("operation error:"),
+            "expected 'operation error:' prefix, got: {}",
+            err.message()
+        );
+        assert!(err.message().contains("Operation '+'"));
+        assert!(err.message().contains("u32"));
+        assert!(err.message().contains("f64"));
     }
 }
