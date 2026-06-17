@@ -1,12 +1,13 @@
 # Op-Lookup Error Spans Design
 
 **Date:** 2026-06-17
-**Status:** Approved
+**Status:** Approved (revised)
 
 ## Goal
 
 Replace `error_at()` at all op-lookup failure sites with expression-scoped spans: from the first token of the production to the last token consumed before the lookup. For example, `"Hello" + 32.0 + "World"` should report:
 
+At runtime (annotate-snippets, contiguous underline):
 ```
 error: operation error: Operation '+' not found for types [alloc::string::String, f64]
  --> test.cel:1:1
@@ -15,17 +16,124 @@ error: operation error: Operation '+' not found for types [alloc::string::String
   | ^^^^^^^^^^^^^^
 ```
 
-The same span will later be bound to the operation in `DynSegment` for runtime error reporting (out of scope for this change).
+At compile time (two `compile_error!()` diagnostics, stable Rust):
+```
+error: operation error: Operation '+' not found for types [alloc::string::String, f64]
+ --> src/main.rs:3:5
+  |
+3 |     expression!("Hello" + 32.0)
+  |                  ^^^^^^^
+error: expression continues here
+ --> src/main.rs:3:16
+  |
+3 |     expression!("Hello" + 32.0)
+  |                           ^^^^
+```
+
+The same spans will later be bound to the operation in `DynSegment` for runtime error reporting (out of scope for this change).
 
 ## Background
 
 The parser currently calls `error_at()` at every op-lookup failure. `error_at()` points to the *next unconsumed token*, which is wrong for type mismatch errors — it implicates the wrong token rather than the expression that produced the mismatched types.
 
-`ParseError` already carries a `proc_macro2::Span`, so the infrastructure for precise spans exists. The only missing pieces are (1) tracking the span of the last consumed token and (2) passing the production span into `lookup()`.
+`ParseError` already carries a `proc_macro2::Span`. The missing pieces are: (1) tracking the span of the last consumed token, (2) a second constructor on `ParseError` for expression-range errors, and (3) passing both the start and end spans into `lookup()`.
+
+`proc_macro::Span::join()` is not yet stable (tracking issue [#54725](https://github.com/rust-lang/rust/issues/54725)), so joining spans is not available on stable Rust. The design avoids `join()` entirely by storing both spans separately and combining them at the reporting layer.
 
 ## Design
 
-### 1. `CELParser` — span tracking (`parser/mod.rs`)
+### 1. `ParseError` — new constructor (`parser/error.rs`)
+
+Add an `end_span: Option<proc_macro2::Span>` field and a `new_range` constructor:
+
+```rust
+pub struct ParseError {
+    message: String,
+    span: proc_macro2::Span,          // start of expression (or sole span)
+    end_span: Option<proc_macro2::Span>, // end of expression, if range error
+}
+
+impl ParseError {
+    // existing — unchanged
+    pub fn new(message: impl Into<String>, span: proc_macro2::Span) -> Self
+
+    // new — for op-lookup failures that span a full sub-expression
+    pub fn new_range(
+        message: impl Into<String>,
+        start: proc_macro2::Span,
+        end: proc_macro2::Span,
+    ) -> Self
+
+    // existing — unchanged
+    pub fn message(&self) -> &str
+    pub fn span(&self) -> proc_macro2::Span
+
+    // new accessor
+    pub fn end_span(&self) -> Option<proc_macro2::Span>
+}
+```
+
+`format_rustc_style` on `ParseError` merges the two spans into one `SourceSpan` (start from `self.span.start()`, end from `self.end_span.unwrap_or(self.span).end()`) and renders a single annotation.
+
+### 2. `CELError` / `SourceSpan` — runtime conversion (`parser/error.rs`)
+
+`SourceSpan` is unchanged (it already stores `start: LineColumn` and `end: LineColumn`).
+
+`From<ParseError> for CELError` is updated to merge the two spans into one `SourceSpan`:
+
+```rust
+impl From<ParseError> for CELError {
+    fn from(e: ParseError) -> Self {
+        let source_span = SourceSpan {
+            start: e.span.start(),
+            end: e.end_span.unwrap_or(e.span).end(),
+        };
+        CELError::new(e.message, source_span)
+    }
+}
+```
+
+This produces a contiguous underline from the expression start to the expression end without needing `Span::join()`.
+
+### 3. `OpLookup::lookup()` — new signature (`parser/op_table.rs`)
+
+```rust
+/// Looks up and applies an operation, attaching expression span to any error.
+///
+/// Searches scopes in LIFO order, then falls back to built-in operations.
+///
+/// # Errors
+///
+/// Returns a [`ParseError`] spanning `start..=end` if no scope or built-in
+/// handles the request, or if a scope itself returns an error.
+///
+/// - Complexity: O(k) in the number of registered scopes, plus O(s) for built-in
+///   signature scan where s is the number of signatures for the operator.
+pub fn lookup(
+    &self,
+    name: &str,
+    segment: &mut DynSegment,
+    num_operands: usize,
+    start: proc_macro2::Span,
+    end: proc_macro2::Span,
+) -> std::result::Result<(), super::ParseError>
+```
+
+`BuiltinScope` and `ScopeFn` keep their `anyhow::Result` return types. Conversion to `ParseError` occurs only at the `OpLookup::lookup()` boundary:
+
+```rust
+// Scope returns error:
+Err(e) => return Err(ParseError::new_range(format!("operation error: {}", e), start, end))
+
+// No match found:
+Err(ParseError::new_range(
+    format!("operation error: Operation '{}' not found for types [{}]", name, type_names),
+    start,
+    end,
+))
+```
+
+### 4. `CELParser` — span tracking (`parser/mod.rs`)
 
 #### New field
 
@@ -33,9 +141,9 @@ The parser currently calls `error_at()` at every op-lookup failure. `error_at()`
 last_span: Span,  // span of the most recently consumed token
 ```
 
-Initialized to `Span::call_site()` in `CELParser::new()` and reset to `Span::call_site()` in `set_tokens()`. Only used after at least one token has been consumed.
+Initialized to `Span::call_site()` in `CELParser::new()` and reset to `Span::call_site()` in `set_tokens()`. Only meaningful after at least one token has been consumed.
 
-#### `advance()` — extracts span from consumed token
+#### `advance()` — records span of consumed token
 
 ```rust
 /// Advances past the current token, recording its span in `last_span`.
@@ -50,8 +158,6 @@ fn advance(&mut self) {
 }
 ```
 
-`advance()` is always called after `peek_token()` has confirmed a token exists, so `expect("token required to advance")` is a valid assertion.
-
 #### `peek_span()` — returns `Option<Span>`
 
 ```rust
@@ -64,8 +170,6 @@ fn peek_span(&mut self) -> Option<Span> {
 }
 ```
 
-Returns `Option<Span>` rather than a fallback value: a caller that needs the span must be able to assert it exists via `expect()`.
-
 #### Production entry and lookup sites
 
 At the entry of every production that calls `op_lookup.lookup()`:
@@ -74,90 +178,78 @@ At the entry of every production that calls `op_lookup.lookup()`:
 let start_span = self.peek_span();
 ```
 
-At each lookup call, replacing the old `if ... let Err(e) = ... error_at(...)` pattern:
+At each lookup call, replacing the old error pattern:
 
 ```rust
-let expr_span = start_span.expect("production has token at start")
-    .join(self.last_span)
-    .expect("all tokens in a CEL expression are from the same source");
-self.op_lookup.lookup(op_name, &mut self.context, arity, expr_span)?;
+let start = start_span.expect("production has token at start");
+self.op_lookup.lookup(op_name, &mut self.context, arity, start, self.last_span)?;
 ```
 
-`start_span.expect()` is safe because the lookup is only reached after a successful sub-production parse, which guarantees a token existed at entry. `join().expect()` is safe because all tokens originate from a single `TokenStream`.
+`start_span.expect()` is safe because the lookup is only reached after a successful sub-production parse, which guarantees a token existed at entry.
 
-The `if self.context.stack_ids.len() >= N` guards are removed: they were artifacts of the `if let Err` pattern and are structurally always true when lookup is reached (operands were just parsed).
+No `Span::join()` is called anywhere.
 
 **Affected productions:** `is_or_expression`, `is_and_expression`, `is_comparison_expression`, `is_bitwise_or_expression`, `is_bitwise_xor_expression`, `is_bitwise_and_expression`, `is_bitwise_shift_expression`, `is_additive_expression`, `is_multiplicative_expression`, `is_unary_expression`, `is_postfix_expression`.
 
-**`error_at()` is unchanged** — it continues to serve syntax errors (unexpected token, missing RHS, unmatched parenthesis) where the current token position is the correct diagnostic site.
+**`error_at()` is unchanged** — it continues to serve syntax errors (unexpected token, missing RHS, unmatched parenthesis).
 
 #### Span semantics per production class
 
-| Production | `start_span` | `last_span` at lookup | Error spans |
+| Production | `start_span` | `self.last_span` at lookup | Error spans |
 |---|---|---|---|
-| Binary loop (`+`, `\|\|`, etc.) | First token of LHS | Last token of RHS | `lhs op rhs` (and accumulates across iterations) |
+| Binary loop (`+`, `\|\|`, etc.) | First token of LHS | Last token of RHS | `lhs op rhs` (accumulates across iterations) |
 | Comparison (`==`, `<`, etc.) | First token of LHS | Last token of RHS | `lhs op rhs` |
 | Unary (`-`, `!`) | Operator token | Last token of operand | `-expr` or `!expr` |
 | Postfix call (`()`) | Identifier token | Closing `)` | `f(args)` |
 
-For chained binary ops (`a + b + c`) where the first succeeds and second fails, `start_span` is still the start of the first operand (`a`), so the error spans the full `a + b + c`. This correctly shows all components that produced the mismatched types.
+For chained binary ops (`a + b + c`) where the first succeeds and second fails, `start_span` is still the start of the first operand (`a`), so the start span correctly covers from `a`. The end span is the last token of `c`.
 
-### 2. `OpLookup::lookup()` — new signature (`parser/op_table.rs`)
+### 5. `cel-rs-macros` — compile-time error emission (`cel-rs-macros/src/lib.rs`)
 
-```rust
-/// Looks up and applies an operation, binding the expression span to the registered op.
-///
-/// Searches scopes in LIFO order, then falls back to built-in operations.
-///
-/// # Errors
-///
-/// Returns a [`ParseError`] carrying `span` if no scope or built-in handles the request,
-/// or if a scope itself returns an error.
-///
-/// - Complexity: O(k) in the number of registered scopes, plus O(s) for built-in
-///   signature scan where s is the number of signatures for the operator.
-pub fn lookup(
-    &self,
-    name: &str,
-    segment: &mut DynSegment,
-    num_operands: usize,
-    span: proc_macro2::Span,
-) -> std::result::Result<(), ParseError>
-```
+When `ParseError` has only `span` (single-span errors like "Undefined identifier"), emit one `compile_error!()` as before.
 
-`BuiltinScope::lookup()` and `ScopeFn` keep their `anyhow::Result` return types. The conversion to `ParseError` occurs only at the `OpLookup::lookup()` boundary:
+When `ParseError` has both `span` and `end_span` (range errors from `lookup()`), emit two `compile_error!()` items:
 
 ```rust
-// Scope returns error:
-Err(e) => return Err(ParseError::new(format!("operation error: {}", e), span))
-
-// No match found:
-Err(ParseError::new(
-    format!("operation error: Operation '{}' not found for types [{}]", name, type_names),
-    span,
-))
+let msg = e.message();
+let start = e.span();
+let mut tokens = quote_spanned! { start => compile_error!(#msg) };
+if let Some(end) = e.end_span() {
+    tokens.extend(quote_spanned! { end => compile_error!("expression continues here") });
+}
+tokens
 ```
 
-`use super::ParseError` is added to `op_table.rs`.
+## Error message consolidation
 
-### 3. Error message consolidation
+The old `"call: "` prefix in `is_postfix_expression` is replaced by `"operation error: "` for consistency, since `lookup()` now constructs the `ParseError` directly.
 
-The `"call: "` prefix used in `is_postfix_expression` is replaced by `"operation error: "` for consistency, since `lookup()` now constructs the `ParseError` directly and context-specific prefixes would require re-wrapping. The `call_undefined_call_op` test assertion is updated to check for `"operation error: "`.
+The `call_undefined_call_op` test assertion is updated from `starts_with("call:")` to `starts_with("operation error:")`.
+
+## Current code state
+
+The branch `sean-parent/parser-actions` currently has partial implementation that used `Span::join()` and `unwrap_or` fallbacks. All those commits need to be replaced by this design. The implementation plan starts from commit `811df34`.
 
 ## Test changes
 
+### `parser/error.rs`
+
+- Tests for `ParseError::new_range`: verify `span()` returns start, `end_span()` returns `Some(end)`.
+- Test for `From<ParseError> for CELError` with a range error: verify `CELError::span()` covers from start to end.
+
 ### `parser/op_table.rs`
 
-- All `lookup(name, segment, arity)` calls gain `Span::call_site()` as a fourth argument.
-- Test functions returning `anyhow::Result<()>`: in non-proc-macro (fallback) mode, `proc_macro2::Span` is `Send + Sync + 'static`, so `ParseError` satisfies `anyhow::Error`'s `From<E: Error + Send + Sync + 'static>` bound and `?` continues to work unchanged.
+- All existing `lookup(name, segment, arity, span)` calls gain a second span argument: `lookup(name, segment, arity, Span::call_site(), Span::call_site())`.
+- New test: `lookup_not_found_error_has_range` — verifies `lookup()` failure returns a `ParseError` whose `end_span()` is `Some`.
 
 ### `parser/mod.rs`
 
-- `call_undefined_call_op`: update `starts_with("call:")` assertion to `starts_with("operation error:")`.
-- New tests verifying that op-lookup failure spans cover the full expression, not just the operator token. For example: a test parsing `"Hello" + 32.0` that fails, then asserts the error span covers both the string and float literals.
+- `call_undefined_call_op`: update assertion from `starts_with("call:")` to `starts_with("operation error:")`.
+- New test `op_type_mismatch_error_spans_full_expression`: parse `"Hello" + 32.0`, assert error `end_span()` is `Some` and its `end().column` covers the end of `32.0`.
 
 ## Non-goals
 
-- Storing the expression span on the `DynSegment` operation for runtime error reporting is deferred to a follow-on task. The `span` parameter passed to `lookup()` is used for error messages on failure; on success it is not yet forwarded to `DynSegment`.
+- Storing the expression span on the `DynSegment` operation for runtime error reporting is deferred to a follow-on task.
 - No changes to `error_at()` or syntax-error spans.
 - No changes to the `ScopeFn` signature.
+- `proc_macro::Span::join()` is not used anywhere; this design is fully stable.
