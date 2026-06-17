@@ -93,4 +93,18 @@ mod playground {
         let mut segment = Segment::new(experiment, |e| e.a.to_string());
         println!("{}", segment.call());
     }
+
+    #[test]
+    fn expression_macro_error() {
+        let result = cel_rs_macros::expression! {
+            "Hello" + "World" + 32.0;
+        };
+    }
+
+    #[test]
+    fn expression_macro_error2() {
+        let result = cel_rs_macros::expression! {
+            "Hello" + "World" + 32.0
+        };
+    }
 }

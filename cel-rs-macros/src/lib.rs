@@ -28,7 +28,7 @@
 //! };
 //! ```
 
-use cel_runtime::{CELError, CELParser, OpLookup};
+use cel_runtime::{CELParser, OpLookup};
 use proc_macro::TokenStream as ProcMacroTokenStream;
 use proc_macro2::{Literal, TokenStream};
 use quote::quote_spanned;
@@ -45,20 +45,11 @@ use quote::quote_spanned;
 pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
     let input = TokenStream::from(input);
     let mut parser = CELParser::new(OpLookup::new());
-    parser.set_tokens(input.into_iter());
-    match parser.is_expression() {
-        Ok(true) => ProcMacroTokenStream::new(),
-        Ok(false) => {
-            let e = CELError::new(
-                "Expected expression",
-                cel_runtime::parser::SourceSpan::default(),
-            );
-            let msg_lit = Literal::string(&e.to_string());
-            quote_spanned!(proc_macro2::Span::call_site() => compile_error!(#msg_lit)).into()
-        }
+    match parser.parse_tokens(input.into_iter()) {
+        Ok(_) => ProcMacroTokenStream::new(),
         Err(e) => {
-            let msg_lit = Literal::string(&e.to_string());
-            quote_spanned!(proc_macro2::Span::call_site() => compile_error!(#msg_lit)).into()
+            let msg_lit = Literal::string(e.message());
+            quote_spanned!(e.span() => compile_error!(#msg_lit)).into()
         }
     }
 }

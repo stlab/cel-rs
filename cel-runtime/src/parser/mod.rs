@@ -6,7 +6,8 @@
 //!
 //! # Error Handling
 //!
-//! Parse errors are returned as [`CELError`], which carries a message and source span for diagnostics.
+//! Parse errors are returned as [`ParseError`], which carries a `proc_macro2::Span` for precise diagnostics.
+//! Convert to [`CELError`] (via `From`) when the error must be stored or sent across thread boundaries.
 //! All errors result from malformed input (syntax errors, type mismatches, undefined identifiers).
 //!
 //! # Grammar
@@ -99,86 +100,86 @@ use std::iter::Peekable;
 use std::str::FromStr;
 
 /// Parser result type.
-pub type Result<T> = std::result::Result<T, CELError>;
+pub type Result<T> = std::result::Result<T, ParseError>;
 
 fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
     match lit {
         CelLiteral::Int(integer) => {
             match integer.suffix() {
                 "" | "i32" => output.just(integer.base10_parse::<i32>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid i32 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 "u8" => output.just(integer.base10_parse::<u8>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid u8 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 "u16" => output.just(integer.base10_parse::<u16>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid u16 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 "u32" => output.just(integer.base10_parse::<u32>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid u32 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 "u64" => output.just(integer.base10_parse::<u64>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid u64 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 "u128" => output.just(integer.base10_parse::<u128>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid u128 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 "usize" => output.just(integer.base10_parse::<usize>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid usize literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 "i8" => output.just(integer.base10_parse::<i8>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid i8 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 "i16" => output.just(integer.base10_parse::<i16>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid i16 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 "i64" => output.just(integer.base10_parse::<i64>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid i64 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 "i128" => output.just(integer.base10_parse::<i128>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid i128 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 "isize" => output.just(integer.base10_parse::<isize>().map_err(|e| {
-                    CELError::with_proc_macro_span(
+                    ParseError::new(
                         format!("invalid isize literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
                 suffix => {
-                    return Err(CELError::with_proc_macro_span(
+                    return Err(ParseError::new(
                         format!("invalid integer literal suffix: `{suffix}`"),
                         integer.span(),
                     ));
@@ -188,19 +189,13 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
         CelLiteral::Float(float) => {
             match float.suffix() {
                 "" | "f64" => output.just(float.base10_parse::<f64>().map_err(|e| {
-                    CELError::with_proc_macro_span(
-                        format!("invalid f64 literal `{float}`: {e}"),
-                        float.span(),
-                    )
+                    ParseError::new(format!("invalid f64 literal `{float}`: {e}"), float.span())
                 })?),
                 "f32" => output.just(float.base10_parse::<f32>().map_err(|e| {
-                    CELError::with_proc_macro_span(
-                        format!("invalid f32 literal `{float}`: {e}"),
-                        float.span(),
-                    )
+                    ParseError::new(format!("invalid f32 literal `{float}`: {e}"), float.span())
                 })?),
                 suffix => {
-                    return Err(CELError::with_proc_macro_span(
+                    return Err(ParseError::new(
                         format!("invalid float literal suffix: `{suffix}`"),
                         float.span(),
                     ));
@@ -226,7 +221,7 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
             output.just(c_str.value());
         }
         other => {
-            return Err(CELError::with_proc_macro_span(
+            return Err(ParseError::new(
                 format!("unsupported literal: {other:?}"),
                 other.span(),
             ));
@@ -335,7 +330,7 @@ impl CELParser {
     /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
     pub fn parse_str(&mut self, s: &str) -> Result<DynSegment> {
         let input = TokenStream::from_str(s)
-            .map_err(|e| CELError::with_proc_macro_span(format!("lex: {}", e), e.span()))?;
+            .map_err(|e| ParseError::new(format!("lex: {}", e), e.span()))?;
         self.parse_tokens(input.into_iter())
     }
 
@@ -386,8 +381,8 @@ impl CELParser {
         self.tokens.as_mut().expect("tokens set").peek()
     }
 
-    /// Builds a [`CELError`] at the current token's span (or call_site if no token).
-    fn error_at(&mut self, message: &str) -> CELError {
+    /// Builds a [`ParseError`] at the current token's span (or call_site if no token).
+    fn error_at(&mut self, message: &str) -> ParseError {
         let span = match self.peek_token() {
             Some(token) => {
                 use lex_lexer::HasSpan;
@@ -395,7 +390,7 @@ impl CELParser {
             }
             None => Span::call_site(),
         };
-        CELError::new(message, SourceSpan::from_proc_macro2(span))
+        ParseError::new(message, span)
     }
 
     fn is_punctuation(&mut self, target: &str) -> bool {
@@ -742,10 +737,7 @@ impl CELParser {
                 self.op_lookup
                     .lookup(&ident_name, &mut self.context, 0)
                     .map_err(|_| {
-                        CELError::with_proc_macro_span(
-                            format!("Undefined identifier: {ident_name}"),
-                            ident_span,
-                        )
+                        ParseError::new(format!("Undefined identifier: {ident_name}"), ident_span)
                     })?;
 
                 Ok(true)
@@ -1039,8 +1031,8 @@ mod tests {
         };
         eprintln!(
             "DEBUG: span.start.line = {}, span.start.column = {}",
-            err.span().start.line,
-            err.span().start.column
+            err.span().start().line,
+            err.span().start().column
         );
 
         let formatted_error = err.format_rustc_style(source, file!(), line, &Renderer::plain());
@@ -1418,8 +1410,29 @@ mod playground {
         "#;
         match parser.parse_str(source) {
             Ok(mut seg) => println!("{:?}", seg.call0::<bool>()),
-            Err(e) => println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::styled())),
+            Err(e) => println!(
+                "{}",
+                e.format_rustc_style(source, file!(), line, &Renderer::styled())
+            ),
         }
         Ok(())
+    }
+
+    #[test]
+    fn expression_macro_error3() {
+        use CELParser;
+        use op_table::OpLookup;
+
+        let line = line!() + 1;
+        let source = r#"
+            "Hello" + "World" + 32.0
+        "#;
+        match CELParser::new(OpLookup::new()).parse_str(source) {
+            Ok(_) => panic!("expected parse error"),
+            Err(e) => println!(
+                "{}",
+                e.format_rustc_style(source, file!(), line, &Renderer::styled())
+            ),
+        }
     }
 }

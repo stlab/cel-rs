@@ -120,13 +120,6 @@ impl CELError {
         }
     }
 
-    /// Creates a new error from a message and a `proc_macro2::Span`.
-    ///
-    /// Extracts line/column from the span so the resulting error is `Send + Sync`.
-    pub fn with_proc_macro_span(message: impl Into<String>, span: proc_macro2::Span) -> Self {
-        CELError::new(message, SourceSpan::from_proc_macro2(span))
-    }
-
     /// Returns the error message.
     pub fn message(&self) -> &str {
         &self.message
@@ -153,6 +146,7 @@ impl CELError {
     /// use annotate_snippets::Renderer;
     /// use cel_runtime::parser::CELParser;
     /// use cel_runtime::parser::op_table::OpLookup;
+    /// use cel_runtime::CELError;
     ///
     /// let line = line!() + 1;
     /// let source = r#"
@@ -160,6 +154,7 @@ impl CELError {
     /// "#;
     /// let mut parser = CELParser::new(OpLookup::new());
     /// if let Err(e) = parser.parse_str(source) {
+    ///     let e: CELError = e.into();
     ///     println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::styled()));
     /// }
     /// ```
@@ -266,11 +261,11 @@ impl ParseError {
     }
 }
 
+/// Converts a [`ParseError`] to a [`CELError`] by extracting the
+/// [`SourceSpan`] from the token span.
+///
+/// Use this at async/runtime boundaries where `Send + Sync` is required.
 impl From<ParseError> for CELError {
-    /// Converts a [`ParseError`] to a [`CELError`] by extracting the
-    /// [`SourceSpan`] from the token span.
-    ///
-    /// Use this at async/runtime boundaries where `Send + Sync` is required.
     fn from(e: ParseError) -> Self {
         CELError::new(e.message, SourceSpan::from_proc_macro2(e.span))
     }
@@ -307,6 +302,7 @@ mod tests {
         let e = ParseError::new("bad token", Span::call_site());
         let cel: CELError = e.into();
         assert_eq!(cel.message(), "bad token");
+        assert_eq!(cel.span(), SourceSpan::from_proc_macro2(Span::call_site()));
     }
 
     #[test]

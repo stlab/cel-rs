@@ -76,6 +76,6 @@ impl std::str::FromStr for DynSegment {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let mut parser = parser::CELParser::new(OpLookup::new());
-        parser.parse_str(s)
+        parser.parse_str(s).map_err(parser::CELError::from)
     }
 }

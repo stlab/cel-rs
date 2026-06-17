@@ -79,7 +79,9 @@
             "command": "test",
             "args": [
                 "--doc",
-                "--workspace"
+                "--workspace",
+                "--",
+                "--nocapture"
             ],
             "problemMatcher": [
                 "$rustc"
