@@ -31,7 +31,7 @@
 use cel_runtime::{CELParser, OpLookup};
 use proc_macro::TokenStream as ProcMacroTokenStream;
 use proc_macro2::{Literal, TokenStream};
-use quote::quote_spanned;
+use quote::{quote, quote_spanned};
 
 /// Validates that the input contains a valid CEL expression.
 ///
@@ -49,12 +49,17 @@ pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
         Ok(_) => ProcMacroTokenStream::new(),
         Err(e) => {
             let msg_lit = Literal::string(e.message());
-            let mut tokens = quote_spanned!(e.span() => compile_error!(#msg_lit));
+            let start_error = quote_spanned!(e.span() => compile_error!(#msg_lit));
             if let Some(end) = e.end_span() {
                 let end_lit = Literal::string("expression continues here");
-                tokens.extend(quote_spanned!(end => compile_error!(#end_lit)));
+                let end_error = quote_spanned!(end => compile_error!(#end_lit));
+                // Two bare compile_error!() are not valid in expression context;
+                // wrapping in a block makes the expansion a valid block expression
+                // while still causing the compiler to expand both invocations.
+                quote!({ #start_error; #end_error }).into()
+            } else {
+                start_error.into()
             }
-            tokens.into()
         }
     }
 }
