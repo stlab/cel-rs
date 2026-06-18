@@ -338,8 +338,8 @@ impl CELParser {
     ///
     /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
     pub fn parse_str(&mut self, s: &str) -> Result<DynSegment> {
-        let input = TokenStream::from_str(s)
-            .map_err(|e| ParseError::new(e.to_string(), e.span()))?;
+        let input =
+            TokenStream::from_str(s).map_err(|e| ParseError::new(e.to_string(), e.span()))?;
         self.parse_tokens(input.into_iter())
     }
 

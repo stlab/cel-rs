@@ -95,18 +95,18 @@ mod playground {
     }
 
     /*
-    #[test]
-    fn expression_macro_error() {
-        let result = cel_rs_macros::expression! {
-            "Hello" + "World" + 32.0;
-        };
-    }
+        #[test]
+        fn expression_macro_error() {
+            let result = cel_rs_macros::expression! {
+                "Hello" + "World" + 32.0;
+            };
+        }
 
-    #[test]
-    fn expression_macro_error2() {
-        let result = cel_rs_macros::expression! {
-            "Hello" + "World" + 32.0
-        };
-    }
+        #[test]
+        fn expression_macro_error2() {
+            let result = cel_rs_macros::expression! {
+                "Hello" + "World" + 32.0
+            };
+        }
     */
 }
