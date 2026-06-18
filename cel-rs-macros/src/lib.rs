@@ -49,7 +49,12 @@ pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
         Ok(_) => ProcMacroTokenStream::new(),
         Err(e) => {
             let msg_lit = Literal::string(e.message());
-            quote_spanned!(e.span() => compile_error!(#msg_lit)).into()
+            let mut tokens = quote_spanned!(e.span() => compile_error!(#msg_lit));
+            if let Some(end) = e.end_span() {
+                let end_lit = Literal::string("expression continues here");
+                tokens.extend(quote_spanned!(end => compile_error!(#end_lit)));
+            }
+            tokens.into()
         }
     }
 }
