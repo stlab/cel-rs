@@ -102,15 +102,6 @@ use std::str::FromStr;
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, ParseError>;
 
-/// Joins two spans into one covering both, falling back to `start` when the underlying
-/// compiler does not support `Span::join` (e.g. stable Rust inside a proc-macro, where
-/// `proc_macro2` gates `join` behind the `proc_macro_span` nightly feature).
-///
-/// The fallback span is `start`, not `end`, so callers always point at least at the
-/// beginning of the sub-expression being reported.
-fn join_spans(start: Span, end: Span) -> Span {
-    start.join(end).unwrap_or(start)
-}
 
 fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
     match lit {
@@ -455,9 +446,13 @@ impl CELParser {
                 if !self.is_and_expression()? {
                     return Err(self.error_at("expected and_expression"));
                 }
-                let expr_span =
-                    join_spans(start_span.expect("production has token at start"), self.last_span);
-                self.op_lookup.lookup("||", &mut self.context, 2, expr_span)?;
+                self.op_lookup.lookup(
+                    "||",
+                    &mut self.context,
+                    2,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
             }
             Ok(true)
         } else {
@@ -473,9 +468,13 @@ impl CELParser {
                 if !self.is_comparison_expression()? {
                     return Err(self.error_at("expected comparison_expression"));
                 }
-                let expr_span =
-                    join_spans(start_span.expect("production has token at start"), self.last_span);
-                self.op_lookup.lookup("&&", &mut self.context, 2, expr_span)?;
+                self.op_lookup.lookup(
+                    "&&",
+                    &mut self.context,
+                    2,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
             }
             Ok(true)
         } else {
@@ -508,9 +507,13 @@ impl CELParser {
                 if !self.is_bitwise_or_expression()? {
                     return Err(self.error_at("expected bitwise_or_expression"));
                 }
-                let expr_span =
-                    join_spans(start_span.expect("production has token at start"), self.last_span);
-                self.op_lookup.lookup(op_name, &mut self.context, 2, expr_span)?;
+                self.op_lookup.lookup(
+                    op_name,
+                    &mut self.context,
+                    2,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
             }
             Ok(true)
         } else {
@@ -526,9 +529,13 @@ impl CELParser {
                 if !self.is_bitwise_xor_expression()? {
                     return Err(self.error_at("expected bitwise_xor_expression"));
                 }
-                let expr_span =
-                    join_spans(start_span.expect("production has token at start"), self.last_span);
-                self.op_lookup.lookup("|", &mut self.context, 2, expr_span)?;
+                self.op_lookup.lookup(
+                    "|",
+                    &mut self.context,
+                    2,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
             }
             Ok(true)
         } else {
@@ -544,9 +551,13 @@ impl CELParser {
                 if !self.is_bitwise_and_expression()? {
                     return Err(self.error_at("expected bitwise_and_expression"));
                 }
-                let expr_span =
-                    join_spans(start_span.expect("production has token at start"), self.last_span);
-                self.op_lookup.lookup("^", &mut self.context, 2, expr_span)?;
+                self.op_lookup.lookup(
+                    "^",
+                    &mut self.context,
+                    2,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
             }
             Ok(true)
         } else {
@@ -562,9 +573,13 @@ impl CELParser {
                 if !self.is_bitwise_shift_expression()? {
                     return Err(self.error_at("expected bitwise_shift_expression"));
                 }
-                let expr_span =
-                    join_spans(start_span.expect("production has token at start"), self.last_span);
-                self.op_lookup.lookup("&", &mut self.context, 2, expr_span)?;
+                self.op_lookup.lookup(
+                    "&",
+                    &mut self.context,
+                    2,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
             }
             Ok(true)
         } else {
@@ -589,11 +604,13 @@ impl CELParser {
                     if !self.is_additive_expression()? {
                         return Err(self.error_at("expected additive_expression"));
                     }
-                    let expr_span = join_spans(
+                    self.op_lookup.lookup(
+                        op_name,
+                        &mut self.context,
+                        2,
                         start_span.expect("production has token at start"),
                         self.last_span,
-                    );
-                    self.op_lookup.lookup(op_name, &mut self.context, 2, expr_span)?;
+                    )?;
                 } else {
                     break;
                 }
@@ -621,11 +638,13 @@ impl CELParser {
                     if !self.is_multiplicative_expression()? {
                         return Err(self.error_at("expected multiplicative_expression"));
                     }
-                    let expr_span = join_spans(
+                    self.op_lookup.lookup(
+                        op_name,
+                        &mut self.context,
+                        2,
                         start_span.expect("production has token at start"),
                         self.last_span,
-                    );
-                    self.op_lookup.lookup(op_name, &mut self.context, 2, expr_span)?;
+                    )?;
                 } else {
                     break;
                 }
@@ -655,11 +674,13 @@ impl CELParser {
                     if !self.is_unary_expression()? {
                         return Err(self.error_at("expected unary_expression"));
                     }
-                    let expr_span = join_spans(
+                    self.op_lookup.lookup(
+                        op_name,
+                        &mut self.context,
+                        2,
                         start_span.expect("production has token at start"),
                         self.last_span,
-                    );
-                    self.op_lookup.lookup(op_name, &mut self.context, 2, expr_span)?;
+                    )?;
                 } else {
                     break;
                 }
@@ -685,9 +706,13 @@ impl CELParser {
             if !self.is_unary_expression()? {
                 return Err(self.error_at("expected unary_expression"));
             }
-            let expr_span =
-                join_spans(start_span.expect("production has token at start"), self.last_span);
-            self.op_lookup.lookup(op_name, &mut self.context, 1, expr_span)?;
+            self.op_lookup.lookup(
+                op_name,
+                &mut self.context,
+                1,
+                start_span.expect("production has token at start"),
+                self.last_span,
+            )?;
             Ok(true)
         } else {
             self.is_postfix_expression()
@@ -719,10 +744,13 @@ impl CELParser {
                 _ => return Err(self.error_at("expected closing parenthesis")),
             }
             // Stack order is [callee, arg1, arg2, ...]; lookup peeks top (arg_count + 1) entries.
-            let expr_span =
-                join_spans(start_span.expect("production has token at start"), self.last_span);
-            self.op_lookup
-                .lookup("()", &mut self.context, arg_count + 1, expr_span)?;
+            self.op_lookup.lookup(
+                "()",
+                &mut self.context,
+                arg_count + 1,
+                start_span.expect("production has token at start"),
+                self.last_span,
+            )?;
         }
         Ok(true)
     }
@@ -759,7 +787,7 @@ impl CELParser {
                 self.advance();
 
                 self.op_lookup
-                    .lookup(&ident_name, &mut self.context, 0, ident_span)
+                    .lookup(&ident_name, &mut self.context, 0, ident_span, ident_span)
                     .map_err(|_| {
                         ParseError::new(format!("Undefined identifier: {ident_name}"), ident_span)
                     })?;
@@ -1425,13 +1453,12 @@ mod tests {
             "expected 'operation error:' prefix, got: {}",
             err.message()
         );
-        // After the fix the joined span runs from col 0 ("Hello") to col 14 (past 32.0).
-        // Before the fix error_at() at EOF produces call_site() whose end.column is 0.
-        let end_col = err.span().end().column;
+        // err.span() is the start ("Hello", col 0–7); end_span() is the end (32.0, end col 14).
+        let end_span = err.end_span().expect("op-lookup errors carry an end span");
         assert!(
-            end_col >= 14,
-            "span should reach the end of 32.0 (expected end.column >= 14, got {})",
-            end_col
+            end_span.end().column >= 14,
+            "end span should reach the end of 32.0 (expected end.column >= 14, got {})",
+            end_span.end().column
         );
     }
 }
