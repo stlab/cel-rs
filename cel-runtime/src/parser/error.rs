@@ -202,6 +202,16 @@ pub struct ParseError {
 
 impl ParseError {
     /// Creates a new parse error with the given message and token span.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use proc_macro2::Span;
+    /// use cel_runtime::parser::ParseError;
+    ///
+    /// let e = ParseError::new("unexpected token", Span::call_site());
+    /// assert_eq!(e.message(), "unexpected token");
+    /// ```
     pub fn new(message: impl Into<String>, span: proc_macro2::Span) -> Self {
         ParseError {
             message: message.into(),
@@ -216,6 +226,19 @@ impl ParseError {
     /// sub-expression rather than a single token. At runtime the two spans
     /// are merged into a contiguous underline; at compile time two separate
     /// `compile_error!()` diagnostics are emitted.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use proc_macro2::Span;
+    /// use cel_runtime::parser::ParseError;
+    ///
+    /// let start = Span::call_site();
+    /// let end = Span::call_site();
+    /// let e = ParseError::new_range("type mismatch", start, end);
+    /// assert_eq!(e.message(), "type mismatch");
+    /// assert!(e.end_span().is_some());
+    /// ```
     pub fn new_range(
         message: impl Into<String>,
         start: proc_macro2::Span,
@@ -363,11 +386,20 @@ mod tests {
 
     #[test]
     fn parse_error_new_range_cel_error_merges_spans() {
-        let start = Span::call_site();
-        let end = Span::call_site();
+        // Use a token stream so start and end have distinct, meaningful positions.
+        let ts: proc_macro2::TokenStream = r#""Hello" 32.0"#.parse().unwrap();
+        let mut iter = ts.into_iter();
+        let start_tok = iter.next().unwrap(); // "Hello"
+        let end_tok = iter.next().unwrap();   // 32.0
+        let start = start_tok.span();
+        let end = end_tok.span();
+
         let e = ParseError::new_range("type mismatch", start, end);
         let cel: CELError = e.into();
+
         assert_eq!(cel.message(), "type mismatch");
+        assert_eq!(cel.span().start, start.start(), "CELError span should start at expression start");
+        assert_eq!(cel.span().end, end.end(), "CELError span should end at expression end");
     }
 
     #[test]
