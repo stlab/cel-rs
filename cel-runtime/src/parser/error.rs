@@ -186,7 +186,8 @@ impl std::fmt::Display for CELError {
 
 impl std::error::Error for CELError {}
 
-/// A parse error carrying the original `proc_macro2::Span` of the offending token.
+/// A parse error carrying the original `proc_macro2::Span` of the offending token or
+/// expression start, plus an optional end span for range errors.
 ///
 /// Used as the return type of all parser methods. Not `Send + Sync` because
 /// `proc_macro2::Span` wraps a compiler-internal handle that is only valid on
@@ -196,6 +197,7 @@ impl std::error::Error for CELError {}
 pub struct ParseError {
     message: String,
     span: proc_macro2::Span,
+    end_span: Option<proc_macro2::Span>,
 }
 
 impl ParseError {
@@ -204,6 +206,25 @@ impl ParseError {
         ParseError {
             message: message.into(),
             span,
+            end_span: None,
+        }
+    }
+
+    /// Creates a parse error spanning a sub-expression from `start` to `end`.
+    ///
+    /// Use this for op-lookup failures where the error implicates a full
+    /// sub-expression rather than a single token. At runtime the two spans
+    /// are merged into a contiguous underline; at compile time two separate
+    /// `compile_error!()` diagnostics are emitted.
+    pub fn new_range(
+        message: impl Into<String>,
+        start: proc_macro2::Span,
+        end: proc_macro2::Span,
+    ) -> Self {
+        ParseError {
+            message: message.into(),
+            span: start,
+            end_span: Some(end),
         }
     }
 
@@ -218,6 +239,14 @@ impl ParseError {
     /// `compile_error!` to the exact source location.
     pub fn span(&self) -> proc_macro2::Span {
         self.span
+    }
+
+    /// Returns the end span of this error, or `None` for single-point errors.
+    ///
+    /// `Some` for errors created with [`new_range`](Self::new_range);
+    /// `None` for errors created with [`new`](Self::new).
+    pub fn end_span(&self) -> Option<proc_macro2::Span> {
+        self.end_span
     }
 
     /// Formats this error in rustc diagnostic style with source context.
@@ -247,7 +276,10 @@ impl ParseError {
         start_line: u32,
         renderer: &Renderer,
     ) -> String {
-        let source_span = SourceSpan::from_proc_macro2(self.span);
+        let source_span = SourceSpan {
+            start: self.span.start(),
+            end: self.end_span.unwrap_or(self.span).end(),
+        };
         let byte_range = span_to_byte_range(source_code, source_span);
         let report = [
             Group::with_title(Level::ERROR.primary_title(self.message.as_str())).element(
@@ -267,7 +299,11 @@ impl ParseError {
 /// Use this at async/runtime boundaries where `Send + Sync` is required.
 impl From<ParseError> for CELError {
     fn from(e: ParseError) -> Self {
-        CELError::new(e.message, SourceSpan::from_proc_macro2(e.span))
+        let source_span = SourceSpan {
+            start: e.span.start(),
+            end: e.end_span.unwrap_or(e.span).end(),
+        };
+        CELError::new(e.message, source_span)
     }
 }
 
@@ -314,5 +350,29 @@ mod tests {
         let formatted = e.format_rustc_style(source, "test.cel", 1, &Renderer::plain());
         assert!(formatted.contains("error: unexpected token"));
         assert!(formatted.contains("test.cel"));
+    }
+
+    #[test]
+    fn parse_error_new_range_has_end_span() {
+        let start = Span::call_site();
+        let end = Span::call_site();
+        let e = ParseError::new_range("type mismatch", start, end);
+        assert_eq!(e.message(), "type mismatch");
+        assert!(e.end_span().is_some());
+    }
+
+    #[test]
+    fn parse_error_new_range_cel_error_merges_spans() {
+        let start = Span::call_site();
+        let end = Span::call_site();
+        let e = ParseError::new_range("type mismatch", start, end);
+        let cel: CELError = e.into();
+        assert_eq!(cel.message(), "type mismatch");
+    }
+
+    #[test]
+    fn parse_error_new_has_no_end_span() {
+        let e = ParseError::new("bad token", Span::call_site());
+        assert!(e.end_span().is_none());
     }
 }
