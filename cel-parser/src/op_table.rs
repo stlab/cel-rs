@@ -26,8 +26,8 @@
 //! - **Bit-shift with out-of-range count**: CEL returns `Err` rather than panicking (debug)
 //!   or masking the shift count (release).
 
-use crate::DynSegment;
 use anyhow::{Result, anyhow};
+use cel_runtime::DynSegment;
 use once_cell::sync::Lazy;
 use phf::phf_map;
 use std::any::TypeId;
@@ -789,7 +789,7 @@ impl BuiltinScope {
 /// # Examples
 ///
 /// ```rust
-/// use cel_runtime::parser::op_table::OpLookup;
+/// use cel_parser::op_table::OpLookup;
 /// use cel_runtime::DynSegment;
 /// use std::any::TypeId;
 ///
@@ -813,7 +813,7 @@ impl OpLookup {
     /// # Examples
     ///
     /// ```rust
-    /// use cel_runtime::OpLookup;
+    /// use cel_parser::OpLookup;
     ///
     /// let lookup = OpLookup::new();
     /// ```
@@ -850,7 +850,7 @@ impl OpLookup {
     ///
     /// # Errors
     ///
-    /// Returns a [`super::ParseError`] spanning `start..=end` if no scope or built-in
+    /// Returns a [`crate::ParseError`] spanning `start..=end` if no scope or built-in
     /// handles the request, or if a scope itself returns an error.
     ///
     /// - Complexity: O(k) in the number of registered scopes, plus O(s) for the built-in
@@ -860,7 +860,7 @@ impl OpLookup {
     ///
     /// ```rust
     /// use proc_macro2::Span;
-    /// use cel_runtime::OpLookup;
+    /// use cel_parser::OpLookup;
     /// use cel_runtime::DynSegment;
     ///
     /// let lookup = OpLookup::new();
@@ -878,18 +878,12 @@ impl OpLookup {
         num_operands: usize,
         start: proc_macro2::Span,
         end: proc_macro2::Span,
-    ) -> std::result::Result<(), super::ParseError> {
+    ) -> std::result::Result<(), crate::ParseError> {
         for scope in self.scopes.iter().rev() {
             match scope(name, segment, num_operands) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
-                Err(e) => {
-                    return Err(super::ParseError::new_range(
-                        e.to_string(),
-                        start,
-                        end,
-                    ))
-                }
+                Err(e) => return Err(crate::ParseError::new_range(e.to_string(), start, end)),
             }
         }
 
@@ -897,16 +891,16 @@ impl OpLookup {
             Ok(true) => return Ok(()),
             Ok(false) => {}
             Err(e) => {
-                return Err(super::ParseError::new_range(
+                return Err(crate::ParseError::new_range(
                     format!("operation error: {}", e),
                     start,
                     end,
-                ))
+                ));
             }
         }
 
         if num_operands == 0 {
-            return Err(super::ParseError::new(
+            return Err(crate::ParseError::new(
                 format!("undefined identifier: `{name}`"),
                 start,
             ));
@@ -921,7 +915,7 @@ impl OpLookup {
             type_names.push_str(info.type_name.as_ref());
             type_names.push('`');
         }
-        Err(super::ParseError::new_range(
+        Err(crate::ParseError::new_range(
             format!("no operation `{name}` for types [{type_names}]"),
             start,
             end,
@@ -1085,7 +1079,13 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
-        let result = lookup.lookup("unknown_op", &mut segment, 2, Span::call_site(), Span::call_site());
+        let result = lookup.lookup(
+            "unknown_op",
+            &mut segment,
+            2,
+            Span::call_site(),
+            Span::call_site(),
+        );
         assert!(result.is_err());
     }
 
@@ -1093,7 +1093,6 @@ mod tests {
     fn test_custom_scope() -> Result<()> {
         let mut lookup = OpLookup::new();
 
-        // Add a custom scope that handles "double"
         lookup.push_scope(|name, segment, num_operands| {
             let matches = {
                 let top = segment.peek_stack_infos(num_operands);
@@ -1109,7 +1108,13 @@ mod tests {
 
         let mut segment = DynSegment::new::<()>();
         segment.just(21u32);
-        lookup.lookup("double", &mut segment, 1, Span::call_site(), Span::call_site())?;
+        lookup.lookup(
+            "double",
+            &mut segment,
+            1,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
         assert_eq!(segment.call0::<u32>()?, 42);
 
         Ok(())
@@ -1119,7 +1124,6 @@ mod tests {
     fn test_scope_override() -> Result<()> {
         let mut lookup = OpLookup::new();
 
-        // Override addition to always return 100
         lookup.push_scope(|name, segment, num_operands| {
             let matches = {
                 let top = segment.peek_stack_infos(num_operands);
@@ -1223,7 +1227,11 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(1u32);
         segment.just(3.0f64);
-        assert!(lookup.lookup("<<", &mut segment, 2, Span::call_site(), Span::call_site()).is_err());
+        assert!(
+            lookup
+                .lookup("<<", &mut segment, 2, Span::call_site(), Span::call_site())
+                .is_err()
+        );
     }
 
     #[test]
@@ -1243,14 +1251,12 @@ mod tests {
             }
         });
 
-        // Test with override
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);
         segment.just(20u32);
         lookup.lookup("+", &mut segment, 2, Span::call_site(), Span::call_site())?;
         assert_eq!(segment.call0::<u32>()?, 100);
 
-        // Pop scope and test normal behavior
         lookup.pop_scope();
         let mut segment = DynSegment::new::<()>();
         segment.just(10u32);

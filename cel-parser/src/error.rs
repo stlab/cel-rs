@@ -37,7 +37,7 @@ impl SourceSpan {
     /// # Examples
     ///
     /// ```rust
-    /// use cel_runtime::parser::SourceSpan;
+    /// use cel_parser::SourceSpan;
     ///
     /// let span = SourceSpan::new(1, 0, 1, 5);
     /// assert_eq!(span.start.line, 1);
@@ -66,7 +66,7 @@ impl SourceSpan {
     ///
     /// ```rust
     /// use proc_macro2::Span;
-    /// use cel_runtime::parser::SourceSpan;
+    /// use cel_parser::SourceSpan;
     ///
     /// let span = SourceSpan::from_proc_macro2(Span::call_site());
     /// assert_eq!(span.start.line, span.end.line);
@@ -137,8 +137,8 @@ impl CELError {
     /// # Examples
     ///
     /// ```rust
-    /// use cel_runtime::CELError;
-    /// use cel_runtime::parser::SourceSpan;
+    /// use cel_parser::CELError;
+    /// use cel_parser::SourceSpan;
     ///
     /// let span = SourceSpan::default();
     /// let e = CELError::new("unexpected token", span);
@@ -156,8 +156,8 @@ impl CELError {
     /// # Examples
     ///
     /// ```rust
-    /// use cel_runtime::CELError;
-    /// use cel_runtime::parser::SourceSpan;
+    /// use cel_parser::CELError;
+    /// use cel_parser::SourceSpan;
     ///
     /// let e = CELError::new("bad input", SourceSpan::default());
     /// assert_eq!(e.message(), "bad input");
@@ -171,8 +171,8 @@ impl CELError {
     /// # Examples
     ///
     /// ```rust
-    /// use cel_runtime::CELError;
-    /// use cel_runtime::parser::SourceSpan;
+    /// use cel_parser::CELError;
+    /// use cel_parser::SourceSpan;
     ///
     /// let span = SourceSpan::default();
     /// let e = CELError::new("bad input", span);
@@ -196,9 +196,9 @@ impl CELError {
     ///
     /// ```rust
     /// use annotate_snippets::Renderer;
-    /// use cel_runtime::parser::CELParser;
-    /// use cel_runtime::parser::op_table::OpLookup;
-    /// use cel_runtime::CELError;
+    /// use cel_parser::CELParser;
+    /// use cel_parser::op_table::OpLookup;
+    /// use cel_parser::CELError;
     ///
     /// let line = line!() + 1;
     /// let source = r#"
@@ -259,7 +259,7 @@ impl ParseError {
     ///
     /// ```rust
     /// use proc_macro2::Span;
-    /// use cel_runtime::parser::ParseError;
+    /// use cel_parser::ParseError;
     ///
     /// let e = ParseError::new("unexpected token", Span::call_site());
     /// assert_eq!(e.message(), "unexpected token");
@@ -283,7 +283,7 @@ impl ParseError {
     ///
     /// ```rust
     /// use proc_macro2::Span;
-    /// use cel_runtime::parser::ParseError;
+    /// use cel_parser::ParseError;
     ///
     /// let start = Span::call_site();
     /// let end = Span::call_site();
@@ -334,8 +334,8 @@ impl ParseError {
     ///
     /// ```rust
     /// use annotate_snippets::Renderer;
-    /// use cel_runtime::parser::CELParser;
-    /// use cel_runtime::OpLookup;
+    /// use cel_parser::CELParser;
+    /// use cel_parser::OpLookup;
     ///
     /// let line = line!() + 1;
     /// let source = "10 + 20 30";
@@ -419,8 +419,6 @@ mod tests {
     #[test]
     fn parse_error_format_rustc_style() {
         let source = "10 + 20 30";
-        // We can only use call_site() in unit tests; the caret position
-        // won't be meaningful, but the message and file path must appear.
         let e = ParseError::new("unexpected token", Span::call_site());
         let formatted = e.format_rustc_style(source, "test.cel", 1, &Renderer::plain());
         assert!(formatted.contains("error: unexpected token"));
@@ -438,11 +436,10 @@ mod tests {
 
     #[test]
     fn parse_error_new_range_cel_error_merges_spans() {
-        // Use a token stream so start and end have distinct, meaningful positions.
         let ts: proc_macro2::TokenStream = r#""Hello" 32.0"#.parse().unwrap();
         let mut iter = ts.into_iter();
-        let start_tok = iter.next().unwrap(); // "Hello"
-        let end_tok = iter.next().unwrap();   // 32.0
+        let start_tok = iter.next().unwrap();
+        let end_tok = iter.next().unwrap();
         let start = start_tok.span();
         let end = end_tok.span();
 
@@ -450,8 +447,16 @@ mod tests {
         let cel: CELError = e.into();
 
         assert_eq!(cel.message(), "type mismatch");
-        assert_eq!(cel.span().start, start.start(), "CELError span should start at expression start");
-        assert_eq!(cel.span().end, end.end(), "CELError span should end at expression end");
+        assert_eq!(
+            cel.span().start,
+            start.start(),
+            "CELError span should start at expression start"
+        );
+        assert_eq!(
+            cel.span().end,
+            end.end(),
+            "CELError span should end at expression end"
+        );
     }
 
     #[test]

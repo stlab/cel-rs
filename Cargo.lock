@@ -26,9 +26,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "cel-parser"
+version = "0.1.0"
+dependencies = [
+ "annotate-snippets",
+ "anyhow",
+ "cel-runtime",
+ "once_cell",
+ "phf",
+ "proc-macro2",
+ "syn",
+]
+
+[[package]]
 name = "cel-rs"
 version = "0.1.0"
 dependencies = [
+ "cel-parser",
  "cel-rs-macros",
  "cel-runtime",
  "proc-macro2",
@@ -38,7 +52,7 @@ dependencies = [
 name = "cel-rs-macros"
 version = "0.1.0"
 dependencies = [
- "cel-runtime",
+ "cel-parser",
  "proc-macro2",
  "quote",
  "trybuild",
@@ -48,13 +62,7 @@ dependencies = [
 name = "cel-runtime"
 version = "0.1.0"
 dependencies = [
- "annotate-snippets",
  "anyhow",
- "once_cell",
- "phf",
- "proc-macro2",
- "quote",
- "syn",
  "typenum",
 ]
 

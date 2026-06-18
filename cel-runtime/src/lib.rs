@@ -40,8 +40,6 @@ pub mod dyn_segment;
 pub mod list_traits;
 /// Memory management and alignment utilities for the runtime.
 pub mod memory;
-/// Recursive descent parser for CEL expressions.
-pub mod parser;
 /// Raw segment implementation without type safety.
 pub mod raw_segment;
 /// Raw sequence implementation for operation sequences.
@@ -65,17 +63,3 @@ pub use raw_stack::*;
 pub use raw_vec::*;
 pub use segment::*;
 //pub use tuple_list::*;
-
-pub use parser::CELError;
-pub use parser::CELParser;
-pub use parser::ParseError;
-pub use parser::op_table::OpLookup;
-
-impl std::str::FromStr for DynSegment {
-    type Err = parser::CELError;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let mut parser = parser::CELParser::new(OpLookup::new());
-        parser.parse_str(s).map_err(parser::CELError::from)
-    }
-}

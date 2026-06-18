@@ -28,7 +28,7 @@
 //! };
 //! ```
 
-use cel_runtime::{CELParser, OpLookup};
+use cel_parser::{CELParser, OpLookup};
 use proc_macro::TokenStream as ProcMacroTokenStream;
 use proc_macro2::{Literal, TokenStream};
 use quote::{quote, quote_spanned};

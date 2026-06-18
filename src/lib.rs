@@ -27,7 +27,7 @@
 //! ## Using the Parser
 //!
 //! ```rust
-//! use cel_rs::cel_runtime::{CELParser, OpLookup};
+//! use cel_rs::cel_parser::{CELParser, OpLookup};
 //! use proc_macro2::TokenStream;
 //! use std::str::FromStr;
 //!
@@ -48,6 +48,7 @@
 //! };
 //! ```
 
+pub use cel_parser;
 pub use cel_rs_macros;
 pub use cel_runtime;
 
@@ -57,9 +58,9 @@ pub mod runtime {
     pub use cel_runtime::*;
 }
 
-/// Re-exports for the CEL parser (part of cel-runtime).
+/// Re-exports for the CEL parser.
 pub mod parser {
-    pub use cel_runtime::parser::{CELParser, op_table::OpLookup};
+    pub use cel_parser::{CELParser, op_table::OpLookup};
 }
 
 /// Re-exports from the cel-rs-macros crate for convenient access.

@@ -37,10 +37,9 @@
 //! # Examples
 //!
 //! ```rust
-//! use cel_runtime::DynSegment;
-//! use std::str::FromStr;
+//! use cel_parser::{CELParser, OpLookup};
 //!
-//! let mut segment: DynSegment = "10u32 + 20u32 * 5u32".parse().unwrap();
+//! let mut segment = CELParser::new(OpLookup::new()).parse_str("10u32 + 20u32 * 5u32").unwrap();
 //! let result = segment.call0::<u32>();
 //! assert!(result.is_ok());
 //! assert_eq!(result.unwrap(), 110); // 10 + 20 * 5 = 10 + 100
@@ -49,8 +48,8 @@
 //! ## Basic Usage
 //!
 //! ```rust
-//! use cel_runtime::parser::CELParser;
-//! use cel_runtime::OpLookup;
+//! use cel_parser::CELParser;
+//! use cel_parser::OpLookup;
 //! use proc_macro2::TokenStream;
 //! use std::str::FromStr;
 //!
@@ -65,8 +64,8 @@
 //!
 //! ```rust
 //! use annotate_snippets::Renderer;
-//! use cel_runtime::parser::CELParser;
-//! use cel_runtime::OpLookup;
+//! use cel_parser::CELParser;
+//! use cel_parser::OpLookup;
 //! use proc_macro2::TokenStream;
 //! use std::str::FromStr;
 //!
@@ -89,12 +88,12 @@ mod lex_lexer;
 pub mod op_table;
 
 pub use error::{CELError, ParseError, SourceSpan};
+pub use op_table::OpLookup;
 pub use proc_macro2::LineColumn;
 
 use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};
-use op_table::OpLookup;
 
-use crate::DynSegment;
+use cel_runtime::DynSegment;
 use proc_macro2::{Delimiter, Span, TokenStream};
 use std::iter::Peekable;
 use std::str::FromStr;
@@ -243,8 +242,8 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
 /// ## Basic Usage
 ///
 /// ```rust
-/// use cel_runtime::OpLookup;
-/// use cel_runtime::parser::CELParser;
+/// use cel_parser::OpLookup;
+/// use cel_parser::CELParser;
 /// use proc_macro2::TokenStream;
 /// use std::str::FromStr;
 ///
@@ -259,8 +258,8 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
 ///
 /// ```rust
 /// use annotate_snippets::Renderer;
-/// use cel_runtime::OpLookup;
-/// use cel_runtime::parser::CELParser;
+/// use cel_parser::OpLookup;
+/// use cel_parser::CELParser;
 /// use proc_macro2::TokenStream;
 /// use std::str::FromStr;
 ///
@@ -351,8 +350,8 @@ impl CELParser {
     /// # Examples
     ///
     /// ```rust
-    /// use cel_runtime::parser::op_table::OpLookup;
-    /// use cel_runtime::parser::CELParser;
+    /// use cel_parser::op_table::OpLookup;
+    /// use cel_parser::CELParser;
     /// use cel_runtime::DynSegment;
     /// use proc_macro2::TokenStream;
     /// use std::any::TypeId;
@@ -992,7 +991,7 @@ mod tests {
             "Failed to parse !!true: {}",
             result.err().unwrap()
         );
-        assert_eq!(result.unwrap().call0::<bool>().unwrap(), true); // !!true = true
+        assert_eq!(result.unwrap().call0::<bool>().unwrap(), true);
     }
 
     #[test]
@@ -1095,11 +1094,6 @@ mod tests {
 
         let formatted = formatted_error;
 
-        // The source string has 3 lines:
-        // Line 0: empty
-        // Line 1: empty
-        // Line 2: "         10 + 20  30 // Unexpected token"
-        // So the error should be on line + 2
         let expected_line = line + 2;
 
         assert!(
@@ -1154,7 +1148,7 @@ mod tests {
             .parse_str("10 + 20 * 3")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<i32>()?;
-        assert_eq!(result, 70); // 10 + (20 * 3) = 10 + 60 = 70
+        assert_eq!(result, 70);
         Ok(())
     }
 
@@ -1165,7 +1159,7 @@ mod tests {
             .parse_str("(10 + 20) * 3")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<i32>()?;
-        assert_eq!(result, 90); // (10 + 20) * 3 = 30 * 3 = 90
+        assert_eq!(result, 90);
         Ok(())
     }
 
@@ -1373,7 +1367,6 @@ mod tests {
                 Ok(true)
             }
             ("()", 3) => {
-                // callee T (bottom), arg1 U, arg2 V (top)
                 segment.op3(|_callee: i32, arg1: i32, arg2: i32| arg1 + arg2)?;
                 Ok(true)
             }
@@ -1469,7 +1462,6 @@ mod tests {
 
     #[test]
     fn op_type_mismatch_error_spans_full_expression() {
-        // Source: "Hello" at cols 0-6, + at col 8, 32.0 at cols 10-13 (end col 14 exclusive)
         let source = r#""Hello" + 32.0"#;
         let mut parser = CELParser::new(OpLookup::new());
         let err = match parser.parse_str(source) {
@@ -1481,7 +1473,6 @@ mod tests {
             "expected 'no operation' prefix, got: {}",
             err.message()
         );
-        // err.span() is the start ("Hello", col 0–7); end_span() is the end (32.0, end col 14).
         let end_span = err.end_span().expect("op-lookup errors carry an end span");
         assert!(
             end_span.end().column >= 14,
@@ -1491,7 +1482,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "playground"))]
+#[cfg(test)]
 mod playground {
     use super::*;
     use annotate_snippets::Renderer;

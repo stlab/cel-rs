@@ -6,6 +6,7 @@ description = "A stack-based runtime for developing domain specific languages"
 
 [dependencies]
 cel-runtime = { path = "./cel-runtime" }
+cel-parser = { path = "./cel-parser" }
 cel-rs-macros = { path = "./cel-rs-macros" }
 proc-macro2 = "1.0"
 
@@ -21,6 +22,7 @@ missing_docs = "warn"
 [workspace]
 members = [
     "cel-runtime",
+    "cel-parser",
     "cel-rs-macros"
 ]
 
