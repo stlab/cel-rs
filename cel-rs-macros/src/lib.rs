@@ -1,5 +1,3 @@
-#![warn(missing_docs)]
-
 //! Procedural macros for the cel-rs crate.
 //!
 //! This crate provides procedural macros for working with CEL (Common Expression Language)
@@ -30,9 +28,10 @@
 //! };
 //! ```
 
-use cel_parser::CELParser;
+use cel_parser::{CELParser, OpLookup};
 use proc_macro::TokenStream as ProcMacroTokenStream;
-use proc_macro2::TokenStream;
+use proc_macro2::{Literal, TokenStream};
+use quote::{quote, quote_spanned};
 
 /// Validates that the input contains a valid CEL expression.
 ///
@@ -45,11 +44,27 @@ use proc_macro2::TokenStream;
 #[proc_macro]
 pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
     let input = TokenStream::from(input);
-    let mut parser = CELParser::new(input.into_iter());
-    if !parser.is_expression() {
-        parser.report_error("Expected expression");
+    let mut parser = CELParser::new(OpLookup::new());
+    match parser.parse_tokens(input.into_iter()) {
+        Ok(_) => ProcMacroTokenStream::new(),
+        Err(e) => {
+            let msg_lit = Literal::string(e.message());
+            let start_error = quote_spanned!(e.span() => compile_error!(#msg_lit));
+            if let Some(end) = e.end_span() {
+                // Intentional second diagnostic at the expression end span. A single merged
+                // underline requires `Span::join()`, which is not stable; until then we emit
+                // two `compile_error!` invocations so both start and end locations are reported.
+                let end_lit = Literal::string("expression continues here");
+                let end_error = quote_spanned!(end => compile_error!(#end_lit));
+                // Two bare compile_error!() are not valid in expression context;
+                // wrapping in a block makes the expansion a valid block expression
+                // while still causing the compiler to expand both invocations.
+                quote!({ #start_error; #end_error }).into()
+            } else {
+                start_error.into()
+            }
+        }
     }
-    parser.get_output().clone().into()
 }
 
 /// Prints the tokens for debugging purposes.
@@ -58,7 +73,7 @@ pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
 /// ```rust
 /// use cel_rs_macros::print_tokens;
 /// print_tokens! {
-///     10
+///     "hello"_key
 /// };
 /// ```
 #[proc_macro]

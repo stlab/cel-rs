@@ -1,0 +1,9 @@
+error: expected multiplicative_expression
+ --> tests/ui/incomplete_expression.rs:4:5
+  |
+4 | /     expression! {
+5 | |         10 +
+6 | |     };
+  | |_____^
+  |
+  = note: this error originates in the macro `expression` (in Nightly builds, run with -Z macro-backtrace for more info)

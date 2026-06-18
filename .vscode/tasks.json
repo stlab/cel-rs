@@ -1,17 +1,369 @@
 {
     "version": "2.0.0",
     "tasks": [
+        // ============ Build Tasks ============
         {
-            "type": "shell",
-            "label": "cargo test build",
-            "command": "cargo",
+            "label": "cargo build",
+            "type": "cargo",
+            "command": "build",
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "cargo test",
+            "type": "cargo",
+            "command": "test",
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "cargo test build (no run)",
+            "type": "cargo",
+            "command": "test",
             "args": [
-                "test",
                 "--no-run"
             ],
             "problemMatcher": [
                 "$rustc"
             ]
+        },
+        {
+            "label": "cargo check",
+            "type": "cargo",
+            "command": "check",
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        // ============ Documentation Tasks ============
+        {
+            "label": "cargo doc (open)",
+            "type": "cargo",
+            "command": "doc",
+            "args": [
+                "--lib",
+                "--no-deps",
+                "--open",
+                "--workspace"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        {
+            "label": "cargo doc",
+            "type": "cargo",
+            "command": "doc",
+            "args": [
+                "--lib",
+                "--no-deps",
+                "--workspace"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        {
+            "label": "cargo test --doc",
+            "type": "cargo",
+            "command": "test",
+            "args": [
+                "--doc",
+                "--workspace",
+                "--",
+                "--nocapture"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        // ============ Formatting Tasks ============
+        {
+            "label": "cargo fmt",
+            "type": "cargo",
+            "command": "fmt",
+            "args": [
+                "--all"
+            ],
+            "problemMatcher": []
+        },
+        // ============ Clippy Tasks ============
+        {
+            "label": "cargo clippy",
+            "type": "cargo",
+            "command": "clippy",
+            "args": [
+                "--workspace"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        {
+            "label": "cargo clippy --fix",
+            "type": "cargo",
+            "command": "clippy",
+            "args": [
+                "--fix",
+                "--workspace"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        // ============ Package-Specific Tests ============
+        {
+            "label": "cargo test (parser)",
+            "type": "cargo",
+            "command": "test",
+            "args": [
+                "--package",
+                "cel-runtime",
+                "--lib",
+                "parser::"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        {
+            "label": "cargo test (runtime)",
+            "type": "cargo",
+            "command": "test",
+            "args": [
+                "--package",
+                "cel-runtime"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ]
+        },
+        // ============ Sanitizers - macOS/Linux ============
+        {
+            "label": "sanitizer: address (macOS)",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "+nightly",
+                "test",
+                "-Zbuild-std",
+                "--target",
+                "x86_64-apple-darwin",
+                "--workspace"
+            ],
+            "options": {
+                "env": {
+                    "RUST_BACKTRACE": "1",
+                    "RUSTFLAGS": "-Zsanitizer=address",
+                    "RUSTDOCFLAGS": "-Zsanitizer=address"
+                }
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "sanitizer: address lib only (macOS)",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "+nightly",
+                "test",
+                "-Zbuild-std",
+                "--target",
+                "x86_64-apple-darwin",
+                "--lib",
+                "--workspace"
+            ],
+            "options": {
+                "env": {
+                    "RUST_BACKTRACE": "1",
+                    "RUSTFLAGS": "-Zsanitizer=address"
+                }
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "sanitizer: leak (macOS)",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "+nightly",
+                "test",
+                "-Zbuild-std",
+                "--target",
+                "x86_64-apple-darwin",
+                "--workspace"
+            ],
+            "options": {
+                "env": {
+                    "RUST_BACKTRACE": "1",
+                    "RUSTFLAGS": "-Zsanitizer=leak",
+                    "RUSTDOCFLAGS": "-Zsanitizer=leak"
+                }
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "sanitizer: thread (macOS)",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "+nightly",
+                "test",
+                "-Zbuild-std",
+                "--target",
+                "x86_64-apple-darwin",
+                "--workspace"
+            ],
+            "options": {
+                "env": {
+                    "RUST_BACKTRACE": "1",
+                    "RUSTFLAGS": "-Zsanitizer=thread",
+                    "RUSTDOCFLAGS": "-Zsanitizer=thread"
+                }
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "sanitizer: address (Linux/WSL2)",
+            "type": "shell",
+            "command": "${env:HOME}/.cargo/bin/cargo",
+            "args": [
+                "+nightly",
+                "test",
+                "-Zbuild-std",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--workspace"
+            ],
+            "options": {
+                "env": {
+                    "RUST_BACKTRACE": "1",
+                    "RUSTFLAGS": "-Zsanitizer=address",
+                    "RUSTDOCFLAGS": "-Zsanitizer=address"
+                }
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "sanitizer: address lib only (Linux/WSL2)",
+            "type": "shell",
+            "command": "${env:HOME}/.cargo/bin/cargo",
+            "args": [
+                "+nightly",
+                "test",
+                "-Zbuild-std",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--lib",
+                "--workspace"
+            ],
+            "options": {
+                "env": {
+                    "RUST_BACKTRACE": "1",
+                    "RUSTFLAGS": "-Zsanitizer=address"
+                }
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "sanitizer: leak (Linux/WSL2)",
+            "type": "shell",
+            "command": "${env:HOME}/.cargo/bin/cargo",
+            "args": [
+                "+nightly",
+                "test",
+                "-Zbuild-std",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--workspace"
+            ],
+            "options": {
+                "env": {
+                    "RUST_BACKTRACE": "1",
+                    "RUSTFLAGS": "-Zsanitizer=leak",
+                    "RUSTDOCFLAGS": "-Zsanitizer=leak"
+                }
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "sanitizer: thread (Linux/WSL2)",
+            "type": "shell",
+            "command": "${env:HOME}/.cargo/bin/cargo",
+            "args": [
+                "+nightly",
+                "test",
+                "-Zbuild-std",
+                "--target",
+                "x86_64-unknown-linux-gnu",
+                "--workspace"
+            ],
+            "options": {
+                "env": {
+                    "RUST_BACKTRACE": "1",
+                    "RUSTFLAGS": "-Zsanitizer=thread",
+                    "RUSTDOCFLAGS": "-Zsanitizer=thread"
+                }
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
         }
     ]
 }

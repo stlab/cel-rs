@@ -1,21 +1,154 @@
 ---
-description: 
+description: Standards for Rust documentation comments
 globs: *.rs
-alwaysApply: false
+alwaysApply: true
 ---
-This rule provides a standard for Rust doc comments.
+This rule establishes standards for Rust documentation comments across all code.
 
-Doc comments should be formatted with line comments in accordance with the [Rust Style
-Guide](https://doc.rust-lang.org/stable/style-guide/#doc-comments).
+## General Principles
 
-All public components should have documentation following the conventions defined in [The RustDoc
-Book](https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html).
+Doc comments should be formatted with line comments (`///` or `//!`) in accordance with the [Rust Style Guide](https://doc.rust-lang.org/stable/style-guide/#doc-comments).
 
-Documentation for functions should always start with a short summary that describes what the
-function does. Additional exposition is usually not necessary unless the function has preconditions
-that may lead to an erroneous result or panic.
+All public and private components **must** have documentation following the conventions defined in [The RustDoc Book](https://doc.rust-lang.org/rustdoc/how-to-write-documentation.html).
 
-For functions that recognize a grammar production, the production is a sufficient comment.
+## Structure
 
-Module comments should contain more exposition and examples and serve as a tutorial for how to use
-the components in the module.
+### Summary Sentence
+- **Always** start with a single-line summary that describes **what** the item does
+- Use present tense ("Returns", "Creates", "Calculates" not "Will return", "Will create")
+- Be concise and direct
+- End with a period
+
+### Additional Sections (when needed)
+These sections are only needed if they are not implied by the summary sentence.
+- Add blank line after summary before additional details
+- Use `# Arguments` for parameter descriptions
+- Use `# Returns` for complex return value explanations
+- Use `# Errors` to document error conditions
+- Use `# Panics` to document panic conditions
+- Use `# Safety` for unsafe functions
+
+## Specific Guidelines
+
+### Functions and Methods
+- Start with what the function **does** (not what it "will do")
+- Document preconditions that may cause errors or panics
+- Follow recommendations from [Better Code: Contracts](https://github.com/stlab/better-code/blob/main/better-code/src/chapter-2-contracts.md) adapted to Rust conventions
+- For grammar production parsers, the production itself is sufficient documentation
+
+**Good:**
+```rust
+/// `additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.`
+fn is_additive_expression(&mut self) -> Result<bool>
+```
+
+**Bad:**
+```rust
+/// This function will parse additive expressions
+fn is_additive_expression(&mut self) -> Result<bool>
+```
+
+### Structs and Enums
+- Describe the purpose and role of the type
+- State any invariants
+
+**Good:**
+```rust
+/// A scope-based operation lookup with stack support.
+///
+/// Provides a stack of scopes for operation resolution, with built-in operations
+/// as the fallback. Scopes are searched in LIFO order (most recently pushed first).
+pub struct OpLookup { /* ... */ }
+```
+
+### Traits
+- Describe what types implementing this trait represent
+- Document trait semantics and contracts
+- Provide examples of implementation
+
+### Modules
+- Use `//!` for module-level documentation
+- Provide comprehensive overview with context
+- Include examples demonstrating typical usage patterns
+- Serve as a tutorial for the module's components
+
+**Good:**
+```rust
+//! Operation table for dynamically dispatching operations based on type signatures.
+//!
+//! This module provides a scope-based registry for operations that can be looked up
+//! based on an operation name (string) and the types of the operands.
+//!
+//! # Examples
+//! ```
+//! // Show typical usage
+//! ```
+```
+
+### Type Aliases
+- Explain what the alias represents
+- Clarify why the alias exists (readability, semantics)
+
+### Constants
+- Describe what the constant represents
+- Include units or context if applicable
+
+## Error Documentation
+
+When functions can return errors:
+- List specific error conditions in `# Errors` section
+- Be explicit about **when** errors occur
+
+**Good:**
+```rust
+/// Looks up and applies an operation to the segment.
+///
+/// # Errors
+///
+/// Returns an error if no scope or built-in operation can handle the request.
+pub fn lookup(&self, name: &str, types: &[TypeId], segment: &mut DynSegment) -> Result<()>
+```
+
+## Panic Documentation
+
+When functions can panic:
+- Document **all** panic conditions in `# Panics` section
+- Be specific about what causes the panic
+
+**Good:**
+```rust
+/// Returns the TypeId for this signature.
+///
+/// # Panics
+///
+/// Panics if the type_id_index is out of bounds (should never happen for valid signatures).
+fn type_id(&self) -> TypeId
+```
+
+## Examples
+
+Include examples (`# Examples`) for:
+- Public APIs
+- Non-obvious usage patterns
+- Types with specific initialization requirements
+- Functions with multiple valid usage patterns
+
+Use triple backticks with `rust` for proper syntax highlighting.
+
+## Conciseness
+
+- Avoid redundant information (don't restate the obvious from signatures)
+- Focus on **why** and **when**, not just **what**
+- Keep it brief but complete
+
+## Cross-References
+
+- Use backticks for code elements: `TypeId`, `DynSegment`, `OpLookup`
+- Use `[Type]` for links to other documented items
+- Link to related functions/types when helpful
+
+## Special Cases
+
+- **Getters/Setters:** Brief description is sufficient ("Returns the X" / "Sets the X")
+- **Grammar Productions:** The production itself is sufficient for parser functions
+- **Internal/Private Items:** Documentation encouraged but not required; focus on public API clarity

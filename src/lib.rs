@@ -1,12 +1,9 @@
-#![warn(missing_docs)]
-
 //! cel-rs provides a stack-based runtime for developing domain specific languages, including
 //! concatenative languages to describe concurrent processes.
 //!
-//! This crate exposes three main components:
+//! This crate exposes two main components:
 //!
-//! - **cel-runtime**: The core stack-based runtime for developing domain specific languages
-//! - **cel-parser**: A recursive descent parser for CEL expressions
+//! - **cel-runtime**: The core stack-based runtime and CEL parser
 //! - **cel-rs-macros**: Procedural macros for CEL expressions
 //!
 //! # Examples
@@ -30,13 +27,15 @@
 //! ## Using the Parser
 //!
 //! ```rust
-//! use cel_rs::cel_parser::CELParser;
+//! use cel_rs::cel_parser::{CELParser, OpLookup};
 //! use proc_macro2::TokenStream;
 //! use std::str::FromStr;
 //!
-//! let input = TokenStream::from_str("10 + 20").unwrap();
-//! let mut parser = CELParser::new(input.into_iter());
-//! assert!(parser.is_expression());
+//! let input = TokenStream::from_str("10").unwrap();
+//! let mut parser = CELParser::new(OpLookup::new());
+//! parser.set_tokens(input.into_iter());
+//! let result = parser.is_expression();
+//! assert!(result.is_ok());
 //! ```
 //!
 //! ## Using the Macros
@@ -59,12 +58,56 @@ pub mod runtime {
     pub use cel_runtime::*;
 }
 
-/// Re-exports from the cel-parser crate for convenient access.
+/// Re-exports for the CEL parser.
 pub mod parser {
-    pub use cel_parser::*;
+    pub use cel_parser::{CELParser, op_table::OpLookup};
 }
 
 /// Re-exports from the cel-rs-macros crate for convenient access.
 pub mod macros {
     pub use cel_rs_macros::*;
+}
+#[cfg(all(test, feature = "playground"))]
+mod playground {
+    struct Experiment {
+        a: u32,
+    }
+
+    struct Segment<T, F: Fn(&mut T) -> String> {
+        context: T,
+        f: F,
+    }
+
+    impl<T, F: Fn(&mut T) -> String> Segment<T, F> {
+        fn new(context: T, f: F) -> Self {
+            Self { context, f }
+        }
+
+        fn call(&mut self) -> String {
+            (self.f)(&mut self.context)
+        }
+    }
+
+    #[test]
+    fn context_segment() {
+        let experiment = Experiment { a: 1 };
+        let mut segment = Segment::new(experiment, |e| e.a.to_string());
+        println!("{}", segment.call());
+    }
+
+    /*
+        #[test]
+        fn expression_macro_error() {
+            let result = cel_rs_macros::expression! {
+                "Hello" + "World" + 32.0;
+            };
+        }
+
+        #[test]
+        fn expression_macro_error2() {
+            let result = cel_rs_macros::expression! {
+                "Hello" + "World" + 32.0
+            };
+        }
+    */
 }

@@ -7,4 +7,9 @@ description = "A stack-based runtime for developing domain specific languages"
 [dependencies]
 anyhow = "1.0"
 typenum = "1.18.0"
-cel-rs-macros = { path = "../cel-rs-macros" }
+
+[features]
+playground = []
+
+[lints]
+workspace = true
