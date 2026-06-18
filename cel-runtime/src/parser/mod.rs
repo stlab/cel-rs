@@ -339,7 +339,7 @@ impl CELParser {
     /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
     pub fn parse_str(&mut self, s: &str) -> Result<DynSegment> {
         let input = TokenStream::from_str(s)
-            .map_err(|e| ParseError::new(format!("lex: {}", e), e.span()))?;
+            .map_err(|e| ParseError::new(e.to_string(), e.span()))?;
         self.parse_tokens(input.into_iter())
     }
 
@@ -1262,8 +1262,8 @@ mod tests {
         if let Err(e) = result {
             let error_msg = format!("{:?}", e);
             assert!(
-                error_msg.contains("Undefined identifier: undefined_var"),
-                "Error message should contain 'Undefined identifier: undefined_var', got: {}",
+                error_msg.contains("undefined identifier: `undefined_var`"),
+                "Error message should contain 'undefined identifier: `undefined_var`', got: {}",
                 error_msg
             );
         }
@@ -1289,8 +1289,8 @@ mod tests {
             err.message()
         );
         assert!(
-            !err.message().contains("Undefined identifier"),
-            "scope Err must not be rewritten as Undefined identifier"
+            !err.message().contains("undefined identifier:"),
+            "scope Err must not be rewritten as undefined identifier"
         );
     }
 
@@ -1303,7 +1303,7 @@ mod tests {
         assert!(result.is_err());
         if let Err(e) = result {
             let formatted_error = e.format_rustc_style(input, "test.cel", 1, &Renderer::plain());
-            assert!(formatted_error.contains("Undefined identifier"));
+            assert!(formatted_error.contains("undefined identifier"));
             assert!(formatted_error.contains("undefined_var"));
             assert!(formatted_error.contains("test.cel"));
         }
@@ -1439,8 +1439,8 @@ mod tests {
             Ok(_) => panic!("expected error when () operator is not registered"),
         };
         assert!(
-            err.message().starts_with("operation error:"),
-            "error should report operation failure, got: {}",
+            err.message().starts_with("no operation"),
+            "error should report no operation found, got: {}",
             err.message()
         );
     }
@@ -1477,8 +1477,8 @@ mod tests {
             Ok(_) => panic!("expected parse error for type mismatch"),
         };
         assert!(
-            err.message().starts_with("operation error:"),
-            "expected 'operation error:' prefix, got: {}",
+            err.message().starts_with("no operation"),
+            "expected 'no operation' prefix, got: {}",
             err.message()
         );
         // err.span() is the start ("Hello", col 0–7); end_span() is the end (32.0, end col 14).

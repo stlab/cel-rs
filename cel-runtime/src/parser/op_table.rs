@@ -42,6 +42,9 @@ pub type OpFn = fn(&mut DynSegment) -> Result<()>;
 /// Receives the operation name, the segment, and the number of operands on top of the stack.
 /// The scope may call `segment.peek_stack_infos(num_operands)` to inspect types. Returns
 /// `Ok(true)` if handled, `Ok(false)` if not found, or `Err` on error.
+///
+/// Error messages returned by scope functions surface verbatim to the user. They should be
+/// lowercase, end without a period, and wrap identifiers and type names in backticks.
 pub type ScopeFn = Box<dyn Fn(&str, &mut DynSegment, usize) -> Result<bool> + Send + Sync>;
 
 /// A signature for a built-in operation.
@@ -825,7 +828,8 @@ impl OpLookup {
     ///
     /// Accepts a closure directly; it is boxed internally. The scope should return
     /// `Ok(true)` if it handled the operation, `Ok(false)` to pass to the next scope,
-    /// or `Err` on error.
+    /// or `Err` on error. Error messages surface verbatim; they should be lowercase, end
+    /// without a period, and wrap identifiers and type names in backticks.
     pub fn push_scope<F>(&mut self, scope: F)
     where
         F: Fn(&str, &mut DynSegment, usize) -> Result<bool> + Send + Sync + 'static,
@@ -881,7 +885,7 @@ impl OpLookup {
                 Ok(false) => {}
                 Err(e) => {
                     return Err(super::ParseError::new_range(
-                        format!("operation error: {}", e),
+                        e.to_string(),
                         start,
                         end,
                     ))
@@ -903,7 +907,7 @@ impl OpLookup {
 
         if num_operands == 0 {
             return Err(super::ParseError::new(
-                format!("Undefined identifier: {}", name),
+                format!("undefined identifier: `{name}`"),
                 start,
             ));
         }
@@ -913,13 +917,12 @@ impl OpLookup {
             if i > 0 {
                 type_names.push_str(", ");
             }
+            type_names.push('`');
             type_names.push_str(info.type_name.as_ref());
+            type_names.push('`');
         }
         Err(super::ParseError::new_range(
-            format!(
-                "operation error: Operation '{}' not found for types [{}]",
-                name, type_names
-            ),
+            format!("no operation `{name}` for types [{type_names}]"),
             start,
             end,
         ))
@@ -1268,13 +1271,13 @@ mod tests {
             .lookup("+", &mut segment, 2, Span::call_site(), Span::call_site())
             .unwrap_err();
         assert!(
-            err.message().starts_with("operation error:"),
-            "expected 'operation error:' prefix, got: {}",
+            err.message().starts_with("no operation"),
+            "expected 'no operation' prefix, got: {}",
             err.message()
         );
-        assert!(err.message().contains("Operation '+'"));
-        assert!(err.message().contains("u32"));
-        assert!(err.message().contains("f64"));
+        assert!(err.message().contains("`+`"));
+        assert!(err.message().contains("`u32`"));
+        assert!(err.message().contains("`f64`"));
     }
 
     #[test]
