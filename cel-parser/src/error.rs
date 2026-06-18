@@ -92,10 +92,17 @@ pub struct CELError {
 /// Converts a [`SourceSpan`] (1-based lines, 0-based character columns) to a byte-offset
 /// range within `source`.
 ///
-/// Returns `source.len()..source.len()` if the span lies past the end of `source`.
-///
 /// - Complexity: O(n) in the length of `source`.
 fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Range<usize> {
+    debug_assert!(
+        span.start.line >= 1,
+        "`span.start.line` must be 1-based (≥ 1)"
+    );
+    debug_assert!(
+        span.end.line > span.start.line
+            || (span.end.line == span.start.line && span.end.column >= span.start.column),
+        "`span.end` must not precede `span.start`"
+    );
     let start_line_byte: usize = source
         .split_inclusive('\n')
         .take(span.start.line - 1)
@@ -128,6 +135,10 @@ fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Range<usize> 
                 .map(char::len_utf8)
                 .sum::<usize>()
     };
+    debug_assert!(
+        end_byte <= source.len(),
+        "computed end_byte exceeds source.len()"
+    );
     start_byte..end_byte
 }
 
@@ -463,5 +474,37 @@ mod tests {
     fn parse_error_new_has_no_end_span() {
         let e = ParseError::new("bad token", Span::call_site());
         assert!(e.end_span().is_none());
+    }
+
+    #[test]
+    fn span_to_byte_range_basic() {
+        let source = "hello world";
+        assert_eq!(
+            span_to_byte_range(source, SourceSpan::new(1, 6, 1, 11)),
+            6..11
+        );
+    }
+
+    #[test]
+    fn span_to_byte_range_empty_span() {
+        let source = "hello";
+        assert_eq!(
+            span_to_byte_range(source, SourceSpan::new(1, 2, 1, 2)),
+            2..2
+        );
+    }
+
+    #[test]
+    fn span_to_byte_range_start_past_end_of_source() {
+        let source = "hi";
+        let r = span_to_byte_range(source, SourceSpan::new(5, 0, 5, 3));
+        assert_eq!(r, source.len()..source.len());
+    }
+
+    #[test]
+    fn span_to_byte_range_end_past_end_of_source() {
+        let source = "hi";
+        let r = span_to_byte_range(source, SourceSpan::new(1, 0, 1, 100));
+        assert!(r.start <= r.end && r.end <= source.len());
     }
 }
