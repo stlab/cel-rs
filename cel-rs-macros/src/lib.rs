@@ -51,6 +51,9 @@ pub fn expression(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
             let msg_lit = Literal::string(e.message());
             let start_error = quote_spanned!(e.span() => compile_error!(#msg_lit));
             if let Some(end) = e.end_span() {
+                // Intentional second diagnostic at the expression end span. A single merged
+                // underline requires `Span::join()`, which is not stable; until then we emit
+                // two `compile_error!` invocations so both start and end locations are reported.
                 let end_lit = Literal::string("expression continues here");
                 let end_error = quote_spanned!(end => compile_error!(#end_lit));
                 // Two bare compile_error!() are not valid in expression context;

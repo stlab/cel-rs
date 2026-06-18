@@ -1,0 +1,5 @@
+error: Undefined identifier: undefined_var
+ --> tests/ui/undefined_identifier.rs:5:9
+  |
+5 |         undefined_var + 10
+  |         ^^^^^^^^^^^^^

@@ -3,20 +3,13 @@
     "allow": [
       "Bash(grep -E \"^\\(test |FAILED|error|ok$|running\\)\")",
       "Bash(grep -v \"^$\")",
-      "Bash(cat > *)",
-      "Bash(bash \"C:/Users/sparent/.claude/plugins/cache/claude-plugins-official/superpowers/6.0.2/skills/subagent-driven-development/scripts/review-package\" 3a74761 HEAD)",
-      "Bash(bash \"C:/Users/sparent/.claude/plugins/cache/claude-plugins-official/superpowers/6.0.2/skills/subagent-driven-development/scripts/task-brief\" \"d:/repos/github.com/stlab/cel-rs/docs/superpowers/plans/2026-06-17-op-lookup-error-spans.md\" 3)",
-      "Bash(bash \"C:/Users/sparent/.claude/plugins/cache/claude-plugins-official/superpowers/6.0.2/skills/subagent-driven-development/scripts/review-package\" 4aee1f9 HEAD)",
-      "Bash(git -C \"d:/repos/github.com/stlab/cel-rs\" merge-base main HEAD)",
-      "Bash(bash \"C:/Users/sparent/.claude/plugins/cache/claude-plugins-official/superpowers/6.0.2/skills/subagent-driven-development/scripts/review-package\" e0401e7aa94fbcc0d07d938579b5277c1158f4af HEAD)",
-      "Read(//c/Users/sparent/.claude/plugins/cache/claude-plugins-official/superpowers/6.0.2/skills/requesting-code-review/**)",
-      "Bash(git -C \"d:/repos/github.com/stlab/cel-rs\" add cel-runtime/src/parser/mod.rs cel-runtime/src/parser/error.rs cel-runtime/src/parser/op_table.rs)",
-      "Bash(git -C d:/repos/github.com/stlab/cel-rs commit -m ' *)",
-      "Bash(cat >> *)",
-      "Bash(echo \"Task 3: complete \\(commits 4aee1f9..282ca58, review clean\\) *)"
-    ],
-    "additionalDirectories": [
-      "d:\\repos\\github.com\\stlab\\cel-rs\\.git\\sdd"
+      "Bash(git merge-base main HEAD)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(cargo *)"
     ]
   }
 }

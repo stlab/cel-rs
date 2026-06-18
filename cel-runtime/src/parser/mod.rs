@@ -792,11 +792,12 @@ impl CELParser {
                 let ident_span = ident.span();
                 self.advance();
 
-                self.op_lookup
-                    .lookup(&ident_name, &mut self.context, 0, ident_span, ident_span)
-                    .map_err(|_| {
-                        ParseError::new(format!("Undefined identifier: {ident_name}"), ident_span)
-                    })?;
+                let not_found = format!(
+                    "operation error: Operation '{ident_name}' not found for types []"
+                );
+                self
+                    .op_lookup
+                    .lookup(&ident_name, &mut self.context, 0, ident_span, ident_span)?;
 
                 Ok(true)
             }
@@ -1270,6 +1271,31 @@ mod tests {
                 error_msg
             );
         }
+    }
+
+    #[test]
+    fn test_identifier_scope_error_propagated() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, _segment, num_operands| {
+            if name == "bad_id" && num_operands == 0 {
+                return Err(anyhow::anyhow!("custom identifier rejected"));
+            }
+            Ok(false)
+        });
+        let mut parser = CELParser::new(lookup);
+        let err = match parser.parse_str("bad_id + 1") {
+            Err(e) => e,
+            Ok(_) => panic!("scope Err should propagate, not become Undefined identifier"),
+        };
+        assert!(
+            err.message().contains("custom identifier rejected"),
+            "expected scope error message, got: {}",
+            err.message()
+        );
+        assert!(
+            !err.message().contains("Undefined identifier"),
+            "scope Err must not be rewritten as Undefined identifier"
+        );
     }
 
     #[test]

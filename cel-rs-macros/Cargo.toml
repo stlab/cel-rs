@@ -13,5 +13,8 @@ quote = "1.0"
 proc-macro2 = "1.0"
 cel-runtime = { path = "../cel-runtime" }
 
+[dev-dependencies]
+trybuild = "1.0"
+
 [lints]
 workspace = true

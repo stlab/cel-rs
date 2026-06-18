@@ -1,0 +1,11 @@
+error: operation error: Operation '+' not found for types [alloc::string::String, f64]
+ --> tests/ui/type_mismatch.rs:5:9
+  |
+5 |         "Hello" + 32.0
+  |         ^^^^^^^
+
+error: expression continues here
+ --> tests/ui/type_mismatch.rs:5:19
+  |
+5 |         "Hello" + 32.0
+  |                   ^^^^
