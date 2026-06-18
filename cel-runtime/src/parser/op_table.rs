@@ -901,6 +901,12 @@ impl OpLookup {
             }
         }
 
+        if num_operands == 0 {
+            return Err(super::ParseError::new(
+                format!("Undefined identifier: {}", name),
+                start,
+            ));
+        }
         let infos = segment.peek_stack_infos(num_operands);
         let mut type_names = String::new();
         for (i, info) in infos.iter().enumerate() {

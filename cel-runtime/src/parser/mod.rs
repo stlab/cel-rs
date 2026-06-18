@@ -792,11 +792,7 @@ impl CELParser {
                 let ident_span = ident.span();
                 self.advance();
 
-                let not_found = format!(
-                    "operation error: Operation '{ident_name}' not found for types []"
-                );
-                self
-                    .op_lookup
+                self.op_lookup
                     .lookup(&ident_name, &mut self.context, 0, ident_span, ident_span)?;
 
                 Ok(true)
