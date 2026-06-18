@@ -87,6 +87,16 @@
                 "$rustc"
             ]
         },
+        // ============ Formatting Tasks ============
+        {
+            "label": "cargo fmt",
+            "type": "cargo",
+            "command": "fmt",
+            "args": [
+                "--all"
+            ],
+            "problemMatcher": []
+        },
         // ============ Clippy Tasks ============
         {
             "label": "cargo clippy",
