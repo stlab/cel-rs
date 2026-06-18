@@ -806,6 +806,14 @@ pub struct OpLookup {
 
 impl OpLookup {
     /// Creates a new operation lookup with only built-in operations.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::OpLookup;
+    ///
+    /// let lookup = OpLookup::new();
+    /// ```
     pub fn new() -> Self {
         OpLookup {
             scopes: Vec::new(),
@@ -843,6 +851,22 @@ impl OpLookup {
     ///
     /// - Complexity: O(k) in the number of registered scopes, plus O(s) for the built-in
     ///   signature scan where s is the number of signatures for the operator.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use proc_macro2::Span;
+    /// use cel_runtime::OpLookup;
+    /// use cel_runtime::DynSegment;
+    ///
+    /// let lookup = OpLookup::new();
+    /// let mut seg = DynSegment::new::<()>();
+    /// // A lookup with zero operands for a known operator succeeds when types match.
+    /// // This example shows the signature only; real usage requires pushed types.
+    /// let result = lookup.lookup("+", &mut seg, 2, Span::call_site(), Span::call_site());
+    /// // result is Err because no operands are on the segment
+    /// assert!(result.is_err());
+    /// ```
     pub fn lookup(
         &self,
         name: &str,

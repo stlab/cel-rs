@@ -102,7 +102,12 @@ use std::str::FromStr;
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, ParseError>;
 
-
+/// Pushes a literal value from `token` onto `segment`.
+///
+/// # Errors
+///
+/// Returns `Err` if the literal type is unsupported or if a suffixed numeric
+/// literal cannot be parsed.
 fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
     match lit {
         CelLiteral::Int(integer) => {
@@ -417,6 +422,7 @@ impl CELParser {
         ParseError::new(message, span)
     }
 
+    /// Consumes and returns `true` if the next token is punctuation matching `target`.
     fn is_punctuation(&mut self, target: &str) -> bool {
         match self.peek_token() {
             Some(Token::Punct { op, .. }) if op == target => {

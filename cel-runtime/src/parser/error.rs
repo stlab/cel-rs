@@ -16,7 +16,7 @@ use proc_macro2::LineColumn;
 pub struct SourceSpan {
     /// Start position (inclusive).
     pub start: LineColumn,
-    /// End position (inclusive).
+    /// End position (exclusive; one past the last character, matching `proc_macro2::Span::end()`).
     pub end: LineColumn,
 }
 
@@ -33,6 +33,16 @@ impl SourceSpan {
     /// Builds a span from raw line/column values.
     ///
     /// Lines are 1-based, columns are 0-based (matching [`proc_macro2::LineColumn`]).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::parser::SourceSpan;
+    ///
+    /// let span = SourceSpan::new(1, 0, 1, 5);
+    /// assert_eq!(span.start.line, 1);
+    /// assert_eq!(span.end.column, 5);
+    /// ```
     pub fn new(start_line: usize, start_column: usize, end_line: usize, end_column: usize) -> Self {
         SourceSpan {
             start: LineColumn {
@@ -51,6 +61,16 @@ impl SourceSpan {
     /// Use this when creating errors in the parser or other code that has a
     /// `proc_macro2::Span`; the result is `Send + Sync` and can be stored in
     /// [`CELError`] for use from async or other threads.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use proc_macro2::Span;
+    /// use cel_runtime::parser::SourceSpan;
+    ///
+    /// let span = SourceSpan::from_proc_macro2(Span::call_site());
+    /// assert_eq!(span.start.line, span.end.line);
+    /// ```
     pub fn from_proc_macro2(span: proc_macro2::Span) -> Self {
         SourceSpan {
             start: span.start(),
@@ -113,6 +133,17 @@ fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Range<usize> 
 
 impl CELError {
     /// Creates a new error with the given message and source span.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::CELError;
+    /// use cel_runtime::parser::SourceSpan;
+    ///
+    /// let span = SourceSpan::default();
+    /// let e = CELError::new("unexpected token", span);
+    /// assert_eq!(e.message(), "unexpected token");
+    /// ```
     pub fn new(message: impl Into<String>, span: SourceSpan) -> Self {
         CELError {
             message: message.into(),
@@ -121,11 +152,32 @@ impl CELError {
     }
 
     /// Returns the error message.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::CELError;
+    /// use cel_runtime::parser::SourceSpan;
+    ///
+    /// let e = CELError::new("bad input", SourceSpan::default());
+    /// assert_eq!(e.message(), "bad input");
+    /// ```
     pub fn message(&self) -> &str {
         &self.message
     }
 
     /// Returns the source span for this error.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::CELError;
+    /// use cel_runtime::parser::SourceSpan;
+    ///
+    /// let span = SourceSpan::default();
+    /// let e = CELError::new("bad input", span);
+    /// assert_eq!(e.span(), span);
+    /// ```
     pub fn span(&self) -> SourceSpan {
         self.span
     }
