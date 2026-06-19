@@ -192,6 +192,9 @@ impl DynSegment {
         self.stack_index = aligned_index + size_of::<T>();
     }
 
+    /// Returns the padding flags for the top N entries of the type stack.
+    ///
+    /// - Complexity: O(N).
     fn get_last_n_padded<const N: usize>(&self) -> [bool; N] {
         let mut result = [false; N];
         let start = self.stack_ids.len().saturating_sub(N);
@@ -202,6 +205,8 @@ impl DynSegment {
     }
 
     /// Captures the current stack droppers for use when unwinding on error.
+    ///
+    /// - Complexity: O(n) in the current stack depth.
     fn capture_unwind(&self) -> Vec<Dropper> {
         self.stack_ids.iter().map(|info| info.dropper).collect()
     }
@@ -248,15 +253,6 @@ impl DynSegment {
     ///
     /// If the operation succeeds, the result is pushed onto the stack. If it fails,
     /// the stack is unwound to its previous state and the error is propagated.
-    ///
-    /// # Arguments
-    ///
-    /// * `op` - A closure that returns a `Result<R>`
-    ///
-    /// # Type Parameters
-    ///
-    /// * `R` - The return type of the operation
-    /// * `F` - The closure type
     pub fn op0r<R, F>(&mut self, op: F)
     where
         F: Fn() -> anyhow::Result<R> + 'static,

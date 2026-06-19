@@ -78,10 +78,9 @@ Every function must have a `///` doc comment written in **contract style**. The 
 **Required sections** (include only those that apply):
 
 1. **Summary** — A concise present-tense sentence fragment describing what the function does or returns, ending with a period.
-2. **Preconditions** — expressed as Rust standard sections:
-   - `# Panics` — conditions that cause a panic.
-   - `# Errors` — conditions that cause an `Err` return.
-   - `# Safety` — invariants the caller must uphold for `unsafe` functions.
+2. **Preconditions** — Non-obvious preconditions not implied by the summary, as `/// - Precondition: <condition>` bullets. Preconditions implied by the summary need not be restated. Violation has unspecified behavior (which may include a panic); do NOT document what happens on violation — instead use `debug_assert!()` to check preconditions in debug builds.
+   - `# Errors` — conditions that cause an `Err` return (runtime errors, not precondition violations).
+   - `# Safety` — invariants the caller must uphold for `unsafe` functions. This is the one place where the consequence of violation (undefined behavior) must be documented.
 3. **Postconditions** — `/// - Postcondition: <condition>` bullet in the body, only when not implicit in the summary.
 4. **Complexity** — `/// - Complexity: <description>` bullet, **required whenever the operation is not O(1)**. Default assumption is O(1) time and space.
 
@@ -94,11 +93,9 @@ Additional rules:
 
 **Example:**
 ```rust
-/// Removes and returns the top element of the stack.
+/// Removes and returns the top element.
 ///
-/// # Panics
-///
-/// Panics if the stack is empty.
+/// - Precondition: `padding` matches the value returned by the corresponding `push`.
 ///
 /// - Complexity: O(1).
 pub fn pop<T>(&mut self, padding: bool) -> T
@@ -108,12 +105,11 @@ pub fn pop<T>(&mut self, padding: bool) -> T
 
 Derive tests from the **contract and public interface only** — do not read or consider the implementation. The test suite verifies observable behavior as specified by the contract:
 
-- Each `# Panics` condition should have a `#[should_panic]` test (when safely testable).
 - Each `# Errors` condition should assert the `Err` variant is returned.
 - Each postcondition should be asserted.
 - Edge cases implied by the summary (empty input, single element, boundary values) should be covered.
 
-Tests written against the implementation risk encoding bugs rather than verifying intent.
+Precondition violations have unspecified behavior and should not be tested. Tests written against the implementation risk encoding bugs rather than verifying intent.
 
 ### Fallible ops
 Operations that can fail use `.op1r` / `.op2r` variants (returning `Result`) rather than `.op1` / `.op2`. Arithmetic on signed integers must use `checked_*` operations, not wrapping arithmetic.
