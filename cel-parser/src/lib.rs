@@ -26,7 +26,8 @@
 //! multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
 //! postfix_expression = primary_expression { "(" parameter_list ")" }.
-//! primary_expression = literal | identifier | "(" or_expression ")".
+//! primary_expression = literal | identifier | "(" or_expression ")" | if_expression.
+//! if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].
 //! parameter_list = [ or_expression { "," or_expression } ].
 //! ```
 //!
@@ -432,6 +433,17 @@ impl CELParser {
         }
     }
 
+    /// Consumes and returns `true` if the next token is an identifier matching `keyword`.
+    fn is_keyword(&mut self, keyword: &str) -> bool {
+        match self.peek_token() {
+            Some(Token::Identifier(ident)) if ident == keyword => {
+                self.advance();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// `expression = or_expression <EOF>.`
     pub fn is_expression(&mut self) -> Result<bool> {
         if !self.is_or_expression()? {
@@ -785,7 +797,14 @@ impl CELParser {
         Ok(count)
     }
 
-    /// `primary_expression = literal | identifier | "(" or_expression ")".`
+    /// `primary_expression = literal | identifier | "(" or_expression ")" | if_expression.`
+    ///
+    /// Dispatches to [`is_if_expression`](Self::is_if_expression) when the `if` keyword is seen.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a parenthesized expression is malformed, or if an `if` expression
+    /// fails to parse.
     fn is_primary_expression(&mut self) -> Result<bool> {
         match self.peek_token() {
             Some(Token::Literal(lit)) => {
@@ -799,6 +818,10 @@ impl CELParser {
                 let ident_span = ident.span();
                 self.advance();
 
+                if ident_name == "if" {
+                    return self.is_if_expression();
+                }
+
                 self.op_lookup
                     .lookup(&ident_name, &mut self.context, 0, ident_span, ident_span)?;
 
@@ -809,6 +832,18 @@ impl CELParser {
                 ..
             }) => {
                 self.advance();
+                // Unit expression: ()
+                if matches!(
+                    self.peek_token(),
+                    Some(Token::CloseDelim {
+                        delimiter: Delimiter::Parenthesis,
+                        ..
+                    })
+                ) {
+                    self.advance();
+                    self.context.just(());
+                    return Ok(true);
+                }
                 if !self.is_or_expression()? {
                     return Err(self.error_at("expected expression"));
                 }
@@ -817,7 +852,7 @@ impl CELParser {
                         delimiter: Delimiter::Parenthesis,
                         ..
                     }) => {
-                        self.advance(); // consume CloseDelim
+                        self.advance();
                         Ok(true)
                     }
                     _ => Err(self.error_at("expected closing parenthesis")),
@@ -825,6 +860,91 @@ impl CELParser {
             }
             _ => Ok(false),
         }
+    }
+
+    /// `if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].`
+    ///
+    /// - Precondition: The `if` keyword has already been consumed by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the condition is missing, if a `{` or `}` delimiter is missing,
+    /// if the then-branch or else-branch expression is missing, or if the then and else
+    /// branch types do not match (as detected by `join2`).
+    fn is_if_expression(&mut self) -> Result<bool> {
+        if !self.is_or_expression()? {
+            return Err(self.error_at("expected condition after `if`"));
+        }
+        match self.peek_token() {
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Brace,
+                ..
+            }) => {
+                self.advance();
+            }
+            _ => return Err(self.error_at("expected `{` after if condition")),
+        }
+        let mut then_fragment = self.context.new_fragment();
+        std::mem::swap(&mut self.context, &mut then_fragment);
+        if !self.is_or_expression()? {
+            return Err(self.error_at("expected expression in then-branch"));
+        }
+        std::mem::swap(&mut self.context, &mut then_fragment);
+        match self.peek_token() {
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Brace,
+                ..
+            }) => {
+                self.advance();
+            }
+            _ => return Err(self.error_at("expected `}` after then-branch")),
+        }
+        let else_fragment = if self.is_keyword("else") {
+            if self.is_keyword("if") {
+                // else if: recursively parse another if_expression
+                let mut fragment = self.context.new_fragment();
+                std::mem::swap(&mut self.context, &mut fragment);
+                self.is_if_expression()?;
+                std::mem::swap(&mut self.context, &mut fragment);
+                fragment
+            } else {
+                // else { expr }
+                match self.peek_token() {
+                    Some(Token::OpenDelim {
+                        delimiter: Delimiter::Brace,
+                        ..
+                    }) => {
+                        self.advance();
+                    }
+                    _ => return Err(self.error_at("expected `{` or `if` after `else`")),
+                }
+                let mut fragment = self.context.new_fragment();
+                std::mem::swap(&mut self.context, &mut fragment);
+                if !self.is_or_expression()? {
+                    return Err(self.error_at("expected expression in else-branch"));
+                }
+                std::mem::swap(&mut self.context, &mut fragment);
+                match self.peek_token() {
+                    Some(Token::CloseDelim {
+                        delimiter: Delimiter::Brace,
+                        ..
+                    }) => {
+                        self.advance();
+                    }
+                    _ => return Err(self.error_at("expected `}` after else-branch")),
+                }
+                fragment
+            }
+        } else {
+            // Implicit else: () — then-branch must also return ()
+            let mut fragment = self.context.new_fragment();
+            fragment.just(());
+            fragment
+        };
+        self.context
+            .join2(then_fragment, else_fragment)
+            .map_err(|e| ParseError::new(e.to_string(), self.last_span))?;
+        Ok(true)
     }
 }
 
@@ -1552,6 +1672,89 @@ mod tests {
             .parse_str("true || false || false")
             .expect("should parse");
         assert_eq!(segment.call0::<bool>().unwrap(), true);
+    }
+
+    #[test]
+    fn if_true_branch_selected() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("if true { 1i32 } else { 2i32 }")
+            .expect("should parse");
+        assert_eq!(segment.call0::<i32>().unwrap(), 1);
+    }
+
+    #[test]
+    fn if_false_branch_selected() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("if false { 1i32 } else { 2i32 }")
+            .expect("should parse");
+        assert_eq!(segment.call0::<i32>().unwrap(), 2);
+    }
+
+    #[test]
+    fn if_else_if_first_branch() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("if true { 1i32 } else if false { 2i32 } else { 3i32 }")
+            .expect("should parse");
+        assert_eq!(segment.call0::<i32>().unwrap(), 1);
+    }
+
+    #[test]
+    fn if_else_if_middle_branch() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("if false { 1i32 } else if true { 2i32 } else { 3i32 }")
+            .expect("should parse");
+        assert_eq!(segment.call0::<i32>().unwrap(), 2);
+    }
+
+    #[test]
+    fn if_else_if_last_branch() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("if false { 1i32 } else if false { 2i32 } else { 3i32 }")
+            .expect("should parse");
+        assert_eq!(segment.call0::<i32>().unwrap(), 3);
+    }
+
+    #[test]
+    fn if_omitted_else_unit_branch() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("if true { () }")
+            .expect("should parse");
+        segment.call0::<()>().expect("should execute");
+    }
+
+    #[test]
+    fn if_omitted_else_rejects_non_unit_then() {
+        // then-branch returns i32, implicit else returns () — types must match.
+        let mut parser = CELParser::new(OpLookup::new());
+        assert!(parser.parse_str("if false { 1i32 }").is_err());
+    }
+
+    #[test]
+    fn if_branch_type_mismatch_is_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        assert!(parser.parse_str("if true { 1i32 } else { true }").is_err());
+    }
+
+    #[test]
+    fn if_missing_open_brace_is_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        assert!(parser.parse_str("if true 1i32 } else { 2i32 }").is_err());
+    }
+
+    #[test]
+    fn if_missing_else_after_brace_is_fine() {
+        // Omitting else is allowed; result type must be ().
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("if false { () }")
+            .expect("should parse");
+        segment.call0::<()>().expect("should execute");
     }
 }
 
