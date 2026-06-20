@@ -874,6 +874,8 @@ impl CELParser {
     /// Returns an error if the condition is missing, if a `{` or `}` delimiter is missing,
     /// if the then-branch or else-branch expression is missing, or if the then and else
     /// branch types do not match (as detected by `join2`).
+    ///
+    /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
     fn is_if_expression(&mut self) -> Result<bool> {
         if !self.is_or_expression()? {
             return Err(self.error_at("expected condition after `if`"));
@@ -1649,6 +1651,13 @@ mod tests {
     }
 
     #[test]
+    fn or_lhs_type_error() {
+        // LHS is i32, not bool — join2 must reject it at parse time.
+        let mut parser = CELParser::new(OpLookup::new());
+        assert!(parser.parse_str("1i32 || true").is_err());
+    }
+
+    #[test]
     fn or_short_circuits_on_true() {
         // Without short-circuit the RHS executes and division-by-zero errors.
         // With short-circuit the RHS fragment is skipped, returning true directly.
@@ -1758,6 +1767,13 @@ mod tests {
             .parse_str("if false { () }")
             .expect("should parse");
         segment.call0::<()>().expect("should execute");
+    }
+
+    #[test]
+    fn if_trailing_else_is_error() {
+        // `else` with no body is a parse error.
+        let mut parser = CELParser::new(OpLookup::new());
+        assert!(parser.parse_str("if true { () } else").is_err());
     }
 }
 
