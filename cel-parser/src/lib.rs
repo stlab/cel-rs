@@ -472,7 +472,8 @@ impl CELParser {
                 std::mem::swap(&mut self.context, &mut rhs_fragment);
                 let mut bypass_fragment = self.context.new_fragment();
                 bypass_fragment.just(true);
-                self.context.join2(bypass_fragment, rhs_fragment)
+                self.context
+                    .join2(bypass_fragment, rhs_fragment)
                     .map_err(|e| ParseError::new(e.to_string(), self.last_span))?;
             }
             Ok(true)
@@ -498,7 +499,8 @@ impl CELParser {
                 std::mem::swap(&mut self.context, &mut rhs_fragment);
                 let mut bypass_fragment = self.context.new_fragment();
                 bypass_fragment.just(false);
-                self.context.join2(rhs_fragment, bypass_fragment)
+                self.context
+                    .join2(rhs_fragment, bypass_fragment)
                     .map_err(|e| ParseError::new(e.to_string(), self.last_span))?;
             }
             Ok(true)
@@ -1628,9 +1630,7 @@ mod tests {
     #[test]
     fn and_evaluates_rhs_when_lhs_true() {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("true && false")
-            .expect("should parse");
+        let mut segment = parser.parse_str("true && false").expect("should parse");
         assert_eq!(segment.call0::<bool>().unwrap(), false);
     }
 
@@ -1671,9 +1671,7 @@ mod tests {
     #[test]
     fn or_evaluates_rhs_when_lhs_false() {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("false || true")
-            .expect("should parse");
+        let mut segment = parser.parse_str("false || true").expect("should parse");
         assert_eq!(segment.call0::<bool>().unwrap(), true);
     }
 
@@ -1734,9 +1732,7 @@ mod tests {
     #[test]
     fn if_omitted_else_unit_branch() {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("if true { () }")
-            .expect("should parse");
+        let mut segment = parser.parse_str("if true { () }").expect("should parse");
         segment.call0::<()>().expect("should execute");
     }
 
@@ -1763,9 +1759,7 @@ mod tests {
     fn if_missing_else_after_brace_is_fine() {
         // Omitting else is allowed; result type must be ().
         let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("if false { () }")
-            .expect("should parse");
+        let mut segment = parser.parse_str("if false { () }").expect("should parse");
         segment.call0::<()>().expect("should execute");
     }
 
