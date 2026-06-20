@@ -462,6 +462,7 @@ impl CELParser {
     /// Returns an error if the RHS is missing after `||`, if the RHS does not
     /// produce a `bool`, or if any sub-expression returns an error.
     fn is_or_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if self.is_and_expression()? {
             while self.is_punctuation("||") {
                 let mut rhs_fragment = self.context.new_fragment();
@@ -474,7 +475,13 @@ impl CELParser {
                 bypass_fragment.just(true);
                 self.context
                     .join2(bypass_fragment, rhs_fragment)
-                    .map_err(|e| ParseError::new(e.to_string(), self.last_span))?;
+                    .map_err(|e| {
+                        ParseError::new_range(
+                            e.to_string(),
+                            start_span.expect("production has token at start"),
+                            self.last_span,
+                        )
+                    })?;
             }
             Ok(true)
         } else {
@@ -489,6 +496,7 @@ impl CELParser {
     /// Returns an error if the RHS is missing after `&&`, if the RHS does not
     /// produce a `bool`, or if any sub-expression returns an error.
     fn is_and_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
         if self.is_comparison_expression()? {
             while self.is_punctuation("&&") {
                 let mut rhs_fragment = self.context.new_fragment();
@@ -501,7 +509,13 @@ impl CELParser {
                 bypass_fragment.just(false);
                 self.context
                     .join2(rhs_fragment, bypass_fragment)
-                    .map_err(|e| ParseError::new(e.to_string(), self.last_span))?;
+                    .map_err(|e| {
+                        ParseError::new_range(
+                            e.to_string(),
+                            start_span.expect("production has token at start"),
+                            self.last_span,
+                        )
+                    })?;
             }
             Ok(true)
         } else {
@@ -1647,14 +1661,22 @@ mod tests {
     fn and_lhs_type_error() {
         // LHS is i32, not bool — join2 must reject it at parse time.
         let mut parser = CELParser::new(OpLookup::new());
-        assert!(parser.parse_str("1i32 && true").is_err());
+        let err = match parser.parse_str("1i32 && true") {
+            Err(e) => e,
+            Ok(_) => panic!("lhs i32 should fail for &&"),
+        };
+        assert!(err.end_span().is_some());
     }
 
     #[test]
     fn or_lhs_type_error() {
         // LHS is i32, not bool — join2 must reject it at parse time.
         let mut parser = CELParser::new(OpLookup::new());
-        assert!(parser.parse_str("1i32 || true").is_err());
+        let err = match parser.parse_str("1i32 || true") {
+            Err(e) => e,
+            Ok(_) => panic!("lhs i32 should fail for ||"),
+        };
+        assert!(err.end_span().is_some());
     }
 
     #[test]
