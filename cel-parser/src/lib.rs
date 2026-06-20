@@ -466,6 +466,11 @@ impl CELParser {
     }
 
     /// `and_expression = comparison_expression { "&&" comparison_expression }.`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RHS is missing after `&&`, if the RHS does not
+    /// produce a `bool`, or if any sub-expression returns an error.
     fn is_and_expression(&mut self) -> Result<bool> {
         if self.is_comparison_expression()? {
             while self.is_punctuation("&&") {
@@ -1479,6 +1484,42 @@ mod tests {
             end_span.end().column
         );
     }
+
+    #[test]
+    fn and_short_circuits_on_false() {
+        // Without short-circuit the RHS executes and division-by-zero errors.
+        // With short-circuit the RHS fragment is skipped, returning false directly.
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("false && (1i32 / 0i32 == 0i32)")
+            .expect("should parse");
+        assert_eq!(segment.call0::<bool>().unwrap(), false);
+    }
+
+    #[test]
+    fn and_evaluates_rhs_when_lhs_true() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("true && false")
+            .expect("should parse");
+        assert_eq!(segment.call0::<bool>().unwrap(), false);
+    }
+
+    #[test]
+    fn and_chained_short_circuits() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("false && false && false")
+            .expect("should parse");
+        assert_eq!(segment.call0::<bool>().unwrap(), false);
+    }
+
+    #[test]
+    fn and_lhs_type_error() {
+        // LHS is i32, not bool — join2 must reject it at parse time.
+        let mut parser = CELParser::new(OpLookup::new());
+        assert!(parser.parse_str("1i32 && true").is_err());
+    }
 }
 
 #[cfg(test)]
@@ -1527,41 +1568,5 @@ mod playground {
                 e.format_rustc_style(source, file!(), line, &Renderer::styled())
             ),
         }
-    }
-
-    #[test]
-    fn and_short_circuits_on_false() {
-        // Without short-circuit the RHS executes and division-by-zero errors.
-        // With short-circuit the RHS fragment is skipped, returning false directly.
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("false && (1i32 / 0i32 == 0i32)")
-            .expect("should parse");
-        assert_eq!(segment.call0::<bool>().unwrap(), false);
-    }
-
-    #[test]
-    fn and_evaluates_rhs_when_lhs_true() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("true && false")
-            .expect("should parse");
-        assert_eq!(segment.call0::<bool>().unwrap(), false);
-    }
-
-    #[test]
-    fn and_chained_short_circuits() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("false && false && false")
-            .expect("should parse");
-        assert_eq!(segment.call0::<bool>().unwrap(), false);
-    }
-
-    #[test]
-    fn and_lhs_type_error() {
-        // LHS is i32, not bool — join2 must reject it at parse time.
-        let mut parser = CELParser::new(OpLookup::new());
-        assert!(parser.parse_str("1i32 && true").is_err());
     }
 }
