@@ -445,19 +445,18 @@ impl CELParser {
 
     /// `or_expression = and_expression { "||" and_expression }.`
     fn is_or_expression(&mut self) -> Result<bool> {
-        let start_span = self.peek_span();
         if self.is_and_expression()? {
             while self.is_punctuation("||") {
+                let mut rhs_fragment = self.context.new_fragment();
+                std::mem::swap(&mut self.context, &mut rhs_fragment);
                 if !self.is_and_expression()? {
                     return Err(self.error_at("expected and_expression"));
                 }
-                self.op_lookup.lookup(
-                    "||",
-                    &mut self.context,
-                    2,
-                    start_span.expect("production has token at start"),
-                    self.last_span,
-                )?;
+                std::mem::swap(&mut self.context, &mut rhs_fragment);
+                let mut bypass_fragment = self.context.new_fragment();
+                bypass_fragment.just(true);
+                self.context.join2(bypass_fragment, rhs_fragment)
+                    .map_err(|e| ParseError::new(e.to_string(), self.last_span))?;
             }
             Ok(true)
         } else {
@@ -1519,6 +1518,35 @@ mod tests {
         // LHS is i32, not bool — join2 must reject it at parse time.
         let mut parser = CELParser::new(OpLookup::new());
         assert!(parser.parse_str("1i32 && true").is_err());
+    }
+
+    #[test]
+    fn or_short_circuits_on_true() {
+        // Without short-circuit the RHS executes and division-by-zero errors.
+        // With short-circuit the RHS fragment is skipped, returning true directly.
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("true || (1i32 / 0i32 == 0i32)")
+            .expect("should parse");
+        assert_eq!(segment.call0::<bool>().unwrap(), true);
+    }
+
+    #[test]
+    fn or_evaluates_rhs_when_lhs_false() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("false || true")
+            .expect("should parse");
+        assert_eq!(segment.call0::<bool>().unwrap(), true);
+    }
+
+    #[test]
+    fn or_chained() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("true || false || false")
+            .expect("should parse");
+        assert_eq!(segment.call0::<bool>().unwrap(), true);
     }
 }
 

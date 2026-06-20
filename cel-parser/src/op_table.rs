@@ -599,10 +599,6 @@ static RIGHT_SHIFT_SIGNATURES: Lazy<Vec<OpSignature>> = Lazy::new(|| {
     v
 });
 
-// Logical OR signatures
-static LOGICAL_OR_SIGNATURES: &[OpSignature] =
-    &[sig!(TYPE_BOOL, 2, |seg| seg.op2(|a: bool, b: bool| a || b))];
-
 // Logical NOT signatures
 static LOGICAL_NOT_SIGNATURES: &[OpSignature] = &[sig!(TYPE_BOOL, 1, |seg| seg.op1(|a: bool| !a))];
 
@@ -734,7 +730,6 @@ static BUILTINS: phf::Map<&'static str, &'static [OpSignature]> = phf_map! {
     "&" => BITWISE_AND_SIGNATURES,
     "|" => BITWISE_OR_SIGNATURES,
     "^" => BITWISE_XOR_SIGNATURES,
-    "||" => LOGICAL_OR_SIGNATURES,
     "!" => LOGICAL_NOT_SIGNATURES,
     "==" => EQUAL_SIGNATURES,
     "!=" => NOT_EQUAL_SIGNATURES,
