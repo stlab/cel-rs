@@ -34,13 +34,14 @@ impl RawSegment {
         }
     }
 
-    /// Returns the maximum alignment required by any value stored in the segment.
+    /// Returns the maximum alignment required by any value pushed onto the stack while executing this segment.
     pub(crate) fn base_alignment(&self) -> usize {
         self.base_alignment
     }
 
-    /// Updates the base alignment to be at least `alignment`.
+    /// Updates the stack base alignment to be at least `alignment`.
     pub(crate) fn update_base_alignment(&mut self, alignment: usize) {
+        debug_assert!(alignment.is_power_of_two());
         self.base_alignment = max(self.base_alignment, alignment);
     }
 
