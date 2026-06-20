@@ -34,11 +34,14 @@ impl RawSegment {
         }
     }
 
+    /// Returns the maximum alignment required by any value pushed onto the stack while executing this segment.
     pub(crate) fn base_alignment(&self) -> usize {
         self.base_alignment
     }
 
+    /// Updates the stack base alignment to be at least `alignment`.
     pub(crate) fn update_base_alignment(&mut self, alignment: usize) {
+        debug_assert!(alignment.is_power_of_two());
         self.base_alignment = max(self.base_alignment, alignment);
     }
 
@@ -52,11 +55,7 @@ impl RawSegment {
             .push(|storage, p| unsafe { storage.drop_in_place::<T>(p) });
     }
 
-    /// [Need a better name for this] raw0_ pushes an operation that takes the stack as the only
-    /// argument and handles pushing its result to the stack directly. This can probably be merged
-    /// with raw0. It is used in join2 in dyn_segment.rs, and some of that implementation should be
-    /// lowered into this file.
-    /// Push a closure that manipulates the stack directly and returns `()`.
+    /// Pushes a closure that manipulates the stack directly and returns `()`.
     pub fn raw0_<F>(&mut self, op: F)
     where
         F: Fn(&mut RawStack) -> Result<()> + 'static,
@@ -100,6 +99,7 @@ impl RawSegment {
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
+    /// Pushes the op-dispatch closure for a unary infallible operation with compile-time padding.
     fn push_op1_<const PADDING0: bool, T, R, F>(&mut self)
     where
         F: Fn(T) -> R + 'static,
@@ -114,6 +114,7 @@ impl RawSegment {
         });
     }
 
+    /// Pushes the op-dispatch closure for a unary fallible operation with compile-time padding.
     fn push_op1r_<const PADDING0: bool, T, R, F>(&mut self)
     where
         F: Fn(&mut RawStack, T) -> Result<R> + 'static,
@@ -161,6 +162,7 @@ impl RawSegment {
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
+    /// Pushes the op-dispatch closure for a unary drop operation with compile-time padding.
     fn drop1_<const PADDING0: bool, T, F>(&mut self)
     where
         F: Fn(T) + 'static,
@@ -188,6 +190,7 @@ impl RawSegment {
         }
     }
 
+    /// Pushes the op-dispatch closure for a binary infallible operation with compile-time padding.
     fn push_op2_<const PADDING0: bool, const PADDING1: bool, T, U, R, F>(&mut self)
     where
         F: Fn(T, U) -> R + 'static,
@@ -223,6 +226,7 @@ impl RawSegment {
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
+    /// Pushes the op-dispatch closure for a binary fallible operation with compile-time padding.
     fn push_op2r_<const PADDING0: bool, const PADDING1: bool, T, U, R, F>(&mut self)
     where
         F: Fn(&mut RawStack, T, U) -> Result<R> + 'static,

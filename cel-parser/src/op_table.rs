@@ -49,15 +49,14 @@ pub type ScopeFn = Box<dyn Fn(&str, &mut DynSegment, usize) -> Result<bool> + Se
 
 /// A signature for a built-in operation.
 ///
-/// Homogeneous ops (e.g. `u32 + u32`) leave `rhs_type_id_index` as `None`; all operands
-/// must match `type_id_index`. Heterogeneous binary ops (e.g. `u64 << u32`) set
-/// `rhs_type_id_index` to the RHS type, leaving `type_id_index` for the LHS.
+/// For homogeneous ops (e.g. `u32 + u32`) `rhs_type_id_index` equals `type_id_index`.
+/// For heterogeneous binary ops (e.g. `u64 << u32`) they differ.
 #[derive(Clone, Copy)]
 struct OpSignature {
     /// Index into TYPE_IDS for the LHS (or sole) operand type.
     type_id_index: usize,
-    /// Index into TYPE_IDS for the RHS operand type; `None` means same as LHS.
-    rhs_type_id_index: Option<usize>,
+    /// Index into TYPE_IDS for the RHS operand type; equals `type_id_index` for homogeneous ops.
+    rhs_type_id_index: usize,
     /// Number of operands this operation accepts.
     arity: u8,
     /// Function pointer to the operation implementation.
@@ -65,12 +64,14 @@ struct OpSignature {
 }
 
 impl OpSignature {
+    /// Returns the `TypeId` of the LHS (or sole) operand.
     fn lhs_type_id(&self) -> TypeId {
         TYPE_IDS[self.type_id_index]
     }
 
+    /// Returns the `TypeId` of the RHS operand.
     fn rhs_type_id(&self) -> TypeId {
-        TYPE_IDS[self.rhs_type_id_index.unwrap_or(self.type_id_index)]
+        TYPE_IDS[self.rhs_type_id_index]
     }
 }
 
@@ -122,7 +123,7 @@ macro_rules! sig {
     ($type_idx:expr, $arity:expr, $closure:expr) => {
         OpSignature {
             type_id_index: $type_idx,
-            rhs_type_id_index: None,
+            rhs_type_id_index: $type_idx,
             arity: $arity,
             op_fn: $closure,
         }
@@ -133,7 +134,7 @@ macro_rules! sig_het {
     ($lhs_idx:expr, $rhs_idx:expr, $closure:expr) => {
         OpSignature {
             type_id_index: $lhs_idx,
-            rhs_type_id_index: Some($rhs_idx),
+            rhs_type_id_index: $rhs_idx,
             arity: 2,
             op_fn: $closure,
         }
@@ -757,6 +758,8 @@ impl BuiltinScope {
     /// Attempts to find and apply a built-in operation.
     ///
     /// Returns `Ok(true)` if found and applied, `Ok(false)` if not found.
+    ///
+    /// - Complexity: O(s) where s is the number of signatures registered for `name`.
     fn lookup(&self, name: &str, segment: &mut DynSegment, num_operands: usize) -> Result<bool> {
         let stack_infos = segment.peek_stack_infos(num_operands);
         let signatures: &[OpSignature] = match name {
