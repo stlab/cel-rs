@@ -2,9 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Setup
+
+After cloning, activate the shared git hooks (one-time):
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Commands
 
 ```bash
+# Format (required before every commit; enforced by pre-commit hook)
+cargo fmt --all
+
 # Build
 cargo build --workspace
 

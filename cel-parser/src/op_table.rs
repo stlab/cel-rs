@@ -599,14 +599,6 @@ static RIGHT_SHIFT_SIGNATURES: Lazy<Vec<OpSignature>> = Lazy::new(|| {
     v
 });
 
-// Logical AND signatures
-static LOGICAL_AND_SIGNATURES: &[OpSignature] =
-    &[sig!(TYPE_BOOL, 2, |seg| seg.op2(|a: bool, b: bool| a && b))];
-
-// Logical OR signatures
-static LOGICAL_OR_SIGNATURES: &[OpSignature] =
-    &[sig!(TYPE_BOOL, 2, |seg| seg.op2(|a: bool, b: bool| a || b))];
-
 // Logical NOT signatures
 static LOGICAL_NOT_SIGNATURES: &[OpSignature] = &[sig!(TYPE_BOOL, 1, |seg| seg.op1(|a: bool| !a))];
 
@@ -738,8 +730,6 @@ static BUILTINS: phf::Map<&'static str, &'static [OpSignature]> = phf_map! {
     "&" => BITWISE_AND_SIGNATURES,
     "|" => BITWISE_OR_SIGNATURES,
     "^" => BITWISE_XOR_SIGNATURES,
-    "&&" => LOGICAL_AND_SIGNATURES,
-    "||" => LOGICAL_OR_SIGNATURES,
     "!" => LOGICAL_NOT_SIGNATURES,
     "==" => EQUAL_SIGNATURES,
     "!=" => NOT_EQUAL_SIGNATURES,
@@ -1031,17 +1021,6 @@ mod tests {
         segment.just(20u32);
         lookup.lookup("<", &mut segment, 2, Span::call_site(), Span::call_site())?;
         assert_eq!(segment.call0::<bool>()?, true);
-        Ok(())
-    }
-
-    #[test]
-    fn test_logical_and() -> Result<()> {
-        let lookup = OpLookup::new();
-        let mut segment = DynSegment::new::<()>();
-        segment.just(true);
-        segment.just(false);
-        lookup.lookup("&&", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<bool>()?, false);
         Ok(())
     }
 
