@@ -803,8 +803,11 @@ impl CELParser {
     ///
     /// # Errors
     ///
-    /// Returns an error if a parenthesized expression is malformed, or if an `if` expression
-    /// fails to parse.
+    /// Returns an error if:
+    /// - A literal value cannot be parsed (e.g., integer out of range).
+    /// - An identifier is not found in the op lookup table.
+    /// - A parenthesized expression is malformed or missing its closing `)`.
+    /// - An `if` expression fails to parse.
     fn is_primary_expression(&mut self) -> Result<bool> {
         match self.peek_token() {
             Some(Token::Literal(lit)) => {
