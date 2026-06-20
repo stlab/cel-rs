@@ -444,6 +444,11 @@ impl CELParser {
     }
 
     /// `or_expression = and_expression { "||" and_expression }.`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RHS is missing after `||`, if the RHS does not
+    /// produce a `bool`, or if any sub-expression returns an error.
     fn is_or_expression(&mut self) -> Result<bool> {
         if self.is_and_expression()? {
             while self.is_punctuation("||") {
