@@ -32,20 +32,26 @@ use once_cell::sync::Lazy;
 use phf::phf_map;
 use std::any::TypeId;
 
+use crate::SourceSpan;
+
 /// A function that pushes an operation onto a DynSegment.
 ///
-/// This is a simple function pointer since built-in operations have no state.
-pub type OpFn = fn(&mut DynSegment) -> Result<()>;
+/// Receives the segment and the source span of the expression that triggered
+/// this operation. This is a simple function pointer since built-in operations
+/// have no state.
+pub type OpFn = fn(&mut DynSegment, SourceSpan) -> Result<()>;
 
 /// A scope function that attempts to resolve and apply an operation.
 ///
-/// Receives the operation name, the segment, and the number of operands on top of the stack.
-/// The scope may call `segment.peek_stack_infos(num_operands)` to inspect types. Returns
-/// `Ok(true)` if handled, `Ok(false)` if not found, or `Err` on error.
+/// Receives the operation name, the segment, the number of operands on top of the stack,
+/// and the source span of the expression. The scope may call
+/// `segment.peek_stack_infos(num_operands)` to inspect types. Returns `Ok(true)` if
+/// handled, `Ok(false)` if not found, or `Err` on error.
 ///
 /// Error messages returned by scope functions surface verbatim to the user. They should be
 /// lowercase, end without a period, and wrap identifiers and type names in backticks.
-pub type ScopeFn = Box<dyn Fn(&str, &mut DynSegment, usize) -> Result<bool> + Send + Sync>;
+pub type ScopeFn =
+    Box<dyn Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync>;
 
 /// A signature for a built-in operation.
 ///
@@ -143,130 +149,140 @@ macro_rules! sig_het {
 
 // Addition signatures
 static ADD_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a.wrapping_add(b))),
-    sig!(TYPE_U16, 2, |seg| seg
+    sig!(TYPE_U8, 2, |seg, _span| seg
+        .op2(|a: u8, b: u8| a.wrapping_add(b))),
+    sig!(TYPE_U16, 2, |seg, _span| seg
         .op2(|a: u16, b: u16| a.wrapping_add(b))),
-    sig!(TYPE_U32, 2, |seg| seg
+    sig!(TYPE_U32, 2, |seg, _span| seg
         .op2(|a: u32, b: u32| a.wrapping_add(b))),
-    sig!(TYPE_U64, 2, |seg| seg
+    sig!(TYPE_U64, 2, |seg, _span| seg
         .op2(|a: u64, b: u64| a.wrapping_add(b))),
-    sig!(TYPE_U128, 2, |seg| seg
+    sig!(TYPE_U128, 2, |seg, _span| seg
         .op2(|a: u128, b: u128| a.wrapping_add(b))),
-    sig!(TYPE_USIZE, 2, |seg| seg
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
         .op2(|a: usize, b: usize| a.wrapping_add(b))),
-    sig!(TYPE_I8, 2, |seg| seg.op2r(|a: i8, b: i8| a
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2r(|a: i8, b: i8| a
         .checked_add(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I16, 2, |seg| seg.op2r(|a: i16, b: i16| a
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2r(|a: i16, b: i16| a
         .checked_add(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I32, 2, |seg| seg.op2r(|a: i32, b: i32| a
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2r(|a: i32, b: i32| a
         .checked_add(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I64, 2, |seg| seg.op2r(|a: i64, b: i64| a
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2r(|a: i64, b: i64| a
         .checked_add(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I128, 2, |seg| seg.op2r(|a: i128, b: i128| a
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2r(|a: i128, b: i128| a
         .checked_add(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2r(|a: isize, b: isize| a
-        .checked_add(b)
-        .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a + b)),
-    sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a + b)),
-    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a + &b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg.op2r(
+        |a: isize, b: isize| a
+            .checked_add(b)
+            .ok_or_else(|| anyhow!("arithmetic overflow"))
+    )),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a + b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a + b)),
+    sig!(TYPE_STR, 2, |seg, _span| seg
+        .op2(|a: String, b: String| a + &b)),
 ];
 
 // Subtraction signatures (both binary and unary)
 static SUB_SIGNATURES: &[OpSignature] = &[
     // Binary subtraction
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a.wrapping_sub(b))),
-    sig!(TYPE_U16, 2, |seg| seg
+    sig!(TYPE_U8, 2, |seg, _span| seg
+        .op2(|a: u8, b: u8| a.wrapping_sub(b))),
+    sig!(TYPE_U16, 2, |seg, _span| seg
         .op2(|a: u16, b: u16| a.wrapping_sub(b))),
-    sig!(TYPE_U32, 2, |seg| seg
+    sig!(TYPE_U32, 2, |seg, _span| seg
         .op2(|a: u32, b: u32| a.wrapping_sub(b))),
-    sig!(TYPE_U64, 2, |seg| seg
+    sig!(TYPE_U64, 2, |seg, _span| seg
         .op2(|a: u64, b: u64| a.wrapping_sub(b))),
-    sig!(TYPE_U128, 2, |seg| seg
+    sig!(TYPE_U128, 2, |seg, _span| seg
         .op2(|a: u128, b: u128| a.wrapping_sub(b))),
-    sig!(TYPE_USIZE, 2, |seg| seg
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
         .op2(|a: usize, b: usize| a.wrapping_sub(b))),
-    sig!(TYPE_I8, 2, |seg| seg.op2r(|a: i8, b: i8| a
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2r(|a: i8, b: i8| a
         .checked_sub(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I16, 2, |seg| seg.op2r(|a: i16, b: i16| a
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2r(|a: i16, b: i16| a
         .checked_sub(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I32, 2, |seg| seg.op2r(|a: i32, b: i32| a
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2r(|a: i32, b: i32| a
         .checked_sub(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I64, 2, |seg| seg.op2r(|a: i64, b: i64| a
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2r(|a: i64, b: i64| a
         .checked_sub(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I128, 2, |seg| seg.op2r(|a: i128, b: i128| a
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2r(|a: i128, b: i128| a
         .checked_sub(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2r(|a: isize, b: isize| a
-        .checked_sub(b)
-        .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a - b)),
-    sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a - b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg.op2r(
+        |a: isize, b: isize| a
+            .checked_sub(b)
+            .ok_or_else(|| anyhow!("arithmetic overflow"))
+    )),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a - b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a - b)),
     // Unary negation
-    sig!(TYPE_I8, 1, |seg| seg.op1r(|a: i8| a
+    sig!(TYPE_I8, 1, |seg, _span| seg.op1r(|a: i8| a
         .checked_neg()
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I16, 1, |seg| seg.op1r(|a: i16| a
+    sig!(TYPE_I16, 1, |seg, _span| seg.op1r(|a: i16| a
         .checked_neg()
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I32, 1, |seg| seg.op1r(|a: i32| a
+    sig!(TYPE_I32, 1, |seg, _span| seg.op1r(|a: i32| a
         .checked_neg()
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I64, 1, |seg| seg.op1r(|a: i64| a
+    sig!(TYPE_I64, 1, |seg, _span| seg.op1r(|a: i64| a
         .checked_neg()
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I128, 1, |seg| seg.op1r(|a: i128| a
+    sig!(TYPE_I128, 1, |seg, _span| seg.op1r(|a: i128| a
         .checked_neg()
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_ISIZE, 1, |seg| seg.op1r(|a: isize| a
+    sig!(TYPE_ISIZE, 1, |seg, _span| seg.op1r(|a: isize| a
         .checked_neg()
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_F32, 1, |seg| seg.op1(|a: f32| -a)),
-    sig!(TYPE_F64, 1, |seg| seg.op1(|a: f64| -a)),
+    sig!(TYPE_F32, 1, |seg, _span| seg.op1(|a: f32| -a)),
+    sig!(TYPE_F64, 1, |seg, _span| seg.op1(|a: f64| -a)),
 ];
 
 // Multiplication signatures
 static MUL_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a.wrapping_mul(b))),
-    sig!(TYPE_U16, 2, |seg| seg
+    sig!(TYPE_U8, 2, |seg, _span| seg
+        .op2(|a: u8, b: u8| a.wrapping_mul(b))),
+    sig!(TYPE_U16, 2, |seg, _span| seg
         .op2(|a: u16, b: u16| a.wrapping_mul(b))),
-    sig!(TYPE_U32, 2, |seg| seg
+    sig!(TYPE_U32, 2, |seg, _span| seg
         .op2(|a: u32, b: u32| a.wrapping_mul(b))),
-    sig!(TYPE_U64, 2, |seg| seg
+    sig!(TYPE_U64, 2, |seg, _span| seg
         .op2(|a: u64, b: u64| a.wrapping_mul(b))),
-    sig!(TYPE_U128, 2, |seg| seg
+    sig!(TYPE_U128, 2, |seg, _span| seg
         .op2(|a: u128, b: u128| a.wrapping_mul(b))),
-    sig!(TYPE_USIZE, 2, |seg| seg
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
         .op2(|a: usize, b: usize| a.wrapping_mul(b))),
-    sig!(TYPE_I8, 2, |seg| seg.op2r(|a: i8, b: i8| a
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2r(|a: i8, b: i8| a
         .checked_mul(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I16, 2, |seg| seg.op2r(|a: i16, b: i16| a
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2r(|a: i16, b: i16| a
         .checked_mul(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I32, 2, |seg| seg.op2r(|a: i32, b: i32| a
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2r(|a: i32, b: i32| a
         .checked_mul(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I64, 2, |seg| seg.op2r(|a: i64, b: i64| a
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2r(|a: i64, b: i64| a
         .checked_mul(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_I128, 2, |seg| seg.op2r(|a: i128, b: i128| a
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2r(|a: i128, b: i128| a
         .checked_mul(b)
         .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2r(|a: isize, b: isize| a
-        .checked_mul(b)
-        .ok_or_else(|| anyhow!("arithmetic overflow")))),
-    sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a * b)),
-    sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a * b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg.op2r(
+        |a: isize, b: isize| a
+            .checked_mul(b)
+            .ok_or_else(|| anyhow!("arithmetic overflow"))
+    )),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a * b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a * b)),
 ];
 
 // Division signatures
@@ -274,44 +290,44 @@ static MUL_SIGNATURES: &[OpSignature] = &[
 // Integer division uses `checked_div` via `op2r` so that division by zero returns an error
 // instead of panicking. Float division keeps `op2` (IEEE 754 defines x/0.0 as inf/nan).
 static DIV_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2r(|a: u8, b: u8| a
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2r(|a: u8, b: u8| a
         .checked_div(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_U16, 2, |seg| seg.op2r(|a: u16, b: u16| a
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2r(|a: u16, b: u16| a
         .checked_div(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_U32, 2, |seg| seg.op2r(|a: u32, b: u32| a
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2r(|a: u32, b: u32| a
         .checked_div(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_U64, 2, |seg| seg.op2r(|a: u64, b: u64| a
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2r(|a: u64, b: u64| a
         .checked_div(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_U128, 2, |seg| seg.op2r(|a: u128, b: u128| a
+    sig!(TYPE_U128, 2, |seg, _span| seg.op2r(|a: u128, b: u128| a
         .checked_div(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2r(|a: usize, b: usize| a
+    sig!(TYPE_USIZE, 2, |seg, _span| seg.op2r(
+        |a: usize, b: usize| a.checked_div(b).ok_or_else(|| anyhow!("division by zero"))
+    )),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2r(|a: i8, b: i8| a
         .checked_div(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_I8, 2, |seg| seg.op2r(|a: i8, b: i8| a
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2r(|a: i16, b: i16| a
         .checked_div(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_I16, 2, |seg| seg.op2r(|a: i16, b: i16| a
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2r(|a: i32, b: i32| a
         .checked_div(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_I32, 2, |seg| seg.op2r(|a: i32, b: i32| a
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2r(|a: i64, b: i64| a
         .checked_div(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_I64, 2, |seg| seg.op2r(|a: i64, b: i64| a
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2r(|a: i128, b: i128| a
         .checked_div(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_I128, 2, |seg| seg.op2r(|a: i128, b: i128| a
-        .checked_div(b)
-        .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2r(|a: isize, b: isize| a
-        .checked_div(b)
-        .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a / b)),
-    sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a / b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg.op2r(
+        |a: isize, b: isize| a.checked_div(b).ok_or_else(|| anyhow!("division by zero"))
+    )),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a / b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a / b)),
 ];
 
 // Modulo signatures
@@ -319,92 +335,98 @@ static DIV_SIGNATURES: &[OpSignature] = &[
 // Integer modulo uses `checked_rem` via `op2r` so that division by zero returns an error
 // instead of panicking. Float modulo keeps `op2` (x % 0.0 yields NaN without panicking).
 static MOD_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2r(|a: u8, b: u8| a
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2r(|a: u8, b: u8| a
         .checked_rem(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_U16, 2, |seg| seg.op2r(|a: u16, b: u16| a
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2r(|a: u16, b: u16| a
         .checked_rem(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_U32, 2, |seg| seg.op2r(|a: u32, b: u32| a
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2r(|a: u32, b: u32| a
         .checked_rem(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_U64, 2, |seg| seg.op2r(|a: u64, b: u64| a
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2r(|a: u64, b: u64| a
         .checked_rem(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_U128, 2, |seg| seg.op2r(|a: u128, b: u128| a
+    sig!(TYPE_U128, 2, |seg, _span| seg.op2r(|a: u128, b: u128| a
         .checked_rem(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2r(|a: usize, b: usize| a
+    sig!(TYPE_USIZE, 2, |seg, _span| seg.op2r(
+        |a: usize, b: usize| a.checked_rem(b).ok_or_else(|| anyhow!("division by zero"))
+    )),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2r(|a: i8, b: i8| a
         .checked_rem(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_I8, 2, |seg| seg.op2r(|a: i8, b: i8| a
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2r(|a: i16, b: i16| a
         .checked_rem(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_I16, 2, |seg| seg.op2r(|a: i16, b: i16| a
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2r(|a: i32, b: i32| a
         .checked_rem(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_I32, 2, |seg| seg.op2r(|a: i32, b: i32| a
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2r(|a: i64, b: i64| a
         .checked_rem(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_I64, 2, |seg| seg.op2r(|a: i64, b: i64| a
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2r(|a: i128, b: i128| a
         .checked_rem(b)
         .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_I128, 2, |seg| seg.op2r(|a: i128, b: i128| a
-        .checked_rem(b)
-        .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2r(|a: isize, b: isize| a
-        .checked_rem(b)
-        .ok_or_else(|| anyhow!("division by zero")))),
-    sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a % b)),
-    sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a % b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg.op2r(
+        |a: isize, b: isize| a.checked_rem(b).ok_or_else(|| anyhow!("division by zero"))
+    )),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a % b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a % b)),
 ];
 
 // Bitwise AND signatures
 static BITWISE_AND_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a & b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a & b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a & b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a & b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a & b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a & b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a & b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a & b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a & b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a & b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a & b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a & b)),
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2(|a: u8, b: u8| a & b)),
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2(|a: u16, b: u16| a & b)),
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2(|a: u32, b: u32| a & b)),
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2(|a: u64, b: u64| a & b)),
+    sig!(TYPE_U128, 2, |seg, _span| seg.op2(|a: u128, b: u128| a & b)),
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
+        .op2(|a: usize, b: usize| a & b)),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2(|a: i8, b: i8| a & b)),
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2(|a: i16, b: i16| a & b)),
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2(|a: i32, b: i32| a & b)),
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2(|a: i64, b: i64| a & b)),
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2(|a: i128, b: i128| a & b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg
+        .op2(|a: isize, b: isize| a & b)),
 ];
 
 // Bitwise OR signatures
 static BITWISE_OR_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a | b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a | b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a | b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a | b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a | b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a | b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a | b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a | b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a | b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a | b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a | b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a | b)),
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2(|a: u8, b: u8| a | b)),
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2(|a: u16, b: u16| a | b)),
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2(|a: u32, b: u32| a | b)),
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2(|a: u64, b: u64| a | b)),
+    sig!(TYPE_U128, 2, |seg, _span| seg.op2(|a: u128, b: u128| a | b)),
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
+        .op2(|a: usize, b: usize| a | b)),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2(|a: i8, b: i8| a | b)),
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2(|a: i16, b: i16| a | b)),
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2(|a: i32, b: i32| a | b)),
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2(|a: i64, b: i64| a | b)),
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2(|a: i128, b: i128| a | b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg
+        .op2(|a: isize, b: isize| a | b)),
 ];
 
 // Bitwise XOR signatures
 static BITWISE_XOR_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a ^ b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a ^ b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a ^ b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a ^ b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a ^ b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a ^ b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a ^ b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a ^ b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a ^ b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a ^ b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a ^ b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a ^ b)),
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2(|a: u8, b: u8| a ^ b)),
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2(|a: u16, b: u16| a ^ b)),
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2(|a: u32, b: u32| a ^ b)),
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2(|a: u64, b: u64| a ^ b)),
+    sig!(TYPE_U128, 2, |seg, _span| seg.op2(|a: u128, b: u128| a ^ b)),
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
+        .op2(|a: usize, b: usize| a ^ b)),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2(|a: i8, b: i8| a ^ b)),
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2(|a: i16, b: i16| a ^ b)),
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2(|a: i32, b: i32| a ^ b)),
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2(|a: i64, b: i64| a ^ b)),
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2(|a: i128, b: i128| a ^ b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg
+        .op2(|a: isize, b: isize| a ^ b)),
 ];
 
 // Macros that push shift signatures onto a Vec as statements.
@@ -420,68 +442,68 @@ static BITWISE_XOR_SIGNATURES: &[OpSignature] = &[
 //   debug-mode panic for shift-with-overflow.
 macro_rules! shl_push {
     ($v:ident, $lhs_idx:expr, $lhs_ty:ty) => {
-        $v.push(sig_het!($lhs_idx, TYPE_U8, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_U8, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: u8| a
                 .checked_shl(u32::from(b))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_U16, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_U16, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: u16| a
                 .checked_shl(u32::from(b))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_U32, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_U32, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: u32| a.checked_shl(b).ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_U64, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_U64, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: u64| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shl(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_U128, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_U128, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: u128| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shl(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_USIZE, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_USIZE, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: usize| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shl(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_I8, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_I8, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: i8| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shl(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_I16, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_I16, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: i16| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shl(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_I32, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_I32, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: i32| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shl(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_I64, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_I64, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: i64| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shl(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_I128, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_I128, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: i128| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shl(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_ISIZE, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_ISIZE, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: isize| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shl(r))
@@ -492,68 +514,68 @@ macro_rules! shl_push {
 
 macro_rules! shr_push {
     ($v:ident, $lhs_idx:expr, $lhs_ty:ty) => {
-        $v.push(sig_het!($lhs_idx, TYPE_U8, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_U8, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: u8| a
                 .checked_shr(u32::from(b))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_U16, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_U16, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: u16| a
                 .checked_shr(u32::from(b))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_U32, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_U32, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: u32| a.checked_shr(b).ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_U64, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_U64, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: u64| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shr(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_U128, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_U128, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: u128| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shr(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_USIZE, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_USIZE, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: usize| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shr(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_I8, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_I8, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: i8| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shr(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_I16, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_I16, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: i16| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shr(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_I32, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_I32, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: i32| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shr(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_I64, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_I64, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: i64| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shr(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_I128, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_I128, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: i128| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shr(r))
                 .ok_or_else(|| anyhow!("shift overflow"))
         )));
-        $v.push(sig_het!($lhs_idx, TYPE_ISIZE, |seg| seg.op2r(
+        $v.push(sig_het!($lhs_idx, TYPE_ISIZE, |seg, _span| seg.op2r(
             |a: $lhs_ty, b: isize| u32::try_from(b)
                 .ok()
                 .and_then(|r| a.checked_shr(r))
@@ -600,122 +622,151 @@ static RIGHT_SHIFT_SIGNATURES: Lazy<Vec<OpSignature>> = Lazy::new(|| {
 });
 
 // Logical NOT signatures
-static LOGICAL_NOT_SIGNATURES: &[OpSignature] = &[sig!(TYPE_BOOL, 1, |seg| seg.op1(|a: bool| !a))];
+static LOGICAL_NOT_SIGNATURES: &[OpSignature] =
+    &[sig!(TYPE_BOOL, 1, |seg, _span| seg.op1(|a: bool| !a))];
 
 // Equality signatures
 static EQUAL_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a == b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a == b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a == b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a == b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a == b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a == b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a == b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a == b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a == b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a == b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a == b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a == b)),
-    sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a == b)),
-    sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a == b)),
-    sig!(TYPE_BOOL, 2, |seg| seg.op2(|a: bool, b: bool| a == b)),
-    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a == b)),
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2(|a: u8, b: u8| a == b)),
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2(|a: u16, b: u16| a == b)),
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2(|a: u32, b: u32| a == b)),
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2(|a: u64, b: u64| a == b)),
+    sig!(TYPE_U128, 2, |seg, _span| seg
+        .op2(|a: u128, b: u128| a == b)),
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
+        .op2(|a: usize, b: usize| a == b)),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2(|a: i8, b: i8| a == b)),
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2(|a: i16, b: i16| a == b)),
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2(|a: i32, b: i32| a == b)),
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2(|a: i64, b: i64| a == b)),
+    sig!(TYPE_I128, 2, |seg, _span| seg
+        .op2(|a: i128, b: i128| a == b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg
+        .op2(|a: isize, b: isize| a == b)),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a == b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a == b)),
+    sig!(TYPE_BOOL, 2, |seg, _span| seg
+        .op2(|a: bool, b: bool| a == b)),
+    sig!(TYPE_STR, 2, |seg, _span| seg
+        .op2(|a: String, b: String| a == b)),
 ];
 
 // Inequality signatures
 static NOT_EQUAL_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a != b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a != b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a != b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a != b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a != b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a != b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a != b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a != b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a != b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a != b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a != b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a != b)),
-    sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a != b)),
-    sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a != b)),
-    sig!(TYPE_BOOL, 2, |seg| seg.op2(|a: bool, b: bool| a != b)),
-    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a != b)),
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2(|a: u8, b: u8| a != b)),
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2(|a: u16, b: u16| a != b)),
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2(|a: u32, b: u32| a != b)),
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2(|a: u64, b: u64| a != b)),
+    sig!(TYPE_U128, 2, |seg, _span| seg
+        .op2(|a: u128, b: u128| a != b)),
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
+        .op2(|a: usize, b: usize| a != b)),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2(|a: i8, b: i8| a != b)),
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2(|a: i16, b: i16| a != b)),
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2(|a: i32, b: i32| a != b)),
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2(|a: i64, b: i64| a != b)),
+    sig!(TYPE_I128, 2, |seg, _span| seg
+        .op2(|a: i128, b: i128| a != b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg
+        .op2(|a: isize, b: isize| a != b)),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a != b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a != b)),
+    sig!(TYPE_BOOL, 2, |seg, _span| seg
+        .op2(|a: bool, b: bool| a != b)),
+    sig!(TYPE_STR, 2, |seg, _span| seg
+        .op2(|a: String, b: String| a != b)),
 ];
 
 // Less than signatures
 static LESS_THAN_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a < b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a < b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a < b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a < b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a < b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a < b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a < b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a < b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a < b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a < b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a < b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a < b)),
-    sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a < b)),
-    sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a < b)),
-    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a < b)),
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2(|a: u8, b: u8| a < b)),
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2(|a: u16, b: u16| a < b)),
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2(|a: u32, b: u32| a < b)),
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2(|a: u64, b: u64| a < b)),
+    sig!(TYPE_U128, 2, |seg, _span| seg.op2(|a: u128, b: u128| a < b)),
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
+        .op2(|a: usize, b: usize| a < b)),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2(|a: i8, b: i8| a < b)),
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2(|a: i16, b: i16| a < b)),
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2(|a: i32, b: i32| a < b)),
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2(|a: i64, b: i64| a < b)),
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2(|a: i128, b: i128| a < b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg
+        .op2(|a: isize, b: isize| a < b)),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a < b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a < b)),
+    sig!(TYPE_STR, 2, |seg, _span| seg
+        .op2(|a: String, b: String| a < b)),
 ];
 
 // Less than or equal signatures
 static LESS_THAN_OR_EQUAL_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a <= b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a <= b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a <= b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a <= b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a <= b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a <= b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a <= b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a <= b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a <= b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a <= b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a <= b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a <= b)),
-    sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a <= b)),
-    sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a <= b)),
-    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a <= b)),
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2(|a: u8, b: u8| a <= b)),
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2(|a: u16, b: u16| a <= b)),
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2(|a: u32, b: u32| a <= b)),
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2(|a: u64, b: u64| a <= b)),
+    sig!(TYPE_U128, 2, |seg, _span| seg
+        .op2(|a: u128, b: u128| a <= b)),
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
+        .op2(|a: usize, b: usize| a <= b)),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2(|a: i8, b: i8| a <= b)),
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2(|a: i16, b: i16| a <= b)),
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2(|a: i32, b: i32| a <= b)),
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2(|a: i64, b: i64| a <= b)),
+    sig!(TYPE_I128, 2, |seg, _span| seg
+        .op2(|a: i128, b: i128| a <= b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg
+        .op2(|a: isize, b: isize| a <= b)),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a <= b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a <= b)),
+    sig!(TYPE_STR, 2, |seg, _span| seg
+        .op2(|a: String, b: String| a <= b)),
 ];
 
 // Greater than signatures
 static GREATER_THAN_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a > b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a > b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a > b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a > b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a > b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a > b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a > b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a > b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a > b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a > b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a > b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a > b)),
-    sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a > b)),
-    sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a > b)),
-    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a > b)),
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2(|a: u8, b: u8| a > b)),
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2(|a: u16, b: u16| a > b)),
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2(|a: u32, b: u32| a > b)),
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2(|a: u64, b: u64| a > b)),
+    sig!(TYPE_U128, 2, |seg, _span| seg.op2(|a: u128, b: u128| a > b)),
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
+        .op2(|a: usize, b: usize| a > b)),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2(|a: i8, b: i8| a > b)),
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2(|a: i16, b: i16| a > b)),
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2(|a: i32, b: i32| a > b)),
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2(|a: i64, b: i64| a > b)),
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2(|a: i128, b: i128| a > b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg
+        .op2(|a: isize, b: isize| a > b)),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a > b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a > b)),
+    sig!(TYPE_STR, 2, |seg, _span| seg
+        .op2(|a: String, b: String| a > b)),
 ];
 
 // Greater than or equal signatures
 static GREATER_THAN_OR_EQUAL_SIGNATURES: &[OpSignature] = &[
-    sig!(TYPE_U8, 2, |seg| seg.op2(|a: u8, b: u8| a >= b)),
-    sig!(TYPE_U16, 2, |seg| seg.op2(|a: u16, b: u16| a >= b)),
-    sig!(TYPE_U32, 2, |seg| seg.op2(|a: u32, b: u32| a >= b)),
-    sig!(TYPE_U64, 2, |seg| seg.op2(|a: u64, b: u64| a >= b)),
-    sig!(TYPE_U128, 2, |seg| seg.op2(|a: u128, b: u128| a >= b)),
-    sig!(TYPE_USIZE, 2, |seg| seg.op2(|a: usize, b: usize| a >= b)),
-    sig!(TYPE_I8, 2, |seg| seg.op2(|a: i8, b: i8| a >= b)),
-    sig!(TYPE_I16, 2, |seg| seg.op2(|a: i16, b: i16| a >= b)),
-    sig!(TYPE_I32, 2, |seg| seg.op2(|a: i32, b: i32| a >= b)),
-    sig!(TYPE_I64, 2, |seg| seg.op2(|a: i64, b: i64| a >= b)),
-    sig!(TYPE_I128, 2, |seg| seg.op2(|a: i128, b: i128| a >= b)),
-    sig!(TYPE_ISIZE, 2, |seg| seg.op2(|a: isize, b: isize| a >= b)),
-    sig!(TYPE_F32, 2, |seg| seg.op2(|a: f32, b: f32| a >= b)),
-    sig!(TYPE_F64, 2, |seg| seg.op2(|a: f64, b: f64| a >= b)),
-    sig!(TYPE_STR, 2, |seg| seg.op2(|a: String, b: String| a >= b)),
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2(|a: u8, b: u8| a >= b)),
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2(|a: u16, b: u16| a >= b)),
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2(|a: u32, b: u32| a >= b)),
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2(|a: u64, b: u64| a >= b)),
+    sig!(TYPE_U128, 2, |seg, _span| seg
+        .op2(|a: u128, b: u128| a >= b)),
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
+        .op2(|a: usize, b: usize| a >= b)),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2(|a: i8, b: i8| a >= b)),
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2(|a: i16, b: i16| a >= b)),
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2(|a: i32, b: i32| a >= b)),
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2(|a: i64, b: i64| a >= b)),
+    sig!(TYPE_I128, 2, |seg, _span| seg
+        .op2(|a: i128, b: i128| a >= b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg
+        .op2(|a: isize, b: isize| a >= b)),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a >= b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a >= b)),
+    sig!(TYPE_STR, 2, |seg, _span| seg
+        .op2(|a: String, b: String| a >= b)),
 ];
 
 /// Compile-time perfect hash map for built-in operations.
@@ -750,7 +801,13 @@ impl BuiltinScope {
     /// Returns `Ok(true)` if found and applied, `Ok(false)` if not found.
     ///
     /// - Complexity: O(s) where s is the number of signatures registered for `name`.
-    fn lookup(&self, name: &str, segment: &mut DynSegment, num_operands: usize) -> Result<bool> {
+    fn lookup(
+        &self,
+        name: &str,
+        segment: &mut DynSegment,
+        num_operands: usize,
+        span: SourceSpan,
+    ) -> Result<bool> {
         let stack_infos = segment.peek_stack_infos(num_operands);
         let signatures: &[OpSignature] = match name {
             "<<" => &LEFT_SHIFT_SIGNATURES,
@@ -766,7 +823,7 @@ impl BuiltinScope {
                 && stack_infos[0].type_id == sig.lhs_type_id()
                 && (arity < 2 || stack_infos[1].type_id == sig.rhs_type_id());
             if matches {
-                (sig.op_fn)(segment)?;
+                (sig.op_fn)(segment, span)?;
                 return Ok(true);
             }
         }
@@ -825,7 +882,7 @@ impl OpLookup {
     /// without a period, and wrap identifiers and type names in backticks.
     pub fn push_scope<F>(&mut self, scope: F)
     where
-        F: Fn(&str, &mut DynSegment, usize) -> Result<bool> + Send + Sync + 'static,
+        F: Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync + 'static,
     {
         self.scopes.push(Box::new(scope));
     }
@@ -872,15 +929,19 @@ impl OpLookup {
         start: proc_macro2::Span,
         end: proc_macro2::Span,
     ) -> std::result::Result<(), crate::ParseError> {
+        let source_span = SourceSpan::from_proc_macro2_range(start, end);
         for scope in self.scopes.iter().rev() {
-            match scope(name, segment, num_operands) {
+            match scope(name, segment, num_operands, source_span) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
                 Err(e) => return Err(crate::ParseError::new_range(e.to_string(), start, end)),
             }
         }
 
-        match self.builtin_scope.lookup(name, segment, num_operands) {
+        match self
+            .builtin_scope
+            .lookup(name, segment, num_operands, source_span)
+        {
             Ok(true) => return Ok(()),
             Ok(false) => {}
             Err(e) => {
@@ -1075,7 +1136,7 @@ mod tests {
     fn test_custom_scope() -> Result<()> {
         let mut lookup = OpLookup::new();
 
-        lookup.push_scope(|name, segment, num_operands| {
+        lookup.push_scope(|name, segment, num_operands, _span| {
             let matches = {
                 let top = segment.peek_stack_infos(num_operands);
                 name == "double" && top.len() == 1 && top[0].type_id == TypeId::of::<u32>()
@@ -1106,7 +1167,7 @@ mod tests {
     fn test_scope_override() -> Result<()> {
         let mut lookup = OpLookup::new();
 
-        lookup.push_scope(|name, segment, num_operands| {
+        lookup.push_scope(|name, segment, num_operands, _span| {
             let matches = {
                 let top = segment.peek_stack_infos(num_operands);
                 name == "+" && top.len() == 2 && top[0].type_id == TypeId::of::<u32>()
@@ -1220,7 +1281,7 @@ mod tests {
     fn test_scope_pop() -> Result<()> {
         let mut lookup = OpLookup::new();
 
-        lookup.push_scope(|name, segment, num_operands| {
+        lookup.push_scope(|name, segment, num_operands, _span| {
             let matches = {
                 let top = segment.peek_stack_infos(num_operands);
                 name == "+" && top.len() == 2 && top[0].type_id == TypeId::of::<u32>()

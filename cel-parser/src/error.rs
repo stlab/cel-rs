@@ -77,6 +77,28 @@ impl SourceSpan {
             end: span.end(),
         }
     }
+
+    /// Builds a span from two `proc_macro2::Span` values (start of `start`, end of `end`).
+    ///
+    /// Use this when an expression spans multiple tokens and you want a range span.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use proc_macro2::Span;
+    /// use cel_parser::SourceSpan;
+    ///
+    /// let start = Span::call_site();
+    /// let end = Span::call_site();
+    /// let span = SourceSpan::from_proc_macro2_range(start, end);
+    /// assert_eq!(span.start.line, span.end.line);
+    /// ```
+    pub fn from_proc_macro2_range(start: proc_macro2::Span, end: proc_macro2::Span) -> Self {
+        SourceSpan {
+            start: start.start(),
+            end: end.end(),
+        }
+    }
 }
 
 /// A CEL parse error with a message and source location.
