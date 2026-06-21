@@ -88,7 +88,7 @@ mod error;
 mod lex_lexer;
 pub mod op_table;
 
-pub use error::{CELError, ParseError, SourceSpan};
+pub use error::{CELError, ParseError, SourceSpan, SpanContext};
 pub use op_table::OpLookup;
 pub use proc_macro2::LineColumn;
 

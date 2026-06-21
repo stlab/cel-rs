@@ -401,6 +401,98 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// A runtime error context carrying the source span of the failing operation.
+///
+/// Add this as anyhow context with `.context(SpanContext::new(span))` when wrapping
+/// an op closure. Retrieve it from an `anyhow::Error` with `e.downcast_ref::<SpanContext>()`.
+pub struct SpanContext {
+    span: SourceSpan,
+}
+
+impl SpanContext {
+    /// Creates a new span context for the given source region.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{SourceSpan, SpanContext};
+    ///
+    /// let span = SourceSpan::new(1, 0, 1, 5);
+    /// let ctx = SpanContext::new(span);
+    /// assert_eq!(ctx.span(), span);
+    /// ```
+    pub fn new(span: SourceSpan) -> Self {
+        SpanContext { span }
+    }
+
+    /// Returns the source span.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{SourceSpan, SpanContext};
+    ///
+    /// let span = SourceSpan::new(2, 3, 2, 7);
+    /// let ctx = SpanContext::new(span);
+    /// assert_eq!(ctx.span(), span);
+    /// ```
+    pub fn span(&self) -> SourceSpan {
+        self.span
+    }
+
+    /// Formats a runtime error message with rustc-style source annotation.
+    ///
+    /// Delegates to `CELError::format_rustc_style` using `self.span` and `message`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use annotate_snippets::Renderer;
+    /// use cel_parser::{SourceSpan, SpanContext};
+    ///
+    /// let source = "1i32 + 2i32";
+    /// let span = SourceSpan::new(1, 5, 1, 6);
+    /// let ctx = SpanContext::new(span);
+    /// let output = ctx.format_rustc_style("arithmetic overflow", source, "test.cel", 1, &Renderer::plain());
+    /// assert!(output.contains("arithmetic overflow"));
+    /// ```
+    pub fn format_rustc_style(
+        &self,
+        message: &str,
+        source_code: &str,
+        filename: &str,
+        start_line: u32,
+        renderer: &Renderer,
+    ) -> String {
+        CELError::new(message, self.span).format_rustc_style(
+            source_code,
+            filename,
+            start_line,
+            renderer,
+        )
+    }
+}
+
+impl std::fmt::Display for SpanContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "at {}:{}-{}:{}",
+            self.span.start.line, self.span.start.column, self.span.end.line, self.span.end.column
+        )
+    }
+}
+
+impl std::fmt::Debug for SpanContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpanContext")
+            .field("span", &self.span)
+            .finish()
+    }
+}
+
+impl std::error::Error for SpanContext {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +598,42 @@ mod tests {
         let source = "hi";
         let r = span_to_byte_range(source, SourceSpan::new(1, 0, 1, 100));
         assert!(r.start <= r.end && r.end <= source.len());
+    }
+
+    #[test]
+    fn span_context_display_shows_span_location() {
+        let span = SourceSpan::new(1, 0, 1, 5);
+        let ctx = SpanContext::new(span);
+        let s = ctx.to_string();
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn span_context_span_roundtrip() {
+        let span = SourceSpan::new(2, 3, 2, 7);
+        let ctx = SpanContext::new(span);
+        assert_eq!(ctx.span(), span);
+    }
+
+    #[test]
+    fn span_context_format_rustc_style_contains_message_and_location() {
+        let source = "1i32 + 2i32";
+        let span = SourceSpan::new(1, 5, 1, 6);
+        let ctx = SpanContext::new(span);
+        let output = ctx.format_rustc_style(
+            "arithmetic overflow",
+            source,
+            "test.cel",
+            1,
+            &Renderer::plain(),
+        );
+        assert!(
+            output.contains("arithmetic overflow"),
+            "expected message in output:\n{output}"
+        );
+        assert!(
+            output.contains("test.cel"),
+            "expected filename in output:\n{output}"
+        );
     }
 }
