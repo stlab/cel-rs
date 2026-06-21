@@ -13,5 +13,8 @@ syn = { version = "2.0", features = ["extra-traits", "parsing"] }
 phf = { version = "0.11", features = ["macros"] }
 once_cell = "1.19"
 
+[features]
+span-diagnostics = []
+
 [lints]
 workspace = true
