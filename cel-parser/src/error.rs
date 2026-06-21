@@ -493,6 +493,57 @@ impl std::fmt::Debug for SpanContext {
 
 impl std::error::Error for SpanContext {}
 
+/// Extension trait that adds rustc-style formatting to `anyhow::Error`.
+///
+/// Import this trait to call `.format_rustc_style(...)` directly on an `anyhow::Error`.
+/// If the error carries a [`SpanContext`] (added during op execution with the
+/// `span-diagnostics` feature), the output includes a source-location annotation.
+/// Otherwise it falls back to `self.to_string()`.
+///
+/// # Examples
+///
+/// ```rust
+/// use annotate_snippets::Renderer;
+/// use cel_parser::FormatRustcStyle;
+///
+/// let err = anyhow::anyhow!("something went wrong");
+/// let output = err.format_rustc_style("1 + 2", "example.cel", 1, &Renderer::plain());
+/// assert_eq!(output, "something went wrong");
+/// ```
+pub trait FormatRustcStyle {
+    /// Formats in rustc diagnostic style.
+    ///
+    /// If the error carries a [`SpanContext`], produces a multi-line caret diagnostic.
+    /// Otherwise returns `self.to_string()`.
+    fn format_rustc_style(
+        &self,
+        source_code: &str,
+        filename: &str,
+        start_line: u32,
+        renderer: &Renderer,
+    ) -> String;
+}
+
+impl FormatRustcStyle for anyhow::Error {
+    fn format_rustc_style(
+        &self,
+        source_code: &str,
+        filename: &str,
+        start_line: u32,
+        renderer: &Renderer,
+    ) -> String {
+        if let Some(ctx) = self.downcast_ref::<SpanContext>() {
+            let message = self
+                .source()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| self.to_string());
+            ctx.format_rustc_style(&message, source_code, filename, start_line, renderer)
+        } else {
+            self.to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,5 +686,38 @@ mod tests {
             output.contains("test.cel"),
             "expected filename in output:\n{output}"
         );
+    }
+
+    #[test]
+    fn format_rustc_style_with_span_context_uses_span() {
+        let source = "1i32 + 2i32";
+        let span = SourceSpan::new(1, 5, 1, 6);
+        let inner = anyhow::anyhow!("arithmetic overflow");
+        let wrapped = inner.context(SpanContext::new(span));
+        let output = FormatRustcStyle::format_rustc_style(
+            &wrapped,
+            source,
+            "test.cel",
+            1,
+            &Renderer::plain(),
+        );
+        assert!(
+            output.contains("arithmetic overflow"),
+            "expected message:\n{output}"
+        );
+        assert!(output.contains("test.cel"), "expected filename:\n{output}");
+    }
+
+    #[test]
+    fn format_rustc_style_without_span_context_falls_back_to_to_string() {
+        let err = anyhow::anyhow!("something went wrong");
+        let output = FormatRustcStyle::format_rustc_style(
+            &err,
+            "unused source",
+            "unused.cel",
+            1,
+            &Renderer::plain(),
+        );
+        assert_eq!(output, "something went wrong");
     }
 }
