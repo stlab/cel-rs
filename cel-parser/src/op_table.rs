@@ -1466,6 +1466,35 @@ mod tests {
         );
     }
 
+    /// Verifies that `ScopeFn` closures compile when written with an explicit `SourceSpan`
+    /// parameter, confirming the type alias signature is correct.
+    #[cfg(feature = "span-diagnostics")]
+    #[test]
+    fn scope_fn_accepts_source_span_parameter() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(
+            |_name: &str, _seg: &mut DynSegment, _n: usize, span: crate::SourceSpan| {
+                // span is available for forwarding to op closures
+                let _ = span;
+                Ok(false)
+            },
+        );
+        // If this compiles, the ScopeFn signature correctly includes SourceSpan.
+    }
+
+    /// Verifies that `FormatRustcStyle` on an `anyhow::Error` without a `SpanContext`
+    /// falls back to the plain error message — the expected behaviour for errors from
+    /// client-added ops that do not attach span context.
+    #[test]
+    fn format_rustc_style_falls_back_for_client_added_op_error() {
+        use crate::FormatRustcStyle;
+        use annotate_snippets::Renderer;
+
+        let err = anyhow::anyhow!("custom domain error");
+        let output = err.format_rustc_style("unused source", "unused.cel", 1, &Renderer::plain());
+        assert_eq!(output, "custom domain error");
+    }
+
     #[cfg(feature = "span-diagnostics")]
     #[test]
     fn runtime_error_carries_span_context() {
