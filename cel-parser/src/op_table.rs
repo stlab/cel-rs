@@ -1498,7 +1498,8 @@ mod tests {
     #[cfg(feature = "span-diagnostics")]
     #[test]
     fn runtime_error_carries_span_context() {
-        use crate::{CELParser, SpanContext};
+        use crate::{CELParser, FormatRustcStyle, SpanContext};
+        use annotate_snippets::Renderer;
 
         let mut parser = CELParser::new(OpLookup::new());
         let source = "1i32 + 2147483647i32"; // i32::MAX + 1 → overflow
@@ -1507,7 +1508,19 @@ mod tests {
         let ctx = err
             .downcast_ref::<SpanContext>()
             .expect("expected SpanContext on runtime error");
-        // span should cover the "+" operator region
-        assert!(ctx.span().start.line >= 1);
+        // The span is on line 1 (1-indexed). In test mode, proc_macro2 with
+        // span-locations assigns spans relative to the parsed string, starting
+        // at column 0 for the first token on each line.
+        assert_eq!(ctx.span().start.line, 1);
+        // End-to-end rendering must mention the error and mark the source location.
+        let rendered = err.format_rustc_style(source, "test.cel", 1, &Renderer::plain());
+        assert!(
+            rendered.contains("arithmetic overflow"),
+            "expected 'arithmetic overflow' in rendered output, got: {rendered}"
+        );
+        assert!(
+            rendered.contains('^'),
+            "expected caret marker in rendered output, got: {rendered}"
+        );
     }
 }

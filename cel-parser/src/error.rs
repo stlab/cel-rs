@@ -555,6 +555,9 @@ impl FormatRustcStyle for anyhow::Error {
         renderer: &Renderer,
     ) -> String {
         if let Some(ctx) = self.downcast_ref::<SpanContext>() {
+            // `SpanContext` is the outermost layer in the anyhow chain, so `self.to_string()`
+            // would return the span location string ("at 1:5-1:6") rather than the op error
+            // message. `source()` recovers the actual error from the layer below.
             let message = self
                 .source()
                 .map(|e| e.to_string())
