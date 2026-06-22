@@ -21,7 +21,7 @@ pub struct SpanContext {
 
 - `Display` impl: renders minimal span location info
 - `std::error::Error` impl: no source (the wrapped op error is the layer below in the anyhow chain)
-- An internal `format_rustc_style(&self, source_text: &str, message: &str) -> String` helper: formats with source location using `annotate-snippets`. The parameters and formatting options match `CELError::format_rustc_style` exactly — confirmed during implementation.
+- A `format_rustc_style(&self, message: &str, source_code: &str, filename: &str, start_line: u32, renderer: &Renderer) -> String` helper: formats with source location using `annotate-snippets`. The parameters and formatting options match `CELError::format_rustc_style` exactly — confirmed during implementation.
 
 `SpanContext` is always compiled — no feature gate on the type itself.
 
