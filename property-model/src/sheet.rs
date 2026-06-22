@@ -221,7 +221,10 @@ impl Sheet {
 
     /// Runs the planning pass and executes the selected methods.
     ///
-    /// Clears the changed-cell set from the previous `propagate()` call before planning.
+    /// The changed-cell set from the previous `propagate()` call is preserved if
+    /// planning fails, so a failed propagation leaves the last successful run's
+    /// change set observable through [`Sheet::changed`]. The set is cleared only
+    /// once planning succeeds, immediately before the selected methods run.
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
@@ -231,15 +234,18 @@ impl Sheet {
     /// - `Error::Cycle` — the selected methods form a dependency cycle.
     /// - `Error::MethodFailed` — a method's function returned an error.
     pub fn propagate(&mut self) -> Result<(), Error> {
-        // Clear the previous changed set before starting a new propagation.
+        // Plan first; on `Error::Conflict` or `Error::Cycle` this returns before
+        // the previous change set is touched, so `changed()` keeps reflecting the
+        // last successful run.
+        let plan =
+            crate::planner::plan(&self.cells, &self.relationships, &self.relationship_order)?;
+
+        // Planning succeeded: clear the previous changed set before executing.
         for id in std::mem::take(&mut self.changed_cells) {
             if let Some(cell) = self.cells.get_mut(id) {
                 cell.changed = false;
             }
         }
-
-        let plan =
-            crate::planner::plan(&self.cells, &self.relationships, &self.relationship_order)?;
 
         for (rel_id, method_idx) in plan.execution_order {
             // Gather outputs in a scoped block so the shared borrows on
