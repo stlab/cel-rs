@@ -74,7 +74,10 @@ Call site:
 use cel_parser::FormatRustcStyle;
 
 if let Err(e) = segment.call0::<u32>() {
-    println!("{}", e.format_rustc_style(source_text));
+    println!(
+        "{}",
+        e.format_rustc_style(source_text, "expr.cel", 1, &annotate_snippets::Renderer::styled())
+    );
 }
 ```
 
