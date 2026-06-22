@@ -1,0 +1,12 @@
+[package]
+name = "property-model"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime library for property model constraint graphs"
+
+[dependencies]
+slotmap = "1.0"
+anyhow = "1.0"
+
+[lints]
+workspace = true
