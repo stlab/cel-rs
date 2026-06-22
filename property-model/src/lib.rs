@@ -33,6 +33,10 @@
 //! assert_eq!(*sheet.read::<f64>(c).unwrap(), 6.0);
 //! ```
 
+pub mod cell;
 pub mod error;
+pub mod relationship;
 
+pub use cell::CellId;
 pub use error::Error;
+pub use relationship::{Method, RelationshipId};
