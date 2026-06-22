@@ -77,6 +77,28 @@ impl SourceSpan {
             end: span.end(),
         }
     }
+
+    /// Builds a span from two `proc_macro2::Span` values (start of `start`, end of `end`).
+    ///
+    /// Use this when an expression spans multiple tokens and you want a range span.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use proc_macro2::Span;
+    /// use cel_parser::SourceSpan;
+    ///
+    /// let start = Span::call_site();
+    /// let end = Span::call_site();
+    /// let span = SourceSpan::from_proc_macro2_range(start, end);
+    /// assert_eq!(span.start.line, span.end.line);
+    /// ```
+    pub fn from_proc_macro2_range(start: proc_macro2::Span, end: proc_macro2::Span) -> Self {
+        SourceSpan {
+            start: start.start(),
+            end: end.end(),
+        }
+    }
 }
 
 /// A CEL parse error with a message and source location.
@@ -401,6 +423,152 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// A runtime error context carrying the source span of the failing operation.
+///
+/// Add this as anyhow context with `.context(SpanContext::new(span))` when wrapping
+/// an op closure. Retrieve it from an `anyhow::Error` with `e.downcast_ref::<SpanContext>()`.
+pub struct SpanContext {
+    span: SourceSpan,
+}
+
+impl SpanContext {
+    /// Creates a new span context for the given source region.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{SourceSpan, SpanContext};
+    ///
+    /// let span = SourceSpan::new(1, 0, 1, 5);
+    /// let ctx = SpanContext::new(span);
+    /// assert_eq!(ctx.span(), span);
+    /// ```
+    pub fn new(span: SourceSpan) -> Self {
+        SpanContext { span }
+    }
+
+    /// Returns the source span.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{SourceSpan, SpanContext};
+    ///
+    /// let span = SourceSpan::new(2, 3, 2, 7);
+    /// let ctx = SpanContext::new(span);
+    /// assert_eq!(ctx.span(), span);
+    /// ```
+    pub fn span(&self) -> SourceSpan {
+        self.span
+    }
+
+    /// Formats a runtime error message with rustc-style source annotation.
+    ///
+    /// Delegates to `CELError::format_rustc_style` using `self.span` and `message`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use annotate_snippets::Renderer;
+    /// use cel_parser::{SourceSpan, SpanContext};
+    ///
+    /// let source = "1i32 + 2i32";
+    /// let span = SourceSpan::new(1, 5, 1, 6);
+    /// let ctx = SpanContext::new(span);
+    /// let output = ctx.format_rustc_style("arithmetic overflow", source, "test.cel", 1, &Renderer::plain());
+    /// assert!(output.contains("arithmetic overflow"));
+    /// ```
+    pub fn format_rustc_style(
+        &self,
+        message: &str,
+        source_code: &str,
+        filename: &str,
+        start_line: u32,
+        renderer: &Renderer,
+    ) -> String {
+        CELError::new(message, self.span).format_rustc_style(
+            source_code,
+            filename,
+            start_line,
+            renderer,
+        )
+    }
+}
+
+impl std::fmt::Display for SpanContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "at {}:{}-{}:{}",
+            self.span.start.line, self.span.start.column, self.span.end.line, self.span.end.column
+        )
+    }
+}
+
+impl std::fmt::Debug for SpanContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpanContext")
+            .field("span", &self.span)
+            .finish()
+    }
+}
+
+impl std::error::Error for SpanContext {}
+
+/// Extension trait that adds rustc-style formatting to `anyhow::Error`.
+///
+/// Import this trait to call `.format_rustc_style(...)` directly on an `anyhow::Error`.
+/// If the error carries a [`SpanContext`] (added during op execution with the
+/// `span-diagnostics` feature), the output includes a source-location annotation.
+/// Otherwise it falls back to `self.to_string()`.
+///
+/// # Examples
+///
+/// ```rust
+/// use annotate_snippets::Renderer;
+/// use cel_parser::FormatRustcStyle;
+///
+/// let err = anyhow::anyhow!("something went wrong");
+/// let output = err.format_rustc_style("1 + 2", "example.cel", 1, &Renderer::plain());
+/// assert_eq!(output, "something went wrong");
+/// ```
+pub trait FormatRustcStyle {
+    /// Formats in rustc diagnostic style.
+    ///
+    /// If the error carries a [`SpanContext`], produces a multi-line caret diagnostic.
+    /// Otherwise returns `self.to_string()`.
+    fn format_rustc_style(
+        &self,
+        source_code: &str,
+        filename: &str,
+        start_line: u32,
+        renderer: &Renderer,
+    ) -> String;
+}
+
+impl FormatRustcStyle for anyhow::Error {
+    fn format_rustc_style(
+        &self,
+        source_code: &str,
+        filename: &str,
+        start_line: u32,
+        renderer: &Renderer,
+    ) -> String {
+        if let Some(ctx) = self.downcast_ref::<SpanContext>() {
+            // `SpanContext` is the outermost layer in the anyhow chain, so `self.to_string()`
+            // would return the span location string ("at 1:5-1:6") rather than the op error
+            // message. `source()` recovers the actual error from the layer below.
+            let message = self
+                .source()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| self.to_string());
+            ctx.format_rustc_style(&message, source_code, filename, start_line, renderer)
+        } else {
+            self.to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +674,75 @@ mod tests {
         let source = "hi";
         let r = span_to_byte_range(source, SourceSpan::new(1, 0, 1, 100));
         assert!(r.start <= r.end && r.end <= source.len());
+    }
+
+    #[test]
+    fn span_context_display_shows_span_location() {
+        let span = SourceSpan::new(1, 0, 1, 5);
+        let ctx = SpanContext::new(span);
+        let s = ctx.to_string();
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn span_context_span_roundtrip() {
+        let span = SourceSpan::new(2, 3, 2, 7);
+        let ctx = SpanContext::new(span);
+        assert_eq!(ctx.span(), span);
+    }
+
+    #[test]
+    fn span_context_format_rustc_style_contains_message_and_location() {
+        let source = "1i32 + 2i32";
+        let span = SourceSpan::new(1, 5, 1, 6);
+        let ctx = SpanContext::new(span);
+        let output = ctx.format_rustc_style(
+            "arithmetic overflow",
+            source,
+            "test.cel",
+            1,
+            &Renderer::plain(),
+        );
+        assert!(
+            output.contains("arithmetic overflow"),
+            "expected message in output:\n{output}"
+        );
+        assert!(
+            output.contains("test.cel"),
+            "expected filename in output:\n{output}"
+        );
+    }
+
+    #[test]
+    fn format_rustc_style_with_span_context_uses_span() {
+        let source = "1i32 + 2i32";
+        let span = SourceSpan::new(1, 5, 1, 6);
+        let inner = anyhow::anyhow!("arithmetic overflow");
+        let wrapped = inner.context(SpanContext::new(span));
+        let output = FormatRustcStyle::format_rustc_style(
+            &wrapped,
+            source,
+            "test.cel",
+            1,
+            &Renderer::plain(),
+        );
+        assert!(
+            output.contains("arithmetic overflow"),
+            "expected message:\n{output}"
+        );
+        assert!(output.contains("test.cel"), "expected filename:\n{output}");
+    }
+
+    #[test]
+    fn format_rustc_style_without_span_context_falls_back_to_to_string() {
+        let err = anyhow::anyhow!("something went wrong");
+        let output = FormatRustcStyle::format_rustc_style(
+            &err,
+            "unused source",
+            "unused.cel",
+            1,
+            &Renderer::plain(),
+        );
+        assert_eq!(output, "something went wrong");
     }
 }

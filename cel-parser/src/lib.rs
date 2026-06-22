@@ -88,7 +88,7 @@ mod error;
 mod lex_lexer;
 pub mod op_table;
 
-pub use error::{CELError, ParseError, SourceSpan};
+pub use error::{CELError, FormatRustcStyle, ParseError, SourceSpan, SpanContext};
 pub use op_table::OpLookup;
 pub use proc_macro2::LineColumn;
 
@@ -360,7 +360,7 @@ impl CELParser {
     ///
     /// let input = TokenStream::from_str("10 + 20").unwrap();
     /// let mut lookup = OpLookup::new();
-    /// lookup.push_scope(|name, segment, num_operands| {
+    /// lookup.push_scope(|name, segment, num_operands, _span| {
     ///     let matches = {
     ///         let top = segment.peek_stack_infos(num_operands);
     ///         name == "+" && top.len() == 2 && top[0].type_id == TypeId::of::<i32>()
@@ -1370,7 +1370,7 @@ mod tests {
     #[test]
     fn test_identifier_with_scope() -> anyhow::Result<()> {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, num_operands| {
+        lookup.push_scope(|name, segment, num_operands, _span| {
             if num_operands == 0 {
                 match name {
                     "x" => {
@@ -1415,7 +1415,7 @@ mod tests {
     #[test]
     fn test_identifier_scope_error_propagated() {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, _segment, num_operands| {
+        lookup.push_scope(|name, _segment, num_operands, _span| {
             if name == "bad_id" && num_operands == 0 {
                 return Err(anyhow::anyhow!("custom identifier rejected"));
             }
@@ -1466,17 +1466,19 @@ mod tests {
     #[test]
     fn call_empty_arg_list() -> anyhow::Result<()> {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
-            ("f", 0) => {
-                segment.op0(|| 0i32);
-                Ok(true)
-            }
-            ("()", 1) => {
-                segment.op1(|_callee: i32| 99i32)?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        });
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                ("()", 1) => {
+                    segment.op1(|_callee: i32| 99i32)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
         let mut parser = CELParser::new(lookup);
         let mut segment = parser
             .parse_str("f()")
@@ -1488,17 +1490,19 @@ mod tests {
     #[test]
     fn call_single_arg() -> anyhow::Result<()> {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
-            ("f", 0) => {
-                segment.op0(|| 0i32);
-                Ok(true)
-            }
-            ("()", 2) => {
-                segment.op2(|_callee: i32, arg: i32| arg)?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        });
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                ("()", 2) => {
+                    segment.op2(|_callee: i32, arg: i32| arg)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
         let mut parser = CELParser::new(lookup);
         let mut segment = parser
             .parse_str("f(42)")
@@ -1510,17 +1514,19 @@ mod tests {
     #[test]
     fn call_multiple_args() -> anyhow::Result<()> {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
-            ("f", 0) => {
-                segment.op0(|| 0i32);
-                Ok(true)
-            }
-            ("()", 3) => {
-                segment.op3(|_callee: i32, arg1: i32, arg2: i32| arg1 + arg2)?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        });
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                ("()", 3) => {
+                    segment.op3(|_callee: i32, arg1: i32, arg2: i32| arg1 + arg2)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
         let mut parser = CELParser::new(lookup);
         let mut segment = parser
             .parse_str("f(10, 32)")
@@ -1532,13 +1538,15 @@ mod tests {
     #[test]
     fn call_missing_closing_paren() {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
-            ("f", 0) => {
-                segment.op0(|| 0i32);
-                Ok(true)
-            }
-            _ => Ok(false),
-        });
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
         let mut parser = CELParser::new(lookup);
         let err = match parser.parse_str("f(42 43)") {
             Err(e) => e,
@@ -1550,13 +1558,15 @@ mod tests {
     #[test]
     fn call_trailing_comma() {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
-            ("f", 0) => {
-                segment.op0(|| 0i32);
-                Ok(true)
-            }
-            _ => Ok(false),
-        });
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
         let mut parser = CELParser::new(lookup);
         let err = match parser.parse_str("f(42,)") {
             Err(e) => e,
@@ -1568,13 +1578,15 @@ mod tests {
     #[test]
     fn call_undefined_call_op() {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
-            ("f", 0) => {
-                segment.op0(|| 0i32);
-                Ok(true)
-            }
-            _ => Ok(false),
-        });
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
         let mut parser = CELParser::new(lookup);
         let err = match parser.parse_str("f()") {
             Err(e) => e,
@@ -1590,17 +1602,19 @@ mod tests {
     #[test]
     fn call_chained() -> anyhow::Result<()> {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, num_operands| match (name, num_operands) {
-            ("f", 0) => {
-                segment.op0(|| 0i32);
-                Ok(true)
-            }
-            ("()", 1) => {
-                segment.op1(|_callee: i32| 7i32)?;
-                Ok(true)
-            }
-            _ => Ok(false),
-        });
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                ("()", 1) => {
+                    segment.op1(|_callee: i32| 7i32)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
         let mut parser = CELParser::new(lookup);
         let mut segment = parser
             .parse_str("f()()")
@@ -1801,7 +1815,7 @@ mod playground {
     #[test]
     fn custom_scope_identifier() -> Result<()> {
         let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, _num_operands| {
+        lookup.push_scope(|name, segment, _num_operands, _span| {
             if name == "constant" {
                 segment.just(42i64);
                 return Ok(true);
@@ -1834,6 +1848,27 @@ mod playground {
         "#;
         match CELParser::new(OpLookup::new()).parse_str(source) {
             Ok(_) => panic!("expected parse error"),
+            Err(e) => println!(
+                "{}",
+                e.format_rustc_style(source, file!(), line, &Renderer::styled())
+            ),
+        }
+    }
+
+    #[test]
+    fn arithmetic_overflow_error() {
+        use error::FormatRustcStyle;
+
+        let line = line!() + 1;
+        let source = r#"
+           1 + 1 +
+                2147483646 + 1
+        "#;
+        let mut seg = CELParser::new(OpLookup::new())
+            .parse_str(source)
+            .expect("parses successfully");
+        match seg.call0::<i32>() {
+            Ok(v) => panic!("expected overflow, got {v}"),
             Err(e) => println!(
                 "{}",
                 e.format_rustc_style(source, file!(), line, &Renderer::styled())
