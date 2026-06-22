@@ -111,10 +111,10 @@ impl Method {
 }
 
 /// Internal storage for a relationship; fields are used by `Sheet` (added in a later task).
-#[allow(dead_code)]
 pub(crate) struct RelationshipData {
     pub(crate) methods: Vec<Method>,
     /// Union of all cell IDs referenced by any method in this relationship.
+    #[expect(dead_code, reason = "adj is reserved for the future model checker")]
     pub(crate) adj: Vec<CellId>,
 }
 

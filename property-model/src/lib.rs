@@ -10,7 +10,7 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust
 //! use property_model::{Sheet, Method};
 //!
 //! let mut sheet = Sheet::new();

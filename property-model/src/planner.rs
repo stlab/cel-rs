@@ -4,6 +4,11 @@
 //! strength (write-recency clock value) of the method's output cells — preferring to
 //! derive cells that were written least recently. Phase 2 runs Kahn's algorithm to
 //! produce a dependency-ordered execution sequence.
+//!
+//! The greedy Phase 1 selection is per-relationship with no global optimality guarantee;
+//! it minimises the minimum output-cell strength locally but does not guarantee that the
+//! globally strongest cell is preserved across the whole sheet. A future model checker
+//! will verify solvability.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 

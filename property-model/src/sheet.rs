@@ -221,6 +221,7 @@ impl Sheet {
 
     /// Runs the planning pass and executes the selected methods.
     ///
+    /// Clears the changed-cell set from the previous `propagate()` call before planning.
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///

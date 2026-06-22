@@ -6,11 +6,14 @@ use std::any::TypeId;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// A value's `TypeId` did not match the cell's registered `TypeId`.
+    /// A value's TypeId did not match the cell's registered TypeId.
+    ///
+    /// - `expected`: the TypeId registered when the cell was created.
+    /// - `found`: the TypeId of the value or declaration supplied by the caller.
     TypeMismatch {
-        /// The expected type ID.
+        /// The TypeId registered when the cell was created.
         expected: TypeId,
-        /// The actual type ID found.
+        /// The TypeId of the value or declaration supplied by the caller.
         found: TypeId,
     },
 
@@ -60,6 +63,24 @@ impl std::error::Error for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_mismatch_fields_convention() {
+        use std::any::TypeId;
+        let expected = TypeId::of::<i32>();
+        let found = TypeId::of::<f64>();
+        let e = Error::TypeMismatch { expected, found };
+        match e {
+            Error::TypeMismatch {
+                expected: e,
+                found: f,
+            } => {
+                assert_eq!(e, TypeId::of::<i32>());
+                assert_eq!(f, TypeId::of::<f64>());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
 
     #[test]
     fn type_mismatch_display_contains_type_mismatch() {

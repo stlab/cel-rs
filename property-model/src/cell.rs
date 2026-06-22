@@ -14,7 +14,6 @@ new_key_type! {
 }
 
 /// Internal storage for a single value cell; fields are used by `Sheet` (added in a later task).
-#[allow(dead_code)]
 pub(crate) struct CellData {
     /// The type-erased current value.
     pub(crate) value: Box<dyn Any>,
