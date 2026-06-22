@@ -60,7 +60,6 @@ impl std::error::Error for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::any::TypeId;
 
     #[test]
     fn type_mismatch_display_contains_type_mismatch() {
@@ -102,5 +101,26 @@ mod tests {
         fn takes_error(_: &dyn std::error::Error) {}
         takes_error(&Error::InvalidId);
         takes_error(&Error::Conflict);
+    }
+
+    #[test]
+    fn method_failed_source_returns_some() {
+        let err = Error::MethodFailed(anyhow::anyhow!("inner"));
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn non_method_failed_variants_have_no_source() {
+        assert!(std::error::Error::source(&Error::InvalidId).is_none());
+        assert!(std::error::Error::source(&Error::Conflict).is_none());
+        assert!(std::error::Error::source(&Error::Cycle).is_none());
+        assert!(std::error::Error::source(&Error::InvalidMethod).is_none());
+        assert!(
+            std::error::Error::source(&Error::TypeMismatch {
+                expected: std::any::TypeId::of::<i32>(),
+                found: std::any::TypeId::of::<f64>(),
+            })
+            .is_none()
+        );
     }
 }
