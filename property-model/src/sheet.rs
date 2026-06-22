@@ -218,6 +218,21 @@ impl Sheet {
             }
         }
     }
+
+    /// Runs the planning pass and executes the selected methods.
+    ///
+    /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
+    /// and [`Sheet::clear_changed`] when done.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::Conflict` — no valid method assignment exists.
+    /// - `Error::Cycle` — the selected methods form a dependency cycle.
+    /// - `Error::MethodFailed` — a method's function returned an error.
+    pub fn propagate(&mut self) -> Result<(), Error> {
+        let _ = crate::planner::plan(&self.cells, &self.relationships, &self.relationship_order)?;
+        Ok(()) // execution wired in Task 6
+    }
 }
 
 impl Default for Sheet {
