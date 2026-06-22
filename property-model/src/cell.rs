@@ -14,6 +14,7 @@ new_key_type! {
 }
 
 /// Internal storage for a single value cell.
+// used in sheet.rs (Task 4)
 #[allow(dead_code)]
 pub(crate) struct CellData {
     /// The type-erased current value.
@@ -46,5 +47,11 @@ mod tests {
         assert!(!data.changed);
         assert!(data.adj.is_empty());
         assert_eq!(*data.value.downcast_ref::<i32>().unwrap(), 42);
+    }
+
+    #[test]
+    fn cell_id_is_copy() {
+        fn takes_copy<T: Copy>(_: T) {}
+        takes_copy(CellId::default());
     }
 }
