@@ -30,14 +30,31 @@ pub struct SpanContext {
 An extension trait on `anyhow::Error`, also in `cel-parser`:
 
 ```rust
+use annotate_snippets::Renderer;
+
 pub trait FormatRustcStyle {
-    fn format_rustc_style(&self, source_text: &str) -> String;
+    fn format_rustc_style(
+        &self,
+        source_code: &str,
+        filename: &str,
+        start_line: u32,
+        renderer: &Renderer,
+    ) -> String;
 }
 
 impl FormatRustcStyle for anyhow::Error {
-    fn format_rustc_style(&self, source_text: &str) -> String {
+    fn format_rustc_style(
+        &self,
+        source_code: &str,
+        filename: &str,
+        start_line: u32,
+        renderer: &Renderer,
+    ) -> String {
         if let Some(ctx) = self.downcast_ref::<SpanContext>() {
-            ctx.format_rustc_style(source_text, &self.to_string())
+            let message = std::error::Error::source(self)
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| self.to_string());
+            ctx.format_rustc_style(&message, source_code, filename, start_line, renderer)
         } else {
             self.to_string()
         }
