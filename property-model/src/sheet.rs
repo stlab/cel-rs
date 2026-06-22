@@ -230,8 +230,43 @@ impl Sheet {
     /// - `Error::Cycle` — the selected methods form a dependency cycle.
     /// - `Error::MethodFailed` — a method's function returned an error.
     pub fn propagate(&mut self) -> Result<(), Error> {
-        let _ = crate::planner::plan(&self.cells, &self.relationships, &self.relationship_order)?;
-        Ok(()) // execution wired in Task 6
+        // Clear the previous changed set before starting a new propagation.
+        for id in std::mem::take(&mut self.changed_cells) {
+            if let Some(cell) = self.cells.get_mut(id) {
+                cell.changed = false;
+            }
+        }
+
+        let plan =
+            crate::planner::plan(&self.cells, &self.relationships, &self.relationship_order)?;
+
+        for (rel_id, method_idx) in plan.execution_order {
+            // Gather outputs in a scoped block so the shared borrows on
+            // `self.relationships` and `self.cells` are released before the
+            // mutable borrow of `self.cells` below.
+            let (outputs, output_ids) = {
+                let method = &self.relationships[rel_id].methods[method_idx];
+                let inputs: Vec<&dyn Any> = method
+                    .inputs
+                    .iter()
+                    .map(|&id| self.cells[id].value.as_ref())
+                    .collect();
+                let outputs = (method.function)(&inputs).map_err(Error::MethodFailed)?;
+                let output_ids = method.outputs.clone();
+                (outputs, output_ids)
+            };
+
+            for (cell_id, new_value) in output_ids.into_iter().zip(outputs) {
+                let cell = &mut self.cells[cell_id];
+                cell.value = new_value;
+                if !cell.changed {
+                    cell.changed = true;
+                    self.changed_cells.push(cell_id);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

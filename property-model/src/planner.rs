@@ -18,7 +18,6 @@ use crate::{
 /// The output of the planning pass.
 pub(crate) struct Plan {
     /// Selected `(RelationshipId, method_index)` pairs in execution order.
-    #[allow(dead_code)] // consumed by Task 6's propagate() implementation
     pub(crate) execution_order: Vec<(RelationshipId, usize)>,
 }
 
