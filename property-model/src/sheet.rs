@@ -255,6 +255,14 @@ impl Sheet {
                 (outputs, output_ids)
             };
 
+            if outputs.len() != output_ids.len() {
+                return Err(Error::MethodFailed(anyhow::anyhow!(
+                    "method produced {} outputs but relationship expects {}",
+                    outputs.len(),
+                    output_ids.len()
+                )));
+            }
+
             for (cell_id, new_value) in output_ids.into_iter().zip(outputs) {
                 let cell = &mut self.cells[cell_id];
                 cell.value = new_value;
