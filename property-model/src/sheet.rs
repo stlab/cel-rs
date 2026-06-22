@@ -133,9 +133,10 @@ impl Sheet {
 
         // Collect the union of all adjacent cells in insertion order, deduplicated.
         let mut adj: Vec<CellId> = Vec::new();
+        let mut seen: std::collections::HashSet<CellId> = std::collections::HashSet::new();
         for method in &methods {
             for &cell_id in method.inputs.iter().chain(method.outputs.iter()) {
-                if !adj.contains(&cell_id) {
+                if seen.insert(cell_id) {
                     adj.push(cell_id);
                 }
             }
