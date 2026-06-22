@@ -3,7 +3,7 @@
 use property_model::{Error, Method, Sheet};
 
 #[test]
-fn propagate_executes_single_method() {
+fn single_method_executes_correctly() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(5_i32);
     let b = sheet.add_cell(0_i32);
@@ -18,7 +18,7 @@ fn propagate_executes_single_method() {
 }
 
 #[test]
-fn changed_returns_updated_cells_after_propagate() {
+fn chained_relationships_execute_in_order() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -37,6 +37,27 @@ fn changed_returns_updated_cells_after_propagate() {
     assert_eq!(changed.len(), 2);
     assert!(changed.contains(&b));
     assert!(changed.contains(&c));
+
+    // Verify methods executed in topological order: a → b → c
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 11);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 12);
+}
+
+#[test]
+fn changed_cells_tracked() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .unwrap();
+
+    sheet.write(a, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    let changed: Vec<_> = sheet.changed().collect();
+    assert_eq!(changed.len(), 1);
+    assert!(changed.contains(&b));
 }
 
 #[test]
@@ -78,7 +99,7 @@ fn propagate_clears_previous_changed_set() {
 }
 
 #[test]
-fn multiway_constraint_derives_weakest_cell() {
+fn strength_drives_method_selection() {
     // a * b = c — three methods, one per direction.
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0.0_f64);
