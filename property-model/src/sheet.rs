@@ -234,11 +234,7 @@ impl Sheet {
     /// - `Error::MethodFailed` — a method's function returned an error.
     pub fn propagate(&mut self) -> Result<(), Error> {
         // Clear the previous changed set before starting a new propagation.
-        for id in std::mem::take(&mut self.changed_cells) {
-            if let Some(cell) = self.cells.get_mut(id) {
-                cell.changed = false;
-            }
-        }
+        self.clear_changed();
 
         let plan =
             crate::planner::plan(&self.cells, &self.relationships, &self.relationship_order)?;
