@@ -45,6 +45,8 @@ impl Method {
     where
         F: Fn(&[&dyn Any]) -> Result<Vec<Box<dyn Any>>, anyhow::Error> + 'static,
     {
+        debug_assert_eq!(inputs.len(), input_types.len());
+        debug_assert_eq!(outputs.len(), output_types.len());
         Method {
             inputs,
             outputs,
