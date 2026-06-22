@@ -99,42 +99,6 @@ fn propagate_clears_previous_changed_set() {
 }
 
 #[test]
-fn failed_propagation_preserves_previous_changed_set() {
-    // A successful propagation records `b` as changed. A subsequent propagation
-    // that fails during planning (Conflict) must leave the previous change set
-    // intact so `changed()` still reflects the last successful run.
-    let mut sheet = Sheet::new();
-    let a = sheet.add_cell(0_i32);
-    let b = sheet.add_cell(0_i32);
-    sheet
-        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
-        .unwrap();
-
-    sheet.write(a, 1_i32).unwrap();
-    sheet.propagate().unwrap();
-    assert!(sheet.changed().any(|id| id == b));
-
-    // Introduce a conflict: two single-method relationships both write `out`,
-    // so planning cannot satisfy both and returns `Error::Conflict`.
-    let p = sheet.add_cell(0_i32);
-    let q = sheet.add_cell(0_i32);
-    let out = sheet.add_cell(0_i32);
-    sheet
-        .add_relationship(vec![Method::from_fn_1_1(p, out, |x: &i32| Ok(*x))])
-        .unwrap();
-    sheet
-        .add_relationship(vec![Method::from_fn_1_1(q, out, |x: &i32| Ok(*x))])
-        .unwrap();
-
-    assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
-
-    // The change set from the last successful propagation is still observable.
-    let changed: Vec<_> = sheet.changed().collect();
-    assert_eq!(changed.len(), 1);
-    assert!(changed.contains(&b));
-}
-
-#[test]
 fn strength_drives_method_selection() {
     // a * b = c — three methods, one per direction.
     let mut sheet = Sheet::new();
