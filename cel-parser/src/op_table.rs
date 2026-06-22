@@ -1483,7 +1483,7 @@ mod tests {
     }
 
     /// Verifies that `FormatRustcStyle` on an `anyhow::Error` without a `SpanContext`
-    /// falls back to the plain error message — the expected behaviour for errors from
+    /// falls back to the plain error message — the expected behavior for errors from
     /// client-added ops that do not attach span context.
     #[test]
     fn format_rustc_style_falls_back_for_client_added_op_error() {
