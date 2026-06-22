@@ -1854,4 +1854,25 @@ mod playground {
             ),
         }
     }
+
+    #[test]
+    fn arithmetic_overflow_error() {
+        use error::FormatRustcStyle;
+
+        let line = line!() + 1;
+        let source = r#"
+           1 + 1 +
+                2147483646 + 1
+        "#;
+        let mut seg = CELParser::new(OpLookup::new())
+            .parse_str(source)
+            .expect("parses successfully");
+        match seg.call0::<i32>() {
+            Ok(v) => panic!("expected overflow, got {v}"),
+            Err(e) => println!(
+                "{}",
+                e.format_rustc_style(source, file!(), line, &Renderer::styled())
+            ),
+        }
+    }
 }
