@@ -36,7 +36,9 @@
 pub mod cell;
 pub mod error;
 pub mod relationship;
+pub mod sheet;
 
 pub use cell::CellId;
 pub use error::Error;
 pub use relationship::{Method, RelationshipId};
+pub use sheet::Sheet;
