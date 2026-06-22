@@ -13,12 +13,9 @@ new_key_type! {
 }
 
 /// A single method within a relationship.
-///
-/// Constructors (`new`, `from_fn_1_1`, `from_fn_2_1`) are added in the next task.
 pub struct Method {}
 
-/// Internal storage for a relationship.
-// used in sheet.rs (Task 4)
+/// Internal storage for a relationship; fields are used by `Sheet` (added in a later task).
 #[allow(dead_code)]
 pub(crate) struct RelationshipData {
     pub(crate) methods: Vec<Method>,

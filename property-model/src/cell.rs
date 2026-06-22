@@ -13,8 +13,7 @@ new_key_type! {
     pub struct CellId;
 }
 
-/// Internal storage for a single value cell.
-// used in sheet.rs (Task 4)
+/// Internal storage for a single value cell; fields are used by `Sheet` (added in a later task).
 #[allow(dead_code)]
 pub(crate) struct CellData {
     /// The type-erased current value.
