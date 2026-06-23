@@ -125,7 +125,7 @@ impl Method {
 
 ## Planning Algorithm
 
-`propagate()` runs three sequential phases.
+`propagate()` runs method selection followed by execution.
 
 ### Phase 1 — Method Selection (Greedy)
 
