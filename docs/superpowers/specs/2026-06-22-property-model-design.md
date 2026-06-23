@@ -125,29 +125,31 @@ impl Method {
 
 ## Planning Algorithm
 
-`propagate()` runs method selection followed by execution.
+`propagate()` runs two sequential phases.
 
-### Phase 1 — Method Selection (Greedy)
+### Phase 1 — Method Selection (Adam-style flood-fill)
 
 Each cell has a `strength` (u64) that is incremented by `write()`. The planner uses strength to decide which cells to preserve as sources and which to derive.
 
-For each relationship in **insertion order** (`Sheet` maintains an explicit `Vec<RelationshipId>` alongside the `SlotMap`, since `SlotMap` does not guarantee iteration order):
+The planner sorts cells by descending strength. Starting from the strongest undetermined cell, it marks that cell as a source, then flood-fills through adjacent relationships:
 
-1. Score each method by the **minimum strength** of its output cells. Lower score = better (we prefer to overwrite weak cells, not strong ones).
-2. Select the highest-scoring valid method. A method is **valid** if none of its output cells have already been claimed as an output by a previously selected method.
-3. Mark the selected method's output cells as claimed.
+1. For each adjacent relationship that has not already been selected, find a method whose inputs are all determined and whose outputs are all still undetermined.
+2. Select that method and mark each of its output cells determined.
+3. Enqueue those output cells and continue the flood-fill.
 
-If no valid method exists for any relationship, return `Error::Conflict`.
+If any relationship cannot be assigned a method by the end of the pass, return `Error::Conflict`. This currently includes mutually dependent relationships that would otherwise form a cycle.
 
-### Execution
+Because a method is selected only after all of its inputs are determined, selection order is already a valid execution order.
 
-Execute methods in topological order:
+### Phase 2 — Execution
+
+Execute methods in selection order:
 
 1. Gather input cell values as `&[&dyn Any]`.
 2. Call the stored function.
 3. Write returned values into output cells and set their `changed` flag.
 
-After execution, the sheet is in a consistent state. The client calls `changed()` to iterate changed cells and `clear_changed()` after processing them.
+After Phase 2, the sheet is in a consistent state. The client calls `changed()` to iterate changed cells and `clear_changed()` after processing them.
 
 ### Future Work: Model Checker
 
@@ -166,6 +168,11 @@ pub enum Error {
 
     /// No valid method assignment could be found (overconstrained).
     Conflict,
+
+    /// The selected methods form a cycle.
+    ///
+    /// Reserved for future planners; the current planner reports unresolved cycles as `Conflict`.
+    Cycle,
 
     /// A method's function returned an error during execution.
     MethodFailed(anyhow::Error),
@@ -188,7 +195,7 @@ property-model/
 │   ├── sheet.rs        (Sheet, propagate, changed tracking)
 │   ├── cell.rs         (CellId, CellData)
 │   ├── relationship.rs (RelationshipId, RelationshipData, Method)
-│   ├── planner.rs      (phase 1 selection)
+│   ├── planner.rs      (Adam-style planning pass)
 │   └── error.rs        (Error enum)
 ```
 
