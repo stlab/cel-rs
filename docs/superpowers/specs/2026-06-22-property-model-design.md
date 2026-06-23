@@ -81,7 +81,7 @@ impl Sheet {
     pub fn read<T: Any + 'static>(&self, id: CellId) -> Result<&T, Error>;
 
     /// Run the planning pass then execute selected methods. Populates the changed-cell set.
-    /// Errors: Conflict, Cycle, MethodFailed.
+    /// Errors: Conflict, MethodFailed.
     pub fn propagate(&mut self) -> Result<(), Error>;
 
     /// Iterate cells whose values changed during the last propagate() call.
@@ -139,11 +139,7 @@ For each relationship in **insertion order** (`Sheet` maintains an explicit `Vec
 
 If no valid method exists for any relationship, return `Error::Conflict`.
 
-### Phase 2 — Topological Sort (Kahn's Algorithm)
-
-Build an execution DAG over the selected methods: an edge from method A → method B when A writes a cell that B reads as input. Run Kahn's algorithm. If the sort cannot complete (a cycle remains), return `Error::Cycle`.
-
-### Phase 3 — Execution
+### Execution
 
 Execute methods in topological order:
 
@@ -151,7 +147,7 @@ Execute methods in topological order:
 2. Call the stored function.
 3. Write returned values into output cells and set their `changed` flag.
 
-After Phase 3, the sheet is in a consistent state. The client calls `changed()` to iterate changed cells and `clear_changed()` after processing them.
+After execution, the sheet is in a consistent state. The client calls `changed()` to iterate changed cells and `clear_changed()` after processing them.
 
 ### Future Work: Model Checker
 
@@ -170,9 +166,6 @@ pub enum Error {
 
     /// No valid method assignment could be found (overconstrained).
     Conflict,
-
-    /// The selected methods form a cycle.
-    Cycle,
 
     /// A method's function returned an error during execution.
     MethodFailed(anyhow::Error),
@@ -195,7 +188,7 @@ property-model/
 │   ├── sheet.rs        (Sheet, propagate, changed tracking)
 │   ├── cell.rs         (CellId, CellData)
 │   ├── relationship.rs (RelationshipId, RelationshipData, Method)
-│   ├── planner.rs      (phase 1 selection + phase 2 topo sort)
+│   ├── planner.rs      (phase 1 selection)
 │   └── error.rs        (Error enum)
 ```
 
