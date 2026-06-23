@@ -262,6 +262,13 @@ impl Sheet {
 
             for (cell_id, new_value) in output_ids.into_iter().zip(outputs) {
                 let cell = &mut self.cells[cell_id];
+                let found = new_value.as_ref().type_id();
+                if found != cell.type_id {
+                    return Err(Error::TypeMismatch {
+                        expected: cell.type_id,
+                        found,
+                    });
+                }
                 cell.value = new_value;
                 if !cell.changed {
                     cell.changed = true;
