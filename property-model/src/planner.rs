@@ -42,10 +42,9 @@ pub(crate) fn plan(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
 ) -> Result<Plan, Error> {
-    // Already-resolved relationships need no explicit tracking: once a method's
-    // outputs are determined, no other method in that relationship remains eligible.
     let mut determined: HashSet<CellId> = HashSet::new();
     let mut selected: Vec<(RelationshipId, usize)> = Vec::new();
+    let mut selected_set: HashSet<RelationshipId> = HashSet::new();
 
     let mut cells_sorted: Vec<CellId> = cells.keys().collect();
     cells_sorted.sort_by_key(|&id| Reverse(cells[id].strength));
@@ -61,6 +60,9 @@ pub(crate) fn plan(
 
         while let Some(cell) = queue.pop_front() {
             for &rel_id in &cells[cell].adj {
+                if selected_set.contains(&rel_id) {
+                    continue;
+                }
                 let rel = &relationships[rel_id];
                 if let Some((method_idx, method)) = rel.methods.iter().enumerate().find(|(_, m)| {
                     m.inputs.iter().all(|i| determined.contains(i))
@@ -77,6 +79,7 @@ pub(crate) fn plan(
                         determined.insert(output);
                         queue.push_back(output);
                     }
+                    selected_set.insert(rel_id);
                     selected.push((rel_id, method_idx));
                 }
             }
@@ -97,6 +100,34 @@ mod tests {
     use crate::{Error, Method, Sheet};
 
     // Propagation-behavior tests live in the integration tests.
+
+    #[test]
+    fn relationship_selected_at_most_once() {
+        // x is inserted first so it sorts before a (equal strength, stable sort).
+        // Without selected_set, flood-fill selects R1 twice (Method 0 then Method 1),
+        // x becomes a source before R2 can run, and propagate() falsely returns Ok.
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(0_i32);
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+
+        // R1: two chained methods — Method 0: a→b, Method 1: b→c
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+                Method::from_fn_1_1(b, c, |v: &i32| Ok(*v)),
+            ])
+            .unwrap();
+        // R2: single method c→x
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(c, x, |v: &i32| Ok(*v))])
+            .unwrap();
+
+        // Both relationships must be assigned exactly one method; if R1 were selected
+        // twice the count check would pass and R2 would silently be skipped.
+        assert!(sheet.propagate().is_err());
+    }
 
     #[test]
     fn conflict_returns_error() {
