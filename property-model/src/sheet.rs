@@ -69,9 +69,8 @@ impl Sheet {
     ///
     /// All methods are validated: their declared `TypeId`s must match the
     /// registered cells, inputs and outputs must be disjoint, and each method
-    /// must have at least one input and one output.  On success the `RelationshipId`
-    /// is added to each adjacent cell's adjacency list and to the insertion-order
-    /// tracking `Vec`.
+    /// must have at least one input and one output. On success the `RelationshipId`
+    /// is added to each adjacent cell's adjacency list.
     ///
     /// # Errors
     ///
