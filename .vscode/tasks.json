@@ -18,6 +18,9 @@
             "label": "cargo test",
             "type": "cargo",
             "command": "test",
+            "args": [
+                "--workspace"
+            ],
             "problemMatcher": [
                 "$rustc"
             ],

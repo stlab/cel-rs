@@ -23,7 +23,8 @@ missing_docs = "warn"
 members = [
     "cel-runtime",
     "cel-parser",
-    "cel-rs-macros"
+    "cel-rs-macros",
+    "property-model",
 ]
 
 [lib]
