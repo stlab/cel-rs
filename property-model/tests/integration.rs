@@ -35,8 +35,8 @@ fn chained_relationships_execute_in_order() {
 
     let changed: Vec<_> = sheet.changed().collect();
     assert_eq!(changed.len(), 2);
-    assert!(changed.contains(&b));
-    assert!(changed.contains(&c));
+    assert!(changed.contains(&&b));
+    assert!(changed.contains(&&c));
 
     // Verify methods executed in topological order: a → b → c
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 11);
@@ -57,7 +57,7 @@ fn changed_cells_tracked() {
 
     let changed: Vec<_> = sheet.changed().collect();
     assert_eq!(changed.len(), 1);
-    assert!(changed.contains(&b));
+    assert!(changed.contains(&&b));
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn propagate_clears_previous_changed_set() {
     // b changed again; changed set should have only cells from this propagation
     let changed: Vec<_> = sheet.changed().collect();
     assert_eq!(changed.len(), 1);
-    assert!(changed.contains(&b));
+    assert!(changed.contains(&&b));
 }
 
 #[test]
@@ -143,14 +143,14 @@ fn method_returning_error_propagates_as_method_failed() {
 }
 
 #[test]
-fn cycle_in_selected_methods_returns_cycle_error() {
-    // a→b and b→a: each relationship has only one method, forming a cycle.
+fn mutually_dependent_relationships_return_conflict() {
+    // a→b and b→a: Adam marks a as a source, flows to b via the first
+    // relationship, then the second relationship's only method (b→a) cannot
+    // fire because a is already determined. The second relationship is left
+    // unassigned, which is reported as a Conflict.
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
-    // Relationship 1: inputs=[a], outputs=[b] — but a is input, so the only method writes b.
-    // Relationship 2: inputs=[b], outputs=[a] — writes a.
-    // Planner selects both (no conflict on outputs), but they form a cycle.
     sheet
         .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
         .unwrap();
@@ -158,5 +158,5 @@ fn cycle_in_selected_methods_returns_cycle_error() {
         .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
         .unwrap();
 
-    assert!(matches!(sheet.propagate(), Err(Error::Cycle)));
+    assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
 }

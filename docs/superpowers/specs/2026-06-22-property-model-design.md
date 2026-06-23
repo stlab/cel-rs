@@ -202,8 +202,27 @@ property-model/
 ## Dependencies
 
 | Crate     | Role                                              |
-|-----------|---------------------------------------------------|
+| --------- | ------------------------------------------------- |
 | `slotmap` | Stable typed handles for cells and relationships  |
 | `anyhow`  | Ergonomic error propagation from method functions |
 
 No dependency on any other crate in this workspace. The future DSL crate will depend on both `property-model` and `cel-runtime`.
+
+## Algorithm References
+
+The planning algorithm is derived from the Adam algorithm (Adobe Source Libraries), which belongs to the DeltaBlue family of multi-way constraint solvers:
+
+- **DeltaBlue** — Freeman-Benson, Maloney, Borning (1990). The foundational strength-based local-propagation algorithm. Single-output methods only; prohibits cycles.
+  [The DeltaBlue Algorithm: An Incremental Constraint Hierarchy Solver](https://www.semanticscholar.org/paper/The-DeltaBlue-algorithm%3A-an-incremental-constraint-Freeman-Benson-Maloney/5afae6525bedd666eeb300679381819dacd3abb9)
+
+- **Multi-way vs. One-way Constraints in User Interfaces** — Borning, Duisberg, Freeman-Benson, Kramer, Woolf (1993). Motivates strength-based method selection.
+  [Multi-way versus One-way Constraints in User Interfaces](https://constraints.cs.washington.edu/solvers/spe-deltablue-93.html)
+
+- **SkyBlue** — Sannella (1994). Extends DeltaBlue with multi-output methods and cycle handling via external solvers. The `property-model` planner operates at this level of generality (multi-output methods are supported).
+  [SkyBlue: A Multi-Way Local Propagation Constraint Solver for User Interface Construction](https://constraints.cs.washington.edu/ui/skyblue-uist-94.html)
+
+- **UltraBlue** — cited in EUPHORIA system (1995). Adds a cycle-avoidance heuristic (O(DN²)) and a value-consistency mechanism for inequality assertions. Neither feature is relevant here: Adam-style selection is acyclic by construction (a method is only selected once all its inputs are determined), and this planner handles equality constraints only.
+  [User Interface Applications of a Multi-way Constraint Solver](https://dsys.cse.wustl.edu/resources/papers/wucs-1995-22.pdf)
+
+- **Adam (Adobe Source Libraries)** — Parent et al. The direct predecessor of this implementation. Uses a monotonically increasing write-recency clock (`strength`) as the priority signal.
+  [adobe_source_libraries/source/adam.cpp](https://github.com/stlab/adobe_source_libraries/blob/4a83677650a259594aff600b08a318cb4786e18e/source/adam.cpp)

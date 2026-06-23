@@ -35,8 +35,6 @@ use crate::{
 pub struct Sheet {
     pub(crate) cells: SlotMap<CellId, CellData>,
     pub(crate) relationships: SlotMap<RelationshipId, RelationshipData>,
-    /// Explicit insertion-order list; `SlotMap` does not guarantee iteration order.
-    pub(crate) relationship_order: Vec<RelationshipId>,
     pub(crate) changed_cells: Vec<CellId>,
     /// Global write-recency clock; incremented by each `write()` call.
     next_strength: u64,
@@ -48,7 +46,6 @@ impl Sheet {
         Sheet {
             cells: SlotMap::with_key(),
             relationships: SlotMap::with_key(),
-            relationship_order: Vec::new(),
             changed_cells: Vec::new(),
             next_strength: 0,
         }
@@ -155,7 +152,6 @@ impl Sheet {
             }
         }
 
-        self.relationship_order.push(rel_id);
         Ok(rel_id)
     }
 
@@ -206,7 +202,8 @@ impl Sheet {
     /// compare old/new values for equality.
     ///
     /// - Complexity: O(n) where n is the number of changed cells.
-        self.changed_cells.iter().copied()
+    pub fn changed(&self) -> impl Iterator<Item = &CellId> + '_ {
+        self.changed_cells.iter()
     }
 
     /// Clears the changed-cell set and resets each cell's `changed` flag.
@@ -237,8 +234,7 @@ impl Sheet {
         // Clear the previous changed set before starting a new propagation.
         self.clear_changed();
 
-        let plan =
-            crate::planner::plan(&self.cells, &self.relationships, &self.relationship_order)?;
+        let plan = crate::planner::plan(&self.cells, &self.relationships)?;
 
         for (rel_id, method_idx) in plan.execution_order {
             // Gather outputs in a scoped block so the shared borrows on
@@ -397,5 +393,55 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(b, c, |x: &i32| Ok(*x))])
             .unwrap();
         assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn changed_is_empty_before_propagate() {
+        let sheet = Sheet::new();
+        assert_eq!(sheet.changed().count(), 0);
+    }
+
+    #[test]
+    fn changed_after_propagate_contains_method_outputs() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+        sheet.write(a, 3_i32).unwrap();
+        sheet.propagate().unwrap();
+        let changed: Vec<_> = sheet.changed().collect();
+        assert_eq!(changed, vec![&b]);
+    }
+
+    #[test]
+    fn clear_changed_empties_changed_set() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+        sheet.write(a, 3_i32).unwrap();
+        sheet.propagate().unwrap();
+        sheet.clear_changed();
+        assert_eq!(sheet.changed().count(), 0);
+    }
+
+    #[test]
+    fn propagate_clears_previous_changed_set() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+        sheet.write(a, 3_i32).unwrap();
+        sheet.propagate().unwrap();
+        sheet.write(a, 5_i32).unwrap();
+        sheet.propagate().unwrap();
+        let changed: Vec<_> = sheet.changed().collect();
+        assert_eq!(changed, vec![&b]);
     }
 }

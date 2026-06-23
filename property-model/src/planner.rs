@@ -1,16 +1,20 @@
-//! Planning pass: selects one method per relationship and topologically orders execution.
+//! Planning pass: selects one method per relationship and returns them in dependency order.
 //!
-//! Phase 1 greedily assigns a method to each relationship by minimising the minimum
-//! strength (write-recency clock value) of the method's output cells — preferring to
-//! derive cells that were written least recently. Phase 2 runs Kahn's algorithm to
-//! produce a dependency-ordered execution sequence.
+//! Implements the Adam algorithm: cells are visited in descending strength (write-recency)
+//! order. The first time a cell is visited it becomes a *source* — its current value is
+//! taken as given. After each cell is determined (either as a source or as the output of
+//! a selected method), the planner flood-fills through adjacent relationships: any
+//! relationship whose method has all inputs determined and all outputs still undetermined
+//! is selected and its outputs are enqueued. In a properly formed multi-way constraint,
+//! at most one method per relationship can be eligible at any given point (the inputs of
+//! each method are the outputs of the other methods), so selection is deterministic.
 //!
-//! The greedy Phase 1 selection is per-relationship with no global optimality guarantee;
-//! it minimises the minimum output-cell strength locally but does not guarantee that the
-//! globally strongest cell is preserved across the whole sheet. A future model checker
-//! will verify solvability.
+//! Because a method is only selected once all its inputs are determined, any method that
+//! writes an input to a later method necessarily appears earlier in the selection order.
+//! The selection order is therefore already a valid topological execution order.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{HashSet, VecDeque};
 
 use slotmap::SlotMap;
 
@@ -26,108 +30,65 @@ pub(crate) struct Plan {
     pub(crate) execution_order: Vec<(RelationshipId, usize)>,
 }
 
-/// Runs Phase 1 (greedy method selection) and Phase 2 (topological sort).
-///
-/// Phase 1 iterates `relationship_order` and, for each relationship, selects
-/// the method whose output cells have the minimum write-strength — preferring
-/// to derive cells that were written least recently. A method is invalid if
-/// any of its output cells were already claimed by an earlier relationship.
-///
-/// Phase 2 runs Kahn's algorithm over the selected methods, where an edge
-/// A→B means method A writes a cell that method B reads as input.
+/// Assigns one method per relationship and returns them in dependency order.
 ///
 /// # Errors
 ///
-/// - `Error::Conflict` — no valid method exists for some relationship.
-/// - `Error::Cycle` — the selected methods form a dependency cycle.
+/// - `Error::Conflict` — not every relationship could be assigned a method.
 ///
-/// - Complexity: O(R·M + N) where R = relationships, M = methods per
-///   relationship, N = total cells across all selected methods.
+/// - Complexity: O(C log C + R·M·K) where C = cells, R = relationships,
+///   M = methods per relationship, K = cells per method.
 pub(crate) fn plan(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
-    relationship_order: &[RelationshipId],
 ) -> Result<Plan, Error> {
-    // ── Phase 1: greedy method selection ────────────────────────────────────
-    let mut claimed: HashSet<CellId> = HashSet::new();
+    // Already-resolved relationships need no explicit tracking: once a method's
+    // outputs are determined, no other method in that relationship remains eligible.
+    let mut determined: HashSet<CellId> = HashSet::new();
     let mut selected: Vec<(RelationshipId, usize)> = Vec::new();
 
-    for &rel_id in relationship_order {
-        let rel = &relationships[rel_id];
+    let mut cells_sorted: Vec<CellId> = cells.keys().collect();
+    cells_sorted.sort_by_key(|&id| Reverse(cells[id].strength));
 
-        let best = rel
-            .methods
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| m.outputs.iter().all(|o| !claimed.contains(o)))
-            .min_by_key(|(_, m)| {
-                m.outputs
-                    .iter()
-                    .map(|&id| cells[id].strength)
-                    .min()
-                    .unwrap_or(0)
-            });
-
-        let (method_idx, method) = best.ok_or(Error::Conflict)?;
-
-        for &output in &method.outputs {
-            claimed.insert(output);
+    for &source in &cells_sorted {
+        if determined.contains(&source) {
+            continue;
         }
-        selected.push((rel_id, method_idx));
-    }
+        determined.insert(source);
 
-    // ── Phase 2: Kahn's topological sort ────────────────────────────────────
-    let n = selected.len();
+        let mut queue: VecDeque<CellId> = VecDeque::new();
+        queue.push_back(source);
 
-    // Map each output cell to the index (in `selected`) of the method that produces it.
-    let mut producer: HashMap<CellId, usize> = HashMap::new();
-    for (i, (rel_id, method_idx)) in selected.iter().enumerate() {
-        let method = &relationships[*rel_id].methods[*method_idx];
-        for &output in &method.outputs {
-            producer.insert(output, i);
-        }
-    }
-
-    // Adjacency list and in-degree for the execution DAG.
-    let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
-    let mut in_degree: Vec<usize> = vec![0; n];
-
-    for (i, (rel_id, method_idx)) in selected.iter().enumerate() {
-        let method = &relationships[*rel_id].methods[*method_idx];
-        for &input in &method.inputs {
-            if let Some(&p) = producer.get(&input)
-                && p != i
-            {
-                adj[p].push(i);
-                in_degree[i] += 1;
+        while let Some(cell) = queue.pop_front() {
+            for &rel_id in &cells[cell].adj {
+                let rel = &relationships[rel_id];
+                if let Some((method_idx, method)) = rel.methods.iter().enumerate().find(|(_, m)| {
+                    m.inputs.iter().all(|i| determined.contains(i))
+                        && m.outputs.iter().all(|o| !determined.contains(o))
+                }) {
+                    debug_assert!(
+                        !rel.methods[method_idx + 1..].iter().any(|m| {
+                            m.inputs.iter().all(|i| determined.contains(i))
+                                && m.outputs.iter().all(|o| !determined.contains(o))
+                        }),
+                        "invariant violated: multiple eligible methods for one relationship"
+                    );
+                    for &output in &method.outputs {
+                        determined.insert(output);
+                        queue.push_back(output);
+                    }
+                    selected.push((rel_id, method_idx));
+                }
             }
         }
     }
 
-    let mut queue: VecDeque<usize> = in_degree
-        .iter()
-        .enumerate()
-        .filter(|&(_, d)| *d == 0)
-        .map(|(i, _)| i)
-        .collect();
-
-    let mut order: Vec<usize> = Vec::with_capacity(n);
-    while let Some(node) = queue.pop_front() {
-        order.push(node);
-        for &next in &adj[node] {
-            in_degree[next] -= 1;
-            if in_degree[next] == 0 {
-                queue.push_back(next);
-            }
-        }
-    }
-
-    if order.len() != n {
-        return Err(Error::Cycle);
+    if selected.len() != relationships.len() {
+        return Err(Error::Conflict);
     }
 
     Ok(Plan {
-        execution_order: order.iter().map(|&i| selected[i]).collect(),
+        execution_order: selected,
     })
 }
 
@@ -135,8 +96,7 @@ pub(crate) fn plan(
 mod tests {
     use crate::{Error, Method, Sheet};
 
-    // Propagation-behavior tests (single_method, strength_drives_selection, chained) live in
-    // Task 6's integration tests, where the full propagate() implementation is wired.
+    // Propagation-behavior tests live in the integration tests.
 
     #[test]
     fn conflict_returns_error() {
