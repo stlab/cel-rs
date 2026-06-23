@@ -227,8 +227,7 @@ impl Sheet {
     ///
     /// # Errors
     ///
-    /// - `Error::Conflict` — no valid method assignment exists.
-    /// - `Error::Cycle` — the selected methods form a dependency cycle.
+    /// - `Error::Conflict` — no valid method assignment exists (this currently includes dependency cycles).
     /// - `Error::MethodFailed` — a method's function returned an error.
     pub fn propagate(&mut self) -> Result<(), Error> {
         // Clear the previous changed set before starting a new propagation.
