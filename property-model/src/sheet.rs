@@ -201,8 +201,8 @@ impl Sheet {
     /// compare old/new values for equality.
     ///
     /// - Complexity: O(n) where n is the number of changed cells.
-    pub fn changed(&self) -> impl Iterator<Item = &CellId> + '_ {
-        self.changed_cells.iter()
+    pub fn changed(&self) -> impl Iterator<Item = CellId> + '_ {
+        self.changed_cells.iter().copied()
     }
 
     /// Clears the changed-cell set and resets each cell's `changed` flag.
@@ -417,7 +417,7 @@ mod tests {
         sheet.write(a, 3_i32).unwrap();
         sheet.propagate().unwrap();
         let changed: Vec<_> = sheet.changed().collect();
-        assert_eq!(changed, vec![&b]);
+        assert_eq!(changed, vec![b]);
     }
 
     #[test]
@@ -447,6 +447,6 @@ mod tests {
         sheet.write(a, 5_i32).unwrap();
         sheet.propagate().unwrap();
         let changed: Vec<_> = sheet.changed().collect();
-        assert_eq!(changed, vec![&b]);
+        assert_eq!(changed, vec![b]);
     }
 }

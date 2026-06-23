@@ -35,8 +35,8 @@ fn chained_relationships_execute_in_order() {
 
     let changed: Vec<_> = sheet.changed().collect();
     assert_eq!(changed.len(), 2);
-    assert!(changed.contains(&&b));
-    assert!(changed.contains(&&c));
+    assert!(changed.contains(&b));
+    assert!(changed.contains(&c));
 
     // Verify methods executed in topological order: a → b → c
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 11);
@@ -57,7 +57,7 @@ fn changed_cells_tracked() {
 
     let changed: Vec<_> = sheet.changed().collect();
     assert_eq!(changed.len(), 1);
-    assert!(changed.contains(&&b));
+    assert!(changed.contains(&b));
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn propagate_clears_previous_changed_set() {
     // b changed again; changed set should have only cells from this propagation
     let changed: Vec<_> = sheet.changed().collect();
     assert_eq!(changed.len(), 1);
-    assert!(changed.contains(&&b));
+    assert!(changed.contains(&b));
 }
 
 #[test]
