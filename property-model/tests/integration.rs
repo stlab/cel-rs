@@ -195,13 +195,6 @@ fn arity_3_2_1() {
 
     sheet.propagate().unwrap();
 
-    println!(
-        "{}, {}, {}",
-        sheet.read::<String>(a).unwrap(),
-        sheet.read::<String>(b).unwrap(),
-        sheet.read::<String>(c).unwrap()
-    );
-
     assert_eq!(sheet.read::<String>(a).unwrap(), "a");
     assert_eq!(sheet.read::<String>(b).unwrap(), "b");
     assert_eq!(sheet.read::<String>(c).unwrap(), "ab");

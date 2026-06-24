@@ -10,9 +10,11 @@
 //! each method are the outputs of the other methods), so selection is deterministic.
 //!
 //! **Pre-claiming**: when a determined cell eliminates all but one feasible method for a
-//! relationship (a method is infeasible if it would overwrite a determined cell), that
-//! sole method's outputs are *pre-claimed*: they can never become sources, even before all
-//! of the method's inputs are determined. This allows the planner to correctly handle
+//! relationship (a method is infeasible if it would overwrite a determined or pre-claimed
+//! cell), that sole method's outputs are *pre-claimed*: they can never become sources, even
+//! before all of the method's inputs are determined. Excluding pre-claimed outputs from
+//! feasibility prevents a method whose output is pre-claimed by the current flood-fill pass
+//! from being counted as a second viable option. This allows the planner to correctly handle
 //! constraints where the highest-strength cell is one of several inputs to the selected
 //! method.
 //!

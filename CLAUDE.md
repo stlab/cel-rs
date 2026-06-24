@@ -53,13 +53,8 @@ git checkout -b <username>/<feature-name>
 
 Never commit directly to `main`.
 
-Before creating a PR, run the full check suite locally:
-
-```bash
-cargo fmt --all
-cargo clippy --workspace -- -D warnings
-cargo test --workspace
-```
+Before creating a PR, run the full check suite locally (fmt, clippy, and test from the
+Commands section above).
 
 ## Project Status
 
