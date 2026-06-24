@@ -23,15 +23,21 @@ jobs:
     
     - name: Cache dependencies
       uses: Swatinem/rust-cache@v2
-    
+
     - name: Check formatting
       run: cargo fmt --check
 
-    - name: Build all workspace members
-      run: cargo build --workspace --verbose
-    
-    - name: Run tests for all workspace members
-      run: cargo test --workspace --verbose -- --nocapture
-    
-    - name: Run clippy on all workspace members
-      run: cargo clippy --workspace -- -D warnings
+    - name: Build workspace (excluding begin app)
+      run: cargo build --workspace --exclude begin --verbose
+
+    - name: Check begin app (renderer-agnostic)
+      run: cargo check -p begin --no-default-features
+
+    - name: Run tests for workspace (excluding begin app)
+      run: cargo test --workspace --exclude begin --verbose -- --nocapture
+
+    - name: Clippy workspace (excluding begin app)
+      run: cargo clippy --workspace --exclude begin -- -D warnings
+
+    - name: Clippy begin app (renderer-agnostic)
+      run: cargo clippy -p begin --no-default-features -- -D warnings

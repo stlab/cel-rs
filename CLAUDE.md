@@ -35,11 +35,30 @@ cargo doc --lib --no-deps --open --workspace
 ```
 
 Sanitizer runs require nightly and a target triple (e.g. `x86_64-apple-darwin` or `x86_64-unknown-linux-gnu`):
+
 ```bash
 RUSTFLAGS=-Zsanitizer=address cargo +nightly test -Zbuild-std --target <triple> --lib --workspace
 RUSTFLAGS=-Zsanitizer=thread  cargo +nightly test -Zbuild-std --target <triple> --workspace
 RUSTFLAGS=-Zsanitizer=leak    cargo +nightly test -Zbuild-std --target <triple> --workspace
 ```
+
+## Git Workflow
+
+Always create a feature branch before making changes. If the current branch is `main`, create a
+branch first:
+
+```bash
+git checkout -b <username>/<feature-name>
+```
+
+Never commit directly to `main`.
+
+## Project Status
+
+This project has not been released yet and has no clients. The API is not stable and may change at
+any time. The project is in **active development** and is not yet feature-complete. Prefer
+redesigning any components rather than patching them or layering on top of them. The goal is to have a
+**clean, correct, and efficient** implementation.
 
 ## Architecture
 
@@ -53,12 +72,12 @@ This is a workspace with three crates:
 
 The runtime is a **stack-based expression evaluator** built in four layers of increasing type safety:
 
-| Layer | File | Role |
-|-------|------|------|
-| `RawStack` | `raw_stack.rs` | Byte-aligned unsafe stack; `push<T>` returns padding bool, `pop<T>` requires it |
-| `RawSegment` | `raw_segment.rs` | Op list + closure storage + per-op dropper functions |
-| `DynSegment` | `dyn_segment.rs` | Runtime type-checking wrapper; maintains `stack_ids: Vec<StackInfo>` |
-| `Segment<Args, Stack>` | `segment.rs` | Zero-cost compile-time phantom wrapper; `Args: IntoList`, `Stack: List` |
+| Layer                  | File             | Role                                                                            |
+| ---------------------- | ---------------- | ------------------------------------------------------------------------------- |
+| `RawStack`             | `raw_stack.rs`   | Byte-aligned unsafe stack; `push<T>` returns padding bool, `pop<T>` requires it |
+| `RawSegment`           | `raw_segment.rs` | Op list + closure storage + per-op dropper functions                            |
+| `DynSegment`           | `dyn_segment.rs` | Runtime type-checking wrapper; maintains `stack_ids: Vec<StackInfo>`            |
+| `Segment<Args, Stack>` | `segment.rs`     | Zero-cost compile-time phantom wrapper; `Args: IntoList`, `Stack: List`         |
 
 The compile-time type system uses **cons-cell heterogeneous lists** (`CStackList<H,T>` / `CNil`) defined in `c_stack_list.rs` and `list_traits.rs`.
 
@@ -77,6 +96,7 @@ The compile-time type system uses **cons-cell heterogeneous lists** (`CStackList
 ## Code Style
 
 ### Avoid heap allocations
+
 - Pass `&str` / `&[T]` rather than cloning into `String` / `Vec<T>`
 - Use generics or `fn` pointers instead of `Box<dyn Trait>` when the type set is statically known
 - Return `&[T]` or `impl Iterator` over owned collections when the data already lives elsewhere
@@ -98,11 +118,13 @@ Every function must have a `///` doc comment written in **contract style**. The 
 If you cannot write a simple contract for a function, treat that as a signal that the design needs improvement.
 
 Additional rules:
+
 - For parser functions, the grammar production is the summary: `/// \`additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.\``
 - Use `# Examples` for all public APIs.
 - Modules use `//!` with a usage tutorial.
 
 **Example:**
+
 ```rust
 /// Removes and returns the top element.
 ///
@@ -123,4 +145,5 @@ Derive tests from the **contract and public interface only** — do not read or 
 Precondition violations have unspecified behavior and should not be tested. Tests written against the implementation risk encoding bugs rather than verifying intent.
 
 ### Fallible ops
+
 Operations that can fail use `.op1r` / `.op2r` variants (returning `Result`) rather than `.op1` / `.op2`. Arithmetic on signed integers must use `checked_*` operations, not wrapping arithmetic.

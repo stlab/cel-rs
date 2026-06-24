@@ -128,8 +128,11 @@ fn strength_drives_method_selection() {
 #[test]
 fn method_returning_error_propagates_as_method_failed() {
     let mut sheet = Sheet::new();
-    let a = sheet.add_cell(0.0_f64);
+    // b added first (lower strength) so it is the output; a added second
+    // (higher strength) so it is the source. The planner selects [a]→b,
+    // which runs the method and surfaces the error.
     let b = sheet.add_cell(0.0_f64);
+    let a = sheet.add_cell(0.0_f64);
     sheet
         .add_relationship(vec![Method::from_fn_1_1(
             a,

@@ -36,7 +36,9 @@ pub struct Sheet {
     pub(crate) cells: SlotMap<CellId, CellData>,
     pub(crate) relationships: SlotMap<RelationshipId, RelationshipData>,
     pub(crate) changed_cells: Vec<CellId>,
-    /// Global write-recency clock; incremented by each `write()` call.
+    /// Monotonic counter incremented by both `add_cell` and `write`; cells added
+    /// later and cells written later have strictly higher strength, making the
+    /// default method-selection direction deterministic.
     next_strength: u64,
 }
 
@@ -55,11 +57,17 @@ impl Sheet {
     ///
     /// The cell's `TypeId` is fixed at creation time; subsequent `write` and
     /// `read` calls that use a different type will return `Error::TypeMismatch`.
+    ///
+    /// Each call increments the sheet's internal strength counter so that cells
+    /// added later have strictly higher initial strength than cells added earlier.
+    /// This makes the default method-selection direction deterministic: cells added
+    /// last are treated as sources and cells added first are treated as outputs.
     pub fn add_cell<T: Any + 'static>(&mut self, value: T) -> CellId {
+        self.next_strength += 1;
         self.cells.insert(CellData {
             value: Box::new(value),
             type_id: TypeId::of::<T>(),
-            strength: 0,
+            strength: self.next_strength,
             changed: false,
             adj: Vec::new(),
         })
@@ -218,6 +226,38 @@ impl Sheet {
         }
     }
 
+    /// Iterates all live cell IDs in the sheet.
+    ///
+    /// - Complexity: O(n) where n is the number of cells.
+    pub fn cells(&self) -> impl Iterator<Item = CellId> + '_ {
+        self.cells.keys()
+    }
+
+    /// Iterates all live relationship IDs in the sheet.
+    ///
+    /// - Complexity: O(n) where n is the number of relationships.
+    pub fn relationships(&self) -> impl Iterator<Item = RelationshipId> + '_ {
+        self.relationships.keys()
+    }
+
+    /// Returns the relationships adjacent to `id`.
+    ///
+    /// Returns `None` if `id` is not a live cell in this sheet.
+    ///
+    /// - Complexity: O(1).
+    pub fn cell_adj(&self, id: CellId) -> Option<&[RelationshipId]> {
+        self.cells.get(id).map(|c| c.adj.as_slice())
+    }
+
+    /// Returns the cells adjacent to `id` (union across all methods).
+    ///
+    /// Returns `None` if `id` is not a live relationship in this sheet.
+    ///
+    /// - Complexity: O(1).
+    pub fn relationship_adj(&self, id: RelationshipId) -> Option<&[CellId]> {
+        self.relationships.get(id).map(|r| r.adj.as_slice())
+    }
+
     /// Runs the planning pass and executes the selected methods.
     ///
     /// Clears the changed-cell set from the previous `propagate()` call before planning.
@@ -288,7 +328,7 @@ impl Default for Sheet {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Error, Method, Sheet};
+    use crate::{Error, Method, Sheet, cell::CellId, relationship::RelationshipId};
     use std::any::TypeId;
 
     #[test]
@@ -448,5 +488,77 @@ mod tests {
         sheet.propagate().unwrap();
         let changed: Vec<_> = sheet.changed().collect();
         assert_eq!(changed, vec![b]);
+    }
+
+    #[test]
+    fn cells_returns_all_cell_ids() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let ids: Vec<_> = sheet.cells().collect();
+        assert!(ids.contains(&a));
+        assert!(ids.contains(&b));
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn cells_returns_empty_for_empty_sheet() {
+        let sheet = Sheet::new();
+        assert_eq!(sheet.cells().count(), 0);
+    }
+
+    #[test]
+    fn relationships_returns_all_relationship_ids() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let r = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        let ids: Vec<_> = sheet.relationships().collect();
+        assert_eq!(ids, vec![r]);
+    }
+
+    #[test]
+    fn relationships_returns_empty_for_empty_sheet() {
+        let sheet = Sheet::new();
+        assert_eq!(sheet.relationships().count(), 0);
+    }
+
+    #[test]
+    fn cell_adj_returns_adjacent_relationships() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let r = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        assert!(sheet.cell_adj(a).unwrap().contains(&r));
+        assert!(sheet.cell_adj(b).unwrap().contains(&r));
+    }
+
+    #[test]
+    fn cell_adj_returns_none_for_invalid_id() {
+        let sheet = Sheet::new();
+        assert!(sheet.cell_adj(CellId::default()).is_none());
+    }
+
+    #[test]
+    fn relationship_adj_returns_adjacent_cells() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let r = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        let adj = sheet.relationship_adj(r).unwrap();
+        assert!(adj.contains(&a));
+        assert!(adj.contains(&b));
+    }
+
+    #[test]
+    fn relationship_adj_returns_none_for_invalid_id() {
+        let sheet = Sheet::new();
+        assert!(sheet.relationship_adj(RelationshipId::default()).is_none());
     }
 }
