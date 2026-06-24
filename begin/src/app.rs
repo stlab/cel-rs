@@ -8,18 +8,20 @@ use crate::graph_view::GraphView;
 use crate::inspector::Inspector;
 
 /// Builds the `a × b = c` demo sheet with three bidirectional methods.
+///
+/// Cells are added in order `c, a, b` so that `a` and `b` have higher initial
+/// strength than `c`. The planner therefore treats `a` and `b` as sources and
+/// derives `c`, which is the intended default direction. `propagate()` is called
+/// once to compute the initial value of `c`.
 pub fn make_demo_sheet() -> (Sheet, Labels) {
     let mut sheet = Sheet::new();
     let mut labels = Labels::new();
 
-    let a = sheet.add_cell(2.0_f64);
-    labels.add_cell::<f64>(a, "a");
-
-    let b = sheet.add_cell(3.0_f64);
-    labels.add_cell::<f64>(b, "b");
-
+    // c added first → lowest strength (output by default).
     let c = sheet.add_cell(0.0_f64);
-    labels.add_cell::<f64>(c, "c");
+    // a and b added later → higher strength (sources by default).
+    let a = sheet.add_cell(2.0_f64);
+    let b = sheet.add_cell(3.0_f64);
 
     let rel = sheet
         .add_relationship(vec![
@@ -28,6 +30,14 @@ pub fn make_demo_sheet() -> (Sheet, Labels) {
             Method::from_fn_2_1([a, c], b, |x: &f64, y: &f64| Ok(y / x)),
         ])
         .unwrap();
+
+    // Compute c = a × b = 6 on startup; clear changed so c does not pulse immediately.
+    sheet.propagate().unwrap();
+    sheet.clear_changed();
+
+    labels.add_cell::<f64>(a, "a");
+    labels.add_cell::<f64>(b, "b");
+    labels.add_cell::<f64>(c, "c");
     labels.add_relationship(rel, "×");
 
     (sheet, labels)

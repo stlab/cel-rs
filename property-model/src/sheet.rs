@@ -55,11 +55,17 @@ impl Sheet {
     ///
     /// The cell's `TypeId` is fixed at creation time; subsequent `write` and
     /// `read` calls that use a different type will return `Error::TypeMismatch`.
+    ///
+    /// Each call increments the sheet's internal strength counter so that cells
+    /// added later have strictly higher initial strength than cells added earlier.
+    /// This makes the default method-selection direction deterministic: cells added
+    /// last are treated as sources and cells added first are treated as outputs.
     pub fn add_cell<T: Any + 'static>(&mut self, value: T) -> CellId {
+        self.next_strength += 1;
         self.cells.insert(CellData {
             value: Box::new(value),
             type_id: TypeId::of::<T>(),
-            strength: 0,
+            strength: self.next_strength,
             changed: false,
             adj: Vec::new(),
         })

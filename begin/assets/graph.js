@@ -2,11 +2,11 @@
     // Tunable layout constants
     var LINK_DISTANCE = 80;
     var CHARGE_STRENGTH = -300;
-    var CELL_W = 40;
-    var CELL_H = 28;
+    var CELL_W = 60;
+    var CELL_H = 36;
     var CELL_RX = 4;
     var REL_R = 16;
-    var CELL_COLLIDE_R = 30;
+    var CELL_COLLIDE_R = 38;
     var REL_COLLIDE_R = 22;
     var PULSE_COLOR = '#f90';
     var PULSE_ON_MS = 200;
@@ -18,6 +18,7 @@
     var cellLayer = null;
     var relLayer = null;
     var labelLayer = null;
+    var valueLayer = null;
     var nodes = [];
     var links = [];
     var width = 800;
@@ -44,12 +45,13 @@
             .attr('orient', 'auto')
             .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#999');
 
-        // Layer groups in z-order: background → links → cells → relationships → labels
+        // Layer groups in z-order: background → links → cells → relationships → labels → values
         svg.append('g').attr('class', 'bg-layer');
         linkLayer = svg.append('g').attr('class', 'link-layer');
         cellLayer = svg.append('g').attr('class', 'cell-layer');
         relLayer = svg.append('g').attr('class', 'rel-layer');
         labelLayer = svg.append('g').attr('class', 'label-layer');
+        valueLayer = svg.append('g').attr('class', 'value-layer');
 
         simulation = d3.forceSimulation()
             .force('link', d3.forceLink().id(function (d) { return d.id; }).distance(LINK_DISTANCE))
@@ -110,12 +112,19 @@
             .attr('class', 'node-relationship')
             .attr('r', REL_R);
 
-        // Join labels (cells only)
+        // Join cell name labels (centered inside rect)
         labelLayer.selectAll('text')
             .data(cellNodes, function (d) { return d.id; })
             .join('text')
             .attr('class', 'node-label')
             .text(function (d) { return d.label; });
+
+        // Join cell value labels (below the name, inside rect)
+        valueLayer.selectAll('text')
+            .data(cellNodes, function (d) { return d.id; })
+            .join('text')
+            .attr('class', 'node-value')
+            .text(function (d) { return d.value || ''; });
 
         // Pulse changed cells
         if (changedSet.size > 0) {
@@ -148,9 +157,15 @@
             .attr('cx', function (d) { return d.x; })
             .attr('cy', function (d) { return d.y; });
 
+        // Cell name: upper half of rect
         labelLayer.selectAll('text')
             .attr('x', function (d) { return d.x; })
-            .attr('y', function (d) { return d.y + CELL_H / 2 + 12; });
+            .attr('y', function (d) { return d.y - 4; });
+
+        // Cell value: lower half of rect
+        valueLayer.selectAll('text')
+            .attr('x', function (d) { return d.x; })
+            .attr('y', function (d) { return d.y + 10; });
     }
 
     window.beginGraph = { init: init, update: update };

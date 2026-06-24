@@ -100,8 +100,10 @@ pub struct NodeData {
     /// Stable string ID: `"c{ffi}"` for cells, `"r{ffi}"` for relationships.
     pub id: String,
     pub kind: NodeKind,
-    /// Cell label; empty string for relationships.
+    /// Cell label (e.g. `"a"`); empty string for relationships.
     pub label: String,
+    /// Current cell value as a display string; empty string for relationships.
+    pub value: String,
 }
 
 /// A single edge in the D3 graph (undirected; connects a cell to a relationship).
@@ -147,15 +149,16 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
     let mut links = Vec::new();
 
     for id in sheet.cells() {
-        let label = labels
+        let (label, value) = labels
             .cells
             .get(&id)
-            .map(|m| m.label.clone())
+            .map(|m| (m.label.clone(), (m.display)(sheet)))
             .unwrap_or_default();
         nodes.push(NodeData {
             id: cell_node_id(id),
             kind: NodeKind::Cell,
             label,
+            value,
         });
     }
 
@@ -164,6 +167,7 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
             id: rel_node_id(id),
             kind: NodeKind::Relationship,
             label: String::new(),
+            value: String::new(),
         });
         if let Some(adj) = sheet.relationship_adj(id) {
             for &cell_id in adj {
