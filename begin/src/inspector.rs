@@ -82,10 +82,10 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
                     input.set(s.clone());
                     let mut sheet_w = sheet.write();
                     let labels_r = labels.read();
-                    if let Some(meta) = labels_r.cells.get(&id) {
-                        if (meta.write_str)(&mut sheet_w, &s).is_ok() {
-                            has_error.set(sheet_w.propagate().is_err());
-                        }
+                    if let Some(meta) = labels_r.cells.get(&id)
+                        && (meta.write_str)(&mut sheet_w, &s).is_ok()
+                    {
+                        has_error.set(sheet_w.propagate().is_err());
                     }
                 },
             }
