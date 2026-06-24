@@ -266,10 +266,16 @@ impl Sheet {
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
+    /// If `execute_plan` fails, `last_plan` is not updated; `selected_method` will continue
+    /// to reflect the last *successful* propagation.
+    ///
     /// # Errors
     ///
     /// - `Error::Conflict` — no valid method assignment exists.
-    /// - `Error::MethodFailed` — a method's function returned an error.
+    /// - `Error::MethodFailed` — a method's function returned an error, or a method produced
+    ///   the wrong number of outputs.
+    /// - `Error::TypeMismatch` — a method output's runtime type does not match the cell's
+    ///   registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.clear_changed();
         let plan = crate::planner::plan(&self.cells, &self.relationships)?;
@@ -279,6 +285,13 @@ impl Sheet {
     }
 
     /// Executes `execution_order` without invoking the planner.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::MethodFailed` — the method's function returned an error, or the method
+    ///   produced a different number of outputs than declared.
+    /// - `Error::TypeMismatch` — a method output's runtime type does not match the cell's
+    ///   registered type.
     ///
     /// - Complexity: O(R·K) where R is the number of entries and K is the max cells per method.
     fn execute_plan(&mut self, execution_order: &[(RelationshipId, usize)]) -> Result<(), Error> {
