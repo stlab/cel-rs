@@ -9,6 +9,15 @@
 //! at most one method per relationship can be eligible at any given point (the inputs of
 //! each method are the outputs of the other methods), so selection is deterministic.
 //!
+//! **Pre-claiming**: when a determined cell eliminates all but one feasible method for a
+//! relationship (a method is infeasible if it would overwrite a determined or pre-claimed
+//! cell), that sole method's outputs are *pre-claimed*: they can never become sources, even
+//! before all of the method's inputs are determined. Excluding pre-claimed outputs from
+//! feasibility prevents a method whose output is pre-claimed by the current flood-fill pass
+//! from being counted as a second viable option. This allows the planner to correctly handle
+//! constraints where the highest-strength cell is one of several inputs to the selected
+//! method.
+//!
 //! Because a method is only selected once all its inputs are determined, any method that
 //! writes an input to a later method necessarily appears earlier in the selection order.
 //! The selection order is therefore already a valid topological execution order.
@@ -43,6 +52,7 @@ pub(crate) fn plan(
     relationships: &SlotMap<RelationshipId, RelationshipData>,
 ) -> Result<Plan, Error> {
     let mut determined: HashSet<CellId> = HashSet::new();
+    let mut pre_claimed: HashSet<CellId> = HashSet::new();
     let mut selected: Vec<(RelationshipId, usize)> = Vec::new();
     let mut selected_set: HashSet<RelationshipId> = HashSet::new();
 
@@ -50,7 +60,7 @@ pub(crate) fn plan(
     cells_sorted.sort_by_key(|&id| Reverse(cells[id].strength));
 
     for &source in &cells_sorted {
-        if determined.contains(&source) {
+        if determined.contains(&source) || pre_claimed.contains(&source) {
             continue;
         }
         determined.insert(source);
@@ -77,10 +87,37 @@ pub(crate) fn plan(
                     );
                     for &output in &method.outputs {
                         determined.insert(output);
+                        pre_claimed.remove(&output);
                         queue.push_back(output);
                     }
                     selected_set.insert(rel_id);
                     selected.push((rel_id, method_idx));
+                } else {
+                    // No method is immediately selectable. If exactly one method remains
+                    // feasible — meaning no other method can run without overwriting a cell
+                    // that is already determined or pre-claimed — and the current cell is
+                    // one of its inputs, the flow continues along that method: pre-claim its
+                    // outputs and enqueue them so the flood-fill propagates further.
+                    //
+                    // Both `determined` and `pre_claimed` are excluded from feasibility so
+                    // that a method whose output is pre-claimed by this same flood-fill pass
+                    // is not counted as a second viable option.
+                    let mut feasible = rel.methods.iter().filter(|m| {
+                        m.outputs
+                            .iter()
+                            .all(|o| !determined.contains(o) && !pre_claimed.contains(o))
+                    });
+                    let first = feasible.next();
+                    let second = feasible.next();
+                    if let (Some(sole), None) = (first, second)
+                        && sole.inputs.contains(&cell)
+                    {
+                        for &output in &sole.outputs {
+                            if pre_claimed.insert(output) {
+                                queue.push_back(output);
+                            }
+                        }
+                    }
                 }
             }
         }

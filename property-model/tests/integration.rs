@@ -1,5 +1,7 @@
 //! End-to-end integration tests for the property-model crate.
 
+use std::any::TypeId;
+
 use property_model::{Error, Method, Sheet};
 
 #[test]
@@ -162,4 +164,38 @@ fn mutually_dependent_relationships_return_conflict() {
         .unwrap();
 
     assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
+}
+
+#[test]
+fn arity_3_2_1() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell("a".to_string());
+    let c = sheet.add_cell("ab".to_string());
+    let b = sheet.add_cell("b".to_string());
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], c, |x: &String, y: &String| Ok(x.clone() + y)),
+            Method::new(
+                vec![c],
+                vec![a, b],
+                vec![TypeId::of::<String>()],
+                vec![TypeId::of::<String>(), TypeId::of::<String>()],
+                |args| {
+                    let z = args[0]
+                        .downcast_ref::<String>()
+                        .expect("type checked at add_relationship");
+                    let mut chars = z.chars();
+                    let first = chars.next().unwrap_or_default().to_string();
+                    let rest = chars.collect::<String>();
+                    Ok(vec![Box::new(first), Box::new(rest)])
+                },
+            ),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(sheet.read::<String>(a).unwrap(), "a");
+    assert_eq!(sheet.read::<String>(b).unwrap(), "b");
+    assert_eq!(sheet.read::<String>(c).unwrap(), "ab");
 }

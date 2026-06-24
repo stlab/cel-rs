@@ -53,6 +53,9 @@ git checkout -b <username>/<feature-name>
 
 Never commit directly to `main`.
 
+Before creating a PR, run the full check suite locally (fmt, clippy, and test from the
+Commands section above).
+
 ## Project Status
 
 This project has not been released yet and has no clients. The API is not stable and may change at
