@@ -107,12 +107,12 @@ pub(crate) fn plan(
                     });
                     let first = feasible.next();
                     let second = feasible.next();
-                    if let (Some(sole), None) = (first, second) {
-                        if sole.inputs.contains(&cell) {
-                            for &output in &sole.outputs {
-                                if pre_claimed.insert(output) {
-                                    queue.push_back(output);
-                                }
+                    if let (Some(sole), None) = (first, second)
+                        && sole.inputs.contains(&cell)
+                    {
+                        for &output in &sole.outputs {
+                            if pre_claimed.insert(output) {
+                                queue.push_back(output);
                             }
                         }
                     }

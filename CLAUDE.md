@@ -53,6 +53,14 @@ git checkout -b <username>/<feature-name>
 
 Never commit directly to `main`.
 
+Before creating a PR, run the full check suite locally:
+
+```bash
+cargo fmt --all
+cargo clippy --workspace -- -D warnings
+cargo test --workspace
+```
+
 ## Project Status
 
 This project has not been released yet and has no clients. The API is not stable and may change at
