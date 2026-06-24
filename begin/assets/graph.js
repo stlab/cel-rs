@@ -25,6 +25,12 @@
     var height = 600;
 
     function init(containerId, data) {
+        // Tear down any previous init (component remount / hot-reload).
+        if (simulation) { simulation.stop(); simulation = null; }
+        if (svg) { svg.remove(); svg = null; }
+        nodes = [];
+        links = [];
+
         var container = document.getElementById(containerId);
         width = container.clientWidth || width;
         height = container.clientHeight || height;

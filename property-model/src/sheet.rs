@@ -36,7 +36,9 @@ pub struct Sheet {
     pub(crate) cells: SlotMap<CellId, CellData>,
     pub(crate) relationships: SlotMap<RelationshipId, RelationshipData>,
     pub(crate) changed_cells: Vec<CellId>,
-    /// Global write-recency clock; incremented by each `write()` call.
+    /// Monotonic counter incremented by both `add_cell` and `write`; cells added
+    /// later and cells written later have strictly higher strength, making the
+    /// default method-selection direction deterministic.
     next_strength: u64,
 }
 

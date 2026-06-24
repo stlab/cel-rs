@@ -55,9 +55,9 @@ Never commit directly to `main`.
 
 ## Project Status
 
-This project has not been release yet and has no clients. The API is not stable and may change at
+This project has not been released yet and has no clients. The API is not stable and may change at
 any time. The project is in **active development** and is not yet feature-complete. Prefer
-redesiging any components rather than patching them or layer on top of them. The goal is to have a
+redesigning any components rather than patching them or layering on top of them. The goal is to have a
 **clean, correct, and efficient** implementation.
 
 ## Architecture
