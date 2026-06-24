@@ -1,0 +1,21 @@
+[package]
+name = "begin"
+version = "0.1.0"
+edition = "2024"
+description = "Cross-platform property model development environment"
+
+[features]
+default = ["desktop"]
+desktop = ["dioxus/desktop"]
+web = ["dioxus/web"]
+
+[dependencies]
+dioxus = { version = "0.7.9", features = [] }
+property-model = { path = "../property-model" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indexmap = "2"
+anyhow = "1"
+
+[lints]
+workspace = true

@@ -1,0 +1,9 @@
+[application]
+name = "begin"
+default_platform = "desktop"
+
+[web.app]
+title = "begin"
+
+[desktop.app]
+title = "begin"
