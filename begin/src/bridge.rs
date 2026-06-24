@@ -1,6 +1,4 @@
 //! Serialization bridge from [`property_model::Sheet`] to D3-ready JSON.
-// Suppressed until bridge types are wired into App (Task 7).
-#![allow(dead_code)]
 //!
 //! [`Labels`] associates display metadata (names, type-erased display and write closures)
 //! with stable [`CellId`] and [`RelationshipId`] keys. [`to_graph_data`] serializes a

@@ -14,7 +14,7 @@ use crate::bridge::GraphData;
 /// The JS guard in `graph.js` makes the initial `update` call before `init`
 /// a no-op, so ordering between `onmounted` and the effect is not critical.
 #[component]
-pub fn GraphView(data: ReadOnlySignal<GraphData>) -> Element {
+pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
     use_effect(move || {
         let json = serde_json::to_string(&*data.read()).unwrap_or_default();
         spawn(async move {

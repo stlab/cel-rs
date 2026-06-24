@@ -68,10 +68,10 @@ fn CellRow(
                         let s = input.peek().clone();
                         let mut sheet_w = sheet.write();
                         let labels_r = labels.read();
-                        if let Some(meta) = labels_r.cells.get(&id) {
-                            if (meta.write_str)(&mut sheet_w, &s).is_ok() {
-                                let _ = sheet_w.propagate();
-                            }
+                        if let Some(meta) = labels_r.cells.get(&id)
+                            && (meta.write_str)(&mut sheet_w, &s).is_ok()
+                        {
+                            let _ = sheet_w.propagate();
                         }
                     }
                 }
