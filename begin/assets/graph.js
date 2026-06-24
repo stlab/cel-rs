@@ -76,6 +76,7 @@
             if (existing) {
                 existing.kind = n.kind;
                 existing.label = n.label;
+                existing.value = n.value;
                 return existing;
             }
             return Object.assign({}, n);

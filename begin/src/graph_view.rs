@@ -1,7 +1,10 @@
 //! [`GraphView`] — renders the D3 force graph inside a `<div>`.
 //!
 //! Mounts D3 once via the element's `onmounted` event; pushes JSON updates
-//! via `document::eval` whenever the `data` signal changes.
+//! via `document::eval` whenever the `data` signal changes. Each update also
+//! writes to `window.__beginGraphData` so that `onmounted`'s polling loop
+//! always calls `init` with the latest snapshot rather than the one captured
+//! at mount time.
 
 use dioxus::prelude::*;
 
@@ -9,17 +12,18 @@ use crate::bridge::GraphData;
 
 /// Renders the property model bipartite graph using D3.
 ///
-/// On mount, calls `window.beginGraph.init`. On every change to `data`,
-/// calls `window.beginGraph.update` with the serialized [`GraphData`] JSON.
-/// The JS guard in `graph.js` makes the initial `update` call before `init`
-/// a no-op, so ordering between `onmounted` and the effect is not critical.
+/// On mount, polls until D3 is ready, then calls `window.beginGraph.init`
+/// using `window.__beginGraphData`, which always holds the latest snapshot.
+/// On every change to `data`, writes the latest snapshot to
+/// `window.__beginGraphData` and calls `window.beginGraph.update`. The JS
+/// guard in `graph.js` makes any `update` call before `init` a no-op.
 #[component]
 pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
     use_effect(move || {
         let json = serde_json::to_string(&*data.read()).unwrap_or_default();
         spawn(async move {
             let _ = document::eval(&format!(
-                "if (typeof window.beginGraph !== 'undefined') window.beginGraph.update({})",
+                "window.__beginGraphData = {}; if (typeof window.beginGraph !== 'undefined') window.beginGraph.update(window.__beginGraphData);",
                 json
             ))
             .await;
@@ -32,16 +36,18 @@ pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
             style: "flex: 1; height: 100%; overflow: hidden;",
             onmounted: move |_evt| async move {
                 let json = serde_json::to_string(&data.peek().clone()).unwrap_or_default();
-                // Poll until both d3 and window.beginGraph are available;
+                // Seed __beginGraphData with the current snapshot; use_effect may
+                // update it if the sheet changes before D3 finishes loading.
                 // document::Script injects <script> tags asynchronously.
                 let script = format!(
-                    r#"(function tryInit(n, data) {{
-                        if (typeof d3 !== 'undefined' && typeof window.beginGraph !== 'undefined') {{
-                            window.beginGraph.init('graph-container', data);
-                        }} else if (n > 0) {{
-                            setTimeout(function() {{ tryInit(n - 1, data); }}, 50);
-                        }}
-                    }})(60, {json});"#
+                    r#"if (!window.__beginGraphData) window.__beginGraphData = {json};
+                       (function tryInit(n) {{
+                           if (typeof d3 !== 'undefined' && typeof window.beginGraph !== 'undefined') {{
+                               window.beginGraph.init('graph-container', window.__beginGraphData);
+                           }} else if (n > 0) {{
+                               setTimeout(function() {{ tryInit(n - 1); }}, 50);
+                           }}
+                       }})(60);"#
                 );
                 let _ = document::eval(&script).await;
             }

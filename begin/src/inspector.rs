@@ -7,7 +7,10 @@ use crate::bridge::Labels;
 
 /// Sidebar panel showing all cells with labels, current values, and text inputs for writing.
 ///
-/// Pressing Enter in an input field writes the parsed value to the cell and propagates.
+/// Editing an input field immediately writes the parsed value to the sheet and propagates
+/// constraints. If propagation fails (for example, division by zero), the input field shows
+/// a red border until the user blurs. The input is not reset while the field is focused;
+/// it syncs back to the computed value on blur, keeping non-edited cells up to date.
 #[component]
 pub fn Inspector(sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
@@ -44,10 +47,16 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
     });
 
     let mut input = use_signal(|| value.peek().clone());
+    let mut is_focused = use_signal(|| false);
+    let mut has_error = use_signal(|| false);
 
-    // Keep input text in sync when the cell value changes externally (e.g. via propagation).
+    // Sync input to the computed value whenever it changes, but not while the user
+    // is actively editing — that would interrupt mid-value typing (e.g. "1." → "1").
     use_effect(move || {
-        input.set(value.read().clone());
+        let v = value.read().clone();
+        if !*is_focused.read() {
+            input.set(v);
+        }
     });
 
     rsx! {
@@ -58,20 +67,27 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
             input {
                 r#type: "text",
                 value: "{input}",
-                style: "width: 100%; box-sizing: border-box; font-family: monospace; font-size: 12px;",
-                oninput: move |e| input.set(e.value()),
-                onkeydown: move |e| {
-                    if e.key() == Key::Enter {
-                        let s = input.peek().clone();
-                        let mut sheet_w = sheet.write();
-                        let labels_r = labels.read();
-                        if let Some(meta) = labels_r.cells.get(&id)
-                            && (meta.write_str)(&mut sheet_w, &s).is_ok()
-                        {
-                            let _ = sheet_w.propagate();
+                style: if *has_error.read() {
+                    "width: 100%; box-sizing: border-box; font-family: monospace; font-size: 12px; border-color: #c00;"
+                } else {
+                    "width: 100%; box-sizing: border-box; font-family: monospace; font-size: 12px;"
+                },
+                onfocus: move |_| is_focused.set(true),
+                onblur: move |_| {
+                    is_focused.set(false);
+                    has_error.set(false);
+                },
+                oninput: move |e| {
+                    let s = e.value();
+                    input.set(s.clone());
+                    let mut sheet_w = sheet.write();
+                    let labels_r = labels.read();
+                    if let Some(meta) = labels_r.cells.get(&id) {
+                        if (meta.write_str)(&mut sheet_w, &s).is_ok() {
+                            has_error.set(sheet_w.propagate().is_err());
                         }
                     }
-                }
+                },
             }
         }
     }

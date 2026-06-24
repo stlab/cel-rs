@@ -58,7 +58,7 @@ pub fn App() -> Element {
         document::Script { src: asset!("/assets/graph.js") }
 
         div {
-            style: "display: flex; width: 100vw; height: 100vh; overflow: hidden;",
+            style: "position: fixed; inset: 0; display: flex; overflow: hidden;",
             GraphView { data: graph_data }
             Inspector { sheet, labels }
         }
