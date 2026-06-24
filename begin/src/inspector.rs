@@ -10,47 +10,44 @@ use crate::bridge::Labels;
 /// Pressing Enter in an input field writes the parsed value to the cell and propagates.
 #[component]
 pub fn Inspector(sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element {
-    let cell_rows: Vec<(CellId, String, String)> = {
-        let s = sheet.read();
-        let l = labels.read();
-        l.cells
-            .iter()
-            .map(|(id, meta)| (*id, meta.label.clone(), (meta.display)(&s)))
-            .collect()
-    };
+    let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
 
     rsx! {
         div {
             style: "width: 260px; min-width: 260px; height: 100%; overflow-y: auto; border-left: 1px solid #ddd; padding: 12px; box-sizing: border-box; font-family: monospace; font-size: 13px;",
             h3 { style: "margin: 0 0 12px 0; font-size: 14px;", "Cells" }
-            for (id, label, value) in cell_rows {
-                CellRow { key: "{id:?}", id, label, value, sheet, labels }
+            for id in ids {
+                CellRow { key: "{id:?}", id, sheet, labels }
             }
         }
     }
 }
 
 #[component]
-fn CellRow(
-    id: CellId,
-    label: String,
-    value: String,
-    sheet: Signal<Sheet>,
-    labels: Signal<Labels>,
-) -> Element {
-    let mut input = use_signal(|| value.clone());
+fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element {
+    let label = use_memo(move || {
+        labels
+            .read()
+            .cells
+            .get(&id)
+            .map(|m| m.label.clone())
+            .unwrap_or_default()
+    });
 
-    // Keep input text in sync when the value changes externally (e.g. via propagation).
+    let value = use_memo(move || {
+        let s = sheet.read();
+        let l = labels.read();
+        l.cells
+            .get(&id)
+            .map(|m| (m.display)(&s))
+            .unwrap_or_default()
+    });
+
+    let mut input = use_signal(|| value.peek().clone());
+
+    // Keep input text in sync when the cell value changes externally (e.g. via propagation).
     use_effect(move || {
-        let current = {
-            let s = sheet.read();
-            let l = labels.read();
-            l.cells
-                .get(&id)
-                .map(|m| (m.display)(&s))
-                .unwrap_or_default()
-        };
-        input.set(current);
+        input.set(value.read().clone());
     });
 
     rsx! {

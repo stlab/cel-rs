@@ -18,7 +18,11 @@ pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
     use_effect(move || {
         let json = serde_json::to_string(&*data.read()).unwrap_or_default();
         spawn(async move {
-            let _ = document::eval(&format!("window.beginGraph.update({})", json)).await;
+            let _ = document::eval(&format!(
+                "if (typeof window.beginGraph !== 'undefined') window.beginGraph.update({})",
+                json
+            ))
+            .await;
         });
     });
 
@@ -28,10 +32,18 @@ pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
             style: "flex: 1; height: 100%; overflow: hidden;",
             onmounted: move |_evt| async move {
                 let json = serde_json::to_string(&data.peek().clone()).unwrap_or_default();
-                let _ = document::eval(
-                    &format!("window.beginGraph.init('graph-container', {})", json),
-                )
-                .await;
+                // Poll until both d3 and window.beginGraph are available;
+                // document::Script injects <script> tags asynchronously.
+                let script = format!(
+                    r#"(function tryInit(n, data) {{
+                        if (typeof d3 !== 'undefined' && typeof window.beginGraph !== 'undefined') {{
+                            window.beginGraph.init('graph-container', data);
+                        }} else if (n > 0) {{
+                            setTimeout(function() {{ tryInit(n - 1, data); }}, 50);
+                        }}
+                    }})(60, {json});"#
+                );
+                let _ = document::eval(&script).await;
             }
         }
     }
