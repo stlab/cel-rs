@@ -1,6 +1,40 @@
 {
     "version": "2.0.0",
+    "inputs": [
+        {
+            "id": "worktreeName",
+            "type": "promptString",
+            "description": "Worktree name (e.g. my-feature) — branch will be worktree-<name>"
+        }
+    ],
     "tasks": [
+        // ============ Worktree Tasks ============
+        {
+            "label": "worktree: create",
+            "type": "shell",
+            "command": "git worktree add \".claude/worktrees/${input:worktreeName}\" -b \"worktree-${input:worktreeName}\" && code --new-window \".claude/worktrees/${input:worktreeName}\"",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "worktree: remove",
+            "type": "shell",
+            "command": "git worktree remove \".claude/worktrees/${input:worktreeName}\"",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
         // ============ Begin Tasks ============
         {
             "label": "begin: serve (desktop)",
