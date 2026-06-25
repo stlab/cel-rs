@@ -266,9 +266,6 @@ impl Sheet {
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
-    /// If `execute_plan` fails, `last_plan` is not updated; `selected_method` will continue
-    /// to reflect the last *successful* propagation.
-    ///
     /// On success, `selected_method` reflects the newly computed plan.
     ///
     /// # Errors
