@@ -69,6 +69,9 @@ Add a `source_cells: HashSet<CellId>` set alongside the existing `determined` se
 
 - When the outer loop promotes a cell as a source: add to both `determined` and `source_cells`.
 - When a method is selected and its outputs are marked determined: add to `determined` only.
+  For self-referencing outputs (cells in both `inputs` and `outputs` of the selected method),
+  also **remove** from `source_cells`: the method has overwritten the source value, so the cell
+  must no longer qualify as a source for subsequent self-referencing eligibility checks.
 
 `source_cells` records which cells were determined via `write()` rather than by a method. This
 distinguishes "may be read as self-referencing input" from "was derived; cannot be used as
@@ -81,7 +84,7 @@ For each method M, classify cells into three disjoint groups:
 | Group | Definition | Eligibility condition |
 |---|---|---|
 | **pure inputs** | `inputs(M) ∖ outputs(M)` | all in `determined` |
-| **self-referencing** | `inputs(M) ∩ outputs(M)` | all in `source_cells` or `pre_claimed` |
+| **self-referencing** | `inputs(M) ∩ outputs(M)` | all in `source_cells` |
 | **pure outputs** | `outputs(M) ∖ inputs(M)` | none in `determined` |
 
 The existing rule is the special case where every cell is either a pure input or a pure output.

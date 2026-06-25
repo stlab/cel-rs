@@ -93,7 +93,7 @@ pub(crate) fn plan(
 
                 // A method is eligible when:
                 //   pure inputs  (inputs ∖ outputs): all in `determined`
-                //   self-ref     (inputs ∩ outputs): all in `source_cells` or `pre_claimed`
+                //   self-ref     (inputs ∩ outputs): all in `source_cells`
                 //   pure outputs (outputs ∖ inputs): none in `determined`
                 let is_eligible = |m: &Method| {
                     m.inputs
@@ -103,7 +103,7 @@ pub(crate) fn plan(
                         && m.inputs
                             .iter()
                             .filter(|i| m.outputs.contains(i))
-                            .all(|i| source_cells.contains(i) || pre_claimed.contains(i))
+                            .all(|i| source_cells.contains(i))
                         && m.outputs
                             .iter()
                             .filter(|o| !m.inputs.contains(o))
@@ -130,6 +130,10 @@ pub(crate) fn plan(
                         // (as sources); only re-queue cells that are newly determined.
                         let newly_determined = determined.insert(output);
                         pre_claimed.remove(&output);
+                        // A method's output is no longer a source: remove it so that
+                        // subsequent self-referencing eligibility checks cannot treat
+                        // a method-derived value as a source value.
+                        source_cells.remove(&output);
                         if newly_determined {
                             queue.push_back(output);
                         }
