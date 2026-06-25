@@ -370,6 +370,41 @@ impl Sheet {
             .get(idx)
             .map(|m| m.outputs.as_slice())
     }
+
+    /// Returns `true` if `id` was not written by any selected method in the last propagation.
+    ///
+    /// Returns `false` if no propagation has run yet (conservatively forces a full re-plan).
+    pub fn is_source(&self, id: CellId) -> bool {
+        let Some(plan) = &self.last_plan else {
+            return false;
+        };
+        !plan.iter().any(|&(rel_id, method_idx)| {
+            self.relationships
+                .get(rel_id)
+                .and_then(|r| r.methods.get(method_idx))
+                .map(|m| m.outputs.contains(&id))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Re-executes the cached plan without invoking the planner.
+    ///
+    /// - Precondition: Every cell written since the last `propagate()` satisfies
+    ///   `is_source(id)`. Violation produces incorrect output values but no panic.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::Conflict` — `propagate()` has not yet been called; no plan is cached.
+    /// - `Error::MethodFailed` — a method's function returned an error.
+    pub fn propagate_without_replan(&mut self) -> Result<(), Error> {
+        let Some(execution_order) = self.last_plan.take() else {
+            return Err(Error::Conflict);
+        };
+        self.clear_changed();
+        let result = self.execute_plan(&execution_order);
+        self.last_plan = Some(execution_order);
+        result
+    }
 }
 
 impl Default for Sheet {
@@ -683,5 +718,74 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
             .unwrap();
         assert!(sheet.method_outputs(rel, 99).is_none());
+    }
+
+    #[test]
+    fn is_source_returns_false_before_propagate() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        assert!(!sheet.is_source(a));
+    }
+
+    #[test]
+    fn is_source_returns_true_for_input_cell_after_propagate() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Write to `a` so it has the highest strength and becomes the source.
+        sheet.write(a, 0_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert!(sheet.is_source(a));
+    }
+
+    #[test]
+    fn is_source_returns_false_for_output_cell_after_propagate() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Write to `a` so it has the highest strength and becomes the source.
+        sheet.write(a, 0_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert!(!sheet.is_source(b));
+    }
+
+    #[test]
+    fn propagate_without_replan_returns_conflict_before_propagate() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        assert!(matches!(
+            sheet.propagate_without_replan(),
+            Err(Error::Conflict)
+        ));
+    }
+
+    #[test]
+    fn propagate_without_replan_executes_cached_plan() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+        // Write to `a` so it has the highest strength and becomes the source.
+        sheet.write(a, 0_i32).unwrap();
+        sheet.propagate().unwrap();
+        sheet.write(a, 5_i32).unwrap();
+        sheet.propagate_without_replan().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
     }
 }
