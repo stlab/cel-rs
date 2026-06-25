@@ -71,20 +71,15 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
                 id: field_id,
                 value: input.read().clone(),
                 invalid: *has_error.read(),
-                // Dioxus's event serializer only reads `event.target.value` for
-                // native HTMLInputElement — custom elements always serialize as "".
-                // Read the DOM value directly after the event so sp-textfield has
-                // updated its own value property.
+                // Dioxus's event serializer only reads event.target.value for
+                // HTMLInputElement — custom elements (sp-textfield) always give "".
+                // Use dioxus.send() in JS and eval.recv() to read the live value.
                 oninput: move |_: FormEvent| {
                     spawn(async move {
-                        let val = document::eval(&format!(
-                            r#"document.getElementById("cell-{id:?}").value"#
-                        ))
-                        .await
-                        .ok()
-                        .and_then(|v| v.as_str().map(String::from))
-                        .unwrap_or_default();
-
+                        let mut eval = document::eval(&format!(
+                            r#"dioxus.send(document.getElementById("cell-{id:?}").value)"#
+                        ));
+                        let Ok(val) = eval.recv::<String>().await else { return; };
                         input.set(val.clone());
                         let mut sheet_w = sheet.write();
                         let labels_r = labels.read();
