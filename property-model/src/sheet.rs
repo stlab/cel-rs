@@ -78,14 +78,16 @@ impl Sheet {
     /// Registers a relationship defined by a non-empty list of methods.
     ///
     /// All methods are validated: their declared `TypeId`s must match the
-    /// registered cells, inputs and outputs must be disjoint, and each method
-    /// must have at least one input and one output. On success the `RelationshipId`
-    /// is added to each adjacent cell's adjacency list.
+    /// registered cells, and each method must have at least one input and one output.
+    /// On success the `RelationshipId` is added to each adjacent cell's adjacency list.
+    ///
+    /// A cell that appears in both a method's inputs and its outputs is a self-referencing
+    /// cell and is explicitly allowed.
     ///
     /// # Errors
     ///
     /// - `Error::InvalidMethod` — `methods` is empty, a method has no inputs,
-    ///   a method has no outputs, or a method's inputs and outputs overlap.
+    ///   or a method has no outputs.
     /// - `Error::InvalidId` — a `CellId` in any method is not found in this sheet.
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
@@ -100,13 +102,6 @@ impl Sheet {
         for method in &methods {
             if method.inputs.is_empty() || method.outputs.is_empty() {
                 return Err(Error::InvalidMethod);
-            }
-
-            // inputs ∩ outputs must be empty
-            for output in &method.outputs {
-                if method.inputs.contains(output) {
-                    return Err(Error::InvalidMethod);
-                }
             }
 
             // declared type counts must match cell-id counts
@@ -481,25 +476,6 @@ mod tests {
         assert!(matches!(
             sheet.add_relationship(vec![method]),
             Err(Error::TypeMismatch { .. })
-        ));
-    }
-
-    #[test]
-    fn add_relationship_overlapping_inputs_outputs_returns_invalid_method() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        // Cell `a` appears in both inputs and outputs.
-        let method = Method::new(
-            vec![a, b],
-            vec![a],
-            vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
-            vec![TypeId::of::<i32>()],
-            |args| Ok(vec![Box::new(*args[0].downcast_ref::<i32>().unwrap())]),
-        );
-        assert!(matches!(
-            sheet.add_relationship(vec![method]),
-            Err(Error::InvalidMethod)
         ));
     }
 
