@@ -26,6 +26,7 @@ members = [
     "cel-rs-macros",
     "property-model",
     "begin",
+    "xtask",
 ]
 
 [lib]

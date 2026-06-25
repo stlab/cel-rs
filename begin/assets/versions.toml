@@ -1,0 +1,9 @@
+[d3]
+version = "7.9.0"
+url = "https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"
+file = "d3.v7.min.js"
+
+[spectrum-web-components]
+version = "0.45.0"
+url = "https://unpkg.com/@spectrum-web-components/bundle@0.45.0/elements.js"
+file = "swc.js"
