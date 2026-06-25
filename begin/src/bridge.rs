@@ -4,8 +4,6 @@
 //! with stable [`CellId`] and [`RelationshipId`] keys. [`to_graph_data`] serializes a
 //! [`Sheet`] and its [`Labels`] into a [`GraphData`] value ready for JSON encoding.
 
-use std::collections::HashMap;
-
 use indexmap::IndexMap;
 use property_model::{CellId, Error, RelationshipId, Sheet};
 use serde::Serialize;
@@ -28,8 +26,6 @@ pub struct CellMeta {
 pub struct Labels {
     /// Cells in insertion order (preserves sidebar ordering).
     pub cells: IndexMap<CellId, CellMeta>,
-    /// Relationship labels (reserved for future tooltip display).
-    pub relationships: HashMap<RelationshipId, String>,
 }
 
 impl Labels {
@@ -37,7 +33,6 @@ impl Labels {
     pub fn new() -> Self {
         Self {
             cells: IndexMap::new(),
-            relationships: HashMap::new(),
         }
     }
 
@@ -68,13 +63,6 @@ impl Labels {
                 }),
             },
         );
-    }
-
-    /// Registers a label for a relationship.
-    ///
-    /// - Precondition: `id` is a live relationship in the sheet this `Labels` will be used with.
-    pub fn add_relationship(&mut self, id: RelationshipId, label: &str) {
-        self.relationships.insert(id, label.to_owned());
     }
 }
 
@@ -237,12 +225,11 @@ mod tests {
         let c = sheet.add_cell(0.0_f64);
         labels.add_cell::<f64>(c, "c");
 
-        let rel = sheet
+        sheet
             .add_relationship(vec![Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| {
                 Ok(x * y)
             })])
             .unwrap();
-        labels.add_relationship(rel, "×");
 
         (sheet, labels)
     }
@@ -341,12 +328,11 @@ mod tests {
         let b = sheet.add_cell(3.0_f64);
         labels.add_cell::<f64>(b, "b");
 
-        let rel = sheet
+        sheet
             .add_relationship(vec![Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| {
                 Ok(x * y)
             })])
             .unwrap();
-        labels.add_relationship(rel, "×");
 
         (sheet, labels)
     }
