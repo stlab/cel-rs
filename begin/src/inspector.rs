@@ -85,7 +85,12 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
                     if let Some(meta) = labels_r.cells.get(&id)
                         && (meta.write_str)(&mut sheet_w, &s).is_ok()
                     {
-                        has_error.set(sheet_w.propagate().is_err());
+                        let result = if sheet_w.is_source(id) {
+                            sheet_w.propagate_without_replan()
+                        } else {
+                            sheet_w.propagate()
+                        };
+                        has_error.set(result.is_err());
                     }
                 },
             }
