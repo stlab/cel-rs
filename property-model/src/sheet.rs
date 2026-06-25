@@ -374,6 +374,8 @@ impl Sheet {
     /// Returns `true` if `id` was not written by any selected method in the last propagation.
     ///
     /// Returns `false` if no propagation has run yet (conservatively forces a full re-plan).
+    ///
+    /// - Complexity: O(R·K) where R is the number of relationships in the cached plan and K is the maximum number of outputs per method.
     pub fn is_source(&self, id: CellId) -> bool {
         let Some(plan) = &self.last_plan else {
             return false;
@@ -389,13 +391,15 @@ impl Sheet {
 
     /// Re-executes the cached plan without invoking the planner.
     ///
-    /// - Precondition: Every cell written since the last `propagate()` satisfies
-    ///   `is_source(id)`. Violation produces incorrect output values but no panic.
+    /// - Precondition: Every cell written since the last successful `propagate()` or
+    ///   `propagate_without_replan()` call satisfies `is_source(id)`. Violation produces incorrect output values but no panic.
     ///
     /// # Errors
     ///
     /// - `Error::Conflict` — `propagate()` has not yet been called; no plan is cached.
     /// - `Error::MethodFailed` — a method's function returned an error.
+    ///
+    /// - Complexity: O(R·K) where R is the number of relationships in the cached plan and K is the maximum cells per method, plus per-method execution cost.
     pub fn propagate_without_replan(&mut self) -> Result<(), Error> {
         let Some(execution_order) = self.last_plan.take() else {
             return Err(Error::Conflict);
