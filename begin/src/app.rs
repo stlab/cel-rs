@@ -6,6 +6,7 @@ use property_model::{Method, Sheet};
 use crate::bridge::{Labels, to_graph_data};
 use crate::graph_view::GraphView;
 use crate::inspector::Inspector;
+use crate::spectrum::SpTheme;
 
 /// Builds the `a × b = c` demo sheet with three bidirectional methods.
 ///
@@ -55,7 +56,8 @@ pub fn make_demo_sheet() -> (Sheet, Labels) {
     (sheet, labels)
 }
 
-/// Root component: two-panel layout with the D3 graph on the left and the Inspector on the right.
+/// Root component: Spectrum theme wrapper, two-panel layout with the D3 graph on the
+/// left and the Inspector on the right.
 #[component]
 pub fn App() -> Element {
     let (initial_sheet, initial_labels) = make_demo_sheet();
@@ -68,11 +70,16 @@ pub fn App() -> Element {
         document::Link { rel: "stylesheet", href: asset!("/assets/graph.css") }
         document::Script { src: asset!("/assets/d3.v7.min.js") }
         document::Script { src: asset!("/assets/graph.js") }
+        document::Script { r#type: "module", src: asset!("/assets/swc.js") }
 
-        div {
-            style: "position: fixed; inset: 0; display: flex; overflow: hidden;",
-            GraphView { data: graph_data }
-            Inspector { sheet, labels }
+        SpTheme {
+            color: "light".to_string(),
+            scale: "medium".to_string(),
+            div {
+                style: "position: fixed; inset: 0; display: flex; overflow: hidden;",
+                GraphView { data: graph_data }
+                Inspector { sheet, labels }
+            }
         }
     }
 }
