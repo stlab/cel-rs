@@ -5,5 +5,5 @@ file = "d3.v7.min.js"
 
 [spectrum-web-components]
 version = "0.45.0"
-url = "https://unpkg.com/@spectrum-web-components/bundle@0.45.0/elements.js"
+url = "https://esm.sh/@spectrum-web-components/bundle@0.45.0/es2022/elements.bundle.mjs"
 file = "swc.js"
