@@ -199,3 +199,95 @@ fn arity_3_2_1() {
     assert_eq!(sheet.read::<String>(b).unwrap(), "b");
     assert_eq!(sheet.read::<String>(c).unwrap(), "ab");
 }
+
+#[test]
+fn self_ref_direct_clamp() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, a, |x: &i32| Ok((*x).min(0)))])
+        .unwrap();
+
+    // Value above 0: clamped to 0.
+    sheet.write(a, 5_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+
+    // Value at 0: unchanged.
+    sheet.write(a, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+
+    // Value below 0: idempotent, unchanged.
+    sheet.write(a, -3_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), -3);
+}
+
+#[test]
+fn self_ref_le_chain() {
+    // a <= b <= c enforced by two self-referencing constraints.
+    //
+    // R1 — a <= b:
+    //   M0: a = min(a, b)  fires when b is the stronger source
+    //   M1: b = max(a, b)  fires when a is the stronger source
+    //
+    // R2 — b <= c:
+    //   M2: b = min(b, c)  fires when c is the stronger source
+    //   M3: c = max(b, c)  fires when b is the stronger source
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let c = sheet.add_cell(0_i32);
+
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    // Case 1: already satisfied — no adjustment.
+    // Write order c, b, a → a is strongest.
+    sheet.write(c, 5_i32).unwrap();
+    sheet.write(b, 3_i32).unwrap();
+    sheet.write(a, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 1);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 3);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 5);
+
+    // Case 2: a > b and a > c, a is strongest → b and c raised to a.
+    sheet.write(c, 1_i32).unwrap();
+    sheet.write(b, 3_i32).unwrap();
+    sheet.write(a, 5_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 5);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 5);
+
+    // Case 3: b > c, c is strongest → b lowered to c; a already <= b.
+    sheet.write(a, 1_i32).unwrap();
+    sheet.write(b, 5_i32).unwrap();
+    sheet.write(c, 3_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 1);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 3);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 3);
+
+    // Case 4: b is strongest, a above and c below → a clamped to b, c raised to b.
+    sheet.write(c, 1_i32).unwrap();
+    sheet.write(a, 5_i32).unwrap();
+    sheet.write(b, 3_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 3);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 3);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 3);
+}
