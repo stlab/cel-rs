@@ -36,6 +36,7 @@ pub fn SpTheme(color: String, scale: String, children: Element) -> Element {
 /// and `aria-invalid`).
 #[component]
 pub fn SpTextfield(
+    id: String,
     value: String,
     invalid: bool,
     oninput: EventHandler<FormEvent>,
@@ -44,6 +45,7 @@ pub fn SpTextfield(
 ) -> Element {
     rsx! {
         sp-textfield {
+            "id": "{id}",
             "value": "{value}",
             // Boolean attribute: omit entirely when false; presence = invalid.
             "invalid": if invalid { "true" },

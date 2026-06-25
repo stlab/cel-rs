@@ -68,6 +68,7 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
             style: "margin-bottom: 8px;",
             SpFieldLabel { for_: field_id.clone(), "{label}" }
             SpTextfield {
+                id: field_id,
                 value: input.read().clone(),
                 invalid: *has_error.read(),
                 oninput: move |e: FormEvent| {

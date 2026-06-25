@@ -28,6 +28,13 @@ members = [
     "begin",
     "xtask",
 ]
+default-members = [
+    "cel-runtime",
+    "cel-parser",
+    "cel-rs-macros",
+    "property-model",
+    "begin",
+]
 
 [lib]
 name = "cel_rs"
