@@ -25,8 +25,8 @@ url = "https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"
 file = "d3.v7.min.js"
 
 [spectrum-web-components]
-version = "0.45.4"
-url = "https://jspm.dev/npm:@spectrum-web-components/bundle@0.45.4/elements.js"
+version = "0.45.0"
+url = "https://esm.sh/@spectrum-web-components/bundle@0.45.0/es2022/elements.bundle.mjs"
 file = "swc.js"
 ```
 
@@ -36,7 +36,7 @@ An `xtask` workspace member provides a cross-platform Rust task runner. Running 
 
 To upgrade a dependency: edit the `version` and `url` fields in `versions.toml`, then run `cargo xtask fetch-assets`.
 
-`xtask` is dev-only and excluded from the production binary. It is added to the workspace `Cargo.toml` with `default-members` excluding it from `cargo build --workspace`.
+`xtask` is dev-only and excluded from the production binary. It is added to the workspace `Cargo.toml` members list. There is no `default-members` entry — `cargo build --workspace` builds all members including `xtask`, but `xtask` produces only a binary used by developers and is not part of the library deliverable.
 
 ### VS Code task
 
@@ -88,7 +88,7 @@ The `Inspector` and `CellRow` components in `inspector.rs` replace raw HTML elem
 | `<input type="text">` | `SpTextfield` (`sp-textfield`) | `invalid` prop replaces `border-color: #c00` |
 | Cell row margin spacer | `SpDivider` (`sp-divider`) between rows | Optional but cleaner |
 
-`sp-textfield` fires standard DOM `input`, `focus`, and `blur` events — identical to what Dioxus's `oninput`, `onfocus`, `onblur` handlers consume today. No JS bridge is needed.
+`sp-textfield` fires standard DOM `input`, `focus`, and `blur` events. However, Dioxus's event serializer reads `.value` only from `HTMLInputElement` — custom elements always yield `""`. Reading the live value therefore requires a JS bridge: `document::eval` sends a `dioxus.send()` call and `eval.recv()` collects the result in an async task. This is the implemented approach.
 
 The sidebar container's `font-family: monospace` is removed; SWC components use Spectrum typography. The `width: 260px` and `border-left` are replaced by a `SpDivider` on the left edge and Spectrum sizing tokens.
 

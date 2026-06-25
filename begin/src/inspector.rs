@@ -9,9 +9,10 @@ use crate::spectrum::{SpDivider, SpFieldLabel, SpHeading, SpTextfield};
 /// Sidebar panel showing all cells with labels, current values, and text inputs for writing.
 ///
 /// Editing an input field immediately writes the parsed value to the sheet and propagates
-/// constraints. If propagation fails (for example, division by zero), `SpTextfield` renders
-/// in its invalid state until the user blurs. The input is not reset while the field is
-/// focused; it syncs back to the computed value on blur, keeping non-edited cells up to date.
+/// constraints. If parsing or propagation fails (for example, non-numeric input or division
+/// by zero), `SpTextfield` renders in its invalid state until the user blurs. The input is
+/// not reset while the field is focused; it syncs back to the computed value on blur,
+/// keeping non-edited cells up to date.
 #[component]
 pub fn Inspector(sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
@@ -80,18 +81,26 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
                             r#"dioxus.send(document.getElementById("cell-{id:?}").value)"#
                         ));
                         let Ok(val) = eval.recv::<String>().await else { return; };
+                        // Discard the result if the user blurred while the round-trip was
+                        // in flight; blur already cleared the error and use_effect will
+                        // restore the last valid computed value.
+                        if !*is_focused.read() {
+                            return;
+                        }
                         input.set(val.clone());
                         let mut sheet_w = sheet.write();
                         let labels_r = labels.read();
-                        if let Some(meta) = labels_r.cells.get(&id)
-                            && (meta.write_str)(&mut sheet_w, &val).is_ok()
-                        {
-                            let result = if sheet_w.is_source(id) {
-                                sheet_w.propagate_without_replan()
+                        if let Some(meta) = labels_r.cells.get(&id) {
+                            if (meta.write_str)(&mut sheet_w, &val).is_ok() {
+                                let result = if sheet_w.is_source(id) {
+                                    sheet_w.propagate_without_replan()
+                                } else {
+                                    sheet_w.propagate()
+                                };
+                                has_error.set(result.is_err());
                             } else {
-                                sheet_w.propagate()
-                            };
-                            has_error.set(result.is_err());
+                                has_error.set(true);
+                            }
                         }
                     });
                 },

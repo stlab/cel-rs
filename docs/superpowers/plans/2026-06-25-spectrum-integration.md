@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Dioxus version: 0.7.9
-- SWC bundle version: 0.45.4 (`@spectrum-web-components/bundle`)
+- SWC bundle version: 0.45.0 (`@spectrum-web-components/bundle`; 0.45.4 does not exist on npm)
 - D3 version: 7.9.0
 - Spectrum theme: `color="light"`, `scale="medium"` (Spectrum 1)
 - No npm/Node.js tooling; all JS assets committed to `begin/assets/`
@@ -70,8 +70,8 @@ url = "https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"
 file = "d3.v7.min.js"
 
 [spectrum-web-components]
-version = "0.45.4"
-url = "https://unpkg.com/@spectrum-web-components/bundle@0.45.4/elements.js"
+version = "0.45.0"
+url = "https://esm.sh/@spectrum-web-components/bundle@0.45.0/es2022/elements.bundle.mjs"
 file = "swc.js"
 ```
 

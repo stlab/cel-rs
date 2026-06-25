@@ -37,6 +37,11 @@ fn fetch_assets() -> Result<(), Box<dyn std::error::Error>> {
     let assets_dir = root.join("begin").join("assets");
 
     for (name, asset) in &assets {
+        // `asset.file` comes from the versions.toml config — reject any path that could
+        // escape the assets directory.
+        if asset.file.contains("..") || asset.file.contains('/') || asset.file.contains('\\') {
+            return Err(format!("invalid asset filename in versions.toml: {}", asset.file).into());
+        }
         let dest = assets_dir.join(&asset.file);
         println!("Fetching {name} v{} ...", asset.version);
         let body = ureq::get(&asset.url).call()?.into_body().read_to_vec()?;
