@@ -269,6 +269,8 @@ impl Sheet {
     /// If `execute_plan` fails, `last_plan` is not updated; `selected_method` will continue
     /// to reflect the last *successful* propagation.
     ///
+    /// On success, `selected_method` reflects the newly computed plan.
+    ///
     /// # Errors
     ///
     /// - `Error::Conflict` — no valid method assignment exists.
@@ -293,7 +295,8 @@ impl Sheet {
     /// - `Error::TypeMismatch` — a method output's runtime type does not match the cell's
     ///   registered type.
     ///
-    /// - Complexity: O(R·K) where R is the number of entries and K is the max cells per method.
+    /// - Complexity: O(R·K) where R is the number of entries and K is the max cells per method,
+    ///   plus per-method execution cost.
     fn execute_plan(&mut self, execution_order: &[(RelationshipId, usize)]) -> Result<(), Error> {
         for &(rel_id, method_idx) in execution_order {
             // Gather outputs in a scoped block so the shared borrows on
@@ -340,7 +343,8 @@ impl Sheet {
 
     /// Returns the index of the method selected for `rel` in the last propagation.
     ///
-    /// Returns `None` if no propagation has run yet or `rel` is not in the cached plan.
+    /// Returns `None` if no propagation has run yet, `rel` is not in the cached plan,
+    /// or `rel` was added after the last `propagate()` call.
     pub fn selected_method(&self, rel: RelationshipId) -> Option<usize> {
         self.last_plan
             .as_ref()?
@@ -398,6 +402,8 @@ impl Sheet {
     ///
     /// - `Error::Conflict` — `propagate()` has not yet been called; no plan is cached.
     /// - `Error::MethodFailed` — a method's function returned an error.
+    /// - `Error::TypeMismatch` — a method output's runtime type does not match the cell's
+    ///   registered type.
     ///
     /// - Complexity: O(R·K) where R is the number of relationships in the cached plan and K is the maximum cells per method, plus per-method execution cost.
     pub fn propagate_without_replan(&mut self) -> Result<(), Error> {
@@ -791,5 +797,42 @@ mod tests {
         sheet.write(a, 5_i32).unwrap();
         sheet.propagate_without_replan().unwrap();
         assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    }
+
+    #[test]
+    fn selected_method_returns_none_for_invalid_id() {
+        let sheet = Sheet::new();
+        assert!(sheet.selected_method(RelationshipId::default()).is_none());
+    }
+
+    #[test]
+    fn propagate_without_replan_correct_after_plan_switch() {
+        // Setup: two cells, b added last (higher strength), so b→a method is selected.
+        // Sheet has two methods: b→a and a→b.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(b, a, |x: &i32| Ok(*x * 2)),
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 3)),
+            ])
+            .unwrap();
+        // First propagate: b is source (added last, higher strength). b→a selected.
+        sheet.write(b, 5_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 10); // a = b * 2 = 10
+        assert!(!sheet.is_source(a)); // a is output
+
+        // Write to a: raises a's strength above b, plan switches to a→b.
+        sheet.write(a, 4_i32).unwrap();
+        sheet.propagate().unwrap(); // plan now: a→b selected (a*3)
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 12); // b = a * 3 = 12
+        assert!(sheet.is_source(a)); // a is now a source
+
+        // Second write to a: is_source(a) is true → propagate_without_replan is safe.
+        sheet.write(a, 7_i32).unwrap();
+        sheet.propagate_without_replan().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 21); // b = a * 3 = 21
     }
 }

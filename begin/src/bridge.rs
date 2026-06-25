@@ -133,7 +133,8 @@ pub struct GraphData {
     pub changed: Vec<String>,
     /// Always empty; reserved for future `when`/`otherwise` conditional relationships.
     pub groups: Vec<GroupData>,
-    /// `true` when a plan has been cached and links are directed; `false` for undirected.
+    /// `true` when at least one relationship has a cached plan and links are directed where
+    /// plans exist; `false` when no plan has been computed.
     pub arrows: bool,
 }
 
