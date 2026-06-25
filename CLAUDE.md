@@ -27,8 +27,11 @@ cargo test --doc --workspace
 cargo test --workspace <test_name>
 
 # Lint (warnings are errors)
-cargo clippy --workspace -- -D warnings
-cargo clippy --fix --workspace
+# The begin crate is excluded from the workspace commands and checked separately
+# with --no-default-features to avoid platform-specific renderer dependencies.
+cargo clippy --workspace --exclude begin -- -D warnings
+cargo clippy -p begin --no-default-features -- -D warnings
+cargo clippy --fix --workspace --exclude begin
 
 # Docs
 cargo doc --lib --no-deps --open --workspace
@@ -53,8 +56,8 @@ git checkout -b <username>/<feature-name>
 
 Never commit directly to `main`.
 
-Before creating a PR, run the full check suite locally (fmt, clippy, and test from the
-Commands section above).
+Before creating a PR, run the full check suite locally — every command in the Commands
+section above, including both clippy invocations (workspace and begin).
 
 ## Project Status
 

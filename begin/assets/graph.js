@@ -41,13 +41,25 @@
             .attr('height', '100%')
             .attr('viewBox', [0, 0, width, height]);
 
-        // Arrowhead marker reserved for method-direction arrows
         var defs = svg.append('defs');
+
+        // Arrow tip at relationship circle edge: refX = tip(10) + REL_R
         defs.append('marker')
-            .attr('id', 'arrowhead')
+            .attr('id', 'arrowhead-to-rel')
             .attr('viewBox', '0 -5 10 10')
-            .attr('refX', 20).attr('refY', 0)
-            .attr('markerWidth', 6).attr('markerHeight', 6)
+            .attr('refX', 10 + REL_R).attr('refY', 0)
+            .attr('markerWidth', 8).attr('markerHeight', 8)
+            .attr('markerUnits', 'userSpaceOnUse')
+            .attr('orient', 'auto')
+            .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#999');
+
+        // Arrow tip at cell rect edge (approx): refX = tip(10) + CELL_W / 2
+        defs.append('marker')
+            .attr('id', 'arrowhead-to-cell')
+            .attr('viewBox', '0 -5 10 10')
+            .attr('refX', 10 + CELL_W / 2).attr('refY', 0)
+            .attr('markerWidth', 8).attr('markerHeight', 8)
+            .attr('markerUnits', 'userSpaceOnUse')
             .attr('orient', 'auto')
             .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#999');
 
@@ -76,9 +88,9 @@
         if (!svg) return;
 
         // Preserve existing node positions by merging into incoming data
-        var nodeMap = new Map(nodes.map(function (n) { return [n.id, n]; }));
+        var oldNodeMap = new Map(nodes.map(function (n) { return [n.id, n]; }));
         nodes = data.nodes.map(function (n) {
-            var existing = nodeMap.get(n.id);
+            var existing = oldNodeMap.get(n.id);
             if (existing) {
                 existing.kind = n.kind;
                 existing.label = n.label;
@@ -87,6 +99,7 @@
             }
             return Object.assign({}, n);
         });
+        var nodeMap = new Map(nodes.map(function (n) { return [n.id, n]; }));
         links = data.links.map(function (l) { return Object.assign({}, l); });
 
         var changedSet = new Set(data.changed || []);
@@ -101,7 +114,16 @@
                 return src + '-' + tgt;
             })
             .join('line')
-            .attr('class', 'link');
+            .attr('class', 'link')
+            .attr('marker-end', function (d) {
+                if (!data.arrows) return null;
+                var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
+                var tgtNode = nodeMap.get(tgtId);
+                if (!tgtNode) return null;
+                return tgtNode.kind === 'Cell'
+                    ? 'url(#arrowhead-to-cell)'
+                    : 'url(#arrowhead-to-rel)';
+            });
 
         // Join cell rects
         cellLayer.selectAll('rect')

@@ -23,11 +23,22 @@ pub fn make_demo_sheet() -> (Sheet, Labels) {
     let a = sheet.add_cell(2.0_f64);
     let b = sheet.add_cell(3.0_f64);
 
-    let rel = sheet
+    sheet
         .add_relationship(vec![
             Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| Ok(x * y)),
             Method::from_fn_2_1([b, c], a, |x: &f64, y: &f64| Ok(y / x)),
             Method::from_fn_2_1([a, c], b, |x: &f64, y: &f64| Ok(y / x)),
+        ])
+        .unwrap();
+
+    let d = sheet.add_cell(4.0_f64);
+    let e = sheet.add_cell(5.0_f64);
+
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([d, e], c, |x: &f64, y: &f64| Ok(x * y)),
+            Method::from_fn_2_1([c, e], d, |x: &f64, y: &f64| Ok(x / y)),
+            Method::from_fn_2_1([c, d], e, |x: &f64, y: &f64| Ok(x / y)),
         ])
         .unwrap();
 
@@ -38,7 +49,8 @@ pub fn make_demo_sheet() -> (Sheet, Labels) {
     labels.add_cell::<f64>(a, "a");
     labels.add_cell::<f64>(b, "b");
     labels.add_cell::<f64>(c, "c");
-    labels.add_relationship(rel, "×");
+    labels.add_cell::<f64>(d, "d");
+    labels.add_cell::<f64>(e, "e");
 
     (sheet, labels)
 }

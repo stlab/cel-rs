@@ -40,6 +40,7 @@ pub struct Sheet {
     /// later and cells written later have strictly higher strength, making the
     /// default method-selection direction deterministic.
     next_strength: u64,
+    last_plan: Option<Vec<(RelationshipId, usize)>>,
 }
 
 impl Sheet {
@@ -50,6 +51,7 @@ impl Sheet {
             relationships: SlotMap::with_key(),
             changed_cells: Vec::new(),
             next_strength: 0,
+            last_plan: None,
         }
     }
 
@@ -264,17 +266,36 @@ impl Sheet {
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
+    /// On success, `selected_method` reflects the newly computed plan.
+    ///
     /// # Errors
     ///
-    /// - `Error::Conflict` — no valid method assignment exists (this currently includes dependency cycles).
-    /// - `Error::MethodFailed` — a method's function returned an error.
+    /// - `Error::Conflict` — no valid method assignment exists.
+    /// - `Error::MethodFailed` — a method's function returned an error, or a method produced
+    ///   the wrong number of outputs.
+    /// - `Error::TypeMismatch` — a method output's runtime type does not match the cell's
+    ///   registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
-        // Clear the previous changed set before starting a new propagation.
         self.clear_changed();
-
         let plan = crate::planner::plan(&self.cells, &self.relationships)?;
+        self.execute_plan(&plan.execution_order)?;
+        self.last_plan = Some(plan.execution_order);
+        Ok(())
+    }
 
-        for (rel_id, method_idx) in plan.execution_order {
+    /// Executes `execution_order` without invoking the planner.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::MethodFailed` — the method's function returned an error, or the method
+    ///   produced a different number of outputs than declared.
+    /// - `Error::TypeMismatch` — a method output's runtime type does not match the cell's
+    ///   registered type.
+    ///
+    /// - Complexity: O(R·K) where R is the number of entries and K is the max cells per method,
+    ///   plus per-method execution cost.
+    fn execute_plan(&mut self, execution_order: &[(RelationshipId, usize)]) -> Result<(), Error> {
+        for &(rel_id, method_idx) in execution_order {
             // Gather outputs in a scoped block so the shared borrows on
             // `self.relationships` and `self.cells` are released before the
             // mutable borrow of `self.cells` below.
@@ -314,8 +335,82 @@ impl Sheet {
                 }
             }
         }
-
         Ok(())
+    }
+
+    /// Returns the index of the method selected for `rel` in the last propagation.
+    ///
+    /// Returns `None` if no propagation has run yet, `rel` is not in the cached plan,
+    /// or `rel` was added after the last `propagate()` call.
+    pub fn selected_method(&self, rel: RelationshipId) -> Option<usize> {
+        self.last_plan
+            .as_ref()?
+            .iter()
+            .find(|&&(r, _)| r == rel)
+            .map(|&(_, idx)| idx)
+    }
+
+    /// Returns the input cells of method `idx` in relationship `rel`.
+    ///
+    /// Returns `None` if `rel` is not a live relationship or `idx` is out of bounds.
+    pub fn method_inputs(&self, rel: RelationshipId, idx: usize) -> Option<&[CellId]> {
+        self.relationships
+            .get(rel)?
+            .methods
+            .get(idx)
+            .map(|m| m.inputs.as_slice())
+    }
+
+    /// Returns the output cells of method `idx` in relationship `rel`.
+    ///
+    /// Returns `None` if `rel` is not a live relationship or `idx` is out of bounds.
+    pub fn method_outputs(&self, rel: RelationshipId, idx: usize) -> Option<&[CellId]> {
+        self.relationships
+            .get(rel)?
+            .methods
+            .get(idx)
+            .map(|m| m.outputs.as_slice())
+    }
+
+    /// Returns `true` if `id` was not written by any selected method in the last propagation.
+    ///
+    /// Returns `false` if no propagation has run yet (conservatively forces a full re-plan).
+    ///
+    /// - Complexity: O(R·K) where R is the number of relationships in the cached plan and K is the maximum number of outputs per method.
+    pub fn is_source(&self, id: CellId) -> bool {
+        let Some(plan) = &self.last_plan else {
+            return false;
+        };
+        !plan.iter().any(|&(rel_id, method_idx)| {
+            self.relationships
+                .get(rel_id)
+                .and_then(|r| r.methods.get(method_idx))
+                .map(|m| m.outputs.contains(&id))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Re-executes the cached plan without invoking the planner.
+    ///
+    /// - Precondition: Every cell written since the last successful `propagate()` or
+    ///   `propagate_without_replan()` call satisfies `is_source(id)`. Violation produces incorrect output values but no panic.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::Conflict` — `propagate()` has not yet been called; no plan is cached.
+    /// - `Error::MethodFailed` — a method's function returned an error.
+    /// - `Error::TypeMismatch` — a method output's runtime type does not match the cell's
+    ///   registered type.
+    ///
+    /// - Complexity: O(R·K) where R is the number of relationships in the cached plan and K is the maximum cells per method, plus per-method execution cost.
+    pub fn propagate_without_replan(&mut self) -> Result<(), Error> {
+        let Some(execution_order) = self.last_plan.take() else {
+            return Err(Error::Conflict);
+        };
+        self.clear_changed();
+        let result = self.execute_plan(&execution_order);
+        self.last_plan = Some(execution_order);
+        result
     }
 }
 
@@ -560,5 +655,181 @@ mod tests {
     fn relationship_adj_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
         assert!(sheet.relationship_adj(RelationshipId::default()).is_none());
+    }
+
+    #[test]
+    fn selected_method_returns_none_before_propagate() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        assert!(sheet.selected_method(rel).is_none());
+    }
+
+    #[test]
+    fn selected_method_returns_index_after_propagate() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Write to `a` so it has the highest strength and becomes the source,
+        // making the a → b method eligible.
+        sheet.write(a, 0_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(sheet.selected_method(rel), Some(0));
+    }
+
+    #[test]
+    fn method_inputs_returns_inputs_for_valid_method() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        assert_eq!(sheet.method_inputs(rel, 0), Some([a].as_slice()));
+    }
+
+    #[test]
+    fn method_outputs_returns_outputs_for_valid_method() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        assert_eq!(sheet.method_outputs(rel, 0), Some([b].as_slice()));
+    }
+
+    #[test]
+    fn method_inputs_returns_none_for_out_of_bounds_idx() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        assert!(sheet.method_inputs(rel, 99).is_none());
+    }
+
+    #[test]
+    fn method_outputs_returns_none_for_out_of_bounds_idx() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        assert!(sheet.method_outputs(rel, 99).is_none());
+    }
+
+    #[test]
+    fn is_source_returns_false_before_propagate() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        assert!(!sheet.is_source(a));
+    }
+
+    #[test]
+    fn is_source_returns_true_for_input_cell_after_propagate() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Write to `a` so it has the highest strength and becomes the source.
+        sheet.write(a, 0_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert!(sheet.is_source(a));
+    }
+
+    #[test]
+    fn is_source_returns_false_for_output_cell_after_propagate() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Write to `a` so it has the highest strength and becomes the source.
+        sheet.write(a, 0_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert!(!sheet.is_source(b));
+    }
+
+    #[test]
+    fn propagate_without_replan_returns_conflict_before_propagate() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        assert!(matches!(
+            sheet.propagate_without_replan(),
+            Err(Error::Conflict)
+        ));
+    }
+
+    #[test]
+    fn propagate_without_replan_executes_cached_plan() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+        // Write to `a` so it has the highest strength and becomes the source.
+        sheet.write(a, 0_i32).unwrap();
+        sheet.propagate().unwrap();
+        sheet.write(a, 5_i32).unwrap();
+        sheet.propagate_without_replan().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    }
+
+    #[test]
+    fn selected_method_returns_none_for_invalid_id() {
+        let sheet = Sheet::new();
+        assert!(sheet.selected_method(RelationshipId::default()).is_none());
+    }
+
+    #[test]
+    fn propagate_without_replan_correct_after_plan_switch() {
+        // Setup: two cells, b added last (higher strength), so b→a method is selected.
+        // Sheet has two methods: b→a and a→b.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(b, a, |x: &i32| Ok(*x * 2)),
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 3)),
+            ])
+            .unwrap();
+        // First propagate: b is source (added last, higher strength). b→a selected.
+        sheet.write(b, 5_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 10); // a = b * 2 = 10
+        assert!(!sheet.is_source(a)); // a is output
+
+        // Write to a: raises a's strength above b, plan switches to a→b.
+        sheet.write(a, 4_i32).unwrap();
+        sheet.propagate().unwrap(); // plan now: a→b selected (a*3)
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 12); // b = a * 3 = 12
+        assert!(sheet.is_source(a)); // a is now a source
+
+        // Second write to a: is_source(a) is true → propagate_without_replan is safe.
+        sheet.write(a, 7_i32).unwrap();
+        sheet.propagate_without_replan().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 21); // b = a * 3 = 21
     }
 }

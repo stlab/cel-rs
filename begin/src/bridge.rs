@@ -4,8 +4,6 @@
 //! with stable [`CellId`] and [`RelationshipId`] keys. [`to_graph_data`] serializes a
 //! [`Sheet`] and its [`Labels`] into a [`GraphData`] value ready for JSON encoding.
 
-use std::collections::HashMap;
-
 use indexmap::IndexMap;
 use property_model::{CellId, Error, RelationshipId, Sheet};
 use serde::Serialize;
@@ -28,8 +26,6 @@ pub struct CellMeta {
 pub struct Labels {
     /// Cells in insertion order (preserves sidebar ordering).
     pub cells: IndexMap<CellId, CellMeta>,
-    /// Relationship labels (reserved for future tooltip display).
-    pub relationships: HashMap<RelationshipId, String>,
 }
 
 impl Labels {
@@ -37,7 +33,6 @@ impl Labels {
     pub fn new() -> Self {
         Self {
             cells: IndexMap::new(),
-            relationships: HashMap::new(),
         }
     }
 
@@ -69,13 +64,6 @@ impl Labels {
             },
         );
     }
-
-    /// Registers a label for a relationship.
-    ///
-    /// - Precondition: `id` is a live relationship in the sheet this `Labels` will be used with.
-    pub fn add_relationship(&mut self, id: RelationshipId, label: &str) {
-        self.relationships.insert(id, label.to_owned());
-    }
 }
 
 impl Default for Labels {
@@ -106,7 +94,10 @@ pub struct NodeData {
     pub value: String,
 }
 
-/// A single edge in the D3 graph (undirected; connects a cell to a relationship).
+/// A single edge in the D3 graph.
+///
+/// When [`GraphData::arrows`] is `false` the edge is undirected; when `true`
+/// it is directed from `source` to `target`.
 #[derive(Serialize, Clone, PartialEq)]
 pub struct LinkData {
     pub source: String,
@@ -130,6 +121,9 @@ pub struct GraphData {
     pub changed: Vec<String>,
     /// Always empty; reserved for future `when`/`otherwise` conditional relationships.
     pub groups: Vec<GroupData>,
+    /// `true` when at least one relationship has a cached plan and links are directed where
+    /// plans exist; `false` when no plan has been computed.
+    pub arrows: bool,
 }
 
 fn cell_node_id(id: CellId) -> String {
@@ -142,11 +136,17 @@ fn rel_node_id(id: RelationshipId) -> String {
 
 /// Serializes `sheet` and `labels` into a [`GraphData`] snapshot for D3.
 ///
+/// When a plan is cached (`sheet.selected_method` returns `Some`) the links are
+/// directed (inputs → relationship → outputs) and [`GraphData::arrows`] is `true`.
+/// Otherwise all cells adjacent to the relationship are emitted as undirected
+/// source→relationship edges and `arrows` is `false`.
+///
 /// - Complexity: O(c + r + e) where c is the number of cells, r the number of
 ///   relationships, and e the number of cell–relationship adjacency pairs.
 pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
     let mut nodes = Vec::new();
     let mut links = Vec::new();
+    let mut arrows = false;
 
     for id in sheet.cells() {
         let (label, value) = labels
@@ -169,7 +169,26 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
             label: String::new(),
             value: String::new(),
         });
-        if let Some(adj) = sheet.relationship_adj(id) {
+
+        if let Some(method_idx) = sheet.selected_method(id) {
+            arrows = true;
+            if let Some(inputs) = sheet.method_inputs(id, method_idx) {
+                for &cell_id in inputs {
+                    links.push(LinkData {
+                        source: cell_node_id(cell_id),
+                        target: rel_node_id(id),
+                    });
+                }
+            }
+            if let Some(outputs) = sheet.method_outputs(id, method_idx) {
+                for &cell_id in outputs {
+                    links.push(LinkData {
+                        source: rel_node_id(id),
+                        target: cell_node_id(cell_id),
+                    });
+                }
+            }
+        } else if let Some(adj) = sheet.relationship_adj(id) {
             for &cell_id in adj {
                 links.push(LinkData {
                     source: cell_node_id(cell_id),
@@ -186,6 +205,7 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
         links,
         changed,
         groups: vec![],
+        arrows,
     }
 }
 
@@ -205,12 +225,11 @@ mod tests {
         let c = sheet.add_cell(0.0_f64);
         labels.add_cell::<f64>(c, "c");
 
-        let rel = sheet
+        sheet
             .add_relationship(vec![Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| {
                 Ok(x * y)
             })])
             .unwrap();
-        labels.add_relationship(rel, "×");
 
         (sheet, labels)
     }
@@ -294,6 +313,79 @@ mod tests {
         let (sheet, labels) = demo_sheet();
         let data = to_graph_data(&sheet, &labels);
         assert!(data.groups.is_empty());
+    }
+
+    // Separate helper that adds the output cell first so propagation succeeds.
+    fn demo_sheet_with_plan() -> (Sheet, Labels) {
+        let mut sheet = Sheet::new();
+        let mut labels = Labels::new();
+
+        // c added first → lowest strength (output by default).
+        let c = sheet.add_cell(0.0_f64);
+        labels.add_cell::<f64>(c, "c");
+        let a = sheet.add_cell(2.0_f64);
+        labels.add_cell::<f64>(a, "a");
+        let b = sheet.add_cell(3.0_f64);
+        labels.add_cell::<f64>(b, "b");
+
+        sheet
+            .add_relationship(vec![Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| {
+                Ok(x * y)
+            })])
+            .unwrap();
+
+        (sheet, labels)
+    }
+
+    #[test]
+    fn to_graph_data_arrows_false_before_propagate() {
+        let (sheet, labels) = demo_sheet_with_plan();
+        let data = to_graph_data(&sheet, &labels);
+        assert!(!data.arrows);
+    }
+
+    #[test]
+    fn to_graph_data_arrows_true_after_propagate() {
+        let (mut sheet, labels) = demo_sheet_with_plan();
+        sheet.propagate().unwrap();
+        let data = to_graph_data(&sheet, &labels);
+        assert!(data.arrows);
+    }
+
+    #[test]
+    fn to_graph_data_directed_input_links_target_relationship() {
+        // Method [a, b] → c; after propagate, a and b are inputs → 2 edges into rel.
+        let (mut sheet, labels) = demo_sheet_with_plan();
+        sheet.propagate().unwrap();
+        let data = to_graph_data(&sheet, &labels);
+
+        let rel_id = data
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Relationship)
+            .map(|n| n.id.clone())
+            .unwrap();
+
+        let to_rel: Vec<_> = data.links.iter().filter(|l| l.target == rel_id).collect();
+        assert_eq!(to_rel.len(), 2);
+    }
+
+    #[test]
+    fn to_graph_data_directed_output_links_source_relationship() {
+        // Method [a, b] → c; after propagate, c is the output → 1 edge out of rel.
+        let (mut sheet, labels) = demo_sheet_with_plan();
+        sheet.propagate().unwrap();
+        let data = to_graph_data(&sheet, &labels);
+
+        let rel_id = data
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Relationship)
+            .map(|n| n.id.clone())
+            .unwrap();
+
+        let from_rel: Vec<_> = data.links.iter().filter(|l| l.source == rel_id).collect();
+        assert_eq!(from_rel.len(), 1);
     }
 
     #[test]
