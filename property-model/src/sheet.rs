@@ -4,11 +4,13 @@
 //! destroyed when the sheet is dropped.
 
 use std::any::{Any, TypeId};
+use std::collections::HashSet;
 
 use slotmap::SlotMap;
 
 use crate::{
     cell::{CellData, CellId},
+    conditional::{Branch, ConditionalData, ConditionalId},
     error::Error,
     relationship::{Method, RelationshipData, RelationshipId},
 };
@@ -41,6 +43,11 @@ pub struct Sheet {
     /// default method-selection direction deterministic.
     next_strength: u64,
     last_plan: Option<Vec<(RelationshipId, usize)>>,
+    /// All conditionals registered on this sheet.
+    pub(crate) conditionals: SlotMap<ConditionalId, ConditionalData>,
+    /// Union of all RelationshipIds assigned to any conditional branch or default.
+    /// Used to exclude them from the unconditional active set.
+    pub(crate) conditional_relationships: HashSet<RelationshipId>,
 }
 
 impl Sheet {
@@ -52,6 +59,8 @@ impl Sheet {
             changed_cells: Vec::new(),
             next_strength: 0,
             last_plan: None,
+            conditionals: SlotMap::with_key(),
+            conditional_relationships: HashSet::new(),
         }
     }
 
@@ -159,6 +168,96 @@ impl Sheet {
         }
 
         Ok(rel_id)
+    }
+
+    /// Registers a conditional that activates relationships based on the value of `cell`.
+    ///
+    /// Each element of `branches` is `(keys, relationships)`: when the match cell's value
+    /// equals any key in `keys`, the branch's `relationships` are added to the active set
+    /// for `propagate`. Branches are evaluated in definition order; first match wins.
+    /// `default` holds relationships activated when no branch matches; pass an empty `Vec`
+    /// for no default.
+    ///
+    /// The match cell's value is compared using the equality function captured at
+    /// `add_cell` time.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidId` — `cell` is not in this sheet.
+    /// - `Error::InvalidConditional` — a branch key's `TypeId` does not match `cell`'s;
+    ///   a referenced relationship does not exist; a relationship has more than one method;
+    ///   a relationship already appears in another conditional branch; or a branch has no keys.
+    ///
+    /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R = relationships per branch.
+    pub fn add_conditional<T: Any + PartialEq + 'static>(
+        &mut self,
+        cell: CellId,
+        branches: Vec<(Vec<T>, Vec<RelationshipId>)>,
+        default: Vec<RelationshipId>,
+    ) -> Result<ConditionalId, Error> {
+        let cell_data = self.cells.get(cell).ok_or(Error::InvalidId)?;
+        if cell_data.type_id != TypeId::of::<T>() {
+            return Err(Error::InvalidConditional);
+        }
+
+        // Collect and validate all relationship IDs (branches + default).
+        let all_rels: Vec<RelationshipId> = branches
+            .iter()
+            .flat_map(|(_, rels)| rels.iter().copied())
+            .chain(default.iter().copied())
+            .collect();
+
+        for &rel_id in &all_rels {
+            let rel = self
+                .relationships
+                .get(rel_id)
+                .ok_or(Error::InvalidConditional)?;
+            if rel.methods.len() != 1 {
+                return Err(Error::InvalidConditional);
+            }
+            if self.conditional_relationships.contains(&rel_id) {
+                return Err(Error::InvalidConditional);
+            }
+        }
+
+        // Validate branch keys are non-empty.
+        for (keys, _) in &branches {
+            if keys.is_empty() {
+                return Err(Error::InvalidConditional);
+            }
+        }
+
+        // Check for duplicate relationship IDs within this call.
+        let mut seen: HashSet<RelationshipId> = HashSet::new();
+        for &rel_id in &all_rels {
+            if !seen.insert(rel_id) {
+                return Err(Error::InvalidConditional);
+            }
+        }
+
+        // Type-erase branch keys.
+        let typed_branches: Vec<Branch> = branches
+            .into_iter()
+            .map(|(keys, relationships)| Branch {
+                keys: keys
+                    .into_iter()
+                    .map(|k| Box::new(k) as Box<dyn Any>)
+                    .collect(),
+                relationships,
+            })
+            .collect();
+
+        // Record all relationships as conditional so they are excluded from the
+        // unconditional active set in propagate().
+        for &rel_id in &all_rels {
+            self.conditional_relationships.insert(rel_id);
+        }
+
+        Ok(self.conditionals.insert(ConditionalData {
+            cell,
+            branches: typed_branches,
+            default,
+        }))
     }
 
     /// Writes a value to a cell, incrementing the cell's write-recency strength.
@@ -458,6 +557,95 @@ impl Default for Sheet {
 mod tests {
     use crate::{Error, Method, Sheet, cell::CellId, relationship::RelationshipId};
     use std::any::TypeId;
+
+    #[test]
+    fn add_conditional_returns_error_for_invalid_cell() {
+        let mut sheet = Sheet::new();
+        let result = sheet.add_conditional(CellId::default(), vec![(vec![0_i32], vec![])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidId)));
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_conditional_for_type_mismatch() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        // Branch keys are f64 but cell holds i32.
+        let result = sheet.add_conditional(a, vec![(vec![0.0_f64], vec![])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_conditional_for_missing_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let result = sheet.add_conditional(
+            a,
+            vec![(vec![0_i32], vec![RelationshipId::default()])],
+            vec![],
+        );
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_conditional_for_multi_method_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        // Relationship has two methods — not allowed in a conditional branch.
+        let rel = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+                Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
+            ])
+            .unwrap();
+        let result = sheet.add_conditional(a, vec![(vec![0_i32], vec![rel])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_conditional_for_empty_branch_keys() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Empty key list is invalid.
+        let result = sheet.add_conditional::<i32>(a, vec![(vec![], vec![rel])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_conditional_for_duplicate_relationship_across_branches() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Add rel to the first conditional.
+        sheet
+            .add_conditional(a, vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        // Try to add the same rel to a second conditional.
+        let result = sheet.add_conditional(a, vec![(vec![1_i32], vec![rel])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_id_for_valid_input() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        let cid = sheet
+            .add_conditional(a, vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        // ConditionalId must be a live key.
+        let _ = cid; // just check it compiles and succeeds
+    }
 
     #[test]
     fn add_cell_returns_distinct_ids() {
