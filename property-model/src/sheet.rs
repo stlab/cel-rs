@@ -1156,6 +1156,46 @@ mod tests {
     }
 
     #[test]
+    fn propagate_without_replan_keeps_derived_strengths_in_low_partition() {
+        // Set up a sheet with a conditional: mode=1 → rel_on active (a→b).
+        let mut sheet = Sheet::new();
+        let mode = sheet.add_cell(0_i32);
+        let a = sheet.add_cell(10_i32);
+        let b = sheet.add_cell(0_i32);
+
+        let rel_on = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        sheet
+            .add_conditional(mode, vec![(vec![1_i32], vec![rel_on])], vec![])
+            .unwrap();
+
+        // Full propagation with mode=1 (conditional active).
+        sheet.write(mode, 1_i32).unwrap();
+        sheet.write(a, 10_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+
+        // b should have a low-order derived strength (high-bit clear).
+        assert_eq!(
+            sheet.cells[b].strength & (1u64 << 63),
+            0,
+            "derived cell b must have low-order strength after propagate"
+        );
+
+        // Re-execute the plan without replanning. b should still be derived correctly.
+        sheet.propagate_without_replan().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+
+        // b's strength should still be in the low partition after propagate_without_replan.
+        assert_eq!(
+            sheet.cells[b].strength & (1u64 << 63),
+            0,
+            "derived cell b must have low-order strength after propagate_without_replan"
+        );
+    }
+
+    #[test]
     fn propagate_without_replan_correct_after_plan_switch() {
         // Setup: two cells, b added last (higher strength), so b→a method is selected.
         // Sheet has two methods: b→a and a→b.

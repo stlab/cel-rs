@@ -18,7 +18,6 @@ new_key_type! {
 
 /// One arm of a [`ConditionalData`]: a set of key values and the relationships
 /// to activate when the match cell equals any key.
-#[allow(dead_code)]
 pub(crate) struct Branch {
     /// Type-erased key values; each `TypeId` matches the match cell's registered type.
     pub(crate) keys: Vec<Box<dyn Any>>,
@@ -27,7 +26,6 @@ pub(crate) struct Branch {
 }
 
 /// Internal storage for a conditional.
-#[allow(dead_code)]
 pub(crate) struct ConditionalData {
     /// The cell whose value is tested.
     pub(crate) cell: CellId,

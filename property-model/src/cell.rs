@@ -29,8 +29,6 @@ pub(crate) struct CellData {
     pub(crate) adj: Vec<RelationshipId>,
     /// Type-erased equality: returns `true` iff both arguments hold equal values of the
     /// cell's registered type. Captured at `add_cell` time from the concrete `T: PartialEq`.
-    // Field is read by conditional-matching code added in a later task.
-    #[allow(dead_code)]
     pub(crate) eq_fn: fn(&dyn Any, &dyn Any) -> bool,
 }
 

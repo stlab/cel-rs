@@ -164,7 +164,7 @@ Goal: ensure match cell values are current before conditional evaluation.
 2. For each match cell, BFS upstream through cell adjacency lists, collecting relationships that:
    - Are **not** in `conditional_relationships`, and
    - Include the match cell (or a transitively needed cell) in their outputs.
-3. This forms the *match-cell subgraph*. Each relationship in it has exactly one method (validated at `add_conditional` time), so the Adam plan for this subgraph is unambiguous.
+3. This forms the *match-cell subgraph*. Relationships that are themselves in `conditional_relationships` are excluded. Relationships in the subgraph may have multiple methods; the Adam planner uses cell strengths to resolve them.
 4. Plan and execute the match-cell subgraph.
 
 If all match cells are written sources (no in-edges in the unconditional graph), this phase is a no-op.

@@ -445,6 +445,65 @@ fn conditional_branch_switch_stability() {
 }
 
 #[test]
+fn conditional_match_cell_derived_from_multi_method_unconditional_relationship() {
+    // A multi-method unconditional relationship can produce the match cell.
+    // Setup: `flag` is produced by a two-method relationship between `x` and `y`.
+    //   M0: [x, y] → flag  (flag = x > y)
+    //   M1: [flag, x] → y  (y = x - 1 if flag else x + 1)
+    // x is written with the highest strength, so the planner picks M0.
+    // When flag=true (x > y), rel_active fires and doubles a into b.
+    let mut sheet = Sheet::new();
+    let x = sheet.add_cell(0_i32);
+    let y = sheet.add_cell(0_i32);
+    let flag = sheet.add_cell(false);
+    let a = sheet.add_cell(3_i32);
+    let b = sheet.add_cell(0_i32);
+
+    // Multi-method unconditional relationship: x, y ↔ flag.
+    // M0: [x, y] → flag  (true iff x > y)
+    // M1: [flag, x] → y
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([x, y], flag, |x: &i32, y: &i32| Ok(*x > *y)),
+            Method::new(
+                vec![flag, x],
+                vec![y],
+                vec![TypeId::of::<bool>(), TypeId::of::<i32>()],
+                vec![TypeId::of::<i32>()],
+                |args| {
+                    let f = args[0].downcast_ref::<bool>().unwrap();
+                    let xv = args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(if *f { *xv - 1 } else { *xv + 1 })])
+                },
+            ),
+        ])
+        .unwrap();
+
+    let rel_active = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+        .unwrap();
+    sheet
+        .add_conditional(flag, vec![(vec![true], vec![rel_active])], vec![])
+        .unwrap();
+
+    // Write x with the highest strength so M0 (x,y→flag) is selected.
+    sheet.write(y, 0_i32).unwrap();
+    sheet.write(x, 10_i32).unwrap(); // x > y → flag = true
+    sheet.write(a, 3_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<bool>(flag).unwrap(), true);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
+
+    // Flip: x=0 ≤ y → flag = false → rel_active inactive.
+    sheet.write(y, 5_i32).unwrap();
+    sheet.write(x, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<bool>(flag).unwrap(), false);
+    // b keeps its last derived value (6) since rel_active is no longer active.
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
+}
+
+#[test]
 fn conditional_match_cell_is_derived_from_unconditional_relationship() {
     // The match cell (flag) is computed by an unconditional single-method relationship.
     let mut sheet = Sheet::new();
