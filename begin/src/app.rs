@@ -67,6 +67,7 @@ pub fn App() -> Element {
     let graph_data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
 
     rsx! {
+        document::Link { rel: "icon", r#type: "image/x-icon", href: asset!("/assets/favicon.ico") }
         document::Link { rel: "stylesheet", href: asset!("/assets/graph.css") }
         document::Script { src: asset!("/assets/d3.v7.min.js") }
         document::Script { src: asset!("/assets/graph.js") }
