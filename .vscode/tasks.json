@@ -78,6 +78,20 @@
             },
             "isBackground": true
         },
+        {
+            "label": "begin: fetch assets",
+            "type": "shell",
+            "command": "cargo",
+            "args": ["xtask", "fetch-assets"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": ["$rustc"],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
         // ============ Build Tasks ============
         {
             "label": "cargo build",

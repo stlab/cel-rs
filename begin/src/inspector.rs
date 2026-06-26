@@ -4,21 +4,24 @@ use dioxus::prelude::*;
 use property_model::{CellId, Sheet};
 
 use crate::bridge::Labels;
+use crate::spectrum::{SpDivider, SpFieldLabel, SpHeading, SpTextfield};
 
 /// Sidebar panel showing all cells with labels, current values, and text inputs for writing.
 ///
 /// Editing an input field immediately writes the parsed value to the sheet and propagates
-/// constraints. If propagation fails (for example, division by zero), the input field shows
-/// a red border until the user blurs. The input is not reset while the field is focused;
-/// it syncs back to the computed value on blur, keeping non-edited cells up to date.
+/// constraints. If parsing or propagation fails (for example, non-numeric input or division
+/// by zero), `SpTextfield` renders in its invalid state until the user blurs. The input is
+/// not reset while the field is focused; it syncs back to the computed value on blur,
+/// keeping non-edited cells up to date.
 #[component]
 pub fn Inspector(sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
 
     rsx! {
         div {
-            style: "width: 260px; min-width: 260px; height: 100%; overflow-y: auto; border-left: 1px solid #ddd; padding: 12px; box-sizing: border-box; font-family: monospace; font-size: 13px;",
-            h3 { style: "margin: 0 0 12px 0; font-size: 14px;", "Cells" }
+            style: "width: 260px; min-width: 260px; height: 100%; overflow-y: auto; padding: 12px; box-sizing: border-box;",
+            SpHeading { "Cells" }
+            SpDivider {}
             for id in ids {
                 CellRow { key: "{id:?}", id, sheet, labels }
             }
@@ -59,41 +62,55 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
         }
     });
 
+    let field_id = format!("cell-{id:?}");
+
     rsx! {
         div {
-            style: "margin-bottom: 10px;",
-            div { style: "font-weight: bold; margin-bottom: 2px;", "{label}" }
-            div { style: "color: #888; margin-bottom: 4px; font-size: 11px;", "{value}" }
-            input {
-                r#type: "text",
-                value: "{input}",
-                style: if *has_error.read() {
-                    "width: 100%; box-sizing: border-box; font-family: monospace; font-size: 12px; border-color: #c00;"
-                } else {
-                    "width: 100%; box-sizing: border-box; font-family: monospace; font-size: 12px;"
+            style: "margin-bottom: 8px;",
+            SpFieldLabel { for_: field_id.clone(), "{label}" }
+            SpTextfield {
+                id: field_id,
+                value: input.read().clone(),
+                invalid: *has_error.read(),
+                // Dioxus's event serializer only reads event.target.value for
+                // HTMLInputElement — custom elements (sp-textfield) always give "".
+                // Use dioxus.send() in JS and eval.recv() to read the live value.
+                oninput: move |_: FormEvent| {
+                    spawn(async move {
+                        let mut eval = document::eval(&format!(
+                            r#"dioxus.send(document.getElementById("cell-{id:?}").value)"#
+                        ));
+                        let Ok(val) = eval.recv::<String>().await else { return; };
+                        // Discard the result if the user blurred while the round-trip was
+                        // in flight; blur already cleared the error and use_effect will
+                        // restore the last valid computed value.
+                        if !*is_focused.read() {
+                            return;
+                        }
+                        input.set(val.clone());
+                        let mut sheet_w = sheet.write();
+                        let labels_r = labels.read();
+                        if let Some(meta) = labels_r.cells.get(&id) {
+                            if (meta.write_str)(&mut sheet_w, &val).is_ok() {
+                                let result = if sheet_w.is_source(id) {
+                                    sheet_w.propagate_without_replan()
+                                } else {
+                                    sheet_w.propagate()
+                                };
+                                has_error.set(result.is_err());
+                            } else {
+                                has_error.set(true);
+                            }
+                        }
+                    });
                 },
                 onfocus: move |_| is_focused.set(true),
                 onblur: move |_| {
                     is_focused.set(false);
                     has_error.set(false);
                 },
-                oninput: move |e| {
-                    let s = e.value();
-                    input.set(s.clone());
-                    let mut sheet_w = sheet.write();
-                    let labels_r = labels.read();
-                    if let Some(meta) = labels_r.cells.get(&id)
-                        && (meta.write_str)(&mut sheet_w, &s).is_ok()
-                    {
-                        let result = if sheet_w.is_source(id) {
-                            sheet_w.propagate_without_replan()
-                        } else {
-                            sheet_w.propagate()
-                        };
-                        has_error.set(result.is_err());
-                    }
-                },
             }
         }
+        SpDivider {}
     }
 }
