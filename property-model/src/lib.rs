@@ -34,12 +34,14 @@
 //! ```
 
 pub mod cell;
+pub mod conditional;
 pub mod error;
 mod planner;
 pub mod relationship;
 pub mod sheet;
 
 pub use cell::CellId;
+pub use conditional::ConditionalId;
 pub use error::Error;
 pub use relationship::{Method, RelationshipId};
 pub use sheet::Sheet;

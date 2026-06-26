@@ -32,6 +32,12 @@ pub enum Error {
     /// A method is structurally invalid (e.g. inputs ∩ outputs is non-empty,
     /// or the outputs list is empty).
     InvalidMethod,
+
+    /// A conditional is structurally invalid: the cell was not found, a referenced
+    /// relationship was not found or has more than one method, a relationship appears
+    /// in more than one conditional branch, a branch key's type does not match the
+    /// cell's registered type, or a branch has no keys.
+    InvalidConditional,
 }
 
 impl std::fmt::Display for Error {
@@ -45,6 +51,7 @@ impl std::fmt::Display for Error {
             Error::Cycle => write!(f, "selected methods form a cycle"),
             Error::MethodFailed(e) => write!(f, "method execution failed: {e}"),
             Error::InvalidMethod => write!(f, "method is structurally invalid"),
+            Error::InvalidConditional => write!(f, "conditional is structurally invalid"),
         }
     }
 }
@@ -143,5 +150,19 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    #[test]
+    fn invalid_conditional_display_contains_conditional() {
+        assert!(
+            Error::InvalidConditional
+                .to_string()
+                .contains("conditional")
+        );
+    }
+
+    #[test]
+    fn invalid_conditional_has_no_source() {
+        assert!(std::error::Error::source(&Error::InvalidConditional).is_none());
     }
 }
