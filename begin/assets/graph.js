@@ -24,6 +24,48 @@
     var width = 800;
     var height = 600;
 
+    // Returns the point on the rect boundary of a cell centered at (tx,ty)
+    // along the approach line from (sx,sy) to (tx,ty).
+    function cellEdgePoint(sx, sy, tx, ty) {
+        var dx = tx - sx, dy = ty - sy;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 1) return { x: tx, y: ty };
+        var nx = dx / dist, ny = dy / dist;
+        var hw = CELL_W / 2, hh = CELL_H / 2;
+        var td = Math.abs(nx) > 1e-9 ? hw / Math.abs(nx) : Infinity;
+        var ld = Math.abs(ny) > 1e-9 ? hh / Math.abs(ny) : Infinity;
+        var d = Math.min(td, ld);
+        return { x: tx - nx * d, y: ty - ny * d };
+    }
+
+    // Returns the point on the boundary of a circle (centered at cx,cy, radius r)
+    // along the approach line from (sx,sy) to (cx,cy).
+    function circleEdgePoint(sx, sy, cx, cy, r) {
+        var dx = cx - sx, dy = cy - sy;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 1) return { x: cx, y: cy };
+        return { x: cx - dx / dist * r, y: cy - dy / dist * r };
+    }
+
+    // Returns edge-to-edge endpoints for a link after D3 resolves source/target to objects.
+    function linkEndpoints(d) {
+        var s = d.source, t = d.target;
+        var srcPt = s.kind === 'Cell'
+            ? cellEdgePoint(t.x, t.y, s.x, s.y)
+            : circleEdgePoint(t.x, t.y, s.x, s.y, REL_R);
+        var tgtPt = t.kind === 'Cell'
+            ? cellEdgePoint(s.x, s.y, t.x, t.y)
+            : circleEdgePoint(s.x, s.y, t.x, t.y, REL_R);
+        return { x1: srcPt.x, y1: srcPt.y, x2: tgtPt.x, y2: tgtPt.y };
+    }
+
+    // Runs the simulation synchronously until settled, then updates the display.
+    function settleSimulation() {
+        var n = Math.ceil(Math.log(simulation.alphaMin()) / Math.log(1 - simulation.alphaDecay()));
+        simulation.stop().alpha(1).tick(n);
+        ticked();
+    }
+
     function init(containerId, data) {
         // Tear down any previous init (component remount / hot-reload).
         if (simulation) { simulation.stop(); simulation = null; }
@@ -43,22 +85,15 @@
 
         var defs = svg.append('defs');
 
-        // Arrow tip at relationship circle edge: refX = tip(10) + REL_R
+        // Arrowhead: refX=10 places the tip (at local x=10) at the line endpoint.
+        // Lines are drawn edge-to-edge so the tip lands exactly at the node boundary.
         defs.append('marker')
-            .attr('id', 'arrowhead-to-rel')
+            .attr('id', 'arrowhead')
             .attr('viewBox', '0 -5 10 10')
-            .attr('refX', 10 + REL_R).attr('refY', 0)
-            .attr('markerWidth', 8).attr('markerHeight', 8)
-            .attr('markerUnits', 'userSpaceOnUse')
-            .attr('orient', 'auto')
-            .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#999');
-
-        // Arrow tip at cell rect edge (approx): refX = tip(10) + CELL_W / 2
-        defs.append('marker')
-            .attr('id', 'arrowhead-to-cell')
-            .attr('viewBox', '0 -5 10 10')
-            .attr('refX', 10 + CELL_W / 2).attr('refY', 0)
-            .attr('markerWidth', 8).attr('markerHeight', 8)
+            .attr('refX', 10)
+            .attr('refY', 0)
+            .attr('markerWidth', 8)
+            .attr('markerHeight', 8)
             .attr('markerUnits', 'userSpaceOnUse')
             .attr('orient', 'auto')
             .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#999');
@@ -87,7 +122,19 @@
         // Guard: no-op if not yet initialized
         if (!svg) return;
 
-        // Preserve existing node positions by merging into incoming data
+        // Detect structural changes before mutating node/link arrays.
+        var oldNodeIds = new Set(nodes.map(function (n) { return n.id; }));
+        var oldLinkSet = new Set(links.map(function (l) {
+            var src = typeof l.source === 'object' ? l.source.id : l.source;
+            var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+            return src + '-' + tgt;
+        }));
+        var structureChanged = nodes.length !== data.nodes.length
+            || links.length !== data.links.length
+            || data.nodes.some(function (n) { return !oldNodeIds.has(n.id); })
+            || data.links.some(function (l) { return !oldLinkSet.has(l.source + '-' + l.target); });
+
+        // Preserve existing node positions by merging into incoming data.
         var oldNodeMap = new Map(nodes.map(function (n) { return [n.id, n]; }));
         nodes = data.nodes.map(function (n) {
             var existing = oldNodeMap.get(n.id);
@@ -119,10 +166,7 @@
                 if (!data.arrows) return null;
                 var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
                 var tgtNode = nodeMap.get(tgtId);
-                if (!tgtNode) return null;
-                return tgtNode.kind === 'Cell'
-                    ? 'url(#arrowhead-to-cell)'
-                    : 'url(#arrowhead-to-rel)';
+                return tgtNode ? 'url(#arrowhead)' : null;
             });
 
         // Join cell rects
@@ -165,18 +209,28 @@
                 .style('fill', null);
         }
 
-        // Restart simulation with updated data
+        // Always update simulation data so that link source/target are resolved
+        // from string IDs to node objects before ticked() accesses d.source.x etc.
         simulation.nodes(nodes);
         simulation.force('link').links(links);
-        simulation.alpha(0.3).restart();
+
+        if (structureChanged) {
+            // Settle synchronously so the graph is stable before display.
+            settleSimulation();
+        } else {
+            // Only labels/values changed — node positions are unchanged.
+            ticked();
+        }
     }
 
     function ticked() {
-        linkLayer.selectAll('line')
-            .attr('x1', function (d) { return d.source.x; })
-            .attr('y1', function (d) { return d.source.y; })
-            .attr('x2', function (d) { return d.target.x; })
-            .attr('y2', function (d) { return d.target.y; });
+        // Draw lines edge-to-edge so arrowhead tips land exactly at node boundaries.
+        linkLayer.selectAll('line').each(function (d) {
+            var ep = linkEndpoints(d);
+            d3.select(this)
+                .attr('x1', ep.x1).attr('y1', ep.y1)
+                .attr('x2', ep.x2).attr('y2', ep.y2);
+        });
 
         cellLayer.selectAll('rect')
             .attr('x', function (d) { return d.x - CELL_W / 2; })
