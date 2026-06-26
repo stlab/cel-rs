@@ -356,6 +356,93 @@ impl Sheet {
         self.relationships.get(id).map(|r| r.adj.as_slice())
     }
 
+    /// Returns the set of unconditional relationships transitively needed to derive
+    /// the given `match_cells`.
+    ///
+    /// Walks upstream (from each match cell, through relationships whose outputs include
+    /// the cell) collecting only relationships not in `self.conditional_relationships`.
+    /// Relationships that only take a match cell as *input* (not output) are skipped.
+    ///
+    /// - Complexity: O(C·R) in the worst case where C = cells and R = relationships.
+    fn match_cell_subgraph(&self, match_cells: &[CellId]) -> HashSet<RelationshipId> {
+        let mut result: HashSet<RelationshipId> = HashSet::new();
+        let mut visited: HashSet<CellId> = HashSet::new();
+        let mut queue: std::collections::VecDeque<CellId> = match_cells.iter().copied().collect();
+
+        for &cell in match_cells {
+            visited.insert(cell);
+        }
+
+        while let Some(cell) = queue.pop_front() {
+            for &rel_id in &self.cells[cell].adj {
+                if self.conditional_relationships.contains(&rel_id) {
+                    continue;
+                }
+                if result.contains(&rel_id) {
+                    continue;
+                }
+                let rel = &self.relationships[rel_id];
+                // Only include relationships that output this cell.
+                let outputs_cell = rel.methods.iter().any(|m| m.outputs.contains(&cell));
+                if !outputs_cell {
+                    continue;
+                }
+                result.insert(rel_id);
+                // Enqueue all inputs of this relationship for upstream BFS.
+                for method in &rel.methods {
+                    for &input in &method.inputs {
+                        if visited.insert(input) {
+                            queue.push_back(input);
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Builds the active relationship set for the general planning pass.
+    ///
+    /// Starts with all unconditional relationships (those not in
+    /// `self.conditional_relationships`), then evaluates each conditional: the first
+    /// branch whose keys contain the match cell's current value is selected, and its
+    /// relationships are added. If no branch matches, the default relationships are added.
+    ///
+    /// - Complexity: O(R + C·B·K) where R = total relationships, C = conditionals,
+    ///   B = branches per conditional, K = keys per branch.
+    fn build_active_set(&self) -> HashSet<RelationshipId> {
+        let mut active: HashSet<RelationshipId> = self
+            .relationships
+            .keys()
+            .filter(|id| !self.conditional_relationships.contains(id))
+            .collect();
+
+        for (_, cond) in &self.conditionals {
+            let cell = &self.cells[cond.cell];
+            let eq_fn = cell.eq_fn;
+            let value = cell.value.as_ref();
+
+            let mut matched = false;
+            for branch in &cond.branches {
+                if branch.keys.iter().any(|key| eq_fn(value, key.as_ref())) {
+                    for &rel_id in &branch.relationships {
+                        active.insert(rel_id);
+                    }
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                for &rel_id in &cond.default {
+                    active.insert(rel_id);
+                }
+            }
+        }
+
+        active
+    }
+
     /// Assigns derived-cell strengths after a planning pass.
     ///
     /// Walks `execution_order` and assigns a decrementing counter (starting at
@@ -390,21 +477,49 @@ impl Sheet {
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
-    /// On success, `selected_method` reflects the newly computed plan.
+    /// **Phase 1 — Pre-plan:** if any conditional match cells are derived (have an
+    /// in-edge in the unconditional relationship graph), the minimal unconditional
+    /// subgraph needed to compute them is planned and executed so their values are
+    /// current before branch evaluation.
+    ///
+    /// **Phase 2 — Conditional evaluation:** each conditional's match cell value is
+    /// read and compared against branch keys; the active relationship set is built.
+    ///
+    /// **Phase 3 — General plan:** the Adam algorithm runs on the active set.
+    ///
+    /// **Phase 4 — Strength post-processing:** derived cells receive low-order strengths
+    /// in evaluation order, enforcing the stability invariant.
     ///
     /// # Errors
     ///
     /// - `Error::Conflict` — no valid method assignment exists.
-    /// - `Error::MethodFailed` — a method's function returned an error, or a method produced
-    ///   the wrong number of outputs.
-    /// - `Error::TypeMismatch` — a method output's runtime type does not match the cell's
-    ///   registered type.
+    /// - `Error::MethodFailed` — a method's function returned an error, or a method
+    ///   produced the wrong number of outputs.
+    /// - `Error::TypeMismatch` — a method output's runtime type does not match the
+    ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.clear_changed();
-        let active: std::collections::HashSet<RelationshipId> = self.relationships.keys().collect();
+
+        // Phase 1: pre-plan for derived match cells.
+        if !self.conditionals.is_empty() {
+            let match_cells: Vec<CellId> = self.conditionals.values().map(|c| c.cell).collect();
+            let pre_active = self.match_cell_subgraph(&match_cells);
+            if !pre_active.is_empty() {
+                let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
+                self.execute_plan(&pre_plan.execution_order)?;
+            }
+        }
+
+        // Phase 2: evaluate conditionals and build the active relationship set.
+        let active = self.build_active_set();
+
+        // Phase 3: general plan on the active set.
         let plan = crate::planner::plan(&self.cells, &self.relationships, &active)?;
         self.execute_plan(&plan.execution_order)?;
+
+        // Phase 4: assign derived-cell strengths in evaluation order.
         self.post_process_strengths(&plan.execution_order);
+
         self.last_plan = Some(plan.execution_order);
         Ok(())
     }

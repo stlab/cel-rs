@@ -291,3 +291,192 @@ fn self_ref_le_chain() {
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 3);
     assert_eq!(*sheet.read::<i32>(c).unwrap(), 3);
 }
+
+#[test]
+fn conditional_activates_matching_branch() {
+    // mode=1 activates rel_on which doubles `a` into `b`.
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(3_i32);
+    let b = sheet.add_cell(0_i32);
+
+    let rel_on = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+        .unwrap();
+
+    sheet
+        .add_conditional(mode, vec![(vec![1_i32], vec![rel_on])], vec![])
+        .unwrap();
+
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.write(a, 3_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
+}
+
+#[test]
+fn conditional_no_match_and_no_default_succeeds_silently() {
+    // No branch matches, no default — propagate succeeds, b keeps its value.
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(3_i32);
+    let b = sheet.add_cell(99_i32);
+
+    let rel_on = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+        .unwrap();
+
+    sheet
+        .add_conditional(mode, vec![(vec![1_i32], vec![rel_on])], vec![])
+        .unwrap();
+
+    // mode=0, no match, rel_on inactive.
+    sheet.write(mode, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    // b unchanged: no method wrote to it.
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 99);
+}
+
+#[test]
+fn conditional_default_branch_activates_when_no_key_matches() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(3_i32);
+    let b = sheet.add_cell(0_i32);
+    let c = sheet.add_cell(0_i32);
+
+    let rel_double = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+        .unwrap();
+    let rel_triple = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, c, |x: &i32| Ok(*x * 3))])
+        .unwrap();
+
+    sheet
+        .add_conditional(
+            mode,
+            vec![(vec![1_i32], vec![rel_double])],
+            vec![rel_triple], // default
+        )
+        .unwrap();
+
+    // mode=1: double branch.
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.write(a, 4_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 8);
+
+    // mode=99: default branch.
+    sheet.write(mode, 99_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 12);
+}
+
+#[test]
+fn conditional_multi_key_branch_matches_any_key() {
+    // Branch is active for mode=0 OR mode=2.
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(5_i32);
+    let b = sheet.add_cell(0_i32);
+
+    let rel = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .unwrap();
+
+    sheet
+        .add_conditional(mode, vec![(vec![0_i32, 2_i32], vec![rel])], vec![])
+        .unwrap();
+
+    sheet.write(a, 7_i32).unwrap();
+    sheet.write(mode, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 7);
+
+    sheet.write(mode, 2_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 7);
+
+    // mode=1 does not match; b stays at its last derived value.
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    // b is no longer derived; it keeps the last value (7).
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 7);
+}
+
+#[test]
+fn conditional_branch_switch_stability() {
+    // When branch switches, previously derived cells should not block the new plan.
+    // Setup: mode controls which of two independent relationships is active.
+    // Branch 0: a→out (out = a * 2)
+    // Branch 1: b→out (out = b * 3)
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(4_i32);
+    let b = sheet.add_cell(5_i32);
+    let out = sheet.add_cell(0_i32);
+
+    let rel_a = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, out, |x: &i32| Ok(*x * 2))])
+        .unwrap();
+    let rel_b = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, out, |x: &i32| Ok(*x * 3))])
+        .unwrap();
+
+    sheet
+        .add_conditional(
+            mode,
+            vec![(vec![0_i32], vec![rel_a]), (vec![1_i32], vec![rel_b])],
+            vec![],
+        )
+        .unwrap();
+
+    // mode=0: out derived from a.
+    sheet.write(mode, 0_i32).unwrap();
+    sheet.write(a, 4_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(out).unwrap(), 8);
+
+    // mode=1: out derived from b. Must not conflict even though out has a stale derived strength.
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.write(b, 5_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(out).unwrap(), 15);
+}
+
+#[test]
+fn conditional_match_cell_is_derived_from_unconditional_relationship() {
+    // The match cell (flag) is computed by an unconditional single-method relationship.
+    let mut sheet = Sheet::new();
+    let x = sheet.add_cell(5_i32);
+    let flag = sheet.add_cell(false);
+    let a = sheet.add_cell(3_i32);
+    let b = sheet.add_cell(0_i32);
+
+    // Unconditional: x → flag  (flag = x > 0)
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(x, flag, |x: &i32| Ok(*x > 0))])
+        .unwrap();
+
+    let rel_true = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+        .unwrap();
+
+    sheet
+        .add_conditional(flag, vec![(vec![true], vec![rel_true])], vec![])
+        .unwrap();
+
+    // x=5 > 0 → flag=true → rel_true active.
+    sheet.write(x, 5_i32).unwrap();
+    sheet.write(a, 3_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<bool>(flag).unwrap(), true);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
+
+    // x=-1 ≤ 0 → flag=false → no match, rel_true inactive.
+    sheet.write(x, -1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<bool>(flag).unwrap(), false);
+    // b has no active relationship; it keeps its previous value.
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
+}
