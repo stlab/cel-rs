@@ -42,7 +42,10 @@ pub(crate) struct Plan {
     pub(crate) execution_order: Vec<(RelationshipId, usize)>,
 }
 
-/// Assigns one method per relationship and returns them in dependency order.
+/// Assigns one method per active relationship and returns them in dependency order.
+///
+/// Only relationships in `active` are planned; relationships outside `active` are
+/// invisible to the flood-fill. The conflict check counts against `active.len()`.
 ///
 /// A method may have cells in both `inputs` and `outputs` (self-referencing). Such a cell is
 /// read at its pre-execution value and overwritten with the result. A self-referencing method
@@ -55,13 +58,14 @@ pub(crate) struct Plan {
 ///
 /// # Errors
 ///
-/// - `Error::Conflict` — not every relationship could be assigned a method.
+/// - `Error::Conflict` — not every active relationship could be assigned a method.
 ///
-/// - Complexity: O(C log C + R·M·K²) where C = cells, R = relationships,
+/// - Complexity: O(C log C + R·M·K²) where C = cells, R = active relationships,
 ///   M = methods per relationship, K = cells per method.
 pub(crate) fn plan(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
+    active: &HashSet<RelationshipId>,
 ) -> Result<Plan, Error> {
     let mut determined: HashSet<CellId> = HashSet::new();
     // Subset of `determined`: cells whose value came from write(), not from a selected method.
@@ -86,6 +90,9 @@ pub(crate) fn plan(
 
         while let Some(cell) = queue.pop_front() {
             for &rel_id in &cells[cell].adj {
+                if !active.contains(&rel_id) {
+                    continue;
+                }
                 if selected_set.contains(&rel_id) {
                     continue;
                 }
@@ -182,7 +189,7 @@ pub(crate) fn plan(
         }
     }
 
-    if selected.len() != relationships.len() {
+    if selected.len() != active.len() {
         return Err(Error::Conflict);
     }
 
@@ -194,8 +201,36 @@ pub(crate) fn plan(
 #[cfg(test)]
 mod tests {
     use crate::{Error, Method, Sheet};
+    use std::collections::HashSet;
 
     // Propagation-behavior tests live in the integration tests.
+
+    #[test]
+    fn plan_with_active_subset_ignores_inactive_relationship() {
+        // Two independent relationships: R1 (a→b) and R2 (c→d).
+        // Plan with only R1 active; R2 must be ignored (not required in output).
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        let d = sheet.add_cell(0_i32);
+
+        let r1 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        let _r2 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(c, d, |x: &i32| Ok(*x))])
+            .unwrap();
+
+        sheet.write(a, 1_i32).unwrap();
+
+        let mut active = HashSet::new();
+        active.insert(r1);
+
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+        assert_eq!(plan.execution_order.len(), 1);
+        assert_eq!(plan.execution_order[0].0, r1);
+    }
 
     #[test]
     fn relationship_selected_at_most_once() {

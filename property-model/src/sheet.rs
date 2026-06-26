@@ -302,7 +302,8 @@ impl Sheet {
     ///   registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.clear_changed();
-        let plan = crate::planner::plan(&self.cells, &self.relationships)?;
+        let active: std::collections::HashSet<RelationshipId> = self.relationships.keys().collect();
+        let plan = crate::planner::plan(&self.cells, &self.relationships, &active)?;
         self.execute_plan(&plan.execution_order)?;
         self.post_process_strengths(&plan.execution_order);
         self.last_plan = Some(plan.execution_order);
