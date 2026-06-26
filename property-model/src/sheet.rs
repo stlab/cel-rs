@@ -60,18 +60,20 @@ impl Sheet {
     /// The cell's `TypeId` is fixed at creation time; subsequent `write` and
     /// `read` calls that use a different type will return `Error::TypeMismatch`.
     ///
-    /// Each call increments the sheet's internal strength counter so that cells
-    /// added later have strictly higher initial strength than cells added earlier.
-    /// This makes the default method-selection direction deterministic: cells added
-    /// last are treated as sources and cells added first are treated as outputs.
-    pub fn add_cell<T: Any + 'static>(&mut self, value: T) -> CellId {
+    /// Each call increments the sheet's internal strength counter and sets bit 63
+    /// of the result. This partitions the strength space: written/added cells always
+    /// have higher strength than derived cells, ensuring stability across conditional
+    /// branch switches.
+    pub fn add_cell<T: Any + PartialEq + 'static>(&mut self, value: T) -> CellId {
         self.next_strength += 1;
+        let strength = self.next_strength | (1u64 << 63);
         self.cells.insert(CellData {
             value: Box::new(value),
             type_id: TypeId::of::<T>(),
-            strength: self.next_strength,
+            strength,
             changed: false,
             adj: Vec::new(),
+            eq_fn: |a, b| a.downcast_ref::<T>() == b.downcast_ref::<T>(),
         })
     }
 
@@ -178,7 +180,7 @@ impl Sheet {
             });
         }
         self.next_strength += 1;
-        cell.strength = self.next_strength;
+        cell.strength = self.next_strength | (1u64 << 63);
         cell.value = Box::new(value);
         Ok(())
     }
@@ -255,6 +257,34 @@ impl Sheet {
         self.relationships.get(id).map(|r| r.adj.as_slice())
     }
 
+    /// Assigns derived-cell strengths after a planning pass.
+    ///
+    /// Walks `execution_order` and assigns a decrementing counter (starting at
+    /// `0x7FFF_FFFF_FFFF_FFFF`) to each output cell of each selected method, in
+    /// execution order. Cells evaluated first receive the highest derived strength.
+    /// Source cells (not the output of any selected method) are not modified.
+    ///
+    /// - Complexity: O(R·K) where R is the number of entries and K is the maximum
+    ///   outputs per method.
+    fn post_process_strengths(&mut self, execution_order: &[(RelationshipId, usize)]) {
+        let mut derived_strength = u64::MAX >> 1; // 0x7FFF_FFFF_FFFF_FFFF
+        let mut seen: std::collections::HashSet<CellId> = std::collections::HashSet::new();
+        for &(rel_id, method_idx) in execution_order {
+            if let Some(rel) = self.relationships.get(rel_id)
+                && let Some(method) = rel.methods.get(method_idx)
+            {
+                for &output in &method.outputs {
+                    if seen.insert(output)
+                        && let Some(cell) = self.cells.get_mut(output)
+                    {
+                        cell.strength = derived_strength;
+                        derived_strength = derived_strength.saturating_sub(1);
+                    }
+                }
+            }
+        }
+    }
+
     /// Runs the planning pass and executes the selected methods.
     ///
     /// Clears the changed-cell set from the previous `propagate()` call before planning.
@@ -274,6 +304,7 @@ impl Sheet {
         self.clear_changed();
         let plan = crate::planner::plan(&self.cells, &self.relationships)?;
         self.execute_plan(&plan.execution_order)?;
+        self.post_process_strengths(&plan.execution_order);
         self.last_plan = Some(plan.execution_order);
         Ok(())
     }
@@ -388,7 +419,10 @@ impl Sheet {
     /// Re-executes the cached plan without invoking the planner.
     ///
     /// - Precondition: Every cell written since the last successful `propagate()` or
-    ///   `propagate_without_replan()` call satisfies `is_source(id)`. Violation produces incorrect output values but no panic.
+    ///   `propagate_without_replan()` call satisfies `is_source(id)`. Violation produces
+    ///   incorrect output values but no panic.
+    /// - Precondition: If the sheet has conditionals, no match-cell value has changed
+    ///   since the last `propagate()`. Violation produces incorrect branch activation.
     ///
     /// # Errors
     ///
@@ -404,6 +438,9 @@ impl Sheet {
         };
         self.clear_changed();
         let result = self.execute_plan(&execution_order);
+        if result.is_ok() {
+            self.post_process_strengths(&execution_order);
+        }
         self.last_plan = Some(execution_order);
         result
     }
@@ -776,6 +813,42 @@ mod tests {
     fn selected_method_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
         assert!(sheet.selected_method(RelationshipId::default()).is_none());
+    }
+
+    #[test]
+    fn add_cell_and_write_set_high_order_bit_on_strength() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        assert!(
+            sheet.cells[a].strength & (1u64 << 63) != 0,
+            "add_cell must set high-order bit"
+        );
+        sheet.write(a, 1_i32).unwrap();
+        assert!(
+            sheet.cells[a].strength & (1u64 << 63) != 0,
+            "write must set high-order bit"
+        );
+    }
+
+    #[test]
+    fn propagate_assigns_low_order_strength_to_derived_cells() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        sheet.write(a, 1_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert!(
+            sheet.cells[a].strength & (1u64 << 63) != 0,
+            "source cell must keep high-order strength"
+        );
+        assert!(
+            sheet.cells[b].strength & (1u64 << 63) == 0,
+            "derived cell must have low-order strength"
+        );
+        assert!(sheet.cells[a].strength > sheet.cells[b].strength);
     }
 
     #[test]
