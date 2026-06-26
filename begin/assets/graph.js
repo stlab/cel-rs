@@ -124,9 +124,15 @@
 
         // Detect structural changes before mutating node/link arrays.
         var oldNodeIds = new Set(nodes.map(function (n) { return n.id; }));
+        var oldLinkSet = new Set(links.map(function (l) {
+            var src = typeof l.source === 'object' ? l.source.id : l.source;
+            var tgt = typeof l.target === 'object' ? l.target.id : l.target;
+            return src + '-' + tgt;
+        }));
         var structureChanged = nodes.length !== data.nodes.length
             || links.length !== data.links.length
-            || data.nodes.some(function (n) { return !oldNodeIds.has(n.id); });
+            || data.nodes.some(function (n) { return !oldNodeIds.has(n.id); })
+            || data.links.some(function (l) { return !oldLinkSet.has(l.source + '-' + l.target); });
 
         // Preserve existing node positions by merging into incoming data.
         var oldNodeMap = new Map(nodes.map(function (n) { return [n.id, n]; }));
