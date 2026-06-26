@@ -4,11 +4,13 @@
 //! destroyed when the sheet is dropped.
 
 use std::any::{Any, TypeId};
+use std::collections::HashSet;
 
 use slotmap::SlotMap;
 
 use crate::{
     cell::{CellData, CellId},
+    conditional::{Branch, ConditionalData, ConditionalId},
     error::Error,
     relationship::{Method, RelationshipData, RelationshipId},
 };
@@ -41,6 +43,11 @@ pub struct Sheet {
     /// default method-selection direction deterministic.
     next_strength: u64,
     last_plan: Option<Vec<(RelationshipId, usize)>>,
+    /// All conditionals registered on this sheet.
+    pub(crate) conditionals: SlotMap<ConditionalId, ConditionalData>,
+    /// Union of all RelationshipIds assigned to any conditional branch or default.
+    /// Used to exclude them from the unconditional active set.
+    pub(crate) conditional_relationships: HashSet<RelationshipId>,
 }
 
 impl Sheet {
@@ -52,6 +59,8 @@ impl Sheet {
             changed_cells: Vec::new(),
             next_strength: 0,
             last_plan: None,
+            conditionals: SlotMap::with_key(),
+            conditional_relationships: HashSet::new(),
         }
     }
 
@@ -60,18 +69,20 @@ impl Sheet {
     /// The cell's `TypeId` is fixed at creation time; subsequent `write` and
     /// `read` calls that use a different type will return `Error::TypeMismatch`.
     ///
-    /// Each call increments the sheet's internal strength counter so that cells
-    /// added later have strictly higher initial strength than cells added earlier.
-    /// This makes the default method-selection direction deterministic: cells added
-    /// last are treated as sources and cells added first are treated as outputs.
-    pub fn add_cell<T: Any + 'static>(&mut self, value: T) -> CellId {
+    /// Each call increments the sheet's internal strength counter and sets bit 63
+    /// of the result. This partitions the strength space: written/added cells always
+    /// have higher strength than derived cells, ensuring stability across conditional
+    /// branch switches.
+    pub fn add_cell<T: Any + PartialEq + 'static>(&mut self, value: T) -> CellId {
         self.next_strength += 1;
+        let strength = self.next_strength | (1u64 << 63);
         self.cells.insert(CellData {
             value: Box::new(value),
             type_id: TypeId::of::<T>(),
-            strength: self.next_strength,
+            strength,
             changed: false,
             adj: Vec::new(),
+            eq_fn: |a, b| a.downcast_ref::<T>() == b.downcast_ref::<T>(),
         })
     }
 
@@ -159,6 +170,96 @@ impl Sheet {
         Ok(rel_id)
     }
 
+    /// Registers a conditional that activates relationships based on the value of `cell`.
+    ///
+    /// Each element of `branches` is `(keys, relationships)`: when the match cell's value
+    /// equals any key in `keys`, the branch's `relationships` are added to the active set
+    /// for `propagate`. Branches are evaluated in definition order; first match wins.
+    /// `default` holds relationships activated when no branch matches; pass an empty `Vec`
+    /// for no default.
+    ///
+    /// The match cell's value is compared using the equality function captured at
+    /// `add_cell` time.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidId` — `cell` is not in this sheet.
+    /// - `Error::InvalidConditional` — a branch key's `TypeId` does not match `cell`'s;
+    ///   a referenced relationship does not exist; a relationship has more than one method;
+    ///   a relationship already appears in another conditional branch; or a branch has no keys.
+    ///
+    /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R = relationships per branch.
+    pub fn add_conditional<T: Any + PartialEq + 'static>(
+        &mut self,
+        cell: CellId,
+        branches: Vec<(Vec<T>, Vec<RelationshipId>)>,
+        default: Vec<RelationshipId>,
+    ) -> Result<ConditionalId, Error> {
+        let cell_data = self.cells.get(cell).ok_or(Error::InvalidId)?;
+        if cell_data.type_id != TypeId::of::<T>() {
+            return Err(Error::InvalidConditional);
+        }
+
+        // Collect and validate all relationship IDs (branches + default).
+        let all_rels: Vec<RelationshipId> = branches
+            .iter()
+            .flat_map(|(_, rels)| rels.iter().copied())
+            .chain(default.iter().copied())
+            .collect();
+
+        for &rel_id in &all_rels {
+            let rel = self
+                .relationships
+                .get(rel_id)
+                .ok_or(Error::InvalidConditional)?;
+            if rel.methods.len() != 1 {
+                return Err(Error::InvalidConditional);
+            }
+            if self.conditional_relationships.contains(&rel_id) {
+                return Err(Error::InvalidConditional);
+            }
+        }
+
+        // Validate branch keys are non-empty.
+        for (keys, _) in &branches {
+            if keys.is_empty() {
+                return Err(Error::InvalidConditional);
+            }
+        }
+
+        // Check for duplicate relationship IDs within this call.
+        let mut seen: HashSet<RelationshipId> = HashSet::new();
+        for &rel_id in &all_rels {
+            if !seen.insert(rel_id) {
+                return Err(Error::InvalidConditional);
+            }
+        }
+
+        // Type-erase branch keys.
+        let typed_branches: Vec<Branch> = branches
+            .into_iter()
+            .map(|(keys, relationships)| Branch {
+                keys: keys
+                    .into_iter()
+                    .map(|k| Box::new(k) as Box<dyn Any>)
+                    .collect(),
+                relationships,
+            })
+            .collect();
+
+        // Record all relationships as conditional so they are excluded from the
+        // unconditional active set in propagate().
+        for &rel_id in &all_rels {
+            self.conditional_relationships.insert(rel_id);
+        }
+
+        Ok(self.conditionals.insert(ConditionalData {
+            cell,
+            branches: typed_branches,
+            default,
+        }))
+    }
+
     /// Writes a value to a cell, incrementing the cell's write-recency strength.
     ///
     /// Each successful `write` increments a global monotonic counter and assigns
@@ -178,7 +279,7 @@ impl Sheet {
             });
         }
         self.next_strength += 1;
-        cell.strength = self.next_strength;
+        cell.strength = self.next_strength | (1u64 << 63);
         cell.value = Box::new(value);
         Ok(())
     }
@@ -255,25 +356,170 @@ impl Sheet {
         self.relationships.get(id).map(|r| r.adj.as_slice())
     }
 
+    /// Returns the set of unconditional relationships transitively needed to derive
+    /// the given `match_cells`.
+    ///
+    /// Walks upstream (from each match cell, through relationships whose outputs include
+    /// the cell) collecting only relationships not in `self.conditional_relationships`.
+    /// Relationships that only take a match cell as *input* (not output) are skipped.
+    ///
+    /// - Complexity: O(C·R) in the worst case where C = cells and R = relationships.
+    fn match_cell_subgraph(&self, match_cells: &[CellId]) -> HashSet<RelationshipId> {
+        let mut result: HashSet<RelationshipId> = HashSet::new();
+        let mut visited: HashSet<CellId> = HashSet::new();
+        let mut queue: std::collections::VecDeque<CellId> = match_cells.iter().copied().collect();
+
+        for &cell in match_cells {
+            visited.insert(cell);
+        }
+
+        while let Some(cell) = queue.pop_front() {
+            for &rel_id in &self.cells[cell].adj {
+                if self.conditional_relationships.contains(&rel_id) {
+                    continue;
+                }
+                if result.contains(&rel_id) {
+                    continue;
+                }
+                let rel = &self.relationships[rel_id];
+                // Only include relationships that output this cell.
+                let outputs_cell = rel.methods.iter().any(|m| m.outputs.contains(&cell));
+                if !outputs_cell {
+                    continue;
+                }
+                result.insert(rel_id);
+                // Enqueue all inputs of this relationship for upstream BFS.
+                for method in &rel.methods {
+                    for &input in &method.inputs {
+                        if visited.insert(input) {
+                            queue.push_back(input);
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Builds the active relationship set for the general planning pass.
+    ///
+    /// Starts with all unconditional relationships (those not in
+    /// `self.conditional_relationships`), then evaluates each conditional: the first
+    /// branch whose keys contain the match cell's current value is selected, and its
+    /// relationships are added. If no branch matches, the default relationships are added.
+    ///
+    /// - Complexity: O(R + C·B·K) where R = total relationships, C = conditionals,
+    ///   B = branches per conditional, K = keys per branch.
+    fn build_active_set(&self) -> HashSet<RelationshipId> {
+        let mut active: HashSet<RelationshipId> = self
+            .relationships
+            .keys()
+            .filter(|id| !self.conditional_relationships.contains(id))
+            .collect();
+
+        for (_, cond) in &self.conditionals {
+            let cell = &self.cells[cond.cell];
+            let eq_fn = cell.eq_fn;
+            let value = cell.value.as_ref();
+
+            let mut matched = false;
+            for branch in &cond.branches {
+                if branch.keys.iter().any(|key| eq_fn(value, key.as_ref())) {
+                    for &rel_id in &branch.relationships {
+                        active.insert(rel_id);
+                    }
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                for &rel_id in &cond.default {
+                    active.insert(rel_id);
+                }
+            }
+        }
+
+        active
+    }
+
+    /// Assigns derived-cell strengths after a planning pass.
+    ///
+    /// Walks `execution_order` and assigns a decrementing counter (starting at
+    /// `0x7FFF_FFFF_FFFF_FFFF`) to each output cell of each selected method, in
+    /// execution order. Cells evaluated first receive the highest derived strength.
+    /// Source cells (not the output of any selected method) are not modified.
+    ///
+    /// - Complexity: O(R·K) where R is the number of entries and K is the maximum
+    ///   outputs per method.
+    fn post_process_strengths(&mut self, execution_order: &[(RelationshipId, usize)]) {
+        let mut derived_strength = u64::MAX >> 1; // 0x7FFF_FFFF_FFFF_FFFF
+        let mut seen: std::collections::HashSet<CellId> = std::collections::HashSet::new();
+        for &(rel_id, method_idx) in execution_order {
+            if let Some(rel) = self.relationships.get(rel_id)
+                && let Some(method) = rel.methods.get(method_idx)
+            {
+                for &output in &method.outputs {
+                    if seen.insert(output)
+                        && let Some(cell) = self.cells.get_mut(output)
+                    {
+                        cell.strength = derived_strength;
+                        derived_strength = derived_strength.saturating_sub(1);
+                    }
+                }
+            }
+        }
+    }
+
     /// Runs the planning pass and executes the selected methods.
     ///
     /// Clears the changed-cell set from the previous `propagate()` call before planning.
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
-    /// On success, `selected_method` reflects the newly computed plan.
+    /// **Phase 1 — Pre-plan:** if any conditional match cells are derived (have an
+    /// in-edge in the unconditional relationship graph), the minimal unconditional
+    /// subgraph needed to compute them is planned and executed so their values are
+    /// current before branch evaluation.
+    ///
+    /// **Phase 2 — Conditional evaluation:** each conditional's match cell value is
+    /// read and compared against branch keys; the active relationship set is built.
+    ///
+    /// **Phase 3 — General plan:** the Adam algorithm runs on the active set.
+    ///
+    /// **Phase 4 — Strength post-processing:** derived cells receive low-order strengths
+    /// in evaluation order, enforcing the stability invariant.
     ///
     /// # Errors
     ///
     /// - `Error::Conflict` — no valid method assignment exists.
-    /// - `Error::MethodFailed` — a method's function returned an error, or a method produced
-    ///   the wrong number of outputs.
-    /// - `Error::TypeMismatch` — a method output's runtime type does not match the cell's
-    ///   registered type.
+    /// - `Error::MethodFailed` — a method's function returned an error, or a method
+    ///   produced the wrong number of outputs.
+    /// - `Error::TypeMismatch` — a method output's runtime type does not match the
+    ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.clear_changed();
-        let plan = crate::planner::plan(&self.cells, &self.relationships)?;
+
+        // Phase 1: pre-plan for derived match cells.
+        if !self.conditionals.is_empty() {
+            let match_cells: Vec<CellId> = self.conditionals.values().map(|c| c.cell).collect();
+            let pre_active = self.match_cell_subgraph(&match_cells);
+            if !pre_active.is_empty() {
+                let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
+                self.execute_plan(&pre_plan.execution_order)?;
+            }
+        }
+
+        // Phase 2: evaluate conditionals and build the active relationship set.
+        let active = self.build_active_set();
+
+        // Phase 3: general plan on the active set.
+        let plan = crate::planner::plan(&self.cells, &self.relationships, &active)?;
         self.execute_plan(&plan.execution_order)?;
+
+        // Phase 4: assign derived-cell strengths in evaluation order.
+        self.post_process_strengths(&plan.execution_order);
+
         self.last_plan = Some(plan.execution_order);
         Ok(())
     }
@@ -388,7 +634,10 @@ impl Sheet {
     /// Re-executes the cached plan without invoking the planner.
     ///
     /// - Precondition: Every cell written since the last successful `propagate()` or
-    ///   `propagate_without_replan()` call satisfies `is_source(id)`. Violation produces incorrect output values but no panic.
+    ///   `propagate_without_replan()` call satisfies `is_source(id)`. Violation produces
+    ///   incorrect output values but no panic.
+    /// - Precondition: If the sheet has conditionals, no match-cell value has changed
+    ///   since the last `propagate()`. Violation produces incorrect branch activation.
     ///
     /// # Errors
     ///
@@ -404,6 +653,9 @@ impl Sheet {
         };
         self.clear_changed();
         let result = self.execute_plan(&execution_order);
+        if result.is_ok() {
+            self.post_process_strengths(&execution_order);
+        }
         self.last_plan = Some(execution_order);
         result
     }
@@ -420,6 +672,95 @@ impl Default for Sheet {
 mod tests {
     use crate::{Error, Method, Sheet, cell::CellId, relationship::RelationshipId};
     use std::any::TypeId;
+
+    #[test]
+    fn add_conditional_returns_error_for_invalid_cell() {
+        let mut sheet = Sheet::new();
+        let result = sheet.add_conditional(CellId::default(), vec![(vec![0_i32], vec![])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidId)));
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_conditional_for_type_mismatch() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        // Branch keys are f64 but cell holds i32.
+        let result = sheet.add_conditional(a, vec![(vec![0.0_f64], vec![])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_conditional_for_missing_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let result = sheet.add_conditional(
+            a,
+            vec![(vec![0_i32], vec![RelationshipId::default()])],
+            vec![],
+        );
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_conditional_for_multi_method_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        // Relationship has two methods — not allowed in a conditional branch.
+        let rel = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+                Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
+            ])
+            .unwrap();
+        let result = sheet.add_conditional(a, vec![(vec![0_i32], vec![rel])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_conditional_for_empty_branch_keys() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Empty key list is invalid.
+        let result = sheet.add_conditional::<i32>(a, vec![(vec![], vec![rel])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_conditional_for_duplicate_relationship_across_branches() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Add rel to the first conditional.
+        sheet
+            .add_conditional(a, vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        // Try to add the same rel to a second conditional.
+        let result = sheet.add_conditional(a, vec![(vec![1_i32], vec![rel])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_id_for_valid_input() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        let cid = sheet
+            .add_conditional(a, vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        // ConditionalId must be a live key.
+        let _ = cid; // just check it compiles and succeeds
+    }
 
     #[test]
     fn add_cell_returns_distinct_ids() {
@@ -776,6 +1117,82 @@ mod tests {
     fn selected_method_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
         assert!(sheet.selected_method(RelationshipId::default()).is_none());
+    }
+
+    #[test]
+    fn add_cell_and_write_set_high_order_bit_on_strength() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        assert!(
+            sheet.cells[a].strength & (1u64 << 63) != 0,
+            "add_cell must set high-order bit"
+        );
+        sheet.write(a, 1_i32).unwrap();
+        assert!(
+            sheet.cells[a].strength & (1u64 << 63) != 0,
+            "write must set high-order bit"
+        );
+    }
+
+    #[test]
+    fn propagate_assigns_low_order_strength_to_derived_cells() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        sheet.write(a, 1_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert!(
+            sheet.cells[a].strength & (1u64 << 63) != 0,
+            "source cell must keep high-order strength"
+        );
+        assert!(
+            sheet.cells[b].strength & (1u64 << 63) == 0,
+            "derived cell must have low-order strength"
+        );
+        assert!(sheet.cells[a].strength > sheet.cells[b].strength);
+    }
+
+    #[test]
+    fn propagate_without_replan_keeps_derived_strengths_in_low_partition() {
+        // Set up a sheet with a conditional: mode=1 → rel_on active (a→b).
+        let mut sheet = Sheet::new();
+        let mode = sheet.add_cell(0_i32);
+        let a = sheet.add_cell(10_i32);
+        let b = sheet.add_cell(0_i32);
+
+        let rel_on = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        sheet
+            .add_conditional(mode, vec![(vec![1_i32], vec![rel_on])], vec![])
+            .unwrap();
+
+        // Full propagation with mode=1 (conditional active).
+        sheet.write(mode, 1_i32).unwrap();
+        sheet.write(a, 10_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+
+        // b should have a low-order derived strength (high-bit clear).
+        assert_eq!(
+            sheet.cells[b].strength & (1u64 << 63),
+            0,
+            "derived cell b must have low-order strength after propagate"
+        );
+
+        // Re-execute the plan without replanning. b should still be derived correctly.
+        sheet.propagate_without_replan().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+
+        // b's strength should still be in the low partition after propagate_without_replan.
+        assert_eq!(
+            sheet.cells[b].strength & (1u64 << 63),
+            0,
+            "derived cell b must have low-order strength after propagate_without_replan"
+        );
     }
 
     #[test]
