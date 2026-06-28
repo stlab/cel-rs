@@ -5,7 +5,7 @@
 //! [`Sheet`] and its [`Labels`] into a [`GraphData`] value ready for JSON encoding.
 
 use indexmap::IndexMap;
-use property_model::{CellId, Error, RelationshipId, Sheet};
+use property_model::{CellId, ConditionalId, Error, RelationshipId, Sheet};
 use serde::Serialize;
 use slotmap::Key;
 
@@ -80,36 +80,45 @@ pub enum NodeKind {
     Cell,
     /// A multi-way constraint — rendered as a `<circle>`.
     Relationship,
+    /// A conditional switch — rendered as a diamond (rotated `<rect>`).
+    Conditional,
 }
 
 /// A single node in the D3 graph.
 #[derive(Serialize, Clone, PartialEq)]
 pub struct NodeData {
-    /// Stable string ID: `"c{ffi}"` for cells, `"r{ffi}"` for relationships.
+    /// Stable string ID: `"c{ffi}"` for cells, `"r{ffi}"` for relationships, `"cond{ffi}"` for conditionals.
     pub id: String,
     pub kind: NodeKind,
-    /// Cell label (e.g. `"a"`); empty string for relationships.
+    /// Cell label (e.g. `"a"`); empty string for relationships and conditionals.
     pub label: String,
-    /// Current cell value as a display string; empty string for relationships.
+    /// Current cell value as a display string; empty string for relationships and conditionals.
     pub value: String,
+}
+
+/// Link kind tag used in the D3 graph.
+#[derive(Serialize, Clone, PartialEq, Eq)]
+pub enum LinkKind {
+    /// A regular constraint edge (cell ↔ relationship, or match cell → conditional node).
+    Constraint,
+    /// A control edge from a conditional node to a branch relationship.
+    Control,
 }
 
 /// A single edge in the D3 graph.
 ///
-/// When [`GraphData::arrows`] is `false` the edge is undirected; when `true`
-/// it is directed from `source` to `target`.
+/// When [`GraphData::arrows`] is `false` constraint edges are undirected; when `true`
+/// they are directed from `source` to `target`. Control edges are always directed
+/// (conditional node → relationship) and styled by `branch_index` and `branch_active`.
 #[derive(Serialize, Clone, PartialEq)]
 pub struct LinkData {
     pub source: String,
     pub target: String,
-}
-
-/// Placeholder for future conditional relationship groups.
-#[derive(Serialize, Clone, PartialEq)]
-pub struct GroupData {
-    pub id: String,
-    pub member_ids: Vec<String>,
-    pub condition_id: String,
+    pub kind: LinkKind,
+    /// Branch index for `Control` links; `None` for `Constraint` links and default-branch control links.
+    pub branch_index: Option<usize>,
+    /// `true` if this branch is currently active; `None` for `Constraint` links.
+    pub branch_active: Option<bool>,
 }
 
 /// Complete graph snapshot ready for JSON serialization and delivery to D3.
@@ -119,10 +128,8 @@ pub struct GraphData {
     pub links: Vec<LinkData>,
     /// Stable IDs of cells that changed during the last `propagate()` call.
     pub changed: Vec<String>,
-    /// Always empty; reserved for future `when`/`otherwise` conditional relationships.
-    pub groups: Vec<GroupData>,
-    /// `true` when at least one relationship has a cached plan and links are directed where
-    /// plans exist; `false` when no plan has been computed.
+    /// `true` when at least one relationship has a cached plan and constraint links are directed
+    /// where plans exist; `false` when no plan has been computed.
     pub arrows: bool,
 }
 
@@ -134,20 +141,28 @@ fn rel_node_id(id: RelationshipId) -> String {
     format!("r{}", id.data().as_ffi())
 }
 
+fn cond_node_id(id: ConditionalId) -> String {
+    format!("cond{}", id.data().as_ffi())
+}
+
 /// Serializes `sheet` and `labels` into a [`GraphData`] snapshot for D3.
 ///
-/// When a plan is cached (`sheet.selected_method` returns `Some`) the links are
-/// directed (inputs → relationship → outputs) and [`GraphData::arrows`] is `true`.
-/// Otherwise all cells adjacent to the relationship are emitted as undirected
-/// source→relationship edges and `arrows` is `false`.
+/// Constraint links: when a plan is cached (`sheet.selected_method` returns `Some`) links are
+/// directed (inputs → relationship → outputs) and [`GraphData::arrows`] is `true`. Otherwise
+/// all cells adjacent to the relationship are emitted as undirected source→relationship edges.
 ///
-/// - Complexity: O(c + r + e) where c is the number of cells, r the number of
-///   relationships, and e the number of cell–relationship adjacency pairs.
+/// Conditional nodes: for each conditional, emits one `Conditional` node, one `Constraint` link
+/// from the match cell to the conditional node, and one `Control` link per relationship in each
+/// branch/default. Control links carry `branch_index` and `branch_active` for rendering.
+///
+/// - Complexity: O(c + r + e + cond·b·k) where c = cells, r = relationships, e = adjacency pairs,
+///   cond = conditionals, b = branches per conditional, k = keys per branch.
 pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
     let mut nodes = Vec::new();
     let mut links = Vec::new();
     let mut arrows = false;
 
+    // Cell nodes
     for id in sheet.cells() {
         let (label, value) = labels
             .cells
@@ -162,6 +177,7 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
         });
     }
 
+    // Relationship nodes and constraint links
     for id in sheet.relationships() {
         nodes.push(NodeData {
             id: rel_node_id(id),
@@ -177,6 +193,9 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
                     links.push(LinkData {
                         source: cell_node_id(cell_id),
                         target: rel_node_id(id),
+                        kind: LinkKind::Constraint,
+                        branch_index: None,
+                        branch_active: None,
                     });
                 }
             }
@@ -185,6 +204,9 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
                     links.push(LinkData {
                         source: rel_node_id(id),
                         target: cell_node_id(cell_id),
+                        kind: LinkKind::Constraint,
+                        branch_index: None,
+                        branch_active: None,
                     });
                 }
             }
@@ -193,6 +215,64 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
                 links.push(LinkData {
                     source: cell_node_id(cell_id),
                     target: rel_node_id(id),
+                    kind: LinkKind::Constraint,
+                    branch_index: None,
+                    branch_active: None,
+                });
+            }
+        }
+    }
+
+    // Conditional nodes and control links
+    for cond_id in sheet.conditionals() {
+        let node_id = cond_node_id(cond_id);
+        nodes.push(NodeData {
+            id: node_id.clone(),
+            kind: NodeKind::Conditional,
+            label: String::new(),
+            value: String::new(),
+        });
+
+        // Constraint link: match cell → conditional node
+        if let Some(match_cell) = sheet.conditional_match_cell(cond_id) {
+            links.push(LinkData {
+                source: cell_node_id(match_cell),
+                target: node_id.clone(),
+                kind: LinkKind::Constraint,
+                branch_index: None,
+                branch_active: None,
+            });
+        }
+
+        let active_branch = sheet.conditional_active_branch(cond_id);
+
+        // Control links for named branches
+        let branch_count = sheet.conditional_branch_count(cond_id).unwrap_or(0);
+        for branch in 0..branch_count {
+            let is_active = active_branch == Some(branch);
+            if let Some(rels) = sheet.conditional_branch_relationships(cond_id, branch) {
+                for &rel_id in rels {
+                    links.push(LinkData {
+                        source: node_id.clone(),
+                        target: rel_node_id(rel_id),
+                        kind: LinkKind::Control,
+                        branch_index: Some(branch),
+                        branch_active: Some(is_active),
+                    });
+                }
+            }
+        }
+
+        // Control links for default relationships
+        let default_active = active_branch.is_none();
+        if let Some(default_rels) = sheet.conditional_default_relationships(cond_id) {
+            for &rel_id in default_rels {
+                links.push(LinkData {
+                    source: node_id.clone(),
+                    target: rel_node_id(rel_id),
+                    kind: LinkKind::Control,
+                    branch_index: None,
+                    branch_active: Some(default_active),
                 });
             }
         }
@@ -204,7 +284,6 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
         nodes,
         links,
         changed,
-        groups: vec![],
         arrows,
     }
 }
@@ -229,6 +308,53 @@ mod tests {
             .add_relationship(vec![Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| {
                 Ok(x * y)
             })])
+            .unwrap();
+
+        (sheet, labels)
+    }
+
+    // Separate helper that adds the output cell first so propagation succeeds.
+    fn demo_sheet_with_plan() -> (Sheet, Labels) {
+        let mut sheet = Sheet::new();
+        let mut labels = Labels::new();
+
+        // c added first → lowest strength (output by default).
+        let c = sheet.add_cell(0.0_f64);
+        labels.add_cell::<f64>(c, "c");
+        let a = sheet.add_cell(2.0_f64);
+        labels.add_cell::<f64>(a, "a");
+        let b = sheet.add_cell(3.0_f64);
+        labels.add_cell::<f64>(b, "b");
+
+        sheet
+            .add_relationship(vec![Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| {
+                Ok(x * y)
+            })])
+            .unwrap();
+
+        (sheet, labels)
+    }
+
+    fn sheet_with_conditional() -> (Sheet, Labels) {
+        let mut sheet = Sheet::new();
+        let mut labels = Labels::new();
+
+        let a = sheet.add_cell(2.0_f64);
+        labels.add_cell::<f64>(a, "a");
+        let b = sheet.add_cell(0.0_f64);
+        labels.add_cell::<f64>(b, "b");
+        let p = sheet.add_cell(0_i32);
+        labels.add_cell::<i32>(p, "p");
+
+        let rel = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |v: &f64| Ok(*v)),
+                Method::from_fn_1_1(b, a, |v: &f64| Ok(*v)),
+            ])
+            .unwrap();
+
+        sheet
+            .add_conditional(p, vec![(vec![0_i32], vec![rel])], vec![])
             .unwrap();
 
         (sheet, labels)
@@ -309,35 +435,6 @@ mod tests {
     }
 
     #[test]
-    fn to_graph_data_groups_is_empty() {
-        let (sheet, labels) = demo_sheet();
-        let data = to_graph_data(&sheet, &labels);
-        assert!(data.groups.is_empty());
-    }
-
-    // Separate helper that adds the output cell first so propagation succeeds.
-    fn demo_sheet_with_plan() -> (Sheet, Labels) {
-        let mut sheet = Sheet::new();
-        let mut labels = Labels::new();
-
-        // c added first → lowest strength (output by default).
-        let c = sheet.add_cell(0.0_f64);
-        labels.add_cell::<f64>(c, "c");
-        let a = sheet.add_cell(2.0_f64);
-        labels.add_cell::<f64>(a, "a");
-        let b = sheet.add_cell(3.0_f64);
-        labels.add_cell::<f64>(b, "b");
-
-        sheet
-            .add_relationship(vec![Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| {
-                Ok(x * y)
-            })])
-            .unwrap();
-
-        (sheet, labels)
-    }
-
-    #[test]
     fn to_graph_data_arrows_false_before_propagate() {
         let (sheet, labels) = demo_sheet_with_plan();
         let data = to_graph_data(&sheet, &labels);
@@ -354,7 +451,6 @@ mod tests {
 
     #[test]
     fn to_graph_data_directed_input_links_target_relationship() {
-        // Method [a, b] → c; after propagate, a and b are inputs → 2 edges into rel.
         let (mut sheet, labels) = demo_sheet_with_plan();
         sheet.propagate().unwrap();
         let data = to_graph_data(&sheet, &labels);
@@ -366,13 +462,16 @@ mod tests {
             .map(|n| n.id.clone())
             .unwrap();
 
-        let to_rel: Vec<_> = data.links.iter().filter(|l| l.target == rel_id).collect();
+        let to_rel: Vec<_> = data
+            .links
+            .iter()
+            .filter(|l| matches!(l.kind, LinkKind::Constraint) && l.target == rel_id)
+            .collect();
         assert_eq!(to_rel.len(), 2);
     }
 
     #[test]
     fn to_graph_data_directed_output_links_source_relationship() {
-        // Method [a, b] → c; after propagate, c is the output → 1 edge out of rel.
         let (mut sheet, labels) = demo_sheet_with_plan();
         sheet.propagate().unwrap();
         let data = to_graph_data(&sheet, &labels);
@@ -384,7 +483,11 @@ mod tests {
             .map(|n| n.id.clone())
             .unwrap();
 
-        let from_rel: Vec<_> = data.links.iter().filter(|l| l.source == rel_id).collect();
+        let from_rel: Vec<_> = data
+            .links
+            .iter()
+            .filter(|l| matches!(l.kind, LinkKind::Constraint) && l.source == rel_id)
+            .collect();
         assert_eq!(from_rel.len(), 1);
     }
 
@@ -409,5 +512,71 @@ mod tests {
         assert!((&labels.cells[&a_id].write_str)(&mut sheet, "5.0").is_ok());
         let display = &labels.cells[&a_id].display;
         assert_eq!(display(&sheet), "5");
+    }
+
+    #[test]
+    fn to_graph_data_emits_conditional_node() {
+        let (sheet, labels) = sheet_with_conditional();
+        let data = to_graph_data(&sheet, &labels);
+        assert!(
+            data.nodes.iter().any(|n| n.kind == NodeKind::Conditional),
+            "expected a Conditional node"
+        );
+    }
+
+    #[test]
+    fn to_graph_data_emits_constraint_link_from_match_cell_to_conditional() {
+        let (sheet, labels) = sheet_with_conditional();
+        let data = to_graph_data(&sheet, &labels);
+        let cond_id = data
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Conditional)
+            .map(|n| n.id.clone())
+            .unwrap();
+        assert!(
+            data.links
+                .iter()
+                .any(|l| matches!(l.kind, LinkKind::Constraint) && l.target == cond_id),
+            "expected a Constraint link targeting the conditional node"
+        );
+    }
+
+    #[test]
+    fn to_graph_data_emits_control_link_for_branch_relationship() {
+        let (sheet, labels) = sheet_with_conditional();
+        let data = to_graph_data(&sheet, &labels);
+        assert!(
+            data.links
+                .iter()
+                .any(|l| matches!(l.kind, LinkKind::Control)),
+            "expected at least one Control link"
+        );
+    }
+
+    #[test]
+    fn to_graph_data_active_branch_control_link_is_active() {
+        let (sheet, labels) = sheet_with_conditional();
+        let data = to_graph_data(&sheet, &labels);
+        let active_control = data
+            .links
+            .iter()
+            .find(|l| matches!(l.kind, LinkKind::Control) && l.branch_index == Some(0));
+        assert!(
+            active_control.is_some(),
+            "expected a Control link for branch 0"
+        );
+        assert_eq!(active_control.unwrap().branch_active, Some(true));
+    }
+
+    #[test]
+    fn to_graph_data_no_groups_field() {
+        let (sheet, labels) = sheet_with_conditional();
+        let data = to_graph_data(&sheet, &labels);
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(
+            !json.contains("\"groups\""),
+            "GraphData must not contain groups"
+        );
     }
 }
