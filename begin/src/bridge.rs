@@ -89,6 +89,7 @@ pub enum NodeKind {
 pub struct NodeData {
     /// Stable string ID: `"c{ffi}"` for cells, `"r{ffi}"` for relationships, `"cond{ffi}"` for conditionals.
     pub id: String,
+    /// The kind of node, determining its visual rendering.
     pub kind: NodeKind,
     /// Cell label (e.g. `"a"`); empty string for relationships and conditionals.
     pub label: String,
@@ -112,8 +113,11 @@ pub enum LinkKind {
 /// (conditional node → relationship) and styled by `branch_index` and `branch_active`.
 #[derive(Serialize, Clone, PartialEq)]
 pub struct LinkData {
+    /// Stable string ID of the source node.
     pub source: String,
+    /// Stable string ID of the target node.
     pub target: String,
+    /// The kind of link, determining its visual rendering.
     pub kind: LinkKind,
     /// Branch index for `Control` links; `None` for `Constraint` links and default-branch control links.
     pub branch_index: Option<usize>,
@@ -124,7 +128,9 @@ pub struct LinkData {
 /// Complete graph snapshot ready for JSON serialization and delivery to D3.
 #[derive(Serialize, Clone, PartialEq)]
 pub struct GraphData {
+    /// All nodes in the graph snapshot.
     pub nodes: Vec<NodeData>,
+    /// All links (constraint and control) in the graph snapshot.
     pub links: Vec<LinkData>,
     /// Stable IDs of cells that changed during the last `propagate()` call.
     pub changed: Vec<String>,
