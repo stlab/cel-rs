@@ -6,17 +6,24 @@
     var CELL_H = 36;
     var CELL_RX = 4;
     var REL_R = 16;
+    var COND_SIZE = 20;                                   // NEW: diamond half-width/height
     var CELL_COLLIDE_R = 38;
     var REL_COLLIDE_R = 22;
+    var COND_COLLIDE_R = COND_SIZE * Math.SQRT2;          // NEW: diamond circumradius
     var PULSE_COLOR = '#f90';
     var PULSE_ON_MS = 200;
     var PULSE_OFF_MS = 400;
+    var BRANCH_COLORS = ['#4a90d9', '#e67e22'];           // NEW: branch 0=blue, 1=orange
+    var DEFAULT_BRANCH_COLOR = '#888';                    // NEW: default/no-branch control links
+    var INACTIVE_OPACITY = 0.25;                          // NEW: dimmed inactive elements
 
     var svg = null;
     var simulation = null;
+    var controlLinkLayer = null;                          // NEW
     var linkLayer = null;
     var cellLayer = null;
     var relLayer = null;
+    var condLayer = null;                                 // NEW
     var labelLayer = null;
     var valueLayer = null;
     var nodes = [];
@@ -47,15 +54,16 @@
         return { x: cx - dx / dist * r, y: cy - dy / dist * r };
     }
 
-    // Returns edge-to-edge endpoints for a link after D3 resolves source/target to objects.
+    // CHANGED: handles Cell, Relationship, and Conditional source/target kinds.
     function linkEndpoints(d) {
         var s = d.source, t = d.target;
-        var srcPt = s.kind === 'Cell'
-            ? cellEdgePoint(t.x, t.y, s.x, s.y)
-            : circleEdgePoint(t.x, t.y, s.x, s.y, REL_R);
-        var tgtPt = t.kind === 'Cell'
-            ? cellEdgePoint(s.x, s.y, t.x, t.y)
-            : circleEdgePoint(s.x, s.y, t.x, t.y, REL_R);
+        function edgePt(node, ox, oy) {
+            if (node.kind === 'Cell') return cellEdgePoint(ox, oy, node.x, node.y);
+            var r = node.kind === 'Conditional' ? COND_COLLIDE_R : REL_R;
+            return circleEdgePoint(ox, oy, node.x, node.y, r);
+        }
+        var srcPt = edgePt(s, t.x, t.y);
+        var tgtPt = edgePt(t, s.x, s.y);
         return { x1: srcPt.x, y1: srcPt.y, x2: tgtPt.x, y2: tgtPt.y };
     }
 
@@ -98,11 +106,13 @@
             .attr('orient', 'auto')
             .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#999');
 
-        // Layer groups in z-order: background → links → cells → relationships → labels → values
+        // Layer z-order: bg → control links → constraint links → cells → rels → conditionals → labels → values
         svg.append('g').attr('class', 'bg-layer');
+        controlLinkLayer = svg.append('g').attr('class', 'control-link-layer'); // NEW
         linkLayer = svg.append('g').attr('class', 'link-layer');
         cellLayer = svg.append('g').attr('class', 'cell-layer');
         relLayer = svg.append('g').attr('class', 'rel-layer');
+        condLayer = svg.append('g').attr('class', 'cond-layer');               // NEW
         labelLayer = svg.append('g').attr('class', 'label-layer');
         valueLayer = svg.append('g').attr('class', 'value-layer');
 
@@ -110,8 +120,12 @@
             .force('link', d3.forceLink().id(function (d) { return d.id; }).distance(LINK_DISTANCE))
             .force('charge', d3.forceManyBody().strength(CHARGE_STRENGTH))
             .force('center', d3.forceCenter(width / 2, height / 2))
-            .force('collide', d3.forceCollide()
-                .radius(function (d) { return d.kind === 'Cell' ? CELL_COLLIDE_R : REL_COLLIDE_R; }));
+            // CHANGED: collision radius handles Conditional nodes.
+            .force('collide', d3.forceCollide().radius(function (d) {
+                if (d.kind === 'Cell') return CELL_COLLIDE_R;
+                if (d.kind === 'Conditional') return COND_COLLIDE_R;
+                return REL_COLLIDE_R;
+            }));
 
         simulation.on('tick', ticked);
 
@@ -152,10 +166,13 @@
         var changedSet = new Set(data.changed || []);
         var cellNodes = nodes.filter(function (n) { return n.kind === 'Cell'; });
         var relNodes = nodes.filter(function (n) { return n.kind === 'Relationship'; });
+        var condNodes = nodes.filter(function (n) { return n.kind === 'Conditional'; }); // NEW
+        var constraintLinks = links.filter(function (l) { return l.kind === 'Constraint'; }); // NEW
+        var controlLinks = links.filter(function (l) { return l.kind === 'Control'; });         // NEW
 
-        // Join links
+        // Constraint links (existing behavior)
         linkLayer.selectAll('line')
-            .data(links, function (d) {
+            .data(constraintLinks, function (d) {         // CHANGED: constraintLinks only
                 var src = typeof d.source === 'object' ? d.source.id : d.source;
                 var tgt = typeof d.target === 'object' ? d.target.id : d.target;
                 return src + '-' + tgt;
@@ -167,6 +184,26 @@
                 var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
                 var tgtNode = nodeMap.get(tgtId);
                 return tgtNode ? 'url(#arrowhead)' : null;
+            });
+
+        // NEW: Control links (dashed, color-coded by branch)
+        controlLinkLayer.selectAll('line')
+            .data(controlLinks, function (d) {
+                var src = typeof d.source === 'object' ? d.source.id : d.source;
+                var tgt = typeof d.target === 'object' ? d.target.id : d.target;
+                return src + '-' + tgt;
+            })
+            .join('line')
+            .attr('class', 'link-control')
+            .attr('stroke-dasharray', '5 3')
+            .attr('stroke', function (d) {
+                if (d.branch_index === null || d.branch_index === undefined) {
+                    return DEFAULT_BRANCH_COLOR;
+                }
+                return BRANCH_COLORS[d.branch_index % BRANCH_COLORS.length] || DEFAULT_BRANCH_COLOR;
+            })
+            .attr('stroke-opacity', function (d) {
+                return d.branch_active ? 1.0 : INACTIVE_OPACITY;
             });
 
         // Join cell rects
@@ -184,6 +221,30 @@
             .join('circle')
             .attr('class', 'node-relationship')
             .attr('r', REL_R);
+
+        // NEW: Dim inactive relationship circles.
+        // A relationship is inactive if any control link targets it but none are active.
+        (function () {
+            var controlledRelIds = new Set();
+            var activeRelIds = new Set();
+            controlLinks.forEach(function (l) {
+                var tgtId = typeof l.target === 'object' ? l.target.id : l.target;
+                controlledRelIds.add(tgtId);
+                if (l.branch_active) activeRelIds.add(tgtId);
+            });
+            relLayer.selectAll('circle').attr('opacity', function (d) {
+                return (controlledRelIds.has(d.id) && !activeRelIds.has(d.id))
+                    ? INACTIVE_OPACITY : null;
+            });
+        }());
+
+        // NEW: Conditional diamond nodes (rotated rect)
+        condLayer.selectAll('rect')
+            .data(condNodes, function (d) { return d.id; })
+            .join('rect')
+            .attr('class', 'node-conditional')
+            .attr('width', COND_SIZE * 2)
+            .attr('height', COND_SIZE * 2);
 
         // Join cell name labels (centered inside rect)
         labelLayer.selectAll('text')
@@ -209,8 +270,8 @@
                 .style('fill', null);
         }
 
-        // Always update simulation data so that link source/target are resolved
-        // from string IDs to node objects before ticked() accesses d.source.x etc.
+        // Feed ALL links to the simulation (both constraint and control) so D3
+        // resolves source/target strings to node objects for ticked().
         simulation.nodes(nodes);
         simulation.force('link').links(links);
 
@@ -224,12 +285,20 @@
     }
 
     function ticked() {
-        // Draw lines edge-to-edge so arrowhead tips land exactly at node boundaries.
+        // Constraint links: edge-to-edge so arrowheads land at node boundaries.
         linkLayer.selectAll('line').each(function (d) {
             var ep = linkEndpoints(d);
             d3.select(this)
                 .attr('x1', ep.x1).attr('y1', ep.y1)
                 .attr('x2', ep.x2).attr('y2', ep.y2);
+        });
+
+        // NEW: Control links: center-to-center (dashed lines, no arrowhead clipping needed).
+        controlLinkLayer.selectAll('line').each(function (d) {
+            var s = d.source, t = d.target;
+            d3.select(this)
+                .attr('x1', s.x).attr('y1', s.y)
+                .attr('x2', t.x).attr('y2', t.y);
         });
 
         cellLayer.selectAll('rect')
@@ -239,6 +308,12 @@
         relLayer.selectAll('circle')
             .attr('cx', function (d) { return d.x; })
             .attr('cy', function (d) { return d.y; });
+
+        // NEW: Conditional diamond: rotated rect centered at (d.x, d.y).
+        condLayer.selectAll('rect')
+            .attr('transform', function (d) {
+                return 'translate(' + d.x + ',' + d.y + ') rotate(45) translate(' + (-COND_SIZE) + ',' + (-COND_SIZE) + ')';
+            });
 
         // Cell name: upper half of rect
         labelLayer.selectAll('text')
