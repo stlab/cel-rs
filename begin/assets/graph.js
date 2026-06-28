@@ -170,7 +170,7 @@
         var constraintLinks = links.filter(function (l) { return l.kind === 'Constraint'; }); // NEW
         var controlLinks = links.filter(function (l) { return l.kind === 'Control'; });         // NEW
 
-        // Constraint links (existing behavior)
+        // Constraint links (marker-end and opacity set below in the dimming IIFE)
         linkLayer.selectAll('line')
             .data(constraintLinks, function (d) {         // CHANGED: constraintLinks only
                 var src = typeof d.source === 'object' ? d.source.id : d.source;
@@ -178,13 +178,7 @@
                 return src + '-' + tgt;
             })
             .join('line')
-            .attr('class', 'link')
-            .attr('marker-end', function (d) {
-                if (!data.arrows) return null;
-                var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
-                var tgtNode = nodeMap.get(tgtId);
-                return tgtNode ? 'url(#arrowhead)' : null;
-            });
+            .attr('class', 'link');
 
         // NEW: Control links (dashed, color-coded by branch)
         controlLinkLayer.selectAll('line')
@@ -222,8 +216,9 @@
             .attr('class', 'node-relationship')
             .attr('r', REL_R);
 
-        // NEW: Dim inactive relationship circles.
+        // Dim inactive relationship circles and their constraint links.
         // A relationship is inactive if any control link targets it but none are active.
+        // Inactive links also lose their arrowheads.
         (function () {
             var controlledRelIds = new Set();
             var activeRelIds = new Set();
@@ -232,10 +227,26 @@
                 controlledRelIds.add(tgtId);
                 if (l.branch_active) activeRelIds.add(tgtId);
             });
+            function isInactiveRel(id) {
+                return controlledRelIds.has(id) && !activeRelIds.has(id);
+            }
             relLayer.selectAll('circle').attr('opacity', function (d) {
-                return (controlledRelIds.has(d.id) && !activeRelIds.has(d.id))
-                    ? INACTIVE_OPACITY : null;
+                return isInactiveRel(d.id) ? INACTIVE_OPACITY : null;
             });
+            linkLayer.selectAll('line')
+                .attr('opacity', function (d) {
+                    var srcId = typeof d.source === 'object' ? d.source.id : d.source;
+                    var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
+                    return (isInactiveRel(srcId) || isInactiveRel(tgtId)) ? INACTIVE_OPACITY : null;
+                })
+                .attr('marker-end', function (d) {
+                    if (!data.arrows) return null;
+                    var srcId = typeof d.source === 'object' ? d.source.id : d.source;
+                    var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
+                    if (isInactiveRel(srcId) || isInactiveRel(tgtId)) return null;
+                    var tgtNode = nodeMap.get(tgtId);
+                    return tgtNode ? 'url(#arrowhead)' : null;
+                });
         }());
 
         // NEW: Conditional diamond nodes (rotated rect)
