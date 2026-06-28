@@ -14,8 +14,10 @@
     var PULSE_ON_MS = 200;
     var PULSE_OFF_MS = 400;
     var BRANCH_COLORS = ['#4a90d9', '#e67e22'];           // NEW: branch 0=blue, 1=orange
+    var BRANCH_COLORS_DIM = ['#a8c8f0', '#f5c8a0'];      // NEW: inactive branch colors
     var DEFAULT_BRANCH_COLOR = '#888';                    // NEW: default/no-branch control links
-    var INACTIVE_OPACITY = 0.25;                          // NEW: dimmed inactive elements
+    var DEFAULT_BRANCH_DIM = '#bbb';                      // NEW: inactive default control links
+    var INACTIVE_STROKE = '#ccc';                         // NEW: stroke color for inactive elements
 
     var svg = null;
     var simulation = null;
@@ -196,8 +198,13 @@
                 }
                 return BRANCH_COLORS[d.branch_index % BRANCH_COLORS.length] || DEFAULT_BRANCH_COLOR;
             })
-            .attr('stroke-opacity', function (d) {
-                return d.branch_active ? 1.0 : INACTIVE_OPACITY;
+            .attr('stroke', function (d) {
+                var idx = (d.branch_index === null || d.branch_index === undefined)
+                    ? -1 : d.branch_index % BRANCH_COLORS.length;
+                if (d.branch_active) {
+                    return idx < 0 ? DEFAULT_BRANCH_COLOR : BRANCH_COLORS[idx];
+                }
+                return idx < 0 ? DEFAULT_BRANCH_DIM : BRANCH_COLORS_DIM[idx];
             });
 
         // Join cell rects
@@ -230,14 +237,14 @@
             function isInactiveRel(id) {
                 return controlledRelIds.has(id) && !activeRelIds.has(id);
             }
-            relLayer.selectAll('circle').attr('opacity', function (d) {
-                return isInactiveRel(d.id) ? INACTIVE_OPACITY : null;
+            relLayer.selectAll('circle').attr('stroke', function (d) {
+                return isInactiveRel(d.id) ? INACTIVE_STROKE : null;
             });
             linkLayer.selectAll('line')
-                .attr('opacity', function (d) {
+                .attr('stroke', function (d) {
                     var srcId = typeof d.source === 'object' ? d.source.id : d.source;
                     var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
-                    return (isInactiveRel(srcId) || isInactiveRel(tgtId)) ? INACTIVE_OPACITY : null;
+                    return (isInactiveRel(srcId) || isInactiveRel(tgtId)) ? INACTIVE_STROKE : null;
                 })
                 .attr('marker-end', function (d) {
                     if (!data.arrows) return null;
