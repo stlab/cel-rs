@@ -34,9 +34,10 @@ pub enum Error {
     InvalidMethod,
 
     /// A conditional is structurally invalid: the cell was not found, a referenced
-    /// relationship was not found or has more than one method, a relationship appears
-    /// in more than one conditional branch, a branch key's type does not match the
-    /// cell's registered type, or a branch has no keys.
+    /// relationship was not found, a branch relationship that shares a cell with the match
+    /// cell or any of its unconditional upstream contributors has more than one method, a
+    /// relationship appears in more than one conditional branch, a branch key's type does
+    /// not match the cell's registered type, or a branch has no keys.
     InvalidConditional,
 }
 
