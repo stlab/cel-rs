@@ -237,11 +237,11 @@
             function isInactiveRel(id) {
                 return controlledRelIds.has(id) && !activeRelIds.has(id);
             }
-            relLayer.selectAll('circle').attr('stroke', function (d) {
+            relLayer.selectAll('circle').style('stroke', function (d) {
                 return isInactiveRel(d.id) ? INACTIVE_STROKE : null;
             });
             linkLayer.selectAll('line')
-                .attr('stroke', function (d) {
+                .style('stroke', function (d) {
                     var srcId = typeof d.source === 'object' ? d.source.id : d.source;
                     var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
                     return (isInactiveRel(srcId) || isInactiveRel(tgtId)) ? INACTIVE_STROKE : null;
