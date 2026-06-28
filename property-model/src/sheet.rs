@@ -185,9 +185,9 @@ impl Sheet {
     ///
     /// - `Error::InvalidId` — `cell` is not in this sheet.
     /// - `Error::InvalidConditional` — a branch key's `TypeId` does not match `cell`'s;
-    ///   a referenced relationship does not exist; a relationship that involves the match cell
-    ///   has more than one method; a relationship already appears in another conditional branch;
-    ///   or a branch has no keys.
+    ///   a referenced relationship does not exist; a branch relationship that shares a cell with
+    ///   the match cell or any of its unconditional upstream contributors has more than one method;
+    ///   a relationship already appears in another conditional branch; or a branch has no keys.
     ///
     /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R = relationships per branch.
     pub fn add_conditional<T: Any + PartialEq + 'static>(
