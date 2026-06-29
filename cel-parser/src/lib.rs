@@ -85,7 +85,7 @@
 //! ```
 
 mod error;
-mod lex_lexer;
+pub mod lex_lexer;
 pub mod op_table;
 
 pub use error::{CELError, FormatRustcStyle, ParseError, SourceSpan, SpanContext};
@@ -310,6 +310,43 @@ impl CELParser {
         self.tokens = Some(LexLexer::new(tokens).peekable());
         self.context = DynSegment::new::<()>();
         self.last_span = Span::call_site();
+    }
+
+    /// Sets the token stream from an existing [`LexLexer`] iterator for inline expression parsing.
+    ///
+    /// Resets the segment context. Use together with [`parse_or_expression`](Self::parse_or_expression)
+    /// and [`take_lex_tokens`](Self::take_lex_tokens) to share a token stream between pm-lang and
+    /// [`CELParser`].
+    pub fn set_lex_tokens(&mut self, tokens: std::iter::Peekable<lex_lexer::LexLexer>) {
+        self.tokens = Some(tokens);
+        self.context = DynSegment::new::<()>();
+        self.last_span = Span::call_site();
+    }
+
+    /// Parses one `or_expression` from the current token stream and returns the segment.
+    ///
+    /// Unlike [`parse_str`](Self::parse_str), this method does not require end-of-stream,
+    /// allowing pm-lang to parse an expression embedded within a larger token stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input does not contain a valid `or_expression`.
+    pub fn parse_or_expression(&mut self) -> Result<DynSegment> {
+        if !self.is_or_expression()? {
+            return Err(self.error_at("expression expected"));
+        }
+        Ok(std::mem::replace(
+            &mut self.context,
+            DynSegment::new::<()>(),
+        ))
+    }
+
+    /// Returns the remaining token stream after expression parsing.
+    ///
+    /// Call after [`parse_or_expression`](Self::parse_or_expression) to recover the shared
+    /// [`LexLexer`] for continued pm-lang parsing.
+    pub fn take_lex_tokens(&mut self) -> Option<std::iter::Peekable<lex_lexer::LexLexer>> {
+        self.tokens.take()
     }
 
     /// Parses a token stream into a [`DynSegment`].
@@ -1804,6 +1841,36 @@ mod tests {
         // `else` with no body is a parse error.
         let mut parser = CELParser::new(OpLookup::new());
         assert!(parser.parse_str("if true { () } else").is_err());
+    }
+
+    #[test]
+    fn parse_or_expression_stops_before_close_brace() {
+        use proc_macro2::TokenTree;
+
+        // Create the token stream which becomes a Group
+        let stream: proc_macro2::TokenStream = "{ 10i32 + 20i32 }".parse().unwrap();
+        let mut tokens = stream.into_iter();
+
+        // The first token is a Group (the braces)
+        let group = match tokens.next() {
+            Some(TokenTree::Group(g)) => g,
+            other => panic!("expected Group, got {:?}", other),
+        };
+
+        // Create lexer from the group's inner tokens plus the remaining
+        let group_tokens = group.stream().into_iter();
+
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(lex_lexer::LexLexer::new(group_tokens).peekable());
+        let mut seg = parser.parse_or_expression().expect("parse failed");
+        let result: i32 = seg.call0().expect("call failed");
+        assert_eq!(result, 30);
+        let remaining: Vec<_> = parser.take_lex_tokens().expect("tokens present").collect();
+        assert_eq!(
+            remaining.len(),
+            0,
+            "expected no remaining tokens (braces were Group delimiters)"
+        );
     }
 }
 

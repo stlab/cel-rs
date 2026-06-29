@@ -151,6 +151,8 @@ impl LexLexer {
                 | ('>', '=')
                 | ('<', '<')
                 | ('>', '>')
+                | ('-', '>')
+                | ('=', '>')
         )
     }
 
@@ -549,5 +551,41 @@ mod tests {
         assert!(matches!(tokens[0], Token::Identifier(_)));
         assert!(matches!(&tokens[1], Token::Punct { op, .. } if op == "+"));
         assert!(matches!(tokens[2], Token::Literal(Lit::Int(..))));
+    }
+
+    #[test]
+    fn arrow_is_two_char_punct() {
+        let stream: TokenStream = "->".parse().unwrap();
+        let mut lexer = LexLexer::new(stream.into_iter());
+        let tok = lexer.next().expect("one token");
+        assert!(
+            matches!(
+                tok,
+                Token::Punct {
+                    op: PunctOp::Two(['-', '>']),
+                    ..
+                }
+            ),
+            "expected PunctOp::Two([\"->\"])), got {tok:?}"
+        );
+        assert!(lexer.next().is_none(), "expected no more tokens");
+    }
+
+    #[test]
+    fn fat_arrow_is_two_char_punct() {
+        let stream: TokenStream = "=>".parse().unwrap();
+        let mut lexer = LexLexer::new(stream.into_iter());
+        let tok = lexer.next().expect("one token");
+        assert!(
+            matches!(
+                tok,
+                Token::Punct {
+                    op: PunctOp::Two(['=', '>']),
+                    ..
+                }
+            ),
+            "expected PunctOp::Two([\"=>\"]), got {tok:?}"
+        );
+        assert!(lexer.next().is_none(), "expected no more tokens");
     }
 }
