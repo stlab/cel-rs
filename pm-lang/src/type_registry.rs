@@ -81,6 +81,9 @@ fn push_arg_impl<T: 'static + Clone>(segment: &mut DynSegment, index: usize) {
     segment.push_arg::<T>(index);
 }
 
+/// Calls `Sheet::add_conditional::<T>` from type-erased branch data.
+///
+/// - Precondition: each `Box<dyn Any>` in `branches` holds a value of type `T`.
 fn add_conditional_impl<T: Any + PartialEq + 'static>(
     sheet: &mut Sheet,
     cell: CellId,
