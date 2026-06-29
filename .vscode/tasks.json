@@ -12,7 +12,7 @@
         {
             "label": "worktree: create",
             "type": "shell",
-            "command": "git worktree add \".claude/worktrees/${input:worktreeName}\" -b \"worktree-${input:worktreeName}\" && cd \".claude/worktrees/${input:worktreeName}\" && tokensave init && code --new-window .",
+            "command": "git worktree add \".claude/worktrees/${input:worktreeName}\" -b \"worktree-${input:worktreeName}\" && tokensave branch add \"worktree-${input:worktreeName}\" && code --new-window \".claude/worktrees/${input:worktreeName}\"",
             "options": {
                 "cwd": "${workspaceFolder}"
             },
