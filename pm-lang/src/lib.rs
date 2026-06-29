@@ -19,10 +19,11 @@
 //! "#).unwrap();
 //! ```
 
-mod error;
 mod parser;
 pub mod type_registry;
 
+// pm-lang reuses cel_parser::ParseError directly; no new error type is introduced.
+// All parse errors carry a proc_macro2::Span for source-location diagnostics.
 pub use cel_parser::ParseError;
 pub use parser::PmParser;
 pub use type_registry::TypeRegistry;

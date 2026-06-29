@@ -22,7 +22,11 @@ thread_local! {
 struct DynCallGuard;
 
 impl Drop for DynCallGuard {
-    /// Clears the `call_dyn` thread-locals.
+    // Zeroes rather than restores the prior thread-local state.
+    // This is safe as long as call_dyn is not re-entered on the same thread
+    // (no nested call_dyn). If nested calls become necessary in the future,
+    // change to save/restore: capture (CALL_DYN_PTR, CALL_DYN_LEN) at guard
+    // construction and restore them here instead of zeroing.
     fn drop(&mut self) {
         CALL_DYN_PTR.with(|c| c.set(0));
         CALL_DYN_LEN.with(|c| c.set(0));

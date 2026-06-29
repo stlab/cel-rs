@@ -1052,4 +1052,32 @@ mod tests {
             "float literal for i32 annotation must be an error"
         );
     }
+
+    #[test]
+    fn parse_and_propagate_sheet() {
+        let mut p = PmParser::new(TypeRegistry::new(), OpLookup::new());
+        let mut sheet = p
+            .parse_str(
+                r#"
+            sheet image_resize {
+                cell width:  f64 = 4.0;
+                cell height: f64 = 3.0;
+                cell area:   f64;
+                relationship {
+                    method [width, height] -> [area]   { width * height }
+                    method [area, height]  -> [width]  { area / height }
+                    method [width, area]   -> [height] { area / width }
+                }
+            }
+        "#,
+            )
+            .unwrap();
+
+        // The relationship should compute area = width * height = 4.0 * 3.0 = 12.0.
+        // We can't read cells by name yet (no name→CellId API on Sheet), so we verify
+        // the sheet propagated without error, which exercises the full call_dyn path.
+        // A future test can assert specific cell values once a name-lookup API exists.
+        sheet.propagate().unwrap();
+        let _ = sheet; // sheet is live and propagated
+    }
 }
