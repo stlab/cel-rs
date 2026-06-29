@@ -135,6 +135,11 @@ impl ParseContext {
         ok
     }
 
+    /// Consumes `{`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the next token is not `{`.
     fn expect_open_brace(&mut self) -> Result<Span> {
         let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
             Some(Token::OpenDelim {
@@ -151,6 +156,11 @@ impl ParseContext {
         }
     }
 
+    /// Consumes `}`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the next token is not `}`.
     fn expect_close_brace(&mut self) -> Result<Span> {
         let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
             Some(Token::CloseDelim {
@@ -167,6 +177,11 @@ impl ParseContext {
         }
     }
 
+    /// Consumes `[`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the next token is not `[`.
     fn expect_open_bracket(&mut self) -> Result<Span> {
         let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
             Some(Token::OpenDelim {
@@ -183,6 +198,11 @@ impl ParseContext {
         }
     }
 
+    /// Consumes `]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the next token is not `]`.
     fn expect_close_bracket(&mut self) -> Result<Span> {
         let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
             Some(Token::CloseDelim {
@@ -684,6 +704,7 @@ macro_rules! try_parse_float {
     };
 }
 
+/// Parses `i` as the integer or float type described by `entry`, returning `None` on mismatch.
 fn parse_int_literal(entry: &TypeEntry, i: &syn::LitInt) -> Option<Box<dyn Any>> {
     match entry.type_id {
         t if t == TypeId::of::<i8>() => try_parse_int!(i, i8),
@@ -704,6 +725,7 @@ fn parse_int_literal(entry: &TypeEntry, i: &syn::LitInt) -> Option<Box<dyn Any>>
     }
 }
 
+/// Parses `f` as the float type described by `entry`, returning `None` on mismatch.
 fn parse_float_literal(entry: &TypeEntry, f: &syn::LitFloat) -> Option<Box<dyn Any>> {
     match entry.type_id {
         t if t == TypeId::of::<f64>() => try_parse_float!(f, f64),
@@ -1018,6 +1040,16 @@ mod tests {
         assert!(
             result.is_err(),
             "float literal for i32 match cell must be an error"
+        );
+    }
+
+    #[test]
+    fn parse_cell_literal_type_mismatch_is_error() {
+        // Float literal for an i32 cell should be a parse error.
+        let result = parser().parse_str("sheet s { cell x: i32 = 1.0; }");
+        assert!(
+            result.is_err(),
+            "float literal for i32 annotation must be an error"
         );
     }
 }
