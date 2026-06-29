@@ -193,12 +193,6 @@
             .attr('class', 'link-control')
             .attr('stroke-dasharray', '5 3')
             .attr('stroke', function (d) {
-                if (d.branch_index === null || d.branch_index === undefined) {
-                    return DEFAULT_BRANCH_COLOR;
-                }
-                return BRANCH_COLORS[d.branch_index % BRANCH_COLORS.length] || DEFAULT_BRANCH_COLOR;
-            })
-            .attr('stroke', function (d) {
                 var idx = (d.branch_index === null || d.branch_index === undefined)
                     ? -1 : d.branch_index % BRANCH_COLORS.length;
                 if (d.branch_active) {

@@ -93,16 +93,16 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
                         if let Some(meta) = labels_r.cells.get(&id) {
                             if (meta.write_str)(&mut sheet_w, &val).is_ok() {
                                 // A conditional match cell changes the active constraint set
-                        // when written, which invalidates the plan even if the cell
-                        // is a source — so we must always replan for match cells.
-                        let is_match_cell = sheet_w
-                            .conditionals()
-                            .any(|cid| sheet_w.conditional_match_cell(cid) == Some(id));
-                        let result = if sheet_w.is_source(id) && !is_match_cell {
-                            sheet_w.propagate_without_replan()
-                        } else {
-                            sheet_w.propagate()
-                        };
+                                // when written, which invalidates the plan even if the cell
+                                // is a source — so we must always replan for match cells.
+                                let is_match_cell = sheet_w
+                                    .conditionals()
+                                    .any(|cid| sheet_w.conditional_match_cell(cid) == Some(id));
+                                let result = if sheet_w.is_source(id) && !is_match_cell {
+                                    sheet_w.propagate_without_replan()
+                                } else {
+                                    sheet_w.propagate()
+                                };
                                 has_error.set(result.is_err());
                             } else {
                                 has_error.set(true);
