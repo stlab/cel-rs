@@ -21,7 +21,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use cel_runtime::DynSegment;
-use property_model::{CellId, Sheet};
+use property_model::{CellId, ConditionalId, RelationshipId, Sheet};
 
 /// Registers a `push_arg<T>(index)` op on a segment.
 pub type PushArgFn = fn(&mut DynSegment, usize);
@@ -31,6 +31,17 @@ pub type AddCellFn = fn(&mut Sheet, Box<dyn Any>) -> CellId;
 
 /// Executes a compiled segment with the supplied inputs and boxes the result.
 pub type CallDynFn = fn(&mut DynSegment, &[&dyn Any]) -> anyhow::Result<Box<dyn Any>>;
+
+/// Calls `Sheet::add_conditional` with the appropriate concrete type.
+///
+/// Each branch carries a single boxed key value and the `RelationshipId` for that branch.
+/// The default is a list of `RelationshipId`s active when no branch key matches.
+pub type AddConditionalFn = fn(
+    &mut Sheet,
+    CellId,
+    Vec<(Box<dyn Any>, RelationshipId)>,
+    Vec<RelationshipId>,
+) -> Result<ConditionalId, property_model::Error>;
 
 /// Metadata for a single type registered in a [`TypeRegistry`].
 pub struct TypeEntry {
@@ -46,6 +57,8 @@ pub struct TypeEntry {
     pub call_dyn_fn: CallDynFn,
     /// Constructs a default `T` if the type implements `Default`; otherwise `None`.
     pub default_fn: Option<fn() -> Box<dyn Any>>,
+    /// Calls `Sheet::add_conditional::<T>` with type-erased branch keys.
+    pub add_conditional_fn: AddConditionalFn,
 }
 
 /// Maps DSL type names to Rust types for pm-lang cell declarations.
@@ -66,6 +79,24 @@ pub struct TypeRegistry {
 
 fn push_arg_impl<T: 'static + Clone>(segment: &mut DynSegment, index: usize) {
     segment.push_arg::<T>(index);
+}
+
+fn add_conditional_impl<T: Any + PartialEq + 'static>(
+    sheet: &mut Sheet,
+    cell: CellId,
+    branches: Vec<(Box<dyn Any>, RelationshipId)>,
+    default: Vec<RelationshipId>,
+) -> Result<ConditionalId, property_model::Error> {
+    let typed_branches: Vec<(Vec<T>, Vec<RelationshipId>)> = branches
+        .into_iter()
+        .map(|(val, rel_id)| {
+            let v = *val
+                .downcast::<T>()
+                .expect("add_conditional_impl: type matches registration");
+            (vec![v], vec![rel_id])
+        })
+        .collect();
+    sheet.add_conditional::<T>(cell, typed_branches, default)
 }
 
 fn add_cell_impl<T: Any + PartialEq + 'static>(sheet: &mut Sheet, value: Box<dyn Any>) -> CellId {
@@ -135,6 +166,7 @@ impl TypeRegistry {
                 add_cell_fn: add_cell_impl::<T>,
                 call_dyn_fn: call_dyn_impl::<T>,
                 default_fn: Some(|| Box::new(T::default()) as Box<dyn Any>),
+                add_conditional_fn: add_conditional_impl::<T>,
             },
         );
         self.by_type_id.insert(type_id, name.to_owned());
@@ -168,6 +200,7 @@ impl TypeRegistry {
                 add_cell_fn: add_cell_impl::<T>,
                 call_dyn_fn: call_dyn_impl::<T>,
                 default_fn: None,
+                add_conditional_fn: add_conditional_impl::<T>,
             },
         );
         self.by_type_id.insert(type_id, name.to_owned());

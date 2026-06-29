@@ -243,6 +243,14 @@ impl DynSegment {
         }
     }
 
+    /// Returns the `TypeId` of the value currently on top of the stack, or `None` if the stack is empty.
+    ///
+    /// Used to verify method output types at parse time without consuming the stack.
+    #[must_use]
+    pub fn peek_output_type_id(&self) -> Option<TypeId> {
+        self.stack_ids.last().map(|info| info.type_id)
+    }
+
     /// Returns a slice of the top N [`StackInfo`] entries (stack order: oldest first in the slice).
     ///
     /// Use this for operation lookup so errors can report type names. Returns an empty slice
