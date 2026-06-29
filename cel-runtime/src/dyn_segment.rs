@@ -22,6 +22,7 @@ thread_local! {
 struct DynCallGuard;
 
 impl Drop for DynCallGuard {
+    /// Clears the `call_dyn` thread-locals.
     fn drop(&mut self) {
         CALL_DYN_PTR.with(|c| c.set(0));
         CALL_DYN_LEN.with(|c| c.set(0));
@@ -834,5 +835,56 @@ mod tests {
         let x: i32 = 5;
         let result = seg.call_dyn::<String>(&[&x as &dyn Any]);
         assert!(result.is_err(), "expected Err on type mismatch");
+    }
+
+    #[test]
+    fn call_dyn_errors_if_segment_has_preloaded_arguments() {
+        // DynSegment::new::<(T,)>() creates a segment that expects a pre-loaded T argument.
+        let mut seg = DynSegment::new::<(i32,)>();
+        let result = seg.call_dyn::<i32>(&[]);
+        assert!(
+            result.is_err(),
+            "expected Err when segment has pre-loaded argument types"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("pre-loaded"),
+            "error message should mention pre-loaded: {msg}"
+        );
+    }
+
+    #[test]
+    fn call_dyn_errors_if_stack_has_wrong_count() {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        seg.push_arg::<i32>(1);
+        // Two values on stack, no combining op — stack_ids.len() == 2
+        let x: i32 = 1;
+        let y: i32 = 2;
+        let result = seg.call_dyn::<i32>(&[&x as &dyn Any, &y as &dyn Any]);
+        assert!(result.is_err(), "expected Err when stack has 2 values");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("exactly 1"),
+            "error message should mention count: {msg}"
+        );
+    }
+
+    #[test]
+    fn call_dyn_errors_if_op_returns_error() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        seg.op1r(|_x: i32| -> anyhow::Result<i32> {
+            Err(anyhow::anyhow!("op failed deliberately"))
+        })?;
+        let x: i32 = 5;
+        let result = seg.call_dyn::<i32>(&[&x as &dyn Any]);
+        assert!(result.is_err(), "expected Err when op fails");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("op failed"),
+            "error message should propagate op error: {msg}"
+        );
+        Ok(())
     }
 }
