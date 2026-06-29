@@ -85,7 +85,7 @@
 //! ```
 
 mod error;
-mod lex_lexer;
+pub mod lex_lexer;
 pub mod op_table;
 
 pub use error::{CELError, FormatRustcStyle, ParseError, SourceSpan, SpanContext};
@@ -310,6 +310,45 @@ impl CELParser {
         self.tokens = Some(LexLexer::new(tokens).peekable());
         self.context = DynSegment::new::<()>();
         self.last_span = Span::call_site();
+    }
+
+    /// Sets the token stream from an existing [`LexLexer`] iterator for inline expression parsing.
+    ///
+    /// Resets the segment context. Use together with [`parse_or_expression`](Self::parse_or_expression)
+    /// and [`take_lex_tokens`](Self::take_lex_tokens) to share a token stream between pm-lang and
+    /// [`CELParser`].
+    pub fn set_lex_tokens(&mut self, tokens: std::iter::Peekable<lex_lexer::LexLexer>) {
+        self.tokens = Some(tokens);
+        self.context = DynSegment::new::<()>();
+        self.last_span = Span::call_site();
+    }
+
+    /// Parses one `or_expression` from the current token stream and returns the segment.
+    ///
+    /// Unlike [`parse_str`](Self::parse_str), this method does not require end-of-stream,
+    /// allowing pm-lang to parse an expression embedded within a larger token stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input does not contain a valid `or_expression`.
+    ///
+    /// - Complexity: O(n) in the number of tokens in the expression.
+    pub fn parse_or_expression(&mut self) -> Result<DynSegment> {
+        if !self.is_or_expression()? {
+            return Err(self.error_at("expression expected"));
+        }
+        Ok(std::mem::replace(
+            &mut self.context,
+            DynSegment::new::<()>(),
+        ))
+    }
+
+    /// Returns the remaining token stream after expression parsing.
+    ///
+    /// Call after [`parse_or_expression`](Self::parse_or_expression) to recover the shared
+    /// [`LexLexer`] for continued pm-lang parsing.
+    pub fn take_lex_tokens(&mut self) -> Option<std::iter::Peekable<lex_lexer::LexLexer>> {
+        self.tokens.take()
     }
 
     /// Parses a token stream into a [`DynSegment`].
@@ -1804,6 +1843,37 @@ mod tests {
         // `else` with no body is a parse error.
         let mut parser = CELParser::new(OpLookup::new());
         assert!(parser.parse_str("if true { () } else").is_err());
+    }
+
+    #[test]
+    fn parse_or_expression_stops_before_comma() -> anyhow::Result<()> {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "10i32 + 20i32, 5i32".parse().unwrap();
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
+        let mut seg = parser
+            .parse_or_expression()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let result: i32 = seg.call0()?;
+        assert_eq!(result, 30);
+        let remaining: Vec<_> = parser.take_lex_tokens().expect("tokens present").collect();
+        // The comma and "5i32" should remain unconsumed.
+        assert_eq!(
+            remaining.len(),
+            2,
+            "expected 2 remaining tokens (comma and 5i32)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_or_expression_on_empty_input_returns_error() {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "".parse().unwrap();
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
+        let result = parser.parse_or_expression();
+        assert!(result.is_err(), "expected Err for empty input");
     }
 }
 

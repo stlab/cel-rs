@@ -6,9 +6,32 @@ use crate::raw_stack::RawStack;
 use crate::{CStackListHeadLimit, CStackListHeadPadded, ReverseList};
 use anyhow::Result;
 use anyhow::ensure;
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::cmp::max;
+
+thread_local! {
+    // Safety: valid only during the execution of `call_dyn` on this thread.
+    // Set before executing the segment; cleared by `DynCallGuard::drop` even on panic.
+    static CALL_DYN_PTR: Cell<usize> = const { Cell::new(0) };
+    static CALL_DYN_LEN: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Clears the `call_dyn` thread-locals when dropped.
+struct DynCallGuard;
+
+impl Drop for DynCallGuard {
+    // Zeroes rather than restores the prior thread-local state.
+    // This is safe as long as call_dyn is not re-entered on the same thread
+    // (no nested call_dyn). If nested calls become necessary in the future,
+    // change to save/restore: capture (CALL_DYN_PTR, CALL_DYN_LEN) at guard
+    // construction and restore them here instead of zeroing.
+    fn drop(&mut self) {
+        CALL_DYN_PTR.with(|c| c.set(0));
+        CALL_DYN_LEN.with(|c| c.set(0));
+    }
+}
 
 /// Recursive type node carrying a [`TypeId`], display name, and optional associated types.
 ///
@@ -224,6 +247,14 @@ impl DynSegment {
         }
     }
 
+    /// Returns the `TypeId` of the value currently on top of the stack, or `None` if the stack is empty.
+    ///
+    /// Used to verify method output types at parse time without consuming the stack.
+    #[must_use]
+    pub fn peek_output_type_id(&self) -> Option<TypeId> {
+        self.stack_ids.last().map(|info| info.type_id)
+    }
+
     /// Returns a slice of the top N [`StackInfo`] entries (stack order: oldest first in the slice).
     ///
     /// Use this for operation lookup so errors can report type names. Returns an empty slice
@@ -319,6 +350,77 @@ impl DynSegment {
     /// Pushes a value to the stack without any operations.
     pub fn just<T: 'static + Clone>(&mut self, value: T) {
         self.op0(move || value.clone());
+    }
+
+    /// Emits a zero-argument op that clones the call argument at `index` and pushes it.
+    ///
+    /// At execution time the op reads `inputs[index]` from the slice supplied to
+    /// [`call_dyn`](Self::call_dyn) and clones the value onto the stack.
+    ///
+    /// - Precondition: Every call to [`call_dyn`] must supply an `inputs` slice where
+    ///   `inputs[index]` is a value of type `T`.
+    ///
+    /// - Complexity: O(1).
+    pub fn push_arg<T: 'static + Clone>(&mut self, index: usize) {
+        self.segment.push_op0(move || {
+            CALL_DYN_PTR.with(|ptr_cell| {
+                CALL_DYN_LEN.with(|len_cell| {
+                    let raw_ptr = ptr_cell.get() as *const &dyn Any;
+                    let len = len_cell.get();
+                    assert!(!raw_ptr.is_null(), "push_arg op invoked outside call_dyn");
+                    debug_assert!(index < len, "push_arg index {index} out of range {len}");
+                    // Safety: raw_ptr is non-null (checked above) and valid for the duration
+                    // of the enclosing call_dyn call; DynCallGuard clears it on return.
+                    let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len) };
+                    slice[index]
+                        .downcast_ref::<T>()
+                        .expect("push_arg type mismatch at runtime")
+                        .clone()
+                })
+            })
+        });
+        self.push_type::<T>();
+    }
+
+    /// Executes the segment with `inputs` as call arguments and returns the final result.
+    ///
+    /// Ops registered via [`push_arg`](Self::push_arg) read their values from `inputs`
+    /// by index at execution time. Unlike [`call0`](Self::call0), this method does not
+    /// consume the type stack, so the same segment may be called repeatedly.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if:
+    /// - The segment requires pre-loaded arguments (created with a non-unit `Args` type).
+    /// - The stack does not contain exactly one value after expression compilation.
+    /// - The `TypeId` of `R` does not match the top-of-stack type.
+    /// - Any op returns an error during execution.
+    ///
+    /// - Complexity: O(n) in the number of ops.
+    pub fn call_dyn<R: 'static>(&mut self, inputs: &[&dyn Any]) -> anyhow::Result<R> {
+        ensure!(
+            self.argument_ids.is_empty(),
+            "call_dyn: segment requires {} pre-loaded argument(s); \
+             use call_dyn only with push_arg-based segments",
+            self.argument_ids.len()
+        );
+        ensure!(
+            self.stack_ids.len() == 1,
+            "call_dyn: expected exactly 1 value on stack, got {}",
+            self.stack_ids.len()
+        );
+        ensure!(
+            self.stack_ids[0].type_id == TypeId::of::<R>(),
+            "call_dyn: result type mismatch: expected {}, got {}",
+            std::any::type_name::<R>(),
+            self.stack_ids[0].type_name,
+        );
+        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
+        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
+        let _guard = DynCallGuard;
+        // Safety: type check above verified R matches stack top; bypasses pop_types
+        // so stack_ids is not consumed, enabling repeated calls.
+        unsafe { self.segment.call0() }
     }
 
     /// Pushes a unary operation that takes one argument of type T and returns a value of type R.
@@ -538,6 +640,7 @@ impl DynSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::any::Any;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -698,6 +801,102 @@ mod tests {
         let result = root_segment.call0::<u32>()?;
         println!("Result: {}", result);
 
+        Ok(())
+    }
+
+    #[test]
+    fn push_arg_single_input() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        let x: i32 = 42;
+        let result: i32 = seg.call_dyn(&[&x as &dyn Any])?;
+        assert_eq!(result, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn push_arg_two_inputs_with_op() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        seg.push_arg::<i32>(1);
+        seg.op2(|a: i32, b: i32| a + b)?;
+        let a: i32 = 3;
+        let b: i32 = 4;
+        let result: i32 = seg.call_dyn(&[&a as &dyn Any, &b as &dyn Any])?;
+        assert_eq!(result, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_is_repeatable() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        let x: i32 = 5;
+        let r1: i32 = seg.call_dyn(&[&x as &dyn Any])?;
+        let y: i32 = 10;
+        let r2: i32 = seg.call_dyn(&[&y as &dyn Any])?;
+        assert_eq!(r1, 5);
+        assert_eq!(r2, 10);
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_type_mismatch_returns_error() {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        let x: i32 = 5;
+        let result = seg.call_dyn::<String>(&[&x as &dyn Any]);
+        assert!(result.is_err(), "expected Err on type mismatch");
+    }
+
+    #[test]
+    fn call_dyn_errors_if_segment_has_preloaded_arguments() {
+        // DynSegment::new::<(T,)>() creates a segment that expects a pre-loaded T argument.
+        let mut seg = DynSegment::new::<(i32,)>();
+        let result = seg.call_dyn::<i32>(&[]);
+        assert!(
+            result.is_err(),
+            "expected Err when segment has pre-loaded argument types"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("pre-loaded"),
+            "error message should mention pre-loaded: {msg}"
+        );
+    }
+
+    #[test]
+    fn call_dyn_errors_if_stack_has_wrong_count() {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        seg.push_arg::<i32>(1);
+        // Two values on stack, no combining op — stack_ids.len() == 2
+        let x: i32 = 1;
+        let y: i32 = 2;
+        let result = seg.call_dyn::<i32>(&[&x as &dyn Any, &y as &dyn Any]);
+        assert!(result.is_err(), "expected Err when stack has 2 values");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("exactly 1"),
+            "error message should mention count: {msg}"
+        );
+    }
+
+    #[test]
+    fn call_dyn_errors_if_op_returns_error() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        seg.op1r(|_x: i32| -> anyhow::Result<i32> {
+            Err(anyhow::anyhow!("op failed deliberately"))
+        })?;
+        let x: i32 = 5;
+        let result = seg.call_dyn::<i32>(&[&x as &dyn Any]);
+        assert!(result.is_err(), "expected Err when op fails");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("op failed"),
+            "error message should propagate op error: {msg}"
+        );
         Ok(())
     }
 }
