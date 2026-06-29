@@ -6,9 +6,27 @@ use crate::raw_stack::RawStack;
 use crate::{CStackListHeadLimit, CStackListHeadPadded, ReverseList};
 use anyhow::Result;
 use anyhow::ensure;
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::cmp::max;
+
+thread_local! {
+    // Safety: valid only during the execution of `call_dyn` on this thread.
+    // Set before executing the segment; cleared by `DynCallGuard::drop` even on panic.
+    static CALL_DYN_PTR: Cell<usize> = const { Cell::new(0) };
+    static CALL_DYN_LEN: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Clears the `call_dyn` thread-locals when dropped.
+struct DynCallGuard;
+
+impl Drop for DynCallGuard {
+    fn drop(&mut self) {
+        CALL_DYN_PTR.with(|c| c.set(0));
+        CALL_DYN_LEN.with(|c| c.set(0));
+    }
+}
 
 /// Recursive type node carrying a [`TypeId`], display name, and optional associated types.
 ///
@@ -321,6 +339,77 @@ impl DynSegment {
         self.op0(move || value.clone());
     }
 
+    /// Emits a zero-argument op that clones the call argument at `index` and pushes it.
+    ///
+    /// At execution time the op reads `inputs[index]` from the slice supplied to
+    /// [`call_dyn`](Self::call_dyn) and clones the value onto the stack.
+    ///
+    /// - Precondition: Every call to [`call_dyn`] must supply an `inputs` slice where
+    ///   `inputs[index]` is a value of type `T`.
+    ///
+    /// - Complexity: O(1).
+    pub fn push_arg<T: 'static + Clone>(&mut self, index: usize) {
+        self.segment.push_op0(move || {
+            CALL_DYN_PTR.with(|ptr_cell| {
+                CALL_DYN_LEN.with(|len_cell| {
+                    let raw_ptr = ptr_cell.get() as *const &dyn Any;
+                    let len = len_cell.get();
+                    debug_assert!(!raw_ptr.is_null(), "push_arg op invoked outside call_dyn");
+                    debug_assert!(index < len, "push_arg index {index} out of range {len}");
+                    // Safety: raw_ptr is a valid *const &dyn Any for the duration of the
+                    // enclosing call_dyn call; DynCallGuard clears it when call_dyn returns.
+                    let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len) };
+                    slice[index]
+                        .downcast_ref::<T>()
+                        .expect("push_arg type mismatch at runtime")
+                        .clone()
+                })
+            })
+        });
+        self.push_type::<T>();
+    }
+
+    /// Executes the segment with `inputs` as call arguments and returns the final result.
+    ///
+    /// Ops registered via [`push_arg`](Self::push_arg) read their values from `inputs`
+    /// by index at execution time. Unlike [`call0`](Self::call0), this method does not
+    /// consume the type stack, so the same segment may be called repeatedly.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if:
+    /// - The segment requires pre-loaded arguments (created with a non-unit `Args` type).
+    /// - The stack does not contain exactly one value after expression compilation.
+    /// - The `TypeId` of `R` does not match the top-of-stack type.
+    /// - Any op returns an error during execution.
+    ///
+    /// - Complexity: O(n) in the number of ops.
+    pub fn call_dyn<R: 'static>(&mut self, inputs: &[&dyn Any]) -> anyhow::Result<R> {
+        ensure!(
+            self.argument_ids.is_empty(),
+            "call_dyn: segment requires {} pre-loaded argument(s); \
+             use call_dyn only with push_arg-based segments",
+            self.argument_ids.len()
+        );
+        ensure!(
+            self.stack_ids.len() == 1,
+            "call_dyn: expected exactly 1 value on stack, got {}",
+            self.stack_ids.len()
+        );
+        ensure!(
+            self.stack_ids[0].type_id == TypeId::of::<R>(),
+            "call_dyn: result type mismatch: expected {}, got {}",
+            std::any::type_name::<R>(),
+            self.stack_ids[0].type_name,
+        );
+        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
+        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
+        let _guard = DynCallGuard;
+        // Safety: type check above verified R matches stack top; bypasses pop_types
+        // so stack_ids is not consumed, enabling repeated calls.
+        unsafe { self.segment.call0() }
+    }
+
     /// Pushes a unary operation that takes one argument of type T and returns a value of type R.
     ///
     /// Verifies that the top of the type stack matches the expected input type T
@@ -538,6 +627,7 @@ impl DynSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::any::Any;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -699,5 +789,50 @@ mod tests {
         println!("Result: {}", result);
 
         Ok(())
+    }
+
+    #[test]
+    fn push_arg_single_input() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        let x: i32 = 42;
+        let result: i32 = seg.call_dyn(&[&x as &dyn Any])?;
+        assert_eq!(result, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn push_arg_two_inputs_with_op() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        seg.push_arg::<i32>(1);
+        seg.op2(|a: i32, b: i32| a + b)?;
+        let a: i32 = 3;
+        let b: i32 = 4;
+        let result: i32 = seg.call_dyn(&[&a as &dyn Any, &b as &dyn Any])?;
+        assert_eq!(result, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_is_repeatable() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        let x: i32 = 5;
+        let r1: i32 = seg.call_dyn(&[&x as &dyn Any])?;
+        let y: i32 = 10;
+        let r2: i32 = seg.call_dyn(&[&y as &dyn Any])?;
+        assert_eq!(r1, 5);
+        assert_eq!(r2, 10);
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_type_mismatch_returns_error() {
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg::<i32>(0);
+        let x: i32 = 5;
+        let result = seg.call_dyn::<String>(&[&x as &dyn Any]);
+        assert!(result.is_err(), "expected Err on type mismatch");
     }
 }
