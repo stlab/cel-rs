@@ -6,7 +6,7 @@ use property_model::Sheet;
 use crate::ParseError;
 use crate::TypeRegistry;
 
-/// Parser result type.
+/// A parser result type aliasing [`cel_parser::ParseError`] as the error.
 pub type Result<T> = std::result::Result<T, ParseError>;
 
 /// Parses pm-lang source strings into live [`Sheet`]s.
@@ -19,6 +19,15 @@ pub struct PmParser {
 
 impl PmParser {
     /// Creates a parser with the given type registry and operation lookup.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use pm_lang::{PmParser, TypeRegistry};
+    /// use cel_parser::OpLookup;
+    ///
+    /// let parser = PmParser::new(TypeRegistry::new(), OpLookup::new());
+    /// ```
     pub fn new(types: TypeRegistry, op_lookup: OpLookup) -> Self {
         PmParser {
             types,

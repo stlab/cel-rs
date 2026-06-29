@@ -32,7 +32,7 @@ pub type AddCellFn = fn(&mut Sheet, Box<dyn Any>) -> CellId;
 /// Executes a compiled segment with the supplied inputs and boxes the result.
 pub type CallDynFn = fn(&mut DynSegment, &[&dyn Any]) -> anyhow::Result<Box<dyn Any>>;
 
-/// Metadata for a single registered type.
+/// Metadata for a single type registered in a [`TypeRegistry`].
 pub struct TypeEntry {
     /// Runtime type identity.
     pub type_id: TypeId,
@@ -115,6 +115,15 @@ impl TypeRegistry {
     /// Registers `T` under `name` with default initialization support.
     ///
     /// - Postcondition: `self.get(name)` returns `Some(entry)` with `entry.default_fn.is_some()`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use pm_lang::TypeRegistry;
+    /// let mut reg = TypeRegistry::new();
+    /// reg.register::<u64>("my_u64");
+    /// assert!(reg.get("my_u64").is_some());
+    /// ```
     pub fn register<T: Any + PartialEq + Default + Clone + 'static>(&mut self, name: &str) {
         let type_id = TypeId::of::<T>();
         self.by_name.insert(
@@ -136,6 +145,18 @@ impl TypeRegistry {
     /// A cell declared as `cell x: T;` (no initializer) is a parse error for this type.
     ///
     /// - Postcondition: `self.get(name)` returns `Some(entry)` with `entry.default_fn.is_none()`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use pm_lang::TypeRegistry;
+    /// #[derive(PartialEq, Clone)]
+    /// struct MyType(i32);
+    /// let mut reg = TypeRegistry::new();
+    /// reg.register_no_default::<MyType>("MyType");
+    /// let entry = reg.get("MyType").unwrap();
+    /// assert!(entry.default_fn.is_none());
+    /// ```
     pub fn register_no_default<T: Any + PartialEq + Clone + 'static>(&mut self, name: &str) {
         let type_id = TypeId::of::<T>();
         self.by_name.insert(
@@ -155,6 +176,15 @@ impl TypeRegistry {
     /// Looks up a type entry by its DSL name.
     ///
     /// Returns `None` if `name` has not been registered.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use pm_lang::TypeRegistry;
+    /// let reg = TypeRegistry::new();
+    /// assert!(reg.get("f64").is_some());
+    /// assert!(reg.get("nonexistent").is_none());
+    /// ```
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&TypeEntry> {
         self.by_name.get(name)
@@ -163,6 +193,16 @@ impl TypeRegistry {
     /// Looks up a type entry by its `TypeId`.
     ///
     /// Returns `None` if no type with this `TypeId` has been registered.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use pm_lang::TypeRegistry;
+    /// use std::any::TypeId;
+    /// let reg = TypeRegistry::new();
+    /// assert!(reg.entry_by_type_id(TypeId::of::<f64>()).is_some());
+    /// assert!(reg.entry_by_type_id(TypeId::of::<Vec<u8>>()).is_none());
+    /// ```
     #[must_use]
     pub fn entry_by_type_id(&self, type_id: TypeId) -> Option<&TypeEntry> {
         let name = self.by_type_id.get(&type_id)?;
@@ -279,5 +319,15 @@ mod tests {
     fn get_nonexistent_returns_none() {
         let reg = TypeRegistry::new();
         assert!(reg.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn entry_by_type_id_nonexistent_returns_none() {
+        let reg = TypeRegistry::new();
+        // Vec<u8> is not a registered built-in type.
+        assert!(
+            reg.entry_by_type_id(std::any::TypeId::of::<Vec<u8>>())
+                .is_none()
+        );
     }
 }
