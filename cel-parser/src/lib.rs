@@ -331,6 +331,8 @@ impl CELParser {
     /// # Errors
     ///
     /// Returns an error if the input does not contain a valid `or_expression`.
+    ///
+    /// - Complexity: O(n) in the number of tokens in the expression.
     pub fn parse_or_expression(&mut self) -> Result<DynSegment> {
         if !self.is_or_expression()? {
             return Err(self.error_at("expression expected"));
@@ -1844,33 +1846,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_or_expression_stops_before_close_brace() {
-        use proc_macro2::TokenTree;
-
-        // Create the token stream which becomes a Group
-        let stream: proc_macro2::TokenStream = "{ 10i32 + 20i32 }".parse().unwrap();
-        let mut tokens = stream.into_iter();
-
-        // The first token is a Group (the braces)
-        let group = match tokens.next() {
-            Some(TokenTree::Group(g)) => g,
-            other => panic!("expected Group, got {:?}", other),
-        };
-
-        // Create lexer from the group's inner tokens plus the remaining
-        let group_tokens = group.stream().into_iter();
-
+    fn parse_or_expression_stops_before_comma() -> anyhow::Result<()> {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "10i32 + 20i32, 5i32".parse().unwrap();
         let mut parser = CELParser::new(OpLookup::new());
-        parser.set_lex_tokens(lex_lexer::LexLexer::new(group_tokens).peekable());
-        let mut seg = parser.parse_or_expression().expect("parse failed");
-        let result: i32 = seg.call0().expect("call failed");
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
+        let mut seg = parser
+            .parse_or_expression()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let result: i32 = seg.call0()?;
         assert_eq!(result, 30);
         let remaining: Vec<_> = parser.take_lex_tokens().expect("tokens present").collect();
+        // The comma and "5i32" should remain unconsumed.
         assert_eq!(
             remaining.len(),
-            0,
-            "expected no remaining tokens (braces were Group delimiters)"
+            2,
+            "expected 2 remaining tokens (comma and 5i32)"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_or_expression_on_empty_input_returns_error() {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "".parse().unwrap();
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
+        let result = parser.parse_or_expression();
+        assert!(result.is_err(), "expected Err for empty input");
     }
 }
 
