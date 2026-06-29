@@ -367,10 +367,10 @@ impl DynSegment {
                 CALL_DYN_LEN.with(|len_cell| {
                     let raw_ptr = ptr_cell.get() as *const &dyn Any;
                     let len = len_cell.get();
-                    debug_assert!(!raw_ptr.is_null(), "push_arg op invoked outside call_dyn");
+                    assert!(!raw_ptr.is_null(), "push_arg op invoked outside call_dyn");
                     debug_assert!(index < len, "push_arg index {index} out of range {len}");
-                    // Safety: raw_ptr is a valid *const &dyn Any for the duration of the
-                    // enclosing call_dyn call; DynCallGuard clears it when call_dyn returns.
+                    // Safety: raw_ptr is non-null (checked above) and valid for the duration
+                    // of the enclosing call_dyn call; DynCallGuard clears it on return.
                     let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len) };
                     slice[index]
                         .downcast_ref::<T>()

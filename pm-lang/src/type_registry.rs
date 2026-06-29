@@ -160,6 +160,9 @@ impl TypeRegistry {
     /// ```
     pub fn register<T: Any + PartialEq + Default + Clone + 'static>(&mut self, name: &str) {
         let type_id = TypeId::of::<T>();
+        if let Some(old) = self.by_name.get(name) {
+            self.by_type_id.remove(&old.type_id);
+        }
         self.by_name.insert(
             name.to_owned(),
             TypeEntry {
@@ -194,6 +197,9 @@ impl TypeRegistry {
     /// ```
     pub fn register_no_default<T: Any + PartialEq + Clone + 'static>(&mut self, name: &str) {
         let type_id = TypeId::of::<T>();
+        if let Some(old) = self.by_name.get(name) {
+            self.by_type_id.remove(&old.type_id);
+        }
         self.by_name.insert(
             name.to_owned(),
             TypeEntry {
@@ -365,5 +371,44 @@ mod tests {
             reg.entry_by_type_id(std::any::TypeId::of::<Vec<u8>>())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn register_overwrite_removes_stale_type_id() {
+        #[derive(PartialEq, Clone, Default)]
+        struct TypeA;
+        #[derive(PartialEq, Clone, Default)]
+        struct TypeB;
+
+        let mut reg = TypeRegistry::new();
+        reg.register::<TypeA>("alias");
+        reg.register::<TypeB>("alias");
+
+        // After overwriting, TypeA's TypeId must no longer be found.
+        assert!(
+            reg.entry_by_type_id(TypeId::of::<TypeA>()).is_none(),
+            "stale TypeA mapping should have been removed"
+        );
+        // TypeB must be reachable by both name and TypeId.
+        assert!(reg.entry_by_type_id(TypeId::of::<TypeB>()).is_some());
+        assert_eq!(reg.get("alias").unwrap().type_id, TypeId::of::<TypeB>());
+    }
+
+    #[test]
+    fn register_no_default_overwrite_removes_stale_type_id() {
+        #[derive(PartialEq, Clone)]
+        struct TypeA;
+        #[derive(PartialEq, Clone)]
+        struct TypeB;
+
+        let mut reg = TypeRegistry::new();
+        reg.register_no_default::<TypeA>("alias");
+        reg.register_no_default::<TypeB>("alias");
+
+        assert!(
+            reg.entry_by_type_id(TypeId::of::<TypeA>()).is_none(),
+            "stale TypeA mapping should have been removed"
+        );
+        assert!(reg.entry_by_type_id(TypeId::of::<TypeB>()).is_some());
     }
 }

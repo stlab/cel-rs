@@ -379,7 +379,9 @@ impl PmParser {
     fn parse_cell_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("cell"); // consume
         let (name, name_span) = ctx.consume_ident()?;
-        let _ = name_span;
+        if ctx.cell_names.contains_key(&name) {
+            return Err(ParseError::new(format!("duplicate cell `{name}`"), name_span));
+        }
 
         let (type_id, add_fn, initial_value): (TypeId, AddCellFn, Box<dyn Any>) =
             if ctx.consume_punct(":") {
@@ -1079,5 +1081,17 @@ mod tests {
         // A future test can assert specific cell values once a name-lookup API exists.
         sheet.propagate().unwrap();
         let _ = sheet; // sheet is live and propagated
+    }
+
+    #[test]
+    fn parse_duplicate_cell_is_error() {
+        let result = parser().parse_str("sheet s { cell x: i32; cell x: f64; }");
+        match result {
+            Ok(_) => panic!("expected error for duplicate cell name"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("duplicate cell `x`"), "error mentions duplicate name: {msg}");
+            }
+        }
     }
 }
