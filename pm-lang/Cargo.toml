@@ -1,0 +1,16 @@
+[package]
+name = "pm-lang"
+version = "0.1.0"
+edition = "2024"
+description = "A DSL parser for property models"
+
+[dependencies]
+cel-parser  = { path = "../cel-parser" }
+cel-runtime = { path = "../cel-runtime" }
+property-model = { path = "../property-model" }
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
+syn = { version = "2.0", features = ["extra-traits", "parsing"] }
+anyhow = "1.0"
+
+[lints]
+workspace = true

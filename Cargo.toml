@@ -25,6 +25,7 @@ members = [
     "cel-parser",
     "cel-rs-macros",
     "property-model",
+    "pm-lang",
     "begin",
     "xtask",
 ]
