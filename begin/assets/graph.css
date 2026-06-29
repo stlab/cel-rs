@@ -49,3 +49,15 @@ html, body {
     pointer-events: none;
     user-select: none;
 }
+
+.node-conditional {
+    fill: #fffff0;
+    stroke: #555;
+    stroke-width: 1.5;
+    cursor: default;
+}
+
+.link-control {
+    stroke-width: 1.5;
+    fill: none;
+}

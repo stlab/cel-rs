@@ -666,6 +666,72 @@ impl Sheet {
         })
     }
 
+    /// Iterates all live conditional IDs in the sheet.
+    ///
+    /// - Complexity: O(n) where n is the number of conditionals.
+    pub fn conditionals(&self) -> impl Iterator<Item = ConditionalId> + '_ {
+        self.conditionals.keys()
+    }
+
+    /// Returns the match cell for conditional `id`.
+    ///
+    /// Returns `None` if `id` is not a live conditional in this sheet.
+    pub fn conditional_match_cell(&self, id: ConditionalId) -> Option<CellId> {
+        self.conditionals.get(id).map(|c| c.cell)
+    }
+
+    /// Returns the number of named branches in conditional `id`.
+    ///
+    /// Returns `None` if `id` is not a live conditional in this sheet.
+    pub fn conditional_branch_count(&self, id: ConditionalId) -> Option<usize> {
+        self.conditionals.get(id).map(|c| c.branches.len())
+    }
+
+    /// Returns the relationship IDs for branch `branch` of conditional `id`.
+    ///
+    /// Returns `None` if `id` is not a live conditional, or `branch` is out of bounds.
+    pub fn conditional_branch_relationships(
+        &self,
+        id: ConditionalId,
+        branch: usize,
+    ) -> Option<&[RelationshipId]> {
+        self.conditionals
+            .get(id)?
+            .branches
+            .get(branch)
+            .map(|b| b.relationships.as_slice())
+    }
+
+    /// Returns the default relationship IDs for conditional `id`.
+    ///
+    /// These relationships are active when no named branch key matches the match cell.
+    /// Returns `None` if `id` is not a live conditional in this sheet.
+    pub fn conditional_default_relationships(
+        &self,
+        id: ConditionalId,
+    ) -> Option<&[RelationshipId]> {
+        self.conditionals.get(id).map(|c| c.default.as_slice())
+    }
+
+    /// Returns the index of the currently matching branch for conditional `id`.
+    ///
+    /// Evaluates branch keys against the match cell's current value in definition order;
+    /// returns the index of the first matching branch. Returns `None` if no branch key
+    /// matches (the default branch is active) or if `id` is not a live conditional.
+    ///
+    /// - Complexity: O(B·K) where B = branches, K = keys per branch.
+    pub fn conditional_active_branch(&self, id: ConditionalId) -> Option<usize> {
+        let cond = self.conditionals.get(id)?;
+        let cell = &self.cells[cond.cell];
+        let eq_fn = cell.eq_fn;
+        let value = cell.value.as_ref();
+        cond.branches
+            .iter()
+            .enumerate()
+            .find(|(_, branch)| branch.keys.iter().any(|key| eq_fn(value, key.as_ref())))
+            .map(|(i, _)| i)
+    }
+
     /// Re-executes the cached plan without invoking the planner.
     ///
     /// - Precondition: Every cell written since the last successful `propagate()` or
@@ -705,7 +771,7 @@ impl Default for Sheet {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Error, Method, Sheet, cell::CellId, relationship::RelationshipId};
+    use crate::{ConditionalId, Error, Method, Sheet, cell::CellId, relationship::RelationshipId};
     use std::any::TypeId;
 
     #[test]
@@ -1300,5 +1366,163 @@ mod tests {
         sheet.write(a, 7_i32).unwrap();
         sheet.propagate_without_replan().unwrap();
         assert_eq!(*sheet.read::<i32>(b).unwrap(), 21); // b = a * 3 = 21
+    }
+
+    // ── Conditional accessor tests ─────────────────────────────────────────
+
+    fn sheet_with_two_branch_conditional() -> (Sheet, ConditionalId) {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let p = sheet.add_cell(0_i32);
+
+        let rel0 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &i32| Ok(*v))])
+            .unwrap();
+        let rel1 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, a, |v: &i32| Ok(*v))])
+            .unwrap();
+
+        let cid = sheet
+            .add_conditional(
+                p,
+                vec![(vec![0_i32], vec![rel0]), (vec![1_i32], vec![rel1])],
+                vec![],
+            )
+            .unwrap();
+        (sheet, cid)
+    }
+
+    fn sheet_with_default_conditional() -> (Sheet, ConditionalId, RelationshipId) {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let p = sheet.add_cell(99_i32); // no branch matches → default
+
+        let rel_default = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &i32| Ok(*v))])
+            .unwrap();
+
+        let cid = sheet
+            .add_conditional::<i32>(p, vec![], vec![rel_default])
+            .unwrap();
+        (sheet, cid, rel_default)
+    }
+
+    #[test]
+    fn conditionals_returns_registered_id() {
+        let (sheet, cid) = sheet_with_two_branch_conditional();
+        assert!(sheet.conditionals().any(|id| id == cid));
+    }
+
+    #[test]
+    fn conditionals_empty_on_new_sheet() {
+        let sheet = Sheet::new();
+        assert_eq!(sheet.conditionals().count(), 0);
+    }
+
+    #[test]
+    fn conditional_match_cell_returns_correct_cell() {
+        let mut sheet = Sheet::new();
+        let p = sheet.add_cell(0_i32);
+        let cid = sheet.add_conditional::<i32>(p, vec![], vec![]).unwrap();
+        assert_eq!(sheet.conditional_match_cell(cid), Some(p));
+    }
+
+    #[test]
+    fn conditional_match_cell_returns_none_for_invalid_id() {
+        let sheet = Sheet::new();
+        assert_eq!(sheet.conditional_match_cell(ConditionalId::default()), None);
+    }
+
+    #[test]
+    fn conditional_branch_count_returns_correct_count() {
+        let (sheet, cid) = sheet_with_two_branch_conditional();
+        assert_eq!(sheet.conditional_branch_count(cid), Some(2));
+    }
+
+    #[test]
+    fn conditional_branch_count_returns_none_for_invalid_id() {
+        let sheet = Sheet::new();
+        assert_eq!(
+            sheet.conditional_branch_count(ConditionalId::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn conditional_branch_relationships_returns_correct_rels() {
+        let (sheet, cid) = sheet_with_two_branch_conditional();
+        let rels0 = sheet.conditional_branch_relationships(cid, 0).unwrap();
+        let rels1 = sheet.conditional_branch_relationships(cid, 1).unwrap();
+        assert_eq!(rels0.len(), 1);
+        assert_eq!(rels1.len(), 1);
+        assert_ne!(rels0[0], rels1[0]);
+    }
+
+    #[test]
+    fn conditional_branch_relationships_returns_none_for_out_of_bounds() {
+        let (sheet, cid) = sheet_with_two_branch_conditional();
+        assert!(sheet.conditional_branch_relationships(cid, 2).is_none());
+    }
+
+    #[test]
+    fn conditional_branch_relationships_returns_none_for_invalid_id() {
+        let sheet = Sheet::new();
+        assert!(
+            sheet
+                .conditional_branch_relationships(ConditionalId::default(), 0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn conditional_default_relationships_returns_correct_rels() {
+        let (sheet, cid, rel_default) = sheet_with_default_conditional();
+        let rels = sheet.conditional_default_relationships(cid).unwrap();
+        assert_eq!(rels, [rel_default]);
+    }
+
+    #[test]
+    fn conditional_default_relationships_empty_when_no_default() {
+        let (sheet, cid) = sheet_with_two_branch_conditional();
+        assert_eq!(sheet.conditional_default_relationships(cid).unwrap(), &[]);
+    }
+
+    #[test]
+    fn conditional_default_relationships_returns_none_for_invalid_id() {
+        let sheet = Sheet::new();
+        assert!(
+            sheet
+                .conditional_default_relationships(ConditionalId::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn conditional_active_branch_returns_matching_branch_index() {
+        let (mut sheet, cid) = sheet_with_two_branch_conditional();
+        let p = sheet.conditional_match_cell(cid).unwrap();
+        sheet.write(p, 0_i32).unwrap();
+        assert_eq!(sheet.conditional_active_branch(cid), Some(0));
+        sheet.write(p, 1_i32).unwrap();
+        assert_eq!(sheet.conditional_active_branch(cid), Some(1));
+    }
+
+    #[test]
+    fn conditional_active_branch_returns_none_when_no_branch_matches() {
+        let (mut sheet, cid) = sheet_with_two_branch_conditional();
+        let p = sheet.conditional_match_cell(cid).unwrap();
+        sheet.write(p, 99_i32).unwrap();
+        assert_eq!(sheet.conditional_active_branch(cid), None);
+    }
+
+    #[test]
+    fn conditional_active_branch_returns_none_for_invalid_id() {
+        let sheet = Sheet::new();
+        assert_eq!(
+            sheet.conditional_active_branch(ConditionalId::default()),
+            None
+        );
     }
 }
