@@ -380,7 +380,10 @@ impl PmParser {
         ctx.is_keyword("cell"); // consume
         let (name, name_span) = ctx.consume_ident()?;
         if ctx.cell_names.contains_key(&name) {
-            return Err(ParseError::new(format!("duplicate cell `{name}`"), name_span));
+            return Err(ParseError::new(
+                format!("duplicate cell `{name}`"),
+                name_span,
+            ));
         }
 
         let (type_id, add_fn, initial_value): (TypeId, AddCellFn, Box<dyn Any>) =
@@ -1090,7 +1093,10 @@ mod tests {
             Ok(_) => panic!("expected error for duplicate cell name"),
             Err(e) => {
                 let msg = e.to_string();
-                assert!(msg.contains("duplicate cell `x`"), "error mentions duplicate name: {msg}");
+                assert!(
+                    msg.contains("duplicate cell `x`"),
+                    "error mentions duplicate name: {msg}"
+                );
             }
         }
     }
