@@ -342,7 +342,7 @@ impl PmParser {
         self.cel.op_lookup_mut()
     }
 
-    /// Parses a pm-lang source string into a live [`Sheet`].
+    /// Parses a pm-lang source string into a live [`ParsedSheet`].
     ///
     /// Resets internal parse state on each call.
     ///
