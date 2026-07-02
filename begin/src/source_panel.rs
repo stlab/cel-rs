@@ -91,9 +91,9 @@ pub fn SourcePanel(
                     button {
                         onclick: move |_| {
                             let source = editor_source.read().clone();
-                            applied_source.set(source.clone());
                             let outcome = build_sheet(&source);
                             if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
+                                applied_source.set(source.clone());
                                 sheet.set(new_sheet);
                                 labels.set(new_labels);
                             }
