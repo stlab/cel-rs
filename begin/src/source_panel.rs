@@ -1,6 +1,7 @@
 //! [`SourcePanel`] — collapsible bottom panel for editing and applying pm-lang source.
 
 use annotate_snippets::Renderer;
+use dioxus::prelude::*;
 use pm_lang::{PmParser, TypeRegistry};
 use property_model::Sheet;
 
@@ -51,6 +52,72 @@ pub fn build_sheet(source: &str) -> BuildOutcome {
             BuildOutcome {
                 sheet_labels: Some((parsed.sheet, labels)),
                 error: Some(msg),
+            }
+        }
+    }
+}
+
+/// Collapsible bottom panel: a pm-lang source textarea, an Apply button, and
+/// a rustc-style diagnostic for the most recent parse or runtime failure.
+///
+/// Clicking Apply parses `editor_source`, builds a new sheet and labels via
+/// [`build_sheet`], and — on success or on a runtime (propagate) failure —
+/// replaces `sheet`/`labels` and updates `applied_source` to match. On a
+/// parse failure, `sheet`/`labels` are left unchanged.
+#[allow(dead_code)]
+#[component]
+pub fn SourcePanel(
+    editor_source: Signal<String>,
+    applied_source: Signal<String>,
+    sheet: Signal<Sheet>,
+    labels: Signal<Labels>,
+    error: Signal<Option<String>>,
+    open: Signal<bool>,
+) -> Element {
+    let mut editor_source = editor_source;
+    let mut applied_source = applied_source;
+    let mut sheet = sheet;
+    let mut labels = labels;
+    let mut error = error;
+    let mut open = open;
+
+    rsx! {
+        div {
+            style: "border-top: 1px solid #ccc; display: flex; flex-direction: column; flex-shrink: 0;",
+            div {
+                style: "display: flex; align-items: center; gap: 8px; padding: 4px 8px;",
+                button {
+                    onclick: move |_| open.toggle(),
+                    if *open.read() { "▼ Source" } else { "▶ Source" }
+                }
+                if *open.read() {
+                    button {
+                        onclick: move |_| {
+                            let source = editor_source.read().clone();
+                            applied_source.set(source.clone());
+                            let outcome = build_sheet(&source);
+                            if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
+                                sheet.set(new_sheet);
+                                labels.set(new_labels);
+                            }
+                            error.set(outcome.error);
+                        },
+                        "Apply"
+                    }
+                }
+            }
+            if *open.read() {
+                textarea {
+                    style: "width: 100%; height: 160px; font-family: monospace; box-sizing: border-box; margin: 0; border: none; border-top: 1px solid #ccc;",
+                    value: "{editor_source}",
+                    oninput: move |evt: FormEvent| editor_source.set(evt.value()),
+                }
+                if let Some(msg) = error.read().as_ref() {
+                    pre {
+                        style: "margin: 0; padding: 8px; background: #fee; color: #900; overflow: auto; max-height: 200px; white-space: pre-wrap; font-family: monospace;",
+                        "{msg}"
+                    }
+                }
             }
         }
     }
