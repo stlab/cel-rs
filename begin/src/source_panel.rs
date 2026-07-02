@@ -13,7 +13,6 @@ use crate::bridge::{Labels, format_property_model_error, labels_from_cell_names}
 /// then fails to propagate still returns the built sheet and labels alongside
 /// the formatted error, matching how the Inspector already tolerates
 /// propagate failures during cell edits.
-#[allow(dead_code)]
 pub struct BuildOutcome {
     /// The built sheet and its UI labels, if parsing succeeded.
     pub sheet_labels: Option<(Sheet, Labels)>,
@@ -25,7 +24,6 @@ pub struct BuildOutcome {
 /// once so initial derived values are populated.
 ///
 /// - Complexity: O(n) in the length of `source` plus the cost of one `propagate()`.
-#[allow(dead_code)]
 pub fn build_sheet(source: &str) -> BuildOutcome {
     let mut parser = PmParser::new(TypeRegistry::new(), cel_parser::OpLookup::new());
     let mut parsed = match parser.parse_str(source) {
@@ -64,7 +62,6 @@ pub fn build_sheet(source: &str) -> BuildOutcome {
 /// [`build_sheet`], and — on success or on a runtime (propagate) failure —
 /// replaces `sheet`/`labels` and updates `applied_source` to match. On a
 /// parse failure, `sheet`/`labels` are left unchanged.
-#[allow(dead_code)]
 #[component]
 pub fn SourcePanel(
     editor_source: Signal<String>,
