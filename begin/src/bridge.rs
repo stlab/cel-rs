@@ -4,6 +4,8 @@
 //! with stable [`CellId`] and [`RelationshipId`] keys. [`to_graph_data`] serializes a
 //! [`Sheet`] and its [`Labels`] into a [`GraphData`] value ready for JSON encoding.
 
+use annotate_snippets::Renderer;
+use cel_parser::FormatRustcStyle;
 use indexmap::IndexMap;
 use property_model::{CellId, ConditionalId, Error, RelationshipId, Sheet};
 use serde::Serialize;
@@ -111,6 +113,23 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -
         try_ty!(String);
     }
     labels
+}
+
+/// Formats a [`Error`] as a rustc-style diagnostic when possible.
+///
+/// `Error::MethodFailed` wraps an `anyhow::Error` raised by a compiled method
+/// body; when that error carries a `SpanContext` (attached automatically by
+/// cel-parser's `span-diagnostics` feature for built-in arithmetic ops) this
+/// renders a full caret diagnostic against `source`. All other variants have
+/// no source span and fall back to their `Display` message.
+#[allow(dead_code)]
+pub fn format_property_model_error(e: &Error, source: &str) -> String {
+    match e {
+        Error::MethodFailed(inner) => {
+            inner.format_rustc_style(source, "<pm-lang source>", 1, &Renderer::plain())
+        }
+        other => other.to_string(),
+    }
 }
 
 /// Node kind tag used in the D3 graph.
@@ -338,6 +357,27 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
 mod tests {
     use super::*;
     use property_model::{Method, Sheet};
+
+    #[test]
+    fn format_property_model_error_invalid_id_falls_back_to_display() {
+        let msg = format_property_model_error(&Error::InvalidId, "source text");
+        assert_eq!(msg, "invalid cell or relationship id");
+    }
+
+    #[test]
+    fn format_property_model_error_method_failed_renders_caret_diagnostic() {
+        use cel_parser::{SourceSpan, SpanContext};
+
+        let source = "1i32 / 0i32";
+        let span = SourceSpan::new(1, 0, 1, 11);
+        let inner = anyhow::anyhow!("division by zero").context(SpanContext::new(span));
+        let err = Error::MethodFailed(inner);
+
+        let msg = format_property_model_error(&err, source);
+
+        assert!(msg.contains("division by zero"), "{msg}");
+        assert!(msg.contains(source), "{msg}");
+    }
 
     #[test]
     fn labels_from_cell_names_builds_entries_for_supported_types() {
