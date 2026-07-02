@@ -81,7 +81,7 @@ pub fn App() -> Element {
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
                     GraphView { data: graph_data }
-                    Inspector { sheet, labels }
+                    Inspector { sheet, labels, error, applied_source }
                 }
                 SourcePanel {
                     editor_source,

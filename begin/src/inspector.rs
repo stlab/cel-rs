@@ -14,7 +14,12 @@ use crate::spectrum::{SpDivider, SpFieldLabel, SpHeading, SpTextfield};
 /// not reset while the field is focused; it syncs back to the computed value on blur,
 /// keeping non-edited cells up to date.
 #[component]
-pub fn Inspector(sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element {
+pub fn Inspector(
+    sheet: Signal<Sheet>,
+    labels: Signal<Labels>,
+    error: Signal<Option<String>>,
+    applied_source: Signal<String>,
+) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
 
     rsx! {
@@ -23,14 +28,20 @@ pub fn Inspector(sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element {
             SpHeading { "Cells" }
             SpDivider {}
             for id in ids {
-                CellRow { key: "{id:?}", id, sheet, labels }
+                CellRow { key: "{id:?}", id, sheet, labels, error, applied_source }
             }
         }
     }
 }
 
 #[component]
-fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element {
+fn CellRow(
+    id: CellId,
+    sheet: Signal<Sheet>,
+    labels: Signal<Labels>,
+    error: Signal<Option<String>>,
+    applied_source: Signal<String>,
+) -> Element {
     let label = use_memo(move || {
         labels
             .read()
@@ -90,22 +101,34 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
                         input.set(val.clone());
                         let mut sheet_w = sheet.write();
                         let labels_r = labels.read();
-                        if let Some(meta) = labels_r.cells.get(&id) {
-                            if (meta.write_str)(&mut sheet_w, &val).is_ok() {
+                        let Some(meta) = labels_r.cells.get(&id) else { return; };
+                        let write_result = (meta.write_str)(&mut sheet_w, &val);
+                        drop(labels_r);
+                        let propagate_result = match write_result {
+                            Ok(()) => {
                                 // A conditional match cell changes the active constraint set
                                 // when written, which invalidates the plan even if the cell
                                 // is a source — so we must always replan for match cells.
                                 let is_match_cell = sheet_w
                                     .conditionals()
                                     .any(|cid| sheet_w.conditional_match_cell(cid) == Some(id));
-                                let result = if sheet_w.is_source(id) && !is_match_cell {
+                                if sheet_w.is_source(id) && !is_match_cell {
                                     sheet_w.propagate_without_replan()
                                 } else {
                                     sheet_w.propagate()
-                                };
-                                has_error.set(result.is_err());
-                            } else {
+                                }
+                            }
+                            Err(e) => Err(e),
+                        };
+                        match propagate_result {
+                            Ok(()) => {
+                                has_error.set(false);
+                                error.set(None);
+                            }
+                            Err(e) => {
                                 has_error.set(true);
+                                let source = applied_source.read().clone();
+                                error.set(Some(crate::bridge::format_property_model_error(&e, &source)));
                             }
                         }
                     });
