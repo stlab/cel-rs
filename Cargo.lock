@@ -275,9 +275,12 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "begin"
 version = "0.1.0"
 dependencies = [
+ "annotate-snippets",
  "anyhow",
+ "cel-parser",
  "dioxus",
  "indexmap",
+ "pm-lang",
  "property-model",
  "serde",
  "serde_json",
@@ -3753,6 +3756,7 @@ dependencies = [
  "anyhow",
  "cel-parser",
  "cel-runtime",
+ "indexmap",
  "proc-macro2",
  "property-model",
  "syn 2.0.117",

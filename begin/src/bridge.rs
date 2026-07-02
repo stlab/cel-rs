@@ -83,7 +83,6 @@ impl Default for Labels {
 /// of these are silently skipped — they simply won't appear in the sidebar.
 ///
 /// - Complexity: O(n) in the number of cells.
-#[allow(dead_code)]
 pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -> Labels {
     let mut labels = Labels::new();
     for (name, &(id, type_id)) in cell_names {
@@ -122,7 +121,6 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -
 /// cel-parser's `span-diagnostics` feature for built-in arithmetic ops) this
 /// renders a full caret diagnostic against `source`. All other variants have
 /// no source span and fall back to their `Display` message.
-#[allow(dead_code)]
 pub fn format_property_model_error(e: &Error, source: &str) -> String {
     match e {
         Error::MethodFailed(inner) => {

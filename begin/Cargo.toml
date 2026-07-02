@@ -19,6 +19,7 @@ anyhow = "1"
 slotmap = "1.0"
 cel-parser = { path = "../cel-parser" }
 annotate-snippets = "0.12"
+pm-lang = { path = "../pm-lang" }
 
 [lints]
 workspace = true
