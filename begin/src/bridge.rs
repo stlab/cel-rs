@@ -114,7 +114,7 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -
     labels
 }
 
-/// Formats a [`Error`] as a rustc-style diagnostic when possible.
+/// Formats an [`Error`] as a rustc-style diagnostic when possible.
 ///
 /// `Error::MethodFailed` wraps an `anyhow::Error` raised by a compiled method
 /// body; when that error carries a `SpanContext` (attached automatically by

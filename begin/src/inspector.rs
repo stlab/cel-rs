@@ -122,8 +122,13 @@ fn CellRow(
                         };
                         match propagate_result {
                             Ok(()) => {
+                                // Only clear the shared diagnostic if this cell was the one
+                                // showing it — otherwise an unrelated error (e.g. a failed
+                                // Apply) would be silently hidden by this success.
+                                if *has_error.read() {
+                                    error.set(None);
+                                }
                                 has_error.set(false);
-                                error.set(None);
                             }
                             Err(e) => {
                                 has_error.set(true);
@@ -136,6 +141,11 @@ fn CellRow(
                 onfocus: move |_| is_focused.set(true),
                 onblur: move |_| {
                     is_focused.set(false);
+                    // The field is reverting to the last valid computed value, so clear
+                    // the diagnostic if it was this cell's own write/propagate error.
+                    if *has_error.read() {
+                        error.set(None);
+                    }
                     has_error.set(false);
                 },
             }

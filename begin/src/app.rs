@@ -54,15 +54,15 @@ pub const DEMO_SOURCE: &str = r#"sheet demo {
 pub fn App() -> Element {
     let editor_source = use_signal(|| DEMO_SOURCE.to_string());
     let applied_source = use_signal(|| DEMO_SOURCE.to_string());
-    let error = use_signal(|| None::<String>);
     let source_panel_open = use_signal(|| true);
 
     let initial = build_sheet(DEMO_SOURCE);
     let (initial_sheet, initial_labels) = initial
         .sheet_labels
-        .expect("DEMO_SOURCE must parse and build a sheet without error");
+        .expect("DEMO_SOURCE must parse successfully");
     let sheet = use_signal(|| initial_sheet);
     let labels = use_signal(|| initial_labels);
+    let error = use_signal(|| initial.error);
 
     let graph_data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
 
