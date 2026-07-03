@@ -61,7 +61,10 @@ pub fn build_sheet(source: &str) -> BuildOutcome {
 /// Clicking Apply parses `editor_source`, builds a new sheet and labels via
 /// [`build_sheet`], and — on success or on a runtime (propagate) failure —
 /// replaces `sheet`/`labels` and updates `applied_source` to match. On a
-/// parse failure, `sheet`/`labels` are left unchanged.
+/// parse failure, `sheet`/`labels` are left unchanged. `error_is_parse` is
+/// updated alongside `error` so the Inspector can tell a parse failure (not
+/// resolvable by editing cells) apart from a runtime failure. The diagnostic,
+/// when present, stays visible even while the panel is collapsed.
 #[component]
 pub fn SourcePanel(
     editor_source: Signal<String>,
@@ -69,6 +72,7 @@ pub fn SourcePanel(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
     error: Signal<Option<String>>,
+    error_is_parse: Signal<bool>,
     open: Signal<bool>,
 ) -> Element {
     let mut editor_source = editor_source;
@@ -76,6 +80,7 @@ pub fn SourcePanel(
     let mut sheet = sheet;
     let mut labels = labels;
     let mut error = error;
+    let mut error_is_parse = error_is_parse;
     let mut open = open;
 
     rsx! {
@@ -92,11 +97,13 @@ pub fn SourcePanel(
                         onclick: move |_| {
                             let source = editor_source.read().clone();
                             let outcome = build_sheet(&source);
+                            let is_parse_error = outcome.sheet_labels.is_none();
                             if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
                                 applied_source.set(source.clone());
                                 sheet.set(new_sheet);
                                 labels.set(new_labels);
                             }
+                            error_is_parse.set(is_parse_error);
                             error.set(outcome.error);
                         },
                         "Apply"
@@ -109,11 +116,11 @@ pub fn SourcePanel(
                     value: "{editor_source}",
                     oninput: move |evt: FormEvent| editor_source.set(evt.value()),
                 }
-                if let Some(msg) = error.read().as_ref() {
-                    pre {
-                        style: "margin: 0; padding: 8px; background: #fee; color: #900; overflow: auto; max-height: 200px; white-space: pre-wrap; font-family: monospace;",
-                        "{msg}"
-                    }
+            }
+            if let Some(msg) = error.read().as_ref() {
+                pre {
+                    style: "margin: 0; padding: 8px; background: #fee; color: #900; overflow: auto; max-height: 200px; white-space: pre-wrap; font-family: monospace;",
+                    "{msg}"
                 }
             }
         }

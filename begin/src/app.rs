@@ -63,6 +63,9 @@ pub fn App() -> Element {
     let sheet = use_signal(|| initial_sheet);
     let labels = use_signal(|| initial_labels);
     let error = use_signal(|| initial.error);
+    // DEMO_SOURCE always parses, so any startup error is a runtime (propagate)
+    // error, never a parse error.
+    let error_is_parse = use_signal(|| false);
 
     let graph_data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
 
@@ -81,7 +84,7 @@ pub fn App() -> Element {
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
                     GraphView { data: graph_data }
-                    Inspector { sheet, labels, error, applied_source }
+                    Inspector { sheet, labels, error, error_is_parse, applied_source }
                 }
                 SourcePanel {
                     editor_source,
@@ -89,6 +92,7 @@ pub fn App() -> Element {
                     sheet,
                     labels,
                     error,
+                    error_is_parse,
                     open: source_panel_open,
                 }
             }
