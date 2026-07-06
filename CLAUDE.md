@@ -47,12 +47,7 @@ RUSTFLAGS=-Zsanitizer=leak    cargo +nightly test -Zbuild-std --target <triple> 
 
 ## Git Workflow
 
-Always create a feature branch before making changes. If the current branch is `main`, create a
-branch first:
-
-```bash
-git checkout -b <username>/<feature-name>
-```
+If a request is made that requires any modification, additions, or deletions to files in the project, stop and suggest the user create a worktree first.
 
 Never commit directly to `main`.
 
