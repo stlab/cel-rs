@@ -13,8 +13,19 @@ use crate::spectrum::{SpDivider, SpFieldLabel, SpHeading, SpTextfield};
 /// by zero), `SpTextfield` renders in its invalid state until the user blurs. The input is
 /// not reset while the field is focused; it syncs back to the computed value on blur,
 /// keeping non-edited cells up to date.
+///
+/// `error_is_parse` tracks whether the currently displayed `error` came from a pm-lang parse
+/// failure (source text is invalid, so no successful sheet edit can resolve it) versus a
+/// runtime propagate failure (resolvable by any successful propagate, from either the Inspector
+/// or a re-applied source). Only runtime errors are cleared here.
 #[component]
-pub fn Inspector(sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element {
+pub fn Inspector(
+    sheet: Signal<Sheet>,
+    labels: Signal<Labels>,
+    error: Signal<Option<String>>,
+    error_is_parse: Signal<bool>,
+    applied_source: Signal<String>,
+) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
 
     rsx! {
@@ -23,14 +34,21 @@ pub fn Inspector(sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element {
             SpHeading { "Cells" }
             SpDivider {}
             for id in ids {
-                CellRow { key: "{id:?}", id, sheet, labels }
+                CellRow { key: "{id:?}", id, sheet, labels, error, error_is_parse, applied_source }
             }
         }
     }
 }
 
 #[component]
-fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element {
+fn CellRow(
+    id: CellId,
+    sheet: Signal<Sheet>,
+    labels: Signal<Labels>,
+    error: Signal<Option<String>>,
+    error_is_parse: Signal<bool>,
+    applied_source: Signal<String>,
+) -> Element {
     let label = use_memo(move || {
         labels
             .read()
@@ -90,22 +108,42 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
                         input.set(val.clone());
                         let mut sheet_w = sheet.write();
                         let labels_r = labels.read();
-                        if let Some(meta) = labels_r.cells.get(&id) {
-                            if (meta.write_str)(&mut sheet_w, &val).is_ok() {
+                        let Some(meta) = labels_r.cells.get(&id) else { return; };
+                        let write_result = (meta.write_str)(&mut sheet_w, &val);
+                        drop(labels_r);
+                        let propagate_result = match write_result {
+                            Ok(()) => {
                                 // A conditional match cell changes the active constraint set
                                 // when written, which invalidates the plan even if the cell
                                 // is a source — so we must always replan for match cells.
                                 let is_match_cell = sheet_w
                                     .conditionals()
                                     .any(|cid| sheet_w.conditional_match_cell(cid) == Some(id));
-                                let result = if sheet_w.is_source(id) && !is_match_cell {
+                                if sheet_w.is_source(id) && !is_match_cell {
                                     sheet_w.propagate_without_replan()
                                 } else {
                                     sheet_w.propagate()
-                                };
-                                has_error.set(result.is_err());
-                            } else {
+                                }
+                            }
+                            Err(e) => Err(e),
+                        };
+                        match propagate_result {
+                            Ok(()) => {
+                                // Any successful propagate means the sheet is now fully
+                                // consistent, so a stale *runtime* error is no longer
+                                // relevant regardless of which cell fixed it. A *parse*
+                                // error is about the (unrelated) editor source text, so it
+                                // is left in place until the source is corrected and applied.
+                                if !*error_is_parse.read() {
+                                    error.set(None);
+                                }
+                                has_error.set(false);
+                            }
+                            Err(e) => {
                                 has_error.set(true);
+                                error_is_parse.set(false);
+                                let source = applied_source.read().clone();
+                                error.set(Some(crate::bridge::format_property_model_error(&e, &source)));
                             }
                         }
                     });
@@ -113,6 +151,11 @@ fn CellRow(id: CellId, sheet: Signal<Sheet>, labels: Signal<Labels>) -> Element 
                 onfocus: move |_| is_focused.set(true),
                 onblur: move |_| {
                     is_focused.set(false);
+                    // The field is reverting to the last valid computed value, so clear
+                    // the diagnostic if it was this cell's own write/propagate error.
+                    if *has_error.read() {
+                        error.set(None);
+                    }
                     has_error.set(false);
                 },
             }

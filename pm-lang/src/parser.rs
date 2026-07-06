@@ -21,9 +21,10 @@
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::FromStr;
+
+use indexmap::IndexMap;
 
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Literal, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
@@ -38,6 +39,36 @@ use crate::type_registry::{AddCellFn, AddConditionalFn, CallDynFn, PushArgFn, Ty
 pub type Result<T> = std::result::Result<T, ParseError>;
 
 // ---------------------------------------------------------------------------
+// ParsedSheet
+// ---------------------------------------------------------------------------
+
+/// The result of [`PmParser::parse_str`]: a live [`Sheet`] plus the declared
+/// cell names, in source declaration order.
+///
+/// Derefs to [`Sheet`] so callers that only need sheet methods (e.g.
+/// `propagate`) can use the result exactly as if it were a `Sheet`.
+pub struct ParsedSheet {
+    /// The constructed sheet.
+    pub sheet: Sheet,
+    /// Cell name → `(CellId, TypeId)`, in declaration order.
+    pub cell_names: IndexMap<String, (CellId, TypeId)>,
+}
+
+impl std::ops::Deref for ParsedSheet {
+    type Target = Sheet;
+
+    fn deref(&self) -> &Sheet {
+        &self.sheet
+    }
+}
+
+impl std::ops::DerefMut for ParsedSheet {
+    fn deref_mut(&mut self) -> &mut Sheet {
+        &mut self.sheet
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ParseContext — mutable state for one parse_str call
 // ---------------------------------------------------------------------------
 
@@ -45,8 +76,9 @@ struct ParseContext {
     /// Token stream; `None` while temporarily owned by CELParser.
     tokens: Option<Peekable<LexLexer>>,
     sheet: Sheet,
-    /// Maps cell name → (CellId, TypeId) for method and conditional compilation.
-    cell_names: HashMap<String, (CellId, TypeId)>,
+    /// Maps cell name → (CellId, TypeId), in declaration order, for method and
+    /// conditional compilation and for exposing to callers via `ParsedSheet`.
+    cell_names: IndexMap<String, (CellId, TypeId)>,
 }
 
 impl ParseContext {
@@ -277,7 +309,7 @@ impl ParseContext {
 // PmParser
 // ---------------------------------------------------------------------------
 
-/// Parses pm-lang source strings into live [`Sheet`]s.
+/// Parses pm-lang source strings into live [`ParsedSheet`]s (sheet + cell names).
 ///
 /// # Example
 ///
@@ -286,7 +318,7 @@ impl ParseContext {
 /// use cel_parser::OpLookup;
 ///
 /// let mut parser = PmParser::new(TypeRegistry::new(), OpLookup::new());
-/// let sheet = parser.parse_str("sheet s { cell x: i32 = 0; }").unwrap();
+/// let parsed = parser.parse_str("sheet s { cell x: i32 = 0; }").unwrap();
 /// ```
 pub struct PmParser {
     pub(crate) types: TypeRegistry,
@@ -310,7 +342,7 @@ impl PmParser {
         self.cel.op_lookup_mut()
     }
 
-    /// Parses a pm-lang source string into a live [`Sheet`].
+    /// Parses a pm-lang source string into a live [`ParsedSheet`].
     ///
     /// Resets internal parse state on each call.
     ///
@@ -319,19 +351,22 @@ impl PmParser {
     /// Returns `Err` on any syntax error, unknown type name, type mismatch between a
     /// cell annotation and its initializer, undeclared cell name in a method cell list,
     /// or arity mismatch in an `output_list` tuple.
-    pub fn parse_str(&mut self, source: &str) -> Result<Sheet> {
+    pub fn parse_str(&mut self, source: &str) -> Result<ParsedSheet> {
         let stream =
             TokenStream::from_str(source).map_err(|e| ParseError::new(e.to_string(), e.span()))?;
         let mut ctx = ParseContext {
             tokens: Some(LexLexer::new(stream.into_iter()).peekable()),
             sheet: Sheet::new(),
-            cell_names: HashMap::new(),
+            cell_names: IndexMap::new(),
         };
         self.parse_sheet(&mut ctx)?;
         if let Some(tok) = ctx.peek_token() {
             return Err(ParseError::new("unexpected token", tok.span()));
         }
-        Ok(ctx.sheet)
+        Ok(ParsedSheet {
+            sheet: ctx.sheet,
+            cell_names: ctx.cell_names,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -1099,5 +1134,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn parse_str_returns_cell_names_in_declaration_order() {
+        let parsed = parser()
+            .parse_str("sheet s { cell z: i32 = 1; cell a: i32 = 2; cell m: i32 = 3; }")
+            .unwrap();
+        let names: Vec<&str> = parsed.cell_names.keys().map(String::as_str).collect();
+        assert_eq!(names, vec!["z", "a", "m"]);
+    }
+
+    #[test]
+    fn parsed_sheet_derefs_to_sheet_for_propagate() {
+        let mut parsed = parser().parse_str("sheet s { cell x: i32 = 1; }").unwrap();
+        // Deref/DerefMut must make Sheet's methods directly callable.
+        parsed.propagate().unwrap();
     }
 }

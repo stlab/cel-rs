@@ -4,10 +4,13 @@
 //! with stable [`CellId`] and [`RelationshipId`] keys. [`to_graph_data`] serializes a
 //! [`Sheet`] and its [`Labels`] into a [`GraphData`] value ready for JSON encoding.
 
+use annotate_snippets::Renderer;
+use cel_parser::FormatRustcStyle;
 use indexmap::IndexMap;
 use property_model::{CellId, ConditionalId, Error, RelationshipId, Sheet};
 use serde::Serialize;
 use slotmap::Key;
+use std::any::TypeId;
 
 /// Type-erased write closure: parses a string and writes it to a cell.
 pub type WriteStrFn = Box<dyn Fn(&mut Sheet, &str) -> Result<(), Error>>;
@@ -70,6 +73,60 @@ impl Default for Labels {
     /// Returns `Labels::new()`.
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Builds a [`Labels`] from a pm-lang-style declaration-ordered cell name map.
+///
+/// Matches each `TypeId` against the built-in primitive types
+/// `pm_lang::TypeRegistry::new()` registers. Cells whose `TypeId` is not one
+/// of these are silently skipped — they simply won't appear in the sidebar.
+///
+/// - Complexity: O(n) in the number of cells.
+pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -> Labels {
+    let mut labels = Labels::new();
+    for (name, &(id, type_id)) in cell_names {
+        macro_rules! try_ty {
+            ($T:ty) => {
+                if type_id == TypeId::of::<$T>() {
+                    labels.add_cell::<$T>(id, name);
+                    continue;
+                }
+            };
+        }
+        try_ty!(i8);
+        try_ty!(i16);
+        try_ty!(i32);
+        try_ty!(i64);
+        try_ty!(i128);
+        try_ty!(isize);
+        try_ty!(u8);
+        try_ty!(u16);
+        try_ty!(u32);
+        try_ty!(u64);
+        try_ty!(u128);
+        try_ty!(usize);
+        try_ty!(f32);
+        try_ty!(f64);
+        try_ty!(bool);
+        try_ty!(String);
+    }
+    labels
+}
+
+/// Formats an [`Error`] as a rustc-style diagnostic when possible.
+///
+/// `Error::MethodFailed` wraps an `anyhow::Error` raised by a compiled method
+/// body; when that error carries a `SpanContext` (attached automatically by
+/// cel-parser's `span-diagnostics` feature for built-in arithmetic ops) this
+/// renders a full caret diagnostic against `source`. All other variants have
+/// no source span and fall back to their `Display` message.
+pub fn format_property_model_error(e: &Error, source: &str) -> String {
+    match e {
+        Error::MethodFailed(inner) => {
+            inner.format_rustc_style(source, "<pm-lang source>", 1, &Renderer::plain())
+        }
+        other => other.to_string(),
     }
 }
 
@@ -298,6 +355,69 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
 mod tests {
     use super::*;
     use property_model::{Method, Sheet};
+
+    #[test]
+    fn format_property_model_error_invalid_id_falls_back_to_display() {
+        let msg = format_property_model_error(&Error::InvalidId, "source text");
+        assert_eq!(msg, "invalid cell or relationship id");
+    }
+
+    #[test]
+    fn format_property_model_error_method_failed_renders_caret_diagnostic() {
+        use cel_parser::{SourceSpan, SpanContext};
+
+        let source = "1i32 / 0i32";
+        let span = SourceSpan::new(1, 0, 1, 11);
+        let inner = anyhow::anyhow!("division by zero").context(SpanContext::new(span));
+        let err = Error::MethodFailed(inner);
+
+        let msg = format_property_model_error(&err, source);
+
+        assert!(msg.contains("division by zero"), "{msg}");
+        assert!(msg.contains(source), "{msg}");
+    }
+
+    #[test]
+    fn labels_from_cell_names_builds_entries_for_supported_types() {
+        use std::any::TypeId;
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(2.0_f64);
+        let b = sheet.add_cell(3_i32);
+        let c = sheet.add_cell(true);
+        let d = sheet.add_cell("hi".to_string());
+
+        let mut cell_names = IndexMap::new();
+        cell_names.insert("a".to_string(), (a, TypeId::of::<f64>()));
+        cell_names.insert("b".to_string(), (b, TypeId::of::<i32>()));
+        cell_names.insert("c".to_string(), (c, TypeId::of::<bool>()));
+        cell_names.insert("d".to_string(), (d, TypeId::of::<String>()));
+
+        let labels = labels_from_cell_names(&cell_names);
+
+        assert_eq!(labels.cells.len(), 4);
+        assert_eq!((labels.cells[&a].display)(&sheet), "2");
+        assert_eq!((labels.cells[&b].display)(&sheet), "3");
+        assert_eq!((labels.cells[&c].display)(&sheet), "true");
+        assert_eq!((labels.cells[&d].display)(&sheet), "hi");
+    }
+
+    #[test]
+    fn labels_from_cell_names_preserves_declaration_order() {
+        use std::any::TypeId;
+
+        let mut sheet = Sheet::new();
+        let z = sheet.add_cell(1_i32);
+        let a = sheet.add_cell(2_i32);
+
+        let mut cell_names = IndexMap::new();
+        cell_names.insert("z".to_string(), (z, TypeId::of::<i32>()));
+        cell_names.insert("a".to_string(), (a, TypeId::of::<i32>()));
+
+        let labels = labels_from_cell_names(&cell_names);
+        let ids: Vec<_> = labels.cells.keys().copied().collect();
+        assert_eq!(ids, vec![z, a]);
+    }
 
     fn demo_sheet() -> (Sheet, Labels) {
         let mut sheet = Sheet::new();
