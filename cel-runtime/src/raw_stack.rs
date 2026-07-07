@@ -170,6 +170,60 @@ impl RawStack {
         }
     }
 
+    /// Repacks `sizes.len()` already-pushed values (currently at the absolute
+    /// byte offsets in `src_offsets`) into one contiguous, self-contained
+    /// region of `total_size` bytes starting at `dest_base`, placing element
+    /// `i` at `dest_base + dest_offsets[i]`. Adjusts the tracked length to
+    /// `dest_base + total_size` and returns whether leading padding was
+    /// inserted between `ambient_start` and `dest_base`.
+    ///
+    /// - Precondition: `src_offsets`, `dest_offsets`, and `sizes` have equal
+    ///   length; `dest_base >= ambient_start`; the source ranges are
+    ///   currently valid, initialized bytes.
+    ///
+    /// - Complexity: O(n) in `sizes.len()`.
+    ///
+    /// # Safety
+    /// The offsets and sizes must correctly describe the actual bytes in the
+    /// buffer; no two destination ranges may overlap.
+    pub unsafe fn repack(
+        &mut self,
+        ambient_start: usize,
+        dest_base: usize,
+        total_size: usize,
+        src_offsets: &[usize],
+        dest_offsets: &[usize],
+        sizes: &[usize],
+    ) -> bool {
+        debug_assert!(dest_base >= ambient_start);
+        debug_assert_eq!(src_offsets.len(), sizes.len());
+        debug_assert_eq!(dest_offsets.len(), sizes.len());
+
+        let target_len = dest_base + total_size;
+        let current_len = self.buffer.len();
+        let grown_len = current_len.max(target_len);
+        unsafe {
+            if grown_len > current_len {
+                self.buffer.reserve(grown_len - current_len);
+                self.buffer.set_len(grown_len);
+            }
+            let base_ptr = self.buffer.as_mut_ptr().cast::<u8>();
+            for i in 0..sizes.len() {
+                std::ptr::copy(
+                    base_ptr.add(src_offsets[i]),
+                    base_ptr.add(dest_base + dest_offsets[i]),
+                    sizes[i],
+                );
+            }
+            if dest_base > ambient_start {
+                self.buffer[ambient_start].write(1);
+                self.buffer[ambient_start + 1..dest_base].fill(MaybeUninit::new(0));
+            }
+            self.buffer.set_len(target_len);
+        }
+        dest_base > ambient_start
+    }
+
     /// Pops a value of type `T` from the stack. Does not change the stack capacity.
     ///
     /// # Safety
@@ -372,5 +426,53 @@ mod tests {
         }
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert_eq!(stack.len(), 1);
+    }
+
+    #[test]
+    fn repack_moves_elements_to_ideal_offsets_and_reports_padding() {
+        // Ambient layout: [u8 @0][pad][u32 @4][u8 @8] — u8 then u32 then u8, each
+        // pushed with ordinary alignment relative to a 1-byte ambient start.
+        let mut stack = RawStack::with_base_alignment(align_of::<u32>());
+        let ambient_start = stack.len(); // 0
+        let _ = stack.push(0xAAu8); // element 0: ambient offset 0
+        let _p1 = stack.push(0xBBBB_BBBBu32); // element 1: ambient offset 4 (1 byte padded to 4)
+        let _p2 = stack.push(0xCCu8); // element 2: ambient offset 8
+
+        // Ideal (self-contained) layout for (u8, u32, u8) from a zero base:
+        // offset 0 (u8), offset 4 (u32, aligned up from 1), offset 8 (u8) -> total 9,
+        // rounded to the tuple's own max align (4) -> total_size 12.
+        let src_offsets = [0usize, 4, 8];
+        let dest_offsets = [0usize, 4, 8];
+        let sizes = [1usize, 4, 1];
+        let total_size = 12usize;
+        let dest_base = 0usize; // ambient_start (0) is already 4-aligned
+
+        let padding = unsafe {
+            stack.repack(
+                ambient_start,
+                dest_base,
+                total_size,
+                &src_offsets,
+                &dest_offsets,
+                &sizes,
+            )
+        };
+        assert!(
+            !padding,
+            "ambient_start was already aligned; no leading pad expected"
+        );
+        assert_eq!(stack.len(), dest_base + total_size);
+
+        let mut a = [0u8; 1];
+        let mut b = [0u8; 4];
+        let mut c = [0u8; 1];
+        unsafe {
+            stack.copy_from(dest_base, 1, a.as_mut_ptr());
+            stack.copy_from(dest_base + 4, 4, b.as_mut_ptr());
+            stack.copy_from(dest_base + 8, 1, c.as_mut_ptr());
+        }
+        assert_eq!(a[0], 0xAA);
+        assert_eq!(u32::from_ne_bytes(b), 0xBBBB_BBBB);
+        assert_eq!(c[0], 0xCC);
     }
 }
