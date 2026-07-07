@@ -33,24 +33,49 @@ impl Drop for DynCallGuard {
     }
 }
 
-/// Recursive type node carrying a [`TypeId`], display name, and optional associated types.
+/// Drops a value in place, given a pointer to its bytes and (for tuple
+/// values) its own element metadata for recursive drops.
 ///
-/// Used for function parameter/return types, tuple elements, and similar structure.
-/// Not yet used; reserved for parse-time call checking and richer error reporting.
+/// # Safety
+/// `ptr` must point to a valid, live, properly aligned value of the type this
+/// dropper was generated for; `associated` must be that same value's own
+/// element list (empty for non-tuple values).
+pub type RawDropper = unsafe fn(*mut u8, &[AssociatedType]);
+
+/// Recursive type node carrying a [`TypeId`], display name, byte layout, and
+/// an in-place dropper — describes one element of a tuple (or, nested, one
+/// element of a tuple element).
 #[derive(Clone, Debug)]
 pub struct AssociatedType {
     /// Runtime type id for this node.
     pub type_id: TypeId,
     /// Human-readable name for error reporting (borrowed when from `type_name::<T>()`).
     pub type_name: Cow<'static, str>,
-    /// Child types (e.g. function parameters, tuple elements).
+    /// Byte offset from the start of the enclosing tuple.
+    pub offset: usize,
+    /// Size in bytes of this element's value.
+    pub size: usize,
+    /// Required alignment in bytes of this element's value.
+    pub align: usize,
+    /// In-place dropper for this element, callable at `base + offset`.
+    pub dropper: RawDropper,
+    /// Child types, for a nested tuple element.
     pub associated: Vec<AssociatedType>,
 }
 
+/// Marker type used as the `TypeId` for tuple aggregate stack entries.
+///
+/// A tuple's real type identity is the ordered `associated` list on its
+/// [`StackInfo`], not this marker's `TypeId` — comparisons that need to
+/// distinguish tuple shapes must inspect `associated`, not `type_id`.
+#[derive(Debug)]
+pub struct DynTuple;
+
 /// Information about a type on the stack, including its cleanup function.
 ///
-/// Holds metadata for a value pushed onto the stack: runtime type id, display name
-/// for errors, padding, dropper, and an optional list of associated types.
+/// Holds metadata for a value pushed onto the stack: runtime type id, display
+/// name for errors, padding, size/alignment, an in-place dropper, and an
+/// optional list of associated element types (populated for tuples).
 pub struct StackInfo {
     /// Runtime type id for this stack slot (e.g. for scope matching).
     pub type_id: TypeId,
@@ -58,9 +83,13 @@ pub struct StackInfo {
     pub type_name: Cow<'static, str>,
     /// Whether padding was inserted before this value for alignment.
     pub(crate) padding: bool,
-    /// Dropper used when unwinding the stack.
-    dropper: Dropper,
-    /// Associated types (e.g. function params, tuple elements). Unused for now.
+    /// Size in bytes of this stack slot's value.
+    pub size: usize,
+    /// Required alignment in bytes of this stack slot's value.
+    pub align: usize,
+    /// In-place dropper for this value, callable at its own start address.
+    pub(crate) raw_dropper: RawDropper,
+    /// Associated element types (populated for tuples; empty otherwise).
     pub associated: Vec<AssociatedType>,
 }
 
@@ -91,20 +120,14 @@ impl<H: 'static, T: ToTypeIdList + 'static + CStackListHeadLimit> ToTypeIdList
             type_id: TypeId::of::<H>(),
             type_name: Cow::Borrowed(std::any::type_name::<H>()),
             padding: Self::HEAD_PADDED,
-            dropper: |stack| unsafe { stack.drop::<H>(Self::HEAD_PADDED) },
+            size: size_of::<H>(),
+            align: align_of::<H>(),
+            raw_dropper: |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<H>()) },
             associated: Vec::new(),
         });
         list
     }
 }
-
-/// A type-checked wrapper around [`RawSegment`] that maintains a stack of type information
-/// to ensure type safety during operation execution.
-///
-/// [`DynSegment`] tracks the types of values on the stack at compile time and verifies
-/// that operations receive arguments of the correct type. This prevents type mismatches
-/// that could occur when using [`RawSegment`] directly.
-type Dropper = fn(&mut RawStack);
 
 /// A dynamic segment that provides runtime type checking for stack operations.
 ///
@@ -205,11 +228,9 @@ impl DynSegment {
             type_id: TypeId::of::<T>(),
             type_name: Cow::Borrowed(std::any::type_name::<T>()),
             padding: padded,
-            dropper: if padded {
-                |stack| unsafe { stack.drop::<T>(true) }
-            } else {
-                |stack| unsafe { stack.drop::<T>(false) }
-            },
+            size: size_of::<T>(),
+            align: align_of::<T>(),
+            raw_dropper: |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) },
             associated: Vec::new(),
         });
         self.stack_index = aligned_index + size_of::<T>();
@@ -230,17 +251,33 @@ impl DynSegment {
     /// Captures the current stack droppers for use when unwinding on error.
     ///
     /// - Complexity: O(n) in the current stack depth.
-    fn capture_unwind(&self) -> Vec<Dropper> {
-        self.stack_ids.iter().map(|info| info.dropper).collect()
+    fn capture_unwind(&self) -> Vec<(usize, bool, RawDropper, Vec<AssociatedType>)> {
+        self.stack_ids
+            .iter()
+            .map(|info| {
+                (
+                    info.size,
+                    info.padding,
+                    info.raw_dropper,
+                    info.associated.clone(),
+                )
+            })
+            .collect()
     }
 
     /// Runs the captured droppers in reverse order on error, then propagates the error.
-    fn unwind_on_err<R>(unwind: &[Dropper], stack: &mut RawStack, result: Result<R>) -> Result<R> {
+    fn unwind_on_err<R>(
+        unwind: &[(usize, bool, RawDropper, Vec<AssociatedType>)],
+        stack: &mut RawStack,
+        result: Result<R>,
+    ) -> Result<R> {
         match result {
             Ok(r) => Ok(r),
             Err(e) => {
-                for dropper in unwind.iter().rev() {
-                    dropper(stack);
+                for (size, padding, raw_dropper, associated) in unwind.iter().rev() {
+                    unsafe {
+                        stack.drop_sized(*size, *padding, |ptr| raw_dropper(ptr, associated));
+                    }
                 }
                 Err(e)
             }
@@ -898,5 +935,33 @@ mod tests {
             "error message should propagate op error: {msg}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn stack_info_records_size_and_align() {
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 7u32);
+        let infos = seg.peek_stack_infos(1);
+        assert_eq!(infos[0].size, size_of::<u32>());
+        assert_eq!(infos[0].align, align_of::<u32>());
+        assert!(infos[0].associated.is_empty());
+    }
+
+    #[test]
+    fn associated_type_carries_offset_size_align_dropper() {
+        // Exercises the new AssociatedType shape directly — no runtime behavior
+        // yet, just the data shape this task adds.
+        let a = AssociatedType {
+            type_id: std::any::TypeId::of::<u32>(),
+            type_name: std::borrow::Cow::Borrowed("u32"),
+            offset: 4,
+            size: 4,
+            align: 4,
+            dropper: |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<u32>()) },
+            associated: Vec::new(),
+        };
+        assert_eq!(a.offset, 4);
+        assert_eq!(a.size, 4);
+        assert_eq!(a.align, 4);
     }
 }
