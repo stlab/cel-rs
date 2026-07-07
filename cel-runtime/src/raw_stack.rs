@@ -109,8 +109,10 @@ impl RawStack {
     ///
     /// # Safety
     /// `offset..offset + size` must be within the currently-initialized buffer;
-    /// `dst` must be valid for writes of `size` bytes.
+    /// `dst` must be valid for writes of `size` bytes and must not overlap the
+    /// stack's internal buffer.
     pub unsafe fn copy_from(&self, offset: usize, size: usize, dst: *mut u8) {
+        debug_assert!(offset + size <= self.buffer.len());
         unsafe {
             std::ptr::copy_nonoverlapping(self.buffer.as_ptr().add(offset).cast::<u8>(), dst, size);
         }
@@ -133,6 +135,7 @@ impl RawStack {
     /// # Safety
     /// No live (undropped) value may exist at or above `new_len`.
     pub unsafe fn truncate_to(&mut self, new_len: usize, padding: bool) {
+        debug_assert!(new_len <= self.buffer.len());
         let padding_count = if padding {
             self.buffer[..new_len]
                 .iter()
@@ -159,6 +162,7 @@ impl RawStack {
         padding: bool,
         run_drop: impl FnOnce(*mut u8),
     ) {
+        debug_assert!(size <= self.buffer.len());
         let p = self.buffer.len() - size;
         unsafe {
             self.drop_at(p, run_drop);
