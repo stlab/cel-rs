@@ -54,8 +54,7 @@ varies with stack depth — unusable for matching against a fixed concrete
 ## Grammar
 
 ```
-tuple_or_group = ")"
-                | or_expression ["," [ or_expression { "," or_expression } ]] ")"
+tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")"
 ```
 
 Extends the existing `(` handling in `is_primary_expression`:
