@@ -1217,8 +1217,12 @@ mod tests {
         seg_a.tuple_index(1);
         seg_b.tuple_index(1);
         assert_eq!(seg_a.call0::<u32>().unwrap(), 2);
-        seg_b.op2(|_extra: u8, x: u32| x).unwrap();
-        assert_eq!(seg_b.call0::<u32>().unwrap(), 2);
+        // Return the deeper (pre-tuple) value, not the just-extracted one: the
+        // extracted u32's own read doesn't depend on its padding flag being
+        // correct (it's computed from the live buffer length), but correctly
+        // recovering `extra` underneath it does.
+        seg_b.op2(|extra: u8, _x: u32| extra).unwrap();
+        assert_eq!(seg_b.call0::<u8>().unwrap(), 99);
     }
 
     #[test]
@@ -1279,8 +1283,11 @@ mod tests {
         seg.op0(|| 0x1122_3344_5566_7788u64); // element 1
         seg.make_tuple(2, ambient_start);
         seg.tuple_index(0);
-        seg.op2(|_sentinel: u8, x: u32| x).unwrap();
-        assert_eq!(seg.call0::<u32>().unwrap(), 0xAABB_CCDD);
+        // Return the deeper sentinel, not the just-extracted u32: recovering
+        // it correctly is exactly what depends on the fixed padding/offset
+        // bookkeeping (the u32's own read would succeed even under the bug).
+        seg.op2(|sentinel: u8, _x: u32| sentinel).unwrap();
+        assert_eq!(seg.call0::<u8>().unwrap(), 0xEE);
     }
 
     #[test]
