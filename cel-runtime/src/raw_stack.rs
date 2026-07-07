@@ -81,7 +81,8 @@ impl RawStack {
     /// - Precondition: `align` is a power of two.
     ///
     /// # Safety
-    /// `src` must be valid for reads of `size` bytes.
+    /// `src` must be valid for reads of `size` bytes, and must not overlap the
+    /// stack's internal buffer.
     pub unsafe fn push_raw(&mut self, align: usize, size: usize, src: *const u8) -> bool {
         debug_assert!(align.is_power_of_two());
         let len = self.buffer.len();
@@ -164,6 +165,9 @@ impl RawStack {
             self.truncate_to(p, padding);
         }
     }
+
+    /// Pops a value of type `T` from the stack. Does not change the stack capacity.
+    ///
     /// # Safety
     ///
     /// The type `T` must be the same type as the value on the top of the stack.
@@ -325,9 +329,7 @@ mod tests {
         let _ = stack.push(DropCounter(count.clone()));
         let len_before = stack.len();
         unsafe {
-            stack.drop_at(0, |ptr| unsafe {
-                std::ptr::drop_in_place(ptr.cast::<DropCounter>())
-            });
+            stack.drop_at(0, |ptr| std::ptr::drop_in_place(ptr.cast::<DropCounter>()));
         }
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert_eq!(stack.len(), len_before);
@@ -360,7 +362,7 @@ mod tests {
         let _ = stack.push(1u8);
         let padding = stack.push(DropCounter(count.clone()));
         unsafe {
-            stack.drop_sized(size_of::<DropCounter>(), padding, |ptr| unsafe {
+            stack.drop_sized(size_of::<DropCounter>(), padding, |ptr| {
                 std::ptr::drop_in_place(ptr.cast::<DropCounter>())
             });
         }
