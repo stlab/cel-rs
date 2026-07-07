@@ -81,8 +81,7 @@ impl RawStack {
     /// - Precondition: `align` is a power of two.
     ///
     /// # Safety
-    /// `src` must be valid for reads of `size` bytes, and must not overlap the
-    /// stack's internal buffer.
+    /// `src` must be valid for reads of `size` bytes.
     pub unsafe fn push_raw(&mut self, align: usize, size: usize, src: *const u8) -> bool {
         debug_assert!(align.is_power_of_two());
         let len = self.buffer.len();
@@ -105,8 +104,66 @@ impl RawStack {
         aligned_index - len > 0
     }
 
-    /// Pops a value of type `T` from the stack. Does not change the stack capacity.
+    /// Copies `size` bytes starting at absolute buffer offset `offset` into `dst`.
     ///
+    /// # Safety
+    /// `offset..offset + size` must be within the currently-initialized buffer;
+    /// `dst` must be valid for writes of `size` bytes.
+    pub unsafe fn copy_from(&self, offset: usize, size: usize, dst: *mut u8) {
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.buffer.as_ptr().add(offset).cast::<u8>(), dst, size);
+        }
+    }
+
+    /// Drops a value in place at absolute buffer offset `offset`, without
+    /// altering the stack's tracked length.
+    ///
+    /// # Safety
+    /// `offset` must point to a live, valid value; `run_drop` must correctly
+    /// run that value's destructor given a pointer to its start.
+    pub unsafe fn drop_at(&mut self, offset: usize, run_drop: impl FnOnce(*mut u8)) {
+        unsafe { run_drop(self.buffer.as_mut_ptr().add(offset).cast::<u8>()) };
+    }
+
+    /// Truncates the stack back to `new_len`, additionally stripping `padding`
+    /// bytes that preceded the removed region (scanned the same way
+    /// [`pop`](Self::pop) does).
+    ///
+    /// # Safety
+    /// No live (undropped) value may exist at or above `new_len`.
+    pub unsafe fn truncate_to(&mut self, new_len: usize, padding: bool) {
+        let padding_count = if padding {
+            self.buffer[..new_len]
+                .iter()
+                .rev()
+                .take_while(|&x| unsafe { x.assume_init() == 0 })
+                .count()
+                + 1
+        } else {
+            0
+        };
+        self.buffer.truncate(new_len - padding_count);
+    }
+
+    /// Drops a value of `size` bytes at the top of the stack in place, then
+    /// removes it (and any padding that preceded it).
+    ///
+    /// # Safety
+    /// The top `size` bytes (plus padding if `padding` is true) must be a
+    /// live, valid value; `run_drop` must correctly run its destructor given a
+    /// pointer to its start.
+    pub unsafe fn drop_sized(
+        &mut self,
+        size: usize,
+        padding: bool,
+        run_drop: impl FnOnce(*mut u8),
+    ) {
+        let p = self.buffer.len() - size;
+        unsafe {
+            self.drop_at(p, run_drop);
+            self.truncate_to(p, padding);
+        }
+    }
     /// # Safety
     ///
     /// The type `T` must be the same type as the value on the top of the stack.
@@ -239,5 +296,75 @@ mod tests {
             )
         };
         assert_eq!(padding_typed, padding_raw);
+    }
+
+    #[test]
+    fn copy_from_reads_bytes_at_offset() {
+        let mut stack = RawStack::with_base_alignment(align_of::<u32>());
+        let _ = stack.push(10u32);
+        let _ = stack.push(20u32);
+        let mut buf = [0u8; 4];
+        unsafe { stack.copy_from(0, 4, buf.as_mut_ptr()) };
+        assert_eq!(u32::from_ne_bytes(buf), 10);
+    }
+
+    #[test]
+    fn drop_at_runs_destructor_without_changing_length() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut stack = RawStack::with_base_alignment(align_of::<DropCounter>());
+        let _ = stack.push(DropCounter(count.clone()));
+        let len_before = stack.len();
+        unsafe {
+            stack.drop_at(0, |ptr| unsafe {
+                std::ptr::drop_in_place(ptr.cast::<DropCounter>())
+            });
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(stack.len(), len_before);
+    }
+
+    #[test]
+    fn truncate_to_strips_recorded_padding() {
+        let mut stack = RawStack::with_base_alignment(align_of::<f64>());
+        let _ = stack.push(1u8);
+        let padding = stack.push(2.5f64); // padding == true: 7 bytes inserted before the f64
+        let len_with_value = stack.len();
+        unsafe { stack.truncate_to(len_with_value - size_of::<f64>(), padding) };
+        assert_eq!(stack.len(), 1); // back to just the u8
+    }
+
+    #[test]
+    fn drop_sized_combines_drop_at_and_truncate_to() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut stack = RawStack::with_base_alignment(align_of::<DropCounter>());
+        let _ = stack.push(1u8);
+        let padding = stack.push(DropCounter(count.clone()));
+        unsafe {
+            stack.drop_sized(size_of::<DropCounter>(), padding, |ptr| unsafe {
+                std::ptr::drop_in_place(ptr.cast::<DropCounter>())
+            });
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_eq!(stack.len(), 1);
     }
 }
