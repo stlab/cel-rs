@@ -85,20 +85,26 @@ unsafe fn drop_tuple(ptr: *mut u8, associated: &[AssociatedType]) {
 /// Extracts element `index` from the tuple currently on top of `stack`,
 /// dropping every other element, leaving just the extracted value on top.
 ///
+/// Never strips the tuple's own leading padding (if any): the extracted
+/// element inherits that same leading-padding relationship unchanged, since
+/// `tuple_base` is by construction already aligned for every element inside
+/// the tuple (the tuple's own alignment is the max of all its elements'), so
+/// re-pushing the target from `tuple_base` introduces no padding of its own.
+///
 /// - Complexity: O(n) in the tuple's arity.
 ///
 /// # Safety
-/// The top `tuple_size` bytes (plus `tuple_padding` if set) of `stack` must be
-/// a live tuple value whose layout matches `associated`.
+/// The top `tuple_size` bytes of `stack` must be a live tuple value whose
+/// layout matches `associated`.
 unsafe fn extract_tuple_element(
     stack: &mut RawStack,
     tuple_size: usize,
-    tuple_padding: bool,
     associated: &[AssociatedType],
     index: usize,
 ) {
     let tuple_base = stack.len() - tuple_size;
     let target = &associated[index];
+    debug_assert!(tuple_base.is_multiple_of(target.align));
 
     let mut scratch = vec![0u8; target.size];
     unsafe {
@@ -122,8 +128,14 @@ unsafe fn extract_tuple_element(
     }
 
     unsafe {
-        stack.truncate_to(tuple_base, tuple_padding);
-        stack.push_raw(target.align, target.size, scratch.as_ptr());
+        // padding=false: this truncates only down to tuple_base, never past
+        // the tuple's own leading pad (see doc comment above).
+        stack.truncate_to(tuple_base, false);
+        let repushed_padding = stack.push_raw(target.align, target.size, scratch.as_ptr());
+        debug_assert!(
+            !repushed_padding,
+            "tuple_base is already aligned for every element inside the tuple"
+        );
     }
 }
 
@@ -403,6 +415,11 @@ impl DynSegment {
         );
         debug_assert!(index < info.associated.len(), "tuple_index out of range");
 
+        // tuple_start is the tuple's own aligned base (dest_base from
+        // make_tuple), already a multiple of every element's alignment. The
+        // extracted element inherits the tuple's own leading-padding
+        // relationship unchanged — see extract_tuple_element's doc comment
+        // for why no realignment is needed or performed.
         let tuple_start = self.stack_index - info.size;
         let target = info.associated[index].clone();
         let associated = info.associated.clone();
@@ -411,22 +428,21 @@ impl DynSegment {
 
         self.segment.raw0_(move |stack| {
             unsafe {
-                extract_tuple_element(stack, tuple_size, tuple_padding, &associated, index);
+                extract_tuple_element(stack, tuple_size, &associated, index);
             }
             Ok(())
         });
 
-        let target_start = align_index(target.align, tuple_start);
         self.stack_ids.push(StackInfo {
             type_id: target.type_id,
             type_name: target.type_name,
-            padding: target_start != tuple_start,
+            padding: tuple_padding,
             size: target.size,
             align: target.align,
             raw_dropper: target.dropper,
             associated: target.associated,
         });
-        self.stack_index = target_start + target.size;
+        self.stack_index = tuple_start + target.size;
     }
 
     /// Returns the padding flags for the top N entries of the type stack.
@@ -1245,6 +1261,26 @@ mod tests {
         seg.tuple_index(1);
         seg.op2(|a: u32, b: u32| a + b).unwrap();
         assert_eq!(seg.call0::<u32>().unwrap(), 6);
+    }
+
+    #[test]
+    fn tuple_index_result_inherits_leading_padding_when_element_align_is_smaller() {
+        // Regression test: index element 0 (u32, align 4) out of a leading-
+        // padded (u32, u64) tuple (tuple_align 8) at a misaligned ambient
+        // start. The extracted element's align (4) is smaller than the
+        // tuple's own align (8), which previously caused the result's
+        // padding flag and stack_index bookkeeping to disagree with the
+        // actual runtime layout (see plan/task-5 review history) — popping a
+        // deeper sentinel afterward would silently read the wrong bytes.
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 0xEEu8); // sentinel, ambient offset 0
+        let ambient_start = seg.current_stack_offset(); // 1: misaligned for align-8 tuple
+        seg.op0(|| 0xAABB_CCDDu32); // element 0
+        seg.op0(|| 0x1122_3344_5566_7788u64); // element 1
+        seg.make_tuple(2, ambient_start);
+        seg.tuple_index(0);
+        seg.op2(|_sentinel: u8, x: u32| x).unwrap();
+        assert_eq!(seg.call0::<u32>().unwrap(), 0xAABB_CCDD);
     }
 
     #[test]
