@@ -71,6 +71,62 @@ pub struct AssociatedType {
 #[derive(Debug)]
 pub struct DynTuple;
 
+/// `RawDropper` for a tuple value: drops each element at `ptr + element.offset`
+/// in reverse order, recursing into nested tuples via their own droppers.
+///
+/// # Safety
+/// `ptr` must point to a live tuple value whose layout matches `associated`.
+unsafe fn drop_tuple(ptr: *mut u8, associated: &[AssociatedType]) {
+    for elem in associated.iter().rev() {
+        unsafe { (elem.dropper)(ptr.add(elem.offset), &elem.associated) };
+    }
+}
+
+/// Extracts element `index` from the tuple currently on top of `stack`,
+/// dropping every other element, leaving just the extracted value on top.
+///
+/// - Complexity: O(n) in the tuple's arity.
+///
+/// # Safety
+/// The top `tuple_size` bytes (plus `tuple_padding` if set) of `stack` must be
+/// a live tuple value whose layout matches `associated`.
+unsafe fn extract_tuple_element(
+    stack: &mut RawStack,
+    tuple_size: usize,
+    tuple_padding: bool,
+    associated: &[AssociatedType],
+    index: usize,
+) {
+    let tuple_base = stack.len() - tuple_size;
+    let target = &associated[index];
+
+    let mut scratch = vec![0u8; target.size];
+    unsafe {
+        stack.copy_from(
+            tuple_base + target.offset,
+            target.size,
+            scratch.as_mut_ptr(),
+        );
+    }
+
+    for (i, elem) in associated.iter().enumerate().rev() {
+        if i == index {
+            continue;
+        }
+        let elem_associated = &elem.associated;
+        unsafe {
+            stack.drop_at(tuple_base + elem.offset, |ptr| {
+                (elem.dropper)(ptr, elem_associated)
+            });
+        }
+    }
+
+    unsafe {
+        stack.truncate_to(tuple_base, tuple_padding);
+        stack.push_raw(target.align, target.size, scratch.as_ptr());
+    }
+}
+
 /// Information about a type on the stack, including its cleanup function.
 ///
 /// Holds metadata for a value pushed onto the stack: runtime type id, display
@@ -234,6 +290,143 @@ impl DynSegment {
             associated: Vec::new(),
         });
         self.stack_index = aligned_index + size_of::<T>();
+    }
+
+    /// Returns the current parse-time stack byte offset.
+    ///
+    /// Snapshot this before parsing a tuple's first element and pass it to
+    /// [`make_tuple`](Self::make_tuple).
+    #[must_use]
+    pub fn current_stack_offset(&self) -> usize {
+        self.stack_index
+    }
+
+    /// Returns the arity of the tuple on top of the stack, or `None` if the
+    /// top value isn't a tuple.
+    #[must_use]
+    pub fn peek_tuple_arity(&self) -> Option<usize> {
+        let info = self.stack_ids.last()?;
+        (info.type_id == TypeId::of::<DynTuple>()).then_some(info.associated.len())
+    }
+
+    /// Collapses the top `n` stack values (pushed starting at byte offset
+    /// `ambient_start`, e.g. via [`current_stack_offset`](Self::current_stack_offset)
+    /// captured before parsing the first element) into one tuple value.
+    ///
+    /// The tuple's internal layout (offsets between elements) depends only on
+    /// the elements' own types — never on `ambient_start` — matching the
+    /// layout a `#[repr(C)]` struct with these fields, in this order, would
+    /// use.
+    ///
+    /// - Precondition: at least `n` values are on the stack, pushed
+    ///   contiguously starting at `ambient_start` with no other values
+    ///   interleaved.
+    ///
+    /// - Complexity: O(n).
+    pub fn make_tuple(&mut self, n: usize, ambient_start: usize) {
+        debug_assert!(n <= self.stack_ids.len());
+        let start = self.stack_ids.len() - n;
+        let elems: Vec<StackInfo> = self.stack_ids.drain(start..).collect();
+
+        let mut ambient_offset = ambient_start;
+        let mut ideal_offset = 0usize;
+        let mut tuple_align = 1usize;
+        let mut src_offsets = Vec::with_capacity(n);
+        let mut associated = Vec::with_capacity(n);
+        for elem in &elems {
+            ambient_offset = align_index(elem.align, ambient_offset);
+            ideal_offset = align_index(elem.align, ideal_offset);
+            tuple_align = tuple_align.max(elem.align);
+
+            src_offsets.push(ambient_offset);
+            associated.push(AssociatedType {
+                type_id: elem.type_id,
+                type_name: elem.type_name.clone(),
+                offset: ideal_offset,
+                size: elem.size,
+                align: elem.align,
+                dropper: elem.raw_dropper,
+                associated: elem.associated.clone(),
+            });
+
+            ambient_offset += elem.size;
+            ideal_offset += elem.size;
+        }
+        let total_size = align_index(tuple_align, ideal_offset);
+        let dest_base = align_index(tuple_align, ambient_start);
+
+        let dest_offsets: Vec<usize> = associated.iter().map(|a| a.offset).collect();
+        let sizes: Vec<usize> = elems.iter().map(|e| e.size).collect();
+
+        self.segment.raw0_(move |stack| {
+            unsafe {
+                stack.repack(
+                    ambient_start,
+                    dest_base,
+                    total_size,
+                    &src_offsets,
+                    &dest_offsets,
+                    &sizes,
+                );
+            }
+            Ok(())
+        });
+
+        self.stack_ids.push(StackInfo {
+            type_id: TypeId::of::<DynTuple>(),
+            type_name: Cow::Borrowed(std::any::type_name::<DynTuple>()),
+            padding: dest_base != ambient_start,
+            size: total_size,
+            align: tuple_align,
+            raw_dropper: drop_tuple,
+            associated,
+        });
+        self.stack_index = dest_base + total_size;
+    }
+
+    /// Extracts element `index` from the tuple on top of the stack, replacing
+    /// the whole tuple with just that element's value.
+    ///
+    /// - Precondition: the top-of-stack value is a tuple with at least
+    ///   `index + 1` elements.
+    ///
+    /// - Complexity: O(n) in the tuple's arity.
+    pub fn tuple_index(&mut self, index: usize) {
+        let info = self
+            .stack_ids
+            .pop()
+            .expect("tuple_index requires a value on the stack");
+        debug_assert_eq!(
+            info.type_id,
+            TypeId::of::<DynTuple>(),
+            "tuple_index requires a tuple on top of the stack"
+        );
+        debug_assert!(index < info.associated.len(), "tuple_index out of range");
+
+        let tuple_start = self.stack_index - info.size;
+        let target = info.associated[index].clone();
+        let associated = info.associated.clone();
+        let tuple_padding = info.padding;
+        let tuple_size = info.size;
+
+        self.segment.raw0_(move |stack| {
+            unsafe {
+                extract_tuple_element(stack, tuple_size, tuple_padding, &associated, index);
+            }
+            Ok(())
+        });
+
+        let target_start = align_index(target.align, tuple_start);
+        self.stack_ids.push(StackInfo {
+            type_id: target.type_id,
+            type_name: target.type_name,
+            padding: target_start != tuple_start,
+            size: target.size,
+            align: target.align,
+            raw_dropper: target.dropper,
+            associated: target.associated,
+        });
+        self.stack_index = target_start + target.size;
     }
 
     /// Returns the padding flags for the top N entries of the type stack.
@@ -963,5 +1156,105 @@ mod tests {
         assert_eq!(a.offset, 4);
         assert_eq!(a.size, 4);
         assert_eq!(a.align, 4);
+    }
+
+    #[test]
+    fn make_tuple_then_index_each_element() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 10u32);
+        seg.op0(|| "hello");
+        seg.make_tuple(2, ambient_start);
+        assert_eq!(seg.peek_tuple_arity(), Some(2));
+
+        // Index element 1 first on a clone-free single segment isn't possible
+        // (tuple_index consumes the tuple), so build two segments to check both.
+        let mut seg0 = DynSegment::new::<()>();
+        let ambient_start0 = seg0.current_stack_offset();
+        seg0.op0(|| 10u32);
+        seg0.op0(|| "hello");
+        seg0.make_tuple(2, ambient_start0);
+        seg0.tuple_index(0);
+        assert_eq!(seg0.call0::<u32>().unwrap(), 10);
+
+        seg.tuple_index(1);
+        assert_eq!(seg.call0::<&'static str>().unwrap(), "hello");
+    }
+
+    #[test]
+    fn tuple_layout_is_independent_of_ambient_stack_depth() {
+        // (u8, u32): with nothing ahead of it vs. with a u8 already on the stack,
+        // internal padding between elements must be identical either way.
+        let mut seg_a = DynSegment::new::<()>();
+        let ambient_a = seg_a.current_stack_offset();
+        seg_a.op0(|| 1u8);
+        seg_a.op0(|| 2u32);
+        seg_a.make_tuple(2, ambient_a);
+
+        let mut seg_b = DynSegment::new::<()>();
+        seg_b.op0(|| 99u8); // extra value ahead, shifts ambient depth
+        let ambient_b = seg_b.current_stack_offset();
+        seg_b.op0(|| 1u8);
+        seg_b.op0(|| 2u32);
+        seg_b.make_tuple(2, ambient_b);
+
+        seg_a.tuple_index(1);
+        seg_b.tuple_index(1);
+        assert_eq!(seg_a.call0::<u32>().unwrap(), 2);
+        seg_b.op2(|_extra: u8, x: u32| x).unwrap();
+        assert_eq!(seg_b.call0::<u32>().unwrap(), 2);
+    }
+
+    #[test]
+    fn tuple_index_drops_every_other_element_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let tracker = DropCounter(drop_count.clone());
+
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(move || tracker.clone());
+        seg.op0(|| 42u32);
+        seg.make_tuple(2, ambient_start);
+        seg.tuple_index(1); // keep the u32, drop the DropCounter
+
+        assert_eq!(seg.call0::<u32>().unwrap(), 42);
+        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn tuple_index_combined_with_another_op() {
+        // Mirrors the spec's `5 + (0, 1).1` case: indexing must leave the stack in
+        // a state a subsequent op can correctly consume.
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 5u32);
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 0u32);
+        seg.op0(|| 1u32);
+        seg.make_tuple(2, ambient_start);
+        seg.tuple_index(1);
+        seg.op2(|a: u32, b: u32| a + b).unwrap();
+        assert_eq!(seg.call0::<u32>().unwrap(), 6);
+    }
+
+    #[test]
+    fn one_tuple_round_trips() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 99u32);
+        seg.make_tuple(1, ambient_start);
+        assert_eq!(seg.peek_tuple_arity(), Some(1));
+        seg.tuple_index(0);
+        assert_eq!(seg.call0::<u32>().unwrap(), 99);
     }
 }
