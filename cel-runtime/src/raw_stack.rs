@@ -28,6 +28,7 @@ impl RawStack {
 
     /// Returns the number of bytes currently on the stack.
     #[must_use]
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.buffer.len()
     }
@@ -80,7 +81,8 @@ impl RawStack {
     /// - Precondition: `align` is a power of two.
     ///
     /// # Safety
-    /// `src` must be valid for reads of `size` bytes.
+    /// `src` must be valid for reads of `size` bytes, and must not overlap the
+    /// stack's internal buffer.
     pub unsafe fn push_raw(&mut self, align: usize, size: usize, src: *const u8) -> bool {
         debug_assert!(align.is_power_of_two());
         let len = self.buffer.len();
