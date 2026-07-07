@@ -185,7 +185,14 @@ impl RawStack {
     ///
     /// # Safety
     /// The offsets and sizes must correctly describe the actual bytes in the
-    /// buffer; no two destination ranges may overlap.
+    /// buffer; no two destination ranges may overlap. `src_offsets` and
+    /// `dest_offsets` must be in the same relative element order (element `i`'s
+    /// source and destination must both be the `i`-th non-overlapping range in
+    /// their respective layouts) — this method does not reorder elements, only
+    /// re-pads between them. Given that and `dest_base >= ambient_start`, each
+    /// element's destination start is guaranteed to be at or after every
+    /// earlier element's source end, which is what makes processing in reverse
+    /// index order below safe against clobbering not-yet-read source bytes.
     pub unsafe fn repack(
         &mut self,
         ambient_start: usize,
@@ -208,7 +215,11 @@ impl RawStack {
                 self.buffer.set_len(grown_len);
             }
             let base_ptr = self.buffer.as_mut_ptr().cast::<u8>();
-            for i in 0..sizes.len() {
+            // Process highest index first: each element's destination is
+            // provably at or after every earlier element's source end (see
+            // `# Safety` above), so this order never overwrites source bytes
+            // an earlier iteration still needs to read.
+            for i in (0..sizes.len()).rev() {
                 std::ptr::copy(
                     base_ptr.add(src_offsets[i]),
                     base_ptr.add(dest_base + dest_offsets[i]),
@@ -474,5 +485,62 @@ mod tests {
         assert_eq!(a[0], 0xAA);
         assert_eq!(u32::from_ne_bytes(b), 0xBBBB_BBBB);
         assert_eq!(c[0], 0xCC);
+    }
+
+    #[test]
+    fn repack_shifts_right_without_corrupting_unread_source_bytes() {
+        // A misaligned ambient_start forces dest_base > ambient_start, which
+        // means the destination of the *first* tuple element can land inside
+        // the *source* range of a *later*, not-yet-copied element. Processing
+        // elements low-index-first would silently corrupt that later element's
+        // bytes before they're read; this test fails under that ordering and
+        // passes under the correct (reverse) ordering.
+        let mut stack = RawStack::with_base_alignment(align_of::<u32>());
+        let _ = stack.push(0xFFu8); // sentinel, ambient offset 0, before the tuple
+        let ambient_start = stack.len(); // 1: misaligned relative to u32's 4-byte align
+        let _ = stack.push(0xDDu8); // element 0: ambient offset 1
+        let _ = stack.push(0x1122_3344u32); // element 1: ambient offset 4 (3 bytes padded)
+
+        // Ideal (u8, u32) layout from zero: offset 0 (u8), offset 4 (u32) -> total 8.
+        let src_offsets = [1usize, 4];
+        let dest_offsets = [0usize, 4];
+        let sizes = [1usize, 4];
+        let total_size = 8usize;
+        let dest_base = 4usize; // align_index(4, ambient_start=1) == 4, so this shifts right
+
+        let padding = unsafe {
+            stack.repack(
+                ambient_start,
+                dest_base,
+                total_size,
+                &src_offsets,
+                &dest_offsets,
+                &sizes,
+            )
+        };
+        assert!(
+            padding,
+            "ambient_start (1) is not 4-aligned; a leading pad is expected"
+        );
+        assert_eq!(stack.len(), dest_base + total_size);
+
+        let mut sentinel = [0u8; 1];
+        let mut a = [0u8; 1];
+        let mut b = [0u8; 4];
+        unsafe {
+            stack.copy_from(0, 1, sentinel.as_mut_ptr());
+            stack.copy_from(dest_base, 1, a.as_mut_ptr());
+            stack.copy_from(dest_base + 4, 4, b.as_mut_ptr());
+        }
+        assert_eq!(
+            sentinel[0], 0xFF,
+            "bytes before the tuple must be untouched"
+        );
+        assert_eq!(a[0], 0xDD);
+        assert_eq!(
+            u32::from_ne_bytes(b),
+            0x1122_3344,
+            "the u32's bytes must survive the repack uncorrupted"
+        );
     }
 }
