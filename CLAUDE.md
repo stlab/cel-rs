@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+See `docs/VISION.md` for the long-term goals and direction behind each crate in this
+workspace — read it when a task touches roadmap, priorities, or "why does this exist"
+questions.
+
 ## Setup
 
 After cloning, activate the shared git hooks (one-time):
@@ -63,11 +67,15 @@ redesigning any components rather than patching them or layering on top of them.
 
 ## Architecture
 
-This is a workspace with three crates:
+This workspace is centered on `cel-runtime` and is split into libraries, a façade crate, and supporting tools:
 
-- **`cel-runtime`** — core runtime; all meaningful code lives here
-- **`cel-rs`** — thin façade that re-exports from `cel-runtime`
+- **`cel-rs`** — root façade crate that re-exports `cel-runtime` and depends on `cel-parser` and `cel-rs-macros`
+- **`cel-runtime`** — core stack-based runtime; all evaluation and stack machinery lives here
+- **`cel-parser`** — recursive-descent CEL parser, lexer, and parser error types
 - **`cel-rs-macros`** — proc-macro crate for compile-time CEL expression validation
+- **`property-model`** and **`pm-lang`** — supporting crates for the property-model and PM language features
+- **`begin`** — Dioxus-based UI application
+- **`xtask`** — repository automation and maintenance tasks
 
 ### Four-layer stack abstraction (cel-runtime/src/)
 
@@ -82,17 +90,17 @@ The runtime is a **stack-based expression evaluator** built in four layers of in
 
 The compile-time type system uses **cons-cell heterogeneous lists** (`CStackList<H,T>` / `CNil`) defined in `c_stack_list.rs` and `list_traits.rs`.
 
-### Parser pipeline (cel-runtime/src/parser/)
+### Parser pipeline (cel-parser/src/)
 
 ```
 &str → TokenStream (proc_macro2) → LexLexer (flatten + combine multi-char ops) → CELParser (recursive descent) → DynSegment
 ```
 
-`parser/mod.rs` contains the full recursive-descent grammar. Function names mirror grammar productions directly (e.g. `is_additive_expression`).
+`cel-parser/src/lib.rs` contains the grammar entry points and parser pipeline. Function names mirror grammar productions directly (e.g. `is_additive_expression`).
 
-`parser/op_table.rs` implements `OpLookup`: a stack of custom `ScopeFn` scopes (LIFO) backed by static `phf_map` built-in ops. Overloading is by arity + `TypeId`.
+`cel-parser/src/op_table.rs` implements `OpLookup`: a stack of custom `ScopeFn` scopes (LIFO) backed by static `phf_map` built-in ops. Overloading is by arity + `TypeId`.
 
-`parser/error.rs` defines `CELError` with `SourceSpan` and `format_rustc_style()` for caret diagnostics.
+`cel-parser/src/error.rs` defines `CELError` and `SourceSpan`, plus `format_rustc_style()` for caret diagnostics.
 
 ## Code Style
 
