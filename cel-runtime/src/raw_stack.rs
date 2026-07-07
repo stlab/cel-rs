@@ -26,6 +26,13 @@ impl RawStack {
         }
     }
 
+    /// Returns the number of bytes currently on the stack.
+    #[must_use]
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
     /// Pushes a value of type `T` onto the stack.
     ///
     /// The value is stored as raw bytes in the internal buffer. The pushed value must be
@@ -63,6 +70,35 @@ impl RawStack {
             std::ptr::write(
                 self.buffer.as_mut_ptr().add(aligned_index).cast::<T>(),
                 value,
+            );
+        }
+        aligned_index - len > 0
+    }
+
+    /// Pushes `size` raw bytes from `src`, aligned to `align`, using the same
+    /// padding/marker-byte bookkeeping as [`push`](Self::push).
+    ///
+    /// - Precondition: `align` is a power of two.
+    ///
+    /// # Safety
+    /// `src` must be valid for reads of `size` bytes.
+    pub unsafe fn push_raw(&mut self, align: usize, size: usize, src: *const u8) -> bool {
+        debug_assert!(align.is_power_of_two());
+        let len = self.buffer.len();
+        let aligned_index = align_index(align, len);
+        let new_len = aligned_index + size;
+
+        self.buffer.reserve(new_len - len);
+        unsafe {
+            self.buffer.set_len(new_len);
+            if aligned_index - len > 0 {
+                self.buffer[len].write(1);
+                self.buffer[len + 1..aligned_index].fill(MaybeUninit::new(0));
+            }
+            std::ptr::copy_nonoverlapping(
+                src,
+                self.buffer.as_mut_ptr().add(aligned_index).cast::<u8>(),
+                size,
             );
         }
         aligned_index - len > 0
@@ -157,5 +193,50 @@ mod tests {
         let value_u: u32 = unsafe { stack.pop(padding1) };
         assert_eq!(value_f, 3.14);
         assert_eq!(value_u, 42);
+    }
+
+    #[test]
+    fn len_reflects_pushed_bytes() {
+        let mut stack = RawStack::with_base_alignment(align_of::<u32>());
+        assert_eq!(stack.len(), 0);
+        let _ = stack.push(7u32);
+        assert_eq!(stack.len(), size_of::<u32>());
+    }
+
+    #[test]
+    fn push_raw_round_trips_like_push() {
+        let mut stack = RawStack::with_base_alignment(align_of::<f64>());
+        let padding1 = stack.push(1u8);
+        let value = 3.14f64;
+        let padding2 = unsafe {
+            stack.push_raw(
+                align_of::<f64>(),
+                size_of::<f64>(),
+                (&value as *const f64).cast::<u8>(),
+            )
+        };
+        let popped: f64 = unsafe { stack.pop(padding2) };
+        assert_eq!(popped, 3.14);
+        let popped_u8: u8 = unsafe { stack.pop(padding1) };
+        assert_eq!(popped_u8, 1);
+    }
+
+    #[test]
+    fn push_raw_padding_matches_typed_push() {
+        let mut stack_a = RawStack::with_base_alignment(align_of::<f64>());
+        let _ = stack_a.push(1u8);
+        let padding_typed = stack_a.push(2.5f64);
+
+        let mut stack_b = RawStack::with_base_alignment(align_of::<f64>());
+        let _ = stack_b.push(1u8);
+        let value = 2.5f64;
+        let padding_raw = unsafe {
+            stack_b.push_raw(
+                align_of::<f64>(),
+                size_of::<f64>(),
+                (&value as *const f64).cast::<u8>(),
+            )
+        };
+        assert_eq!(padding_typed, padding_raw);
     }
 }
