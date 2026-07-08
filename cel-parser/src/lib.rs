@@ -929,19 +929,16 @@ impl CELParser {
     }
 
     /// `primary_expression = literal | identifier | tuple_or_group | if_expression.`
-    /// `tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".`
     ///
-    /// Dispatches to [`is_if_expression`](Self::is_if_expression) when the `if` keyword is seen.
-    /// `()` parses as unit, `(expr)` as grouping, `(expr,)` as a 1-tuple, and
-    /// `(expr, expr, ...)` as an n-tuple.
+    /// Dispatches to [`is_if_expression`](Self::is_if_expression) when the `if` keyword is seen,
+    /// and to [`is_tuple_or_group`](Self::is_tuple_or_group) when `(` is seen.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - A literal value cannot be parsed (e.g., integer out of range).
     /// - An identifier is not found in the op lookup table.
-    /// - A parenthesized expression or tuple literal is malformed, has a missing or
-    ///   misplaced comma, or is missing its closing `)`.
+    /// - A tuple-or-group expression fails to parse.
     /// - An `if` expression fails to parse.
     fn is_primary_expression(&mut self) -> Result<bool> {
         match self.peek_token() {
@@ -968,75 +965,88 @@ impl CELParser {
             Some(Token::OpenDelim {
                 delimiter: Delimiter::Parenthesis,
                 ..
-            }) => {
-                self.advance();
-                // Unit expression: ()
-                if matches!(
-                    self.peek_token(),
-                    Some(Token::CloseDelim {
-                        delimiter: Delimiter::Parenthesis,
-                        ..
-                    })
-                ) {
-                    self.advance();
-                    self.context.just(());
-                    return Ok(true);
-                }
-                let ambient_start = self.context.current_stack_offset();
-                if !self.is_or_expression()? {
-                    return Err(self.error_at("expected expression"));
-                }
-                if matches!(
-                    self.peek_token(),
-                    Some(Token::CloseDelim {
-                        delimiter: Delimiter::Parenthesis,
-                        ..
-                    })
-                ) {
-                    // Grouping: exactly one expression, no comma.
-                    self.advance();
-                    return Ok(true);
-                }
-                if !self.is_punctuation(",") {
-                    return Err(self.error_at("expected ',' or closing parenthesis"));
-                }
-                let mut count = 1;
-                if matches!(
-                    self.peek_token(),
-                    Some(Token::CloseDelim {
-                        delimiter: Delimiter::Parenthesis,
-                        ..
-                    })
-                ) {
-                    // Single element + trailing comma: 1-tuple.
-                    self.advance();
-                    self.context.make_tuple(count, ambient_start);
-                    return Ok(true);
-                }
-                loop {
-                    if !self.is_or_expression()? {
-                        return Err(self.error_at("expected expression after ','"));
-                    }
-                    count += 1;
-                    if matches!(
-                        self.peek_token(),
-                        Some(Token::CloseDelim {
-                            delimiter: Delimiter::Parenthesis,
-                            ..
-                        })
-                    ) {
-                        self.advance();
-                        break;
-                    }
-                    if !self.is_punctuation(",") {
-                        return Err(self.error_at("expected ',' or closing parenthesis"));
-                    }
-                }
-                self.context.make_tuple(count, ambient_start);
-                Ok(true)
-            }
+            }) => self.is_tuple_or_group(),
             _ => Ok(false),
         }
+    }
+
+    /// `tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".`
+    ///
+    /// `()` parses as unit, `(expr)` as grouping, `(expr,)` as a 1-tuple, and
+    /// `(expr, expr, ...)` as an n-tuple.
+    ///
+    /// - Precondition: The next token is `Token::OpenDelim` with `Delimiter::Parenthesis`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parenthesized expression or tuple literal is malformed, has a
+    /// missing or misplaced comma, or is missing its closing `)`.
+    fn is_tuple_or_group(&mut self) -> Result<bool> {
+        self.advance();
+        // Unit expression: ()
+        if matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            self.advance();
+            self.context.just(());
+            return Ok(true);
+        }
+        let ambient_start = self.context.current_stack_offset();
+        if !self.is_or_expression()? {
+            return Err(self.error_at("expected expression"));
+        }
+        if matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            // Grouping: exactly one expression, no comma.
+            self.advance();
+            return Ok(true);
+        }
+        if !self.is_punctuation(",") {
+            return Err(self.error_at("expected ',' or closing parenthesis"));
+        }
+        let mut count = 1;
+        if matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            // Single element + trailing comma: 1-tuple.
+            self.advance();
+            self.context.make_tuple(count, ambient_start);
+            return Ok(true);
+        }
+        loop {
+            if !self.is_or_expression()? {
+                return Err(self.error_at("expected expression after ','"));
+            }
+            count += 1;
+            if matches!(
+                self.peek_token(),
+                Some(Token::CloseDelim {
+                    delimiter: Delimiter::Parenthesis,
+                    ..
+                })
+            ) {
+                self.advance();
+                break;
+            }
+            if !self.is_punctuation(",") {
+                return Err(self.error_at("expected ',' or closing parenthesis"));
+            }
+        }
+        self.context.make_tuple(count, ambient_start);
+        Ok(true)
     }
 
     /// `if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].`
