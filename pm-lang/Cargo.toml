@@ -13,5 +13,8 @@ syn = { version = "2.0", features = ["extra-traits", "parsing"] }
 anyhow = "1.0"
 indexmap = "2"
 
+[features]
+playground = []
+
 [lints]
 workspace = true

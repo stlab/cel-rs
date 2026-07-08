@@ -1273,7 +1273,7 @@ mod tests {
     #[test]
     fn two_element_tuple_no_trailing_comma() {
         let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser.parse_str(r#"("Hello", 42i32)"#).unwrap();
+        let seg: DynSegment = parser.parse_str(r#"("Hello", 42i32)"#).unwrap();
         assert_eq!(seg.peek_tuple_arity(), Some(2));
     }
 
