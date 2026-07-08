@@ -56,6 +56,27 @@ fn span_err(_span: SourceSpan, e: anyhow::Error) -> anyhow::Error {
 /// have no state.
 pub type OpFn = fn(&mut DynSegment, SourceSpan) -> Result<()>;
 
+/// A signature for an operator/function whose selected operand is a tuple.
+///
+/// Matches when the operand at `tuple_operand_index` (0-based, in the same
+/// stack order [`DynSegment::peek_stack_infos`] returns) is a tuple whose
+/// element `TypeId`s equal `shape`, in order, and every other peeked operand's
+/// flat `TypeId` equals the corresponding entry in `operand_type_ids` (the
+/// entry at `tuple_operand_index` in `operand_type_ids` is ignored).
+pub struct TupleOpSignature {
+    /// Operator/function name this signature is registered under.
+    pub name: String,
+    /// Expected element `TypeId`s, in order, for the tuple-shaped operand.
+    pub shape: Vec<TypeId>,
+    /// Which peeked operand position must be the tuple.
+    pub tuple_operand_index: usize,
+    /// Flat `TypeId`s expected for the non-tuple operands, in stack order
+    /// (the `tuple_operand_index` entry is ignored).
+    pub operand_type_ids: Vec<TypeId>,
+    /// Function that pushes the operation onto the segment.
+    pub op_fn: OpFn,
+}
+
 /// A scope function that attempts to resolve and apply an operation.
 ///
 /// Receives the operation name, the segment, the number of operands on top of the stack,
@@ -968,6 +989,7 @@ impl BuiltinScope {
 pub struct OpLookup {
     scopes: Vec<ScopeFn>,
     builtin_scope: BuiltinScope,
+    tuple_signatures: Vec<TupleOpSignature>,
 }
 
 impl OpLookup {
@@ -984,7 +1006,53 @@ impl OpLookup {
         OpLookup {
             scopes: Vec::new(),
             builtin_scope: BuiltinScope,
+            tuple_signatures: Vec::new(),
         }
+    }
+
+    /// Registers a tuple-shaped operator signature, matched by element
+    /// `TypeId` sequence the same way built-in operators are matched by flat
+    /// `TypeId`.
+    pub fn register_tuple_op(&mut self, signature: TupleOpSignature) {
+        self.tuple_signatures.push(signature);
+    }
+
+    /// Attempts to find and apply a registered tuple-shaped signature.
+    ///
+    /// Returns `Ok(true)` if found and applied, `Ok(false)` if not found.
+    ///
+    /// - Complexity: O(s) where s is the number of registered tuple signatures.
+    fn lookup_tuple_signature(
+        &self,
+        name: &str,
+        segment: &mut DynSegment,
+        num_operands: usize,
+        span: SourceSpan,
+    ) -> Result<bool> {
+        let stack_infos = segment.peek_stack_infos(num_operands);
+        for sig in &self.tuple_signatures {
+            if sig.name != name || sig.tuple_operand_index >= stack_infos.len() {
+                continue;
+            }
+            let tuple_info = &stack_infos[sig.tuple_operand_index];
+            let shape_matches = tuple_info.associated.len() == sig.shape.len()
+                && tuple_info
+                    .associated
+                    .iter()
+                    .zip(&sig.shape)
+                    .all(|(a, t)| a.type_id == *t);
+            if !shape_matches {
+                continue;
+            }
+            let others_match = stack_infos.iter().enumerate().all(|(i, info)| {
+                i == sig.tuple_operand_index || info.type_id == sig.operand_type_ids[i]
+            });
+            if others_match {
+                (sig.op_fn)(segment, span)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Pushes a new scope onto the stack.
@@ -1048,6 +1116,18 @@ impl OpLookup {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
                 Err(e) => return Err(crate::ParseError::new_range(e.to_string(), start, end)),
+            }
+        }
+
+        match self.lookup_tuple_signature(name, segment, num_operands, source_span) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(e) => {
+                return Err(crate::ParseError::new_range(
+                    format!("operation error: {}", e),
+                    start,
+                    end,
+                ));
             }
         }
 
@@ -1521,6 +1601,70 @@ mod tests {
         assert!(
             rendered.contains('^'),
             "expected caret marker in rendered output, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn tuple_shaped_signature_matches_and_dispatches() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.register_tuple_op(TupleOpSignature {
+            name: "greet".to_string(),
+            shape: vec![TypeId::of::<String>(), TypeId::of::<i32>()],
+            tuple_operand_index: 0,
+            operand_type_ids: vec![],
+            op_fn: |seg, _span| {
+                seg.tuple_index(1);
+                seg.op1(|_ignored: i32| true)
+            },
+        });
+
+        let mut segment = DynSegment::new::<()>();
+        let ambient_start = segment.current_stack_offset();
+        segment.op0(|| "hi".to_string());
+        segment.op0(|| 7i32);
+        segment.make_tuple(2, ambient_start);
+
+        lookup.lookup(
+            "greet",
+            &mut segment,
+            1,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        assert!(segment.call0::<bool>()?);
+        Ok(())
+    }
+
+    #[test]
+    fn tuple_shaped_signature_does_not_match_wrong_shape() {
+        let mut lookup = OpLookup::new();
+        lookup.register_tuple_op(TupleOpSignature {
+            name: "greet".to_string(),
+            shape: vec![TypeId::of::<String>(), TypeId::of::<i32>()],
+            tuple_operand_index: 0,
+            operand_type_ids: vec![],
+            op_fn: |seg, _span| {
+                seg.tuple_index(1);
+                seg.op1(|_ignored: i32| true)
+            },
+        });
+
+        let mut segment = DynSegment::new::<()>();
+        let ambient_start = segment.current_stack_offset();
+        segment.op0(|| 1i32);
+        segment.op0(|| 2i32);
+        segment.make_tuple(2, ambient_start);
+
+        let result = lookup.lookup(
+            "greet",
+            &mut segment,
+            1,
+            Span::call_site(),
+            Span::call_site(),
+        );
+        assert!(
+            result.is_err(),
+            "shape (i32, i32) should not match (String, i32)"
         );
     }
 }
