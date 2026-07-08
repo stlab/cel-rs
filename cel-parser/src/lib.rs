@@ -858,15 +858,21 @@ impl CELParser {
                         if !float.suffix().is_empty() {
                             return Err(self.error_at("tuple index must be an unsuffixed integer"));
                         }
-                        self.advance();
                         // base10_digits() returns the decimal digits with underscores
-                        // stripped and the suffix removed, e.g. "0.1" or "10.25" —
-                        // splitting on the (always-present) '.' recovers the two
-                        // chained integer indices.
+                        // stripped and the suffix removed, e.g. "0.1" or "10.25" for
+                        // ordinary decimal floats — splitting on '.' recovers the two
+                        // chained integer indices. Scientific-notation floats (e.g.
+                        // `1e2`) normalize to digits with no '.' at all; reject those
+                        // as a parse error (checked before advancing, so the error
+                        // span still points at the float token) rather than assuming
+                        // a '.' is always present.
                         let digits = float.base10_digits();
-                        let (first, second) = digits
-                            .split_once('.')
-                            .expect("float literal digits always contain a decimal point");
+                        let Some((first, second)) = digits.split_once('.') else {
+                            return Err(self.error_at(
+                                "tuple index chain must use decimal notation (e.g. `.0.1`)",
+                            ));
+                        };
+                        self.advance();
                         let first_index = first.parse::<usize>().map_err(|e| {
                             self.error_at(&format!("invalid tuple index `{first}`: {e}"))
                         })?;
@@ -1358,6 +1364,16 @@ mod tests {
         // unsuffixed-integer rule must still reject it.
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str("(1i32, 2i32).0.1i32");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn chained_tuple_index_scientific_notation_is_a_parse_error_not_a_panic() {
+        // `1e2` normalizes to digits with no '.' at all (scientific notation),
+        // unlike ordinary decimal floats like `0.1` — must be a graceful parse
+        // error, not a panic on the assumption that '.' is always present.
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32, 2i32).1e2");
         assert!(result.is_err());
     }
 
