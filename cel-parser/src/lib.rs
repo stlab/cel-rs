@@ -25,7 +25,7 @@
 //! additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
 //! multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
-//! postfix_expression = primary_expression { "(" parameter_list ")" }.
+//! postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.
 //! primary_expression = literal | identifier | tuple_or_group | if_expression.
 //! tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".
 //! if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].
@@ -800,38 +800,66 @@ impl CELParser {
         }
     }
 
-    /// `postfix_expression = primary_expression { "(" parameter_list ")" }.`
+    /// `postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.`
     fn is_postfix_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
         if !self.is_primary_expression()? {
             return Ok(false);
         }
-        while matches!(
-            self.peek_token(),
-            Some(Token::OpenDelim {
-                delimiter: Delimiter::Parenthesis,
-                ..
-            })
-        ) {
-            self.advance(); // consume "("
-            let arg_count = self.parameter_list()?;
-            match self.peek_token() {
-                Some(Token::CloseDelim {
+        loop {
+            if matches!(
+                self.peek_token(),
+                Some(Token::OpenDelim {
                     delimiter: Delimiter::Parenthesis,
                     ..
-                }) => {
-                    self.advance(); // consume ")"
+                })
+            ) {
+                self.advance(); // consume "("
+                let arg_count = self.parameter_list()?;
+                match self.peek_token() {
+                    Some(Token::CloseDelim {
+                        delimiter: Delimiter::Parenthesis,
+                        ..
+                    }) => {
+                        self.advance(); // consume ")"
+                    }
+                    _ => return Err(self.error_at("expected closing parenthesis")),
                 }
-                _ => return Err(self.error_at("expected closing parenthesis")),
+                // Stack order is [callee, arg1, arg2, ...]; lookup peeks top (arg_count + 1) entries.
+                self.op_lookup.lookup(
+                    "()",
+                    &mut self.context,
+                    arg_count + 1,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
+            } else if self.is_punctuation(".") {
+                let index = match self.peek_token() {
+                    Some(Token::Literal(CelLiteral::Int(integer))) => {
+                        let integer = integer.clone();
+                        if !integer.suffix().is_empty() {
+                            return Err(self.error_at("tuple index must be an unsuffixed integer"));
+                        }
+                        self.advance();
+                        integer.base10_parse::<usize>().map_err(|e| {
+                            self.error_at(&format!("invalid tuple index `{integer}`: {e}"))
+                        })?
+                    }
+                    _ => return Err(self.error_at("expected integer after '.'")),
+                };
+                let arity = self
+                    .context
+                    .peek_tuple_arity()
+                    .ok_or_else(|| self.error_at("'.N' requires a tuple"))?;
+                if index >= arity {
+                    return Err(self.error_at(&format!(
+                        "tuple index `{index}` out of range for tuple of arity {arity}"
+                    )));
+                }
+                self.context.tuple_index(index);
+            } else {
+                break;
             }
-            // Stack order is [callee, arg1, arg2, ...]; lookup peeks top (arg_count + 1) entries.
-            self.op_lookup.lookup(
-                "()",
-                &mut self.context,
-                arg_count + 1,
-                start_span.expect("production has token at start"),
-                self.last_span,
-            )?;
         }
         Ok(true)
     }
@@ -1213,6 +1241,55 @@ mod tests {
     fn missing_comma_between_elements_is_an_error() {
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str("(1i32 2i32)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn index_first_element_of_tuple() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(10i32, 20i32).0").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 10);
+    }
+
+    #[test]
+    fn index_second_element_of_tuple() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(10i32, 20i32).1").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 20);
+    }
+
+    #[test]
+    fn indexing_combined_with_addition() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("5i32 + (0i32, 1i32).1").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 6);
+    }
+
+    #[test]
+    fn indexing_combined_with_addition_on_the_right() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(0i32, 1i32).1 + 5i32").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 6);
+    }
+
+    #[test]
+    fn out_of_range_index_is_a_parse_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32, 2i32).5");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn indexing_a_non_tuple_is_a_parse_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("1i32.0");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn suffixed_index_is_a_parse_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32, 2i32).0i32");
         assert!(result.is_err());
     }
 
