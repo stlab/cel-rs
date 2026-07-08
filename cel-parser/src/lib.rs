@@ -26,7 +26,8 @@
 //! multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
 //! postfix_expression = primary_expression { "(" parameter_list ")" }.
-//! primary_expression = literal | identifier | "(" or_expression ")" | if_expression.
+//! primary_expression = literal | identifier | tuple_or_group | if_expression.
+//! tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".
 //! if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].
 //! parameter_list = [ or_expression { "," or_expression } ].
 //! ```
@@ -852,16 +853,20 @@ impl CELParser {
         Ok(count)
     }
 
-    /// `primary_expression = literal | identifier | "(" or_expression ")" | if_expression.`
+    /// `primary_expression = literal | identifier | tuple_or_group | if_expression.`
+    /// `tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".`
     ///
     /// Dispatches to [`is_if_expression`](Self::is_if_expression) when the `if` keyword is seen.
+    /// `()` parses as unit, `(expr)` as grouping, `(expr,)` as a 1-tuple, and
+    /// `(expr, expr, ...)` as an n-tuple.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - A literal value cannot be parsed (e.g., integer out of range).
     /// - An identifier is not found in the op lookup table.
-    /// - A parenthesized expression is malformed or missing its closing `)`.
+    /// - A parenthesized expression or tuple literal is malformed, has a missing or
+    ///   misplaced comma, or is missing its closing `)`.
     /// - An `if` expression fails to parse.
     fn is_primary_expression(&mut self) -> Result<bool> {
         match self.peek_token() {
@@ -902,19 +907,58 @@ impl CELParser {
                     self.context.just(());
                     return Ok(true);
                 }
+                let ambient_start = self.context.current_stack_offset();
                 if !self.is_or_expression()? {
                     return Err(self.error_at("expected expression"));
                 }
-                match self.peek_token() {
+                if matches!(
+                    self.peek_token(),
                     Some(Token::CloseDelim {
                         delimiter: Delimiter::Parenthesis,
                         ..
-                    }) => {
-                        self.advance();
-                        Ok(true)
-                    }
-                    _ => Err(self.error_at("expected closing parenthesis")),
+                    })
+                ) {
+                    // Grouping: exactly one expression, no comma.
+                    self.advance();
+                    return Ok(true);
                 }
+                if !self.is_punctuation(",") {
+                    return Err(self.error_at("expected ',' or closing parenthesis"));
+                }
+                let mut count = 1;
+                if matches!(
+                    self.peek_token(),
+                    Some(Token::CloseDelim {
+                        delimiter: Delimiter::Parenthesis,
+                        ..
+                    })
+                ) {
+                    // Single element + trailing comma: 1-tuple.
+                    self.advance();
+                    self.context.make_tuple(count, ambient_start);
+                    return Ok(true);
+                }
+                loop {
+                    if !self.is_or_expression()? {
+                        return Err(self.error_at("expected expression after ','"));
+                    }
+                    count += 1;
+                    if matches!(
+                        self.peek_token(),
+                        Some(Token::CloseDelim {
+                            delimiter: Delimiter::Parenthesis,
+                            ..
+                        })
+                    ) {
+                        self.advance();
+                        break;
+                    }
+                    if !self.is_punctuation(",") {
+                        return Err(self.error_at("expected ',' or closing parenthesis"));
+                    }
+                }
+                self.context.make_tuple(count, ambient_start);
+                Ok(true)
             }
             _ => Ok(false),
         }
@@ -1126,6 +1170,50 @@ mod tests {
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str("(10 + 20) * 30");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn unit_still_parses_as_unit() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("()").unwrap();
+        seg.call0::<()>().unwrap();
+    }
+
+    #[test]
+    fn single_paren_expression_is_grouping_not_tuple() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(1i32 + 2i32)").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 3);
+    }
+
+    #[test]
+    fn one_tuple_requires_trailing_comma() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(1i32,)").unwrap();
+        assert_eq!(seg.peek_tuple_arity(), Some(1));
+        seg.tuple_index(0);
+        assert_eq!(seg.call0::<i32>().unwrap(), 1);
+    }
+
+    #[test]
+    fn two_element_tuple_no_trailing_comma() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str(r#"("Hello", 42i32)"#).unwrap();
+        assert_eq!(seg.peek_tuple_arity(), Some(2));
+    }
+
+    #[test]
+    fn trailing_comma_rejected_for_arity_two() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32, 2i32,)");
+        assert!(result.is_err(), "trailing comma is only valid for 1-tuples");
+    }
+
+    #[test]
+    fn missing_comma_between_elements_is_an_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32 2i32)");
+        assert!(result.is_err());
     }
 
     #[test]
