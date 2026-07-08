@@ -328,8 +328,13 @@ impl DynSegment {
     ///
     /// The tuple's internal layout (offsets between elements) depends only on
     /// the elements' own types — never on `ambient_start` — matching the
-    /// layout a `#[repr(C)]` struct with these fields, in this order, would
-    /// use.
+    /// layout that [`CStackList`]'s own nested `#[repr(C)]` cons cells
+    /// produce when built via sequential `.push()` calls in the same
+    /// declaration order: each element is placed at its own alignment, then
+    /// the running offset is padded up to the maximum alignment of every
+    /// element seen so far (not just the tuple's overall alignment) before
+    /// the next element is placed, mirroring how each nested cons cell pads
+    /// itself to its own alignment before the next field is appended.
     ///
     /// - Precondition: at least `n` values are on the stack, pushed
     ///   contiguously starting at `ambient_start` with no other values
@@ -342,30 +347,41 @@ impl DynSegment {
         let elems: Vec<StackInfo> = self.stack_ids.drain(start..).collect();
 
         let mut ambient_offset = ambient_start;
-        let mut ideal_offset = 0usize;
+        let mut offset = 0usize;
         let mut tuple_align = 1usize;
         let mut src_offsets = Vec::with_capacity(n);
         let mut associated = Vec::with_capacity(n);
         for elem in &elems {
+            // ambient_offset tracks where this element already sits on the
+            // ambient RawStack from ordinary sequential pushes — a plain
+            // flat layout, unrelated to CStackList's nested convention.
             ambient_offset = align_index(elem.align, ambient_offset);
-            ideal_offset = align_index(elem.align, ideal_offset);
+            src_offsets.push(ambient_offset);
+            ambient_offset += elem.size;
+
+            // offset tracks the element's position in the tuple's canonical
+            // (CStackList-matching) layout: place at this element's own
+            // alignment, then pad up to the running max alignment so far.
+            offset = align_index(elem.align, offset);
             tuple_align = tuple_align.max(elem.align);
 
-            src_offsets.push(ambient_offset);
             associated.push(AssociatedType {
                 type_id: elem.type_id,
                 type_name: elem.type_name.clone(),
-                offset: ideal_offset,
+                offset,
                 size: elem.size,
                 align: elem.align,
                 dropper: elem.raw_dropper,
                 associated: elem.associated.clone(),
             });
 
-            ambient_offset += elem.size;
-            ideal_offset += elem.size;
+            offset += elem.size;
+            offset = align_index(tuple_align, offset);
         }
-        let total_size = align_index(tuple_align, ideal_offset);
+        // The last iteration's rounding already used the full tuple_align
+        // (tuple_align has accumulated every element's alignment by then),
+        // so `offset` is already the tuple's correct total size.
+        let total_size = offset;
         let dest_base = align_index(tuple_align, ambient_start);
 
         let dest_offsets: Vec<usize> = associated.iter().map(|a| a.offset).collect();
@@ -943,10 +959,12 @@ impl DynSegment {
         );
         let element_infos = L::to_stack_info_list();
         let mut offset = 0usize;
+        let mut align_so_far = 1usize;
         let associated = element_infos
             .iter()
             .map(|elem_info| {
                 offset = align_index(elem_info.align, offset);
+                align_so_far = align_so_far.max(elem_info.align);
                 let a = AssociatedType {
                     type_id: elem_info.type_id,
                     type_name: elem_info.type_name.clone(),
@@ -957,6 +975,7 @@ impl DynSegment {
                     associated: elem_info.associated.clone(),
                 };
                 offset += elem_info.size;
+                offset = align_index(align_so_far, offset);
                 a
             })
             .collect();
@@ -1414,5 +1433,104 @@ mod tests {
 
         let result = seg.pop_tuple_as::<CStackList<&str, CStackList<u32, CNil<()>>>>();
         assert!(result.is_err(), "(u32, u32) should not match (u32, &str)");
+    }
+
+    /// `(u32, u8, u8)` shape used to distinguish the correct CStackList-nested
+    /// layout (offsets `[0, 4, 8]`, size 12) from the old flat `#[repr(C)]`
+    /// struct formula (offsets `[0, 4, 5]`, size 8): a higher-alignment
+    /// element (`u32`) is followed by two lower-alignment elements (`u8`,
+    /// `u8`), which is exactly the case the two formulas disagree on.
+    type DivergentAlignmentShape = CStackList<u8, CStackList<u8, CStackList<u32, CNil<()>>>>;
+
+    fn build_divergent_alignment_shape() -> DivergentAlignmentShape {
+        // Declaration order (u32, u8, u8): elem0 = u32 is pushed first (innermost
+        // tail), elem2 = the second u8 is pushed last (outermost head).
+        CStackList(
+            CStackList(CStackList(().into_c_stack_list(), 0xAAu32), 0xBBu8),
+            0xCCu8,
+        )
+    }
+
+    #[test]
+    fn make_tuple_then_index_last_element_of_divergent_alignment_shape() {
+        // Confirms element 2 reads back correctly via make_tuple's own
+        // internally consistent repack. This alone can't distinguish offset 8
+        // from offset 5 (make_tuple's write and read paths both use the same
+        // formula) — see `push_tuple_round_trips_divergent_alignment_shape`
+        // below for the test that actually exercises the real CStackList
+        // layout and would fail under the old (flat) formula.
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 0xAAu32);
+        seg.op0(|| 0xBBu8);
+        seg.op0(|| 0xCCu8);
+        seg.make_tuple(3, ambient_start);
+        assert_eq!(seg.peek_tuple_arity(), Some(3));
+        seg.tuple_index(2);
+        assert_eq!(seg.call0::<u8>().unwrap(), 0xCCu8);
+    }
+
+    #[test]
+    fn push_tuple_round_trips_divergent_alignment_shape() {
+        // Round-trips a real `CStackList<u8, CStackList<u8, CStackList<u32,
+        // CNil<()>>>>` value (memory layout produced by rustc itself, not by
+        // our offset formula) through `push_tuple`, then indexes each
+        // element. This test fails under the old flat-struct offset formula
+        // (which computes offset 5 for the last element, when the real
+        // struct places it at offset 8) and passes under the fix.
+        let sample = build_divergent_alignment_shape();
+        // Confirm construction order really is (u32, u8, u8) in declaration
+        // order (outermost push is last / head — see pop_tuple_as's doc
+        // comment for this convention).
+        assert_eq!(*sample.head(), 0xCCu8);
+        assert_eq!(*sample.tail().head(), 0xBBu8);
+        assert_eq!(*sample.tail().tail().head(), 0xAAu32);
+
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(build_divergent_alignment_shape);
+        seg.push_tuple::<DivergentAlignmentShape>();
+        assert_eq!(seg.peek_tuple_arity(), Some(3));
+
+        // tuple_index consumes the tuple, so index each element in its own
+        // segment (mirrors make_tuple_then_index_each_element's pattern).
+        let mut seg0 = DynSegment::new::<()>();
+        seg0.op0(build_divergent_alignment_shape);
+        seg0.push_tuple::<DivergentAlignmentShape>();
+        seg0.tuple_index(0);
+        assert_eq!(seg0.call0::<u32>().unwrap(), 0xAAu32);
+
+        let mut seg1 = DynSegment::new::<()>();
+        seg1.op0(build_divergent_alignment_shape);
+        seg1.push_tuple::<DivergentAlignmentShape>();
+        seg1.tuple_index(1);
+        assert_eq!(seg1.call0::<u8>().unwrap(), 0xBBu8);
+
+        seg.tuple_index(2);
+        assert_eq!(seg.call0::<u8>().unwrap(), 0xCCu8);
+    }
+
+    #[test]
+    fn make_tuple_then_pop_tuple_as_round_trips_divergent_alignment_shape()
+    -> Result<(), anyhow::Error> {
+        // Closes the loop on the other bridge direction: build via
+        // make_tuple (which now computes the CStackList-matching layout),
+        // relabel with pop_tuple_as, and confirm the resulting concrete
+        // value's fields (read by rustc's own layout, via .head()/.tail())
+        // agree with what was pushed for every element, including the
+        // divergent-alignment last element.
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 0xAAu32);
+        seg.op0(|| 0xBBu8);
+        seg.op0(|| 0xCCu8);
+        seg.make_tuple(3, ambient_start);
+        assert_eq!(seg.peek_tuple_arity(), Some(3));
+
+        seg.pop_tuple_as::<DivergentAlignmentShape>()?;
+        let result = seg.call0::<DivergentAlignmentShape>()?;
+        assert_eq!(*result.tail().tail().head(), 0xAAu32);
+        assert_eq!(*result.tail().head(), 0xBBu8);
+        assert_eq!(*result.head(), 0xCCu8);
+        Ok(())
     }
 }
