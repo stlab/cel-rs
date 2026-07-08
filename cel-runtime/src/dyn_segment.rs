@@ -5,6 +5,7 @@ use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
 use crate::{CStackListHeadLimit, CStackListHeadPadded, ReverseList};
 use anyhow::Result;
+use anyhow::anyhow;
 use anyhow::ensure;
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
@@ -881,6 +882,89 @@ impl DynSegment {
         }
         unsafe { self.segment.call1(arg) }
     }
+
+    /// Reinterprets the tuple on top of the stack as a concrete `L`
+    /// (typically a `CStackList<...>` chain), replacing its `StackInfo` with
+    /// `L`'s. No bytes move: both sides already use the same
+    /// natural-alignment, declaration-order layout, so this is a relabel, not
+    /// a copy.
+    ///
+    /// - Precondition: `L` was assembled via sequential `.push()` calls in
+    ///   the same field order as the tuple (not via `into_c_stack_list()` on
+    ///   a same-order plain tuple, which reverses element order).
+    ///
+    /// # Errors
+    /// Returns an error if the top of stack isn't a tuple, or its element
+    /// `TypeId`s (in order) don't match `L`'s.
+    pub fn pop_tuple_as<L: List + ToTypeIdList + 'static>(&mut self) -> Result<()> {
+        let info = self
+            .stack_ids
+            .last()
+            .ok_or_else(|| anyhow!("pop_tuple_as: stack is empty"))?;
+        ensure!(
+            info.type_id == TypeId::of::<DynTuple>(),
+            "pop_tuple_as: top of stack is not a tuple"
+        );
+        let expected: Vec<TypeId> = L::to_stack_info_list().iter().map(|s| s.type_id).collect();
+        let actual: Vec<TypeId> = info.associated.iter().map(|a| a.type_id).collect();
+        ensure!(
+            expected == actual,
+            "pop_tuple_as: tuple element types do not match `{}`",
+            std::any::type_name::<L>()
+        );
+        debug_assert_eq!(info.size, size_of::<L>());
+        debug_assert_eq!(info.align, align_of::<L>());
+
+        let info = self.stack_ids.last_mut().expect("checked above");
+        info.type_id = TypeId::of::<L>();
+        info.type_name = Cow::Borrowed(std::any::type_name::<L>());
+        info.raw_dropper = |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<L>()) };
+        info.associated = Vec::new();
+        Ok(())
+    }
+
+    /// Relabels the concrete `L` value on top of the stack as a tuple,
+    /// exposing its elements for `.N` indexing and tuple-shaped op matching.
+    /// No bytes move — see [`pop_tuple_as`](Self::pop_tuple_as) for why this
+    /// is sound.
+    ///
+    /// - Precondition: the top of the stack currently holds a value of type
+    ///   `L`, assembled via sequential `.push()` calls (not
+    ///   `into_c_stack_list()` on a same-order plain tuple).
+    pub fn push_tuple<L: List + ToTypeIdList + 'static>(&mut self) {
+        let info = self
+            .stack_ids
+            .last_mut()
+            .expect("push_tuple requires a value on the stack");
+        debug_assert_eq!(
+            info.type_id,
+            TypeId::of::<L>(),
+            "push_tuple: top of stack is not the expected type"
+        );
+        let element_infos = L::to_stack_info_list();
+        let mut offset = 0usize;
+        let associated = element_infos
+            .iter()
+            .map(|elem_info| {
+                offset = align_index(elem_info.align, offset);
+                let a = AssociatedType {
+                    type_id: elem_info.type_id,
+                    type_name: elem_info.type_name.clone(),
+                    offset,
+                    size: elem_info.size,
+                    align: elem_info.align,
+                    dropper: elem_info.raw_dropper,
+                    associated: elem_info.associated.clone(),
+                };
+                offset += elem_info.size;
+                a
+            })
+            .collect();
+        info.type_id = TypeId::of::<DynTuple>();
+        info.type_name = Cow::Borrowed(std::any::type_name::<DynTuple>());
+        info.raw_dropper = drop_tuple;
+        info.associated = associated;
+    }
 }
 
 #[cfg(test)]
@@ -1299,5 +1383,36 @@ mod tests {
         assert_eq!(seg.peek_tuple_arity(), Some(1));
         seg.tuple_index(0);
         assert_eq!(seg.call0::<u32>().unwrap(), 99);
+    }
+
+    #[test]
+    fn push_tuple_then_pop_tuple_as_round_trips() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        // Build a concrete CStackList<u32, CStackList<&str, CNil<()>>> by pushing
+        // fields in declaration order (NOT via into_c_stack_list, which reverses
+        // order — see pop_tuple_as's doc comment). `CNil`'s inner field is
+        // private, so build the empty base via the public `IntoCStackList`
+        // conversion on `()` rather than the tuple-struct constructor.
+        seg.op0(|| CStackList(().into_c_stack_list(), 7u32).push("hi"));
+        seg.push_tuple::<CStackList<&str, CStackList<u32, CNil<()>>>>();
+        assert_eq!(seg.peek_tuple_arity(), Some(2));
+
+        seg.pop_tuple_as::<CStackList<&str, CStackList<u32, CNil<()>>>>()?;
+        let result = seg.call0::<CStackList<&str, CStackList<u32, CNil<()>>>>()?;
+        assert_eq!(result.head(), &"hi");
+        assert_eq!(result.tail().head(), &7u32);
+        Ok(())
+    }
+
+    #[test]
+    fn pop_tuple_as_rejects_shape_mismatch() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1u32);
+        seg.op0(|| 2u32);
+        seg.make_tuple(2, ambient_start);
+
+        let result = seg.pop_tuple_as::<CStackList<&str, CStackList<u32, CNil<()>>>>();
+        assert!(result.is_err(), "(u32, u32) should not match (u32, &str)");
     }
 }
