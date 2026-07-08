@@ -62,7 +62,12 @@ pub type OpFn = fn(&mut DynSegment, SourceSpan) -> Result<()>;
 /// stack order [`DynSegment::peek_stack_infos`] returns) is a tuple whose
 /// element `TypeId`s equal `shape`, in order, and every other peeked operand's
 /// flat `TypeId` equals the corresponding entry in `operand_type_ids` (the
-/// entry at `tuple_operand_index` in `operand_type_ids` is ignored).
+/// entry at `tuple_operand_index` in `operand_type_ids` is never read — it's
+/// safe to omit trailing entries, including the whole vector, when
+/// `tuple_operand_index` is the only or highest operand position).
+///
+/// A non-tuple operand position with no corresponding `operand_type_ids`
+/// entry (i.e. out of bounds) simply never matches, rather than panicking.
 pub struct TupleOpSignature {
     /// Operator/function name this signature is registered under.
     pub name: String,
@@ -1045,7 +1050,7 @@ impl OpLookup {
                 continue;
             }
             let others_match = stack_infos.iter().enumerate().all(|(i, info)| {
-                i == sig.tuple_operand_index || info.type_id == sig.operand_type_ids[i]
+                i == sig.tuple_operand_index || sig.operand_type_ids.get(i) == Some(&info.type_id)
             });
             if others_match {
                 (sig.op_fn)(segment, span)?;
