@@ -801,6 +801,13 @@ impl CELParser {
     }
 
     /// `postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.`
+    ///
+    /// The repetition allows chained indices (`t.0.1`): each `"." unsuffixed_integer`
+    /// is applied in turn to whatever value the previous step left on top of the
+    /// stack. Source text like `.0.1` tokenizes as a single `.` followed by one
+    /// float literal `0.1` (Rust's own lexer maximally munches the digits after
+    /// the second `.`), so that case is detected and split back into its two
+    /// integer indices — see the `Token::Literal(CelLiteral::Float(..))` arm below.
     fn is_postfix_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
         if !self.is_primary_expression()? {
@@ -834,34 +841,68 @@ impl CELParser {
                     self.last_span,
                 )?;
             } else if self.is_punctuation(".") {
-                let index = match self.peek_token() {
+                match self.peek_token() {
                     Some(Token::Literal(CelLiteral::Int(integer))) => {
                         let integer = integer.clone();
                         if !integer.suffix().is_empty() {
                             return Err(self.error_at("tuple index must be an unsuffixed integer"));
                         }
                         self.advance();
-                        integer.base10_parse::<usize>().map_err(|e| {
+                        let index = integer.base10_parse::<usize>().map_err(|e| {
                             self.error_at(&format!("invalid tuple index `{integer}`: {e}"))
-                        })?
+                        })?;
+                        self.apply_tuple_index(index)?;
+                    }
+                    Some(Token::Literal(CelLiteral::Float(float))) => {
+                        let float = float.clone();
+                        if !float.suffix().is_empty() {
+                            return Err(self.error_at("tuple index must be an unsuffixed integer"));
+                        }
+                        self.advance();
+                        // base10_digits() returns the decimal digits with underscores
+                        // stripped and the suffix removed, e.g. "0.1" or "10.25" —
+                        // splitting on the (always-present) '.' recovers the two
+                        // chained integer indices.
+                        let digits = float.base10_digits();
+                        let (first, second) = digits
+                            .split_once('.')
+                            .expect("float literal digits always contain a decimal point");
+                        let first_index = first.parse::<usize>().map_err(|e| {
+                            self.error_at(&format!("invalid tuple index `{first}`: {e}"))
+                        })?;
+                        let second_index = second.parse::<usize>().map_err(|e| {
+                            self.error_at(&format!("invalid tuple index `{second}`: {e}"))
+                        })?;
+                        self.apply_tuple_index(first_index)?;
+                        self.apply_tuple_index(second_index)?;
                     }
                     _ => return Err(self.error_at("expected integer after '.'")),
-                };
-                let arity = self
-                    .context
-                    .peek_tuple_arity()
-                    .ok_or_else(|| self.error_at("'.N' requires a tuple"))?;
-                if index >= arity {
-                    return Err(self.error_at(&format!(
-                        "tuple index `{index}` out of range for tuple of arity {arity}"
-                    )));
                 }
-                self.context.tuple_index(index);
             } else {
                 break;
             }
         }
         Ok(true)
+    }
+
+    /// Applies a single `.N` tuple-index operation to the value currently on
+    /// top of the stack, replacing it with element `index`.
+    ///
+    /// # Errors
+    /// Returns an error if the top of stack isn't a tuple, or if `index` is
+    /// out of range for its arity.
+    fn apply_tuple_index(&mut self, index: usize) -> Result<()> {
+        let arity = self
+            .context
+            .peek_tuple_arity()
+            .ok_or_else(|| self.error_at("'.N' requires a tuple"))?;
+        if index >= arity {
+            return Err(self.error_at(&format!(
+                "tuple index `{index}` out of range for tuple of arity {arity}"
+            )));
+        }
+        self.context.tuple_index(index);
+        Ok(())
     }
 
     /// `parameter_list = [ or_expression { "," or_expression } ].`
@@ -1290,6 +1331,33 @@ mod tests {
     fn suffixed_index_is_a_parse_error() {
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str("(1i32, 2i32).0i32");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn chained_tuple_index_into_nested_tuple() {
+        // `.1` selects the inner tuple `(10i32, 20i32)`, then `.0` selects its
+        // first element. Source text `.1.0` tokenizes as a single float
+        // literal `1.0`, which must be split back into the chained indices
+        // `1` then `0` — using a shape/value where applying the indices to
+        // the wrong operand or in the wrong order gives a different (wrong)
+        // answer than 10 (e.g. swapping order would try `.0` on an i32 and
+        // fail to parse; picking element 0 first would return "a" or 10
+        // depending on order, not confusably 10 either way, so pick values
+        // that make a mix-up obvious).
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str(r#"("a", (10i32, 20i32)).1.0"#)
+            .expect("chained .1.0 index should parse");
+        assert_eq!(seg.call0::<i32>().unwrap(), 10);
+    }
+
+    #[test]
+    fn chained_tuple_index_suffixed_second_part_is_a_parse_error() {
+        // The suffix lands on the whole `0.1i32` float token; the existing
+        // unsuffixed-integer rule must still reject it.
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32, 2i32).0.1i32");
         assert!(result.is_err());
     }
 
