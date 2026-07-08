@@ -11,6 +11,7 @@ use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::cmp::max;
+use std::mem::MaybeUninit;
 
 thread_local! {
     // Safety: valid only during the execution of `call_dyn` on this thread.
@@ -107,7 +108,12 @@ unsafe fn extract_tuple_element(
     let target = &associated[index];
     debug_assert!(tuple_base.is_multiple_of(target.align));
 
-    let mut scratch = vec![0u8; target.size];
+    // MaybeUninit<u8>, not u8: `target`'s bytes may include its own interior
+    // padding, which is itself uninitialized — reading it into a `Vec<u8>`
+    // (whose elements must always be valid, initialized `u8`s) would be
+    // undefined behavior even though these bytes are never inspected, only
+    // moved.
+    let mut scratch: Vec<MaybeUninit<u8>> = vec![MaybeUninit::uninit(); target.size];
     unsafe {
         stack.copy_from(
             tuple_base + target.offset,
@@ -228,7 +234,13 @@ pub struct DynSegment {
     /// Type names for each argument slot, for error reporting (parallel to `argument_ids`).
     pub(crate) argument_names: Vec<Cow<'static, str>>,
     pub(crate) stack_ids: Vec<StackInfo>,
-    stack_index: usize,
+    /// Fixed byte offset `stack_ids[0]` is laid out relative to; established
+    /// once at construction (post-argument space for a full segment, or the
+    /// as-if-already-popped ambient offset for a fragment — see
+    /// [`new_fragment`](Self::new_fragment)). The current top-of-stack offset
+    /// is always recomputed from this plus `stack_ids`, never cached, so it
+    /// can never drift out of sync after ops consume stack entries.
+    base_stack_index: usize,
 }
 
 impl DynSegment {
@@ -244,20 +256,32 @@ impl DynSegment {
             argument_ids: stack_ids.iter().map(|s| s.type_id).collect(),
             argument_names: stack_ids.iter().map(|s| s.type_name.clone()).collect(),
             stack_ids,
-            stack_index: size_of::<ReverseList<Args::Output>>(),
+            base_stack_index: size_of::<ReverseList<Args::Output>>(),
         }
     }
 
     /// Create a DynSegment that is a fragment of a larger segment, it may
     /// be used to implement conditional execution.
+    ///
+    /// - Precondition: the top of the stack currently holds the condition
+    ///   value that [`join2`](Self::join2) will pop before this fragment's
+    ///   ops run — the fragment's own local offsets are computed as if that
+    ///   pop had already happened, matching the layout the fragment will
+    ///   actually see at execution time. (`join2` independently rejects a
+    ///   non-`bool` condition with an `Err`, so a mismatched condition type
+    ///   at this point is a pending parse error, not a violated invariant.)
     #[must_use]
     pub fn new_fragment(&self) -> Self {
+        debug_assert!(
+            !self.stack_ids.is_empty(),
+            "new_fragment requires a condition value on top of the stack"
+        );
         DynSegment {
             segment: RawSegment::new(),
             argument_ids: Vec::new(),
             argument_names: Vec::new(),
             stack_ids: Vec::new(),
-            stack_index: self.stack_index,
+            base_stack_index: self.stack_offset_after(self.stack_ids.len().saturating_sub(1)),
         }
     }
 
@@ -285,13 +309,33 @@ impl DynSegment {
         Ok(())
     }
 
+    /// Computes the top-of-stack byte offset after the first `count` entries
+    /// of `stack_ids`, replaying each entry's own alignment/size from
+    /// `base_stack_index`.
+    ///
+    /// Recomputing on demand (rather than caching a running total) keeps this
+    /// correct after any operation that removes entries from `stack_ids`
+    /// (e.g. [`pop_types`](Self::pop_types)), since there is no cached value
+    /// that could fall out of sync with the actual entries left on the stack.
+    ///
+    /// - Complexity: O(count).
+    fn stack_offset_after(&self, count: usize) -> usize {
+        let mut offset = self.base_stack_index;
+        for info in &self.stack_ids[..count] {
+            offset = align_index(info.align, offset);
+            offset += info.size;
+        }
+        offset
+    }
+
     /// Push type to stack and register dropper.
     fn push_type<T>(&mut self)
     where
         T: 'static,
     {
-        let aligned_index = align_index(align_of::<T>(), self.stack_index);
-        let padded = aligned_index != self.stack_index;
+        let current = self.stack_offset_after(self.stack_ids.len());
+        let aligned_index = align_index(align_of::<T>(), current);
+        let padded = aligned_index != current;
 
         self.stack_ids.push(StackInfo {
             type_id: TypeId::of::<T>(),
@@ -302,7 +346,6 @@ impl DynSegment {
             raw_dropper: |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) },
             associated: Vec::new(),
         });
-        self.stack_index = aligned_index + size_of::<T>();
     }
 
     /// Returns the current parse-time stack byte offset.
@@ -311,7 +354,7 @@ impl DynSegment {
     /// [`make_tuple`](Self::make_tuple).
     #[must_use]
     pub fn current_stack_offset(&self) -> usize {
-        self.stack_index
+        self.stack_offset_after(self.stack_ids.len())
     }
 
     /// Returns the arity of the tuple on top of the stack, or `None` if the
@@ -410,7 +453,6 @@ impl DynSegment {
             raw_dropper: drop_tuple,
             associated,
         });
-        self.stack_index = dest_base + total_size;
     }
 
     /// Extracts element `index` from the tuple on top of the stack, replacing
@@ -432,12 +474,9 @@ impl DynSegment {
         );
         debug_assert!(index < info.associated.len(), "tuple_index out of range");
 
-        // tuple_start is the tuple's own aligned base (dest_base from
-        // make_tuple), already a multiple of every element's alignment. The
-        // extracted element inherits the tuple's own leading-padding
+        // The extracted element inherits the tuple's own leading-padding
         // relationship unchanged — see extract_tuple_element's doc comment
         // for why no realignment is needed or performed.
-        let tuple_start = self.stack_index - info.size;
         let target = info.associated[index].clone();
         let associated = info.associated.clone();
         let tuple_padding = info.padding;
@@ -459,7 +498,6 @@ impl DynSegment {
             raw_dropper: target.dropper,
             associated: target.associated,
         });
-        self.stack_index = tuple_start + target.size;
     }
 
     /// Returns the padding flags for the top N entries of the type stack.

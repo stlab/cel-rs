@@ -78,12 +78,23 @@ impl RawStack {
     /// Pushes `size` raw bytes from `src`, aligned to `align`, using the same
     /// padding/marker-byte bookkeeping as [`push`](Self::push).
     ///
+    /// `src` is typed as `MaybeUninit<u8>` rather than `u8` because the bytes
+    /// being copied may include a source value's interior padding, which is
+    /// itself uninitialized — reading it through a `u8` pointer instead would
+    /// be undefined behavior even though this function never inspects the
+    /// bytes' values.
+    ///
     /// - Precondition: `align` is a power of two.
     ///
     /// # Safety
     /// `src` must be valid for reads of `size` bytes, and must not overlap the
     /// stack's internal buffer.
-    pub unsafe fn push_raw(&mut self, align: usize, size: usize, src: *const u8) -> bool {
+    pub unsafe fn push_raw(
+        &mut self,
+        align: usize,
+        size: usize,
+        src: *const MaybeUninit<u8>,
+    ) -> bool {
         debug_assert!(align.is_power_of_two());
         let len = self.buffer.len();
         let aligned_index = align_index(align, len);
@@ -96,25 +107,27 @@ impl RawStack {
                 self.buffer[len].write(1);
                 self.buffer[len + 1..aligned_index].fill(MaybeUninit::new(0));
             }
-            std::ptr::copy_nonoverlapping(
-                src,
-                self.buffer.as_mut_ptr().add(aligned_index).cast::<u8>(),
-                size,
-            );
+            std::ptr::copy_nonoverlapping(src, self.buffer.as_mut_ptr().add(aligned_index), size);
         }
         aligned_index - len > 0
     }
 
     /// Copies `size` bytes starting at absolute buffer offset `offset` into `dst`.
     ///
+    /// `dst` is typed as `MaybeUninit<u8>` rather than `u8` because the bytes
+    /// being copied may be a value's interior padding, which is itself
+    /// uninitialized — reading it through a `u8` pointer instead would be
+    /// undefined behavior even though this function never inspects the
+    /// bytes' values.
+    ///
     /// # Safety
     /// `offset..offset + size` must be within the currently-initialized buffer;
     /// `dst` must be valid for writes of `size` bytes and must not overlap the
     /// stack's internal buffer.
-    pub unsafe fn copy_from(&self, offset: usize, size: usize, dst: *mut u8) {
+    pub unsafe fn copy_from(&self, offset: usize, size: usize, dst: *mut MaybeUninit<u8>) {
         debug_assert!(offset + size <= self.buffer.len());
         unsafe {
-            std::ptr::copy_nonoverlapping(self.buffer.as_ptr().add(offset).cast::<u8>(), dst, size);
+            std::ptr::copy_nonoverlapping(self.buffer.as_ptr().add(offset), dst, size);
         }
     }
 
@@ -214,7 +227,7 @@ impl RawStack {
                 self.buffer.reserve(grown_len - current_len);
                 self.buffer.set_len(grown_len);
             }
-            let base_ptr = self.buffer.as_mut_ptr().cast::<u8>();
+            let base_ptr = self.buffer.as_mut_ptr();
             // Process highest index first: each element's destination is
             // provably at or after every earlier element's source end (see
             // `# Safety` above), so this order never overwrites source bytes
@@ -343,7 +356,7 @@ mod tests {
             stack.push_raw(
                 align_of::<f64>(),
                 size_of::<f64>(),
-                (&value as *const f64).cast::<u8>(),
+                (&value as *const f64).cast::<MaybeUninit<u8>>(),
             )
         };
         let popped: f64 = unsafe { stack.pop(padding2) };
@@ -365,7 +378,7 @@ mod tests {
             stack_b.push_raw(
                 align_of::<f64>(),
                 size_of::<f64>(),
-                (&value as *const f64).cast::<u8>(),
+                (&value as *const f64).cast::<MaybeUninit<u8>>(),
             )
         };
         assert_eq!(padding_typed, padding_raw);
@@ -377,7 +390,7 @@ mod tests {
         let _ = stack.push(10u32);
         let _ = stack.push(20u32);
         let mut buf = [0u8; 4];
-        unsafe { stack.copy_from(0, 4, buf.as_mut_ptr()) };
+        unsafe { stack.copy_from(0, 4, buf.as_mut_ptr().cast::<MaybeUninit<u8>>()) };
         assert_eq!(u32::from_ne_bytes(buf), 10);
     }
 
@@ -478,9 +491,9 @@ mod tests {
         let mut b = [0u8; 4];
         let mut c = [0u8; 1];
         unsafe {
-            stack.copy_from(dest_base, 1, a.as_mut_ptr());
-            stack.copy_from(dest_base + 4, 4, b.as_mut_ptr());
-            stack.copy_from(dest_base + 8, 1, c.as_mut_ptr());
+            stack.copy_from(dest_base, 1, a.as_mut_ptr().cast::<MaybeUninit<u8>>());
+            stack.copy_from(dest_base + 4, 4, b.as_mut_ptr().cast::<MaybeUninit<u8>>());
+            stack.copy_from(dest_base + 8, 1, c.as_mut_ptr().cast::<MaybeUninit<u8>>());
         }
         assert_eq!(a[0], 0xAA);
         assert_eq!(u32::from_ne_bytes(b), 0xBBBB_BBBB);
@@ -528,9 +541,9 @@ mod tests {
         let mut a = [0u8; 1];
         let mut b = [0u8; 4];
         unsafe {
-            stack.copy_from(0, 1, sentinel.as_mut_ptr());
-            stack.copy_from(dest_base, 1, a.as_mut_ptr());
-            stack.copy_from(dest_base + 4, 4, b.as_mut_ptr());
+            stack.copy_from(0, 1, sentinel.as_mut_ptr().cast::<MaybeUninit<u8>>());
+            stack.copy_from(dest_base, 1, a.as_mut_ptr().cast::<MaybeUninit<u8>>());
+            stack.copy_from(dest_base + 4, 4, b.as_mut_ptr().cast::<MaybeUninit<u8>>());
         }
         assert_eq!(
             sentinel[0], 0xFF,

@@ -1299,6 +1299,71 @@ mod tests {
     }
 
     #[test]
+    fn tuple_element_can_be_arithmetic_expression() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(1i32 + 2i32, 3i32).0").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 3);
+    }
+
+    #[test]
+    fn tuple_second_element_can_be_arithmetic_expression() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(1i32 + 2i32, 3i32).1").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 3);
+    }
+
+    #[test]
+    fn tuple_ambient_start_correct_after_sibling_expression() {
+        // Regression test: a fully-evaluated sibling subexpression earlier in
+        // the same additive chain must not shift where the following tuple
+        // literal thinks its elements land on the real stack.
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("(1i32 + 2i32) + 3i32 + (4i32, 5i32).0")
+            .unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 10);
+    }
+
+    #[test]
+    fn tuple_index_inside_if_then_branch() {
+        // Regression test: `join2` pops the condition bool before running
+        // the chosen fragment, so a tuple literal inside that fragment must
+        // compute its layout as if that pop already happened.
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("if true { (10i32, 20i32).1 } else { 0i32 }")
+            .unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 20);
+    }
+
+    #[test]
+    fn tuple_index_inside_if_else_branch() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("if false { 0i32 } else { (10i32, 20i32).1 }")
+            .unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 20);
+    }
+
+    #[test]
+    fn tuple_index_inside_and_rhs() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("(1i32, 2i32).1 == 2i32 && (10i32, 20i32).1 == 20i32")
+            .unwrap();
+        assert!(seg.call0::<bool>().unwrap());
+    }
+
+    #[test]
+    fn tuple_index_inside_or_rhs() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("(1i32, 2i32).1 == 99i32 || (10i32, 20i32).1 == 20i32")
+            .unwrap();
+        assert!(seg.call0::<bool>().unwrap());
+    }
+
+    #[test]
     fn index_second_element_of_tuple() {
         let mut parser = CELParser::new(OpLookup::new());
         let mut seg = parser.parse_str("(10i32, 20i32).1").unwrap();

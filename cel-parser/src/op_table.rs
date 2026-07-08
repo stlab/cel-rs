@@ -27,7 +27,7 @@
 //!   or masking the shift count (release).
 
 use anyhow::{Result, anyhow};
-use cel_runtime::DynSegment;
+use cel_runtime::{DynSegment, DynTuple};
 use once_cell::sync::Lazy;
 use phf::phf_map;
 use std::any::TypeId;
@@ -62,12 +62,13 @@ pub type OpFn = fn(&mut DynSegment, SourceSpan) -> Result<()>;
 /// stack order [`DynSegment::peek_stack_infos`] returns) is a tuple whose
 /// element `TypeId`s equal `shape`, in order, and every other peeked operand's
 /// flat `TypeId` equals the corresponding entry in `operand_type_ids` (the
-/// entry at `tuple_operand_index` in `operand_type_ids` is never read — it's
-/// safe to omit trailing entries, including the whole vector, when
-/// `tuple_operand_index` is the only or highest operand position).
+/// entry at `tuple_operand_index` in `operand_type_ids` is never read).
 ///
-/// A non-tuple operand position with no corresponding `operand_type_ids`
-/// entry (i.e. out of bounds) simply never matches, rather than panicking.
+/// `operand_type_ids` must have an entry for every non-tuple operand
+/// position: a missing entry (out of bounds, including an entirely empty
+/// vector when there are non-tuple operands) simply never matches, rather
+/// than panicking — it is only safe to omit the whole vector when
+/// `tuple_operand_index` is the *only* operand position.
 pub struct TupleOpSignature {
     /// Operator/function name this signature is registered under.
     pub name: String,
@@ -1040,7 +1041,8 @@ impl OpLookup {
                 continue;
             }
             let tuple_info = &stack_infos[sig.tuple_operand_index];
-            let shape_matches = tuple_info.associated.len() == sig.shape.len()
+            let shape_matches = tuple_info.type_id == TypeId::of::<DynTuple>()
+                && tuple_info.associated.len() == sig.shape.len()
                 && tuple_info
                     .associated
                     .iter()
@@ -1670,6 +1672,36 @@ mod tests {
         assert!(
             result.is_err(),
             "shape (i32, i32) should not match (String, i32)"
+        );
+    }
+
+    #[test]
+    fn tuple_shaped_signature_with_empty_shape_does_not_match_non_tuple() {
+        // Regression test: a 0-element `shape` must only match an actual
+        // 0-arity tuple, not any non-tuple operand (which also reports an
+        // empty `associated` list).
+        let mut lookup = OpLookup::new();
+        lookup.register_tuple_op(TupleOpSignature {
+            name: "unit_greet".to_string(),
+            shape: vec![],
+            tuple_operand_index: 0,
+            operand_type_ids: vec![],
+            op_fn: |seg, _span| seg.op1(|_ignored: i32| true),
+        });
+
+        let mut segment = DynSegment::new::<()>();
+        segment.op0(|| 42i32);
+
+        let result = lookup.lookup(
+            "unit_greet",
+            &mut segment,
+            1,
+            Span::call_site(),
+            Span::call_site(),
+        );
+        assert!(
+            result.is_err(),
+            "empty-shape tuple signature must not match a non-tuple operand"
         );
     }
 }
