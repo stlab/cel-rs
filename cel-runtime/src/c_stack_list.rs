@@ -380,7 +380,12 @@ mod tests {
         #[repr(C)]
         struct TestStruct(i32, &'static str, f64);
 
-        let test_struct = unsafe { std::mem::transmute::<_, TestStruct>(list) };
+        let test_struct = unsafe {
+            std::mem::transmute::<
+                CStackList<f64, CStackList<&str, CStackList<i32, CNil<()>>>>,
+                TestStruct,
+            >(list)
+        };
 
         assert_eq!(test_struct.0, 32);
         assert_eq!(test_struct.1, "Hello");

@@ -249,10 +249,10 @@ mod tests {
     fn push_pop_different_types() {
         let mut stack = RawStack::with_base_alignment(max(align_of::<u32>(), align_of::<f64>()));
         let padding1 = stack.push(42u32);
-        let padding2 = stack.push(3.14f64);
+        let padding2 = stack.push(42.14f64);
         let value_f: f64 = unsafe { stack.pop(padding2) };
         let value_u: u32 = unsafe { stack.pop(padding1) };
-        assert_eq!(value_f, 3.14);
+        assert_eq!(value_f, 42.14);
         assert_eq!(value_u, 42);
     }
 
@@ -268,7 +268,7 @@ mod tests {
     fn push_raw_round_trips_like_push() {
         let mut stack = RawStack::with_base_alignment(align_of::<f64>());
         let padding1 = stack.push(1u8);
-        let value = 3.14f64;
+        let value = 42.14f64;
         let padding2 = unsafe {
             stack.push_raw(
                 align_of::<f64>(),
@@ -277,7 +277,7 @@ mod tests {
             )
         };
         let popped: f64 = unsafe { stack.pop(padding2) };
-        assert_eq!(popped, 3.14);
+        assert_eq!(popped, 42.14);
         let popped_u8: u8 = unsafe { stack.pop(padding1) };
         assert_eq!(popped_u8, 1);
     }
@@ -328,9 +328,7 @@ mod tests {
         let _ = stack.push(DropCounter(count.clone()));
         let len_before = stack.len();
         unsafe {
-            stack.drop_at(0, |ptr| unsafe {
-                std::ptr::drop_in_place(ptr.cast::<DropCounter>())
-            });
+            stack.drop_at(0, |ptr| std::ptr::drop_in_place(ptr.cast::<DropCounter>()));
         }
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert_eq!(stack.len(), len_before);
@@ -363,7 +361,7 @@ mod tests {
         let _ = stack.push(1u8);
         let padding = stack.push(DropCounter(count.clone()));
         unsafe {
-            stack.drop_sized(size_of::<DropCounter>(), padding, |ptr| unsafe {
+            stack.drop_sized(size_of::<DropCounter>(), padding, |ptr| {
                 std::ptr::drop_in_place(ptr.cast::<DropCounter>())
             });
         }

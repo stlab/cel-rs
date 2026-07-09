@@ -629,14 +629,14 @@ fn conditional_match_cell_derived_from_multi_method_unconditional_relationship()
     sheet.write(x, 10_i32).unwrap(); // x > y → flag = true
     sheet.write(a, 3_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(*sheet.read::<bool>(flag).unwrap(), true);
+    assert!(*sheet.read::<bool>(flag).unwrap());
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
 
     // Flip: x=0 ≤ y → flag = false → rel_active inactive.
     sheet.write(y, 5_i32).unwrap();
     sheet.write(x, 0_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(*sheet.read::<bool>(flag).unwrap(), false);
+    assert!(!*sheet.read::<bool>(flag).unwrap());
     // b keeps its last derived value (6) since rel_active is no longer active.
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
 }
@@ -667,13 +667,13 @@ fn conditional_match_cell_is_derived_from_unconditional_relationship() {
     sheet.write(x, 5_i32).unwrap();
     sheet.write(a, 3_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(*sheet.read::<bool>(flag).unwrap(), true);
+    assert!(*sheet.read::<bool>(flag).unwrap());
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
 
     // x=-1 ≤ 0 → flag=false → no match, rel_true inactive.
     sheet.write(x, -1_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(*sheet.read::<bool>(flag).unwrap(), false);
+    assert!(!*sheet.read::<bool>(flag).unwrap());
     // b has no active relationship; it keeps its previous value.
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
 }

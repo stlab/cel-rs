@@ -635,7 +635,7 @@ mod tests {
             .cells()
             .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("a"))
             .unwrap();
-        assert!((&labels.cells[&a_id].write_str)(&mut sheet, "5.0").is_ok());
+        assert!((labels.cells[&a_id].write_str)(&mut sheet, "5.0").is_ok());
         let display = &labels.cells[&a_id].display;
         assert_eq!(display(&sheet), "5");
     }

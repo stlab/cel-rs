@@ -328,7 +328,7 @@ mod tests {
         let reg = TypeRegistry::new();
         let entry = reg.get("f64").unwrap();
         let mut sheet = Sheet::new();
-        let val: Box<dyn Any> = Box::new(3.14_f64);
+        let val: Box<dyn Any> = Box::new(42.14_f64);
         let _cell_id = (entry.add_cell_fn)(&mut sheet, val);
         // Compiles and runs without panicking: add_cell_fn is callable.
     }

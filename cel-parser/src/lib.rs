@@ -1012,7 +1012,6 @@ impl CELParser {
 mod tests {
     use super::*;
     use annotate_snippets::Renderer;
-    use anyhow;
 
     #[test]
     fn simple_expression() {
@@ -1044,28 +1043,28 @@ mod tests {
     #[test]
     fn float_literal() {
         let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("3.14");
+        let result = parser.parse_str("42.14");
         assert!(result.is_ok());
         let value = result.unwrap().call0::<f64>().unwrap();
-        assert!((value - 3.14).abs() < 1e-10);
+        assert!((value - 42.14).abs() < 1e-10);
     }
 
     #[test]
     fn float_literal_f64_suffix() {
         let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("3.14f64");
+        let result = parser.parse_str("42.14f64");
         assert!(result.is_ok());
         let value = result.unwrap().call0::<f64>().unwrap();
-        assert!((value - 3.14).abs() < 1e-10);
+        assert!((value - 42.14).abs() < 1e-10);
     }
 
     #[test]
     fn float_literal_f32_suffix() {
         let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("3.14f32");
+        let result = parser.parse_str("42.14f32");
         assert!(result.is_ok());
         let value = result.unwrap().call0::<f32>().unwrap();
-        assert!((value - 3.14f32).abs() < 1e-6);
+        assert!((value - 42.14f32).abs() < 1e-6);
     }
 
     #[test]
@@ -1084,7 +1083,7 @@ mod tests {
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str("true");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().call0::<bool>().unwrap(), true);
+        assert!(result.unwrap().call0::<bool>().unwrap());
     }
 
     #[test]
@@ -1179,7 +1178,7 @@ mod tests {
             "Failed to parse !!true: {}",
             result.err().unwrap()
         );
-        assert_eq!(result.unwrap().call0::<bool>().unwrap(), true);
+        assert!(result.unwrap().call0::<bool>().unwrap());
     }
 
     #[test]
@@ -1203,7 +1202,7 @@ mod tests {
             eprintln!("Error message: {}", e.message());
         }
         assert!(result.is_ok(), "Failed to parse: {}", result.err().unwrap());
-        assert_eq!(result.unwrap().call0::<bool>().unwrap(), true);
+        assert!(result.unwrap().call0::<bool>().unwrap());
     }
 
     #[test]
@@ -1358,7 +1357,7 @@ mod tests {
             .parse_str("10 < 20")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<bool>()?;
-        assert_eq!(result, true);
+        assert!(result);
         Ok(())
     }
 
@@ -1369,7 +1368,7 @@ mod tests {
             .parse_str("true && false")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<bool>()?;
-        assert_eq!(result, false);
+        assert!(!result);
         Ok(())
     }
 
@@ -1391,7 +1390,7 @@ mod tests {
             .parse_str("!true")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result = segment.call0::<bool>()?;
-        assert_eq!(result, false);
+        assert!(!result);
         Ok(())
     }
 
@@ -1691,14 +1690,14 @@ mod tests {
         let mut segment = parser
             .parse_str("false && (1i32 / 0i32 == 0i32)")
             .expect("should parse");
-        assert_eq!(segment.call0::<bool>().unwrap(), false);
+        assert!(!segment.call0::<bool>().unwrap());
     }
 
     #[test]
     fn and_evaluates_rhs_when_lhs_true() {
         let mut parser = CELParser::new(OpLookup::new());
         let mut segment = parser.parse_str("true && false").expect("should parse");
-        assert_eq!(segment.call0::<bool>().unwrap(), false);
+        assert!(!segment.call0::<bool>().unwrap());
     }
 
     #[test]
@@ -1707,7 +1706,7 @@ mod tests {
         let mut segment = parser
             .parse_str("false && false && false")
             .expect("should parse");
-        assert_eq!(segment.call0::<bool>().unwrap(), false);
+        assert!(!segment.call0::<bool>().unwrap());
     }
 
     #[test]
@@ -1740,14 +1739,14 @@ mod tests {
         let mut segment = parser
             .parse_str("true || (1i32 / 0i32 == 0i32)")
             .expect("should parse");
-        assert_eq!(segment.call0::<bool>().unwrap(), true);
+        assert!(segment.call0::<bool>().unwrap());
     }
 
     #[test]
     fn or_evaluates_rhs_when_lhs_false() {
         let mut parser = CELParser::new(OpLookup::new());
         let mut segment = parser.parse_str("false || true").expect("should parse");
-        assert_eq!(segment.call0::<bool>().unwrap(), true);
+        assert!(segment.call0::<bool>().unwrap());
     }
 
     #[test]
@@ -1756,7 +1755,7 @@ mod tests {
         let mut segment = parser
             .parse_str("true || false || false")
             .expect("should parse");
-        assert_eq!(segment.call0::<bool>().unwrap(), true);
+        assert!(segment.call0::<bool>().unwrap());
     }
 
     #[test]
