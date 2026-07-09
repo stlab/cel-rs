@@ -12,8 +12,11 @@ use crate::spectrum::SpTheme;
 /// (`a × b = c` and `d × e = f`) linked by a conditional on `p`.
 ///
 /// - `p = 0`: the relationship `c = f` (bidirectional) becomes active.
-/// - `p = 1`: the relationship `c = f × 2` (bidirectional) becomes active.
-/// - Any other `p`: the two systems are independent.
+/// - `p = 1`: the relationship `c = f × 2` (bidirectional) becomes active, and a
+///   single-method relationship `g = c × 10` also becomes active — `g` is *forced*
+///   while this branch is active (see [`property_model::Sheet::is_forced`]), so its
+///   Inspector field is disabled and it is highlighted in the graph.
+/// - Any other `p`: the two systems are independent and `g` is not forced.
 pub const DEMO_SOURCE: &str = r#"sheet demo {
     cell a: f64 = 2.0;
     cell b: f64 = 3.0;
@@ -21,6 +24,7 @@ pub const DEMO_SOURCE: &str = r#"sheet demo {
     cell d: f64 = 4.0;
     cell e: f64 = 5.0;
     cell f: f64;
+    cell g: f64;
     cell p: i32 = 0;
 
     relationship {
@@ -43,6 +47,12 @@ pub const DEMO_SOURCE: &str = r#"sheet demo {
         1i32 => {
             method [f] -> [c] { f * 2.0 }
             method [c] -> [f] { c / 2.0 }
+        }
+    }
+
+    conditional p {
+        1i32 => {
+            method [c] -> [g] { c * 10.0 }
         }
     }
 }
@@ -97,5 +107,64 @@ pub fn App() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_source_g_not_forced_when_p_is_zero() {
+        let outcome = build_sheet(DEMO_SOURCE);
+        let (sheet, labels) = outcome.sheet_labels.expect("DEMO_SOURCE must build");
+        let g_id = sheet
+            .cells()
+            .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("g"))
+            .unwrap();
+        assert!(!sheet.is_forced(g_id), "g should not be forced when p == 0");
+    }
+
+    #[test]
+    fn demo_source_g_forced_when_p_is_one() {
+        let outcome = build_sheet(DEMO_SOURCE);
+        let (mut sheet, labels) = outcome.sheet_labels.expect("DEMO_SOURCE must build");
+        let p_id = sheet
+            .cells()
+            .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("p"))
+            .unwrap();
+        let g_id = sheet
+            .cells()
+            .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("g"))
+            .unwrap();
+
+        sheet.write(p_id, 1_i32).unwrap();
+        sheet.propagate().unwrap();
+
+        assert!(sheet.is_forced(g_id), "g should be forced when p == 1");
+    }
+
+    #[test]
+    fn demo_source_g_unforced_again_after_p_returns_to_zero() {
+        let outcome = build_sheet(DEMO_SOURCE);
+        let (mut sheet, labels) = outcome.sheet_labels.expect("DEMO_SOURCE must build");
+        let p_id = sheet
+            .cells()
+            .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("p"))
+            .unwrap();
+        let g_id = sheet
+            .cells()
+            .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("g"))
+            .unwrap();
+
+        sheet.write(p_id, 1_i32).unwrap();
+        sheet.propagate().unwrap();
+        sheet.write(p_id, 0_i32).unwrap();
+        sheet.propagate().unwrap();
+
+        assert!(
+            !sheet.is_forced(g_id),
+            "g should not be forced once p == 0 again"
+        );
     }
 }
