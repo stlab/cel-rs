@@ -5,11 +5,13 @@ use crate::raw_segment::RawSegment;
 use crate::raw_stack::RawStack;
 use crate::{CStackListHeadLimit, CStackListHeadPadded, ReverseList};
 use anyhow::Result;
+use anyhow::anyhow;
 use anyhow::ensure;
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::cmp::max;
+use std::mem::MaybeUninit;
 
 thread_local! {
     // Safety: valid only during the execution of `call_dyn` on this thread.
@@ -33,24 +35,152 @@ impl Drop for DynCallGuard {
     }
 }
 
-/// Recursive type node carrying a [`TypeId`], display name, and optional associated types.
+/// Drops a value in place, given a pointer to its bytes and (for tuple
+/// values) its own element metadata for recursive drops.
 ///
-/// Used for function parameter/return types, tuple elements, and similar structure.
-/// Not yet used; reserved for parse-time call checking and richer error reporting.
+/// # Safety
+/// `ptr` must point to a valid, live, properly aligned value of the type this
+/// dropper was generated for; `associated` must be that same value's own
+/// element list (empty for non-tuple values).
+pub type RawDropper = unsafe fn(*mut u8, &[AssociatedType]);
+
+/// Recursive type node carrying a [`TypeId`], display name, byte layout, and
+/// an in-place dropper — describes one element of a tuple (or, nested, one
+/// element of a tuple element).
 #[derive(Clone, Debug)]
 pub struct AssociatedType {
     /// Runtime type id for this node.
     pub type_id: TypeId,
     /// Human-readable name for error reporting (borrowed when from `type_name::<T>()`).
     pub type_name: Cow<'static, str>,
-    /// Child types (e.g. function parameters, tuple elements).
+    /// Byte offset from the start of the enclosing tuple.
+    pub offset: usize,
+    /// Size in bytes of this element's value.
+    pub size: usize,
+    /// Required alignment in bytes of this element's value.
+    pub align: usize,
+    /// In-place dropper for this element, callable at `base + offset`.
+    pub dropper: RawDropper,
+    /// Child types, for a nested tuple element.
     pub associated: Vec<AssociatedType>,
+}
+
+/// Marker type used as the `TypeId` for tuple aggregate stack entries.
+///
+/// A tuple's real type identity is the ordered `associated` list on its
+/// [`StackInfo`], not this marker's `TypeId` — comparisons that need to
+/// distinguish tuple shapes must inspect `associated`, not `type_id`.
+#[derive(Debug)]
+pub struct DynTuple;
+
+/// `RawDropper` for a tuple value: drops each element at `ptr + element.offset`
+/// in reverse order, recursing into nested tuples via their own droppers.
+///
+/// # Safety
+/// `ptr` must point to a live tuple value whose layout matches `associated`.
+unsafe fn drop_tuple(ptr: *mut u8, associated: &[AssociatedType]) {
+    for elem in associated.iter().rev() {
+        unsafe { (elem.dropper)(ptr.add(elem.offset), &elem.associated) };
+    }
+}
+
+/// Returns whether every element `TypeId` in `a` and `b` matches, in order —
+/// recursing into nested tuple elements' own `associated` shapes rather than
+/// stopping at their shared [`DynTuple`] marker `TypeId`.
+///
+/// - Complexity: O(n) in the total number of (nested) elements.
+fn tuple_shapes_match(a: &[AssociatedType], b: &[AssociatedType]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.type_id == y.type_id
+                && (x.type_id != TypeId::of::<DynTuple>()
+                    || tuple_shapes_match(&x.associated, &y.associated))
+        })
+}
+
+/// Returns whether `a` and `b` describe the same type — for tuples, this
+/// means the same element shape (recursively), not just the shared
+/// [`DynTuple`] marker `TypeId`, since every tuple shares that one `TypeId`
+/// regardless of arity or element types.
+fn stack_info_shapes_match(a: &StackInfo, b: &StackInfo) -> bool {
+    a.type_id == b.type_id
+        && (a.type_id != TypeId::of::<DynTuple>()
+            || tuple_shapes_match(&a.associated, &b.associated))
+}
+
+/// Extracts element `index` from the tuple currently on top of `stack`,
+/// dropping every other element, leaving just the extracted value on top.
+///
+/// Also strips the tuple's own leading padding (if any): once only one
+/// element survives, that space is dead — no `StackInfo` entry accounts for
+/// it — so it must not linger, or later offset computations (e.g. for a
+/// tuple literal built from this result) would disagree with the real
+/// stack. The extracted element is re-pushed at its own natural alignment
+/// relative to the ambient offset the tuple originally started at, which
+/// `expected_padding` (computed the same way at parse time) predicts.
+///
+/// - Complexity: O(n) in the tuple's arity.
+///
+/// # Safety
+/// The top `tuple_size` bytes of `stack` must be a live tuple value whose
+/// layout matches `associated`, and `tuple_padding` must be that tuple's own
+/// recorded leading-padding flag.
+unsafe fn extract_tuple_element(
+    stack: &mut RawStack,
+    tuple_size: usize,
+    tuple_padding: bool,
+    associated: &[AssociatedType],
+    index: usize,
+    expected_padding: bool,
+) {
+    let tuple_base = stack.len() - tuple_size;
+    let target = &associated[index];
+    debug_assert!(tuple_base.is_multiple_of(target.align));
+
+    // MaybeUninit<u8>, not u8: `target`'s bytes may include its own interior
+    // padding, which is itself uninitialized — reading it into a `Vec<u8>`
+    // (whose elements must always be valid, initialized `u8`s) would be
+    // undefined behavior even though these bytes are never inspected, only
+    // moved.
+    let mut scratch: Vec<MaybeUninit<u8>> = vec![MaybeUninit::uninit(); target.size];
+    unsafe {
+        stack.copy_from(
+            tuple_base + target.offset,
+            target.size,
+            scratch.as_mut_ptr(),
+        );
+    }
+
+    for (i, elem) in associated.iter().enumerate().rev() {
+        if i == index {
+            continue;
+        }
+        let elem_associated = &elem.associated;
+        unsafe {
+            stack.drop_at(tuple_base + elem.offset, |ptr| {
+                (elem.dropper)(ptr, elem_associated)
+            });
+        }
+    }
+
+    unsafe {
+        // tuple_padding: strip the tuple's own leading pad too, all the way
+        // back to the true ambient offset it was built from — not just down
+        // to tuple_base (see doc comment above).
+        stack.truncate_to(tuple_base, tuple_padding);
+        let repushed_padding = stack.push_raw(target.align, target.size, scratch.as_ptr());
+        debug_assert_eq!(
+            repushed_padding, expected_padding,
+            "extracted element's padding must match the parse-time prediction"
+        );
+    }
 }
 
 /// Information about a type on the stack, including its cleanup function.
 ///
-/// Holds metadata for a value pushed onto the stack: runtime type id, display name
-/// for errors, padding, dropper, and an optional list of associated types.
+/// Holds metadata for a value pushed onto the stack: runtime type id, display
+/// name for errors, padding, size/alignment, an in-place dropper, and an
+/// optional list of associated element types (populated for tuples).
 pub struct StackInfo {
     /// Runtime type id for this stack slot (e.g. for scope matching).
     pub type_id: TypeId,
@@ -58,9 +188,13 @@ pub struct StackInfo {
     pub type_name: Cow<'static, str>,
     /// Whether padding was inserted before this value for alignment.
     pub(crate) padding: bool,
-    /// Dropper used when unwinding the stack.
-    dropper: Dropper,
-    /// Associated types (e.g. function params, tuple elements). Unused for now.
+    /// Size in bytes of this stack slot's value.
+    pub size: usize,
+    /// Required alignment in bytes of this stack slot's value.
+    pub align: usize,
+    /// In-place dropper for this value, callable at its own start address.
+    pub(crate) raw_dropper: RawDropper,
+    /// Associated element types (populated for tuples; empty otherwise).
     pub associated: Vec<AssociatedType>,
 }
 
@@ -91,20 +225,14 @@ impl<H: 'static, T: ToTypeIdList + 'static + CStackListHeadLimit> ToTypeIdList
             type_id: TypeId::of::<H>(),
             type_name: Cow::Borrowed(std::any::type_name::<H>()),
             padding: Self::HEAD_PADDED,
-            dropper: |stack| unsafe { stack.drop::<H>(Self::HEAD_PADDED) },
+            size: size_of::<H>(),
+            align: align_of::<H>(),
+            raw_dropper: |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<H>()) },
             associated: Vec::new(),
         });
         list
     }
 }
-
-/// A type-checked wrapper around [`RawSegment`] that maintains a stack of type information
-/// to ensure type safety during operation execution.
-///
-/// [`DynSegment`] tracks the types of values on the stack at compile time and verifies
-/// that operations receive arguments of the correct type. This prevents type mismatches
-/// that could occur when using [`RawSegment`] directly.
-type Dropper = fn(&mut RawStack);
 
 /// A dynamic segment that provides runtime type checking for stack operations.
 ///
@@ -136,7 +264,13 @@ pub struct DynSegment {
     /// Type names for each argument slot, for error reporting (parallel to `argument_ids`).
     pub(crate) argument_names: Vec<Cow<'static, str>>,
     pub(crate) stack_ids: Vec<StackInfo>,
-    stack_index: usize,
+    /// Fixed byte offset `stack_ids[0]` is laid out relative to; established
+    /// once at construction (post-argument space for a full segment, or the
+    /// as-if-already-popped ambient offset for a fragment — see
+    /// [`new_fragment`](Self::new_fragment)). The current top-of-stack offset
+    /// is always recomputed from this plus `stack_ids`, never cached, so it
+    /// can never drift out of sync after ops consume stack entries.
+    base_stack_index: usize,
 }
 
 impl DynSegment {
@@ -152,20 +286,32 @@ impl DynSegment {
             argument_ids: stack_ids.iter().map(|s| s.type_id).collect(),
             argument_names: stack_ids.iter().map(|s| s.type_name.clone()).collect(),
             stack_ids,
-            stack_index: size_of::<ReverseList<Args::Output>>(),
+            base_stack_index: size_of::<ReverseList<Args::Output>>(),
         }
     }
 
     /// Create a DynSegment that is a fragment of a larger segment, it may
     /// be used to implement conditional execution.
+    ///
+    /// - Precondition: the top of the stack currently holds the condition
+    ///   value that [`join2`](Self::join2) will pop before this fragment's
+    ///   ops run — the fragment's own local offsets are computed as if that
+    ///   pop had already happened, matching the layout the fragment will
+    ///   actually see at execution time. (`join2` independently rejects a
+    ///   non-`bool` condition with an `Err`, so a mismatched condition type
+    ///   at this point is a pending parse error, not a violated invariant.)
     #[must_use]
     pub fn new_fragment(&self) -> Self {
+        debug_assert!(
+            !self.stack_ids.is_empty(),
+            "new_fragment requires a condition value on top of the stack"
+        );
         DynSegment {
             segment: RawSegment::new(),
             argument_ids: Vec::new(),
             argument_names: Vec::new(),
             stack_ids: Vec::new(),
-            stack_index: self.stack_index,
+            base_stack_index: self.stack_offset_after(self.stack_ids.len().saturating_sub(1)),
         }
     }
 
@@ -193,26 +339,208 @@ impl DynSegment {
         Ok(())
     }
 
+    /// Computes the top-of-stack byte offset after the first `count` entries
+    /// of `stack_ids`, replaying each entry's own alignment/size from
+    /// `base_stack_index`.
+    ///
+    /// Recomputing on demand (rather than caching a running total) keeps this
+    /// correct after any operation that removes entries from `stack_ids`
+    /// (e.g. [`pop_types`](Self::pop_types)), since there is no cached value
+    /// that could fall out of sync with the actual entries left on the stack.
+    ///
+    /// - Complexity: O(count).
+    fn stack_offset_after(&self, count: usize) -> usize {
+        let mut offset = self.base_stack_index;
+        for info in &self.stack_ids[..count] {
+            offset = align_index(info.align, offset);
+            offset += info.size;
+        }
+        offset
+    }
+
     /// Push type to stack and register dropper.
     fn push_type<T>(&mut self)
     where
         T: 'static,
     {
-        let aligned_index = align_index(align_of::<T>(), self.stack_index);
-        let padded = aligned_index != self.stack_index;
+        let current = self.stack_offset_after(self.stack_ids.len());
+        let aligned_index = align_index(align_of::<T>(), current);
+        let padded = aligned_index != current;
 
         self.stack_ids.push(StackInfo {
             type_id: TypeId::of::<T>(),
             type_name: Cow::Borrowed(std::any::type_name::<T>()),
             padding: padded,
-            dropper: if padded {
-                |stack| unsafe { stack.drop::<T>(true) }
-            } else {
-                |stack| unsafe { stack.drop::<T>(false) }
-            },
+            size: size_of::<T>(),
+            align: align_of::<T>(),
+            raw_dropper: |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) },
             associated: Vec::new(),
         });
-        self.stack_index = aligned_index + size_of::<T>();
+    }
+
+    /// Returns the current parse-time stack byte offset.
+    ///
+    /// Snapshot this before parsing a tuple's first element and pass it to
+    /// [`make_tuple`](Self::make_tuple).
+    #[must_use]
+    pub fn current_stack_offset(&self) -> usize {
+        self.stack_offset_after(self.stack_ids.len())
+    }
+
+    /// Returns the arity of the tuple on top of the stack, or `None` if the
+    /// top value isn't a tuple.
+    #[must_use]
+    pub fn peek_tuple_arity(&self) -> Option<usize> {
+        let info = self.stack_ids.last()?;
+        (info.type_id == TypeId::of::<DynTuple>()).then_some(info.associated.len())
+    }
+
+    /// Collapses the top `n` stack values (pushed starting at byte offset
+    /// `ambient_start`, e.g. via [`current_stack_offset`](Self::current_stack_offset)
+    /// captured before parsing the first element) into one tuple value.
+    ///
+    /// The tuple's internal layout (offsets between elements) depends only on
+    /// the elements' own types — never on `ambient_start` — matching the
+    /// layout that [`CStackList`]'s own nested `#[repr(C)]` cons cells
+    /// produce when built via sequential `.push()` calls in the same
+    /// declaration order: each element is placed at its own alignment, then
+    /// the running offset is padded up to the maximum alignment of every
+    /// element seen so far (not just the tuple's overall alignment) before
+    /// the next element is placed, mirroring how each nested cons cell pads
+    /// itself to its own alignment before the next field is appended.
+    ///
+    /// - Precondition: at least `n` values are on the stack, pushed
+    ///   contiguously starting at `ambient_start` with no other values
+    ///   interleaved.
+    ///
+    /// - Complexity: O(n).
+    pub fn make_tuple(&mut self, n: usize, ambient_start: usize) {
+        debug_assert!(n <= self.stack_ids.len());
+        let start = self.stack_ids.len() - n;
+        let elems: Vec<StackInfo> = self.stack_ids.drain(start..).collect();
+
+        let mut ambient_offset = ambient_start;
+        let mut offset = 0usize;
+        let mut tuple_align = 1usize;
+        let mut src_offsets = Vec::with_capacity(n);
+        let mut associated = Vec::with_capacity(n);
+        for elem in &elems {
+            // ambient_offset tracks where this element already sits on the
+            // ambient RawStack from ordinary sequential pushes — a plain
+            // flat layout, unrelated to CStackList's nested convention.
+            ambient_offset = align_index(elem.align, ambient_offset);
+            src_offsets.push(ambient_offset);
+            ambient_offset += elem.size;
+
+            // offset tracks the element's position in the tuple's canonical
+            // (CStackList-matching) layout: place at this element's own
+            // alignment, then pad up to the running max alignment so far.
+            offset = align_index(elem.align, offset);
+            tuple_align = tuple_align.max(elem.align);
+
+            associated.push(AssociatedType {
+                type_id: elem.type_id,
+                type_name: elem.type_name.clone(),
+                offset,
+                size: elem.size,
+                align: elem.align,
+                dropper: elem.raw_dropper,
+                associated: elem.associated.clone(),
+            });
+
+            offset += elem.size;
+            offset = align_index(tuple_align, offset);
+        }
+        // The last iteration's rounding already used the full tuple_align
+        // (tuple_align has accumulated every element's alignment by then),
+        // so `offset` is already the tuple's correct total size.
+        let total_size = offset;
+        let dest_base = align_index(tuple_align, ambient_start);
+
+        let dest_offsets: Vec<usize> = associated.iter().map(|a| a.offset).collect();
+        let sizes: Vec<usize> = elems.iter().map(|e| e.size).collect();
+
+        self.segment.raw0_(move |stack| {
+            unsafe {
+                stack.repack(
+                    ambient_start,
+                    dest_base,
+                    total_size,
+                    &src_offsets,
+                    &dest_offsets,
+                    &sizes,
+                );
+            }
+            Ok(())
+        });
+
+        self.stack_ids.push(StackInfo {
+            type_id: TypeId::of::<DynTuple>(),
+            type_name: Cow::Borrowed(std::any::type_name::<DynTuple>()),
+            padding: dest_base != ambient_start,
+            size: total_size,
+            align: tuple_align,
+            raw_dropper: drop_tuple,
+            associated,
+        });
+    }
+
+    /// Extracts element `index` from the tuple on top of the stack, replacing
+    /// the whole tuple with just that element's value.
+    ///
+    /// - Precondition: the top-of-stack value is a tuple with at least
+    ///   `index + 1` elements.
+    ///
+    /// - Complexity: O(n) in the tuple's arity.
+    pub fn tuple_index(&mut self, index: usize) {
+        let info = self
+            .stack_ids
+            .pop()
+            .expect("tuple_index requires a value on the stack");
+        debug_assert_eq!(
+            info.type_id,
+            TypeId::of::<DynTuple>(),
+            "tuple_index requires a tuple on top of the stack"
+        );
+        debug_assert!(index < info.associated.len(), "tuple_index out of range");
+
+        let target = info.associated[index].clone();
+        let associated = info.associated.clone();
+        let tuple_padding = info.padding;
+        let tuple_size = info.size;
+
+        // The tuple's own leading pad becomes dead space once torn down to
+        // one element, so the extracted element gets its own padding flag:
+        // recomputed relative to the ambient offset the tuple was originally
+        // built from (with the tuple's own entry already popped above, this
+        // replay gives exactly that offset), not inherited from the tuple.
+        let ambient_before_tuple = self.stack_offset_after(self.stack_ids.len());
+        let new_offset = align_index(target.align, ambient_before_tuple);
+        let new_padding = new_offset != ambient_before_tuple;
+
+        self.segment.raw0_(move |stack| {
+            unsafe {
+                extract_tuple_element(
+                    stack,
+                    tuple_size,
+                    tuple_padding,
+                    &associated,
+                    index,
+                    new_padding,
+                );
+            }
+            Ok(())
+        });
+
+        self.stack_ids.push(StackInfo {
+            type_id: target.type_id,
+            type_name: target.type_name,
+            padding: new_padding,
+            size: target.size,
+            align: target.align,
+            raw_dropper: target.dropper,
+            associated: target.associated,
+        });
     }
 
     /// Returns the padding flags for the top N entries of the type stack.
@@ -230,17 +558,33 @@ impl DynSegment {
     /// Captures the current stack droppers for use when unwinding on error.
     ///
     /// - Complexity: O(n) in the current stack depth.
-    fn capture_unwind(&self) -> Vec<Dropper> {
-        self.stack_ids.iter().map(|info| info.dropper).collect()
+    fn capture_unwind(&self) -> Vec<(usize, bool, RawDropper, Vec<AssociatedType>)> {
+        self.stack_ids
+            .iter()
+            .map(|info| {
+                (
+                    info.size,
+                    info.padding,
+                    info.raw_dropper,
+                    info.associated.clone(),
+                )
+            })
+            .collect()
     }
 
     /// Runs the captured droppers in reverse order on error, then propagates the error.
-    fn unwind_on_err<R>(unwind: &[Dropper], stack: &mut RawStack, result: Result<R>) -> Result<R> {
+    fn unwind_on_err<R>(
+        unwind: &[(usize, bool, RawDropper, Vec<AssociatedType>)],
+        stack: &mut RawStack,
+        result: Result<R>,
+    ) -> Result<R> {
         match result {
             Ok(r) => Ok(r),
             Err(e) => {
-                for dropper in unwind.iter().rev() {
-                    dropper(stack);
+                for (size, padding, raw_dropper, associated) in unwind.iter().rev() {
+                    unsafe {
+                        stack.drop_sized(*size, *padding, |ptr| raw_dropper(ptr, associated));
+                    }
                 }
                 Err(e)
             }
@@ -533,7 +877,7 @@ impl DynSegment {
             fragment_1.stack_ids.len()
         );
         ensure!(
-            fragment_0.stack_ids[0].type_id == fragment_1.stack_ids[0].type_id,
+            stack_info_shapes_match(&fragment_0.stack_ids[0], &fragment_1.stack_ids[0]),
             "fragment result types must match"
         );
 
@@ -634,6 +978,92 @@ impl DynSegment {
             ));
         }
         unsafe { self.segment.call1(arg) }
+    }
+
+    /// Reinterprets the tuple on top of the stack as a concrete `L`
+    /// (typically a `CStackList<...>` chain), replacing its `StackInfo` with
+    /// `L`'s. No bytes move: both sides already use the same
+    /// natural-alignment, declaration-order layout, so this is a relabel, not
+    /// a copy.
+    ///
+    /// - Precondition: `L` was assembled via sequential `.push()` calls in
+    ///   the same field order as the tuple (not via `into_c_stack_list()` on
+    ///   a same-order plain tuple, which reverses element order).
+    ///
+    /// # Errors
+    /// Returns an error if the top of stack isn't a tuple, or its element
+    /// `TypeId`s (in order) don't match `L`'s.
+    pub fn pop_tuple_as<L: List + ToTypeIdList + 'static>(&mut self) -> Result<()> {
+        let info = self
+            .stack_ids
+            .last()
+            .ok_or_else(|| anyhow!("pop_tuple_as: stack is empty"))?;
+        ensure!(
+            info.type_id == TypeId::of::<DynTuple>(),
+            "pop_tuple_as: top of stack is not a tuple"
+        );
+        let expected: Vec<TypeId> = L::to_stack_info_list().iter().map(|s| s.type_id).collect();
+        let actual: Vec<TypeId> = info.associated.iter().map(|a| a.type_id).collect();
+        ensure!(
+            expected == actual,
+            "pop_tuple_as: tuple element types do not match `{}`",
+            std::any::type_name::<L>()
+        );
+        debug_assert_eq!(info.size, size_of::<L>());
+        debug_assert_eq!(info.align, align_of::<L>());
+
+        let info = self.stack_ids.last_mut().expect("checked above");
+        info.type_id = TypeId::of::<L>();
+        info.type_name = Cow::Borrowed(std::any::type_name::<L>());
+        info.raw_dropper = |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<L>()) };
+        info.associated = Vec::new();
+        Ok(())
+    }
+
+    /// Relabels the concrete `L` value on top of the stack as a tuple,
+    /// exposing its elements for `.N` indexing and tuple-shaped op matching.
+    /// No bytes move — see [`pop_tuple_as`](Self::pop_tuple_as) for why this
+    /// is sound.
+    ///
+    /// - Precondition: the top of the stack currently holds a value of type
+    ///   `L`, assembled via sequential `.push()` calls (not
+    ///   `into_c_stack_list()` on a same-order plain tuple).
+    pub fn push_tuple<L: List + ToTypeIdList + 'static>(&mut self) {
+        let info = self
+            .stack_ids
+            .last_mut()
+            .expect("push_tuple requires a value on the stack");
+        debug_assert_eq!(
+            info.type_id,
+            TypeId::of::<L>(),
+            "push_tuple: top of stack is not the expected type"
+        );
+        let element_infos = L::to_stack_info_list();
+        let mut offset = 0usize;
+        let mut align_so_far = 1usize;
+        let associated = element_infos
+            .iter()
+            .map(|elem_info| {
+                offset = align_index(elem_info.align, offset);
+                align_so_far = align_so_far.max(elem_info.align);
+                let a = AssociatedType {
+                    type_id: elem_info.type_id,
+                    type_name: elem_info.type_name.clone(),
+                    offset,
+                    size: elem_info.size,
+                    align: elem_info.align,
+                    dropper: elem_info.raw_dropper,
+                    associated: elem_info.associated.clone(),
+                };
+                offset += elem_info.size;
+                offset = align_index(align_so_far, offset);
+                a
+            })
+            .collect();
+        info.type_id = TypeId::of::<DynTuple>();
+        info.type_name = Cow::Borrowed(std::any::type_name::<DynTuple>());
+        info.raw_dropper = drop_tuple;
+        info.associated = associated;
     }
 }
 
@@ -897,6 +1327,343 @@ mod tests {
             msg.contains("op failed"),
             "error message should propagate op error: {msg}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn stack_info_records_size_and_align() {
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 7u32);
+        let infos = seg.peek_stack_infos(1);
+        assert_eq!(infos[0].size, size_of::<u32>());
+        assert_eq!(infos[0].align, align_of::<u32>());
+        assert!(infos[0].associated.is_empty());
+    }
+
+    #[test]
+    fn associated_type_carries_offset_size_align_dropper() {
+        // Exercises the new AssociatedType shape directly — no runtime behavior
+        // yet, just the data shape this task adds.
+        let a = AssociatedType {
+            type_id: std::any::TypeId::of::<u32>(),
+            type_name: std::borrow::Cow::Borrowed("u32"),
+            offset: 4,
+            size: 4,
+            align: 4,
+            dropper: |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<u32>()) },
+            associated: Vec::new(),
+        };
+        assert_eq!(a.offset, 4);
+        assert_eq!(a.size, 4);
+        assert_eq!(a.align, 4);
+    }
+
+    #[test]
+    fn make_tuple_then_index_each_element() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 10u32);
+        seg.op0(|| "hello");
+        seg.make_tuple(2, ambient_start);
+        assert_eq!(seg.peek_tuple_arity(), Some(2));
+
+        // Index element 1 first on a clone-free single segment isn't possible
+        // (tuple_index consumes the tuple), so build two segments to check both.
+        let mut seg0 = DynSegment::new::<()>();
+        let ambient_start0 = seg0.current_stack_offset();
+        seg0.op0(|| 10u32);
+        seg0.op0(|| "hello");
+        seg0.make_tuple(2, ambient_start0);
+        seg0.tuple_index(0);
+        assert_eq!(seg0.call0::<u32>().unwrap(), 10);
+
+        seg.tuple_index(1);
+        assert_eq!(seg.call0::<&'static str>().unwrap(), "hello");
+    }
+
+    #[test]
+    fn tuple_layout_is_independent_of_ambient_stack_depth() {
+        // (u8, u32): with nothing ahead of it vs. with a u8 already on the stack,
+        // internal padding between elements must be identical either way.
+        let mut seg_a = DynSegment::new::<()>();
+        let ambient_a = seg_a.current_stack_offset();
+        seg_a.op0(|| 1u8);
+        seg_a.op0(|| 2u32);
+        seg_a.make_tuple(2, ambient_a);
+
+        let mut seg_b = DynSegment::new::<()>();
+        seg_b.op0(|| 99u8); // extra value ahead, shifts ambient depth
+        let ambient_b = seg_b.current_stack_offset();
+        seg_b.op0(|| 1u8);
+        seg_b.op0(|| 2u32);
+        seg_b.make_tuple(2, ambient_b);
+
+        seg_a.tuple_index(1);
+        seg_b.tuple_index(1);
+        assert_eq!(seg_a.call0::<u32>().unwrap(), 2);
+        // Return the deeper (pre-tuple) value, not the just-extracted one: the
+        // extracted u32's own read doesn't depend on its padding flag being
+        // correct (it's computed from the live buffer length), but correctly
+        // recovering `extra` underneath it does.
+        seg_b.op2(|extra: u8, _x: u32| extra).unwrap();
+        assert_eq!(seg_b.call0::<u8>().unwrap(), 99);
+    }
+
+    #[test]
+    fn tuple_index_drops_every_other_element_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let tracker = DropCounter(drop_count.clone());
+
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(move || tracker.clone());
+        seg.op0(|| 42u32);
+        seg.make_tuple(2, ambient_start);
+        seg.tuple_index(1); // keep the u32, drop the DropCounter
+
+        assert_eq!(seg.call0::<u32>().unwrap(), 42);
+        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn repack_relocated_element_drops_exactly_once() {
+        // Regression test for the concern that repack's ptr::copy-based move
+        // never runs destructors at an element's old (pre-relocation) offset:
+        // that's the same memmove-without-drop pattern std itself uses (e.g.
+        // Vec::remove) and is sound as long as nothing treats the vacated
+        // slot as live afterward, which make_tuple's bookkeeping guarantees.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[repr(align(16))]
+        #[allow(dead_code)]
+        struct Over16(u8);
+
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let tracker = DropCounter(drop_count.clone());
+
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 0xEEu8); // sentinel, forces a misaligned ambient_start
+        let ambient_start = seg.current_stack_offset(); // 1
+        seg.op0(move || tracker.clone()); // element 0: DropCounter, align 8
+        seg.op0(|| Over16(0)); // element 1: align 16, forces tuple_align=16
+        // tuple_align (16) > DropCounter's own align (8), so dest_base
+        // (align_index(16, 1) == 16) differs from DropCounter's natural
+        // ambient position (align_index(8, 1) == 8): repack must physically
+        // relocate it, leaving its old bytes behind.
+        seg.make_tuple(2, ambient_start);
+        seg.tuple_index(0); // keep the DropCounter, drop Over16 in place
+        seg.op2(|_sentinel: u8, val: DropCounter| val).unwrap();
+
+        let extracted = seg.call0::<DropCounter>().unwrap();
+        assert_eq!(
+            drop_count.load(Ordering::SeqCst),
+            0,
+            "extracting must not have already dropped the relocated element"
+        );
+        drop(extracted);
+        assert_eq!(
+            drop_count.load(Ordering::SeqCst),
+            1,
+            "relocated element must drop exactly once (no leak, no double-drop)"
+        );
+    }
+
+    #[test]
+    fn tuple_index_combined_with_another_op() {
+        // Mirrors the spec's `5 + (0, 1).1` case: indexing must leave the stack in
+        // a state a subsequent op can correctly consume.
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 5u32);
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 0u32);
+        seg.op0(|| 1u32);
+        seg.make_tuple(2, ambient_start);
+        seg.tuple_index(1);
+        seg.op2(|a: u32, b: u32| a + b).unwrap();
+        assert_eq!(seg.call0::<u32>().unwrap(), 6);
+    }
+
+    #[test]
+    fn tuple_index_result_inherits_leading_padding_when_element_align_is_smaller() {
+        // Regression test: index element 0 (u32, align 4) out of a leading-
+        // padded (u32, u64) tuple (tuple_align 8) at a misaligned ambient
+        // start. The extracted element's align (4) is smaller than the
+        // tuple's own align (8), which previously caused the result's
+        // padding flag and stack_index bookkeeping to disagree with the
+        // actual runtime layout (see plan/task-5 review history) — popping a
+        // deeper sentinel afterward would silently read the wrong bytes.
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 0xEEu8); // sentinel, ambient offset 0
+        let ambient_start = seg.current_stack_offset(); // 1: misaligned for align-8 tuple
+        seg.op0(|| 0xAABB_CCDDu32); // element 0
+        seg.op0(|| 0x1122_3344_5566_7788u64); // element 1
+        seg.make_tuple(2, ambient_start);
+        seg.tuple_index(0);
+        // Return the deeper sentinel, not the just-extracted u32: recovering
+        // it correctly is exactly what depends on the fixed padding/offset
+        // bookkeeping (the u32's own read would succeed even under the bug).
+        seg.op2(|sentinel: u8, _x: u32| sentinel).unwrap();
+        assert_eq!(seg.call0::<u8>().unwrap(), 0xEE);
+    }
+
+    #[test]
+    fn one_tuple_round_trips() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 99u32);
+        seg.make_tuple(1, ambient_start);
+        assert_eq!(seg.peek_tuple_arity(), Some(1));
+        seg.tuple_index(0);
+        assert_eq!(seg.call0::<u32>().unwrap(), 99);
+    }
+
+    #[test]
+    fn push_tuple_then_pop_tuple_as_round_trips() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        // Build a concrete CStackList<u32, CStackList<&str, CNil<()>>> by pushing
+        // fields in declaration order (NOT via into_c_stack_list, which reverses
+        // order — see pop_tuple_as's doc comment). `CNil`'s inner field is
+        // private, so build the empty base via the public `IntoCStackList`
+        // conversion on `()` rather than the tuple-struct constructor.
+        seg.op0(|| CStackList(().into_c_stack_list(), 7u32).push("hi"));
+        seg.push_tuple::<CStackList<&str, CStackList<u32, CNil<()>>>>();
+        assert_eq!(seg.peek_tuple_arity(), Some(2));
+
+        seg.pop_tuple_as::<CStackList<&str, CStackList<u32, CNil<()>>>>()?;
+        let result = seg.call0::<CStackList<&str, CStackList<u32, CNil<()>>>>()?;
+        assert_eq!(result.head(), &"hi");
+        assert_eq!(result.tail().head(), &7u32);
+        Ok(())
+    }
+
+    #[test]
+    fn pop_tuple_as_rejects_shape_mismatch() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1u32);
+        seg.op0(|| 2u32);
+        seg.make_tuple(2, ambient_start);
+
+        let result = seg.pop_tuple_as::<CStackList<&str, CStackList<u32, CNil<()>>>>();
+        assert!(result.is_err(), "(u32, u32) should not match (u32, &str)");
+    }
+
+    /// `(u32, u8, u8)` shape used to distinguish the correct CStackList-nested
+    /// layout (offsets `[0, 4, 8]`, size 12) from the old flat `#[repr(C)]`
+    /// struct formula (offsets `[0, 4, 5]`, size 8): a higher-alignment
+    /// element (`u32`) is followed by two lower-alignment elements (`u8`,
+    /// `u8`), which is exactly the case the two formulas disagree on.
+    type DivergentAlignmentShape = CStackList<u8, CStackList<u8, CStackList<u32, CNil<()>>>>;
+
+    fn build_divergent_alignment_shape() -> DivergentAlignmentShape {
+        // Declaration order (u32, u8, u8): elem0 = u32 is pushed first (innermost
+        // tail), elem2 = the second u8 is pushed last (outermost head).
+        CStackList(
+            CStackList(CStackList(().into_c_stack_list(), 0xAAu32), 0xBBu8),
+            0xCCu8,
+        )
+    }
+
+    #[test]
+    fn make_tuple_then_index_last_element_of_divergent_alignment_shape() {
+        // Confirms element 2 reads back correctly via make_tuple's own
+        // internally consistent repack. This alone can't distinguish offset 8
+        // from offset 5 (make_tuple's write and read paths both use the same
+        // formula) — see `push_tuple_round_trips_divergent_alignment_shape`
+        // below for the test that actually exercises the real CStackList
+        // layout and would fail under the old (flat) formula.
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 0xAAu32);
+        seg.op0(|| 0xBBu8);
+        seg.op0(|| 0xCCu8);
+        seg.make_tuple(3, ambient_start);
+        assert_eq!(seg.peek_tuple_arity(), Some(3));
+        seg.tuple_index(2);
+        assert_eq!(seg.call0::<u8>().unwrap(), 0xCCu8);
+    }
+
+    #[test]
+    fn push_tuple_round_trips_divergent_alignment_shape() {
+        // Round-trips a real `CStackList<u8, CStackList<u8, CStackList<u32,
+        // CNil<()>>>>` value (memory layout produced by rustc itself, not by
+        // our offset formula) through `push_tuple`, then indexes each
+        // element. This test fails under the old flat-struct offset formula
+        // (which computes offset 5 for the last element, when the real
+        // struct places it at offset 8) and passes under the fix.
+        let sample = build_divergent_alignment_shape();
+        // Confirm construction order really is (u32, u8, u8) in declaration
+        // order (outermost push is last / head — see pop_tuple_as's doc
+        // comment for this convention).
+        assert_eq!(*sample.head(), 0xCCu8);
+        assert_eq!(*sample.tail().head(), 0xBBu8);
+        assert_eq!(*sample.tail().tail().head(), 0xAAu32);
+
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(build_divergent_alignment_shape);
+        seg.push_tuple::<DivergentAlignmentShape>();
+        assert_eq!(seg.peek_tuple_arity(), Some(3));
+
+        // tuple_index consumes the tuple, so index each element in its own
+        // segment (mirrors make_tuple_then_index_each_element's pattern).
+        let mut seg0 = DynSegment::new::<()>();
+        seg0.op0(build_divergent_alignment_shape);
+        seg0.push_tuple::<DivergentAlignmentShape>();
+        seg0.tuple_index(0);
+        assert_eq!(seg0.call0::<u32>().unwrap(), 0xAAu32);
+
+        let mut seg1 = DynSegment::new::<()>();
+        seg1.op0(build_divergent_alignment_shape);
+        seg1.push_tuple::<DivergentAlignmentShape>();
+        seg1.tuple_index(1);
+        assert_eq!(seg1.call0::<u8>().unwrap(), 0xBBu8);
+
+        seg.tuple_index(2);
+        assert_eq!(seg.call0::<u8>().unwrap(), 0xCCu8);
+    }
+
+    #[test]
+    fn make_tuple_then_pop_tuple_as_round_trips_divergent_alignment_shape()
+    -> Result<(), anyhow::Error> {
+        // Closes the loop on the other bridge direction: build via
+        // make_tuple (which now computes the CStackList-matching layout),
+        // relabel with pop_tuple_as, and confirm the resulting concrete
+        // value's fields (read by rustc's own layout, via .head()/.tail())
+        // agree with what was pushed for every element, including the
+        // divergent-alignment last element.
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 0xAAu32);
+        seg.op0(|| 0xBBu8);
+        seg.op0(|| 0xCCu8);
+        seg.make_tuple(3, ambient_start);
+        assert_eq!(seg.peek_tuple_arity(), Some(3));
+
+        seg.pop_tuple_as::<DivergentAlignmentShape>()?;
+        let result = seg.call0::<DivergentAlignmentShape>()?;
+        assert_eq!(*result.tail().tail().head(), 0xAAu32);
+        assert_eq!(*result.tail().head(), 0xBBu8);
+        assert_eq!(*result.head(), 0xCCu8);
         Ok(())
     }
 }

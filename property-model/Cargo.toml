@@ -8,5 +8,8 @@ description = "Runtime library for property model constraint graphs"
 slotmap = "1.0"
 anyhow = "1.0"
 
+[features]
+playground = []
+
 [lints]
 workspace = true

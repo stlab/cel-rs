@@ -78,11 +78,23 @@ impl RawStack {
     /// Pushes `size` raw bytes from `src`, aligned to `align`, using the same
     /// padding/marker-byte bookkeeping as [`push`](Self::push).
     ///
+    /// `src` is typed as `MaybeUninit<u8>` rather than `u8` because the bytes
+    /// being copied may include a source value's interior padding, which is
+    /// itself uninitialized — reading it through a `u8` pointer instead would
+    /// be undefined behavior even though this function never inspects the
+    /// bytes' values.
+    ///
     /// - Precondition: `align` is a power of two.
     ///
     /// # Safety
-    /// `src` must be valid for reads of `size` bytes.
-    pub unsafe fn push_raw(&mut self, align: usize, size: usize, src: *const u8) -> bool {
+    /// `src` must be valid for reads of `size` bytes, and must not overlap the
+    /// stack's internal buffer.
+    pub unsafe fn push_raw(
+        &mut self,
+        align: usize,
+        size: usize,
+        src: *const MaybeUninit<u8>,
+    ) -> bool {
         debug_assert!(align.is_power_of_two());
         let len = self.buffer.len();
         let aligned_index = align_index(align, len);
@@ -95,23 +107,27 @@ impl RawStack {
                 self.buffer[len].write(1);
                 self.buffer[len + 1..aligned_index].fill(MaybeUninit::new(0));
             }
-            std::ptr::copy_nonoverlapping(
-                src,
-                self.buffer.as_mut_ptr().add(aligned_index).cast::<u8>(),
-                size,
-            );
+            std::ptr::copy_nonoverlapping(src, self.buffer.as_mut_ptr().add(aligned_index), size);
         }
         aligned_index - len > 0
     }
 
     /// Copies `size` bytes starting at absolute buffer offset `offset` into `dst`.
     ///
+    /// `dst` is typed as `MaybeUninit<u8>` rather than `u8` because the bytes
+    /// being copied may be a value's interior padding, which is itself
+    /// uninitialized — reading it through a `u8` pointer instead would be
+    /// undefined behavior even though this function never inspects the
+    /// bytes' values.
+    ///
     /// # Safety
     /// `offset..offset + size` must be within the currently-initialized buffer;
-    /// `dst` must be valid for writes of `size` bytes.
-    pub unsafe fn copy_from(&self, offset: usize, size: usize, dst: *mut u8) {
+    /// `dst` must be valid for writes of `size` bytes and must not overlap the
+    /// stack's internal buffer.
+    pub unsafe fn copy_from(&self, offset: usize, size: usize, dst: *mut MaybeUninit<u8>) {
+        debug_assert!(offset + size <= self.buffer.len());
         unsafe {
-            std::ptr::copy_nonoverlapping(self.buffer.as_ptr().add(offset).cast::<u8>(), dst, size);
+            std::ptr::copy_nonoverlapping(self.buffer.as_ptr().add(offset), dst, size);
         }
     }
 
@@ -132,6 +148,7 @@ impl RawStack {
     /// # Safety
     /// No live (undropped) value may exist at or above `new_len`.
     pub unsafe fn truncate_to(&mut self, new_len: usize, padding: bool) {
+        debug_assert!(new_len <= self.buffer.len());
         let padding_count = if padding {
             self.buffer[..new_len]
                 .iter()
@@ -158,11 +175,77 @@ impl RawStack {
         padding: bool,
         run_drop: impl FnOnce(*mut u8),
     ) {
+        debug_assert!(size <= self.buffer.len());
         let p = self.buffer.len() - size;
         unsafe {
             self.drop_at(p, run_drop);
             self.truncate_to(p, padding);
         }
+    }
+
+    /// Repacks `sizes.len()` already-pushed values (currently at the absolute
+    /// byte offsets in `src_offsets`) into one contiguous, self-contained
+    /// region of `total_size` bytes starting at `dest_base`, placing element
+    /// `i` at `dest_base + dest_offsets[i]`. Adjusts the tracked length to
+    /// `dest_base + total_size` and returns whether leading padding was
+    /// inserted between `ambient_start` and `dest_base`.
+    ///
+    /// - Precondition: `src_offsets`, `dest_offsets`, and `sizes` have equal
+    ///   length; `dest_base >= ambient_start`; the source ranges are
+    ///   currently valid, initialized bytes.
+    ///
+    /// - Complexity: O(n) in `sizes.len()`.
+    ///
+    /// # Safety
+    /// The offsets and sizes must correctly describe the actual bytes in the
+    /// buffer; no two destination ranges may overlap. `src_offsets` and
+    /// `dest_offsets` must be in the same relative element order (element `i`'s
+    /// source and destination must both be the `i`-th non-overlapping range in
+    /// their respective layouts) — this method does not reorder elements, only
+    /// re-pads between them. Given that and `dest_base >= ambient_start`, each
+    /// element's destination start is guaranteed to be at or after every
+    /// earlier element's source end, which is what makes processing in reverse
+    /// index order below safe against clobbering not-yet-read source bytes.
+    pub unsafe fn repack(
+        &mut self,
+        ambient_start: usize,
+        dest_base: usize,
+        total_size: usize,
+        src_offsets: &[usize],
+        dest_offsets: &[usize],
+        sizes: &[usize],
+    ) -> bool {
+        debug_assert!(dest_base >= ambient_start);
+        debug_assert_eq!(src_offsets.len(), sizes.len());
+        debug_assert_eq!(dest_offsets.len(), sizes.len());
+
+        let target_len = dest_base + total_size;
+        let current_len = self.buffer.len();
+        let grown_len = current_len.max(target_len);
+        unsafe {
+            if grown_len > current_len {
+                self.buffer.reserve(grown_len - current_len);
+                self.buffer.set_len(grown_len);
+            }
+            let base_ptr = self.buffer.as_mut_ptr();
+            // Process highest index first: each element's destination is
+            // provably at or after every earlier element's source end (see
+            // `# Safety` above), so this order never overwrites source bytes
+            // an earlier iteration still needs to read.
+            for i in (0..sizes.len()).rev() {
+                std::ptr::copy(
+                    base_ptr.add(src_offsets[i]),
+                    base_ptr.add(dest_base + dest_offsets[i]),
+                    sizes[i],
+                );
+            }
+            if dest_base > ambient_start {
+                self.buffer[ambient_start].write(1);
+                self.buffer[ambient_start + 1..dest_base].fill(MaybeUninit::new(0));
+            }
+            self.buffer.set_len(target_len);
+        }
+        dest_base > ambient_start
     }
 
     /// Pops a value of type `T` from the stack. Does not change the stack capacity.
@@ -273,7 +356,7 @@ mod tests {
             stack.push_raw(
                 align_of::<f64>(),
                 size_of::<f64>(),
-                (&value as *const f64).cast::<u8>(),
+                (&value as *const f64).cast::<MaybeUninit<u8>>(),
             )
         };
         let popped: f64 = unsafe { stack.pop(padding2) };
@@ -295,7 +378,7 @@ mod tests {
             stack_b.push_raw(
                 align_of::<f64>(),
                 size_of::<f64>(),
-                (&value as *const f64).cast::<u8>(),
+                (&value as *const f64).cast::<MaybeUninit<u8>>(),
             )
         };
         assert_eq!(padding_typed, padding_raw);
@@ -307,7 +390,7 @@ mod tests {
         let _ = stack.push(10u32);
         let _ = stack.push(20u32);
         let mut buf = [0u8; 4];
-        unsafe { stack.copy_from(0, 4, buf.as_mut_ptr()) };
+        unsafe { stack.copy_from(0, 4, buf.as_mut_ptr().cast::<MaybeUninit<u8>>()) };
         assert_eq!(u32::from_ne_bytes(buf), 10);
     }
 
@@ -367,5 +450,110 @@ mod tests {
         }
         assert_eq!(count.load(Ordering::SeqCst), 1);
         assert_eq!(stack.len(), 1);
+    }
+
+    #[test]
+    fn repack_moves_elements_to_ideal_offsets_and_reports_padding() {
+        // Ambient layout: [u8 @0][pad][u32 @4][u8 @8] — u8 then u32 then u8, each
+        // pushed with ordinary alignment relative to a 1-byte ambient start.
+        let mut stack = RawStack::with_base_alignment(align_of::<u32>());
+        let ambient_start = stack.len(); // 0
+        let _ = stack.push(0xAAu8); // element 0: ambient offset 0
+        let _p1 = stack.push(0xBBBB_BBBBu32); // element 1: ambient offset 4 (1 byte padded to 4)
+        let _p2 = stack.push(0xCCu8); // element 2: ambient offset 8
+
+        // Ideal (self-contained) layout for (u8, u32, u8) from a zero base:
+        // offset 0 (u8), offset 4 (u32, aligned up from 1), offset 8 (u8) -> total 9,
+        // rounded to the tuple's own max align (4) -> total_size 12.
+        let src_offsets = [0usize, 4, 8];
+        let dest_offsets = [0usize, 4, 8];
+        let sizes = [1usize, 4, 1];
+        let total_size = 12usize;
+        let dest_base = 0usize; // ambient_start (0) is already 4-aligned
+
+        let padding = unsafe {
+            stack.repack(
+                ambient_start,
+                dest_base,
+                total_size,
+                &src_offsets,
+                &dest_offsets,
+                &sizes,
+            )
+        };
+        assert!(
+            !padding,
+            "ambient_start was already aligned; no leading pad expected"
+        );
+        assert_eq!(stack.len(), dest_base + total_size);
+
+        let mut a = [0u8; 1];
+        let mut b = [0u8; 4];
+        let mut c = [0u8; 1];
+        unsafe {
+            stack.copy_from(dest_base, 1, a.as_mut_ptr().cast::<MaybeUninit<u8>>());
+            stack.copy_from(dest_base + 4, 4, b.as_mut_ptr().cast::<MaybeUninit<u8>>());
+            stack.copy_from(dest_base + 8, 1, c.as_mut_ptr().cast::<MaybeUninit<u8>>());
+        }
+        assert_eq!(a[0], 0xAA);
+        assert_eq!(u32::from_ne_bytes(b), 0xBBBB_BBBB);
+        assert_eq!(c[0], 0xCC);
+    }
+
+    #[test]
+    fn repack_shifts_right_without_corrupting_unread_source_bytes() {
+        // A misaligned ambient_start forces dest_base > ambient_start, which
+        // means the destination of the *first* tuple element can land inside
+        // the *source* range of a *later*, not-yet-copied element. Processing
+        // elements low-index-first would silently corrupt that later element's
+        // bytes before they're read; this test fails under that ordering and
+        // passes under the correct (reverse) ordering.
+        let mut stack = RawStack::with_base_alignment(align_of::<u32>());
+        let _ = stack.push(0xFFu8); // sentinel, ambient offset 0, before the tuple
+        let ambient_start = stack.len(); // 1: misaligned relative to u32's 4-byte align
+        let _ = stack.push(0xDDu8); // element 0: ambient offset 1
+        let _ = stack.push(0x1122_3344u32); // element 1: ambient offset 4 (3 bytes padded)
+
+        // Ideal (u8, u32) layout from zero: offset 0 (u8), offset 4 (u32) -> total 8.
+        let src_offsets = [1usize, 4];
+        let dest_offsets = [0usize, 4];
+        let sizes = [1usize, 4];
+        let total_size = 8usize;
+        let dest_base = 4usize; // align_index(4, ambient_start=1) == 4, so this shifts right
+
+        let padding = unsafe {
+            stack.repack(
+                ambient_start,
+                dest_base,
+                total_size,
+                &src_offsets,
+                &dest_offsets,
+                &sizes,
+            )
+        };
+        assert!(
+            padding,
+            "ambient_start (1) is not 4-aligned; a leading pad is expected"
+        );
+        assert_eq!(stack.len(), dest_base + total_size);
+
+        let mut sentinel = [0u8; 1];
+        let mut a = [0u8; 1];
+        let mut b = [0u8; 4];
+        unsafe {
+            stack.copy_from(0, 1, sentinel.as_mut_ptr().cast::<MaybeUninit<u8>>());
+            stack.copy_from(dest_base, 1, a.as_mut_ptr().cast::<MaybeUninit<u8>>());
+            stack.copy_from(dest_base + 4, 4, b.as_mut_ptr().cast::<MaybeUninit<u8>>());
+        }
+        assert_eq!(
+            sentinel[0], 0xFF,
+            "bytes before the tuple must be untouched"
+        );
+        assert_eq!(a[0], 0xDD);
+        assert_eq!(
+            u32::from_ne_bytes(b),
+            0x1122_3344,
+            "the u32's bytes must survive the repack uncorrupted"
+        );
     }
 }

@@ -8,6 +8,7 @@ description = "Cross-platform property model development environment"
 default = ["desktop"]
 desktop = ["dioxus/desktop"]
 web = ["dioxus/web"]
+playground = []
 
 [dependencies]
 dioxus = { version = "0.7.9", features = [] }

@@ -25,8 +25,9 @@
 //! additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
 //! multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
-//! postfix_expression = primary_expression { "(" parameter_list ")" }.
-//! primary_expression = literal | identifier | "(" or_expression ")" | if_expression.
+//! postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.
+//! primary_expression = literal | identifier | tuple_or_group | if_expression.
+//! tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".
 //! if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].
 //! parameter_list = [ or_expression { "," or_expression } ].
 //! ```
@@ -799,40 +800,115 @@ impl CELParser {
         }
     }
 
-    /// `postfix_expression = primary_expression { "(" parameter_list ")" }.`
+    /// `postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.`
+    ///
+    /// The repetition allows chained indices (`t.0.1`): each `"." unsuffixed_integer`
+    /// is applied in turn to whatever value the previous step left on top of the
+    /// stack. Source text like `.0.1` tokenizes as a single `.` followed by one
+    /// float literal `0.1` (Rust's own lexer maximally munches the digits after
+    /// the second `.`), so that case is detected and split back into its two
+    /// integer indices — see the `Token::Literal(CelLiteral::Float(..))` arm below.
     fn is_postfix_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
         if !self.is_primary_expression()? {
             return Ok(false);
         }
-        while matches!(
-            self.peek_token(),
-            Some(Token::OpenDelim {
-                delimiter: Delimiter::Parenthesis,
-                ..
-            })
-        ) {
-            self.advance(); // consume "("
-            let arg_count = self.parameter_list()?;
-            match self.peek_token() {
-                Some(Token::CloseDelim {
+        loop {
+            if matches!(
+                self.peek_token(),
+                Some(Token::OpenDelim {
                     delimiter: Delimiter::Parenthesis,
                     ..
-                }) => {
-                    self.advance(); // consume ")"
+                })
+            ) {
+                self.advance(); // consume "("
+                let arg_count = self.parameter_list()?;
+                match self.peek_token() {
+                    Some(Token::CloseDelim {
+                        delimiter: Delimiter::Parenthesis,
+                        ..
+                    }) => {
+                        self.advance(); // consume ")"
+                    }
+                    _ => return Err(self.error_at("expected closing parenthesis")),
                 }
-                _ => return Err(self.error_at("expected closing parenthesis")),
+                // Stack order is [callee, arg1, arg2, ...]; lookup peeks top (arg_count + 1) entries.
+                self.op_lookup.lookup(
+                    "()",
+                    &mut self.context,
+                    arg_count + 1,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
+            } else if self.is_punctuation(".") {
+                match self.peek_token() {
+                    Some(Token::Literal(CelLiteral::Int(integer))) => {
+                        let integer = integer.clone();
+                        if !integer.suffix().is_empty() {
+                            return Err(self.error_at("tuple index must be an unsuffixed integer"));
+                        }
+                        self.advance();
+                        let index = integer.base10_parse::<usize>().map_err(|e| {
+                            self.error_at(&format!("invalid tuple index `{integer}`: {e}"))
+                        })?;
+                        self.apply_tuple_index(index)?;
+                    }
+                    Some(Token::Literal(CelLiteral::Float(float))) => {
+                        let float = float.clone();
+                        if !float.suffix().is_empty() {
+                            return Err(self.error_at("tuple index must be an unsuffixed integer"));
+                        }
+                        // base10_digits() returns the decimal digits with underscores
+                        // stripped and the suffix removed, e.g. "0.1" or "10.25" for
+                        // ordinary decimal floats — splitting on '.' recovers the two
+                        // chained integer indices. Scientific-notation floats (e.g.
+                        // `1e2`) normalize to digits with no '.' at all; reject those
+                        // as a parse error (checked before advancing, so the error
+                        // span still points at the float token) rather than assuming
+                        // a '.' is always present.
+                        let digits = float.base10_digits();
+                        let Some((first, second)) = digits.split_once('.') else {
+                            return Err(self.error_at(
+                                "tuple index chain must use decimal notation (e.g. `.0.1`)",
+                            ));
+                        };
+                        self.advance();
+                        let first_index = first.parse::<usize>().map_err(|e| {
+                            self.error_at(&format!("invalid tuple index `{first}`: {e}"))
+                        })?;
+                        let second_index = second.parse::<usize>().map_err(|e| {
+                            self.error_at(&format!("invalid tuple index `{second}`: {e}"))
+                        })?;
+                        self.apply_tuple_index(first_index)?;
+                        self.apply_tuple_index(second_index)?;
+                    }
+                    _ => return Err(self.error_at("expected integer after '.'")),
+                }
+            } else {
+                break;
             }
-            // Stack order is [callee, arg1, arg2, ...]; lookup peeks top (arg_count + 1) entries.
-            self.op_lookup.lookup(
-                "()",
-                &mut self.context,
-                arg_count + 1,
-                start_span.expect("production has token at start"),
-                self.last_span,
-            )?;
         }
         Ok(true)
+    }
+
+    /// Applies a single `.N` tuple-index operation to the value currently on
+    /// top of the stack, replacing it with element `index`.
+    ///
+    /// # Errors
+    /// Returns an error if the top of stack isn't a tuple, or if `index` is
+    /// out of range for its arity.
+    fn apply_tuple_index(&mut self, index: usize) -> Result<()> {
+        let arity = self
+            .context
+            .peek_tuple_arity()
+            .ok_or_else(|| self.error_at("'.N' requires a tuple"))?;
+        if index >= arity {
+            return Err(self.error_at(&format!(
+                "tuple index `{index}` out of range for tuple of arity {arity}"
+            )));
+        }
+        self.context.tuple_index(index);
+        Ok(())
     }
 
     /// `parameter_list = [ or_expression { "," or_expression } ].`
@@ -852,16 +928,17 @@ impl CELParser {
         Ok(count)
     }
 
-    /// `primary_expression = literal | identifier | "(" or_expression ")" | if_expression.`
+    /// `primary_expression = literal | identifier | tuple_or_group | if_expression.`
     ///
-    /// Dispatches to [`is_if_expression`](Self::is_if_expression) when the `if` keyword is seen.
+    /// Dispatches to [`is_if_expression`](Self::is_if_expression) when the `if` keyword is seen,
+    /// and to [`is_tuple_or_group`](Self::is_tuple_or_group) when `(` is seen.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - A literal value cannot be parsed (e.g., integer out of range).
     /// - An identifier is not found in the op lookup table.
-    /// - A parenthesized expression is malformed or missing its closing `)`.
+    /// - A tuple-or-group expression fails to parse.
     /// - An `if` expression fails to parse.
     fn is_primary_expression(&mut self) -> Result<bool> {
         match self.peek_token() {
@@ -888,36 +965,88 @@ impl CELParser {
             Some(Token::OpenDelim {
                 delimiter: Delimiter::Parenthesis,
                 ..
-            }) => {
-                self.advance();
-                // Unit expression: ()
-                if matches!(
-                    self.peek_token(),
-                    Some(Token::CloseDelim {
-                        delimiter: Delimiter::Parenthesis,
-                        ..
-                    })
-                ) {
-                    self.advance();
-                    self.context.just(());
-                    return Ok(true);
-                }
-                if !self.is_or_expression()? {
-                    return Err(self.error_at("expected expression"));
-                }
-                match self.peek_token() {
-                    Some(Token::CloseDelim {
-                        delimiter: Delimiter::Parenthesis,
-                        ..
-                    }) => {
-                        self.advance();
-                        Ok(true)
-                    }
-                    _ => Err(self.error_at("expected closing parenthesis")),
-                }
-            }
+            }) => self.is_tuple_or_group(),
             _ => Ok(false),
         }
+    }
+
+    /// `tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".`
+    ///
+    /// `()` parses as unit, `(expr)` as grouping, `(expr,)` as a 1-tuple, and
+    /// `(expr, expr, ...)` as an n-tuple.
+    ///
+    /// - Precondition: The next token is `Token::OpenDelim` with `Delimiter::Parenthesis`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parenthesized expression or tuple literal is malformed, has a
+    /// missing or misplaced comma, or is missing its closing `)`.
+    fn is_tuple_or_group(&mut self) -> Result<bool> {
+        self.advance();
+        // Unit expression: ()
+        if matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            self.advance();
+            self.context.just(());
+            return Ok(true);
+        }
+        let ambient_start = self.context.current_stack_offset();
+        if !self.is_or_expression()? {
+            return Err(self.error_at("expected expression"));
+        }
+        if matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            // Grouping: exactly one expression, no comma.
+            self.advance();
+            return Ok(true);
+        }
+        if !self.is_punctuation(",") {
+            return Err(self.error_at("expected ',' or closing parenthesis"));
+        }
+        let mut count = 1;
+        if matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            // Single element + trailing comma: 1-tuple.
+            self.advance();
+            self.context.make_tuple(count, ambient_start);
+            return Ok(true);
+        }
+        loop {
+            if !self.is_or_expression()? {
+                return Err(self.error_at("expected expression after ','"));
+            }
+            count += 1;
+            if matches!(
+                self.peek_token(),
+                Some(Token::CloseDelim {
+                    delimiter: Delimiter::Parenthesis,
+                    ..
+                })
+            ) {
+                self.advance();
+                break;
+            }
+            if !self.is_punctuation(",") {
+                return Err(self.error_at("expected ',' or closing parenthesis"));
+            }
+        }
+        self.context.make_tuple(count, ambient_start);
+        Ok(true)
     }
 
     /// `if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].`
@@ -1125,6 +1254,215 @@ mod tests {
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str("(10 + 20) * 30");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn unit_still_parses_as_unit() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("()").unwrap();
+        seg.call0::<()>().unwrap();
+    }
+
+    #[test]
+    fn single_paren_expression_is_grouping_not_tuple() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(1i32 + 2i32)").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 3);
+    }
+
+    #[test]
+    fn one_tuple_requires_trailing_comma() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(1i32,)").unwrap();
+        assert_eq!(seg.peek_tuple_arity(), Some(1));
+        seg.tuple_index(0);
+        assert_eq!(seg.call0::<i32>().unwrap(), 1);
+    }
+
+    #[test]
+    fn two_element_tuple_no_trailing_comma() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let seg: DynSegment = parser.parse_str(r#"("Hello", 42i32)"#).unwrap();
+        assert_eq!(seg.peek_tuple_arity(), Some(2));
+    }
+
+    #[test]
+    fn trailing_comma_rejected_for_arity_two() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32, 2i32,)");
+        assert!(result.is_err(), "trailing comma is only valid for 1-tuples");
+    }
+
+    #[test]
+    fn missing_comma_between_elements_is_an_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32 2i32)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn index_first_element_of_tuple() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(10i32, 20i32).0").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 10);
+    }
+
+    #[test]
+    fn tuple_element_can_be_arithmetic_expression() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(1i32 + 2i32, 3i32).0").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 3);
+    }
+
+    #[test]
+    fn tuple_second_element_can_be_arithmetic_expression() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(1i32 + 2i32, 3i32).1").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 3);
+    }
+
+    #[test]
+    fn tuple_ambient_start_correct_after_sibling_expression() {
+        // Regression test: a fully-evaluated sibling subexpression earlier in
+        // the same additive chain must not shift where the following tuple
+        // literal thinks its elements land on the real stack.
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("(1i32 + 2i32) + 3i32 + (4i32, 5i32).0")
+            .unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 10);
+    }
+
+    #[test]
+    fn tuple_index_inside_if_then_branch() {
+        // Regression test: `join2` pops the condition bool before running
+        // the chosen fragment, so a tuple literal inside that fragment must
+        // compute its layout as if that pop already happened.
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("if true { (10i32, 20i32).1 } else { 0i32 }")
+            .unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 20);
+    }
+
+    #[test]
+    fn tuple_index_inside_if_else_branch() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("if false { 0i32 } else { (10i32, 20i32).1 }")
+            .unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 20);
+    }
+
+    #[test]
+    fn tuple_index_inside_and_rhs() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("(1i32, 2i32).1 == 2i32 && (10i32, 20i32).1 == 20i32")
+            .unwrap();
+        assert!(seg.call0::<bool>().unwrap());
+    }
+
+    #[test]
+    fn tuple_index_inside_or_rhs() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("(1i32, 2i32).1 == 99i32 || (10i32, 20i32).1 == 20i32")
+            .unwrap();
+        assert!(seg.call0::<bool>().unwrap());
+    }
+
+    #[test]
+    fn tuple_containing_indexed_nested_tuple_result() {
+        // Regression test: extracting an element from a misaligned nested
+        // tuple must not leave the tuple's own leading padding as dead space
+        // on the stack — otherwise a later tuple literal built from this
+        // result computes its element offsets against the wrong ambient
+        // start and reads garbage. (7, not 1: the dead gap's own marker
+        // byte is hardcoded to value 1, so a value of 1 here would pass
+        // even when reading the wrong offset.)
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(0u8, (7u8, 2u64).0).1").unwrap();
+        assert_eq!(seg.call0::<u8>().unwrap(), 7);
+    }
+
+    #[test]
+    fn index_second_element_of_tuple() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(10i32, 20i32).1").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 20);
+    }
+
+    #[test]
+    fn indexing_combined_with_addition() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("5i32 + (0i32, 1i32).1").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 6);
+    }
+
+    #[test]
+    fn indexing_combined_with_addition_on_the_right() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(0i32, 1i32).1 + 5i32").unwrap();
+        assert_eq!(seg.call0::<i32>().unwrap(), 6);
+    }
+
+    #[test]
+    fn out_of_range_index_is_a_parse_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32, 2i32).5");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn indexing_a_non_tuple_is_a_parse_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("1i32.0");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn suffixed_index_is_a_parse_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32, 2i32).0i32");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn chained_tuple_index_into_nested_tuple() {
+        // `.1` selects the inner tuple `(10i32, 20i32)`, then `.0` selects its
+        // first element. Source text `.1.0` tokenizes as a single float
+        // literal `1.0`, which must be split back into the chained indices
+        // `1` then `0` — using a shape/value where applying the indices to
+        // the wrong operand or in the wrong order gives a different (wrong)
+        // answer than 10 (e.g. swapping order would try `.0` on an i32 and
+        // fail to parse; picking element 0 first would return "a" or 10
+        // depending on order, not confusably 10 either way, so pick values
+        // that make a mix-up obvious).
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str(r#"("a", (10i32, 20i32)).1.0"#)
+            .expect("chained .1.0 index should parse");
+        assert_eq!(seg.call0::<i32>().unwrap(), 10);
+    }
+
+    #[test]
+    fn chained_tuple_index_suffixed_second_part_is_a_parse_error() {
+        // The suffix lands on the whole `0.1i32` float token; the existing
+        // unsuffixed-integer rule must still reject it.
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32, 2i32).0.1i32");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn chained_tuple_index_scientific_notation_is_a_parse_error_not_a_panic() {
+        // `1e2` normalizes to digits with no '.' at all (scientific notation),
+        // unlike ordinary decimal floats like `0.1` — must be a graceful parse
+        // error, not a panic on the assumption that '.' is always present.
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("(1i32, 2i32).1e2");
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1821,6 +2159,30 @@ mod tests {
     fn if_branch_type_mismatch_is_error() {
         let mut parser = CELParser::new(OpLookup::new());
         assert!(parser.parse_str("if true { 1i32 } else { true }").is_err());
+    }
+
+    #[test]
+    fn if_branch_tuple_arity_mismatch_is_error() {
+        // Regression test: every tuple shares the same erased `DynTuple`
+        // marker type, so a naive type_id comparison would accept branches
+        // with genuinely different tuple shapes — join2 must compare shapes,
+        // not just the marker type, and reject this.
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("if false { (1i32, 2i32) } else { (3i64, 4i64, 5i64) }.0");
+        assert!(
+            result.is_err(),
+            "branches with different tuple shapes must not be accepted"
+        );
+    }
+
+    #[test]
+    fn if_branch_tuple_element_type_mismatch_is_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("if false { (1i32, 2i32) } else { (3i64, 4i64) }.0");
+        assert!(
+            result.is_err(),
+            "branches with the same arity but different element types must not be accepted"
+        );
     }
 
     #[test]
