@@ -20,6 +20,48 @@ fn single_method_executes_correctly() {
 }
 
 #[test]
+fn single_method_forced_direction() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(5_i32);
+    let b = sheet.add_cell(0_i32); // b has higher priority
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 3))])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 15);
+}
+
+#[test]
+fn forced_direction_cascades_through_adjacent_relationship() {
+    // R1: a -> b (single method) forces b, regardless of strength.
+    // R2: b -> c or c -> b (two methods) — b is already forced by R1, so R2's
+    // c -> b method can never fire without double-writing b; c is forced too.
+    // b and c are added after a and never written, so if strength alone decided
+    // source selection, either could wrongly become a source instead of a.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(2_i32);
+    let b = sheet.add_cell(0_i32);
+    let c = sheet.add_cell(0_i32);
+
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 10))])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(b, c, |x: &i32| Ok(*x + 1)),
+            Method::from_fn_1_1(c, b, |x: &i32| Ok(*x + 1)),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 21);
+}
+
+#[test]
 fn chained_relationships_execute_in_order() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);

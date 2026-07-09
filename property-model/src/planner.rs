@@ -21,12 +21,20 @@
 //! constraints where the highest-strength cell is one of several inputs to the selected
 //! method.
 //!
+//! **Forced outputs**: a cell that is a pure output — present in a method's `outputs`
+//! but not its `inputs` — in every currently-viable method of some relationship can
+//! never be a source, regardless of strength: that relationship has no alternative but
+//! to produce it. [`forced_output_cells`] computes this as a fixpoint over all active
+//! relationships (eliminating a method whose pure output is guaranteed to be produced by
+//! a *different* relationship can force further cells), and the result is excluded from
+//! source candidacy before the strength-ordered pass below begins.
+//!
 //! Because a method is only selected once all its inputs are determined, any method that
 //! writes an input to a later method necessarily appears earlier in the selection order.
 //! The selection order is therefore already a valid topological execution order.
 
 use std::cmp::Reverse;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use slotmap::SlotMap;
 
@@ -40,6 +48,12 @@ use crate::{
 pub(crate) struct Plan {
     /// Selected `(RelationshipId, method_index)` pairs in execution order.
     pub(crate) execution_order: Vec<(RelationshipId, usize)>,
+    /// Cells that can never be a source under the relationships this plan considered.
+    /// See [`forced_output_cells`].
+    // Not yet read outside `#[cfg(test)]`: a follow-up change wires this into the
+    // executor's replan-skip check. Exercised today by the `planner::tests` assertions.
+    #[allow(dead_code)]
+    pub(crate) forced_outputs: HashSet<CellId>,
 }
 
 /// Assigns one method per active relationship and returns them in dependency order.
@@ -75,11 +89,18 @@ pub(crate) fn plan(
     let mut selected: Vec<(RelationshipId, usize)> = Vec::new();
     let mut selected_set: HashSet<RelationshipId> = HashSet::new();
 
+    // Cells that some active relationship's method structure guarantees will always
+    // be produced by a method, regardless of strength. These can never be a source.
+    let forced_outputs = forced_output_cells(relationships, active);
+
     let mut cells_sorted: Vec<CellId> = cells.keys().collect();
     cells_sorted.sort_by_key(|&id| Reverse(cells[id].strength));
 
     for &source in &cells_sorted {
-        if determined.contains(&source) || pre_claimed.contains(&source) {
+        if determined.contains(&source)
+            || pre_claimed.contains(&source)
+            || forced_outputs.contains(&source)
+        {
             continue;
         }
         determined.insert(source);
@@ -195,7 +216,97 @@ pub(crate) fn plan(
 
     Ok(Plan {
         execution_order: selected,
+        forced_outputs,
     })
+}
+
+/// Returns the cells `method` writes but does not read.
+///
+/// Self-referencing cells (present in both `inputs` and `outputs`) are excluded: they
+/// are read at their pre-execution value, so they retain their ordinary role as
+/// potential sources.
+fn pure_outputs(method: &Method) -> HashSet<CellId> {
+    method
+        .outputs
+        .iter()
+        .filter(|o| !method.inputs.contains(o))
+        .copied()
+        .collect()
+}
+
+/// Computes the cells that can never be a source under `active`: cells that some
+/// relationship in `active` guarantees will always be produced by a method, regardless
+/// of strength.
+///
+/// A cell is forced by a relationship when it is a [`pure_outputs`] member of every one
+/// of that relationship's currently-alive methods. Starting with all methods alive, this
+/// runs to a fixpoint: any method whose pure outputs include a cell forced by a
+/// *different* relationship is eliminated (selecting it would always double-write that
+/// cell), which can force more cells for the relationships that lost a method. The loop
+/// stops once no relationship loses another method.
+///
+/// - Precondition: every `RelationshipId` in `active` is present in `relationships`.
+///
+/// - Complexity: O(D · R · M · K) where D = total methods eliminated across all
+///   iterations (bounded by the total method count), R = active relationships,
+///   M = methods per relationship, K = cells per method.
+fn forced_output_cells(
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    active: &HashSet<RelationshipId>,
+) -> HashSet<CellId> {
+    let mut alive: HashMap<RelationshipId, Vec<bool>> = active
+        .iter()
+        .map(|&rel_id| (rel_id, vec![true; relationships[rel_id].methods.len()]))
+        .collect();
+
+    loop {
+        let mut forced_per_rel: HashMap<RelationshipId, HashSet<CellId>> = HashMap::new();
+        for &rel_id in active {
+            let rel = &relationships[rel_id];
+            let alive_methods = &alive[&rel_id];
+            let mut forced: Option<HashSet<CellId>> = None;
+            for (idx, method) in rel.methods.iter().enumerate() {
+                if !alive_methods[idx] {
+                    continue;
+                }
+                let po = pure_outputs(method);
+                forced = Some(match forced {
+                    None => po,
+                    Some(prev) => prev.intersection(&po).copied().collect(),
+                });
+            }
+            forced_per_rel.insert(rel_id, forced.unwrap_or_default());
+        }
+
+        let global_forced: HashSet<CellId> = forced_per_rel.values().flatten().copied().collect();
+
+        let mut changed = false;
+        for &rel_id in active {
+            let others_forced: HashSet<CellId> = global_forced
+                .difference(&forced_per_rel[&rel_id])
+                .copied()
+                .collect();
+            if others_forced.is_empty() {
+                continue;
+            }
+            let rel = &relationships[rel_id];
+            let alive_methods = alive.get_mut(&rel_id).expect("seeded for every active id");
+            for (idx, method) in rel.methods.iter().enumerate() {
+                if alive_methods[idx]
+                    && pure_outputs(method)
+                        .iter()
+                        .any(|c| others_forced.contains(c))
+                {
+                    alive_methods[idx] = false;
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            return global_forced;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -277,5 +388,52 @@ mod tests {
             .unwrap();
 
         assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
+    }
+
+    #[test]
+    fn single_method_output_is_forced_and_not_selected_as_source() {
+        // b outranks a in strength (added second), but the relationship has only one
+        // method (a -> b), so b must never be treated as a source.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 3))])
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        assert!(plan.forced_outputs.contains(&b));
+        assert!(!plan.forced_outputs.contains(&a));
+        assert_eq!(plan.execution_order.len(), 1);
+    }
+
+    #[test]
+    fn forced_outputs_cascade_through_adjacent_relationship() {
+        // R1: a -> b (single method) forces b.
+        // R2: b -> c or c -> b (two methods) — once b is forced by R1, R2's c -> b
+        // method would double-write b, so it is eliminated, forcing c too.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(2_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 10))])
+            .unwrap();
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(b, c, |x: &i32| Ok(*x + 1)),
+                Method::from_fn_1_1(c, b, |x: &i32| Ok(*x + 1)),
+            ])
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        assert!(plan.forced_outputs.contains(&b));
+        assert!(plan.forced_outputs.contains(&c));
+        assert!(!plan.forced_outputs.contains(&a));
+        assert_eq!(plan.execution_order.len(), 2);
     }
 }
