@@ -71,8 +71,10 @@ pub(crate) struct Plan {
 ///
 /// - `Error::Conflict` — not every active relationship could be assigned a method.
 ///
-/// - Complexity: O(C log C + R·M·K²) where C = cells, R = active relationships,
-///   M = methods per relationship, K = cells per method.
+/// - Complexity: O(C log C + R·M·K² + D·R·M·K²) where C = cells, R = active
+///   relationships, M = methods per relationship, K = cells per method, and
+///   D = methods eliminated while computing [`forced_output_cells`] (bounded by the
+///   total method count).
 pub(crate) fn plan(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
@@ -222,6 +224,8 @@ pub(crate) fn plan(
 /// Self-referencing cells (present in both `inputs` and `outputs`) are excluded: they
 /// are read at their pre-execution value, so they retain their ordinary role as
 /// potential sources.
+///
+/// - Complexity: O(K²) where K = cells per method (`inputs.contains` scans linearly).
 fn pure_outputs(method: &Method) -> HashSet<CellId> {
     method
         .outputs
