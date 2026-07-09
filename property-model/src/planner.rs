@@ -247,9 +247,10 @@ fn pure_outputs(method: &Method) -> HashSet<CellId> {
 ///
 /// - Precondition: every `RelationshipId` in `active` is present in `relationships`.
 ///
-/// - Complexity: O(D · R · M · K) where D = total methods eliminated across all
+/// - Complexity: O(D · R · M · K²) where D = total methods eliminated across all
 ///   iterations (bounded by the total method count), R = active relationships,
-///   M = methods per relationship, K = cells per method.
+///   M = methods per relationship, K = cells per method (squared because
+///   [`pure_outputs`] scans `inputs` once per output).
 fn forced_output_cells(
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
