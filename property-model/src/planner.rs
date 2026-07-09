@@ -284,20 +284,14 @@ fn forced_output_cells(
 
         let mut changed = false;
         for &rel_id in active {
-            let others_forced: HashSet<CellId> = global_forced
-                .difference(&forced_per_rel[&rel_id])
-                .copied()
-                .collect();
-            if others_forced.is_empty() {
-                continue;
-            }
+            let own_forced = &forced_per_rel[&rel_id];
             let rel = &relationships[rel_id];
             let alive_methods = alive.get_mut(&rel_id).expect("seeded for every active id");
             for (idx, method) in rel.methods.iter().enumerate() {
                 if alive_methods[idx]
                     && pure_outputs(method)
                         .iter()
-                        .any(|c| others_forced.contains(c))
+                        .any(|c| global_forced.contains(c) && !own_forced.contains(c))
                 {
                     alive_methods[idx] = false;
                     changed = true;

@@ -671,8 +671,8 @@ impl Sheet {
         })
     }
 
-    /// Returns `true` if `id` can never be a source under the currently active
-    /// relationships.
+    /// Returns `true` if `id` can never be a source, as of the last successful
+    /// `propagate()` call.
     ///
     /// Some active relationship's method structure guarantees the cell is always
     /// produced by a method, regardless of strength — writing to it has no lasting
