@@ -62,6 +62,102 @@ fn forced_direction_cascades_through_adjacent_relationship() {
 }
 
 #[test]
+fn is_forced_false_before_propagate() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .unwrap();
+    assert!(!sheet.is_forced(b));
+}
+
+#[test]
+fn is_forced_true_for_single_method_output() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(5_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 3))])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert!(sheet.is_forced(b));
+    assert!(!sheet.is_forced(a));
+}
+
+#[test]
+fn is_forced_false_for_multi_method_relationship() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0.0_f64);
+    let b = sheet.add_cell(0.0_f64);
+    let c = sheet.add_cell(0.0_f64);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| Ok((*x) * (*y))),
+            Method::from_fn_2_1([b, c], a, |x: &f64, y: &f64| Ok((*y) / (*x))),
+            Method::from_fn_2_1([a, c], b, |x: &f64, y: &f64| Ok((*y) / (*x))),
+        ])
+        .unwrap();
+    sheet.write(a, 2.0_f64).unwrap();
+    sheet.write(b, 3.0_f64).unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert!(!sheet.is_forced(a));
+    assert!(!sheet.is_forced(b));
+    assert!(!sheet.is_forced(c));
+}
+
+#[test]
+fn forced_cells_iterates_all_forced_cells() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(2_i32);
+    let b = sheet.add_cell(0_i32);
+    let c = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 10))])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(b, c, |x: &i32| Ok(*x + 1)),
+            Method::from_fn_1_1(c, b, |x: &i32| Ok(*x + 1)),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    let forced: std::collections::HashSet<_> = sheet.forced_cells().collect();
+    assert_eq!(forced, std::collections::HashSet::from([b, c]));
+}
+
+#[test]
+fn is_forced_respects_conditional_branch_activation() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(3_i32);
+    let b = sheet.add_cell(0_i32);
+
+    let rel_on = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+        .unwrap();
+    sheet
+        .add_conditional(mode, vec![(vec![1_i32], vec![rel_on])], vec![])
+        .unwrap();
+
+    // mode=0: rel_on inactive, b is not forced.
+    sheet.write(mode, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(!sheet.is_forced(b));
+
+    // mode=1: rel_on active, b is forced.
+    sheet.write(mode, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.is_forced(b));
+}
+
+#[test]
 fn chained_relationships_execute_in_order() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);

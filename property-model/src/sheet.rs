@@ -43,6 +43,9 @@ pub struct Sheet {
     /// default method-selection direction deterministic.
     next_strength: u64,
     last_plan: Option<Vec<(RelationshipId, usize)>>,
+    /// Cells reported forced (see [`Sheet::is_forced`]) by the last full `propagate()`
+    /// call. Not recomputed by `propagate_without_replan`.
+    last_forced: Option<HashSet<CellId>>,
     /// All conditionals registered on this sheet.
     pub(crate) conditionals: SlotMap<ConditionalId, ConditionalData>,
     /// Union of all RelationshipIds assigned to any conditional branch or default.
@@ -59,6 +62,7 @@ impl Sheet {
             changed_cells: Vec::new(),
             next_strength: 0,
             last_plan: None,
+            last_forced: None,
             conditionals: SlotMap::with_key(),
             conditional_relationships: HashSet::new(),
         }
@@ -555,6 +559,7 @@ impl Sheet {
         // Phase 4: assign derived-cell strengths in evaluation order.
         self.post_process_strengths(&plan.execution_order);
 
+        self.last_forced = Some(plan.forced_outputs);
         self.last_plan = Some(plan.execution_order);
         Ok(())
     }
@@ -666,6 +671,28 @@ impl Sheet {
         })
     }
 
+    /// Returns `true` if `id` can never be a source under the currently active
+    /// relationships.
+    ///
+    /// Some active relationship's method structure guarantees the cell is always
+    /// produced by a method, regardless of strength — writing to it has no lasting
+    /// effect once `propagate()` runs again. Useful for disabling input fields in a UI.
+    ///
+    /// Returns `false` if no propagation has run yet.
+    pub fn is_forced(&self, id: CellId) -> bool {
+        self.last_forced
+            .as_ref()
+            .is_some_and(|forced| forced.contains(&id))
+    }
+
+    /// Iterates cells that are forced (see [`Sheet::is_forced`]) as of the last
+    /// `propagate()` call.
+    ///
+    /// - Complexity: O(n) where n is the number of forced cells.
+    pub fn forced_cells(&self) -> impl Iterator<Item = CellId> + '_ {
+        self.last_forced.iter().flatten().copied()
+    }
+
     /// Iterates all live conditional IDs in the sheet.
     ///
     /// - Complexity: O(n) where n is the number of conditionals.
@@ -739,6 +766,9 @@ impl Sheet {
     ///   incorrect output values but no panic.
     /// - Precondition: If the sheet has conditionals, no match-cell value has changed
     ///   since the last `propagate()`. Violation produces incorrect branch activation.
+    ///
+    /// `is_forced` and `forced_cells` continue to reflect the last full `propagate()`
+    /// call; this method does not recompute them.
     ///
     /// # Errors
     ///

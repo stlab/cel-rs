@@ -50,9 +50,6 @@ pub(crate) struct Plan {
     pub(crate) execution_order: Vec<(RelationshipId, usize)>,
     /// Cells that can never be a source under the relationships this plan considered.
     /// See [`forced_output_cells`].
-    // Not yet read outside `#[cfg(test)]`: a follow-up change wires this into the
-    // executor's replan-skip check. Exercised today by the `planner::tests` assertions.
-    #[allow(dead_code)]
     pub(crate) forced_outputs: HashSet<CellId>,
 }
 
