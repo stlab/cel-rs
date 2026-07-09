@@ -191,6 +191,10 @@ pub struct GraphData {
     pub links: Vec<LinkData>,
     /// Stable IDs of cells that changed during the last `propagate()` call.
     pub changed: Vec<String>,
+    /// Stable IDs of cells forced by an active relationship (see
+    /// [`property_model::Sheet::is_forced`]); consumers should disable input for these
+    /// cells and may render them distinctly.
+    pub forced: Vec<String>,
     /// `true` when at least one relationship has a cached plan and constraint links are directed
     /// where plans exist; `false` when no plan has been computed.
     pub arrows: bool,
@@ -342,11 +346,13 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
     }
 
     let changed = sheet.changed().map(cell_node_id).collect();
+    let forced = sheet.forced_cells().map(cell_node_id).collect();
 
     GraphData {
         nodes,
         links,
         changed,
+        forced,
         arrows,
     }
 }
@@ -477,6 +483,28 @@ mod tests {
                 Method::from_fn_1_1(a, b, |v: &f64| Ok(*v)),
                 Method::from_fn_1_1(b, a, |v: &f64| Ok(*v)),
             ])
+            .unwrap();
+
+        sheet
+            .add_conditional(p, vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+
+        (sheet, labels)
+    }
+
+    fn sheet_with_forced_conditional() -> (Sheet, Labels) {
+        let mut sheet = Sheet::new();
+        let mut labels = Labels::new();
+
+        let a = sheet.add_cell(2.0_f64);
+        labels.add_cell::<f64>(a, "a");
+        let b = sheet.add_cell(0.0_f64);
+        labels.add_cell::<f64>(b, "b");
+        let p = sheet.add_cell(0_i32);
+        labels.add_cell::<i32>(p, "p");
+
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &f64| Ok(*v))])
             .unwrap();
 
         sheet
@@ -704,5 +732,38 @@ mod tests {
             !json.contains("\"groups\""),
             "GraphData must not contain groups"
         );
+    }
+
+    #[test]
+    fn to_graph_data_forced_field_contains_forced_cell() {
+        let (mut sheet, labels) = sheet_with_forced_conditional();
+        sheet.propagate().unwrap();
+
+        let b_id = sheet
+            .cells()
+            .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("b"))
+            .unwrap();
+
+        let data = to_graph_data(&sheet, &labels);
+        assert!(data.forced.contains(&cell_node_id(b_id)));
+    }
+
+    #[test]
+    fn to_graph_data_forced_field_excludes_cell_when_branch_inactive() {
+        let (mut sheet, labels) = sheet_with_forced_conditional();
+        let p_id = sheet
+            .cells()
+            .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("p"))
+            .unwrap();
+        sheet.write(p_id, 1_i32).unwrap();
+        sheet.propagate().unwrap();
+
+        let b_id = sheet
+            .cells()
+            .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("b"))
+            .unwrap();
+
+        let data = to_graph_data(&sheet, &labels);
+        assert!(!data.forced.contains(&cell_node_id(b_id)));
     }
 }
