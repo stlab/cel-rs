@@ -16,5 +16,8 @@ cel-parser = { path = "../cel-parser" }
 [dev-dependencies]
 trybuild = "1.0"
 
+[features]
+playground = []
+
 [lints]
 workspace = true

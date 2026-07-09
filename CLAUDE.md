@@ -58,6 +58,11 @@ Never commit directly to `main`.
 Before creating a PR, run the full check suite locally — every command in the Commands
 section above, including both clippy invocations (workspace and begin).
 
+`cargo build --workspace` and `cargo test --workspace` must produce zero compiler
+warnings — clippy's `-D warnings` does not catch everything a plain build/test compile
+can warn about (e.g. an unused `mut`). Read the build/test output and fix any warnings
+before opening the PR.
+
 ## Project Status
 
 This project has not been released yet and has no clients. The API is not stable and may change at

@@ -27,7 +27,7 @@
 //!   or masking the shift count (release).
 
 use anyhow::{Result, anyhow};
-use cel_runtime::DynSegment;
+use cel_runtime::{DynSegment, DynTuple};
 use once_cell::sync::Lazy;
 use phf::phf_map;
 use std::any::TypeId;
@@ -55,6 +55,40 @@ fn span_err(_span: SourceSpan, e: anyhow::Error) -> anyhow::Error {
 /// this operation. This is a simple function pointer since built-in operations
 /// have no state.
 pub type OpFn = fn(&mut DynSegment, SourceSpan) -> Result<()>;
+
+/// A signature for an operator/function whose selected operand is a tuple.
+///
+/// Matches when the operand at `tuple_operand_index` (0-based, in the same
+/// stack order [`DynSegment::peek_stack_infos`] returns) is a tuple whose
+/// element `TypeId`s equal `shape`, in order, and every other peeked operand's
+/// flat `TypeId` equals the corresponding entry in `operand_type_ids` (the
+/// entry at `tuple_operand_index` in `operand_type_ids` is never read).
+///
+/// `operand_type_ids` must have an entry for every non-tuple operand
+/// position: a missing entry (out of bounds, including an entirely empty
+/// vector when there are non-tuple operands) simply never matches, rather
+/// than panicking — it is only safe to omit the whole vector when
+/// `tuple_operand_index` is the *only* operand position.
+///
+/// `shape` is flat: an element position that is itself a nested tuple can
+/// only be recorded as `DynTuple`'s `TypeId`, which matches *any* nested
+/// tuple at that position regardless of its inner arity or element types.
+/// Two registrations that would only differ by that inner shape are not
+/// distinguishable — do not rely on nested-tuple precision at this level.
+pub struct TupleOpSignature {
+    /// Operator/function name this signature is registered under.
+    pub name: String,
+    /// Expected element `TypeId`s, in order, for the tuple-shaped operand.
+    /// See the struct-level note on nested tuples.
+    pub shape: Vec<TypeId>,
+    /// Which peeked operand position must be the tuple.
+    pub tuple_operand_index: usize,
+    /// Flat `TypeId`s expected for the non-tuple operands, in stack order
+    /// (the `tuple_operand_index` entry is ignored).
+    pub operand_type_ids: Vec<TypeId>,
+    /// Function that pushes the operation onto the segment.
+    pub op_fn: OpFn,
+}
 
 /// A scope function that attempts to resolve and apply an operation.
 ///
@@ -968,6 +1002,7 @@ impl BuiltinScope {
 pub struct OpLookup {
     scopes: Vec<ScopeFn>,
     builtin_scope: BuiltinScope,
+    tuple_signatures: Vec<TupleOpSignature>,
 }
 
 impl OpLookup {
@@ -984,7 +1019,54 @@ impl OpLookup {
         OpLookup {
             scopes: Vec::new(),
             builtin_scope: BuiltinScope,
+            tuple_signatures: Vec::new(),
         }
+    }
+
+    /// Registers a tuple-shaped operator signature, matched by element
+    /// `TypeId` sequence the same way built-in operators are matched by flat
+    /// `TypeId`.
+    pub fn register_tuple_op(&mut self, signature: TupleOpSignature) {
+        self.tuple_signatures.push(signature);
+    }
+
+    /// Attempts to find and apply a registered tuple-shaped signature.
+    ///
+    /// Returns `Ok(true)` if found and applied, `Ok(false)` if not found.
+    ///
+    /// - Complexity: O(s) where s is the number of registered tuple signatures.
+    fn lookup_tuple_signature(
+        &self,
+        name: &str,
+        segment: &mut DynSegment,
+        num_operands: usize,
+        span: SourceSpan,
+    ) -> Result<bool> {
+        let stack_infos = segment.peek_stack_infos(num_operands);
+        for sig in &self.tuple_signatures {
+            if sig.name != name || sig.tuple_operand_index >= stack_infos.len() {
+                continue;
+            }
+            let tuple_info = &stack_infos[sig.tuple_operand_index];
+            let shape_matches = tuple_info.type_id == TypeId::of::<DynTuple>()
+                && tuple_info.associated.len() == sig.shape.len()
+                && tuple_info
+                    .associated
+                    .iter()
+                    .zip(&sig.shape)
+                    .all(|(a, t)| a.type_id == *t);
+            if !shape_matches {
+                continue;
+            }
+            let others_match = stack_infos.iter().enumerate().all(|(i, info)| {
+                i == sig.tuple_operand_index || sig.operand_type_ids.get(i) == Some(&info.type_id)
+            });
+            if others_match {
+                (sig.op_fn)(segment, span)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Pushes a new scope onto the stack.
@@ -1048,6 +1130,18 @@ impl OpLookup {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
                 Err(e) => return Err(crate::ParseError::new_range(e.to_string(), start, end)),
+            }
+        }
+
+        match self.lookup_tuple_signature(name, segment, num_operands, source_span) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(e) => {
+                return Err(crate::ParseError::new_range(
+                    format!("operation error: {}", e),
+                    start,
+                    end,
+                ));
             }
         }
 
@@ -1521,6 +1615,100 @@ mod tests {
         assert!(
             rendered.contains('^'),
             "expected caret marker in rendered output, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn tuple_shaped_signature_matches_and_dispatches() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.register_tuple_op(TupleOpSignature {
+            name: "greet".to_string(),
+            shape: vec![TypeId::of::<String>(), TypeId::of::<i32>()],
+            tuple_operand_index: 0,
+            operand_type_ids: vec![],
+            op_fn: |seg, _span| {
+                seg.tuple_index(1);
+                seg.op1(|_ignored: i32| true)
+            },
+        });
+
+        let mut segment = DynSegment::new::<()>();
+        let ambient_start = segment.current_stack_offset();
+        segment.op0(|| "hi".to_string());
+        segment.op0(|| 7i32);
+        segment.make_tuple(2, ambient_start);
+
+        lookup.lookup(
+            "greet",
+            &mut segment,
+            1,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        assert!(segment.call0::<bool>()?);
+        Ok(())
+    }
+
+    #[test]
+    fn tuple_shaped_signature_does_not_match_wrong_shape() {
+        let mut lookup = OpLookup::new();
+        lookup.register_tuple_op(TupleOpSignature {
+            name: "greet".to_string(),
+            shape: vec![TypeId::of::<String>(), TypeId::of::<i32>()],
+            tuple_operand_index: 0,
+            operand_type_ids: vec![],
+            op_fn: |seg, _span| {
+                seg.tuple_index(1);
+                seg.op1(|_ignored: i32| true)
+            },
+        });
+
+        let mut segment = DynSegment::new::<()>();
+        let ambient_start = segment.current_stack_offset();
+        segment.op0(|| 1i32);
+        segment.op0(|| 2i32);
+        segment.make_tuple(2, ambient_start);
+
+        let result = lookup.lookup(
+            "greet",
+            &mut segment,
+            1,
+            Span::call_site(),
+            Span::call_site(),
+        );
+        assert!(
+            result.is_err(),
+            "shape (i32, i32) should not match (String, i32)"
+        );
+    }
+
+    #[test]
+    fn tuple_shaped_signature_with_empty_shape_does_not_match_non_tuple() {
+        // Regression test: a 0-element `shape` must only match an actual
+        // 0-arity tuple, not any non-tuple operand (which also reports an
+        // empty `associated` list).
+        let mut lookup = OpLookup::new();
+        lookup.register_tuple_op(TupleOpSignature {
+            name: "unit_greet".to_string(),
+            shape: vec![],
+            tuple_operand_index: 0,
+            operand_type_ids: vec![],
+            op_fn: |seg, _span| seg.op1(|_ignored: i32| true),
+        });
+
+        let mut segment = DynSegment::new::<()>();
+        segment.op0(|| 42i32);
+
+        let result = lookup.lookup(
+            "unit_greet",
+            &mut segment,
+            1,
+            Span::call_site(),
+            Span::call_site(),
+        );
+        assert!(
+            result.is_err(),
+            "empty-shape tuple signature must not match a non-tuple operand"
         );
     }
 }
