@@ -83,16 +83,16 @@ pub fn print_tokens(input: ProcMacroTokenStream) -> ProcMacroTokenStream {
     for e in input {
         match e {
             proc_macro2::TokenTree::Punct(punct) => {
-                println!("punct: {punct:?}");
+                eprintln!("punct: {punct:?}");
             }
             proc_macro2::TokenTree::Ident(ident) => {
-                println!("ident: {ident:?}");
+                eprintln!("ident: {ident:?}");
             }
             proc_macro2::TokenTree::Group(group) => {
-                println!("group: {group:?}");
+                eprintln!("group: {group:?}");
             }
             proc_macro2::TokenTree::Literal(lit) => {
-                println!("literal: {lit:?}");
+                eprintln!("literal: {lit:?}");
             }
         }
     }

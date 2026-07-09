@@ -395,7 +395,7 @@ mod tests {
         let token = lexer.next().unwrap();
         match token {
             Token::Literal(Lit::Bool(lit_bool)) => {
-                assert_eq!(lit_bool.value, true);
+                assert!(lit_bool.value);
             }
             _ => panic!("Expected boolean literal for 'true', got {:?}", token),
         }
@@ -407,7 +407,7 @@ mod tests {
         let token = lexer.next().unwrap();
         match token {
             Token::Literal(Lit::Bool(lit_bool)) => {
-                assert_eq!(lit_bool.value, false);
+                assert!(!lit_bool.value);
             }
             _ => panic!("Expected boolean literal for 'false', got {:?}", token),
         }

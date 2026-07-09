@@ -1291,7 +1291,7 @@ mod tests {
         segment.just(10u32);
         segment.just(20u32);
         lookup.lookup("<", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<bool>()?, true);
+        assert!(segment.call0::<bool>()?);
         Ok(())
     }
 
@@ -1322,7 +1322,7 @@ mod tests {
         let mut segment = DynSegment::new::<()>();
         segment.just(true);
         lookup.lookup("!", &mut segment, 1, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<bool>()?, false);
+        assert!(!segment.call0::<bool>()?);
         Ok(())
     }
 

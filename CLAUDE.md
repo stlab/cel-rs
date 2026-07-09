@@ -31,11 +31,13 @@ cargo test --doc --workspace
 cargo test --workspace <test_name>
 
 # Lint (warnings are errors)
+# --all-targets is required so tests, doctests, and benches are linted too —
+# without it, clippy silently skips everything behind #[cfg(test)] and tests/.
 # The begin crate is excluded from the workspace commands and checked separately
 # with --no-default-features to avoid platform-specific renderer dependencies.
-cargo clippy --workspace --exclude begin -- -D warnings
-cargo clippy -p begin --no-default-features -- -D warnings
-cargo clippy --fix --workspace --exclude begin
+cargo clippy --workspace --exclude begin --all-targets -- -D warnings
+cargo clippy -p begin --no-default-features --all-targets -- -D warnings
+cargo clippy --fix --workspace --exclude begin --all-targets
 
 # Docs
 cargo doc --lib --no-deps --open --workspace
