@@ -67,6 +67,8 @@ fn CellRow(
             .unwrap_or_default()
     });
 
+    let forced = use_memo(move || sheet.read().is_forced(id));
+
     let mut input = use_signal(|| value.peek().clone());
     let mut is_focused = use_signal(|| false);
     let mut has_error = use_signal(|| false);
@@ -90,6 +92,7 @@ fn CellRow(
                 id: field_id,
                 value: input.read().clone(),
                 invalid: *has_error.read(),
+                disabled: *forced.read(),
                 // Dioxus's event serializer only reads event.target.value for
                 // HTMLInputElement — custom elements (sp-textfield) always give "".
                 // Use dioxus.send() in JS and eval.recv() to read the live value.

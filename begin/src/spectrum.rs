@@ -33,12 +33,14 @@ pub fn SpTheme(color: String, scale: String, children: Element) -> Element {
 ///
 /// Maps to `<sp-textfield>`. Fires standard DOM `input`, `focus`, and `blur`
 /// events. Setting `invalid` to `true` renders the SWC error state (red ring
-/// and `aria-invalid`).
+/// and `aria-invalid`). Setting `disabled` to `true` renders the SWC disabled
+/// state and blocks focus/input at the DOM level.
 #[component]
 pub fn SpTextfield(
     id: String,
     value: String,
     invalid: bool,
+    disabled: bool,
     oninput: EventHandler<FormEvent>,
     onfocus: EventHandler<FocusEvent>,
     onblur: EventHandler<FocusEvent>,
@@ -49,6 +51,7 @@ pub fn SpTextfield(
             "value": "{value}",
             // Boolean attribute: omit entirely when false; presence = invalid.
             "invalid": if invalid { "true" },
+            "disabled": if disabled { "true" },
             oninput: move |e| oninput.call(e),
             onfocus: move |e| onfocus.call(e),
             onblur: move |e| onblur.call(e),
