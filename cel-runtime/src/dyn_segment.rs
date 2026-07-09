@@ -87,22 +87,27 @@ unsafe fn drop_tuple(ptr: *mut u8, associated: &[AssociatedType]) {
 /// Extracts element `index` from the tuple currently on top of `stack`,
 /// dropping every other element, leaving just the extracted value on top.
 ///
-/// Never strips the tuple's own leading padding (if any): the extracted
-/// element inherits that same leading-padding relationship unchanged, since
-/// `tuple_base` is by construction already aligned for every element inside
-/// the tuple (the tuple's own alignment is the max of all its elements'), so
-/// re-pushing the target from `tuple_base` introduces no padding of its own.
+/// Also strips the tuple's own leading padding (if any): once only one
+/// element survives, that space is dead — no `StackInfo` entry accounts for
+/// it — so it must not linger, or later offset computations (e.g. for a
+/// tuple literal built from this result) would disagree with the real
+/// stack. The extracted element is re-pushed at its own natural alignment
+/// relative to the ambient offset the tuple originally started at, which
+/// `expected_padding` (computed the same way at parse time) predicts.
 ///
 /// - Complexity: O(n) in the tuple's arity.
 ///
 /// # Safety
 /// The top `tuple_size` bytes of `stack` must be a live tuple value whose
-/// layout matches `associated`.
+/// layout matches `associated`, and `tuple_padding` must be that tuple's own
+/// recorded leading-padding flag.
 unsafe fn extract_tuple_element(
     stack: &mut RawStack,
     tuple_size: usize,
+    tuple_padding: bool,
     associated: &[AssociatedType],
     index: usize,
+    expected_padding: bool,
 ) {
     let tuple_base = stack.len() - tuple_size;
     let target = &associated[index];
@@ -135,13 +140,14 @@ unsafe fn extract_tuple_element(
     }
 
     unsafe {
-        // padding=false: this truncates only down to tuple_base, never past
-        // the tuple's own leading pad (see doc comment above).
-        stack.truncate_to(tuple_base, false);
+        // tuple_padding: strip the tuple's own leading pad too, all the way
+        // back to the true ambient offset it was built from — not just down
+        // to tuple_base (see doc comment above).
+        stack.truncate_to(tuple_base, tuple_padding);
         let repushed_padding = stack.push_raw(target.align, target.size, scratch.as_ptr());
-        debug_assert!(
-            !repushed_padding,
-            "tuple_base is already aligned for every element inside the tuple"
+        debug_assert_eq!(
+            repushed_padding, expected_padding,
+            "extracted element's padding must match the parse-time prediction"
         );
     }
 }
@@ -474,17 +480,30 @@ impl DynSegment {
         );
         debug_assert!(index < info.associated.len(), "tuple_index out of range");
 
-        // The extracted element inherits the tuple's own leading-padding
-        // relationship unchanged — see extract_tuple_element's doc comment
-        // for why no realignment is needed or performed.
         let target = info.associated[index].clone();
         let associated = info.associated.clone();
         let tuple_padding = info.padding;
         let tuple_size = info.size;
 
+        // The tuple's own leading pad becomes dead space once torn down to
+        // one element, so the extracted element gets its own padding flag:
+        // recomputed relative to the ambient offset the tuple was originally
+        // built from (with the tuple's own entry already popped above, this
+        // replay gives exactly that offset), not inherited from the tuple.
+        let ambient_before_tuple = self.stack_offset_after(self.stack_ids.len());
+        let new_offset = align_index(target.align, ambient_before_tuple);
+        let new_padding = new_offset != ambient_before_tuple;
+
         self.segment.raw0_(move |stack| {
             unsafe {
-                extract_tuple_element(stack, tuple_size, &associated, index);
+                extract_tuple_element(
+                    stack,
+                    tuple_size,
+                    tuple_padding,
+                    &associated,
+                    index,
+                    new_padding,
+                );
             }
             Ok(())
         });
@@ -492,7 +511,7 @@ impl DynSegment {
         self.stack_ids.push(StackInfo {
             type_id: target.type_id,
             type_name: target.type_name,
-            padding: tuple_padding,
+            padding: new_padding,
             size: target.size,
             align: target.align,
             raw_dropper: target.dropper,

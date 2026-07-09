@@ -1374,6 +1374,20 @@ mod tests {
     }
 
     #[test]
+    fn tuple_containing_indexed_nested_tuple_result() {
+        // Regression test: extracting an element from a misaligned nested
+        // tuple must not leave the tuple's own leading padding as dead space
+        // on the stack — otherwise a later tuple literal built from this
+        // result computes its element offsets against the wrong ambient
+        // start and reads garbage. (7, not 1: the dead gap's own marker
+        // byte is hardcoded to value 1, so a value of 1 here would pass
+        // even when reading the wrong offset.)
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(0u8, (7u8, 2u64).0).1").unwrap();
+        assert_eq!(seg.call0::<u8>().unwrap(), 7);
+    }
+
+    #[test]
     fn index_second_element_of_tuple() {
         let mut parser = CELParser::new(OpLookup::new());
         let mut seg = parser.parse_str("(10i32, 20i32).1").unwrap();
