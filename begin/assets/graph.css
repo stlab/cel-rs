@@ -61,3 +61,13 @@ html, body {
     stroke-width: 1.5;
     fill: none;
 }
+
+.node-cell.forced {
+    stroke: #8e44ad;
+    stroke-width: 3;
+}
+
+.link.forced-edge {
+    stroke: #8e44ad;
+    stroke-width: 3;
+}

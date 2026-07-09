@@ -250,6 +250,21 @@
                 });
         }());
 
+        // Highlight forced cells (see property_model::Sheet::is_forced) and the
+        // constraint edge that produces each one. Forced cells always belong to a
+        // currently active relationship, so this never overlaps with the inactive-
+        // relationship dimming above.
+        (function () {
+            var forcedSet = new Set(data.forced || []);
+            cellLayer.selectAll('rect')
+                .classed('forced', function (d) { return forcedSet.has(d.id); });
+            linkLayer.selectAll('line')
+                .classed('forced-edge', function (d) {
+                    var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
+                    return forcedSet.has(tgtId);
+                });
+        }());
+
         // NEW: Conditional diamond nodes (rotated rect)
         condLayer.selectAll('rect')
             .data(condNodes, function (d) { return d.id; })
