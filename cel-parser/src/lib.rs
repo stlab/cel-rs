@@ -2163,6 +2163,30 @@ mod tests {
     }
 
     #[test]
+    fn if_branch_tuple_arity_mismatch_is_error() {
+        // Regression test: every tuple shares the same erased `DynTuple`
+        // marker type, so a naive type_id comparison would accept branches
+        // with genuinely different tuple shapes — join2 must compare shapes,
+        // not just the marker type, and reject this.
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("if false { (1i32, 2i32) } else { (3i64, 4i64, 5i64) }.0");
+        assert!(
+            result.is_err(),
+            "branches with different tuple shapes must not be accepted"
+        );
+    }
+
+    #[test]
+    fn if_branch_tuple_element_type_mismatch_is_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("if false { (1i32, 2i32) } else { (3i64, 4i64) }.0");
+        assert!(
+            result.is_err(),
+            "branches with the same arity but different element types must not be accepted"
+        );
+    }
+
+    #[test]
     fn if_missing_open_brace_is_error() {
         let mut parser = CELParser::new(OpLookup::new());
         assert!(parser.parse_str("if true 1i32 } else { 2i32 }").is_err());

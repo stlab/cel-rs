@@ -84,6 +84,30 @@ unsafe fn drop_tuple(ptr: *mut u8, associated: &[AssociatedType]) {
     }
 }
 
+/// Returns whether every element `TypeId` in `a` and `b` matches, in order —
+/// recursing into nested tuple elements' own `associated` shapes rather than
+/// stopping at their shared [`DynTuple`] marker `TypeId`.
+///
+/// - Complexity: O(n) in the total number of (nested) elements.
+fn tuple_shapes_match(a: &[AssociatedType], b: &[AssociatedType]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.type_id == y.type_id
+                && (x.type_id != TypeId::of::<DynTuple>()
+                    || tuple_shapes_match(&x.associated, &y.associated))
+        })
+}
+
+/// Returns whether `a` and `b` describe the same type — for tuples, this
+/// means the same element shape (recursively), not just the shared
+/// [`DynTuple`] marker `TypeId`, since every tuple shares that one `TypeId`
+/// regardless of arity or element types.
+fn stack_info_shapes_match(a: &StackInfo, b: &StackInfo) -> bool {
+    a.type_id == b.type_id
+        && (a.type_id != TypeId::of::<DynTuple>()
+            || tuple_shapes_match(&a.associated, &b.associated))
+}
+
 /// Extracts element `index` from the tuple currently on top of `stack`,
 /// dropping every other element, leaving just the extracted value on top.
 ///
@@ -853,7 +877,7 @@ impl DynSegment {
             fragment_1.stack_ids.len()
         );
         ensure!(
-            fragment_0.stack_ids[0].type_id == fragment_1.stack_ids[0].type_id,
+            stack_info_shapes_match(&fragment_0.stack_ids[0], &fragment_1.stack_ids[0]),
             "fragment result types must match"
         );
 
