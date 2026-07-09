@@ -1437,6 +1437,58 @@ mod tests {
     }
 
     #[test]
+    fn repack_relocated_element_drops_exactly_once() {
+        // Regression test for the concern that repack's ptr::copy-based move
+        // never runs destructors at an element's old (pre-relocation) offset:
+        // that's the same memmove-without-drop pattern std itself uses (e.g.
+        // Vec::remove) and is sound as long as nothing treats the vacated
+        // slot as live afterward, which make_tuple's bookkeeping guarantees.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[repr(align(16))]
+        #[allow(dead_code)]
+        struct Over16(u8);
+
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let tracker = DropCounter(drop_count.clone());
+
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 0xEEu8); // sentinel, forces a misaligned ambient_start
+        let ambient_start = seg.current_stack_offset(); // 1
+        seg.op0(move || tracker.clone()); // element 0: DropCounter, align 8
+        seg.op0(|| Over16(0)); // element 1: align 16, forces tuple_align=16
+        // tuple_align (16) > DropCounter's own align (8), so dest_base
+        // (align_index(16, 1) == 16) differs from DropCounter's natural
+        // ambient position (align_index(8, 1) == 8): repack must physically
+        // relocate it, leaving its old bytes behind.
+        seg.make_tuple(2, ambient_start);
+        seg.tuple_index(0); // keep the DropCounter, drop Over16 in place
+        seg.op2(|_sentinel: u8, val: DropCounter| val).unwrap();
+
+        let extracted = seg.call0::<DropCounter>().unwrap();
+        assert_eq!(
+            drop_count.load(Ordering::SeqCst),
+            0,
+            "extracting must not have already dropped the relocated element"
+        );
+        drop(extracted);
+        assert_eq!(
+            drop_count.load(Ordering::SeqCst),
+            1,
+            "relocated element must drop exactly once (no leak, no double-drop)"
+        );
+    }
+
+    #[test]
     fn tuple_index_combined_with_another_op() {
         // Mirrors the spec's `5 + (0, 1).1` case: indexing must leave the stack in
         // a state a subsequent op can correctly consume.

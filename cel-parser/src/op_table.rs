@@ -69,10 +69,17 @@ pub type OpFn = fn(&mut DynSegment, SourceSpan) -> Result<()>;
 /// vector when there are non-tuple operands) simply never matches, rather
 /// than panicking — it is only safe to omit the whole vector when
 /// `tuple_operand_index` is the *only* operand position.
+///
+/// `shape` is flat: an element position that is itself a nested tuple can
+/// only be recorded as `DynTuple`'s `TypeId`, which matches *any* nested
+/// tuple at that position regardless of its inner arity or element types.
+/// Two registrations that would only differ by that inner shape are not
+/// distinguishable — do not rely on nested-tuple precision at this level.
 pub struct TupleOpSignature {
     /// Operator/function name this signature is registered under.
     pub name: String,
     /// Expected element `TypeId`s, in order, for the tuple-shaped operand.
+    /// See the struct-level note on nested tuples.
     pub shape: Vec<TypeId>,
     /// Which peeked operand position must be the tuple.
     pub tuple_operand_index: usize,
