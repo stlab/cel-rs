@@ -53,6 +53,7 @@ pub fn App() -> Element {
             spawn(async move {
                 use futures_util::StreamExt;
                 while rx.next().await.is_some() {
+                    eprintln!("loading {}", crate::bridge::SOURCE_FILE_NAME);
                     let source = match crate::demo_source::load_demo_source() {
                         Ok(source) => source,
                         Err(err) => {

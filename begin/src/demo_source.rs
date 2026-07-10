@@ -168,6 +168,10 @@ pub fn spawn_hot_reload(mut on_change: impl FnMut() + Send + 'static) {
         if let dioxus_devtools::DevserverMsg::HotReload(hot_reload) = msg
             && hot_reload_targets_demo(&hot_reload)
         {
+            eprintln!(
+                "demo.pm hot-reload message matched: {:?}",
+                hot_reload.assets
+            );
             on_change();
         }
     });
