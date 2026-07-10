@@ -66,6 +66,14 @@ dimming (which only applies to relationships an active control link has switched
 
 ### Demo source: a conditional relationship that forces a cell
 
+> **Superseded during implementation:** the form below (folding `[c] -> [g]` into the
+> existing `1i32` branch) does not force `g`. pm-lang groups every method in one branch
+> into a single relationship, and a relationship's forced outputs are the intersection
+> of its methods' pure outputs — mixing `[c] -> [g]` in with the `c`/`f` methods makes
+> that intersection empty. The shipped code instead declares `g`'s method in its own
+> `conditional p { 1i32 => { .. } }` block, gated on the same match cell; see the doc
+> comment on `DEMO_SOURCE` in `begin/src/app.rs` for the final form.
+
 `DEMO_SOURCE` (`begin/src/app.rs`) adds one cell and one method to the existing `p`
 conditional's `1i32` branch, rather than introducing an unrelated second conditional:
 

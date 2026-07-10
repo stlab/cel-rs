@@ -9,7 +9,7 @@ use crate::source_panel::{SourcePanel, build_sheet};
 use crate::spectrum::SpTheme;
 
 /// Default pm-lang source: two independent bidirectional constraint systems
-/// (`a × b = c` and `d × e = f`) linked by a conditional on `p`.
+/// (`a × b = c` and `d × e = f`) linked by two conditionals on `p`.
 ///
 /// - `p = 0`: the relationship `c = f` (bidirectional) becomes active.
 /// - `p = 1`: the relationship `c = f × 2` (bidirectional) becomes active, and a
@@ -17,6 +17,14 @@ use crate::spectrum::SpTheme;
 ///   while this branch is active (see [`property_model::Sheet::is_forced`]), so its
 ///   Inspector field is disabled and it is highlighted in the graph.
 /// - Any other `p`: the two systems are independent and `g` is not forced.
+///
+/// `g`'s relationship is declared in its own `conditional p { .. }` block rather than
+/// folded into the first: pm-lang groups every method in one branch into a single
+/// relationship, and a relationship's forced outputs are the *intersection* of its
+/// methods' pure outputs — mixing `[c] -> [g]` in with the `c`/`f` methods would make
+/// that intersection empty, forcing nothing. Two conditionals sharing the same match
+/// cell compose independently, so this is a distinct relationship gated on the same
+/// `p == 1` condition. This also means the graph renders two diamond nodes for `p`.
 pub const DEMO_SOURCE: &str = r#"sheet demo {
     cell a: f64 = 2.0;
     cell b: f64 = 3.0;
