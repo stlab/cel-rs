@@ -21,6 +21,7 @@
 
 use annotate_snippets::Renderer;
 use dioxus::prelude::*;
+use dioxus_devtools::HotReloadMsg;
 use pm_lang::{PmParser, TypeRegistry};
 use property_model::Sheet;
 
@@ -109,6 +110,35 @@ pub fn load_demo_source() -> String {
     DEMO_SOURCE_TEXT.to_string()
 }
 
+/// True if `msg` reports a change to the file at `demo_path`.
+///
+/// Only called (outside of tests) from [`spawn_hot_reload`], which is desktop-only;
+/// unused when the `desktop` feature is disabled, same as [`DEMO_ASSET`].
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+fn hot_reload_targets_demo(msg: &HotReloadMsg, demo_path: &std::path::Path) -> bool {
+    msg.assets.iter().any(|p| p == demo_path)
+}
+
+/// Connects to the `dx serve` devserver and calls `on_change` whenever `demo.pm`
+/// changes on disk. A no-op if not running under `dx serve` (`dioxus_devtools::connect`
+/// itself returns immediately in that case) or if `DEMO_ASSET` can't be resolved to a
+/// filesystem path.
+///
+/// - Complexity: spawns one background OS thread for the life of the process.
+#[cfg(feature = "desktop")]
+pub fn spawn_hot_reload(mut on_change: impl FnMut() + Send + 'static) {
+    let Ok(demo_path) = dioxus::asset_resolver::asset_path(&DEMO_ASSET) else {
+        return;
+    };
+    dioxus_devtools::connect(move |msg| {
+        if let dioxus_devtools::DevserverMsg::HotReload(hot_reload) = msg {
+            if hot_reload_targets_demo(&hot_reload, &demo_path) {
+                on_change();
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +186,39 @@ mod tests {
     fn demo_source_text_parses_successfully() {
         let outcome = build_sheet(DEMO_SOURCE_TEXT);
         assert!(outcome.sheet_labels.is_some());
+    }
+}
+
+#[cfg(test)]
+mod hot_reload_tests {
+    use super::*;
+    use dioxus_devtools::HotReloadMsg;
+    use std::path::PathBuf;
+
+    #[test]
+    fn hot_reload_targets_demo_true_when_assets_contains_path() {
+        let demo_path = PathBuf::from("/x/demo.pm");
+        let msg = HotReloadMsg {
+            assets: vec![demo_path.clone()],
+            ..Default::default()
+        };
+        assert!(hot_reload_targets_demo(&msg, &demo_path));
+    }
+
+    #[test]
+    fn hot_reload_targets_demo_false_when_assets_empty() {
+        let demo_path = PathBuf::from("/x/demo.pm");
+        let msg = HotReloadMsg::default();
+        assert!(!hot_reload_targets_demo(&msg, &demo_path));
+    }
+
+    #[test]
+    fn hot_reload_targets_demo_false_for_unrelated_asset() {
+        let demo_path = PathBuf::from("/x/demo.pm");
+        let msg = HotReloadMsg {
+            assets: vec![PathBuf::from("/x/graph.css")],
+            ..Default::default()
+        };
+        assert!(!hot_reload_targets_demo(&msg, &demo_path));
     }
 }

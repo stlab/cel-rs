@@ -9,8 +9,10 @@ use crate::inspector::Inspector;
 use crate::spectrum::SpTheme;
 
 /// Root component: Spectrum theme wrapper with the graph and Inspector filling the
-/// viewport. The demo pm-lang source lives in `begin/assets/demo.pm` — edit it and
-/// (on desktop, under `dx serve`) it hot-reloads into this running app.
+/// viewport. The demo pm-lang source lives in `begin/assets/demo.pm` — on desktop,
+/// editing it while running under `dx serve` hot-reloads the sheet into this running
+/// app via [`crate::demo_source::spawn_hot_reload`], exactly as if the old Apply
+/// button had been pressed.
 #[component]
 pub fn App() -> Element {
     let initial_source = load_demo_source();
@@ -24,6 +26,34 @@ pub fn App() -> Element {
     let sheet = use_signal(|| initial_sheet);
     let labels = use_signal(|| initial_labels);
     let active_source = use_signal(|| initial_source);
+
+    #[cfg(feature = "desktop")]
+    {
+        let mut sheet = sheet;
+        let mut labels = labels;
+        let mut active_source = active_source;
+        use_hook(move || {
+            let (tx, mut rx) = futures_channel::mpsc::unbounded::<()>();
+            crate::demo_source::spawn_hot_reload(move || {
+                let _ = tx.unbounded_send(());
+            });
+            spawn(async move {
+                use futures_util::StreamExt;
+                while rx.next().await.is_some() {
+                    let source = crate::demo_source::load_demo_source();
+                    let outcome = crate::demo_source::build_sheet(&source);
+                    if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
+                        sheet.set(new_sheet);
+                        labels.set(new_labels);
+                        active_source.set(source);
+                    }
+                    if let Some(msg) = outcome.error {
+                        eprintln!("{msg}");
+                    }
+                }
+            });
+        });
+    }
 
     let graph_data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
 
