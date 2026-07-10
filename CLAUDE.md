@@ -105,7 +105,7 @@ The compile-time type system uses **cons-cell heterogeneous lists** (`CStackList
 
 ### Parser pipeline (cel-parser/src/)
 
-```
+```text
 &str → TokenStream (proc_macro2) → LexLexer (flatten + combine multi-char ops) → CELParser (recursive descent) → DynSegment
 ```
 
