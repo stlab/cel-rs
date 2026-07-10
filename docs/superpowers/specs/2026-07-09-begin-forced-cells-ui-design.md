@@ -67,16 +67,14 @@ dimming (which only applies to relationships an active control link has switched
 
 ### Demo source: a conditional relationship that forces a cell
 
-> **Superseded during implementation:** the form below (folding `[c] -> [g]` into the
-> existing `1i32` branch) does not force `g`. pm-lang groups every method in one branch
-> into a single relationship, and a relationship's forced outputs are the intersection
-> of its methods' pure outputs — mixing `[c] -> [g]` in with the `c`/`f` methods makes
-> that intersection empty. The shipped code instead declares `g`'s method in its own
-> `conditional p { 1i32 => { .. } }` block, gated on the same match cell; see the doc
-> comment on `DEMO_SOURCE` in `begin/src/app.rs` for the final form.
-
-`DEMO_SOURCE` (`begin/src/app.rs`) adds one cell and one method to the existing `p`
-conditional's `1i32` branch, rather than introducing an unrelated second conditional:
+`DEMO_SOURCE` (`begin/src/app.rs`) adds cell `g` and a second
+`conditional p { 1i32 => { .. } }` block, rather than folding `[c] -> [g]` into the
+existing `1i32` branch: pm-lang groups every method in one branch into a single
+relationship, and a relationship's forced outputs are the intersection of its methods'
+pure outputs, so mixing `[c] -> [g]` in with the `c`/`f` methods would make that
+intersection empty and force nothing. Two conditionals sharing the same match cell
+compose independently, so `g`'s relationship is a separate relationship gated on the
+same `p == 1` condition:
 
 ```
 cell g: f64;
@@ -86,6 +84,10 @@ conditional p {
     1i32 => {
         method [f] -> [c] { f * 2.0 }
         method [c] -> [f] { c / 2.0 }
+    }
+}
+conditional p {
+    1i32 => {
         method [c] -> [g] { c * 10.0 }
     }
 }
@@ -94,8 +96,8 @@ conditional p {
 `[c] -> [g]` is a single-method relationship, so `g` is forced whenever branch `1i32` is
 active and not forced otherwise — directly exercising "forced only while its owning
 conditional branch is active." Setting `p` to `1` in the running demo disables `g`'s
-Inspector field and highlights `g` and its incoming edge in the graph; setting `p` back
-to `0` (or anything else) re-enables it.
+Inspector field and highlights `g` plus every constraint edge touching it (incoming and
+outgoing) in the graph; setting `p` back to `0` (or anything else) re-enables it.
 
 ## Testing
 
@@ -108,12 +110,13 @@ to `0` (or anything else) re-enables it.
   exercised by `cargo test` for Dioxus components in this crate today, consistent with
   the rest of `inspector.rs`).
 - Manual verification: run the app, toggle `p` between `0` and `1`, confirm `g`'s field
-  disables/enables and the graph highlights `g` + its incoming edge accordingly.
+  disables/enables and the graph highlights `g` + every constraint edge touching it
+  accordingly.
 
 ## Out of Scope
 
 - No changes to `property-model`; `is_forced`/`forced_cells` already exist.
 - No tooltip or label annotation on forced fields — disabling the input is sufficient
   per current design; a label annotation can be added later if it proves necessary.
-- No highlighting of the relationship node that produces a forced cell, only the cell
-  and its incoming edge, per the approved design.
+- No highlighting of the relationship node that produces a forced cell — only the cell
+  and the constraint edges touching it are highlighted, per the approved design.

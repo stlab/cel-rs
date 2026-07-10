@@ -259,6 +259,12 @@ EOF
 
 In `begin/assets/graph.js`, inside `update()`, immediately after the existing inactive-relationship IIFE (the block ending at line 251, right before the `// NEW: Conditional diamond nodes` comment at line 253), add:
 
+> **Superseded during implementation:** the snippet below only marks the edge whose
+> *target* is forced (the incoming edge). The shipped code also marks edges whose
+> *source* is forced, so a forced cell's outgoing edges (carrying its guaranteed value
+> onward to other relationships) get highlighted too — see the forced-highlighting IIFE
+> in `begin/assets/graph.js` for the final form.
+
 ```javascript
         // Highlight forced cells (see property_model::Sheet::is_forced) and the
         // constraint edge that produces each one. Forced cells always belong to a
@@ -398,6 +404,14 @@ Run: `cargo test -p begin --no-default-features demo_source_g`
 Expected: FAIL — `called \`Option::unwrap()\` on a \`None\` value` (no cell named `"g"` exists in `DEMO_SOURCE` yet).
 
 - [ ] **Step 3: Update `DEMO_SOURCE`**
+
+> **Superseded during implementation:** the snippet below folds `[c] -> [g]` into the
+> existing `1i32` branch, which does not force `g` — pm-lang groups every method in one
+> branch into a single relationship, and a relationship's forced outputs are the
+> intersection of its methods' pure outputs, so mixing `[c] -> [g]` in with the `c`/`f`
+> methods makes that intersection empty. The shipped code instead declares `g`'s method
+> in its own `conditional p { 1i32 => { .. } }` block, gated on the same match cell —
+> see the doc comment on `DEMO_SOURCE` in `begin/src/app.rs` for the final form.
 
 Replace `begin/src/app.rs:11-49` with:
 
