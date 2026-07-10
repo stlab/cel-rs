@@ -48,9 +48,10 @@ let forced = sheet.forced_cells().map(cell_node_id).collect();
 
 `graph.js`'s `update()` builds a `Set` from `data.forced` and:
 - toggles a `forced` CSS class on cell `<rect>` elements whose ID is in the set
-- toggles a `forced-edge` CSS class on constraint `<line>` elements whose *target* is a
-  forced cell (the edge from the relationship that produces it; direction is already
-  established by the existing directed-link logic when a plan is cached)
+- toggles a `forced-edge` CSS class on constraint `<line>` elements whose *source or
+  target* is a forced cell — both the incoming edge from the relationship that produces
+  it, and any outgoing edges carrying its (also guaranteed) value onward to other
+  relationships
 
 `graph.css` adds:
 

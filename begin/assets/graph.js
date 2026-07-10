@@ -250,18 +250,21 @@
                 });
         }());
 
-        // Highlight forced cells (see property_model::Sheet::is_forced) and the
-        // constraint edge that produces each one. Forced cells always belong to a
-        // currently active relationship, so this never overlaps with the inactive-
-        // relationship dimming above.
+        // Highlight forced cells (see property_model::Sheet::is_forced) and every
+        // constraint edge touching one: the incoming edge that produces it, and any
+        // outgoing edges carrying its (also guaranteed) value onward to other
+        // relationships. Forced cells always belong to a currently active
+        // relationship, so this never overlaps with the inactive-relationship
+        // dimming above.
         (function () {
             var forcedSet = new Set(data.forced || []);
             cellLayer.selectAll('rect')
                 .classed('forced', function (d) { return forcedSet.has(d.id); });
             linkLayer.selectAll('line')
                 .classed('forced-edge', function (d) {
+                    var srcId = typeof d.source === 'object' ? d.source.id : d.source;
                     var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
-                    return forcedSet.has(tgtId);
+                    return forcedSet.has(srcId) || forcedSet.has(tgtId);
                 });
         }());
 
