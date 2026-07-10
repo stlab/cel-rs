@@ -33,14 +33,14 @@ use crate::bridge::{
 /// `dx serve`'s file watcher tracks it and reports changes in hot-reload messages
 /// (see [`spawn_hot_reload`]).
 ///
-/// The `Asset` value itself is never read: content is loaded straight from the
-/// source tree (see [`load_demo_source`]), and hot-reload matching is done by
-/// extension (see [`hot_reload_targets_demo`]) rather than by this asset's resolved
-/// path, since `dx`'s hot-reload message reports the asset's bundled name, which
-/// has no reliable relationship to this asset's own resolved path. Only the
-/// `asset!()` macro's registration side effect — making `dx` track this file at
-/// all — is needed here.
-#[allow(dead_code)]
+/// Its resolved path is not used for content loading (see [`load_demo_source`]) or
+/// for hot-reload matching (see [`hot_reload_targets_demo`], which matches by
+/// extension instead — `dx`'s hot-reload message reports the asset's bundled name,
+/// which has no reliable relationship to this asset's own resolved path). It's still
+/// deliberately read once, in [`spawn_hot_reload`], purely to keep `dx`'s asset
+/// registration for this file from being compiled away — see that function's doc
+/// comment for why that read is necessary, not incidental.
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 static DEMO_ASSET: Asset = asset!("/assets/demo.pm");
 
 /// Compile-time snapshot of the demo source.
@@ -153,9 +153,17 @@ fn hot_reload_targets_demo(msg: &HotReloadMsg) -> bool {
 /// changes on disk. A no-op if not running under `dx serve`
 /// (`dioxus_devtools::connect` itself returns immediately in that case).
 ///
+/// The discarded [`dioxus::asset_resolver::asset_path`] call below is deliberate,
+/// not dead code: `manganis-macro`'s asset registration (unlike its FFI-metadata
+/// counterpart) never applies `#[used]` to the linker section holding `DEMO_ASSET`'s
+/// bundle entry, so if nothing ever reads the `Asset` value, `dx`'s build can
+/// legitimately end up with no record of `demo.pm` to track at all. Touching the
+/// value once here is enough to keep it from being compiled away.
+///
 /// - Complexity: spawns one background OS thread for the life of the process.
 #[cfg(feature = "desktop")]
 pub fn spawn_hot_reload(mut on_change: impl FnMut() + Send + 'static) {
+    let _ = dioxus::asset_resolver::asset_path(DEMO_ASSET);
     dioxus_devtools::connect(move |msg| {
         if let dioxus_devtools::DevserverMsg::HotReload(hot_reload) = msg
             && hot_reload_targets_demo(&hot_reload)
