@@ -100,7 +100,7 @@ pub fn build_sheet(source: &str) -> BuildOutcome {
 /// resolved file cannot be read (e.g. a transient race with an editor's save).
 #[cfg(feature = "desktop")]
 pub fn load_demo_source() -> Result<String, String> {
-    let path = dioxus::asset_resolver::asset_path(&DEMO_ASSET)
+    let path = dioxus::asset_resolver::asset_path(DEMO_ASSET)
         .map_err(|e| format!("failed to resolve demo.pm asset path: {e}"))?;
     std::fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))
 }
@@ -115,6 +115,8 @@ pub fn load_demo_source() -> Result<String, String> {
 ///
 /// Only called (outside of tests) from [`spawn_hot_reload`], which is desktop-only;
 /// unused when the `desktop` feature is disabled, same as [`DEMO_ASSET`].
+///
+/// - Complexity: O(n) in the number of changed assets in `msg`.
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
 fn hot_reload_targets_demo(msg: &HotReloadMsg, demo_path: &std::path::Path) -> bool {
     msg.assets.iter().any(|p| p == demo_path)
@@ -128,14 +130,14 @@ fn hot_reload_targets_demo(msg: &HotReloadMsg, demo_path: &std::path::Path) -> b
 /// - Complexity: spawns one background OS thread for the life of the process.
 #[cfg(feature = "desktop")]
 pub fn spawn_hot_reload(mut on_change: impl FnMut() + Send + 'static) {
-    let Ok(demo_path) = dioxus::asset_resolver::asset_path(&DEMO_ASSET) else {
+    let Ok(demo_path) = dioxus::asset_resolver::asset_path(DEMO_ASSET) else {
         return;
     };
     dioxus_devtools::connect(move |msg| {
-        if let dioxus_devtools::DevserverMsg::HotReload(hot_reload) = msg {
-            if hot_reload_targets_demo(&hot_reload, &demo_path) {
-                on_change();
-            }
+        if let dioxus_devtools::DevserverMsg::HotReload(hot_reload) = msg
+            && hot_reload_targets_demo(&hot_reload, &demo_path)
+        {
+            on_change();
         }
     });
 }
