@@ -119,12 +119,13 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -
 /// `Error::MethodFailed` wraps an `anyhow::Error` raised by a compiled method
 /// body; when that error carries a `SpanContext` (attached automatically by
 /// cel-parser's `span-diagnostics` feature for built-in arithmetic ops) this
-/// renders a full caret diagnostic against `source`. All other variants have
-/// no source span and fall back to their `Display` message.
+/// renders a full caret diagnostic against `source`, ANSI-colored for a
+/// terminal. All other variants have no source span and fall back to their
+/// `Display` message.
 pub fn format_property_model_error(e: &Error, source: &str) -> String {
     match e {
         Error::MethodFailed(inner) => {
-            inner.format_rustc_style(source, "<pm-lang source>", 1, &Renderer::plain())
+            inner.format_rustc_style(source, "<pm-lang source>", 1, &Renderer::styled())
         }
         other => other.to_string(),
     }

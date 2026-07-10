@@ -3,28 +3,21 @@
 use dioxus::prelude::*;
 use property_model::{CellId, Sheet};
 
-use crate::bridge::Labels;
+use crate::bridge::{Labels, format_property_model_error};
 use crate::spectrum::{SpDivider, SpFieldLabel, SpHeading, SpTextfield};
 
 /// Sidebar panel showing all cells with labels, current values, and text inputs for writing.
 ///
 /// Editing an input field immediately writes the parsed value to the sheet and propagates
 /// constraints. If parsing or propagation fails (for example, non-numeric input or division
-/// by zero), `SpTextfield` renders in its invalid state until the user blurs. The input is
-/// not reset while the field is focused; it syncs back to the computed value on blur,
-/// keeping non-edited cells up to date.
-///
-/// `error_is_parse` tracks whether the currently displayed `error` came from a pm-lang parse
-/// failure (source text is invalid, so no successful sheet edit can resolve it) versus a
-/// runtime propagate failure (resolvable by any successful propagate, from either the Inspector
-/// or a re-applied source). Only runtime errors are cleared here.
+/// by zero), `SpTextfield` renders in its invalid state until the user blurs, and the
+/// formatted diagnostic is printed to stderr. The input is not reset while the field is
+/// focused; it syncs back to the computed value on blur, keeping non-edited cells up to date.
 #[component]
 pub fn Inspector(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
-    error: Signal<Option<String>>,
-    error_is_parse: Signal<bool>,
-    applied_source: Signal<String>,
+    active_source: Signal<String>,
 ) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
 
@@ -34,7 +27,7 @@ pub fn Inspector(
             SpHeading { "Cells" }
             SpDivider {}
             for id in ids {
-                CellRow { key: "{id:?}", id, sheet, labels, error, error_is_parse, applied_source }
+                CellRow { key: "{id:?}", id, sheet, labels, active_source }
             }
         }
     }
@@ -45,9 +38,7 @@ fn CellRow(
     id: CellId,
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
-    error: Signal<Option<String>>,
-    error_is_parse: Signal<bool>,
-    applied_source: Signal<String>,
+    active_source: Signal<String>,
 ) -> Element {
     let label = use_memo(move || {
         labels
@@ -132,21 +123,12 @@ fn CellRow(
                         };
                         match propagate_result {
                             Ok(()) => {
-                                // Any successful propagate means the sheet is now fully
-                                // consistent, so a stale *runtime* error is no longer
-                                // relevant regardless of which cell fixed it. A *parse*
-                                // error is about the (unrelated) editor source text, so it
-                                // is left in place until the source is corrected and applied.
-                                if !*error_is_parse.read() {
-                                    error.set(None);
-                                }
                                 has_error.set(false);
                             }
                             Err(e) => {
                                 has_error.set(true);
-                                error_is_parse.set(false);
-                                let source = applied_source.read().clone();
-                                error.set(Some(crate::bridge::format_property_model_error(&e, &source)));
+                                let source = active_source.read().clone();
+                                eprintln!("{}", format_property_model_error(&e, &source));
                             }
                         }
                     });
@@ -154,11 +136,6 @@ fn CellRow(
                 onfocus: move |_| is_focused.set(true),
                 onblur: move |_| {
                     is_focused.set(false);
-                    // The field is reverting to the last valid computed value, so clear
-                    // the diagnostic if it was this cell's own write/propagate error.
-                    if *has_error.read() {
-                        error.set(None);
-                    }
                     has_error.set(false);
                 },
             }
