@@ -30,11 +30,17 @@ use crate::bridge::{
 };
 
 /// The demo pm-lang source file, referenced individually (not via a folder) so
-/// `dx serve`'s file watcher reports changes to it in hot-reload messages.
+/// `dx serve`'s file watcher tracks it and reports changes in hot-reload messages
+/// (see [`spawn_hot_reload`]).
 ///
-/// Only resolved on desktop (see [`load_demo_source`]); unused when the `desktop`
-/// feature is disabled.
-#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+/// The `Asset` value itself is never read: content is loaded straight from the
+/// source tree (see [`load_demo_source`]), and hot-reload matching is done by
+/// extension (see [`hot_reload_targets_demo`]) rather than by this asset's resolved
+/// path, since `dx`'s hot-reload message reports the asset's bundled name, which
+/// has no reliable relationship to this asset's own resolved path. Only the
+/// `asset!()` macro's registration side effect — making `dx` track this file at
+/// all — is needed here.
+#[allow(dead_code)]
 static DEMO_ASSET: Asset = asset!("/assets/demo.pm");
 
 /// Compile-time snapshot of the demo source.
@@ -97,16 +103,15 @@ pub fn build_sheet(source: &str) -> BuildOutcome {
     }
 }
 
-/// Reads the demo source directly from its location in the crate source tree,
-/// deliberately bypassing [`DEMO_ASSET`]'s bundled copy.
+/// Reads the demo source directly from its location in the crate source tree.
 ///
-/// `dx serve`'s asset-hotreload step copies the changed file into the build's
-/// bundled asset directory before notifying us (see [`spawn_hot_reload`]), but that
-/// copy is skipped if a stale file already sits at the destination and deleting it
-/// first fails silently — observed in practice on Windows, where the old copy can
-/// still be open/locked. Reading straight from `CARGO_MANIFEST_DIR` sidesteps that
-/// bundling step entirely, which is safe here because `begin` is only ever run from
-/// a live checkout during development, never distributed to a machine without one.
+/// This deliberately avoids resolving [`DEMO_ASSET`]'s path at all:
+/// `Asset::resolve()` returns the absolute source path directly whenever `begin`
+/// isn't running as a bundled app — true for every documented way of running it,
+/// always from a live checkout under `dx serve` — so there's nothing to gain from
+/// routing through it, and it keeps content loading fully decoupled from
+/// `DEMO_ASSET`'s only real purpose: getting `dx` to track and report changes to
+/// this file (see [`spawn_hot_reload`]).
 ///
 /// # Errors
 ///
@@ -124,31 +129,36 @@ pub fn load_demo_source() -> Result<String, String> {
     Ok(DEMO_SOURCE_TEXT.to_string())
 }
 
-/// True if `msg` reports a change to the file at `demo_path`.
+/// True if `msg` reports a change to a `.pm` asset (i.e. the demo source).
+///
+/// Matches by extension rather than exact path: `dx`'s hot-reload message reports
+/// each changed asset as a short, bundled-name path (e.g. `/assets/demo.pm`), which
+/// has no reliable equality relationship to [`DEMO_ASSET`]'s own resolved path (in a
+/// `dx serve` dev session that resolves to the absolute source path instead — see
+/// [`load_demo_source`]). This crate has exactly one `.pm` asset, so matching by
+/// extension is both correct and robust to however `dx` names the bundled entry.
 ///
 /// Only called (outside of tests) from [`spawn_hot_reload`], which is desktop-only;
 /// unused when the `desktop` feature is disabled, same as [`DEMO_ASSET`].
 ///
 /// - Complexity: O(n) in the number of changed assets in `msg`.
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
-fn hot_reload_targets_demo(msg: &HotReloadMsg, demo_path: &std::path::Path) -> bool {
-    msg.assets.iter().any(|p| p == demo_path)
+fn hot_reload_targets_demo(msg: &HotReloadMsg) -> bool {
+    msg.assets
+        .iter()
+        .any(|p| p.extension().and_then(|ext| ext.to_str()) == Some("pm"))
 }
 
 /// Connects to the `dx serve` devserver and calls `on_change` whenever `demo.pm`
-/// changes on disk. A no-op if not running under `dx serve` (`dioxus_devtools::connect`
-/// itself returns immediately in that case) or if `DEMO_ASSET` can't be resolved to a
-/// filesystem path.
+/// changes on disk. A no-op if not running under `dx serve`
+/// (`dioxus_devtools::connect` itself returns immediately in that case).
 ///
 /// - Complexity: spawns one background OS thread for the life of the process.
 #[cfg(feature = "desktop")]
 pub fn spawn_hot_reload(mut on_change: impl FnMut() + Send + 'static) {
-    let Ok(demo_path) = dioxus::asset_resolver::asset_path(DEMO_ASSET) else {
-        return;
-    };
     dioxus_devtools::connect(move |msg| {
         if let dioxus_devtools::DevserverMsg::HotReload(hot_reload) = msg
-            && hot_reload_targets_demo(&hot_reload, &demo_path)
+            && hot_reload_targets_demo(&hot_reload)
         {
             on_change();
         }
@@ -212,29 +222,35 @@ mod hot_reload_tests {
     use std::path::PathBuf;
 
     #[test]
-    fn hot_reload_targets_demo_true_when_assets_contains_path() {
-        let demo_path = PathBuf::from("/x/demo.pm");
+    fn hot_reload_targets_demo_true_for_pm_asset() {
         let msg = HotReloadMsg {
-            assets: vec![demo_path.clone()],
+            assets: vec![PathBuf::from("/assets/demo.pm")],
             ..Default::default()
         };
-        assert!(hot_reload_targets_demo(&msg, &demo_path));
+        assert!(hot_reload_targets_demo(&msg));
+    }
+
+    #[test]
+    fn hot_reload_targets_demo_true_for_hash_suffixed_pm_asset() {
+        let msg = HotReloadMsg {
+            assets: vec![PathBuf::from("/assets/demo-a1b2c3d4.pm")],
+            ..Default::default()
+        };
+        assert!(hot_reload_targets_demo(&msg));
     }
 
     #[test]
     fn hot_reload_targets_demo_false_when_assets_empty() {
-        let demo_path = PathBuf::from("/x/demo.pm");
         let msg = HotReloadMsg::default();
-        assert!(!hot_reload_targets_demo(&msg, &demo_path));
+        assert!(!hot_reload_targets_demo(&msg));
     }
 
     #[test]
     fn hot_reload_targets_demo_false_for_unrelated_asset() {
-        let demo_path = PathBuf::from("/x/demo.pm");
         let msg = HotReloadMsg {
-            assets: vec![PathBuf::from("/x/graph.css")],
+            assets: vec![PathBuf::from("/assets/graph.css")],
             ..Default::default()
         };
-        assert!(!hot_reload_targets_demo(&msg, &demo_path));
+        assert!(!hot_reload_targets_demo(&msg));
     }
 }

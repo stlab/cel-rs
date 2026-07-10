@@ -1,8 +1,9 @@
 //! Root [`App`] component.
 
 use dioxus::prelude::*;
+use property_model::Sheet;
 
-use crate::bridge::to_graph_data;
+use crate::bridge::{Labels, to_graph_data};
 use crate::demo_source::{build_sheet, load_demo_source};
 use crate::graph_view::GraphView;
 use crate::inspector::Inspector;
@@ -13,19 +14,31 @@ use crate::spectrum::SpTheme;
 /// editing it while running under `dx serve` hot-reloads the sheet into this running
 /// app via [`crate::demo_source::spawn_hot_reload`], exactly as if the old Apply
 /// button had been pressed.
+///
+/// A read or parse failure at startup does not prevent the app from launching: it
+/// prints the diagnostic to stderr and starts with an empty sheet instead, so a
+/// syntax error in `demo.pm` can be fixed and hot-reloaded in without restarting.
 #[component]
 pub fn App() -> Element {
-    let initial_source = load_demo_source().expect("demo.pm must be readable at startup");
-    let initial = build_sheet(&initial_source);
-    if let Some(err) = &initial.error {
-        eprintln!("{err}");
-    }
-    let (initial_sheet, initial_labels) = initial
-        .sheet_labels
-        .expect("demo.pm must parse successfully");
+    let (initial_sheet, initial_labels, initial_active_source) = match load_demo_source() {
+        Ok(source) => {
+            let outcome = build_sheet(&source);
+            if let Some(err) = &outcome.error {
+                eprintln!("{err}");
+            }
+            match outcome.sheet_labels {
+                Some((sheet, labels)) => (sheet, labels, source),
+                None => (Sheet::new(), Labels::new(), String::new()),
+            }
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            (Sheet::new(), Labels::new(), String::new())
+        }
+    };
     let sheet = use_signal(|| initial_sheet);
     let labels = use_signal(|| initial_labels);
-    let active_source = use_signal(|| initial_source);
+    let active_source = use_signal(|| initial_active_source);
 
     #[cfg(feature = "desktop")]
     {
