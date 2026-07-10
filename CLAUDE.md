@@ -33,10 +33,15 @@ cargo test --workspace <test_name>
 # Lint (warnings are errors)
 # --all-targets is required so tests, doctests, and benches are linted too —
 # without it, clippy silently skips everything behind #[cfg(test)] and tests/.
-# The begin crate is excluded from the workspace commands and checked separately
-# with --no-default-features to avoid platform-specific renderer dependencies.
+# The begin crate is excluded from the workspace commands and checked separately:
+# once with --no-default-features (to avoid platform-specific renderer dependencies)
+# and once with its default features (desktop) so #[cfg(feature = "desktop")] code —
+# the code path the app actually ships — is linted too. Neither of the other two
+# invocations covers that code, so skipping this one lets desktop-only warnings
+# through unnoticed.
 cargo clippy --workspace --exclude begin --all-targets -- -D warnings
 cargo clippy -p begin --no-default-features --all-targets -- -D warnings
+cargo clippy -p begin --all-targets -- -D warnings
 cargo clippy --fix --workspace --exclude begin --all-targets
 
 # Docs
@@ -58,7 +63,8 @@ If a request is made that requires any modification, additions, or deletions to 
 Never commit directly to `main`.
 
 Before creating a PR, run the full check suite locally — every command in the Commands
-section above, including both clippy invocations (workspace and begin).
+section above, including all three clippy invocations (workspace, and begin with and
+without its default features).
 
 `cargo build --workspace` and `cargo test --workspace` must produce zero compiler
 warnings — clippy's `-D warnings` does not catch everything a plain build/test compile
