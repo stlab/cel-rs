@@ -114,6 +114,10 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -
     labels
 }
 
+/// Display name for the pm-lang source file, shown in diagnostic headers
+/// (e.g. `--> begin/assets/demo.pm:8:11`).
+pub const SOURCE_FILE_NAME: &str = "begin/assets/demo.pm";
+
 /// Formats an [`Error`] as a rustc-style diagnostic when possible.
 ///
 /// `Error::MethodFailed` wraps an `anyhow::Error` raised by a compiled method
@@ -125,7 +129,7 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -
 pub fn format_property_model_error(e: &Error, source: &str) -> String {
     match e {
         Error::MethodFailed(inner) => {
-            inner.format_rustc_style(source, "<pm-lang source>", 1, &Renderer::styled())
+            inner.format_rustc_style(source, SOURCE_FILE_NAME, 1, &Renderer::styled())
         }
         other => other.to_string(),
     }

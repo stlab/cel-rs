@@ -25,7 +25,9 @@ use dioxus_devtools::HotReloadMsg;
 use pm_lang::{PmParser, TypeRegistry};
 use property_model::Sheet;
 
-use crate::bridge::{Labels, format_property_model_error, labels_from_cell_names};
+use crate::bridge::{
+    Labels, SOURCE_FILE_NAME, format_property_model_error, labels_from_cell_names,
+};
 
 /// The demo pm-lang source file, referenced individually (not via a folder) so
 /// `dx serve`'s file watcher reports changes to it in hot-reload messages.
@@ -39,9 +41,12 @@ static DEMO_ASSET: Asset = asset!("/assets/demo.pm");
 ///
 /// Used as the non-desktop [`load_demo_source`] fallback and as the fixture for
 /// unit tests, both of which need a value that doesn't depend on desktop asset
-/// bundling being available. Unused (by design) in ordinary desktop builds, where
-/// [`load_demo_source`] always reads `assets/demo.pm` from disk instead.
-#[cfg_attr(all(feature = "desktop", not(test)), allow(dead_code))]
+/// bundling being available. Compiled out entirely in an ordinary desktop build
+/// (not just lint-suppressed): `include_str!` registers `demo.pm` as a compile-time
+/// dependency in cargo's dep-info, and `dx serve` treats any changed file that
+/// appears there as requiring a full rebuild — which would defeat this file's own
+/// asset-based hot reload (see [`spawn_hot_reload`]) every time `demo.pm` is edited.
+#[cfg(any(not(feature = "desktop"), test))]
 pub(crate) const DEMO_SOURCE_TEXT: &str = include_str!("../assets/demo.pm");
 
 /// The result of parsing and building a sheet from pm-lang source.
@@ -66,7 +71,7 @@ pub fn build_sheet(source: &str) -> BuildOutcome {
     let mut parsed = match parser.parse_str(source) {
         Ok(p) => p,
         Err(e) => {
-            let msg = e.format_rustc_style(source, "<pm-lang source>", 1, &Renderer::styled());
+            let msg = e.format_rustc_style(source, SOURCE_FILE_NAME, 1, &Renderer::styled());
             return BuildOutcome {
                 sheet_labels: None,
                 error: Some(msg),
