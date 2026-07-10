@@ -94,20 +94,21 @@ pub fn build_sheet(source: &str) -> BuildOutcome {
 
 /// Reads the demo source, resolving [`DEMO_ASSET`] to a filesystem path on desktop.
 ///
-/// - Precondition: the app is launched via `dx serve`/`dx build` (true for every
-///   documented way of running `begin`), so `DEMO_ASSET` resolves to a real path.
+/// # Errors
+///
+/// Returns `Err` if `DEMO_ASSET` cannot be resolved to a filesystem path, or if the
+/// resolved file cannot be read (e.g. a transient race with an editor's save).
 #[cfg(feature = "desktop")]
-pub fn load_demo_source() -> String {
+pub fn load_demo_source() -> Result<String, String> {
     let path = dioxus::asset_resolver::asset_path(&DEMO_ASSET)
-        .expect("demo.pm must resolve to a filesystem path on desktop");
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+        .map_err(|e| format!("failed to resolve demo.pm asset path: {e}"))?;
+    std::fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))
 }
 
 /// Non-desktop fallback: the compile-time snapshot, with no live reload.
 #[cfg(not(feature = "desktop"))]
-pub fn load_demo_source() -> String {
-    DEMO_SOURCE_TEXT.to_string()
+pub fn load_demo_source() -> Result<String, String> {
+    Ok(DEMO_SOURCE_TEXT.to_string())
 }
 
 /// True if `msg` reports a change to the file at `demo_path`.

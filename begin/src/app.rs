@@ -15,7 +15,7 @@ use crate::spectrum::SpTheme;
 /// button had been pressed.
 #[component]
 pub fn App() -> Element {
-    let initial_source = load_demo_source();
+    let initial_source = load_demo_source().expect("demo.pm must be readable at startup");
     let initial = build_sheet(&initial_source);
     if let Some(err) = &initial.error {
         eprintln!("{err}");
@@ -40,7 +40,13 @@ pub fn App() -> Element {
             spawn(async move {
                 use futures_util::StreamExt;
                 while rx.next().await.is_some() {
-                    let source = crate::demo_source::load_demo_source();
+                    let source = match crate::demo_source::load_demo_source() {
+                        Ok(source) => source,
+                        Err(err) => {
+                            eprintln!("{err}");
+                            continue;
+                        }
+                    };
                     let outcome = crate::demo_source::build_sheet(&source);
                     if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
                         sheet.set(new_sheet);
