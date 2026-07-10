@@ -97,16 +97,24 @@ pub fn build_sheet(source: &str) -> BuildOutcome {
     }
 }
 
-/// Reads the demo source, resolving [`DEMO_ASSET`] to a filesystem path on desktop.
+/// Reads the demo source directly from its location in the crate source tree,
+/// deliberately bypassing [`DEMO_ASSET`]'s bundled copy.
+///
+/// `dx serve`'s asset-hotreload step copies the changed file into the build's
+/// bundled asset directory before notifying us (see [`spawn_hot_reload`]), but that
+/// copy is skipped if a stale file already sits at the destination and deleting it
+/// first fails silently — observed in practice on Windows, where the old copy can
+/// still be open/locked. Reading straight from `CARGO_MANIFEST_DIR` sidesteps that
+/// bundling step entirely, which is safe here because `begin` is only ever run from
+/// a live checkout during development, never distributed to a machine without one.
 ///
 /// # Errors
 ///
-/// Returns `Err` if `DEMO_ASSET` cannot be resolved to a filesystem path, or if the
-/// resolved file cannot be read (e.g. a transient race with an editor's save).
+/// Returns `Err` if the file cannot be read (e.g. a transient race with an editor's
+/// save).
 #[cfg(feature = "desktop")]
 pub fn load_demo_source() -> Result<String, String> {
-    let path = dioxus::asset_resolver::asset_path(DEMO_ASSET)
-        .map_err(|e| format!("failed to resolve demo.pm asset path: {e}"))?;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/demo.pm");
     std::fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))
 }
 
