@@ -33,6 +33,10 @@
     var width = 800;
     var height = 600;
     var resizeObserver = null;
+    var zoom = null;
+    var zoomLayer = null;
+    var hasInitialFit = false;
+    var MAX_ZOOM = 8;
 
     // Returns the point on the rect boundary of a cell centered at (tx,ty)
     // along the approach line from (sx,sy) to (tx,ty).
@@ -70,11 +74,66 @@
         return { x1: srcPt.x, y1: srcPt.y, x2: tgtPt.x, y2: tgtPt.y };
     }
 
+    // Returns the axis-aligned bounding box of all node visuals, in graph
+    // (pre-zoom-transform) coordinates. Falls back to the viewport when there
+    // are no nodes yet.
+    function computeBBox() {
+        if (nodes.length === 0) {
+            return { minX: 0, minY: 0, maxX: width, maxY: height };
+        }
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        nodes.forEach(function (n) {
+            var hw, hh;
+            if (n.kind === 'Cell') { hw = CELL_W / 2; hh = CELL_H / 2; }
+            else if (n.kind === 'Conditional') { hw = COND_COLLIDE_R; hh = COND_COLLIDE_R; }
+            else { hw = REL_R; hh = REL_R; }
+            minX = Math.min(minX, n.x - hw);
+            minY = Math.min(minY, n.y - hh);
+            maxX = Math.max(maxX, n.x + hw);
+            maxY = Math.max(maxY, n.y + hh);
+        });
+        return { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
+    }
+
+    // Returns the scale that fits `bbox` entirely inside the current
+    // viewport, and the centered zoom transform at that scale.
+    function fitTransformFor(bbox) {
+        var cx = (bbox.minX + bbox.maxX) / 2;
+        var cy = (bbox.minY + bbox.maxY) / 2;
+        var contentW = Math.max(bbox.maxX - bbox.minX, 1);
+        var contentH = Math.max(bbox.maxY - bbox.minY, 1);
+        var fitScale = Math.min(width / contentW, height / contentH);
+        return {
+            fitScale: fitScale,
+            transform: d3.zoomIdentity.translate(width / 2, height / 2).scale(fitScale).translate(-cx, -cy)
+        };
+    }
+
+    // Recomputes zoom scale/pan bounds from the current node layout. On the
+    // first call after init(), snaps the view to fit; afterward, preserves
+    // the user's current pan/zoom, only re-clamping it if it now falls
+    // outside the new bounds.
+    function updateZoomConstraints() {
+        var bbox = computeBBox();
+        var fit = fitTransformFor(bbox);
+        var maxScale = Math.max(fit.fitScale, MAX_ZOOM);
+        zoom.scaleExtent([fit.fitScale, maxScale])
+            .translateExtent([[bbox.minX, bbox.minY], [bbox.maxX, bbox.maxY]])
+            .extent([[0, 0], [width, height]]);
+        if (!hasInitialFit) {
+            svg.call(zoom.transform, fit.transform);
+            hasInitialFit = true;
+        } else {
+            svg.call(zoom.transform, d3.zoomTransform(svg.node()));
+        }
+    }
+
     // Runs the simulation synchronously until settled, then updates the display.
     function settleSimulation() {
         var n = Math.ceil(Math.log(simulation.alphaMin()) / Math.log(1 - simulation.alphaDecay()));
         simulation.stop().alpha(1).tick(n);
         ticked();
+        updateZoomConstraints();
     }
 
     function init(containerId, data) {
@@ -82,6 +141,9 @@
         if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
         if (simulation) { simulation.stop(); simulation = null; }
         if (svg) { svg.remove(); svg = null; }
+        zoom = null;
+        zoomLayer = null;
+        hasInitialFit = false;
         nodes = [];
         links = [];
 
@@ -124,14 +186,22 @@
             .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#999');
 
         // Layer z-order: bg → control links → constraint links → cells → rels → conditionals → labels → values
-        svg.append('g').attr('class', 'bg-layer');
-        controlLinkLayer = svg.append('g').attr('class', 'control-link-layer'); // NEW
-        linkLayer = svg.append('g').attr('class', 'link-layer');
-        cellLayer = svg.append('g').attr('class', 'cell-layer');
-        relLayer = svg.append('g').attr('class', 'rel-layer');
-        condLayer = svg.append('g').attr('class', 'cond-layer');               // NEW
-        labelLayer = svg.append('g').attr('class', 'label-layer');
-        valueLayer = svg.append('g').attr('class', 'value-layer');
+        zoomLayer = svg.append('g').attr('class', 'zoom-layer');
+        zoomLayer.append('g').attr('class', 'bg-layer');
+        controlLinkLayer = zoomLayer.append('g').attr('class', 'control-link-layer'); // NEW
+        linkLayer = zoomLayer.append('g').attr('class', 'link-layer');
+        cellLayer = zoomLayer.append('g').attr('class', 'cell-layer');
+        relLayer = zoomLayer.append('g').attr('class', 'rel-layer');
+        condLayer = zoomLayer.append('g').attr('class', 'cond-layer');               // NEW
+        labelLayer = zoomLayer.append('g').attr('class', 'label-layer');
+        valueLayer = zoomLayer.append('g').attr('class', 'value-layer');
+
+        // Pan/zoom: the transform is applied to zoomLayer; scale/pan bounds
+        // are set by updateZoomConstraints() once node positions are known.
+        zoom = d3.zoom().on('zoom', function (event) {
+            zoomLayer.attr('transform', event.transform);
+        });
+        svg.call(zoom);
 
         simulation = d3.forceSimulation()
             .force('link', d3.forceLink().id(function (d) { return d.id; }).distance(LINK_DISTANCE))
