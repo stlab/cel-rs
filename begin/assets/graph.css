@@ -71,3 +71,27 @@ html, body {
     stroke: #8e44ad;
     stroke-width: 3;
 }
+
+.graph-zoom-controls {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    gap: 4px;
+    z-index: 10;
+}
+
+.graph-zoom-controls button {
+    width: 28px;
+    height: 28px;
+    border: 1px solid #999;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.85);
+    font-family: monospace;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.graph-zoom-controls button:hover {
+    background: #fff;
+}

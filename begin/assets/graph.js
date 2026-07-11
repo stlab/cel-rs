@@ -455,5 +455,22 @@
             .attr('y', function (d) { return d.y + 10; });
     }
 
-    window.beginGraph = { init: init, update: update };
+    // Called by the on-screen zoom controls in graph_view.rs.
+    function zoomIn() {
+        if (!svg || !zoom) return;
+        svg.transition().duration(200).call(zoom.scaleBy, 1.3);
+    }
+
+    function zoomOut() {
+        if (!svg || !zoom) return;
+        svg.transition().duration(200).call(zoom.scaleBy, 1 / 1.3);
+    }
+
+    function resetZoom() {
+        if (!svg || !zoom) return;
+        var fit = fitTransformFor(computeBBox());
+        svg.transition().duration(300).call(zoom.transform, fit.transform);
+    }
+
+    window.beginGraph = { init: init, update: update, zoomIn: zoomIn, zoomOut: zoomOut, resetZoom: resetZoom };
 }());
