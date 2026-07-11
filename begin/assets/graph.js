@@ -163,18 +163,38 @@
 
         var container = document.getElementById(containerId);
 
-        // Measure once, after layout has settled, then never resize the graph
-        // again — a plain clientWidth/clientHeight read here can race layout
-        // and return a stale (often zero) size, which is what made the graph
-        // appear cut off on first load.
+        // Keep observing for the life of this mount (torn down above on the
+        // next init() call) so the view area tracks the container's size
+        // continuously, not just once at mount. The first firing measures
+        // after layout has settled — a plain clientWidth/clientHeight read
+        // here can race layout and return a stale (often zero) size, which
+        // is what made the graph appear cut off on first load — and builds
+        // the graph; every later firing just resizes the existing canvas.
         resizeObserver = new ResizeObserver(function () {
-            resizeObserver.disconnect();
-            resizeObserver = null;
             width = container.clientWidth || width;
             height = container.clientHeight || height;
-            buildGraph(container, data);
+            if (!svg) {
+                buildGraph(container, data);
+            } else {
+                resizeCanvas();
+            }
         });
         resizeObserver.observe(container);
+    }
+
+    // Resizes the existing SVG to the current width/height without touching
+    // node positions or restarting the simulation. Keeps viewBox equal to the
+    // pixel size (not just fixed) so the browser never stretches existing
+    // content to fill the new size — that mismatch is what caused the graph
+    // to visually distort on resize before pan/zoom existed. Recomputing the
+    // zoom constraints preserves the user's current pan/zoom, only
+    // re-clamping it if it now falls outside the new bounds.
+    function resizeCanvas() {
+        svg.attr('width', width)
+            .attr('height', height)
+            .attr('viewBox', [0, 0, width, height]);
+        simulation.force('center').x(width / 2).y(height / 2);
+        updateZoomConstraints();
     }
 
     function buildGraph(container, data) {
