@@ -32,6 +32,7 @@
     var links = [];
     var width = 800;
     var height = 600;
+    var resizeObserver = null;
 
     // Returns the point on the rect boundary of a cell centered at (tx,ty)
     // along the approach line from (sx,sy) to (tx,ty).
@@ -78,19 +79,33 @@
 
     function init(containerId, data) {
         // Tear down any previous init (component remount / hot-reload).
+        if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
         if (simulation) { simulation.stop(); simulation = null; }
         if (svg) { svg.remove(); svg = null; }
         nodes = [];
         links = [];
 
         var container = document.getElementById(containerId);
-        width = container.clientWidth || width;
-        height = container.clientHeight || height;
 
+        // Measure once, after layout has settled, then never resize the graph
+        // again — a plain clientWidth/clientHeight read here can race layout
+        // and return a stale (often zero) size, which is what made the graph
+        // appear cut off on first load.
+        resizeObserver = new ResizeObserver(function () {
+            resizeObserver.disconnect();
+            resizeObserver = null;
+            width = container.clientWidth || width;
+            height = container.clientHeight || height;
+            buildGraph(container, data);
+        });
+        resizeObserver.observe(container);
+    }
+
+    function buildGraph(container, data) {
         svg = d3.select(container)
             .append('svg')
-            .attr('width', '100%')
-            .attr('height', '100%')
+            .attr('width', width)
+            .attr('height', height)
             .attr('viewBox', [0, 0, width, height]);
 
         var defs = svg.append('defs');
