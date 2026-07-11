@@ -9,6 +9,7 @@
 use dioxus::prelude::*;
 
 use crate::bridge::GraphData;
+use crate::spectrum::{SpActionButton, SpActionGroup, SpIconZoomIn, SpIconZoomOut};
 
 /// Renders the property model bipartite graph using D3.
 ///
@@ -53,29 +54,35 @@ pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
             },
             div {
                 class: "graph-zoom-controls",
-                button {
-                    onclick: move |_| {
-                        spawn(async move {
-                            let _ = document::eval("window.beginGraph.zoomIn();").await;
-                        });
-                    },
-                    "+"
-                }
-                button {
-                    onclick: move |_| {
-                        spawn(async move {
-                            let _ = document::eval("window.beginGraph.zoomOut();").await;
-                        });
-                    },
-                    "-"
-                }
-                button {
-                    onclick: move |_| {
-                        spawn(async move {
-                            let _ = document::eval("window.beginGraph.resetZoom();").await;
-                        });
-                    },
-                    "Fit"
+                SpActionGroup {
+                    compact: true,
+                    SpActionButton {
+                        quiet: false,
+                        onclick: move |_| {
+                            spawn(async move {
+                                let _ = document::eval("window.beginGraph.zoomOut();").await;
+                            });
+                        },
+                        SpIconZoomOut {}
+                    }
+                    SpActionButton {
+                        quiet: false,
+                        onclick: move |_| {
+                            spawn(async move {
+                                let _ = document::eval("window.beginGraph.resetZoom();").await;
+                            });
+                        },
+                        "Fit"
+                    }
+                    SpActionButton {
+                        quiet: false,
+                        onclick: move |_| {
+                            spawn(async move {
+                                let _ = document::eval("window.beginGraph.zoomIn();").await;
+                            });
+                        },
+                        SpIconZoomIn {}
+                    }
                 }
             }
         }
