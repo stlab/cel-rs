@@ -4,8 +4,22 @@ url = "https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"
 file = "d3.v7.min.js"
 
 [spectrum-web-components]
-# 0.45.4 does not exist on npm; 0.45.0 is the latest 0.45.x release.
-# URL uses esm.sh bundled endpoint for a self-contained single-file ESM bundle.
-version = "0.45.0"
-url = "https://esm.sh/@spectrum-web-components/bundle@0.45.0/es2022/elements.bundle.mjs"
+# 1.12.2 is the latest release at time of writing and is the first line to support
+# Spectrum 2 (system="spectrum-two") — Spectrum 2 requires >=1.0.0.
+# URL uses esm.sh's self-bundled endpoint for a self-contained single-file ESM bundle
+# (verified to contain no external relative imports).
+version = "1.12.2"
+url = "https://esm.sh/@spectrum-web-components/bundle@1.12.2/es2022/elements.bundle.mjs"
 file = "swc.js"
+
+[spectrum-icon-zoom-in]
+# icons-workflow is not part of the main bundle package (verified: bundle's elements.js
+# entry point has no "icons-workflow" import), so each icon needed is vendored separately.
+version = "1.12.2"
+url = "https://esm.sh/@spectrum-web-components/icons-workflow@1.12.2/es2022/icons/sp-icon-zoom-in.bundle.mjs"
+file = "swc-icon-zoom-in.js"
+
+[spectrum-icon-zoom-out]
+version = "1.12.2"
+url = "https://esm.sh/@spectrum-web-components/icons-workflow@1.12.2/es2022/icons/sp-icon-zoom-out.bundle.mjs"
+file = "swc-icon-zoom-out.js"
