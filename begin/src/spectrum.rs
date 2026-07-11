@@ -107,6 +107,7 @@ pub fn SpHeading(children: Element) -> Element {
 pub fn SpActionGroup(compact: bool, children: Element) -> Element {
     rsx! {
         sp-action-group {
+            // Boolean attribute: omit entirely when false; presence = compact.
             "compact": if compact { "true" },
             {children}
         }
@@ -119,12 +120,13 @@ pub fn SpActionGroup(compact: bool, children: Element) -> Element {
 /// visual-prominence state.
 #[component]
 pub fn SpActionButton(
-    quiet: bool,
+    #[props(default)] quiet: bool,
     onclick: EventHandler<MouseEvent>,
     children: Element,
 ) -> Element {
     rsx! {
         sp-action-button {
+            // Boolean attribute: omit entirely when false; presence = quiet.
             "quiet": if quiet { "true" },
             onclick: move |e| onclick.call(e),
             {children}
@@ -134,11 +136,18 @@ pub fn SpActionButton(
 
 /// Zoom-in glyph, used as `SpActionButton` icon content.
 ///
-/// Maps to `<sp-icon-zoom-in>`.
+/// Maps to `<sp-icon-zoom-in>`. Rendered via `dangerous_inner_html` on a wrapping
+/// `span` rather than the usual `sp-icon-zoom-in {}` RSX element syntax: dioxus-rsx
+/// 0.7.9 reconstructs hyphenated custom-element tag names by joining each `-`-separated
+/// segment's `Ident::to_string()`, and a segment matching a Rust keyword (`in`) parses
+/// as a raw identifier whose `to_string()` includes the `r#` prefix, corrupting the tag
+/// to `sp-icon-zoom-r#in`.
 #[component]
 pub fn SpIconZoomIn() -> Element {
     rsx! {
-        sp-icon-zoom-in {}
+        span {
+            dangerous_inner_html: "<sp-icon-zoom-in></sp-icon-zoom-in>",
+        }
     }
 }
 

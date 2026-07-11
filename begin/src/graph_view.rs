@@ -57,7 +57,6 @@ pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
                 SpActionGroup {
                     compact: true,
                     SpActionButton {
-                        quiet: false,
                         onclick: move |_| {
                             spawn(async move {
                                 let _ = document::eval("window.beginGraph.zoomOut();").await;
@@ -66,7 +65,6 @@ pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
                         SpIconZoomOut {}
                     }
                     SpActionButton {
-                        quiet: false,
                         onclick: move |_| {
                             spawn(async move {
                                 let _ = document::eval("window.beginGraph.resetZoom();").await;
@@ -75,7 +73,6 @@ pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
                         "Fit"
                     }
                     SpActionButton {
-                        quiet: false,
                         onclick: move |_| {
                             spawn(async move {
                                 let _ = document::eval("window.beginGraph.zoomIn();").await;
