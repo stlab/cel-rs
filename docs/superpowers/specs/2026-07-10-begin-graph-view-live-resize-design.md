@@ -29,10 +29,24 @@ staying fixed while the size changes.
 
 The graph view's visible canvas grows and shrinks with its container
 (window resize, sidebar toggle, etc.) so the graph is never needlessly
-clipped. The current zoom level and pan position are never changed by a
-resize — only the amount of canvas around/within reach of that view changes.
-If the user is zoomed in, a larger container reveals more of the graph at
-the same zoom level, rather than zooming out to fit.
+clipped. A resize only changes the amount of canvas around/within reach of
+the current view — it never *directly* changes zoom level or pan position.
+If the user is zoomed in past fit scale, a larger container reveals more of
+the graph at the same zoom level, rather than zooming out to fit.
+
+This is deliberately *not* the same as "zoom is always pixel-identical
+before and after a resize": fit scale is itself defined relative to the
+container size (the scale at which the whole graph exactly fills it), so it
+rises as the container grows. If the user hasn't zoomed past fit — i.e.
+their current scale is sitting at that floor — enlarging the window carries
+the floor up with it, and the existing re-clamp in `updateZoomConstraints()`
+(which exists to pull an out-of-bounds transform back in, not specifically
+for resizes) brings the scale up to match, so the graph keeps filling the
+larger pane rather than leaving blank canvas around it. This is intentional:
+"scale changes" here is a *consequence* of re-clamping to newly-recomputed
+bounds using the same mechanism already used for structural changes, not a
+resize handler independently deciding to rescale anything. Only a user who
+has zoomed in past fit is guaranteed an unchanged scale across a resize.
 
 ## Design
 
@@ -84,9 +98,13 @@ verified manually via `dx serve --platform desktop`:
 - Resize the window (or otherwise resize the container, e.g. a future
   sidebar toggle): confirm the visible canvas grows/shrinks with it, with no
   stretching/distortion of existing content.
-- Zoom/pan away from the fit view, then resize the window larger: confirm
-  the zoom level and pan position are unchanged, and more of the graph
-  becomes visible/reachable within the larger canvas.
+- Without touching zoom (still at fit scale), enlarge the window: confirm
+  the graph zooms in just enough to keep filling the new, larger pane (the
+  expected fit-scale-tracks-the-floor behavior — see Goal), not left at its
+  old pixel scale with blank canvas around it.
+- Zoom in *past* fit scale, then resize the window larger: confirm the zoom
+  level and pan position are unchanged, and more of the graph becomes
+  visible/reachable within the larger canvas.
 - Shrink the window below the current pan/zoom's bounds: confirm the view
   re-clamps back within bounds (same re-clamping behavior already verified
   for structural changes in the pan/zoom spec) rather than showing an

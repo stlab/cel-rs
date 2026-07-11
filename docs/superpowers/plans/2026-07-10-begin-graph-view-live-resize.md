@@ -15,7 +15,7 @@
 - `graph.js` has no test runner in this repo — verification for this task is manual, via `dx serve --platform desktop` run from `begin/`.
 - No debouncing: each `ResizeObserver` firing is cheap (attribute updates plus the existing constraint recomputation) and the force simulation is not restarted, so resize events don't need to be coalesced.
 - The view area must track the container symmetrically in both directions (grow and shrink) — no minimum/high-water-mark size.
-- A resize must never change the current zoom scale or pan position on its own; it only changes how much canvas is available.
+- A resize never *independently* rescales or pans the view — any scale/pan change is only the existing re-clamp-to-bounds mechanism reacting to a shrunk/grown fit-scale floor or content-bounds extent, the same mechanism already used for structural changes. A user zoomed in past fit scale is guaranteed an unchanged scale and pan across a resize; a user sitting at (untouched) fit scale will see the graph zoom to keep filling a larger container, since fit scale itself is defined relative to container size.
 
 ---
 
@@ -119,10 +119,10 @@ Replace it with:
 Run (from `begin/`): `dx serve --platform desktop`
 
 1. Wait for the app to load with `demo.pm`'s graph. Confirm it fits its initial container with no part cut off, same as before this change.
-2. Resize the OS window larger (drag an edge to make it noticeably wider and taller).
-3. Confirm the graph view's visible canvas grows to fill the new space, and existing content is **not** stretched or distorted — node/text sizes stay the same as before the resize.
-4. Use the `+` zoom button (or scroll-wheel) to zoom in, then resize the window larger again.
-5. Confirm the zoom level and pan position are unchanged by the resize, and more of the graph becomes visible within the larger canvas (rather than the view snapping back to a fit scale).
+2. Without touching zoom (still at fit scale), resize the OS window larger (drag an edge to make it noticeably wider and taller).
+3. Confirm the graph view's visible canvas grows to fill the new space, and existing content is **not** stretched or distorted — and confirm the graph zooms in just enough to keep filling the larger pane (expected: fit scale rises with container size) rather than staying at its old pixel scale with blank canvas around it.
+4. Use the `+` zoom button (or scroll-wheel) to zoom in *past* fit scale, then resize the window larger again.
+5. Confirm the zoom level and pan position are unchanged by this resize, and more of the graph becomes visible within the larger canvas (rather than the view snapping back to a fit scale) — this is the case where scale must NOT change.
 6. Shrink the window back down, including below the size where the current pan/zoom would fall outside the graph's bounds.
 7. Confirm the view re-clamps back within bounds (pan and/or scale adjusts back in) rather than showing content pulled outside the visible area, matching the existing re-clamping behavior already used for structural changes.
 8. Click the "Fit" button after resizing; confirm it still fits the whole graph into the current (possibly resized) canvas.
