@@ -97,3 +97,57 @@ pub fn SpHeading(children: Element) -> Element {
         }
     }
 }
+
+/// Groups a row of `SpActionButton`s into a single visual cluster.
+///
+/// Maps to `<sp-action-group>`. Setting `compact` to `true` removes the gaps between
+/// buttons and rounds only the group's outermost corners — interior buttons (including
+/// a lone middle button) render square on both sides.
+#[component]
+pub fn SpActionGroup(compact: bool, children: Element) -> Element {
+    rsx! {
+        sp-action-group {
+            "compact": if compact { "true" },
+            {children}
+        }
+    }
+}
+
+/// A single button within an `SpActionGroup` (or standalone).
+///
+/// Maps to `<sp-action-button>`. Setting `quiet` to `true` renders the SWC diminished
+/// visual-prominence state.
+#[component]
+pub fn SpActionButton(
+    quiet: bool,
+    onclick: EventHandler<MouseEvent>,
+    children: Element,
+) -> Element {
+    rsx! {
+        sp-action-button {
+            "quiet": if quiet { "true" },
+            onclick: move |e| onclick.call(e),
+            {children}
+        }
+    }
+}
+
+/// Zoom-in glyph, used as `SpActionButton` icon content.
+///
+/// Maps to `<sp-icon-zoom-in>`.
+#[component]
+pub fn SpIconZoomIn() -> Element {
+    rsx! {
+        sp-icon-zoom-in {}
+    }
+}
+
+/// Zoom-out glyph, used as `SpActionButton` icon content.
+///
+/// Maps to `<sp-icon-zoom-out>`.
+#[component]
+pub fn SpIconZoomOut() -> Element {
+    rsx! {
+        sp-icon-zoom-out {}
+    }
+}
