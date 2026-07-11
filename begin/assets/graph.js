@@ -128,12 +128,16 @@
         } else {
             // zoom.transform() only runs d3's clamping logic when passed a
             // function, not a plain transform object — so explicitly clamp
-            // the preserved transform via d3's own constrain function
-            // (exposed through the public zoom.constrain() accessor) before
-            // applying it, otherwise a shrunk translateExtent/scaleExtent
-            // would never actually pull an out-of-bounds view back in.
+            // the preserved transform before applying it, otherwise a
+            // shrunk translateExtent/scaleExtent would never actually pull
+            // an out-of-bounds view back in. d3's own constrain function
+            // (exposed through the public zoom.constrain() accessor) only
+            // adjusts x/y against translateExtent — it leaves k untouched —
+            // so clamp k against scaleExtent ourselves first.
             var current = d3.zoomTransform(svg.node());
-            var clamped = zoom.constrain()(current, extent, translateExtent);
+            var clampedK = Math.max(fit.fitScale, Math.min(maxScale, current.k));
+            var rescaled = current.scale(clampedK / current.k);
+            var clamped = zoom.constrain()(rescaled, extent, translateExtent);
             svg.call(zoom.transform, clamped);
         }
     }
