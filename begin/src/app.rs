@@ -87,6 +87,7 @@ pub fn App() -> Element {
         SpTheme {
             color: "light".to_string(),
             scale: "medium".to_string(),
+            system: "spectrum-two".to_string(),
             div {
                 style: "position: fixed; inset: 0; display: flex; overflow: hidden;",
                 GraphView { data: graph_data }

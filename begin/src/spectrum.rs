@@ -19,11 +19,12 @@ use dioxus::prelude::*;
 ///
 /// Must be the root ancestor of any `SpXxx` component. Maps to `<sp-theme>`.
 #[component]
-pub fn SpTheme(color: String, scale: String, children: Element) -> Element {
+pub fn SpTheme(color: String, scale: String, system: String, children: Element) -> Element {
     rsx! {
         sp-theme {
             "color": "{color}",
             "scale": "{scale}",
+            "system": "{system}",
             {children}
         }
     }
