@@ -117,14 +117,24 @@
         var bbox = computeBBox();
         var fit = fitTransformFor(bbox);
         var maxScale = Math.max(fit.fitScale, MAX_ZOOM);
+        var extent = [[0, 0], [width, height]];
+        var translateExtent = [[bbox.minX, bbox.minY], [bbox.maxX, bbox.maxY]];
         zoom.scaleExtent([fit.fitScale, maxScale])
-            .translateExtent([[bbox.minX, bbox.minY], [bbox.maxX, bbox.maxY]])
-            .extent([[0, 0], [width, height]]);
+            .translateExtent(translateExtent)
+            .extent(extent);
         if (!hasInitialFit) {
             svg.call(zoom.transform, fit.transform);
             hasInitialFit = true;
         } else {
-            svg.call(zoom.transform, d3.zoomTransform(svg.node()));
+            // zoom.transform() only runs d3's clamping logic when passed a
+            // function, not a plain transform object — so explicitly clamp
+            // the preserved transform via d3's own constrain function
+            // (exposed through the public zoom.constrain() accessor) before
+            // applying it, otherwise a shrunk translateExtent/scaleExtent
+            // would never actually pull an out-of-bounds view back in.
+            var current = d3.zoomTransform(svg.node());
+            var clamped = zoom.constrain()(current, extent, translateExtent);
+            svg.call(zoom.transform, clamped);
         }
     }
 
