@@ -23,3 +23,17 @@ file = "swc-icon-zoom-in.js"
 version = "1.12.2"
 url = "https://esm.sh/@spectrum-web-components/icons-workflow@1.12.2/es2022/icons/sp-icon-zoom-out.bundle.mjs"
 file = "swc-icon-zoom-out.js"
+
+[spectrum-theme-light]
+# The main "bundle" package's elements.bundle.mjs has sp-theme's *class logic* but not
+# the actual --spectrum-* token *values* for a given system/color - those live in this
+# separate module, meant to be loaded as its own <script type="module"> tag in
+# non-bundler setups (confirmed via the theme package's own exports map).
+version = "1.12.2"
+url = "https://esm.sh/@spectrum-web-components/theme@1.12.2/es2022/spectrum-two/theme-light.bundle.mjs"
+file = "swc-theme-light.js"
+
+[spectrum-scale-medium]
+version = "1.12.2"
+url = "https://esm.sh/@spectrum-web-components/theme@1.12.2/es2022/spectrum-two/scale-medium.bundle.mjs"
+file = "swc-scale-medium.js"
