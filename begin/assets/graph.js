@@ -10,13 +10,12 @@
     var CELL_COLLIDE_R = 38;
     var REL_COLLIDE_R = 22;
     var COND_COLLIDE_R = COND_SIZE * Math.SQRT2;          // NEW: diamond circumradius
+    var NODE_STROKE_WIDTH = 1.5;                          // NEW: matches .node-cell/-relationship/-conditional stroke-width
+    var CONTROL_DOT_RADIUS = 2.4;                         // NEW: rendered radius of the '#dot' marker (r=4 in a 10-wide viewBox scaled to a 6-wide marker: 4 * 6/10)
+    var FIT_MARGIN = 16;                                  // extra breathing room around node bounds (stroke width, labels) so Fit doesn't clip geometry
     var PULSE_COLOR = '#f90';
     var PULSE_ON_MS = 200;
     var PULSE_OFF_MS = 400;
-    var BRANCH_COLORS = ['#4a90d9', '#e67e22'];           // NEW: branch 0=blue, 1=orange
-    var BRANCH_COLORS_DIM = ['#a8c8f0', '#f5c8a0'];      // NEW: inactive branch colors
-    var DEFAULT_BRANCH_COLOR = '#888';                    // NEW: default/no-branch control links
-    var DEFAULT_BRANCH_DIM = '#bbb';                      // NEW: inactive default control links
     var INACTIVE_STROKE = '#ccc';                         // NEW: stroke color for inactive elements
 
     var svg = null;
@@ -92,7 +91,10 @@
             maxX = Math.max(maxX, n.x + hw);
             maxY = Math.max(maxY, n.y + hh);
         });
-        return { minX: minX, minY: minY, maxX: maxX, maxY: maxY };
+        return {
+            minX: minX - FIT_MARGIN, minY: minY - FIT_MARGIN,
+            maxX: maxX + FIT_MARGIN, maxY: maxY + FIT_MARGIN
+        };
     }
 
     // Returns the scale that fits `bbox` entirely inside the current
@@ -217,7 +219,22 @@
             .attr('markerHeight', 8)
             .attr('markerUnits', 'userSpaceOnUse')
             .attr('orient', 'auto')
-            .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#999');
+            // context-stroke: inherit the referencing line's current stroke (which
+            // switches between the enabled/disabled colors set on the line itself)
+            // so the arrowhead always matches its edge without duplicating that logic.
+            .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', 'context-stroke');
+
+        // Dot marker: caps control links where they meet the relationship they target.
+        defs.append('marker')
+            .attr('id', 'dot')
+            .attr('viewBox', '0 0 10 10')
+            .attr('refX', 5)
+            .attr('refY', 5)
+            .attr('markerWidth', 6)
+            .attr('markerHeight', 6)
+            .attr('markerUnits', 'userSpaceOnUse')
+            .attr('orient', 'auto')
+            .append('circle').attr('cx', 5).attr('cy', 5).attr('r', 4).attr('fill', 'context-stroke');
 
         // Layer z-order: bg → control links → constraint links → cells → rels → conditionals → labels → values
         zoomLayer = svg.append('g').attr('class', 'zoom-layer');
@@ -301,7 +318,9 @@
             .join('line')
             .attr('class', 'link');
 
-        // NEW: Control links (dashed, color-coded by branch)
+        // NEW: Control links (dashed, dot-capped where they meet their target relationship).
+        // Stroke matches the enabled/disabled node stroke color depending on whether
+        // this specific branch is currently active.
         controlLinkLayer.selectAll('line')
             .data(controlLinks, function (d) {
                 var src = typeof d.source === 'object' ? d.source.id : d.source;
@@ -311,14 +330,8 @@
             .join('line')
             .attr('class', 'link-control')
             .attr('stroke-dasharray', '5 3')
-            .attr('stroke', function (d) {
-                var idx = (d.branch_index === null || d.branch_index === undefined)
-                    ? -1 : d.branch_index % BRANCH_COLORS.length;
-                if (d.branch_active) {
-                    return idx < 0 ? DEFAULT_BRANCH_COLOR : BRANCH_COLORS[idx];
-                }
-                return idx < 0 ? DEFAULT_BRANCH_DIM : BRANCH_COLORS_DIM[idx];
-            });
+            .attr('marker-end', 'url(#dot)')
+            .style('stroke', function (d) { return d.branch_active ? null : INACTIVE_STROKE; });
 
         // Join cell rects
         cellLayer.selectAll('rect')
@@ -442,12 +455,20 @@
                 .attr('x2', ep.x2).attr('y2', ep.y2);
         });
 
-        // NEW: Control links: center-to-center (dashed lines, no arrowhead clipping needed).
+        // NEW: Control links: edge-to-edge so the dot marker just touches the
+        // relationship's rendered boundary instead of overlapping it. The target
+        // radius is padded by half the node's stroke width (the nominal radius sits
+        // on the stroke's centerline, not its outer edge) plus the dot marker's own
+        // rendered radius (the marker is centered on the line's endpoint, so without
+        // this the dot would straddle the boundary rather than sit tangent to it).
         controlLinkLayer.selectAll('line').each(function (d) {
-            var s = d.source, t = d.target;
+            var ep = linkEndpoints(d);
+            var t = d.target;
+            var tgtR = (t.kind === 'Conditional' ? COND_COLLIDE_R : REL_R) + NODE_STROKE_WIDTH / 2 + CONTROL_DOT_RADIUS;
+            var tgtPt = circleEdgePoint(d.source.x, d.source.y, t.x, t.y, tgtR);
             d3.select(this)
-                .attr('x1', s.x).attr('y1', s.y)
-                .attr('x2', t.x).attr('y2', t.y);
+                .attr('x1', ep.x1).attr('y1', ep.y1)
+                .attr('x2', tgtPt.x).attr('y2', tgtPt.y);
         });
 
         cellLayer.selectAll('rect')

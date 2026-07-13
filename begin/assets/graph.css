@@ -12,9 +12,8 @@ html, body {
 }
 
 .link {
-    stroke: #999;
+    stroke: #444;
     stroke-width: 1.5;
-    stroke-opacity: 0.7;
 }
 
 .node-cell {
@@ -51,13 +50,14 @@ html, body {
 }
 
 .node-conditional {
-    fill: #fffff0;
-    stroke: #555;
+    fill: #fff;
+    stroke: #444;
     stroke-width: 1.5;
     cursor: default;
 }
 
 .link-control {
+    stroke: #444;
     stroke-width: 1.5;
     fill: none;
 }

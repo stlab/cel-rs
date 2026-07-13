@@ -129,16 +129,20 @@ pub fn SpActionButton(onclick: EventHandler<MouseEvent>, children: Element) -> E
 
 /// Zoom-in glyph, used as `SpActionButton` icon content.
 ///
-/// Maps to `<sp-icon-zoom-in>`. Rendered via `dangerous_inner_html` on a wrapping
-/// `span` rather than the usual `sp-icon-zoom-in {}` RSX element syntax: dioxus-rsx
-/// 0.7.9 reconstructs hyphenated custom-element tag names by joining each `-`-separated
-/// segment's `Ident::to_string()`, and a segment matching a Rust keyword (`in`) parses
-/// as a raw identifier whose `to_string()` includes the `r#` prefix, corrupting the tag
-/// to `sp-icon-zoom-r#in`.
+/// Maps to `<sp-icon-zoom-in>`, assigned to the button's `icon` slot so
+/// `ActionButton` centers and sizes it like any other action-button icon
+/// instead of treating it as label text. Rendered via `dangerous_inner_html`
+/// on a wrapping `span` rather than the usual `sp-icon-zoom-in {}` RSX element
+/// syntax: dioxus-rsx 0.7.9 reconstructs hyphenated custom-element tag names
+/// by joining each `-`-separated segment's `Ident::to_string()`, and a segment
+/// matching a Rust keyword (`in`) parses as a raw identifier whose
+/// `to_string()` includes the `r#` prefix, corrupting the tag to
+/// `sp-icon-zoom-r#in`.
 #[component]
 pub fn SpIconZoomIn() -> Element {
     rsx! {
         span {
+            "slot": "icon",
             dangerous_inner_html: "<sp-icon-zoom-in></sp-icon-zoom-in>",
         }
     }
@@ -146,10 +150,14 @@ pub fn SpIconZoomIn() -> Element {
 
 /// Zoom-out glyph, used as `SpActionButton` icon content.
 ///
-/// Maps to `<sp-icon-zoom-out>`.
+/// Maps to `<sp-icon-zoom-out>`, assigned to the button's `icon` slot so
+/// `ActionButton` centers and sizes it like any other action-button icon
+/// instead of treating it as label text.
 #[component]
 pub fn SpIconZoomOut() -> Element {
     rsx! {
-        sp-icon-zoom-out {}
+        sp-icon-zoom-out {
+            "slot": "icon",
+        }
     }
 }

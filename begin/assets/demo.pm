@@ -5,7 +5,7 @@ sheet demo {
     cell d: f64 = 4.0;
     cell e: f64 = 5.0;
     cell f: f64;
-    cell g: f64;
+    cell g = 0.0;
     cell p: i32 = 0;
 
     relationship {
