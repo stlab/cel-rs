@@ -1,0 +1,15 @@
+{
+  "name": "begin-js-assets",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Builds begin's vendored Spectrum Web Components bundle (assets/swc.js) via esbuild.",
+  "scripts": {
+    "build": "esbuild js/spectrum-entry.js --bundle --format=esm --outfile=assets/swc.js --loader:.css=css"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.2",
+    "@spectrum-web-components/bundle": "1.12.2",
+    "@spectrum-web-components/theme": "1.12.2",
+    "@spectrum-web-components/icons-workflow": "1.12.2"
+  }
+}

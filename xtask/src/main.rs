@@ -52,6 +52,36 @@ fn fetch_assets() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Runs `npm ci` then `npm run build` in `begin/` to regenerate the vendored
+/// Spectrum Web Components bundle (`begin/assets/swc.js`) from `begin/package.json`
+/// and `begin/js/spectrum-entry.js`.
+///
+/// # Errors
+/// Returns `Err` if `npm` is not on `PATH`, or if either command exits non-zero.
+fn build_js() -> Result<(), Box<dyn std::error::Error>> {
+    let root = project_root();
+    let begin_dir = root.join("begin");
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+
+    let steps: [&[&str]; 2] = [&["ci"], &["run", "build"]];
+    for args in steps {
+        println!(
+            "Running `npm {}` in {} ...",
+            args.join(" "),
+            begin_dir.display()
+        );
+        let status = std::process::Command::new(npm)
+            .args(args)
+            .current_dir(&begin_dir)
+            .status()?;
+        if !status.success() {
+            return Err(format!("npm {} failed with {status}", args.join(" ")).into());
+        }
+    }
+
+    Ok(())
+}
+
 /// Entry point: dispatches to the named task.
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -61,8 +91,14 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("build-js") => {
+            if let Err(e) = build_js() {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         _ => {
-            eprintln!("Usage: cargo xtask fetch-assets");
+            eprintln!("Usage: cargo xtask <fetch-assets|build-js>");
             std::process::exit(1);
         }
     }
