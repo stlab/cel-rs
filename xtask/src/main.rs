@@ -28,6 +28,10 @@ fn project_root() -> PathBuf {
 }
 
 /// Downloads every asset listed in `begin/assets/versions.toml` into `begin/assets/`.
+///
+/// # Errors
+/// Returns `Err` if `versions.toml` is missing or malformed, if a download fails, or
+/// if an entry's `file` would escape the assets directory.
 fn fetch_assets() -> Result<(), Box<dyn std::error::Error>> {
     let root = project_root();
     let manifest_path = root.join("begin").join("assets").join("versions.toml");

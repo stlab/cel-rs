@@ -116,18 +116,11 @@ pub fn SpActionGroup(compact: bool, children: Element) -> Element {
 
 /// A single button within an `SpActionGroup` (or standalone).
 ///
-/// Maps to `<sp-action-button>`. Setting `quiet` to `true` renders the SWC diminished
-/// visual-prominence state.
+/// Maps to `<sp-action-button>`.
 #[component]
-pub fn SpActionButton(
-    #[props(default)] quiet: bool,
-    onclick: EventHandler<MouseEvent>,
-    children: Element,
-) -> Element {
+pub fn SpActionButton(onclick: EventHandler<MouseEvent>, children: Element) -> Element {
     rsx! {
         sp-action-button {
-            // Boolean attribute: omit entirely when false; presence = quiet.
-            "quiet": if quiet { "true" },
             onclick: move |e| onclick.call(e),
             {children}
         }
