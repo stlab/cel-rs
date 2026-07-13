@@ -83,8 +83,6 @@ pub fn App() -> Element {
         document::Script { src: asset!("/assets/d3.v7.min.js") }
         document::Script { src: asset!("/assets/graph.js") }
         document::Script { r#type: "module", src: asset!("/assets/swc.js") }
-        document::Script { r#type: "module", src: asset!("/assets/swc-icon-zoom-in.js") }
-        document::Script { r#type: "module", src: asset!("/assets/swc-icon-zoom-out.js") }
 
         SpTheme {
             color: "light".to_string(),
