@@ -12,6 +12,7 @@ playground = []
 
 [dependencies]
 dioxus = { version = "0.7.9", features = [] }
+dioxus-devtools = "0.7.9"
 futures-channel = "0.3"
 futures-util = "0.3"
 property-model = { path = "../property-model" }

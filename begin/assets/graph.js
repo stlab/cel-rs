@@ -36,6 +36,7 @@
     var zoomLayer = null;
     var hasInitialFit = false;
     var MAX_ZOOM = 8;
+    var latestData = null;
 
     // Returns the point on the rect boundary of a cell centered at (tx,ty)
     // along the approach line from (sx,sy) to (tx,ty).
@@ -162,6 +163,7 @@
         hasInitialFit = false;
         nodes = [];
         links = [];
+        latestData = data;
 
         var container = document.getElementById(containerId);
 
@@ -172,11 +174,16 @@
         // here can race layout and return a stale (often zero) size, which
         // is what made the graph appear cut off on first load — and builds
         // the graph; every later firing just resizes the existing canvas.
+        //
+        // ResizeObserver's first callback fires asynchronously, not on this
+        // observe() call, so any update() in between is a no-op (svg is
+        // still null) and must not be lost — buildGraph reads latestData
+        // (kept current by update()) rather than this closure's `data`.
         resizeObserver = new ResizeObserver(function () {
             width = container.clientWidth || width;
             height = container.clientHeight || height;
             if (!svg) {
-                buildGraph(container, data);
+                buildGraph(container, latestData);
             } else {
                 resizeCanvas();
             }
@@ -271,6 +278,7 @@
     }
 
     function update(data) {
+        latestData = data;
         // Guard: no-op if not yet initialized
         if (!svg) return;
 
