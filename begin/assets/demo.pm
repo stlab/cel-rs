@@ -29,6 +29,9 @@ sheet demo {
             method [f] -> [c] { f * 2.0 }
             method [c] -> [f] { c / 2.0 }
         }
+        _ => {
+            method [f] -> [c] { f }
+        }
     }
 
     conditional p {
