@@ -72,6 +72,11 @@ html, body {
     stroke-width: 3;
 }
 
+.node-relationship.forced {
+    stroke: #8e44ad;
+    stroke-width: 3;
+}
+
 .graph-zoom-controls {
     position: absolute;
     top: 8px;

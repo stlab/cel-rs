@@ -390,21 +390,27 @@
                 });
         }());
 
-        // Highlight forced cells (see property_model::Sheet::is_forced) and every
-        // constraint edge touching one: the incoming edge that produces it, and any
-        // outgoing edges carrying its (also guaranteed) value onward to other
-        // relationships. Forced cells always belong to a currently active
-        // relationship, so this never overlaps with the inactive-relationship
+        // Highlight forced cells (see property_model::Sheet::is_forced) and forced
+        // relationships (see property_model::Sheet::is_relationship_forced) — those
+        // with only one viable method, regardless of cell strength — plus every
+        // constraint edge touching either: the incoming edge into a forced
+        // relationship, its outgoing edge(s), and any further edges carrying a
+        // forced cell's guaranteed value onward. Both always belong to a currently
+        // active relationship, so this never overlaps with the inactive-relationship
         // dimming above.
         (function () {
             var forcedSet = new Set(data.forced || []);
+            var forcedRelSet = new Set(data.forced_relationships || []);
             cellLayer.selectAll('rect')
                 .classed('forced', function (d) { return forcedSet.has(d.id); });
+            relLayer.selectAll('circle')
+                .classed('forced', function (d) { return forcedRelSet.has(d.id); });
             linkLayer.selectAll('line')
                 .classed('forced-edge', function (d) {
                     var srcId = typeof d.source === 'object' ? d.source.id : d.source;
                     var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
-                    return forcedSet.has(srcId) || forcedSet.has(tgtId);
+                    return forcedSet.has(srcId) || forcedSet.has(tgtId)
+                        || forcedRelSet.has(srcId) || forcedRelSet.has(tgtId);
                 });
         }());
 
