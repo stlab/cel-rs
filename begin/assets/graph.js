@@ -282,17 +282,24 @@
         // Guard: no-op if not yet initialized
         if (!svg) return;
 
-        // Detect structural changes before mutating node/link arrays.
+        // Detect structural changes before mutating node/link arrays. Link identity
+        // is an unordered node-id pair: replanning can flip which end of an existing
+        // edge is the source and which is the target (e.g. a relationship's input
+        // becomes its output) without changing the graph's topology, and such flips
+        // must not be treated as a structural change — doing so forces a full
+        // simulation restart (see settleSimulation) that visibly repositions every
+        // node, not just the ones on the flipped edge.
+        function linkKey(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
         var oldNodeIds = new Set(nodes.map(function (n) { return n.id; }));
         var oldLinkSet = new Set(links.map(function (l) {
             var src = typeof l.source === 'object' ? l.source.id : l.source;
             var tgt = typeof l.target === 'object' ? l.target.id : l.target;
-            return src + '-' + tgt;
+            return linkKey(src, tgt);
         }));
         var structureChanged = nodes.length !== data.nodes.length
             || links.length !== data.links.length
             || data.nodes.some(function (n) { return !oldNodeIds.has(n.id); })
-            || data.links.some(function (l) { return !oldLinkSet.has(l.source + '-' + l.target); });
+            || data.links.some(function (l) { return !oldLinkSet.has(linkKey(l.source, l.target)); });
 
         // Preserve existing node positions by merging into incoming data.
         var oldNodeMap = new Map(nodes.map(function (n) { return [n.id, n]; }));
