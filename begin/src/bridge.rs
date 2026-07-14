@@ -200,6 +200,10 @@ pub struct GraphData {
     /// [`property_model::Sheet::is_forced`]); consumers should disable input for these
     /// cells and may render them distinctly.
     pub forced: Vec<String>,
+    /// Stable IDs of relationships forced by the planner (see
+    /// [`property_model::Sheet::is_relationship_forced`]); consumers may render them
+    /// distinctly, along with their constraint edges.
+    pub forced_relationships: Vec<String>,
     /// `true` when at least one relationship has a cached plan and constraint links are directed
     /// where plans exist; `false` when no plan has been computed.
     pub arrows: bool,
@@ -352,12 +356,14 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
 
     let changed = sheet.changed().map(cell_node_id).collect();
     let forced = sheet.forced_cells().map(cell_node_id).collect();
+    let forced_relationships = sheet.forced_relationships().map(rel_node_id).collect();
 
     GraphData {
         nodes,
         links,
         changed,
         forced,
+        forced_relationships,
         arrows,
     }
 }
@@ -770,5 +776,30 @@ mod tests {
 
         let data = to_graph_data(&sheet, &labels);
         assert!(!data.forced.contains(&cell_node_id(b_id)));
+    }
+
+    #[test]
+    fn to_graph_data_forced_relationships_field_contains_forced_relationship() {
+        let (mut sheet, labels) = sheet_with_forced_conditional();
+        let rel_id = sheet.relationships().next().unwrap();
+        sheet.propagate().unwrap();
+
+        let data = to_graph_data(&sheet, &labels);
+        assert!(data.forced_relationships.contains(&rel_node_id(rel_id)));
+    }
+
+    #[test]
+    fn to_graph_data_forced_relationships_field_excludes_relationship_when_branch_inactive() {
+        let (mut sheet, labels) = sheet_with_forced_conditional();
+        let rel_id = sheet.relationships().next().unwrap();
+        let p_id = sheet
+            .cells()
+            .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("p"))
+            .unwrap();
+        sheet.write(p_id, 1_i32).unwrap();
+        sheet.propagate().unwrap();
+
+        let data = to_graph_data(&sheet, &labels);
+        assert!(!data.forced_relationships.contains(&rel_node_id(rel_id)));
     }
 }
