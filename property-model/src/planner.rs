@@ -56,6 +56,10 @@ pub(crate) struct Plan {
     /// Cells that can never be a source under the relationships this plan considered.
     /// See [`forced_output_cells`].
     pub(crate) forced_outputs: HashSet<CellId>,
+    /// Active relationships with exactly one alive method after the forced-output
+    /// fixpoint (see [`forced_output_cells`]) — the planner has no alternative method
+    /// to choose for these, regardless of cell strength.
+    pub(crate) forced_relationships: HashSet<RelationshipId>,
 }
 
 /// Assigns one method per active relationship and returns them in dependency order.
@@ -238,9 +242,16 @@ pub(crate) fn plan(
         return Err(Error::Conflict);
     }
 
+    let forced_relationships: HashSet<RelationshipId> = alive
+        .iter()
+        .filter(|(_, methods)| methods.iter().filter(|&&is_alive| is_alive).count() == 1)
+        .map(|(&rel_id, _)| rel_id)
+        .collect();
+
     Ok(Plan {
         execution_order: selected,
         forced_outputs,
+        forced_relationships,
     })
 }
 
@@ -461,6 +472,70 @@ mod tests {
         assert!(plan.forced_outputs.contains(&c));
         assert!(!plan.forced_outputs.contains(&a));
         assert_eq!(plan.execution_order.len(), 2);
+    }
+
+    #[test]
+    fn forced_relationships_true_for_single_method_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 3))])
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        assert!(plan.forced_relationships.contains(&rel));
+    }
+
+    #[test]
+    fn forced_relationships_excludes_multi_method_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0.0_f64);
+        let b = sheet.add_cell(0.0_f64);
+        let c = sheet.add_cell(0.0_f64);
+        let rel = sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| Ok((*x) * (*y))),
+                Method::from_fn_2_1([b, c], a, |x: &f64, y: &f64| Ok((*y) / (*x))),
+                Method::from_fn_2_1([a, c], b, |x: &f64, y: &f64| Ok((*y) / (*x))),
+            ])
+            .unwrap();
+        sheet.write(a, 2.0_f64).unwrap();
+        sheet.write(b, 3.0_f64).unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        assert!(!plan.forced_relationships.contains(&rel));
+    }
+
+    #[test]
+    fn forced_relationships_cascade_through_adjacent_relationship() {
+        // R1: a -> b (single method) is trivially forced.
+        // R2: b -> c or c -> b — c -> b dies once b is forced by R1 (it would
+        // double-write b), leaving b -> c as R2's sole alive method, so R2 becomes
+        // forced too even though it started with two methods.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(2_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        let r1 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 10))])
+            .unwrap();
+        let r2 = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(b, c, |x: &i32| Ok(*x + 1)),
+                Method::from_fn_1_1(c, b, |x: &i32| Ok(*x + 1)),
+            ])
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        assert!(plan.forced_relationships.contains(&r1));
+        assert!(plan.forced_relationships.contains(&r2));
     }
 
     #[test]
