@@ -2,3 +2,4 @@
 .tokensave
 .claude/worktrees/
 /begin/node_modules
+.DS_Store
