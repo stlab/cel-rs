@@ -9,6 +9,7 @@
 use dioxus::prelude::*;
 
 use crate::bridge::GraphData;
+use crate::spectrum::{SpActionButton, SpActionGroup, SpIconZoomIn, SpIconZoomOut};
 
 /// Renders the property model bipartite graph using D3.
 ///
@@ -33,7 +34,7 @@ pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
     rsx! {
         div {
             id: "graph-container",
-            style: "flex: 1; height: 100%; overflow: hidden;",
+            style: "flex: 1; height: 100%; overflow: hidden; position: relative;",
             onmounted: move |_evt| async move {
                 let json = serde_json::to_string(&data.peek().clone()).unwrap_or_default();
                 // Seed __beginGraphData with the current snapshot; use_effect may
@@ -50,6 +51,36 @@ pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
                        }})(60);"#
                 );
                 let _ = document::eval(&script).await;
+            },
+            div {
+                class: "graph-zoom-controls",
+                SpActionGroup {
+                    compact: true,
+                    SpActionButton {
+                        onclick: move |_| {
+                            spawn(async move {
+                                let _ = document::eval("window.beginGraph.zoomOut();").await;
+                            });
+                        },
+                        SpIconZoomOut {}
+                    }
+                    SpActionButton {
+                        onclick: move |_| {
+                            spawn(async move {
+                                let _ = document::eval("window.beginGraph.resetZoom();").await;
+                            });
+                        },
+                        "Fit"
+                    }
+                    SpActionButton {
+                        onclick: move |_| {
+                            spawn(async move {
+                                let _ = document::eval("window.beginGraph.zoomIn();").await;
+                            });
+                        },
+                        SpIconZoomIn {}
+                    }
+                }
             }
         }
     }

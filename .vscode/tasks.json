@@ -92,6 +92,20 @@
                 "panel": "dedicated"
             }
         },
+        {
+            "label": "begin: build js",
+            "type": "shell",
+            "command": "cargo",
+            "args": ["xtask", "build-js"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
         // ============ Build Tasks ============
         {
             "label": "cargo build",

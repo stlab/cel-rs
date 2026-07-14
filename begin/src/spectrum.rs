@@ -19,11 +19,12 @@ use dioxus::prelude::*;
 ///
 /// Must be the root ancestor of any `SpXxx` component. Maps to `<sp-theme>`.
 #[component]
-pub fn SpTheme(color: String, scale: String, children: Element) -> Element {
+pub fn SpTheme(color: String, scale: String, system: String, children: Element) -> Element {
     rsx! {
         sp-theme {
             "color": "{color}",
             "scale": "{scale}",
+            "system": "{system}",
             {children}
         }
     }
@@ -93,6 +94,70 @@ pub fn SpHeading(children: Element) -> Element {
     rsx! {
         sp-heading {
             {children}
+        }
+    }
+}
+
+/// Groups a row of `SpActionButton`s into a single visual cluster.
+///
+/// Maps to `<sp-action-group>`. Setting `compact` to `true` removes the gaps between
+/// buttons and rounds only the group's outermost corners — interior buttons (including
+/// a lone middle button) render square on both sides.
+#[component]
+pub fn SpActionGroup(compact: bool, children: Element) -> Element {
+    rsx! {
+        sp-action-group {
+            // Boolean attribute: omit entirely when false; presence = compact.
+            "compact": if compact { "true" },
+            {children}
+        }
+    }
+}
+
+/// A single button within an `SpActionGroup` (or standalone).
+///
+/// Maps to `<sp-action-button>`.
+#[component]
+pub fn SpActionButton(onclick: EventHandler<MouseEvent>, children: Element) -> Element {
+    rsx! {
+        sp-action-button {
+            onclick: move |e| onclick.call(e),
+            {children}
+        }
+    }
+}
+
+/// Zoom-in glyph, used as `SpActionButton` icon content.
+///
+/// Maps to `<sp-icon-zoom-in>`, assigned to the button's `icon` slot so
+/// `ActionButton` centers and sizes it like any other action-button icon
+/// instead of treating it as label text. Rendered via `dangerous_inner_html`
+/// on a wrapping `span` rather than the usual `sp-icon-zoom-in {}` RSX element
+/// syntax: dioxus-rsx 0.7.9 reconstructs hyphenated custom-element tag names
+/// by joining each `-`-separated segment's `Ident::to_string()`, and a segment
+/// matching a Rust keyword (`in`) parses as a raw identifier whose
+/// `to_string()` includes the `r#` prefix, corrupting the tag to
+/// `sp-icon-zoom-r#in`.
+#[component]
+pub fn SpIconZoomIn() -> Element {
+    rsx! {
+        span {
+            "slot": "icon",
+            dangerous_inner_html: "<sp-icon-zoom-in></sp-icon-zoom-in>",
+        }
+    }
+}
+
+/// Zoom-out glyph, used as `SpActionButton` icon content.
+///
+/// Maps to `<sp-icon-zoom-out>`, assigned to the button's `icon` slot so
+/// `ActionButton` centers and sizes it like any other action-button icon
+/// instead of treating it as label text.
+#[component]
+pub fn SpIconZoomOut() -> Element {
+    rsx! {
+        sp-icon-zoom-out {
+            "slot": "icon",
         }
     }
 }

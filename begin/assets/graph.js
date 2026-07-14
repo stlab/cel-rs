@@ -10,13 +10,12 @@
     var CELL_COLLIDE_R = 38;
     var REL_COLLIDE_R = 22;
     var COND_COLLIDE_R = COND_SIZE * Math.SQRT2;          // NEW: diamond circumradius
+    var NODE_STROKE_WIDTH = 1.5;                          // NEW: matches .node-cell/-relationship/-conditional stroke-width
+    var CONTROL_DOT_RADIUS = 2.4;                         // NEW: rendered radius of the '#dot' marker (r=4 in a 10-wide viewBox scaled to a 6-wide marker: 4 * 6/10)
+    var FIT_MARGIN = 16;                                  // extra breathing room around node bounds (stroke width, labels) so Fit doesn't clip geometry
     var PULSE_COLOR = '#f90';
     var PULSE_ON_MS = 200;
     var PULSE_OFF_MS = 400;
-    var BRANCH_COLORS = ['#4a90d9', '#e67e22'];           // NEW: branch 0=blue, 1=orange
-    var BRANCH_COLORS_DIM = ['#a8c8f0', '#f5c8a0'];      // NEW: inactive branch colors
-    var DEFAULT_BRANCH_COLOR = '#888';                    // NEW: default/no-branch control links
-    var DEFAULT_BRANCH_DIM = '#bbb';                      // NEW: inactive default control links
     var INACTIVE_STROKE = '#ccc';                         // NEW: stroke color for inactive elements
 
     var svg = null;
@@ -32,6 +31,11 @@
     var links = [];
     var width = 800;
     var height = 600;
+    var resizeObserver = null;
+    var zoom = null;
+    var zoomLayer = null;
+    var hasInitialFit = false;
+    var MAX_ZOOM = 8;
 
     // Returns the point on the rect boundary of a cell centered at (tx,ty)
     // along the approach line from (sx,sy) to (tx,ty).
@@ -69,28 +73,137 @@
         return { x1: srcPt.x, y1: srcPt.y, x2: tgtPt.x, y2: tgtPt.y };
     }
 
+    // Returns the axis-aligned bounding box of all node visuals, in graph
+    // (pre-zoom-transform) coordinates. Falls back to the viewport when there
+    // are no nodes yet.
+    function computeBBox() {
+        if (nodes.length === 0) {
+            return { minX: 0, minY: 0, maxX: width, maxY: height };
+        }
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        nodes.forEach(function (n) {
+            var hw, hh;
+            if (n.kind === 'Cell') { hw = CELL_W / 2; hh = CELL_H / 2; }
+            else if (n.kind === 'Conditional') { hw = COND_COLLIDE_R; hh = COND_COLLIDE_R; }
+            else { hw = REL_R; hh = REL_R; }
+            minX = Math.min(minX, n.x - hw);
+            minY = Math.min(minY, n.y - hh);
+            maxX = Math.max(maxX, n.x + hw);
+            maxY = Math.max(maxY, n.y + hh);
+        });
+        return {
+            minX: minX - FIT_MARGIN, minY: minY - FIT_MARGIN,
+            maxX: maxX + FIT_MARGIN, maxY: maxY + FIT_MARGIN
+        };
+    }
+
+    // Returns the scale that fits `bbox` entirely inside the current
+    // viewport, and the centered zoom transform at that scale.
+    function fitTransformFor(bbox) {
+        var cx = (bbox.minX + bbox.maxX) / 2;
+        var cy = (bbox.minY + bbox.maxY) / 2;
+        var contentW = Math.max(bbox.maxX - bbox.minX, 1);
+        var contentH = Math.max(bbox.maxY - bbox.minY, 1);
+        var fitScale = Math.min(width / contentW, height / contentH);
+        return {
+            fitScale: fitScale,
+            transform: d3.zoomIdentity.translate(width / 2, height / 2).scale(fitScale).translate(-cx, -cy)
+        };
+    }
+
+    // Recomputes zoom scale/pan bounds from the current node layout. On the
+    // first call after init(), snaps the view to fit; afterward, preserves
+    // the user's current pan/zoom, only re-clamping it if it now falls
+    // outside the new bounds.
+    function updateZoomConstraints() {
+        var bbox = computeBBox();
+        var fit = fitTransformFor(bbox);
+        var maxScale = Math.max(fit.fitScale, MAX_ZOOM);
+        var extent = [[0, 0], [width, height]];
+        var translateExtent = [[bbox.minX, bbox.minY], [bbox.maxX, bbox.maxY]];
+        zoom.scaleExtent([fit.fitScale, maxScale])
+            .translateExtent(translateExtent)
+            .extent(extent);
+        if (!hasInitialFit) {
+            svg.call(zoom.transform, fit.transform);
+            hasInitialFit = true;
+        } else {
+            // zoom.transform() only runs d3's clamping logic when passed a
+            // function, not a plain transform object — so explicitly clamp
+            // the preserved transform before applying it, otherwise a
+            // shrunk translateExtent/scaleExtent would never actually pull
+            // an out-of-bounds view back in. d3's own constrain function
+            // (exposed through the public zoom.constrain() accessor) only
+            // adjusts x/y against translateExtent — it leaves k untouched —
+            // so clamp k against scaleExtent ourselves first.
+            var current = d3.zoomTransform(svg.node());
+            var clampedK = Math.max(fit.fitScale, Math.min(maxScale, current.k));
+            var rescaled = current.scale(clampedK / current.k);
+            var clamped = zoom.constrain()(rescaled, extent, translateExtent);
+            svg.call(zoom.transform, clamped);
+        }
+    }
+
     // Runs the simulation synchronously until settled, then updates the display.
     function settleSimulation() {
         var n = Math.ceil(Math.log(simulation.alphaMin()) / Math.log(1 - simulation.alphaDecay()));
         simulation.stop().alpha(1).tick(n);
         ticked();
+        updateZoomConstraints();
     }
 
     function init(containerId, data) {
         // Tear down any previous init (component remount / hot-reload).
+        if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
         if (simulation) { simulation.stop(); simulation = null; }
         if (svg) { svg.remove(); svg = null; }
+        zoom = null;
+        zoomLayer = null;
+        hasInitialFit = false;
         nodes = [];
         links = [];
 
         var container = document.getElementById(containerId);
-        width = container.clientWidth || width;
-        height = container.clientHeight || height;
 
+        // Keep observing for the life of this mount (torn down above on the
+        // next init() call) so the view area tracks the container's size
+        // continuously, not just once at mount. The first firing measures
+        // after layout has settled — a plain clientWidth/clientHeight read
+        // here can race layout and return a stale (often zero) size, which
+        // is what made the graph appear cut off on first load — and builds
+        // the graph; every later firing just resizes the existing canvas.
+        resizeObserver = new ResizeObserver(function () {
+            width = container.clientWidth || width;
+            height = container.clientHeight || height;
+            if (!svg) {
+                buildGraph(container, data);
+            } else {
+                resizeCanvas();
+            }
+        });
+        resizeObserver.observe(container);
+    }
+
+    // Resizes the existing SVG to the current width/height without touching
+    // node positions or restarting the simulation. Keeps viewBox equal to the
+    // pixel size (not just fixed) so the browser never stretches existing
+    // content to fill the new size — that mismatch is what caused the graph
+    // to visually distort on resize before pan/zoom existed. Recomputing the
+    // zoom constraints preserves the user's current pan/zoom, only
+    // re-clamping it if it now falls outside the new bounds.
+    function resizeCanvas() {
+        svg.attr('width', width)
+            .attr('height', height)
+            .attr('viewBox', [0, 0, width, height]);
+        simulation.force('center').x(width / 2).y(height / 2);
+        updateZoomConstraints();
+    }
+
+    function buildGraph(container, data) {
         svg = d3.select(container)
             .append('svg')
-            .attr('width', '100%')
-            .attr('height', '100%')
+            .attr('width', width)
+            .attr('height', height)
             .attr('viewBox', [0, 0, width, height]);
 
         var defs = svg.append('defs');
@@ -106,17 +219,40 @@
             .attr('markerHeight', 8)
             .attr('markerUnits', 'userSpaceOnUse')
             .attr('orient', 'auto')
-            .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#999');
+            // context-stroke: inherit the referencing line's current stroke (which
+            // switches between the enabled/disabled colors set on the line itself)
+            // so the arrowhead always matches its edge without duplicating that logic.
+            .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', 'context-stroke');
+
+        // Dot marker: caps control links where they meet the relationship they target.
+        defs.append('marker')
+            .attr('id', 'dot')
+            .attr('viewBox', '0 0 10 10')
+            .attr('refX', 5)
+            .attr('refY', 5)
+            .attr('markerWidth', 6)
+            .attr('markerHeight', 6)
+            .attr('markerUnits', 'userSpaceOnUse')
+            .attr('orient', 'auto')
+            .append('circle').attr('cx', 5).attr('cy', 5).attr('r', 4).attr('fill', 'context-stroke');
 
         // Layer z-order: bg → control links → constraint links → cells → rels → conditionals → labels → values
-        svg.append('g').attr('class', 'bg-layer');
-        controlLinkLayer = svg.append('g').attr('class', 'control-link-layer'); // NEW
-        linkLayer = svg.append('g').attr('class', 'link-layer');
-        cellLayer = svg.append('g').attr('class', 'cell-layer');
-        relLayer = svg.append('g').attr('class', 'rel-layer');
-        condLayer = svg.append('g').attr('class', 'cond-layer');               // NEW
-        labelLayer = svg.append('g').attr('class', 'label-layer');
-        valueLayer = svg.append('g').attr('class', 'value-layer');
+        zoomLayer = svg.append('g').attr('class', 'zoom-layer');
+        zoomLayer.append('g').attr('class', 'bg-layer');
+        controlLinkLayer = zoomLayer.append('g').attr('class', 'control-link-layer'); // NEW
+        linkLayer = zoomLayer.append('g').attr('class', 'link-layer');
+        cellLayer = zoomLayer.append('g').attr('class', 'cell-layer');
+        relLayer = zoomLayer.append('g').attr('class', 'rel-layer');
+        condLayer = zoomLayer.append('g').attr('class', 'cond-layer');               // NEW
+        labelLayer = zoomLayer.append('g').attr('class', 'label-layer');
+        valueLayer = zoomLayer.append('g').attr('class', 'value-layer');
+
+        // Pan/zoom: the transform is applied to zoomLayer; scale/pan bounds
+        // are set by updateZoomConstraints() once node positions are known.
+        zoom = d3.zoom().on('zoom', function (event) {
+            zoomLayer.attr('transform', event.transform);
+        });
+        svg.call(zoom);
 
         simulation = d3.forceSimulation()
             .force('link', d3.forceLink().id(function (d) { return d.id; }).distance(LINK_DISTANCE))
@@ -182,7 +318,9 @@
             .join('line')
             .attr('class', 'link');
 
-        // NEW: Control links (dashed, color-coded by branch)
+        // NEW: Control links (dashed, dot-capped where they meet their target relationship).
+        // Stroke matches the enabled/disabled node stroke color depending on whether
+        // this specific branch is currently active.
         controlLinkLayer.selectAll('line')
             .data(controlLinks, function (d) {
                 var src = typeof d.source === 'object' ? d.source.id : d.source;
@@ -192,14 +330,8 @@
             .join('line')
             .attr('class', 'link-control')
             .attr('stroke-dasharray', '5 3')
-            .attr('stroke', function (d) {
-                var idx = (d.branch_index === null || d.branch_index === undefined)
-                    ? -1 : d.branch_index % BRANCH_COLORS.length;
-                if (d.branch_active) {
-                    return idx < 0 ? DEFAULT_BRANCH_COLOR : BRANCH_COLORS[idx];
-                }
-                return idx < 0 ? DEFAULT_BRANCH_DIM : BRANCH_COLORS_DIM[idx];
-            });
+            .attr('marker-end', 'url(#dot)')
+            .style('stroke', function (d) { return d.branch_active ? null : INACTIVE_STROKE; });
 
         // Join cell rects
         cellLayer.selectAll('rect')
@@ -323,12 +455,20 @@
                 .attr('x2', ep.x2).attr('y2', ep.y2);
         });
 
-        // NEW: Control links: center-to-center (dashed lines, no arrowhead clipping needed).
+        // NEW: Control links: edge-to-edge so the dot marker just touches the
+        // relationship's rendered boundary instead of overlapping it. The target
+        // radius is padded by half the node's stroke width (the nominal radius sits
+        // on the stroke's centerline, not its outer edge) plus the dot marker's own
+        // rendered radius (the marker is centered on the line's endpoint, so without
+        // this the dot would straddle the boundary rather than sit tangent to it).
         controlLinkLayer.selectAll('line').each(function (d) {
-            var s = d.source, t = d.target;
+            var ep = linkEndpoints(d);
+            var t = d.target;
+            var tgtR = (t.kind === 'Conditional' ? COND_COLLIDE_R : REL_R) + NODE_STROKE_WIDTH / 2 + CONTROL_DOT_RADIUS;
+            var tgtPt = circleEdgePoint(d.source.x, d.source.y, t.x, t.y, tgtR);
             d3.select(this)
-                .attr('x1', s.x).attr('y1', s.y)
-                .attr('x2', t.x).attr('y2', t.y);
+                .attr('x1', ep.x1).attr('y1', ep.y1)
+                .attr('x2', tgtPt.x).attr('y2', tgtPt.y);
         });
 
         cellLayer.selectAll('rect')
@@ -356,5 +496,22 @@
             .attr('y', function (d) { return d.y + 10; });
     }
 
-    window.beginGraph = { init: init, update: update };
+    // Called by the on-screen zoom controls in graph_view.rs.
+    function zoomIn() {
+        if (!svg || !zoom) return;
+        svg.transition().duration(200).call(zoom.scaleBy, 1.3);
+    }
+
+    function zoomOut() {
+        if (!svg || !zoom) return;
+        svg.transition().duration(200).call(zoom.scaleBy, 1 / 1.3);
+    }
+
+    function resetZoom() {
+        if (!svg || !zoom) return;
+        var fit = fitTransformFor(computeBBox());
+        svg.transition().duration(300).call(zoom.transform, fit.transform);
+    }
+
+    window.beginGraph = { init: init, update: update, zoomIn: zoomIn, zoomOut: zoomOut, resetZoom: resetZoom };
 }());

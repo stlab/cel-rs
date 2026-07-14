@@ -33,10 +33,15 @@ cargo test --workspace <test_name>
 # Lint (warnings are errors)
 # --all-targets is required so tests, doctests, and benches are linted too —
 # without it, clippy silently skips everything behind #[cfg(test)] and tests/.
-# The begin crate is excluded from the workspace commands and checked separately
-# with --no-default-features to avoid platform-specific renderer dependencies.
+# The begin crate is excluded from the workspace commands and checked separately:
+# once with --no-default-features (to avoid platform-specific renderer dependencies)
+# and once with its default features (desktop) so #[cfg(feature = "desktop")] code —
+# the code path the app actually ships — is linted too. Neither of the other two
+# invocations covers that code, so skipping this one lets desktop-only warnings
+# through unnoticed.
 cargo clippy --workspace --exclude begin --all-targets -- -D warnings
 cargo clippy -p begin --no-default-features --all-targets -- -D warnings
+cargo clippy -p begin --all-targets -- -D warnings
 cargo clippy --fix --workspace --exclude begin --all-targets
 
 # Docs
@@ -58,12 +63,24 @@ If a request is made that requires any modification, additions, or deletions to 
 Never commit directly to `main`.
 
 Before creating a PR, run the full check suite locally — every command in the Commands
-section above, including both clippy invocations (workspace and begin).
+section above, including all three clippy invocations (workspace, and begin with and
+without its default features).
 
 `cargo build --workspace` and `cargo test --workspace` must produce zero compiler
 warnings — clippy's `-D warnings` does not catch everything a plain build/test compile
 can warn about (e.g. an unused `mut`). Read the build/test output and fix any warnings
 before opening the PR.
+
+## UI Verification (begin)
+
+`cargo build`/`cargo clippy` passing proves `begin`'s UI code compiles — it proves
+nothing about what renders. Before considering any UI change to `begin` complete,
+actually render it and look: use the `verifying-begin-ui` skill
+(`.claude/skills/verifying-begin-ui/SKILL.md`), which serves `begin` as a web app and
+drives headless Edge to screenshot it, dump its DOM, and (when needed) query live
+computed styles/shadow-DOM state — `begin`'s default desktop WebView2 window can't be
+driven by standard headless-browser tooling. A change that "looks right" in the RSX is
+not verified until you've seen it rendered.
 
 ## Project Status
 
@@ -99,7 +116,7 @@ The compile-time type system uses **cons-cell heterogeneous lists** (`CStackList
 
 ### Parser pipeline (cel-parser/src/)
 
-```
+```text
 &str → TokenStream (proc_macro2) → LexLexer (flatten + combine multi-char ops) → CELParser (recursive descent) → DynSegment
 ```
 

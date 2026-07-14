@@ -1,3 +1,4 @@
 /target
 .tokensave
 .claude/worktrees/
+/begin/node_modules

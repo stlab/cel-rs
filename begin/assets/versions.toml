@@ -2,10 +2,3 @@
 version = "7.9.0"
 url = "https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"
 file = "d3.v7.min.js"
-
-[spectrum-web-components]
-# 0.45.4 does not exist on npm; 0.45.0 is the latest 0.45.x release.
-# URL uses esm.sh bundled endpoint for a self-contained single-file ESM bundle.
-version = "0.45.0"
-url = "https://esm.sh/@spectrum-web-components/bundle@0.45.0/es2022/elements.bundle.mjs"
-file = "swc.js"
