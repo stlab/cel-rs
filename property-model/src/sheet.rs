@@ -46,6 +46,9 @@ pub struct Sheet {
     /// Cells reported forced (see [`Sheet::is_forced`]) by the last full `propagate()`
     /// call. Not recomputed by `propagate_without_replan`.
     last_forced: Option<HashSet<CellId>>,
+    /// Relationships reported forced (see [`Sheet::is_relationship_forced`]) by the
+    /// last full `propagate()` call. Not recomputed by `propagate_without_replan`.
+    last_forced_relationships: Option<HashSet<RelationshipId>>,
     /// All conditionals registered on this sheet.
     pub(crate) conditionals: SlotMap<ConditionalId, ConditionalData>,
     /// Union of all RelationshipIds assigned to any conditional branch or default.
@@ -63,6 +66,7 @@ impl Sheet {
             next_strength: 0,
             last_plan: None,
             last_forced: None,
+            last_forced_relationships: None,
             conditionals: SlotMap::with_key(),
             conditional_relationships: HashSet::new(),
         }
@@ -560,6 +564,7 @@ impl Sheet {
         self.post_process_strengths(&plan.execution_order);
 
         self.last_forced = Some(plan.forced_outputs);
+        self.last_forced_relationships = Some(plan.forced_relationships);
         self.last_plan = Some(plan.execution_order);
         Ok(())
     }
@@ -691,6 +696,25 @@ impl Sheet {
     /// - Complexity: O(n) where n is the number of forced cells.
     pub fn forced_cells(&self) -> impl Iterator<Item = CellId> + '_ {
         self.last_forced.iter().flatten().copied()
+    }
+
+    /// Returns `true` if `id` had exactly one viable method as of the last successful
+    /// `propagate()` call — the planner has no alternative method to choose for this
+    /// relationship, regardless of cell strength.
+    ///
+    /// Returns `false` if no propagation has run yet.
+    pub fn is_relationship_forced(&self, id: RelationshipId) -> bool {
+        self.last_forced_relationships
+            .as_ref()
+            .is_some_and(|forced| forced.contains(&id))
+    }
+
+    /// Iterates relationships that are forced (see [`Sheet::is_relationship_forced`])
+    /// as of the last `propagate()` call.
+    ///
+    /// - Complexity: O(n) where n is the number of forced relationships.
+    pub fn forced_relationships(&self) -> impl Iterator<Item = RelationshipId> + '_ {
+        self.last_forced_relationships.iter().flatten().copied()
     }
 
     /// Iterates all live conditional IDs in the sheet.
