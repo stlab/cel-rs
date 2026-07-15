@@ -20,6 +20,21 @@ use crate::spectrum::SpTheme;
 /// syntax error in `demo.pm` can be fixed and hot-reloaded in without restarting.
 #[component]
 pub fn App() -> Element {
+    // The webview always probes `/favicon.ico` at the origin root regardless of the
+    // `document::Link` below (standard Chromium behavior). That literal path can't be
+    // reached through the `asset!` pipeline, which always serves under `/assets/`, so
+    // intercept it directly and answer with the same file served to the web build from
+    // `begin/public/favicon.ico`.
+    #[cfg(feature = "desktop")]
+    dioxus::desktop::use_asset_handler("favicon.ico", |_request, responder| {
+        let response = dioxus::desktop::wry::http::Response::builder()
+            .header("Content-Type", "image/x-icon")
+            .header("Access-Control-Allow-Origin", "*")
+            .body(include_bytes!("../public/favicon.ico").to_vec())
+            .expect("valid favicon response");
+        responder.respond(response);
+    });
+
     let (initial_sheet, initial_labels, initial_active_source) = match load_demo_source() {
         Ok(source) => {
             let outcome = build_sheet(&source);
@@ -78,7 +93,7 @@ pub fn App() -> Element {
     let graph_data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
 
     rsx! {
-        document::Link { rel: "icon", r#type: "image/x-icon", href: asset!("/assets/favicon.ico") }
+        document::Link { rel: "icon", r#type: "image/x-icon", href: "/favicon.ico" }
         document::Link { rel: "stylesheet", href: asset!("/assets/graph.css") }
         document::Script { src: asset!("/assets/d3.v7.min.js") }
         document::Script { src: asset!("/assets/graph.js") }
