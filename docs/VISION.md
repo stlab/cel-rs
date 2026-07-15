@@ -42,6 +42,13 @@ for release/performance. That second path does not yet exist.
 - First-class functions.
 - Closure syntax (open question, not yet designed).
 - Borrowing array-language concepts from J.
+- Geometry and affine-transform value types (point, size, rect, and a translate+uniform-scale
+  transform), likely reflecting Linebender's `kurbo` crate rather than defining bespoke ones —
+  `kurbo::TranslateScale` maps directly onto the `{x, y, k}` pan/zoom transform model `begin`'s
+  D3 graph view already uses (see
+  `docs/superpowers/specs/2026-07-10-begin-graph-pan-zoom-design.md`). Needs arithmetic ops for
+  these types plus method-call support (above) for operations like clamping scale to a range or
+  clamping a transform's translation to keep a content rect within a viewport.
 
 ## property-model
 
@@ -91,6 +98,39 @@ groups; the only `cel-parser` client so far.
       relationship multiply(f, g, e);
   }
   ```
+
+- View-constraint sheets: once geometry/matrix types and method-call syntax land (see
+  `cel-runtime`/`cel-parser` above), express view constraints — like `begin`'s graph pan/zoom
+  clamping, currently hand-written in `graph.js` — declaratively instead of imperatively:
+
+  ```text
+  sheet view_constraints(content_bounds: Rect, viewport: Size, max_zoom: f64) {
+      cell view: TranslateScale = TranslateScale::IDENTITY;
+
+      cell fit_scale = min(viewport.width / content_bounds.width(), viewport.height / content_bounds.height());
+      cell min_scale = fit_scale;
+      cell max_scale = max(fit_scale, max_zoom);
+
+      relationship {
+          method [view, min_scale, max_scale, content_bounds, viewport] -> [view] {
+              view.clamp_scale(min_scale, max_scale)
+                  .clamp_translation(content_bounds, viewport)
+          }
+      }
+  }
+
+  sheet graph_view {
+      cell bounds: Rect;
+      cell size: Size;
+
+      relationship view_constraints(bounds, size, 8.0);
+  }
+  ```
+
+  `min_scale`/`max_scale` express "zoom out no further than fit, zoom in no further than
+  `max_zoom`"; `clamp_translation` expresses "panning cannot move content past its own bounds."
+  `begin` would write `bounds`/`size` on resize or structural graph changes and read `view` back
+  to drive the zoom-layer transform, replacing the equivalent logic in `graph.js`.
 
 ## begin
 
