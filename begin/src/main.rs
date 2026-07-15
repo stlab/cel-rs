@@ -8,8 +8,8 @@ mod spectrum;
 
 use dioxus::prelude::*;
 
-#[allow(deprecated)]
 fn main() {
+    #[allow(deprecated)]
     LaunchBuilder::new()
         .with_cfg(desktop! {
             dioxus::desktop::Config::new().with_icon(
