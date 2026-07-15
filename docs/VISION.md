@@ -1,7 +1,7 @@
 # cel-rs Workspace Vision
 
 This is a standing reference for Claude Code, not primarily for human readers. It captures
-the *why* and *where this is headed* behind the workspace's components — complement it with
+the _why_ and _where this is headed_ behind the workspace's components — complement it with
 `CLAUDE.md` (build mechanics, code style) and `docs/superpowers/specs/` (dated, per-feature
 designs). Unlike those specs, this file has no date or status: edit it in place as direction
 changes rather than superseding it with a new dated copy.
@@ -35,6 +35,7 @@ for release/performance. That second path does not yet exist.
 `cel-rs-macros` currently does compile-time validation of CEL expressions only.
 
 **Directions being explored:**
+
 - The second parser backend: compiling CEL directly to Rust via a macro, rather than to
   runtime segments. `cel-rs-macros` — already a proc-macro crate that parses CEL at compile
   time — is the likely home for this, though that's not committed.
@@ -48,7 +49,8 @@ for release/performance. That second path does not yet exist.
   D3 graph view already uses (see
   `docs/superpowers/specs/2026-07-10-begin-graph-pan-zoom-design.md`). Needs arithmetic ops for
   these types plus method-call support (above) for operations like clamping scale to a range or
-  clamping a transform's translation to keep a content rect within a viewport.
+  clamping a transform's translation to keep a content rect within a viewport. Another option would
+  be [Euclid](https://docs.rs/euclid/latest/euclid/).
 
 ## property-model
 
@@ -60,6 +62,7 @@ imperative event handlers.
 **Current state:** conditional relationship groups (`when`/`otherwise`) have landed.
 
 **Directions being explored:**
+
 - Planner correctness for single-method relationships and priorities.
 - A way to query which cells are currently pinned by a single-method relationship, so
   callers (i.e. `begin`'s Inspector) can render those as disabled/uneditable widgets.
@@ -77,6 +80,7 @@ constraint systems as source text (`sheet { cell ...; relationship { method ... 
 groups; the only `cel-parser` client so far.
 
 **Directions being explored:**
+
 - General syntax improvements (open-ended, no fixed list yet).
 - Parameterized, composable sheets: treating a `sheet` definition as a reusable relationship
   template that can be instantiated by name with cell arguments, e.g.:
