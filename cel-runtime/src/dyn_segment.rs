@@ -44,6 +44,14 @@ impl Drop for DynCallGuard {
 /// element list (empty for non-tuple values).
 pub type RawDropper = unsafe fn(*mut u8, &[AssociatedType]);
 
+/// Reads and clones a value of some fixed type from `ptr`, boxing it as
+/// `Box<dyn Any>`.
+///
+/// # Safety
+/// `ptr` must point to a valid, live, properly aligned value of the type this
+/// function was generated for.
+pub type BoxExtractor = unsafe fn(*const u8) -> Box<dyn Any>;
+
 /// Recursive type node carrying a [`TypeId`], display name, byte layout, and
 /// an in-place dropper — describes one element of a tuple (or, nested, one
 /// element of a tuple element).
@@ -767,6 +775,95 @@ impl DynSegment {
         unsafe { self.segment.call0() }
     }
 
+    /// Executes the segment once and splits its tuple result into one boxed value
+    /// per element, using `extractors[i].1` to read element `i`, after checking that
+    /// `extractors[i].0` matches element `i`'s runtime type.
+    ///
+    /// Unlike [`tuple_index`](Self::tuple_index), which permanently specializes a
+    /// segment to extract one fixed element at parse time, this runs the segment
+    /// exactly once at call time and reads every element from that one evaluation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if:
+    /// - The segment requires pre-loaded arguments (created with a non-unit `Args` type).
+    /// - The stack does not contain exactly one value after expression compilation.
+    /// - That value is not a tuple, or its arity does not equal `extractors.len()`.
+    /// - Element `i`'s runtime `TypeId` does not equal `extractors[i].0`.
+    /// - Any op returns an error during execution.
+    ///
+    /// - Complexity: O(n) in the number of ops, plus O(extractors.len()) to split the result.
+    pub fn call_dyn_tuple(
+        &mut self,
+        inputs: &[&dyn Any],
+        extractors: &[(TypeId, BoxExtractor)],
+    ) -> anyhow::Result<Vec<Box<dyn Any>>> {
+        ensure!(
+            self.argument_ids.is_empty(),
+            "call_dyn_tuple: segment requires {} pre-loaded argument(s); \
+             use call_dyn_tuple only with push_arg-based segments",
+            self.argument_ids.len()
+        );
+        ensure!(
+            self.stack_ids.len() == 1,
+            "call_dyn_tuple: expected exactly 1 value on stack, got {}",
+            self.stack_ids.len()
+        );
+        let info = &self.stack_ids[0];
+        ensure!(
+            info.type_id == TypeId::of::<DynTuple>(),
+            "call_dyn_tuple: expected a tuple result, got {}",
+            info.type_name,
+        );
+        ensure!(
+            info.associated.len() == extractors.len(),
+            "call_dyn_tuple: tuple has {} element(s) but {} extractor(s) were supplied",
+            info.associated.len(),
+            extractors.len(),
+        );
+        for (i, (elem, (expected_type_id, _))) in info.associated.iter().zip(extractors).enumerate()
+        {
+            ensure!(
+                elem.type_id == *expected_type_id,
+                "call_dyn_tuple: element {i} type mismatch: expected type {:?}, got `{}`",
+                expected_type_id,
+                elem.type_name,
+            );
+        }
+
+        let tuple_size = info.size;
+        let tuple_padding = info.padding;
+        let associated = info.associated.clone();
+
+        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
+        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
+        let _guard = DynCallGuard;
+
+        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
+        // Safety: the checks above verified the segment builds exactly one tuple
+        // value with `extractors.len()` matching elements; call_dyn's own argument
+        // preconditions (no pre-loaded arguments) hold identically here.
+        unsafe {
+            self.segment.call0_stack(&mut stack)?;
+        }
+
+        let tuple_base = stack.len() - tuple_size;
+        let results: Vec<Box<dyn Any>> = associated
+            .iter()
+            .zip(extractors)
+            .map(|(elem, (_, extractor))| unsafe {
+                stack.read_at(tuple_base + elem.offset, |ptr| extractor(ptr))
+            })
+            .collect();
+
+        unsafe {
+            stack.drop_at(tuple_base, |ptr| drop_tuple(ptr, &associated));
+            stack.truncate_to(tuple_base, tuple_padding);
+        }
+
+        Ok(results)
+    }
+
     /// Pushes a unary operation that takes one argument of type T and returns a value of type R.
     ///
     /// Verifies that the top of the type stack matches the expected input type T
@@ -1328,6 +1425,127 @@ mod tests {
             "error message should propagate op error: {msg}"
         );
         Ok(())
+    }
+
+    unsafe fn extract_u32(ptr: *const u8) -> Box<dyn Any> {
+        unsafe { Box::new(*ptr.cast::<u32>()) }
+    }
+
+    unsafe fn extract_str(ptr: *const u8) -> Box<dyn Any> {
+        unsafe { Box::new(*ptr.cast::<&'static str>()) }
+    }
+
+    #[test]
+    fn call_dyn_tuple_splits_result_into_boxed_elements() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 10u32);
+        seg.op0(|| "hello");
+        seg.make_tuple(2, ambient_start);
+
+        let extractors = [
+            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
+            (TypeId::of::<&'static str>(), extract_str as BoxExtractor),
+        ];
+        let results = seg.call_dyn_tuple(&[], &extractors)?;
+        assert_eq!(results.len(), 2);
+        assert_eq!(*results[0].downcast_ref::<u32>().unwrap(), 10);
+        assert_eq!(*results[1].downcast_ref::<&'static str>().unwrap(), "hello");
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_tuple_is_repeatable() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1u32);
+        seg.op0(|| 2u32);
+        seg.make_tuple(2, ambient_start);
+
+        let extractors = [
+            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
+            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
+        ];
+        let r1 = seg.call_dyn_tuple(&[], &extractors)?;
+        let r2 = seg.call_dyn_tuple(&[], &extractors)?;
+        assert_eq!(*r1[0].downcast_ref::<u32>().unwrap(), 1);
+        assert_eq!(*r2[1].downcast_ref::<u32>().unwrap(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_tuple_errors_if_result_is_not_a_tuple() {
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 5u32);
+        let extractors = [(TypeId::of::<u32>(), extract_u32 as BoxExtractor)];
+        let result = seg.call_dyn_tuple(&[], &extractors);
+        assert!(result.is_err(), "expected Err when result is not a tuple");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("tuple"),
+            "error message should mention tuple: {msg}"
+        );
+    }
+
+    #[test]
+    fn call_dyn_tuple_errors_on_arity_mismatch() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1u32);
+        seg.op0(|| 2u32);
+        seg.make_tuple(2, ambient_start);
+
+        let extractors = [(TypeId::of::<u32>(), extract_u32 as BoxExtractor)];
+        let result = seg.call_dyn_tuple(&[], &extractors);
+        assert!(result.is_err(), "expected Err on arity mismatch");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("2") && msg.contains("1"),
+            "error should mention both arities: {msg}"
+        );
+    }
+
+    #[test]
+    fn call_dyn_tuple_errors_on_element_type_mismatch() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1u32);
+        seg.op0(|| 2u32);
+        seg.make_tuple(2, ambient_start);
+
+        // Element 1 is u32 at runtime, but the extractor table claims &str.
+        let extractors = [
+            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
+            (TypeId::of::<&'static str>(), extract_str as BoxExtractor),
+        ];
+        let result = seg.call_dyn_tuple(&[], &extractors);
+        assert!(result.is_err(), "expected Err on element type mismatch");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("type mismatch"),
+            "error should mention type mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn call_dyn_tuple_errors_if_op_returns_error() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1u32);
+        seg.op0r(|| -> anyhow::Result<u32> { Err(anyhow::anyhow!("op failed deliberately")) });
+        seg.make_tuple(2, ambient_start);
+
+        let extractors = [
+            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
+            (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
+        ];
+        let result = seg.call_dyn_tuple(&[], &extractors);
+        assert!(result.is_err(), "expected Err when op fails");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("op failed"),
+            "error message should propagate op error: {msg}"
+        );
     }
 
     #[test]

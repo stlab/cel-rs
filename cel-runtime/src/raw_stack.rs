@@ -141,6 +141,20 @@ impl RawStack {
         unsafe { run_drop(self.buffer.as_mut_ptr().add(offset).cast::<u8>()) };
     }
 
+    /// Reads a value at absolute buffer offset `offset`, given a callback that
+    /// receives a pointer to its bytes.
+    ///
+    /// - Precondition: `offset` points to a live, valid, properly-aligned value.
+    /// - Precondition: `read` does not retain the pointer beyond the call.
+    ///
+    /// # Safety
+    /// `offset` must point to a live, valid, properly-aligned value for the type the
+    /// caller will reinterpret it as; `read` must not retain the pointer beyond the
+    /// call.
+    pub unsafe fn read_at<R>(&self, offset: usize, read: impl FnOnce(*const u8) -> R) -> R {
+        unsafe { read(self.buffer.as_ptr().add(offset).cast::<u8>()) }
+    }
+
     /// Truncates the stack back to `new_len`, additionally stripping `padding`
     /// bytes that preceded the removed region (scanned the same way
     /// [`pop`](Self::pop) does).
@@ -392,6 +406,17 @@ mod tests {
         let mut buf = [0u8; 4];
         unsafe { stack.copy_from(0, 4, buf.as_mut_ptr().cast::<MaybeUninit<u8>>()) };
         assert_eq!(u32::from_ne_bytes(buf), 10);
+    }
+
+    #[test]
+    fn read_at_gives_a_pointer_to_the_value_without_copying() {
+        let mut stack = RawStack::with_base_alignment(align_of::<u32>());
+        let _ = stack.push(10u32);
+        let _ = stack.push(20u32);
+        let first: u32 = unsafe { stack.read_at(0, |ptr| *ptr.cast::<u32>()) };
+        let second: u32 = unsafe { stack.read_at(4, |ptr| *ptr.cast::<u32>()) };
+        assert_eq!(first, 10);
+        assert_eq!(second, 20);
     }
 
     #[test]
