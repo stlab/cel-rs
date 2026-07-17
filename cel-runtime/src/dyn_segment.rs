@@ -786,6 +786,15 @@ impl DynSegment {
     /// segment to extract one fixed element at parse time, this runs the segment
     /// exactly once at call time and reads every element from that one evaluation.
     ///
+    /// # Safety
+    /// Every `extractors[i].1` must satisfy [`BoxExtractor`]'s contract: it must clone
+    /// the value at the pointer it's given rather than take ownership of it (e.g. via
+    /// a move or `ptr::read`). This method checks that `extractors[i].0` matches
+    /// element `i`'s runtime `TypeId`, but it cannot check what the function pointer
+    /// actually does with the pointer — an extractor that moves instead of clones
+    /// causes a double-drop once this method drops the tuple's original bytes
+    /// afterward.
+    ///
     /// # Errors
     ///
     /// Returns `Err` if:
@@ -796,7 +805,7 @@ impl DynSegment {
     /// - Any op returns an error during execution.
     ///
     /// - Complexity: O(n) in the number of ops, plus O(extractors.len()) to split the result.
-    pub fn call_dyn_tuple(
+    pub unsafe fn call_dyn_tuple(
         &mut self,
         inputs: &[&dyn Any],
         extractors: &[(TypeId, BoxExtractor)],
@@ -1450,7 +1459,7 @@ mod tests {
             (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
             (TypeId::of::<&'static str>(), extract_str as BoxExtractor),
         ];
-        let results = seg.call_dyn_tuple(&[], &extractors)?;
+        let results = unsafe { seg.call_dyn_tuple(&[], &extractors) }?;
         assert_eq!(results.len(), 2);
         assert_eq!(*results[0].downcast_ref::<u32>().unwrap(), 10);
         assert_eq!(*results[1].downcast_ref::<&'static str>().unwrap(), "hello");
@@ -1469,8 +1478,8 @@ mod tests {
             (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
             (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
         ];
-        let r1 = seg.call_dyn_tuple(&[], &extractors)?;
-        let r2 = seg.call_dyn_tuple(&[], &extractors)?;
+        let r1 = unsafe { seg.call_dyn_tuple(&[], &extractors) }?;
+        let r2 = unsafe { seg.call_dyn_tuple(&[], &extractors) }?;
         assert_eq!(*r1[0].downcast_ref::<u32>().unwrap(), 1);
         assert_eq!(*r2[1].downcast_ref::<u32>().unwrap(), 2);
         Ok(())
@@ -1481,7 +1490,7 @@ mod tests {
         let mut seg = DynSegment::new::<()>();
         seg.op0(|| 5u32);
         let extractors = [(TypeId::of::<u32>(), extract_u32 as BoxExtractor)];
-        let result = seg.call_dyn_tuple(&[], &extractors);
+        let result = unsafe { seg.call_dyn_tuple(&[], &extractors) };
         assert!(result.is_err(), "expected Err when result is not a tuple");
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -1499,7 +1508,7 @@ mod tests {
         seg.make_tuple(2, ambient_start);
 
         let extractors = [(TypeId::of::<u32>(), extract_u32 as BoxExtractor)];
-        let result = seg.call_dyn_tuple(&[], &extractors);
+        let result = unsafe { seg.call_dyn_tuple(&[], &extractors) };
         assert!(result.is_err(), "expected Err on arity mismatch");
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -1521,7 +1530,7 @@ mod tests {
             (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
             (TypeId::of::<&'static str>(), extract_str as BoxExtractor),
         ];
-        let result = seg.call_dyn_tuple(&[], &extractors);
+        let result = unsafe { seg.call_dyn_tuple(&[], &extractors) };
         assert!(result.is_err(), "expected Err on element type mismatch");
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -1542,7 +1551,7 @@ mod tests {
             (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
             (TypeId::of::<u32>(), extract_u32 as BoxExtractor),
         ];
-        let result = seg.call_dyn_tuple(&[], &extractors);
+        let result = unsafe { seg.call_dyn_tuple(&[], &extractors) };
         assert!(result.is_err(), "expected Err when op fails");
         let msg = result.unwrap_err().to_string();
         assert!(

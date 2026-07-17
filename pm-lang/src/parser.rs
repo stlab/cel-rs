@@ -864,7 +864,12 @@ fn build_method(
             let seg = &mut *segment.borrow_mut();
             match &compiled {
                 CompiledOutputs::Single(call_fn) => Ok(vec![call_fn(seg, inputs_any)?]),
-                CompiledOutputs::Tuple(extractors) => seg.call_dyn_tuple(inputs_any, extractors),
+                CompiledOutputs::Tuple(extractors) => {
+                    // Safety: every extractor here is `extract_box_impl::<T>` (via
+                    // `TypeEntry::extract_box_fn`), which clones rather than moves —
+                    // satisfying `call_dyn_tuple`'s contract.
+                    unsafe { seg.call_dyn_tuple(inputs_any, extractors) }
+                }
             }
         };
 

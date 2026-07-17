@@ -372,6 +372,24 @@ mod tests {
     }
 
     #[test]
+    fn extract_box_fn_clones_string_independently_of_original() {
+        let reg = TypeRegistry::new();
+        let entry = reg.get("String").unwrap();
+        let original = String::from("hello world, this is heap allocated");
+        let original_ptr = original.as_ptr();
+        let boxed = unsafe { (entry.extract_box_fn)((&original as *const String).cast::<u8>()) };
+        let extracted: Box<String> = boxed.downcast::<String>().expect("String");
+        assert_eq!(*extracted, original);
+        assert_ne!(
+            extracted.as_ptr(),
+            original_ptr,
+            "extract_box_fn must clone (new heap allocation), not move out the original's buffer"
+        );
+        // `original` is still independently valid and droppable here — proving it wasn't
+        // moved out from under us. Both `original` and `extracted` drop safely at scope end.
+    }
+
+    #[test]
     fn entry_by_type_id_roundtrip() {
         let reg = TypeRegistry::new();
         let entry = reg

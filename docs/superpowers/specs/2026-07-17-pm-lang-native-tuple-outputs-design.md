@@ -94,8 +94,11 @@ impl DynSegment {
     /// Executes the segment once and splits its tuple result into one boxed value
     /// per element, using `extractors[i]` to read element `i`.
     ///
-    /// - Precondition: the segment requires no pre-loaded arguments (as `call_dyn`).
-    /// - Precondition: `extractors[i]` matches element `i`'s runtime type.
+    /// # Safety
+    /// Every `extractors[i].1` must satisfy `BoxExtractor`'s contract (clone, not
+    /// move) — this method checks `extractors[i].0` against each element's runtime
+    /// `TypeId`, but cannot check what the function pointer actually does with the
+    /// pointer it's given.
     ///
     /// # Errors
     /// Returns `Err` if any op fails, the result isn't a tuple, or the tuple's arity
@@ -103,13 +106,20 @@ impl DynSegment {
     ///
     /// - Complexity: O(n) in the number of ops, plus O(extractors.len()) to split
     ///   the result.
-    pub fn call_dyn_tuple(
+    pub unsafe fn call_dyn_tuple(
         &mut self,
         inputs: &[&dyn Any],
         extractors: &[(TypeId, BoxExtractor)],
     ) -> anyhow::Result<Vec<Box<dyn Any>>>;
 }
 ```
+
+`call_dyn_tuple` is `unsafe fn`, not a safe wrapper: it receives caller-supplied
+`BoxExtractor` function pointers and cannot verify their behavior (only their
+declared `TypeId`), so a caller whose extractor moves instead of clones can still
+trigger UB. Every current call site (`build_method`'s closure in pm-lang) is sound
+because its extractors all come from `TypeEntry::extract_box_fn`, which is always
+`extract_box_impl::<T>` — a genuine clone.
 
 Implementation: validate preconditions (`argument_ids.is_empty()`, `stack_ids.len() ==
 1`, top is `DynTuple`, `associated.len() == extractors.len()`) — same style as
