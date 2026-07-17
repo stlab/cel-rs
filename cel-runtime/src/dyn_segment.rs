@@ -49,7 +49,10 @@ pub type RawDropper = unsafe fn(*mut u8, &[AssociatedType]);
 ///
 /// # Safety
 /// `ptr` must point to a valid, live, properly aligned value of the type this
-/// function was generated for.
+/// function was generated for. The implementation must clone the value rather than
+/// take ownership of it via a move or `ptr::read`, because the caller retains the
+/// original bytes and drops them itself afterward — an implementation that moves out
+/// of `ptr` instead of cloning causes a double-drop.
 pub type BoxExtractor = unsafe fn(*const u8) -> Box<dyn Any>;
 
 /// Recursive type node carrying a [`TypeId`], display name, byte layout, and
