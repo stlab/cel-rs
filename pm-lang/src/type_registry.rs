@@ -20,7 +20,7 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
-use cel_runtime::DynSegment;
+use cel_runtime::{BoxExtractor, DynSegment};
 use property_model::{CellId, ConditionalId, RelationshipId, Sheet};
 
 /// Registers a `push_arg<T>(index)` op on a segment.
@@ -55,6 +55,9 @@ pub struct TypeEntry {
     pub add_cell_fn: AddCellFn,
     /// Calls `DynSegment::call_dyn::<T>` and boxes the result.
     pub call_dyn_fn: CallDynFn,
+    /// Reads and clones a `T` from a raw pointer into a type-erased box; used to
+    /// split a multi-output method's tuple result into per-cell values.
+    pub extract_box_fn: BoxExtractor,
     /// Constructs a default `T` if the type implements `Default`; otherwise `None`.
     pub default_fn: Option<fn() -> Box<dyn Any>>,
     /// Calls `Sheet::add_conditional::<T>` with type-erased branch keys.
@@ -116,6 +119,14 @@ fn call_dyn_impl<T: 'static + Clone>(
     Ok(Box::new(seg.call_dyn::<T>(inputs)?))
 }
 
+/// Reads and clones a `T` from `ptr`, boxing it as `Box<dyn Any>`.
+///
+/// # Safety
+/// `ptr` must point to a valid, live, properly aligned `T`.
+unsafe fn extract_box_impl<T: Clone + 'static>(ptr: *const u8) -> Box<dyn Any> {
+    Box::new(unsafe { (*ptr.cast::<T>()).clone() })
+}
+
 impl TypeRegistry {
     /// Creates a registry pre-populated with all built-in CEL/Rust primitive types.
     ///
@@ -171,6 +182,7 @@ impl TypeRegistry {
                 push_arg_fn: push_arg_impl::<T>,
                 add_cell_fn: add_cell_impl::<T>,
                 call_dyn_fn: call_dyn_impl::<T>,
+                extract_box_fn: extract_box_impl::<T>,
                 default_fn: Some(|| Box::new(T::default()) as Box<dyn Any>),
                 add_conditional_fn: add_conditional_impl::<T>,
             },
@@ -208,6 +220,7 @@ impl TypeRegistry {
                 push_arg_fn: push_arg_impl::<T>,
                 add_cell_fn: add_cell_impl::<T>,
                 call_dyn_fn: call_dyn_impl::<T>,
+                extract_box_fn: extract_box_impl::<T>,
                 default_fn: None,
                 add_conditional_fn: add_conditional_impl::<T>,
             },
@@ -346,6 +359,34 @@ mod tests {
         let boxed = (entry.call_dyn_fn)(&mut seg, &[&x as &dyn Any]).unwrap();
         let result = boxed.downcast::<i32>().expect("i32");
         assert_eq!(*result, 99);
+    }
+
+    #[test]
+    fn extract_box_fn_reads_and_clones_value() {
+        let reg = TypeRegistry::new();
+        let entry = reg.get("i32").unwrap();
+        let value: i32 = 42;
+        let boxed = unsafe { (entry.extract_box_fn)((&value as *const i32).cast::<u8>()) };
+        let result: Box<i32> = boxed.downcast::<i32>().expect("i32");
+        assert_eq!(*result, 42);
+    }
+
+    #[test]
+    fn extract_box_fn_clones_string_independently_of_original() {
+        let reg = TypeRegistry::new();
+        let entry = reg.get("String").unwrap();
+        let original = String::from("hello world, this is heap allocated");
+        let original_ptr = original.as_ptr();
+        let boxed = unsafe { (entry.extract_box_fn)((&original as *const String).cast::<u8>()) };
+        let extracted: Box<String> = boxed.downcast::<String>().expect("String");
+        assert_eq!(*extracted, original);
+        assert_ne!(
+            extracted.as_ptr(),
+            original_ptr,
+            "extract_box_fn must clone (new heap allocation), not move out the original's buffer"
+        );
+        // `original` is still independently valid and droppable here — proving it wasn't
+        // moved out from under us. Both `original` and `extracted` drop safely at scope end.
     }
 
     #[test]
