@@ -1014,6 +1014,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_and_propagate_multi_output_tuple_sheet() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+            sheet s {
+                cell a:    i32 = 3;
+                cell b:    i32 = 4;
+                cell sum:  i32;
+                cell diff: i32;
+                relationship { method [a, b] -> [sum, diff] { (a + b, a - b) } }
+            }
+        "#,
+            )
+            .unwrap();
+
+        // sum = a + b = 7, diff = a - b = -1. We can't read cells by name yet
+        // (no name->CellId API on Sheet), so we verify the sheet propagated
+        // without error, which exercises the CompiledOutputs::Tuple runtime
+        // path end to end (RefCell wrapping + seg.call_dyn_tuple). A future
+        // test can assert specific cell values once a name-lookup API exists.
+        sheet.propagate().unwrap();
+        let _ = sheet; // sheet is live and propagated
+    }
+
+    #[test]
     fn parse_method_output_tuple_arity_mismatch_is_error() {
         let result = parser().parse_str(
             r#"

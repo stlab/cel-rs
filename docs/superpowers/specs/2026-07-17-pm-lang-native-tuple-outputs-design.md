@@ -106,7 +106,7 @@ impl DynSegment {
     pub fn call_dyn_tuple(
         &mut self,
         inputs: &[&dyn Any],
-        extractors: &[BoxExtractor],
+        extractors: &[(TypeId, BoxExtractor)],
     ) -> anyhow::Result<Vec<Box<dyn Any>>>;
 }
 ```
@@ -154,7 +154,7 @@ CompiledOutputs)`:
 ```rust
 enum CompiledOutputs {
     Single(CallDynFn),
-    Tuple(Vec<cel_runtime::BoxExtractor>),
+    Tuple(Vec<(TypeId, cel_runtime::BoxExtractor)>),
 }
 ```
 

@@ -144,9 +144,6 @@ impl RawStack {
     /// Reads a value at absolute buffer offset `offset`, given a callback that
     /// receives a pointer to its bytes.
     ///
-    /// - Precondition: `offset` points to a live, valid, properly-aligned value.
-    /// - Precondition: `read` does not retain the pointer beyond the call.
-    ///
     /// # Safety
     /// `offset` must point to a live, valid, properly-aligned value for the type the
     /// caller will reinterpret it as; `read` must not retain the pointer beyond the
