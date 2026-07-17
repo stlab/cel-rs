@@ -11,9 +11,7 @@
 //! relationship_decl = "relationship" [ identifier ] "{" { method_decl } "}".
 //! method_decl = "method" cell_list "->" cell_list method_body.
 //! cell_list   = "[" identifier { "," identifier } "]".
-//! method_body = "{" output_list "}".
-//! output_list = "(" or_expression "," or_expression { "," or_expression } ")"
-//!             | or_expression.
+//! method_body = "{" or_expression "}".
 //! conditional_decl   = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".
 //! conditional_branch = literal "=>" "{" { method_decl } "}" [ "," ].
 //! default_branch     = "_"   "=>" "{" { method_decl } "}" [ "," ].
@@ -28,7 +26,7 @@ use indexmap::IndexMap;
 
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Literal, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
-use cel_runtime::DynSegment;
+use cel_runtime::{BoxExtractor, DynSegment};
 use proc_macro2::{Delimiter, Span, TokenStream};
 use property_model::{CellId, Method, RelationshipId, Sheet};
 
@@ -251,30 +249,6 @@ impl ParseContext {
         }
     }
 
-    fn consume_open_paren(&mut self) -> bool {
-        let ok = matches!(
-            self.tokens.as_mut().and_then(|t| t.peek()),
-            Some(Token::OpenDelim {
-                delimiter: Delimiter::Parenthesis,
-                ..
-            })
-        );
-        if ok {
-            self.advance();
-        }
-        ok
-    }
-
-    fn peek_close_paren(&mut self) -> bool {
-        matches!(
-            self.tokens.as_mut().and_then(|t| t.peek()),
-            Some(Token::CloseDelim {
-                delimiter: Delimiter::Parenthesis,
-                ..
-            })
-        )
-    }
-
     /// Consumes and returns a literal token.
     ///
     /// # Errors
@@ -350,7 +324,8 @@ impl PmParser {
     ///
     /// Returns `Err` on any syntax error, unknown type name, type mismatch between a
     /// cell annotation and its initializer, undeclared cell name in a method cell list,
-    /// or arity mismatch in an `output_list` tuple.
+    /// or a tuple arity/element-type mismatch between the output expression and the
+    /// method's declared outputs.
     pub fn parse_str(&mut self, source: &str) -> Result<ParsedSheet> {
         let stream =
             TokenStream::from_str(source).map_err(|e| ParseError::new(e.to_string(), e.span()))?;
@@ -549,8 +524,8 @@ impl PmParser {
         let inputs = self.parse_cell_list(ctx)?;
         ctx.expect_punct("->")?;
         let outputs = self.parse_cell_list(ctx)?;
-        let (segments, call_fns) = self.parse_method_body(ctx, &inputs, &outputs)?;
-        Ok(build_method(inputs, outputs, segments, call_fns))
+        let (segment, compiled) = self.parse_method_body(ctx, &inputs, &outputs)?;
+        Ok(build_method(inputs, outputs, segment, compiled))
     }
 
     /// `cell_list = "[" identifier { "," identifier } "]".`
@@ -573,15 +548,18 @@ impl PmParser {
         Ok(cells)
     }
 
-    /// `method_body = "{" output_list "}".`
+    /// `method_body = "{" or_expression "}".`
     ///
-    /// Returns `(segments, call_dyn_fns)` — one segment and one `call_dyn_fn` per output.
+    /// Returns the compiled body segment and how to split its result across `outputs`:
+    /// one output takes the segment's single result directly; more than one requires
+    /// the result to be a tuple of matching arity and element types, split via
+    /// `call_dyn_tuple`.
     fn parse_method_body(
         &mut self,
         ctx: &mut ParseContext,
         inputs: &[(String, CellId, TypeId)],
         outputs: &[(String, CellId, TypeId)],
-    ) -> Result<(Vec<DynSegment>, Vec<CallDynFn>)> {
+    ) -> Result<(DynSegment, CompiledOutputs)> {
         ctx.expect_open_brace()?;
 
         // Pre-compute push_arg dispatch table for input scope.
@@ -614,29 +592,16 @@ impl PmParser {
                 Ok(false)
             });
 
-        let result = self.parse_output_list(ctx);
+        let result = self.parse_cel_or_expression(ctx);
         self.cel.op_lookup_mut().pop_scope();
-        let segments = result?;
+        let segment = result?;
 
         ctx.expect_close_brace()?;
 
-        if segments.len() != outputs.len() {
-            return Err(ctx.err_at(format!(
-                "output list has {} expression(s) but method declares {} output(s)",
-                segments.len(),
-                outputs.len()
-            )));
-        }
-
-        // Verify output types and collect call_dyn_fn per output.
-        let mut call_fns = Vec::with_capacity(outputs.len());
-        for (i, (seg, (out_name, _, out_type_id))) in
-            segments.iter().zip(outputs.iter()).enumerate()
-        {
-            let actual_type_id = seg.peek_output_type_id().ok_or_else(|| {
-                ctx.err_at(format!(
-                    "output {i} `{out_name}`: expression produced no value"
-                ))
+        let compiled = if outputs.len() == 1 {
+            let (out_name, _, out_type_id) = &outputs[0];
+            let actual_type_id = segment.peek_output_type_id().ok_or_else(|| {
+                ctx.err_at(format!("output `{out_name}`: expression produced no value"))
             })?;
             if actual_type_id != *out_type_id {
                 let expected = self
@@ -650,7 +615,7 @@ impl PmParser {
                     .map(|e| e.type_name)
                     .unwrap_or("?");
                 return Err(ctx.err_at(format!(
-                    "output {i} `{out_name}`: type mismatch: expected `{expected}`, got `{got}`"
+                    "output `{out_name}`: type mismatch: expected `{expected}`, got `{got}`"
                 )));
             }
             let call_fn = self
@@ -658,34 +623,50 @@ impl PmParser {
                 .entry_by_type_id(*out_type_id)
                 .expect("output cell type registered")
                 .call_dyn_fn;
-            call_fns.push(call_fn);
-        }
-
-        Ok((segments, call_fns))
-    }
-
-    /// `output_list = "(" or_expression "," or_expression { "," or_expression } ")" | or_expression.`
-    fn parse_output_list(&mut self, ctx: &mut ParseContext) -> Result<Vec<DynSegment>> {
-        if ctx.consume_open_paren() {
-            let seg1 = self.parse_cel_or_expression(ctx)?;
-            if ctx.peek_close_paren() {
-                ctx.advance(); // parenthesized single expression — not a tuple
-                return Ok(vec![seg1]);
-            }
-            ctx.expect_punct(",")?;
-            let mut segs = vec![seg1];
-            loop {
-                segs.push(self.parse_cel_or_expression(ctx)?);
-                if ctx.peek_close_paren() {
-                    ctx.advance();
-                    break;
-                }
-                ctx.expect_punct(",")?;
-            }
-            Ok(segs)
+            CompiledOutputs::Single(call_fn)
         } else {
-            Ok(vec![self.parse_cel_or_expression(ctx)?])
-        }
+            let arity = segment.peek_tuple_arity().unwrap_or(0);
+            if arity != outputs.len() {
+                return Err(ctx.err_at(format!(
+                    "output expression has arity {arity} but method declares {} output(s)",
+                    outputs.len()
+                )));
+            }
+            let element_type_ids: Vec<TypeId> = segment.peek_stack_infos(1)[0]
+                .associated
+                .iter()
+                .map(|a| a.type_id)
+                .collect();
+
+            let mut extractors = Vec::with_capacity(outputs.len());
+            for (i, ((out_name, _, out_type_id), actual_type_id)) in
+                outputs.iter().zip(&element_type_ids).enumerate()
+            {
+                if actual_type_id != out_type_id {
+                    let expected = self
+                        .types
+                        .entry_by_type_id(*out_type_id)
+                        .map(|e| e.type_name)
+                        .unwrap_or("?");
+                    let got = self
+                        .types
+                        .entry_by_type_id(*actual_type_id)
+                        .map(|e| e.type_name)
+                        .unwrap_or("?");
+                    return Err(ctx.err_at(format!(
+                        "output {i} `{out_name}`: type mismatch: expected `{expected}`, got `{got}`"
+                    )));
+                }
+                let entry = self
+                    .types
+                    .entry_by_type_id(*out_type_id)
+                    .expect("output cell type registered");
+                extractors.push((*out_type_id, entry.extract_box_fn));
+            }
+            CompiledOutputs::Tuple(extractors)
+        };
+
+        Ok((segment, compiled))
     }
 
     /// Delegates one `or_expression` to CELParser, sharing the token stream.
@@ -852,30 +833,39 @@ fn infer_and_parse_literal(
     }
 }
 
-/// Builds a [`Method`] from parsed inputs, outputs, compiled segments, and call_dyn functions.
+/// How to turn one compiled `or_expression`'s result into per-output values.
+enum CompiledOutputs {
+    /// One output: the segment's single result, boxed via `call_dyn`.
+    Single(CallDynFn),
+    /// N > 1 outputs: the segment's tuple result, split via `call_dyn_tuple`. Each
+    /// entry pairs an output's expected `TypeId` with the extractor that reads it.
+    Tuple(Vec<(TypeId, BoxExtractor)>),
+}
+
+/// Builds a [`Method`] from parsed inputs, outputs, the compiled body segment, and how
+/// to split its result across `outputs`.
 fn build_method(
     inputs: Vec<(String, CellId, TypeId)>,
     outputs: Vec<(String, CellId, TypeId)>,
-    segments: Vec<DynSegment>,
-    call_fns: Vec<CallDynFn>,
+    segment: DynSegment,
+    compiled: CompiledOutputs,
 ) -> Method {
     let input_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
     let output_ids: Vec<CellId> = outputs.iter().map(|(_, id, _)| *id).collect();
     let input_types: Vec<TypeId> = inputs.iter().map(|(_, _, tid)| *tid).collect();
     let output_types: Vec<TypeId> = outputs.iter().map(|(_, _, tid)| *tid).collect();
 
-    // Wrap each segment in RefCell: MethodFn is Fn (not FnMut), so interior mutability
-    // is required to call call_dyn(&mut self) from an immutable closure reference.
-    let cells: Vec<RefCell<DynSegment>> = segments.into_iter().map(RefCell::new).collect();
+    // Wrap in RefCell: MethodFn is Fn (not FnMut), so interior mutability is required
+    // to call call_dyn/call_dyn_tuple(&mut self) from an immutable closure reference.
+    let segment = RefCell::new(segment);
 
     let f =
         move |inputs_any: &[&dyn Any]| -> std::result::Result<Vec<Box<dyn Any>>, anyhow::Error> {
-            let mut results = Vec::with_capacity(cells.len());
-            for (cell, call_fn) in cells.iter().zip(call_fns.iter()) {
-                let seg = &mut *cell.borrow_mut();
-                results.push(call_fn(seg, inputs_any)?);
+            let seg = &mut *segment.borrow_mut();
+            match &compiled {
+                CompiledOutputs::Single(call_fn) => Ok(vec![call_fn(seg, inputs_any)?]),
+                CompiledOutputs::Tuple(extractors) => seg.call_dyn_tuple(inputs_any, extractors),
             }
-            Ok(results)
         };
 
     Method::new(input_ids, output_ids, input_types, output_types, f)
@@ -1021,6 +1011,68 @@ mod tests {
         "#,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn parse_method_output_tuple_arity_mismatch_is_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell a: i32 = 1;
+                cell b: i32 = 2;
+                cell x: i32;
+                cell y: i32;
+                cell z: i32;
+                relationship { method [a, b] -> [x, y, z] { (a + b, a - b) } }
+            }
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "2-tuple body for 3 declared outputs must be an error"
+        );
+        let err = result.err().expect("expected Err");
+        let msg = err.message().to_lowercase();
+        assert!(msg.contains("arity"), "{msg}");
+    }
+
+    #[test]
+    fn parse_method_output_tuple_element_type_mismatch_is_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell a: i32 = 1;
+                cell b: f64 = 2.0;
+                cell x: i32;
+                cell y: i32;
+                relationship { method [a, b] -> [x, y] { (a, b) } }
+            }
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "f64 tuple element for an i32 output must be an error"
+        );
+        let err = result.err().expect("expected Err");
+        let msg = err.message().to_lowercase();
+        assert!(msg.contains("type mismatch"), "{msg}");
+    }
+
+    #[test]
+    fn parse_method_single_output_rejects_tuple_body() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell x: i32 = 1;
+                cell y: i32;
+                relationship { method [x] -> [y] { (x,) } }
+            }
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "1-tuple body for a single declared output must be an error"
+        );
     }
 
     #[test]
