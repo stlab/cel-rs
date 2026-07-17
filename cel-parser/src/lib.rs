@@ -88,9 +88,11 @@
 mod error;
 pub mod lex_lexer;
 pub mod op_table;
+pub mod parser_context;
 
 pub use error::{CELError, FormatRustcStyle, ParseError, SourceSpan, SpanContext};
 pub use op_table::OpLookup;
+pub use parser_context::{DynSegmentContext, ParserContext};
 pub use proc_macro2::LineColumn;
 
 use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};
