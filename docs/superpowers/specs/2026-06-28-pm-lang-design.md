@@ -4,6 +4,12 @@
 **Author:** Sean Parent
 **Status:** Approved
 
+> **Superseded in part:** the `output_list` grammar and "Multi-output tuple
+> methods" section below describe pm-lang's original hand-rolled tuple splitting,
+> written before `cel-parser` had native tuple support. See
+> `docs/superpowers/specs/2026-07-17-pm-lang-native-tuple-outputs-design.md` for the
+> current design.
+
 ## Overview
 
 A new `pm-lang` crate implementing a DSL parser for property models. The language is expressed in Wirth EBNF, follows the same lexer conventions as `cel-parser`, and uses `CELParser` for method body expressions. Parsing a pm-lang source string produces a live `Sheet` from the `property-model` crate.
