@@ -576,4 +576,33 @@ mod tests {
         assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
+
+    /// Regression test for a bug where `skip_to_recovery_point`'s fallback token-skipping loop
+    /// adjusted `depth` for *any* `OpenDelim`/`CloseDelim`, regardless of delimiter kind. A
+    /// malformed CEL expression like `(+)` causes the embedded CEL sub-parser to consume the
+    /// opening `(` (via `is_tuple_or_group`) but fail before consuming the matching `)`, since it
+    /// never went through `TokenCursor` (see `TokenCursor::depth`'s own docs). That leftover,
+    /// PM-untracked `)` then reached the old kind-agnostic match during recovery, which decremented
+    /// `depth` for it exactly as if it were a real, PM-tracked `}`/`]` closing — desyncing the
+    /// counter one level below where it should be, and causing recovery to mistake an inner item's
+    /// closing brace for the sheet's own, aborting the whole parse with `Err`.
+    #[test]
+    fn recovery_malformed_cel_expr_with_dangling_paren_recovers() {
+        let sheet = PmAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell good_before: i32 = 1;
+                    relationship { method [a] -> [b] { (+) } }
+                    cell good_after: i32 = 2;
+                }
+            "#,
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
+    }
 }

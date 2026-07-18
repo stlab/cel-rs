@@ -282,6 +282,15 @@ impl TokenCursor {
     /// excess closing delimiters could otherwise dip `depth` below `target_depth` and never
     /// satisfy an exact-equality check.
     ///
+    /// Only `Delimiter::Brace` and `Delimiter::Bracket` affect [`Self::depth`] here, mirroring
+    /// `expect_open_brace`/`expect_close_brace`/`expect_open_bracket`/`expect_close_bracket`.
+    /// `Delimiter::Parenthesis` and `Delimiter::None` are treated as ordinary tokens (consumed,
+    /// no depth change): a CEL sub-expression that fails partway through — e.g. `(+)`, where
+    /// `is_tuple_or_group` consumes `(` but the error occurs before its matching `)` is ever
+    /// reached — can leave a stray, PM-untracked paren in the stream for this method to skip
+    /// past. Treating it as a brace/bracket-equivalent depth change would desync `depth` from
+    /// the real pm-lang nesting it's meant to track.
+    ///
     /// The keyword check matters when the malformed item has no `;` of its own — e.g.
     /// `cell bad unknown_syntax` immediately followed by a sibling `cell` declaration — so
     /// recovery stops before the next item instead of skipping past it in search of a `;`
@@ -301,13 +310,22 @@ impl TokenCursor {
             let at_or_below_target = self.depth <= target_depth;
             match self.peek_token() {
                 None => return last,
-                Some(Token::CloseDelim { .. }) if at_or_below_target => return last,
-                Some(Token::CloseDelim { .. }) => {
+                Some(Token::CloseDelim {
+                    delimiter: Delimiter::Brace | Delimiter::Bracket,
+                    ..
+                }) if at_or_below_target => return last,
+                Some(Token::CloseDelim {
+                    delimiter: Delimiter::Brace | Delimiter::Bracket,
+                    ..
+                }) => {
                     self.depth -= 1;
                     last = self.peek_span();
                     self.advance();
                 }
-                Some(Token::OpenDelim { .. }) => {
+                Some(Token::OpenDelim {
+                    delimiter: Delimiter::Brace | Delimiter::Bracket,
+                    ..
+                }) => {
                     self.depth += 1;
                     last = self.peek_span();
                     self.advance();
