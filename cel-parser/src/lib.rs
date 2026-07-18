@@ -358,8 +358,8 @@ impl<C: ParserContext> Parser<C> {
 
     /// Returns the remaining token stream after expression parsing.
     ///
-    /// Call after [`parse_or_expression`](Self::parse_or_expression) to recover the shared
-    /// [`LexLexer`] for continued pm-lang parsing.
+    /// Call after [`parse_or_expression_ctx`](Self::parse_or_expression_ctx) to recover the
+    /// shared [`LexLexer`] for continued pm-lang parsing.
     pub fn take_lex_tokens(&mut self) -> Option<std::iter::Peekable<lex_lexer::LexLexer>> {
         self.tokens.take()
     }
