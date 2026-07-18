@@ -234,4 +234,53 @@ impl TokenCursor {
             }) | None
         )
     }
+
+    /// Skips tokens until a declaration-boundary recovery point: a `;` at the current nesting
+    /// depth (consumed); a `}` that closes back to the current nesting depth (not consumed, so
+    /// the caller's `at_close_brace` check still sees it); or the `cell`/`relationship`/
+    /// `conditional` keyword that starts the next sheet item, at the current nesting depth (not
+    /// consumed). The keyword check matters when the malformed item has no `;` of its own — e.g.
+    /// `cell bad unknown_syntax` immediately followed by a sibling `cell` declaration — so
+    /// recovery stops before the next item instead of skipping past it in search of a `;`
+    /// belonging to that sibling. Used only by [`crate::PmAstParser`]'s coarse error recovery.
+    ///
+    /// - Postcondition: returns the span of the last token inspected, so an `Error` placeholder
+    ///   node can cover the skipped range.
+    ///
+    /// - Complexity: O(n) in the number of tokens skipped.
+    pub(crate) fn skip_to_recovery_point(&mut self) -> Span {
+        let mut last = self.peek_span();
+        let mut depth: i32 = 0;
+        loop {
+            match self.peek_token() {
+                None => return last,
+                Some(Token::CloseDelim { .. }) if depth == 0 => return last,
+                Some(Token::CloseDelim { .. }) => {
+                    depth -= 1;
+                    last = self.peek_span();
+                    self.advance();
+                }
+                Some(Token::OpenDelim { .. }) => {
+                    depth += 1;
+                    last = self.peek_span();
+                    self.advance();
+                }
+                Some(Token::Punct { op, .. }) if op == ";" && depth == 0 => {
+                    last = self.peek_span();
+                    self.advance();
+                    return last;
+                }
+                Some(Token::Identifier(id))
+                    if depth == 0
+                        && (id == "cell" || id == "relationship" || id == "conditional") =>
+                {
+                    return last;
+                }
+                _ => {
+                    last = self.peek_span();
+                    self.advance();
+                }
+            }
+        }
+    }
 }

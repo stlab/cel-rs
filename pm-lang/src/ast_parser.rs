@@ -48,10 +48,18 @@ impl PmAstParser {
 
     /// Parses a pm-lang source string into an [`ast::Sheet`].
     ///
+    /// A syntax error inside one `cell`/`relationship`/`conditional` item is recorded in
+    /// `Sheet.errors` and replaced by a `SheetItem::Error` placeholder covering the skipped
+    /// tokens; parsing resumes at the next sheet item instead of aborting (see
+    /// [`TokenCursor::skip_to_recovery_point`]). This recovery is declaration-level only: a
+    /// malformed `method_decl` inside a `relationship`/`conditional` block causes the whole
+    /// enclosing item to become one `SheetItem::Error`.
+    ///
     /// # Errors
     ///
-    /// Returns `Err` on any syntax error. (Coarse recovery — continuing past a malformed
-    /// declaration instead of aborting — lands in a later task of this same plan.)
+    /// Returns `Err` for structural errors outside any sheet item (e.g. a missing `sheet`
+    /// keyword, missing sheet name, missing top-level braces, or trailing tokens after the
+    /// sheet closes) — these can't be attributed to a single recoverable item.
     pub fn parse_str(&mut self, source: &str) -> Result<ast::Sheet> {
         use std::str::FromStr;
         let stream = proc_macro2::TokenStream::from_str(source)
@@ -75,8 +83,22 @@ impl PmAstParser {
         let (name, name_span) = cursor.consume_ident()?;
         cursor.expect_open_brace()?;
         let mut items = Vec::new();
+        let mut errors = Vec::new();
         while !cursor.at_close_brace() {
-            items.push(self.parse_sheet_item(cursor)?);
+            let item_start = cursor.peek_span();
+            match self.parse_sheet_item(cursor) {
+                Ok(item) => items.push(item),
+                Err(e) => {
+                    errors.push(e);
+                    let item_end = cursor.skip_to_recovery_point();
+                    items.push(ast::SheetItem::Error {
+                        span: ast::ExprSpan {
+                            start: item_start,
+                            end: item_end,
+                        },
+                    });
+                }
+            }
         }
         let close_span = cursor.expect_close_brace()?;
         Ok(ast::Sheet {
@@ -87,7 +109,7 @@ impl PmAstParser {
                 start: sheet_start,
                 end: close_span,
             },
-            errors: Vec::new(),
+            errors,
         })
     }
 
@@ -416,14 +438,65 @@ mod tests {
     }
 
     #[test]
-    fn parse_unknown_sheet_item_is_an_error() {
-        let result = PmAstParser::new().parse_str("sheet s { bogus x; }");
-        assert!(result.is_err());
+    fn parse_unknown_sheet_item_is_recorded_as_an_error_item() {
+        let sheet = PmAstParser::new()
+            .parse_str("sheet s { bogus x; }")
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
     }
 
     #[test]
-    fn parse_malformed_cell_is_an_error() {
-        let result = PmAstParser::new().parse_str("sheet s { cell x unknown_syntax }");
-        assert!(result.is_err());
+    fn parse_malformed_cell_is_recorded_as_an_error_item() {
+        let sheet = PmAstParser::new()
+            .parse_str("sheet s { cell x unknown_syntax }")
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
+    }
+
+    #[test]
+    fn recovery_records_an_error_item_and_continues_parsing() {
+        let sheet = PmAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell good_before: i32 = 1;
+                    cell bad unknown_syntax
+                    cell good_after: i32 = 2;
+                }
+            "#,
+            )
+            .unwrap();
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
+        assert_eq!(sheet.errors.len(), 1);
+    }
+
+    #[test]
+    fn recovery_collects_multiple_errors_from_multiple_malformed_items() {
+        let sheet = PmAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell bad1 unknown_syntax;
+                    cell bad2 unknown_syntax;
+                    cell good: i32 = 1;
+                }
+            "#,
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 2);
+        assert!(matches!(sheet.items.last(), Some(ast::SheetItem::Cell(_))));
+    }
+
+    #[test]
+    fn well_formed_input_has_empty_errors() {
+        let sheet = PmAstParser::new()
+            .parse_str("sheet s { cell x: i32 = 1; }")
+            .unwrap();
+        assert!(sheet.errors.is_empty());
     }
 }
