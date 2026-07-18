@@ -1242,6 +1242,56 @@ impl Parser<DynSegmentContext> {
     }
 }
 
+impl Parser<AstContext> {
+    /// Parses one `or_expression` from the current token stream and returns the built [`Expr`].
+    ///
+    /// Unlike [`parse_str_ast`](Self::parse_str_ast), this method does not require
+    /// end-of-stream, allowing pm-lang to parse an expression embedded within a larger token
+    /// stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input does not contain a valid `or_expression`.
+    ///
+    /// - Complexity: O(n) in the number of tokens in the expression.
+    pub fn parse_or_expression_ast(&mut self) -> Result<Expr> {
+        self.parse_or_expression_ctx().map(AstContext::into_expr)
+    }
+
+    /// Parses a token stream into an [`Expr`] tree.
+    ///
+    /// Sets the token source, runs the expression grammar, and returns the tree on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input does not contain a valid CEL expression.
+    pub fn parse_tokens_ast(&mut self, tokens: TokenStreamIter) -> Result<Expr> {
+        self.parse_tokens_ctx(tokens).map(AstContext::into_expr)
+    }
+
+    /// Parses a string into an [`Expr`] tree.
+    ///
+    /// Tokenizes the string then parses; equivalent to
+    /// `parse_tokens_ast(TokenStream::from_str(s)?.into_iter())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{AstContext, Expr, OpLookup, Parser};
+    ///
+    /// let mut parser = Parser::<AstContext>::new(OpLookup::new());
+    /// let expr = parser.parse_str_ast("1 + 2").unwrap();
+    /// assert!(matches!(expr, Expr::Op { .. }));
+    /// ```
+    pub fn parse_str_ast(&mut self, s: &str) -> Result<Expr> {
+        self.parse_str_ctx(s).map(AstContext::into_expr)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

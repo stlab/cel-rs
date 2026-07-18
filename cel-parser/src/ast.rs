@@ -661,4 +661,256 @@ mod tests {
         ctx.push_literal(5i32, Span::call_site());
         assert_eq!(ctx.peek_tuple_arity(), Some(usize::MAX));
     }
+
+    use crate::Parser;
+
+    #[test]
+    fn additive_binds_looser_than_multiplicative() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("1 + 2 * 3").unwrap();
+        let Expr::Op { name, operands, .. } = expr else {
+            panic!("expected Op");
+        };
+        assert_eq!(name, "+");
+        assert!(matches!(
+            operands[0],
+            Expr::Literal {
+                value: Literal::I32(1),
+                ..
+            }
+        ));
+        let Expr::Op {
+            name: inner_name,
+            operands: mul_operands,
+            ..
+        } = &operands[1]
+        else {
+            panic!("expected nested Op");
+        };
+        assert_eq!(inner_name, "*");
+        assert!(matches!(
+            mul_operands[0],
+            Expr::Literal {
+                value: Literal::I32(2),
+                ..
+            }
+        ));
+        assert!(matches!(
+            mul_operands[1],
+            Expr::Literal {
+                value: Literal::I32(3),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unary_minus_and_not_are_recorded_as_arity_one_op_nodes() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("-1i32").unwrap();
+        let Expr::Op { name, operands, .. } = expr else {
+            panic!("expected Op");
+        };
+        assert_eq!(name, "-");
+        assert_eq!(operands.len(), 1);
+
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("!true").unwrap();
+        let Expr::Op { name, operands, .. } = expr else {
+            panic!("expected Op");
+        };
+        assert_eq!(name, "!");
+        assert_eq!(operands.len(), 1);
+    }
+
+    #[test]
+    fn bare_identifier_is_an_ident_node() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("x").unwrap();
+        assert!(matches!(expr, Expr::Ident { name, .. } if name == "x"));
+    }
+
+    #[test]
+    fn call_with_no_args_and_with_args() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("f()").unwrap();
+        let Expr::Apply { callee, args, .. } = expr else {
+            panic!("expected Apply");
+        };
+        assert!(matches!(*callee, Expr::Ident { ref name, .. } if name == "f"));
+        assert_eq!(args.len(), 0);
+
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("f(1i32, 2i32)").unwrap();
+        let Expr::Apply { args, .. } = expr else {
+            panic!("expected Apply");
+        };
+        assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn chained_calls_nest_apply_nodes() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("f()()").unwrap();
+        let Expr::Apply { callee, args, .. } = expr else {
+            panic!("expected outer Apply");
+        };
+        assert_eq!(args.len(), 0);
+        assert!(matches!(*callee, Expr::Apply { .. }));
+    }
+
+    #[test]
+    fn unit_grouping_and_tuples() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        assert!(matches!(
+            parser.parse_str_ast("()").unwrap(),
+            Expr::Literal {
+                value: Literal::Unit,
+                ..
+            }
+        ));
+
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        // Grouping: (1i32 + 2i32) has no Tuple wrapper, just the inner Op.
+        assert!(matches!(
+            parser.parse_str_ast("(1i32 + 2i32)").unwrap(),
+            Expr::Op { .. }
+        ));
+
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("(1i32,)").unwrap();
+        assert!(matches!(expr, Expr::Tuple { ref elements, .. } if elements.len() == 1));
+
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("(1i32, 2i32, 3i32)").unwrap();
+        assert!(matches!(expr, Expr::Tuple { ref elements, .. } if elements.len() == 3));
+    }
+
+    #[test]
+    fn tuple_index_single_and_chained() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("(1i32, 2i32).1").unwrap();
+        let Expr::TupleIndex { base, index, .. } = expr else {
+            panic!("expected TupleIndex");
+        };
+        assert_eq!(index, 1);
+        assert!(matches!(*base, Expr::Tuple { ref elements, .. } if elements.len() == 2));
+
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        // Chained `.0.1` tokenizes as one float literal `0.1` split back into two indices.
+        let expr = parser.parse_str_ast("((1i32, 2i32), 3i32).0.1").unwrap();
+        let Expr::TupleIndex { base, index, .. } = expr else {
+            panic!("expected outer TupleIndex");
+        };
+        assert_eq!(index, 1);
+        assert!(matches!(*base, Expr::TupleIndex { index: 0, .. }));
+    }
+
+    #[test]
+    fn tuple_index_on_a_call_result_still_builds_a_tree() {
+        // Deferred validation: DynSegmentContext would reject an out-of-range index at parse
+        // time, but AstContext can't know a call's return arity without type inference, so it
+        // must still build a tree here rather than fail to parse.
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("f().5").unwrap();
+        assert!(matches!(expr, Expr::TupleIndex { index: 5, .. }));
+    }
+
+    #[test]
+    fn if_without_else_has_a_unit_else_branch() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("if true { 1i32 }").unwrap();
+        let Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } = expr
+        else {
+            panic!("expected If");
+        };
+        assert!(matches!(
+            *cond,
+            Expr::Literal {
+                value: Literal::Bool(true),
+                ..
+            }
+        ));
+        assert!(matches!(
+            *then_branch,
+            Expr::Literal {
+                value: Literal::I32(1),
+                ..
+            }
+        ));
+        assert!(matches!(
+            *else_branch,
+            Expr::Literal {
+                value: Literal::Unit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn if_else_and_else_if_chain() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser
+            .parse_str_ast("if true { 1i32 } else { 2i32 }")
+            .unwrap();
+        let Expr::If { else_branch, .. } = expr else {
+            panic!("expected If");
+        };
+        assert!(matches!(
+            *else_branch,
+            Expr::Literal {
+                value: Literal::I32(2),
+                ..
+            }
+        ));
+
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser
+            .parse_str_ast("if true { 1i32 } else if false { 2i32 } else { 3i32 }")
+            .unwrap();
+        let Expr::If { else_branch, .. } = expr else {
+            panic!("expected outer If");
+        };
+        assert!(matches!(*else_branch, Expr::If { .. }));
+    }
+
+    #[test]
+    fn logical_or_is_not_desugared_to_if() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("a || b").unwrap();
+        let Expr::Logical { op, lhs, rhs, .. } = expr else {
+            panic!("expected Logical");
+        };
+        assert_eq!(op, LogicalOp::Or);
+        assert!(matches!(*lhs, Expr::Ident { ref name, .. } if name == "a"));
+        assert!(matches!(*rhs, Expr::Ident { ref name, .. } if name == "b"));
+    }
+
+    #[test]
+    fn logical_and_is_not_desugared_to_if() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("a && b").unwrap();
+        let Expr::Logical { op, .. } = expr else {
+            panic!("expected Logical");
+        };
+        assert_eq!(op, LogicalOp::And);
+    }
+
+    #[test]
+    fn logical_mixes_with_comparison_at_the_right_precedence() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        // `&&` binds looser than `==`, so this is `(a == 1i32) && (b == 2i32)`.
+        let expr = parser.parse_str_ast("a == 1i32 && b == 2i32").unwrap();
+        let Expr::Logical { op, lhs, rhs, .. } = expr else {
+            panic!("expected Logical");
+        };
+        assert_eq!(op, LogicalOp::And);
+        assert!(matches!(*lhs, Expr::Op { ref name, .. } if name == "=="));
+        assert!(matches!(*rhs, Expr::Op { ref name, .. } if name == "=="));
+    }
 }
