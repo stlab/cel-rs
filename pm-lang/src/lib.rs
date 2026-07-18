@@ -19,6 +19,7 @@
 //! "#).unwrap();
 //! ```
 
+pub mod ast;
 mod parser;
 mod token_cursor;
 pub mod type_registry;
