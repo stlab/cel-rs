@@ -52,7 +52,9 @@ pub trait ParserContext: Sized {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the fragments' produced types are incompatible.
+    /// Returns `Err` if the leading condition value isn't a `bool`, if either fragment takes
+    /// arguments, if either fragment doesn't produce exactly one value, or if the fragments'
+    /// produced types don't match.
     fn join2(&mut self, then_fragment: Self, else_fragment: Self) -> anyhow::Result<()>;
 
     /// Combines the last `n` emitted values into a single tuple value.

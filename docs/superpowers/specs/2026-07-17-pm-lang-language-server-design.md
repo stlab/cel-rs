@@ -4,7 +4,7 @@
 
 Give `.pm` (pm-lang) source files real editor tooling in VS Code: diagnostics, an
 auto-formatter following `cargo fmt` conventions, hover, go-to-definition/find-references,
-completion, and document symbols — without duplicating pm-lang's/CEL's grammar into a second,
+completion, and document symbols — without duplicating the pm-lang/CEL grammar into a second,
 independently-maintained parser. pm-lang's operator/identifier/type system is extensible at
 runtime (host binaries register types and operators), so the checker is explicitly best-effort,
 not a complete type system.
