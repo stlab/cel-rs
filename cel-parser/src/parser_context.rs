@@ -28,8 +28,8 @@ pub trait ParserContext: Sized {
     ///   present).
     fn new_fragment(&self) -> Self;
 
-    /// Pushes a literal value.
-    fn push_literal<T: 'static + Clone>(&mut self, value: T);
+    /// Pushes a literal value with the source span of the token it came from.
+    fn push_literal<T: 'static + Clone>(&mut self, value: T, span: Span);
 
     /// Applies a named operator or zero-arity identifier lookup, using `op_lookup` to resolve it
     /// against whatever this context currently holds.
@@ -46,28 +46,55 @@ pub trait ParserContext: Sized {
         end: Span,
     ) -> crate::Result<()>;
 
-    /// Joins two previously-built fragments into `self`, consuming a leading condition value
-    /// already present on `self`. `then_fragment`'s contribution is used when the condition is
-    /// `true`; `else_fragment`'s when `false`.
+    /// Applies a short-circuiting logical operator (`"||"` or `"&&"`), consuming a leading
+    /// condition value already present on `self` and folding in `rhs`, the already-parsed
+    /// right-hand-side fragment.
+    ///
+    /// - Precondition: `name` is `"||"` or `"&&"`, and `rhs` produces exactly one value.
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the leading condition value isn't a `bool`, if either fragment takes
-    /// arguments, if either fragment doesn't produce exactly one value, or if the fragments'
-    /// produced types don't match.
-    fn join2(&mut self, then_fragment: Self, else_fragment: Self) -> anyhow::Result<()>;
+    /// Implementations that validate operand types during parsing (e.g. [`DynSegmentContext`])
+    /// return `Err` if the leading condition value isn't a `bool`. Implementations that defer
+    /// type validation to a later phase (e.g. [`crate::ast::AstContext`]) never return `Err`
+    /// here.
+    fn apply_logical(&mut self, name: &str, rhs: Self, start: Span, end: Span)
+    -> crate::Result<()>;
 
-    /// Combines the last `n` emitted values into a single tuple value.
-    fn make_tuple(&mut self, n: usize, ambient_start: usize);
+    /// Joins two previously-built fragments into `self`, consuming a leading condition value
+    /// already present on `self`. `then_fragment`'s contribution is used when the condition is
+    /// `true`; `else_fragment`'s when `false`. `start`/`end` cover the whole `if`/`else`
+    /// construct.
+    ///
+    /// - Precondition: neither fragment takes arguments, and each produces exactly one value.
+    ///
+    /// # Errors
+    ///
+    /// Implementations that validate operand types during parsing (e.g. [`DynSegmentContext`])
+    /// return `Err` if the leading condition value isn't a `bool` or if the fragments' produced
+    /// types don't match. Implementations that defer type validation to a later phase (e.g.
+    /// [`crate::ast::AstContext`]) never return `Err` here.
+    fn join2(
+        &mut self,
+        then_fragment: Self,
+        else_fragment: Self,
+        start: Span,
+        end: Span,
+    ) -> anyhow::Result<()>;
+
+    /// Combines the last `n` emitted values into a single tuple value. `start`/`end` cover the
+    /// whole `(...)` construct.
+    fn make_tuple(&mut self, n: usize, ambient_start: usize, start: Span, end: Span);
 
     /// Returns the arity of the tuple currently on top, or `None` if the top value isn't a
     /// tuple.
     fn peek_tuple_arity(&self) -> Option<usize>;
 
-    /// Replaces the tuple on top with its `index`-th element.
+    /// Replaces the tuple on top with its `index`-th element. `start`/`end` cover the base
+    /// expression through the index token.
     ///
     /// - Precondition: `peek_tuple_arity()` returns `Some(arity)` with `index < arity`.
-    fn tuple_index(&mut self, index: usize);
+    fn tuple_index(&mut self, index: usize, start: Span, end: Span);
 
     /// Returns the current stack offset, used to compute tuple layouts.
     fn current_stack_offset(&self) -> usize;
@@ -80,9 +107,10 @@ pub trait ParserContext: Sized {
 ///
 /// ```rust
 /// use cel_parser::parser_context::{DynSegmentContext, ParserContext};
+/// use proc_macro2::Span;
 ///
 /// let mut ctx = DynSegmentContext::new_context();
-/// ctx.push_literal(10i32);
+/// ctx.push_literal(10i32, Span::call_site());
 /// ```
 pub struct DynSegmentContext(pub(crate) DynSegment);
 
@@ -116,7 +144,7 @@ impl ParserContext for DynSegmentContext {
         DynSegmentContext(self.0.new_fragment())
     }
 
-    fn push_literal<T: 'static + Clone>(&mut self, value: T) {
+    fn push_literal<T: 'static + Clone>(&mut self, value: T, _span: Span) {
         self.0.just(value);
     }
 
@@ -131,11 +159,39 @@ impl ParserContext for DynSegmentContext {
         op_lookup.lookup(name, &mut self.0, arity, start, end)
     }
 
-    fn join2(&mut self, then_fragment: Self, else_fragment: Self) -> anyhow::Result<()> {
+    fn apply_logical(
+        &mut self,
+        name: &str,
+        rhs: Self,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        let mut bypass = self.new_fragment();
+        let result = match name {
+            "||" => {
+                bypass.0.just(true);
+                self.0.join2(bypass.0, rhs.0)
+            }
+            "&&" => {
+                bypass.0.just(false);
+                self.0.join2(rhs.0, bypass.0)
+            }
+            other => unreachable!("apply_logical called with unsupported operator `{other}`"),
+        };
+        result.map_err(|e| crate::ParseError::new_range(e.to_string(), start, end))
+    }
+
+    fn join2(
+        &mut self,
+        then_fragment: Self,
+        else_fragment: Self,
+        _start: Span,
+        _end: Span,
+    ) -> anyhow::Result<()> {
         self.0.join2(then_fragment.0, else_fragment.0)
     }
 
-    fn make_tuple(&mut self, n: usize, ambient_start: usize) {
+    fn make_tuple(&mut self, n: usize, ambient_start: usize, _start: Span, _end: Span) {
         self.0.make_tuple(n, ambient_start);
     }
 
@@ -143,7 +199,7 @@ impl ParserContext for DynSegmentContext {
         self.0.peek_tuple_arity()
     }
 
-    fn tuple_index(&mut self, index: usize) {
+    fn tuple_index(&mut self, index: usize, _start: Span, _end: Span) {
         self.0.tuple_index(index);
     }
 
@@ -161,15 +217,15 @@ mod tests {
     #[test]
     fn new_context_is_empty_and_ready_for_literals() {
         let mut ctx = DynSegmentContext::new_context();
-        ctx.push_literal(10i32);
+        ctx.push_literal(10i32, Span::call_site());
         assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 10);
     }
 
     #[test]
     fn apply_op_dispatches_builtin_addition() {
         let mut ctx = DynSegmentContext::new_context();
-        ctx.push_literal(10i32);
-        ctx.push_literal(20i32);
+        ctx.push_literal(10i32, Span::call_site());
+        ctx.push_literal(20i32, Span::call_site());
         let lookup = OpLookup::new();
         ctx.apply_op(&lookup, "+", 2, Span::call_site(), Span::call_site())
             .unwrap();
@@ -179,8 +235,8 @@ mod tests {
     #[test]
     fn apply_op_propagates_lookup_error() {
         let mut ctx = DynSegmentContext::new_context();
-        ctx.push_literal(10i32);
-        ctx.push_literal("hi".to_string());
+        ctx.push_literal(10i32, Span::call_site());
+        ctx.push_literal("hi".to_string(), Span::call_site());
         let lookup = OpLookup::new();
         let err = ctx
             .apply_op(&lookup, "+", 2, Span::call_site(), Span::call_site())
@@ -192,42 +248,54 @@ mod tests {
     fn make_tuple_and_tuple_index_roundtrip() {
         let mut ctx = DynSegmentContext::new_context();
         let ambient_start = ctx.current_stack_offset();
-        ctx.push_literal(1i32);
-        ctx.push_literal(2i32);
-        ctx.make_tuple(2, ambient_start);
+        ctx.push_literal(1i32, Span::call_site());
+        ctx.push_literal(2i32, Span::call_site());
+        ctx.make_tuple(2, ambient_start, Span::call_site(), Span::call_site());
         assert_eq!(ctx.peek_tuple_arity(), Some(2));
-        ctx.tuple_index(1);
+        ctx.tuple_index(1, Span::call_site(), Span::call_site());
         assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 2);
     }
 
     #[test]
     fn peek_tuple_arity_is_none_for_non_tuple() {
         let mut ctx = DynSegmentContext::new_context();
-        ctx.push_literal(5i32);
+        ctx.push_literal(5i32, Span::call_site());
         assert_eq!(ctx.peek_tuple_arity(), None);
     }
 
     #[test]
     fn join2_selects_then_fragment_when_condition_true() {
         let mut ctx = DynSegmentContext::new_context();
-        ctx.push_literal(true);
+        ctx.push_literal(true, Span::call_site());
         let mut then_fragment = ctx.new_fragment();
-        then_fragment.push_literal(1i32);
+        then_fragment.push_literal(1i32, Span::call_site());
         let mut else_fragment = ctx.new_fragment();
-        else_fragment.push_literal(2i32);
-        ctx.join2(then_fragment, else_fragment).unwrap();
+        else_fragment.push_literal(2i32, Span::call_site());
+        ctx.join2(
+            then_fragment,
+            else_fragment,
+            Span::call_site(),
+            Span::call_site(),
+        )
+        .unwrap();
         assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 1);
     }
 
     #[test]
     fn join2_selects_else_fragment_when_condition_false() {
         let mut ctx = DynSegmentContext::new_context();
-        ctx.push_literal(false);
+        ctx.push_literal(false, Span::call_site());
         let mut then_fragment = ctx.new_fragment();
-        then_fragment.push_literal(1i32);
+        then_fragment.push_literal(1i32, Span::call_site());
         let mut else_fragment = ctx.new_fragment();
-        else_fragment.push_literal(2i32);
-        ctx.join2(then_fragment, else_fragment).unwrap();
+        else_fragment.push_literal(2i32, Span::call_site());
+        ctx.join2(
+            then_fragment,
+            else_fragment,
+            Span::call_site(),
+            Span::call_site(),
+        )
+        .unwrap();
         assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 2);
     }
 
@@ -236,10 +304,32 @@ mod tests {
         // Proves DynSegmentContext doesn't need `.into_inner()` for read-only DynSegment
         // methods not part of ParserContext itself (e.g. peek_output_type_id).
         let mut ctx = DynSegmentContext::new_context();
-        ctx.push_literal(7i32);
+        ctx.push_literal(7i32, Span::call_site());
         assert_eq!(
             ctx.peek_output_type_id(),
             Some(std::any::TypeId::of::<i32>())
         );
+    }
+
+    #[test]
+    fn apply_logical_or_short_circuits_to_lhs_when_true() {
+        let mut ctx = DynSegmentContext::new_context();
+        ctx.push_literal(true, Span::call_site());
+        let mut rhs = ctx.new_fragment();
+        rhs.push_literal(false, Span::call_site());
+        ctx.apply_logical("||", rhs, Span::call_site(), Span::call_site())
+            .unwrap();
+        assert!(ctx.into_inner().call0::<bool>().unwrap());
+    }
+
+    #[test]
+    fn apply_logical_and_short_circuits_to_false_when_lhs_false() {
+        let mut ctx = DynSegmentContext::new_context();
+        ctx.push_literal(false, Span::call_site());
+        let mut rhs = ctx.new_fragment();
+        rhs.push_literal(true, Span::call_site());
+        ctx.apply_logical("&&", rhs, Span::call_site(), Span::call_site())
+            .unwrap();
+        assert!(!ctx.into_inner().call0::<bool>().unwrap());
     }
 }
