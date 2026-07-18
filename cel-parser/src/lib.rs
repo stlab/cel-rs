@@ -105,83 +105,83 @@ use std::str::FromStr;
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, ParseError>;
 
-/// Pushes a literal value from `token` onto `segment`.
+/// Pushes a literal value from `token` onto `output`.
 ///
 /// # Errors
 ///
 /// Returns `Err` if the literal type is unsupported or if a suffixed numeric
 /// literal cannot be parsed.
-fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
+fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Result<()> {
     match lit {
         CelLiteral::Int(integer) => {
             match integer.suffix() {
-                "" | "i32" => output.just(integer.base10_parse::<i32>().map_err(|e| {
+                "" | "i32" => output.push_literal(integer.base10_parse::<i32>().map_err(|e| {
                     ParseError::new(
                         format!("invalid i32 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
-                "u8" => output.just(integer.base10_parse::<u8>().map_err(|e| {
+                "u8" => output.push_literal(integer.base10_parse::<u8>().map_err(|e| {
                     ParseError::new(
                         format!("invalid u8 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
-                "u16" => output.just(integer.base10_parse::<u16>().map_err(|e| {
+                "u16" => output.push_literal(integer.base10_parse::<u16>().map_err(|e| {
                     ParseError::new(
                         format!("invalid u16 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
-                "u32" => output.just(integer.base10_parse::<u32>().map_err(|e| {
+                "u32" => output.push_literal(integer.base10_parse::<u32>().map_err(|e| {
                     ParseError::new(
                         format!("invalid u32 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
-                "u64" => output.just(integer.base10_parse::<u64>().map_err(|e| {
+                "u64" => output.push_literal(integer.base10_parse::<u64>().map_err(|e| {
                     ParseError::new(
                         format!("invalid u64 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
-                "u128" => output.just(integer.base10_parse::<u128>().map_err(|e| {
+                "u128" => output.push_literal(integer.base10_parse::<u128>().map_err(|e| {
                     ParseError::new(
                         format!("invalid u128 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
-                "usize" => output.just(integer.base10_parse::<usize>().map_err(|e| {
+                "usize" => output.push_literal(integer.base10_parse::<usize>().map_err(|e| {
                     ParseError::new(
                         format!("invalid usize literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
-                "i8" => output.just(integer.base10_parse::<i8>().map_err(|e| {
+                "i8" => output.push_literal(integer.base10_parse::<i8>().map_err(|e| {
                     ParseError::new(
                         format!("invalid i8 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
-                "i16" => output.just(integer.base10_parse::<i16>().map_err(|e| {
+                "i16" => output.push_literal(integer.base10_parse::<i16>().map_err(|e| {
                     ParseError::new(
                         format!("invalid i16 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
-                "i64" => output.just(integer.base10_parse::<i64>().map_err(|e| {
+                "i64" => output.push_literal(integer.base10_parse::<i64>().map_err(|e| {
                     ParseError::new(
                         format!("invalid i64 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
-                "i128" => output.just(integer.base10_parse::<i128>().map_err(|e| {
+                "i128" => output.push_literal(integer.base10_parse::<i128>().map_err(|e| {
                     ParseError::new(
                         format!("invalid i128 literal `{integer}`: {e}"),
                         integer.span(),
                     )
                 })?),
-                "isize" => output.just(integer.base10_parse::<isize>().map_err(|e| {
+                "isize" => output.push_literal(integer.base10_parse::<isize>().map_err(|e| {
                     ParseError::new(
                         format!("invalid isize literal `{integer}`: {e}"),
                         integer.span(),
@@ -197,10 +197,10 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
         }
         CelLiteral::Float(float) => {
             match float.suffix() {
-                "" | "f64" => output.just(float.base10_parse::<f64>().map_err(|e| {
+                "" | "f64" => output.push_literal(float.base10_parse::<f64>().map_err(|e| {
                     ParseError::new(format!("invalid f64 literal `{float}`: {e}"), float.span())
                 })?),
-                "f32" => output.just(float.base10_parse::<f32>().map_err(|e| {
+                "f32" => output.push_literal(float.base10_parse::<f32>().map_err(|e| {
                     ParseError::new(format!("invalid f32 literal `{float}`: {e}"), float.span())
                 })?),
                 suffix => {
@@ -212,22 +212,22 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
             };
         }
         CelLiteral::Str(string) => {
-            output.just(string.value());
+            output.push_literal(string.value());
         }
         CelLiteral::Bool(lit_bool) => {
-            output.just(lit_bool.value);
+            output.push_literal(lit_bool.value);
         }
         CelLiteral::Char(ch) => {
-            output.just(ch.value());
+            output.push_literal(ch.value());
         }
         CelLiteral::Byte(byte) => {
-            output.just(byte.value());
+            output.push_literal(byte.value());
         }
         CelLiteral::ByteStr(byte_str) => {
-            output.just(byte_str.value());
+            output.push_literal(byte_str.value());
         }
         CelLiteral::CStr(c_str) => {
-            output.just(c_str.value());
+            output.push_literal(c_str.value());
         }
         other => {
             return Err(ParseError::new(
@@ -239,7 +239,12 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
     Ok(())
 }
 
-/// A recursive descent parser for expressions.
+/// A recursive descent parser for expressions, generic over the [`ParserContext`] it emits
+/// into.
+///
+/// [`CELParser`] is a type alias for `Parser<DynSegmentContext>` and remains the concrete type
+/// most callers use; it behaves identically to how `CELParser` always has, before this type
+/// became generic.
 ///
 /// # Examples
 ///
@@ -280,26 +285,33 @@ fn push_literal(output: &mut DynSegment, lit: CelLiteral) -> Result<()> {
 ///     println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::plain()));
 /// }
 /// ```
-pub struct CELParser {
+pub struct Parser<C: ParserContext> {
     tokens: Option<Peekable<LexLexer>>,
-    context: DynSegment,
+    context: C,
     op_lookup: OpLookup,
     last_span: Span,
 }
 
-impl CELParser {
+/// A recursive descent parser that executes directly into a [`DynSegment`].
+///
+/// This is the parser every existing caller uses; behavior is unchanged from before [`Parser`]
+/// became generic over [`ParserContext`].
+pub type CELParser = Parser<DynSegmentContext>;
+
+impl<C: ParserContext> Parser<C> {
     /// Creates a new CEL parser with the given operation lookup.
     ///
     /// No tokens are set at construction; use [`set_tokens`](Self::set_tokens),
-    /// [`parse_tokens`](Self::parse_tokens), or [`parse_str`](Self::parse_str) to parse.
+    /// [`parse_tokens_ctx`](Self::parse_tokens_ctx), or [`parse_str_ctx`](Self::parse_str_ctx)
+    /// to parse.
     ///
     /// # Arguments
     ///
     /// * `op_lookup` - Operation lookup for resolving operators and identifiers
     pub fn new(op_lookup: OpLookup) -> Self {
-        CELParser {
+        Parser {
             tokens: None,
-            context: DynSegment::new::<()>(),
+            context: C::new_context(),
             op_lookup,
             last_span: Span::call_site(),
         }
@@ -307,43 +319,41 @@ impl CELParser {
 
     /// Sets the token stream for parsing, resetting internal state.
     ///
-    /// Call before [`is_expression`](Self::is_expression) or use [`parse_tokens`](Self::parse_tokens)
-    /// which sets tokens and parses in one step.
+    /// Call before [`is_expression`](Self::is_expression) or use
+    /// [`parse_tokens_ctx`](Self::parse_tokens_ctx) which sets tokens and parses in one step.
     pub fn set_tokens(&mut self, tokens: TokenStreamIter) {
         self.tokens = Some(LexLexer::new(tokens).peekable());
-        self.context = DynSegment::new::<()>();
+        self.context = C::new_context();
         self.last_span = Span::call_site();
     }
 
     /// Sets the token stream from an existing [`LexLexer`] iterator for inline expression parsing.
     ///
-    /// Resets the segment context. Use together with [`parse_or_expression`](Self::parse_or_expression)
+    /// Resets the context. Use together with [`parse_or_expression_ctx`](Self::parse_or_expression_ctx)
     /// and [`take_lex_tokens`](Self::take_lex_tokens) to share a token stream between pm-lang and
     /// [`CELParser`].
     pub fn set_lex_tokens(&mut self, tokens: std::iter::Peekable<lex_lexer::LexLexer>) {
         self.tokens = Some(tokens);
-        self.context = DynSegment::new::<()>();
+        self.context = C::new_context();
         self.last_span = Span::call_site();
     }
 
-    /// Parses one `or_expression` from the current token stream and returns the segment.
+    /// Parses one `or_expression` from the current token stream and returns the built context.
     ///
-    /// Unlike [`parse_str`](Self::parse_str), this method does not require end-of-stream,
-    /// allowing pm-lang to parse an expression embedded within a larger token stream.
+    /// Unlike [`parse_str_ctx`](Self::parse_str_ctx), this method does not require
+    /// end-of-stream, allowing pm-lang to parse an expression embedded within a larger token
+    /// stream.
     ///
     /// # Errors
     ///
     /// Returns an error if the input does not contain a valid `or_expression`.
     ///
     /// - Complexity: O(n) in the number of tokens in the expression.
-    pub fn parse_or_expression(&mut self) -> Result<DynSegment> {
+    pub fn parse_or_expression_ctx(&mut self) -> Result<C> {
         if !self.is_or_expression()? {
             return Err(self.error_at("expression expected"));
         }
-        Ok(std::mem::replace(
-            &mut self.context,
-            DynSegment::new::<()>(),
-        ))
+        Ok(std::mem::replace(&mut self.context, C::new_context()))
     }
 
     /// Returns the remaining token stream after expression parsing.
@@ -354,35 +364,33 @@ impl CELParser {
         self.tokens.take()
     }
 
-    /// Parses a token stream into a [`DynSegment`].
+    /// Parses a token stream into a context value.
     ///
-    /// Sets the token source, runs the expression grammar, and returns the segment on success.
+    /// Sets the token source, runs the expression grammar, and returns the context on success.
     ///
     /// # Errors
     ///
     /// Returns an error if the input does not contain a valid CEL expression.
-    pub fn parse_tokens(&mut self, tokens: TokenStreamIter) -> Result<DynSegment> {
+    pub fn parse_tokens_ctx(&mut self, tokens: TokenStreamIter) -> Result<C> {
         self.set_tokens(tokens);
         if !self.is_expression()? {
             return Err(self.error_at("expression expected"));
         }
-        Ok(std::mem::replace(
-            &mut self.context,
-            DynSegment::new::<()>(),
-        ))
+        Ok(std::mem::replace(&mut self.context, C::new_context()))
     }
 
-    /// Parses a string into a [`DynSegment`].
+    /// Parses a string into a context value.
     ///
-    /// Tokenizes the string then parses; equivalent to `parse_tokens(TokenStream::from_str(s)?.into_iter())`.
+    /// Tokenizes the string then parses; equivalent to
+    /// `parse_tokens_ctx(TokenStream::from_str(s)?.into_iter())`.
     ///
     /// # Errors
     ///
     /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
-    pub fn parse_str(&mut self, s: &str) -> Result<DynSegment> {
+    pub fn parse_str_ctx(&mut self, s: &str) -> Result<C> {
         let input =
             TokenStream::from_str(s).map_err(|e| ParseError::new(e.to_string(), e.span()))?;
-        self.parse_tokens(input.into_iter())
+        self.parse_tokens_ctx(input.into_iter())
     }
 
     /// Returns a mutable reference to the operation lookup.
@@ -514,7 +522,7 @@ impl CELParser {
                 }
                 std::mem::swap(&mut self.context, &mut rhs_fragment);
                 let mut bypass_fragment = self.context.new_fragment();
-                bypass_fragment.just(true);
+                bypass_fragment.push_literal(true);
                 self.context
                     .join2(bypass_fragment, rhs_fragment)
                     .map_err(|e| {
@@ -548,7 +556,7 @@ impl CELParser {
                 }
                 std::mem::swap(&mut self.context, &mut rhs_fragment);
                 let mut bypass_fragment = self.context.new_fragment();
-                bypass_fragment.just(false);
+                bypass_fragment.push_literal(false);
                 self.context
                     .join2(rhs_fragment, bypass_fragment)
                     .map_err(|e| {
@@ -590,9 +598,9 @@ impl CELParser {
                 if !self.is_bitwise_or_expression()? {
                     return Err(self.error_at("expected bitwise_or_expression"));
                 }
-                self.op_lookup.lookup(
+                self.context.apply_op(
+                    &self.op_lookup,
                     op_name,
-                    &mut self.context,
                     2,
                     start_span.expect("production has token at start"),
                     self.last_span,
@@ -612,9 +620,9 @@ impl CELParser {
                 if !self.is_bitwise_xor_expression()? {
                     return Err(self.error_at("expected bitwise_xor_expression"));
                 }
-                self.op_lookup.lookup(
+                self.context.apply_op(
+                    &self.op_lookup,
                     "|",
-                    &mut self.context,
                     2,
                     start_span.expect("production has token at start"),
                     self.last_span,
@@ -634,9 +642,9 @@ impl CELParser {
                 if !self.is_bitwise_and_expression()? {
                     return Err(self.error_at("expected bitwise_and_expression"));
                 }
-                self.op_lookup.lookup(
+                self.context.apply_op(
+                    &self.op_lookup,
                     "^",
-                    &mut self.context,
                     2,
                     start_span.expect("production has token at start"),
                     self.last_span,
@@ -656,9 +664,9 @@ impl CELParser {
                 if !self.is_bitwise_shift_expression()? {
                     return Err(self.error_at("expected bitwise_shift_expression"));
                 }
-                self.op_lookup.lookup(
+                self.context.apply_op(
+                    &self.op_lookup,
                     "&",
-                    &mut self.context,
                     2,
                     start_span.expect("production has token at start"),
                     self.last_span,
@@ -687,9 +695,9 @@ impl CELParser {
                     if !self.is_additive_expression()? {
                         return Err(self.error_at("expected additive_expression"));
                     }
-                    self.op_lookup.lookup(
+                    self.context.apply_op(
+                        &self.op_lookup,
                         op_name,
-                        &mut self.context,
                         2,
                         start_span.expect("production has token at start"),
                         self.last_span,
@@ -721,9 +729,9 @@ impl CELParser {
                     if !self.is_multiplicative_expression()? {
                         return Err(self.error_at("expected multiplicative_expression"));
                     }
-                    self.op_lookup.lookup(
+                    self.context.apply_op(
+                        &self.op_lookup,
                         op_name,
-                        &mut self.context,
                         2,
                         start_span.expect("production has token at start"),
                         self.last_span,
@@ -757,9 +765,9 @@ impl CELParser {
                     if !self.is_unary_expression()? {
                         return Err(self.error_at("expected unary_expression"));
                     }
-                    self.op_lookup.lookup(
+                    self.context.apply_op(
+                        &self.op_lookup,
                         op_name,
-                        &mut self.context,
                         2,
                         start_span.expect("production has token at start"),
                         self.last_span,
@@ -789,9 +797,9 @@ impl CELParser {
             if !self.is_unary_expression()? {
                 return Err(self.error_at("expected unary_expression"));
             }
-            self.op_lookup.lookup(
+            self.context.apply_op(
+                &self.op_lookup,
                 op_name,
-                &mut self.context,
                 1,
                 start_span.expect("production has token at start"),
                 self.last_span,
@@ -835,9 +843,9 @@ impl CELParser {
                     _ => return Err(self.error_at("expected closing parenthesis")),
                 }
                 // Stack order is [callee, arg1, arg2, ...]; lookup peeks top (arg_count + 1) entries.
-                self.op_lookup.lookup(
+                self.context.apply_op(
+                    &self.op_lookup,
                     "()",
-                    &mut self.context,
                     arg_count + 1,
                     start_span.expect("production has token at start"),
                     self.last_span,
@@ -947,7 +955,7 @@ impl CELParser {
             Some(Token::Literal(lit)) => {
                 let lit_clone = lit.clone();
                 self.advance();
-                push_literal(&mut self.context, lit_clone)?;
+                push_literal_token(&mut self.context, lit_clone)?;
                 Ok(true)
             }
             Some(Token::Identifier(ident)) => {
@@ -959,8 +967,8 @@ impl CELParser {
                     return self.is_if_expression();
                 }
 
-                self.op_lookup
-                    .lookup(&ident_name, &mut self.context, 0, ident_span, ident_span)?;
+                self.context
+                    .apply_op(&self.op_lookup, &ident_name, 0, ident_span, ident_span)?;
 
                 Ok(true)
             }
@@ -994,7 +1002,7 @@ impl CELParser {
             })
         ) {
             self.advance();
-            self.context.just(());
+            self.context.push_literal(());
             return Ok(true);
         }
         let ambient_start = self.context.current_stack_offset();
@@ -1129,13 +1137,54 @@ impl CELParser {
         } else {
             // Implicit else: () — then-branch must also return ()
             let mut fragment = self.context.new_fragment();
-            fragment.just(());
+            fragment.push_literal(());
             fragment
         };
         self.context
             .join2(then_fragment, else_fragment)
             .map_err(|e| ParseError::new(e.to_string(), self.last_span))?;
         Ok(true)
+    }
+}
+
+impl Parser<DynSegmentContext> {
+    /// Parses one `or_expression` from the current token stream and returns the segment.
+    ///
+    /// Unlike [`parse_str`](Self::parse_str), this method does not require end-of-stream,
+    /// allowing pm-lang to parse an expression embedded within a larger token stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input does not contain a valid `or_expression`.
+    ///
+    /// - Complexity: O(n) in the number of tokens in the expression.
+    pub fn parse_or_expression(&mut self) -> Result<DynSegment> {
+        self.parse_or_expression_ctx()
+            .map(DynSegmentContext::into_inner)
+    }
+
+    /// Parses a token stream into a [`DynSegment`].
+    ///
+    /// Sets the token source, runs the expression grammar, and returns the segment on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input does not contain a valid CEL expression.
+    pub fn parse_tokens(&mut self, tokens: TokenStreamIter) -> Result<DynSegment> {
+        self.parse_tokens_ctx(tokens)
+            .map(DynSegmentContext::into_inner)
+    }
+
+    /// Parses a string into a [`DynSegment`].
+    ///
+    /// Tokenizes the string then parses; equivalent to
+    /// `parse_tokens(TokenStream::from_str(s)?.into_iter())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
+    pub fn parse_str(&mut self, s: &str) -> Result<DynSegment> {
+        self.parse_str_ctx(s).map(DynSegmentContext::into_inner)
     }
 }
 
