@@ -1,3 +1,415 @@
+# pm-lang LSP — Parser Generalization (Phase 1) Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Generalize `cel-parser`'s `CELParser` into `Parser<C: ParserContext>` (monomorphized generics) so its recursive-descent grammar is written once and can drive different backends, with `DynSegmentContext` reproducing today's runtime-execution behavior exactly — a pure, behavior-preserving refactor that lays the foundation for the future AST-building context (a later, separate plan) that the language server, formatter, and eventual macro-compilation backend will all consume.
+
+**Architecture:** A new `ParserContext` trait defines the primitive operations the CEL grammar needs (push a literal, apply a named operator, build/join branch fragments, build/index tuples). `DynSegmentContext` implements it by wrapping a `cel_runtime::DynSegment` one-for-one. `CELParser`'s struct and `impl` become generic over `C: ParserContext`; the grammar productions (`is_or_expression`, `is_additive_expression`, ...) call trait methods instead of touching `DynSegment` directly, but are otherwise character-for-character the same logic. Critically, `CELParser`'s three context-returning entry points (`parse_or_expression`, `parse_tokens`, `parse_str`) keep their exact original signatures (`Result<DynSegment>`) via a small `Parser<DynSegmentContext>`-specific `impl` block that unwraps the generic core's `Result<DynSegmentContext>` — this is what keeps `pm-lang` (which stores `DynSegment` directly in `Vec<DynSegment>`/`RefCell<DynSegment>`) compiling with zero changes.
+
+**Tech Stack:** Rust, existing `cel-parser`/`cel-runtime` crates. No new dependencies.
+
+## Global Constraints
+
+- `cargo fmt --all` before every commit (enforced by pre-commit hook).
+- `cargo build --workspace` and `cargo test --workspace` must produce zero compiler warnings.
+- `cargo clippy --workspace --exclude begin --all-targets -- -D warnings` must pass (this plan
+  never touches `begin`, so its two `begin`-specific clippy invocations aren't relevant here, but
+  running them costs nothing and catches surprises).
+- Never commit directly to `main`; this work happens on the current worktree branch.
+- Doc comments follow the project's contract style (Summary / Preconditions / Postconditions /
+  Complexity) — see `CLAUDE.md`.
+- Every existing `cel-parser` test, and every existing test in every crate that depends on it
+  (`pm-lang`, `cel-rs-macros`, `begin`), must keep passing **completely unchanged** — this plan
+  introduces no new syntax and no behavior change, only an internal restructuring.
+
+---
+
+### Task 1: `ParserContext` trait and `DynSegmentContext`
+
+**Files:**
+- Create: `cel-parser/src/parser_context.rs`
+- Modify: `cel-parser/src/lib.rs` (add two lines: `pub mod parser_context;` and a re-export —
+  nothing else in this file changes in this task)
+
+**Interfaces:**
+- Produces (used by Task 2): `pub trait ParserContext: Sized` with methods `new_context() -> Self`,
+  `new_fragment(&self) -> Self`, `push_literal<T: 'static + Clone>(&mut self, value: T)`,
+  `apply_op(&mut self, op_lookup: &OpLookup, name: &str, arity: usize, start: Span, end: Span) -> crate::Result<()>`,
+  `join2(&mut self, then_fragment: Self, else_fragment: Self) -> anyhow::Result<()>`,
+  `make_tuple(&mut self, n: usize, ambient_start: usize)`,
+  `peek_tuple_arity(&self) -> Option<usize>`, `tuple_index(&mut self, index: usize)`,
+  `current_stack_offset(&self) -> usize`. `pub struct DynSegmentContext(pub(crate) DynSegment)`
+  implementing it, plus `DynSegmentContext::into_inner(self) -> DynSegment` and
+  `Deref`/`DerefMut` to `DynSegment`.
+
+- [ ] **Step 1: Write the test module for `DynSegmentContext`**
+
+Create `cel-parser/src/parser_context.rs` with only this content (the trait and struct it
+references don't exist yet — this is the intended failing state):
+
+```rust
+//! `ParserContext`: the pluggable target a CEL grammar production emits into.
+//!
+//! The recursive-descent grammar in `lib.rs` is generic over `C: ParserContext` so the same
+//! grammar can drive different backends without duplicating it. [`DynSegmentContext`] is the
+//! first implementation: it reproduces exactly what `CELParser` did before this trait existed,
+//! wrapping a [`DynSegment`] one-for-one. A future AST-building context (for the language
+//! server, formatter, and eventual macro-compilation backend) is expected to be the second.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::op_table::OpLookup;
+    use proc_macro2::Span;
+
+    #[test]
+    fn new_context_is_empty_and_ready_for_literals() {
+        let mut ctx = DynSegmentContext::new_context();
+        ctx.push_literal(10i32);
+        assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 10);
+    }
+
+    #[test]
+    fn apply_op_dispatches_builtin_addition() {
+        let mut ctx = DynSegmentContext::new_context();
+        ctx.push_literal(10i32);
+        ctx.push_literal(20i32);
+        let lookup = OpLookup::new();
+        ctx.apply_op(&lookup, "+", 2, Span::call_site(), Span::call_site())
+            .unwrap();
+        assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 30);
+    }
+
+    #[test]
+    fn apply_op_propagates_lookup_error() {
+        let mut ctx = DynSegmentContext::new_context();
+        ctx.push_literal(10i32);
+        ctx.push_literal("hi".to_string());
+        let lookup = OpLookup::new();
+        let err = ctx
+            .apply_op(&lookup, "+", 2, Span::call_site(), Span::call_site())
+            .expect_err("mismatched operand types must fail");
+        assert!(err.message().starts_with("no operation"));
+    }
+
+    #[test]
+    fn make_tuple_and_tuple_index_roundtrip() {
+        let mut ctx = DynSegmentContext::new_context();
+        let ambient_start = ctx.current_stack_offset();
+        ctx.push_literal(1i32);
+        ctx.push_literal(2i32);
+        ctx.make_tuple(2, ambient_start);
+        assert_eq!(ctx.peek_tuple_arity(), Some(2));
+        ctx.tuple_index(1);
+        assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 2);
+    }
+
+    #[test]
+    fn peek_tuple_arity_is_none_for_non_tuple() {
+        let mut ctx = DynSegmentContext::new_context();
+        ctx.push_literal(5i32);
+        assert_eq!(ctx.peek_tuple_arity(), None);
+    }
+
+    #[test]
+    fn join2_selects_then_fragment_when_condition_true() {
+        let mut ctx = DynSegmentContext::new_context();
+        ctx.push_literal(true);
+        let mut then_fragment = ctx.new_fragment();
+        then_fragment.push_literal(1i32);
+        let mut else_fragment = ctx.new_fragment();
+        else_fragment.push_literal(2i32);
+        ctx.join2(then_fragment, else_fragment).unwrap();
+        assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 1);
+    }
+
+    #[test]
+    fn join2_selects_else_fragment_when_condition_false() {
+        let mut ctx = DynSegmentContext::new_context();
+        ctx.push_literal(false);
+        let mut then_fragment = ctx.new_fragment();
+        then_fragment.push_literal(1i32);
+        let mut else_fragment = ctx.new_fragment();
+        else_fragment.push_literal(2i32);
+        ctx.join2(then_fragment, else_fragment).unwrap();
+        assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 2);
+    }
+
+    #[test]
+    fn deref_gives_transparent_access_to_dyn_segment_methods() {
+        // Proves DynSegmentContext doesn't need `.into_inner()` for read-only DynSegment
+        // methods not part of ParserContext itself (e.g. peek_output_type_id).
+        let mut ctx = DynSegmentContext::new_context();
+        ctx.push_literal(7i32);
+        assert_eq!(ctx.peek_output_type_id(), Some(std::any::TypeId::of::<i32>()));
+    }
+}
+```
+
+- [ ] **Step 2: Run the test to verify it fails to compile**
+
+Run: `cargo test -p cel-parser parser_context`
+Expected: compile errors — `cannot find function \`new_context\` in this scope` (and similarly for
+every other `DynSegmentContext`/`ParserContext` reference), since neither exists yet.
+
+- [ ] **Step 3: Implement `ParserContext` and `DynSegmentContext`**
+
+Add this content **above** the `#[cfg(test)] mod tests { ... }` block already in
+`cel-parser/src/parser_context.rs` (the module doc comment at the top of the file from Step 1
+stays where it is):
+
+```rust
+use cel_runtime::DynSegment;
+use proc_macro2::Span;
+
+use crate::op_table::OpLookup;
+
+/// The pluggable target a grammar production emits into.
+///
+/// Each method mirrors one operation the grammar in `lib.rs` needs. Implementations decide what
+/// "emitting" means: [`DynSegmentContext`] executes immediately into a stack machine; a future
+/// AST-building context would instead record a tree node.
+pub trait ParserContext: Sized {
+    /// Creates a fresh, empty context with no operations recorded yet.
+    fn new_context() -> Self;
+
+    /// Creates an empty fragment for building an alternate branch (one side of a
+    /// short-circuiting `||`/`&&`, or an `if`/`else` branch), independent of `self`.
+    ///
+    /// - Precondition: `self` matches whatever precondition the implementation's equivalent of
+    ///   `DynSegment::new_fragment` requires (for `DynSegmentContext`, a condition value already
+    ///   present).
+    fn new_fragment(&self) -> Self;
+
+    /// Pushes a literal value.
+    fn push_literal<T: 'static + Clone>(&mut self, value: T);
+
+    /// Applies a named operator or zero-arity identifier lookup, using `op_lookup` to resolve it
+    /// against whatever this context currently holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `op_lookup` cannot resolve `name` for `arity` operands.
+    fn apply_op(
+        &mut self,
+        op_lookup: &OpLookup,
+        name: &str,
+        arity: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()>;
+
+    /// Joins two previously-built fragments into `self`, consuming a leading condition value
+    /// already present on `self`. `then_fragment`'s contribution is used when the condition is
+    /// `true`; `else_fragment`'s when `false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the fragments' produced types are incompatible.
+    fn join2(&mut self, then_fragment: Self, else_fragment: Self) -> anyhow::Result<()>;
+
+    /// Combines the last `n` emitted values into a single tuple value.
+    fn make_tuple(&mut self, n: usize, ambient_start: usize);
+
+    /// Returns the arity of the tuple currently on top, or `None` if the top value isn't a
+    /// tuple.
+    fn peek_tuple_arity(&self) -> Option<usize>;
+
+    /// Replaces the tuple on top with its `index`-th element.
+    ///
+    /// - Precondition: `peek_tuple_arity()` returns `Some(arity)` with `index < arity`.
+    fn tuple_index(&mut self, index: usize);
+
+    /// Returns the current stack offset, used to compute tuple layouts.
+    fn current_stack_offset(&self) -> usize;
+}
+
+/// [`ParserContext`] implementation that executes directly into a [`DynSegment`], reproducing
+/// the runtime-execution behavior `CELParser` always had before this trait existed.
+///
+/// # Examples
+///
+/// ```rust
+/// use cel_parser::parser_context::{DynSegmentContext, ParserContext};
+///
+/// let mut ctx = DynSegmentContext::new_context();
+/// ctx.push_literal(10i32);
+/// ```
+pub struct DynSegmentContext(pub(crate) DynSegment);
+
+impl DynSegmentContext {
+    /// Returns the wrapped [`DynSegment`], consuming `self`.
+    pub fn into_inner(self) -> DynSegment {
+        self.0
+    }
+}
+
+impl std::ops::Deref for DynSegmentContext {
+    type Target = DynSegment;
+
+    fn deref(&self) -> &DynSegment {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for DynSegmentContext {
+    fn deref_mut(&mut self) -> &mut DynSegment {
+        &mut self.0
+    }
+}
+
+impl ParserContext for DynSegmentContext {
+    fn new_context() -> Self {
+        DynSegmentContext(DynSegment::new::<()>())
+    }
+
+    fn new_fragment(&self) -> Self {
+        DynSegmentContext(self.0.new_fragment())
+    }
+
+    fn push_literal<T: 'static + Clone>(&mut self, value: T) {
+        self.0.just(value);
+    }
+
+    fn apply_op(
+        &mut self,
+        op_lookup: &OpLookup,
+        name: &str,
+        arity: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        op_lookup.lookup(name, &mut self.0, arity, start, end)
+    }
+
+    fn join2(&mut self, then_fragment: Self, else_fragment: Self) -> anyhow::Result<()> {
+        self.0.join2(then_fragment.0, else_fragment.0)
+    }
+
+    fn make_tuple(&mut self, n: usize, ambient_start: usize) {
+        self.0.make_tuple(n, ambient_start);
+    }
+
+    fn peek_tuple_arity(&self) -> Option<usize> {
+        self.0.peek_tuple_arity()
+    }
+
+    fn tuple_index(&mut self, index: usize) {
+        self.0.tuple_index(index);
+    }
+
+    fn current_stack_offset(&self) -> usize {
+        self.0.current_stack_offset()
+    }
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cargo test -p cel-parser parser_context`
+Expected: 8 tests pass (`new_context_is_empty_and_ready_for_literals`,
+`apply_op_dispatches_builtin_addition`, `apply_op_propagates_lookup_error`,
+`make_tuple_and_tuple_index_roundtrip`, `peek_tuple_arity_is_none_for_non_tuple`,
+`join2_selects_then_fragment_when_condition_true`,
+`join2_selects_else_fragment_when_condition_false`,
+`deref_gives_transparent_access_to_dyn_segment_methods`).
+
+- [ ] **Step 5: Wire the new module into `cel-parser/src/lib.rs`**
+
+In `cel-parser/src/lib.rs`, find this line (near the top, in the module declarations):
+
+```rust
+pub mod op_table;
+```
+
+Add immediately after it:
+
+```rust
+pub mod parser_context;
+```
+
+Then find this line (in the `pub use` block just below the module declarations):
+
+```rust
+pub use op_table::OpLookup;
+```
+
+Add immediately after it:
+
+```rust
+pub use parser_context::{DynSegmentContext, ParserContext};
+```
+
+- [ ] **Step 6: Run the full existing `cel-parser` test suite to confirm zero regressions**
+
+Run: `cargo test -p cel-parser`
+Expected: every test that existed before this task still passes, plus the 8 new
+`parser_context` tests — no failures, no changes to any existing test needed.
+
+- [ ] **Step 7: Format and lint**
+
+Run:
+```bash
+cargo fmt --all
+cargo clippy -p cel-parser --all-targets -- -D warnings
+```
+Expected: `cargo fmt` makes no further changes beyond what it applies; `clippy` reports zero
+warnings.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add cel-parser/src/parser_context.rs cel-parser/src/lib.rs
+git commit -m "$(cat <<'EOF'
+feat(cel-parser): add ParserContext trait and DynSegmentContext
+
+Generalizes the target a CEL grammar production emits into, so the same
+grammar can later drive an AST-building context (for the language server
+and formatter) without duplicating it. DynSegmentContext reproduces
+today's DynSegment-based execution exactly; no behavior change yet.
+EOF
+)"
+```
+
+---
+
+### Task 2: Generalize `CELParser` into `Parser<C: ParserContext>`
+
+**Files:**
+- Modify: `cel-parser/src/lib.rs` (full rewrite of everything from the top of the file through
+  the end of the `impl` blocks — i.e. everything *before* `#[cfg(test)] mod tests {` — using
+  Task 1's trait; the `#[cfg(test)] mod tests { ... }` and `#[cfg(test)] mod playground { ... }`
+  blocks at the end of the file are **not modified at all** and are the regression safety net for
+  this task)
+
+**Interfaces:**
+- Consumes: `parser_context::{ParserContext, DynSegmentContext}` (Task 1).
+- Produces: `pub struct Parser<C: ParserContext> { .. }`; `pub type CELParser = Parser<DynSegmentContext>;`
+  — every existing public method on `CELParser` (`new`, `set_tokens`, `set_lex_tokens`,
+  `take_lex_tokens`, `op_lookup_mut`, `is_expression`, `parse_or_expression`, `parse_tokens`,
+  `parse_str`) keeps its **exact original signature**, so `pm-lang`, `cel-rs-macros`, and `begin`
+  need zero changes. The generic `impl<C: ParserContext> Parser<C>` additionally exposes
+  `parse_or_expression_ctx(&mut self) -> Result<C>`, `parse_tokens_ctx(&mut self, tokens: TokenStreamIter) -> Result<C>`,
+  and `parse_str_ctx(&mut self, s: &str) -> Result<C>` for future contexts (not used by anything
+  yet — no test targets these directly, they're exercised indirectly through every existing test
+  that calls `parse_str`/`parse_tokens`/`parse_or_expression`, since the `DynSegmentContext`
+  wrappers delegate straight to them).
+
+**Why this preserves every existing test unchanged:** `pm-lang/src/parser.rs` declares
+`fn parse_cel_or_expression(&mut self, ctx: &mut ParseContext) -> Result<DynSegment>` and calls
+`self.cel.parse_or_expression()` directly as that function's return value — if `parse_or_expression`
+returned `Result<DynSegmentContext>` instead of `Result<DynSegment>`, this would be a type error in
+`pm-lang`, a crate this task must not touch. The split below (generic `_ctx` methods returning
+`Result<C>`, plus a `Parser<DynSegmentContext>`-specific `impl` block with the original names
+returning `Result<DynSegment>`) is what avoids that.
+
+- [ ] **Step 1: Replace everything before `#[cfg(test)]` in `cel-parser/src/lib.rs`**
+
+Read the current file first to find exactly where `#[cfg(test)]` begins (search for
+`#[cfg(test)]\nmod tests {`) — everything from line 1 up to (not including) that line is being
+replaced. Replace it with:
+
+```rust
 //! A recursive descent parser for CEL (Common Expression Language) expressions.
 //!
 //! This crate provides a parser that can parse CEL expressions into executable segments.
@@ -902,7 +1314,7 @@ impl<C: ParserContext> Parser<C> {
     }
 
     /// Applies a single `.N` tuple-index operation to the value currently on
-    /// top of the stack, replacing it with element `index`.
+    /// top of the context, replacing it with element `index`.
     ///
     /// # Errors
     /// Returns an error if the top of stack isn't a tuple, or if `index` is
@@ -1171,8 +1583,7 @@ impl Parser<DynSegmentContext> {
     ///
     /// Returns an error if the input does not contain a valid CEL expression.
     pub fn parse_tokens(&mut self, tokens: TokenStreamIter) -> Result<DynSegment> {
-        self.parse_tokens_ctx(tokens)
-            .map(DynSegmentContext::into_inner)
+        self.parse_tokens_ctx(tokens).map(DynSegmentContext::into_inner)
     }
 
     /// Parses a string into a [`DynSegment`].
@@ -1187,1174 +1598,83 @@ impl Parser<DynSegmentContext> {
         self.parse_str_ctx(s).map(DynSegmentContext::into_inner)
     }
 }
+```
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use annotate_snippets::Renderer;
+Leave everything from `#[cfg(test)]\nmod tests {` through the end of the file completely
+untouched.
 
-    #[test]
-    fn simple_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("10");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().call0::<i32>().unwrap(), 10);
-    }
+- [ ] **Step 2: Run the full `cel-parser` test suite**
 
-    #[test]
-    fn integer_literal_i32_suffix() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("10i32");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().call0::<i32>().unwrap(), 10);
-    }
+Run: `cargo test -p cel-parser`
+Expected: every test passes — the same tests that passed before this task, with no test code
+changed at all. If anything fails, the most likely cause is a missed call-site conversion (e.g.
+a leftover `.just(` that should be `.push_literal(`, or a leftover `self.op_lookup.lookup(...)`
+that should be `self.context.apply_op(&self.op_lookup, ...)`) — compare against the exact
+grammar production shown above for the failing test's expression form.
 
-    #[test]
-    fn invalid_integer_suffix() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let err = match parser.parse_str("10xyz") {
-            Err(e) => e,
-            Ok(_) => panic!("expected parse error for invalid integer suffix"),
-        };
-        assert!(err.message().contains("invalid integer literal suffix"));
-        assert!(err.message().contains("xyz"));
-    }
+- [ ] **Step 3: Run the full workspace test suite**
 
-    #[test]
-    fn float_literal() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("42.14");
-        assert!(result.is_ok());
-        let value = result.unwrap().call0::<f64>().unwrap();
-        assert!((value - 42.14).abs() < 1e-10);
-    }
+Run: `cargo test --workspace`
+Expected: every test in every crate passes, including `pm-lang`, `cel-rs-macros`, `property-model`,
+and `begin` — none of these crates' source is touched by this task, so this step is purely a
+safety-net confirmation that `CELParser`'s public API is unchanged.
 
-    #[test]
-    fn float_literal_f64_suffix() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("42.14f64");
-        assert!(result.is_ok());
-        let value = result.unwrap().call0::<f64>().unwrap();
-        assert!((value - 42.14).abs() < 1e-10);
-    }
+- [ ] **Step 4: Lint and build checks**
 
-    #[test]
-    fn float_literal_f32_suffix() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("42.14f32");
-        assert!(result.is_ok());
-        let value = result.unwrap().call0::<f32>().unwrap();
-        assert!((value - 42.14f32).abs() < 1e-6);
-    }
+Run:
+```bash
+cargo build --workspace
+cargo clippy -p cel-parser --all-targets -- -D warnings
+cargo clippy --workspace --exclude begin --all-targets -- -D warnings
+```
+Expected: zero warnings from all three.
 
-    #[test]
-    fn invalid_float_suffix() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let err = match parser.parse_str("3.14xyz") {
-            Err(e) => e,
-            Ok(_) => panic!("expected parse error for invalid float suffix"),
-        };
-        assert!(err.message().contains("invalid float literal suffix"));
-        assert!(err.message().contains("xyz"));
-    }
+- [ ] **Step 5: Format and commit**
 
-    #[test]
-    fn boolean_literal() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("true");
-        assert!(result.is_ok());
-        assert!(result.unwrap().call0::<bool>().unwrap());
-    }
+```bash
+cargo fmt --all
+git add cel-parser/src/lib.rs
+git commit -m "$(cat <<'EOF'
+refactor(cel-parser): generalize CELParser into Parser<C: ParserContext>
 
-    #[test]
-    fn string_literal() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str(r#""hello""#);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().call0::<String>().unwrap(), "hello");
-    }
+The grammar now emits into a ParserContext instead of touching DynSegment
+directly, with DynSegmentContext reproducing today's execution exactly.
+CELParser (= Parser<DynSegmentContext>) keeps its exact original public
+API via a dedicated impl block, so no other crate needs any changes.
+EOF
+)"
+```
 
-    #[test]
-    fn string_concatenation() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str(r#""a" + "b""#);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().call0::<String>().unwrap(), "ab");
-    }
+---
 
-    #[test]
-    fn incomplete_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("10 + 25 25");
-        let err = match result {
-            Ok(_) => panic!("expected parse error"),
-            Err(e) => e,
-        };
-        assert_eq!(err.message(), "unexpected token");
-    }
+## Self-Review
 
-    #[test]
-    fn arithmetic_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("10 + 20 * 30");
-        assert!(result.is_ok());
-    }
+**Spec coverage:** This plan covers the `cel-parser` half of the design doc's Phase 1
+("Generalize the parser" — `ParserContext`, `DynSegmentContext`, behavior-preserving). The
+`pm-lang`-side analogous refactor (its own declaration-level grammar becoming
+context-generic) is intentionally a separate follow-on plan — `pm-lang`'s refactor depends on
+this one landing first, and bundling both into one plan would make a single review/execution
+pass unreasonably large and risky. Phases 2–5 of the design doc (AST context, LSP diagnostics,
+formatter, richer LSP features) are explicitly out of scope for this plan and will each get their
+own plan once this one is merged.
 
-    #[test]
-    fn parenthesized_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("(10 + 20) * 30");
-        assert!(result.is_ok());
-    }
+**Placeholder scan:** No TBD/TODO; every step shows complete code; no step says "similar to
+Task N" without the code.
 
-    #[test]
-    fn unit_still_parses_as_unit() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser.parse_str("()").unwrap();
-        seg.call0::<()>().unwrap();
-    }
+**Type consistency:** `ParserContext`'s trait methods (`new_context`, `new_fragment`,
+`push_literal`, `apply_op`, `join2`, `make_tuple`, `peek_tuple_arity`, `tuple_index`,
+`current_stack_offset`) are named and typed identically between Task 1's trait definition and
+every call site in Task 2's converted grammar. `Parser<C>`'s generic `_ctx`-suffixed methods
+(`parse_or_expression_ctx`, `parse_tokens_ctx`, `parse_str_ctx`) and the `Parser<DynSegmentContext>`-specific
+originals (`parse_or_expression`, `parse_tokens`, `parse_str`) are consistently named and typed
+across both impl blocks in Task 2.
 
-    #[test]
-    fn single_paren_expression_is_grouping_not_tuple() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser.parse_str("(1i32 + 2i32)").unwrap();
-        assert_eq!(seg.call0::<i32>().unwrap(), 3);
-    }
+---
 
-    #[test]
-    fn one_tuple_requires_trailing_comma() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser.parse_str("(1i32,)").unwrap();
-        assert_eq!(seg.peek_tuple_arity(), Some(1));
-        seg.tuple_index(0);
-        assert_eq!(seg.call0::<i32>().unwrap(), 1);
-    }
+Plan complete and saved to `docs/superpowers/plans/2026-07-17-pm-lang-lsp-parser-context.md`. Two execution options:
 
-    #[test]
-    fn two_element_tuple_no_trailing_comma() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let seg: DynSegment = parser.parse_str(r#"("Hello", 42i32)"#).unwrap();
-        assert_eq!(seg.peek_tuple_arity(), Some(2));
-    }
+**1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
 
-    #[test]
-    fn trailing_comma_rejected_for_arity_two() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("(1i32, 2i32,)");
-        assert!(result.is_err(), "trailing comma is only valid for 1-tuples");
-    }
+**2. Inline Execution** - Execute tasks in this session using executing-plans, batch execution with checkpoints
 
-    #[test]
-    fn missing_comma_between_elements_is_an_error() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("(1i32 2i32)");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn index_first_element_of_tuple() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser.parse_str("(10i32, 20i32).0").unwrap();
-        assert_eq!(seg.call0::<i32>().unwrap(), 10);
-    }
-
-    #[test]
-    fn tuple_element_can_be_arithmetic_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser.parse_str("(1i32 + 2i32, 3i32).0").unwrap();
-        assert_eq!(seg.call0::<i32>().unwrap(), 3);
-    }
-
-    #[test]
-    fn tuple_second_element_can_be_arithmetic_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser.parse_str("(1i32 + 2i32, 3i32).1").unwrap();
-        assert_eq!(seg.call0::<i32>().unwrap(), 3);
-    }
-
-    #[test]
-    fn tuple_ambient_start_correct_after_sibling_expression() {
-        // Regression test: a fully-evaluated sibling subexpression earlier in
-        // the same additive chain must not shift where the following tuple
-        // literal thinks its elements land on the real stack.
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser
-            .parse_str("(1i32 + 2i32) + 3i32 + (4i32, 5i32).0")
-            .unwrap();
-        assert_eq!(seg.call0::<i32>().unwrap(), 10);
-    }
-
-    #[test]
-    fn tuple_index_inside_if_then_branch() {
-        // Regression test: `join2` pops the condition bool before running
-        // the chosen fragment, so a tuple literal inside that fragment must
-        // compute its layout as if that pop already happened.
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser
-            .parse_str("if true { (10i32, 20i32).1 } else { 0i32 }")
-            .unwrap();
-        assert_eq!(seg.call0::<i32>().unwrap(), 20);
-    }
-
-    #[test]
-    fn tuple_index_inside_if_else_branch() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser
-            .parse_str("if false { 0i32 } else { (10i32, 20i32).1 }")
-            .unwrap();
-        assert_eq!(seg.call0::<i32>().unwrap(), 20);
-    }
-
-    #[test]
-    fn tuple_index_inside_and_rhs() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser
-            .parse_str("(1i32, 2i32).1 == 2i32 && (10i32, 20i32).1 == 20i32")
-            .unwrap();
-        assert!(seg.call0::<bool>().unwrap());
-    }
-
-    #[test]
-    fn tuple_index_inside_or_rhs() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser
-            .parse_str("(1i32, 2i32).1 == 99i32 || (10i32, 20i32).1 == 20i32")
-            .unwrap();
-        assert!(seg.call0::<bool>().unwrap());
-    }
-
-    #[test]
-    fn tuple_containing_indexed_nested_tuple_result() {
-        // Regression test: extracting an element from a misaligned nested
-        // tuple must not leave the tuple's own leading padding as dead space
-        // on the stack — otherwise a later tuple literal built from this
-        // result computes its element offsets against the wrong ambient
-        // start and reads garbage. (7, not 1: the dead gap's own marker
-        // byte is hardcoded to value 1, so a value of 1 here would pass
-        // even when reading the wrong offset.)
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser.parse_str("(0u8, (7u8, 2u64).0).1").unwrap();
-        assert_eq!(seg.call0::<u8>().unwrap(), 7);
-    }
-
-    #[test]
-    fn index_second_element_of_tuple() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser.parse_str("(10i32, 20i32).1").unwrap();
-        assert_eq!(seg.call0::<i32>().unwrap(), 20);
-    }
-
-    #[test]
-    fn indexing_combined_with_addition() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser.parse_str("5i32 + (0i32, 1i32).1").unwrap();
-        assert_eq!(seg.call0::<i32>().unwrap(), 6);
-    }
-
-    #[test]
-    fn indexing_combined_with_addition_on_the_right() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser.parse_str("(0i32, 1i32).1 + 5i32").unwrap();
-        assert_eq!(seg.call0::<i32>().unwrap(), 6);
-    }
-
-    #[test]
-    fn out_of_range_index_is_a_parse_error() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("(1i32, 2i32).5");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn indexing_a_non_tuple_is_a_parse_error() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("1i32.0");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn suffixed_index_is_a_parse_error() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("(1i32, 2i32).0i32");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn chained_tuple_index_into_nested_tuple() {
-        // `.1` selects the inner tuple `(10i32, 20i32)`, then `.0` selects its
-        // first element. Source text `.1.0` tokenizes as a single float
-        // literal `1.0`, which must be split back into the chained indices
-        // `1` then `0` — using a shape/value where applying the indices to
-        // the wrong operand or in the wrong order gives a different (wrong)
-        // answer than 10 (e.g. swapping order would try `.0` on an i32 and
-        // fail to parse; picking element 0 first would return "a" or 10
-        // depending on order, not confusably 10 either way, so pick values
-        // that make a mix-up obvious).
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut seg = parser
-            .parse_str(r#"("a", (10i32, 20i32)).1.0"#)
-            .expect("chained .1.0 index should parse");
-        assert_eq!(seg.call0::<i32>().unwrap(), 10);
-    }
-
-    #[test]
-    fn chained_tuple_index_suffixed_second_part_is_a_parse_error() {
-        // The suffix lands on the whole `0.1i32` float token; the existing
-        // unsuffixed-integer rule must still reject it.
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("(1i32, 2i32).0.1i32");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn chained_tuple_index_scientific_notation_is_a_parse_error_not_a_panic() {
-        // `1e2` normalizes to digits with no '.' at all (scientific notation),
-        // unlike ordinary decimal floats like `0.1` — must be a graceful parse
-        // error, not a panic on the assumption that '.' is always present.
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("(1i32, 2i32).1e2");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn complex_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("10 + 20 * (30 - 5) / 2");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn logical_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("true && false || true");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn comparison_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("10 == 20 && 30 > 40");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn bitwise_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("1 | 2 & 3 ^ 4");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn shift_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("8u32 << 2u32 + 16u32 >> 1u32");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn unary_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("-10 + -20");
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn double_negation() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("!!true");
-        assert!(
-            result.is_ok(),
-            "Failed to parse !!true: {}",
-            result.err().unwrap()
-        );
-        assert!(result.unwrap().call0::<bool>().unwrap());
-    }
-
-    #[test]
-    fn double_minus() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("--5");
-        assert!(
-            result.is_ok(),
-            "Failed to parse --5: {}",
-            result.err().unwrap()
-        );
-        assert_eq!(result.unwrap().call0::<i32>().unwrap(), 5);
-    }
-
-    #[test]
-    fn chained_unary_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("!!false || !!true");
-        if let Err(ref e) = result {
-            eprintln!("Error: {:?}", e);
-            eprintln!("Error message: {}", e.message());
-        }
-        assert!(result.is_ok(), "Failed to parse: {}", result.err().unwrap());
-        assert!(result.unwrap().call0::<bool>().unwrap());
-    }
-
-    #[test]
-    fn invalid_expression() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("+");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn error_formatting() {
-        let source = "10 + 20 30";
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str(source);
-
-        assert!(result.is_err());
-
-        let err = match &result {
-            Ok(_) => panic!("expected parse error"),
-            Err(e) => e,
-        };
-        assert_eq!(err.message(), "unexpected token");
-
-        let formatted = err.format_rustc_style(source, "test.cel", 1u32, &Renderer::plain());
-        assert!(formatted.contains("error: unexpected token"));
-        assert!(formatted.contains("test.cel:1:"));
-        assert!(formatted.contains("1 | 10 + 20 30"));
-        assert!(formatted.contains("^"));
-    }
-
-    #[test]
-    fn error_formatting_with_line_offset() {
-        let source = "10 + 20 30";
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str(source);
-
-        assert!(result.is_err());
-
-        let err = match &result {
-            Ok(_) => panic!("expected parse error"),
-            Err(e) => e,
-        };
-        let formatted = err.format_rustc_style(source, "large_file.rs", 42u32, &Renderer::plain());
-        assert!(formatted.contains("error: unexpected token"));
-        assert!(formatted.contains("large_file.rs:42:"));
-        assert!(formatted.contains("42 | 10 + 20 30"));
-        assert!(formatted.contains("^"));
-    }
-
-    #[test]
-    fn print_error_formatting() {
-        let line = line!() + 1;
-        let source = r#"
-
-         10 + 20  30 // Unexpected token
-
-     "#;
-
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str(source);
-
-        assert!(result.is_err(), "Expected parsing to fail");
-
-        let err = match &result {
-            Ok(_) => panic!("expected parse error"),
-            Err(e) => e,
-        };
-        eprintln!(
-            "DEBUG: span.start.line = {}, span.start.column = {}",
-            err.span().start().line,
-            err.span().start().column
-        );
-
-        let formatted_error = err.format_rustc_style(source, file!(), line, &Renderer::plain());
-        println!("{}", formatted_error);
-
-        let formatted = formatted_error;
-
-        let expected_line = line + 2;
-
-        assert!(
-            formatted.contains("error: unexpected token"),
-            "Should contain error message, got: {}",
-            formatted
-        );
-        assert!(
-            formatted.contains(&format!("{}:", expected_line)),
-            "Should show error on line {}, got: {}",
-            expected_line,
-            formatted
-        );
-        assert!(
-            formatted.contains("30"),
-            "Should show the source line with '30', got: {}",
-            formatted
-        );
-        assert!(
-            formatted.contains("^"),
-            "Should have carets pointing to error, got: {}",
-            formatted
-        );
-    }
-
-    #[test]
-    fn test_addition_execution() -> anyhow::Result<()> {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("10 + 20")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result = segment.call0::<i32>()?;
-        assert_eq!(result, 30);
-        Ok(())
-    }
-
-    #[test]
-    fn test_multiplication_execution() -> anyhow::Result<()> {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("3 * 7")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result = segment.call0::<i32>()?;
-        assert_eq!(result, 21);
-        Ok(())
-    }
-
-    #[test]
-    fn test_complex_arithmetic_execution() -> anyhow::Result<()> {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("10 + 20 * 3")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result = segment.call0::<i32>()?;
-        assert_eq!(result, 70);
-        Ok(())
-    }
-
-    #[test]
-    fn test_parenthesized_arithmetic_execution() -> anyhow::Result<()> {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("(10 + 20) * 3")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result = segment.call0::<i32>()?;
-        assert_eq!(result, 90);
-        Ok(())
-    }
-
-    #[test]
-    fn test_comparison_execution() -> anyhow::Result<()> {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("10 < 20")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result = segment.call0::<bool>()?;
-        assert!(result);
-        Ok(())
-    }
-
-    #[test]
-    fn test_logical_and_execution() -> anyhow::Result<()> {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("true && false")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result = segment.call0::<bool>()?;
-        assert!(!result);
-        Ok(())
-    }
-
-    #[test]
-    fn test_unary_negation_execution() -> anyhow::Result<()> {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("-42")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result = segment.call0::<i32>()?;
-        assert_eq!(result, -42);
-        Ok(())
-    }
-
-    #[test]
-    fn test_logical_not_execution() -> anyhow::Result<()> {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("!true")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result = segment.call0::<bool>()?;
-        assert!(!result);
-        Ok(())
-    }
-
-    #[test]
-    fn test_u32_addition_execution() -> anyhow::Result<()> {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("10u32 + 20u32")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result = segment.call0::<u32>()?;
-        assert_eq!(result, 30);
-        Ok(())
-    }
-
-    #[test]
-    fn test_identifier_with_scope() -> anyhow::Result<()> {
-        let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, num_operands, _span| {
-            if num_operands == 0 {
-                match name {
-                    "x" => {
-                        segment.op0(|| 10i32);
-                        Ok(true)
-                    }
-                    "y" => {
-                        segment.op0(|| 20i32);
-                        Ok(true)
-                    }
-                    _ => Ok(false),
-                }
-            } else {
-                Ok(false)
-            }
-        });
-        let mut parser = CELParser::new(lookup);
-        let mut segment = parser
-            .parse_str("x + y")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result = segment.call0::<i32>()?;
-        assert_eq!(result, 30);
-        Ok(())
-    }
-
-    #[test]
-    fn test_undefined_identifier_error() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("undefined_var + 10");
-
-        assert!(result.is_err());
-        if let Err(e) = result {
-            let error_msg = format!("{:?}", e);
-            assert!(
-                error_msg.contains("undefined identifier: `undefined_var`"),
-                "Error message should contain 'undefined identifier: `undefined_var`', got: {}",
-                error_msg
-            );
-        }
-    }
-
-    #[test]
-    fn test_identifier_scope_error_propagated() {
-        let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, _segment, num_operands, _span| {
-            if name == "bad_id" && num_operands == 0 {
-                return Err(anyhow::anyhow!("custom identifier rejected"));
-            }
-            Ok(false)
-        });
-        let mut parser = CELParser::new(lookup);
-        let err = match parser.parse_str("bad_id + 1") {
-            Err(e) => e,
-            Ok(_) => panic!("scope Err should propagate, not become Undefined identifier"),
-        };
-        assert!(
-            err.message().contains("custom identifier rejected"),
-            "expected scope error message, got: {}",
-            err.message()
-        );
-        assert!(
-            !err.message().contains("undefined identifier:"),
-            "scope Err must not be rewritten as undefined identifier"
-        );
-    }
-
-    #[test]
-    fn test_undefined_identifier_error_formatting() {
-        let input = "undefined_var + 10";
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str(input);
-
-        assert!(result.is_err());
-        if let Err(e) = result {
-            let formatted_error = e.format_rustc_style(input, "test.cel", 1, &Renderer::plain());
-            assert!(formatted_error.contains("undefined identifier"));
-            assert!(formatted_error.contains("undefined_var"));
-            assert!(formatted_error.contains("test.cel"));
-        }
-    }
-
-    #[test]
-    fn test_float_arithmetic_execution() -> anyhow::Result<()> {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("3.5 * 2.0")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result = segment.call0::<f64>()?;
-        assert_eq!(result, 7.0);
-        Ok(())
-    }
-
-    #[test]
-    fn call_empty_arg_list() -> anyhow::Result<()> {
-        let mut lookup = OpLookup::new();
-        lookup.push_scope(
-            |name, segment, num_operands, _span| match (name, num_operands) {
-                ("f", 0) => {
-                    segment.op0(|| 0i32);
-                    Ok(true)
-                }
-                ("()", 1) => {
-                    segment.op1(|_callee: i32| 99i32)?;
-                    Ok(true)
-                }
-                _ => Ok(false),
-            },
-        );
-        let mut parser = CELParser::new(lookup);
-        let mut segment = parser
-            .parse_str("f()")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        assert_eq!(segment.call0::<i32>()?, 99);
-        Ok(())
-    }
-
-    #[test]
-    fn call_single_arg() -> anyhow::Result<()> {
-        let mut lookup = OpLookup::new();
-        lookup.push_scope(
-            |name, segment, num_operands, _span| match (name, num_operands) {
-                ("f", 0) => {
-                    segment.op0(|| 0i32);
-                    Ok(true)
-                }
-                ("()", 2) => {
-                    segment.op2(|_callee: i32, arg: i32| arg)?;
-                    Ok(true)
-                }
-                _ => Ok(false),
-            },
-        );
-        let mut parser = CELParser::new(lookup);
-        let mut segment = parser
-            .parse_str("f(42)")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        assert_eq!(segment.call0::<i32>()?, 42);
-        Ok(())
-    }
-
-    #[test]
-    fn call_multiple_args() -> anyhow::Result<()> {
-        let mut lookup = OpLookup::new();
-        lookup.push_scope(
-            |name, segment, num_operands, _span| match (name, num_operands) {
-                ("f", 0) => {
-                    segment.op0(|| 0i32);
-                    Ok(true)
-                }
-                ("()", 3) => {
-                    segment.op3(|_callee: i32, arg1: i32, arg2: i32| arg1 + arg2)?;
-                    Ok(true)
-                }
-                _ => Ok(false),
-            },
-        );
-        let mut parser = CELParser::new(lookup);
-        let mut segment = parser
-            .parse_str("f(10, 32)")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        assert_eq!(segment.call0::<i32>()?, 42);
-        Ok(())
-    }
-
-    #[test]
-    fn call_missing_closing_paren() {
-        let mut lookup = OpLookup::new();
-        lookup.push_scope(
-            |name, segment, num_operands, _span| match (name, num_operands) {
-                ("f", 0) => {
-                    segment.op0(|| 0i32);
-                    Ok(true)
-                }
-                _ => Ok(false),
-            },
-        );
-        let mut parser = CELParser::new(lookup);
-        let err = match parser.parse_str("f(42 43)") {
-            Err(e) => e,
-            Ok(_) => panic!("expected parse error for missing closing parenthesis"),
-        };
-        assert_eq!(err.message(), "expected closing parenthesis");
-    }
-
-    #[test]
-    fn call_trailing_comma() {
-        let mut lookup = OpLookup::new();
-        lookup.push_scope(
-            |name, segment, num_operands, _span| match (name, num_operands) {
-                ("f", 0) => {
-                    segment.op0(|| 0i32);
-                    Ok(true)
-                }
-                _ => Ok(false),
-            },
-        );
-        let mut parser = CELParser::new(lookup);
-        let err = match parser.parse_str("f(42,)") {
-            Err(e) => e,
-            Ok(_) => panic!("expected parse error for trailing comma"),
-        };
-        assert_eq!(err.message(), "expected expression after comma");
-    }
-
-    #[test]
-    fn call_undefined_call_op() {
-        let mut lookup = OpLookup::new();
-        lookup.push_scope(
-            |name, segment, num_operands, _span| match (name, num_operands) {
-                ("f", 0) => {
-                    segment.op0(|| 0i32);
-                    Ok(true)
-                }
-                _ => Ok(false),
-            },
-        );
-        let mut parser = CELParser::new(lookup);
-        let err = match parser.parse_str("f()") {
-            Err(e) => e,
-            Ok(_) => panic!("expected error when () operator is not registered"),
-        };
-        assert!(
-            err.message().starts_with("no operation"),
-            "error should report no operation found, got: {}",
-            err.message()
-        );
-    }
-
-    #[test]
-    fn call_chained() -> anyhow::Result<()> {
-        let mut lookup = OpLookup::new();
-        lookup.push_scope(
-            |name, segment, num_operands, _span| match (name, num_operands) {
-                ("f", 0) => {
-                    segment.op0(|| 0i32);
-                    Ok(true)
-                }
-                ("()", 1) => {
-                    segment.op1(|_callee: i32| 7i32)?;
-                    Ok(true)
-                }
-                _ => Ok(false),
-            },
-        );
-        let mut parser = CELParser::new(lookup);
-        let mut segment = parser
-            .parse_str("f()()")
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        assert_eq!(segment.call0::<i32>()?, 7);
-        Ok(())
-    }
-
-    #[test]
-    fn op_type_mismatch_error_spans_full_expression() {
-        let source = r#""Hello" + 32.0"#;
-        let mut parser = CELParser::new(OpLookup::new());
-        let err = match parser.parse_str(source) {
-            Err(e) => e,
-            Ok(_) => panic!("expected parse error for type mismatch"),
-        };
-        assert!(
-            err.message().starts_with("no operation"),
-            "expected 'no operation' prefix, got: {}",
-            err.message()
-        );
-        let end_span = err.end_span().expect("op-lookup errors carry an end span");
-        assert!(
-            end_span.end().column >= 14,
-            "end span should reach the end of 32.0 (expected end.column >= 14, got {})",
-            end_span.end().column
-        );
-    }
-
-    #[test]
-    fn and_short_circuits_on_false() {
-        // Without short-circuit the RHS executes and division-by-zero errors.
-        // With short-circuit the RHS fragment is skipped, returning false directly.
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("false && (1i32 / 0i32 == 0i32)")
-            .expect("should parse");
-        assert!(!segment.call0::<bool>().unwrap());
-    }
-
-    #[test]
-    fn and_evaluates_rhs_when_lhs_true() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("true && false").expect("should parse");
-        assert!(!segment.call0::<bool>().unwrap());
-    }
-
-    #[test]
-    fn and_chained_short_circuits() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("false && false && false")
-            .expect("should parse");
-        assert!(!segment.call0::<bool>().unwrap());
-    }
-
-    #[test]
-    fn and_lhs_type_error() {
-        // LHS is i32, not bool — join2 must reject it at parse time.
-        let mut parser = CELParser::new(OpLookup::new());
-        let err = match parser.parse_str("1i32 && true") {
-            Err(e) => e,
-            Ok(_) => panic!("lhs i32 should fail for &&"),
-        };
-        assert!(err.end_span().is_some());
-    }
-
-    #[test]
-    fn or_lhs_type_error() {
-        // LHS is i32, not bool — join2 must reject it at parse time.
-        let mut parser = CELParser::new(OpLookup::new());
-        let err = match parser.parse_str("1i32 || true") {
-            Err(e) => e,
-            Ok(_) => panic!("lhs i32 should fail for ||"),
-        };
-        assert!(err.end_span().is_some());
-    }
-
-    #[test]
-    fn or_short_circuits_on_true() {
-        // Without short-circuit the RHS executes and division-by-zero errors.
-        // With short-circuit the RHS fragment is skipped, returning true directly.
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("true || (1i32 / 0i32 == 0i32)")
-            .expect("should parse");
-        assert!(segment.call0::<bool>().unwrap());
-    }
-
-    #[test]
-    fn or_evaluates_rhs_when_lhs_false() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("false || true").expect("should parse");
-        assert!(segment.call0::<bool>().unwrap());
-    }
-
-    #[test]
-    fn or_chained() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("true || false || false")
-            .expect("should parse");
-        assert!(segment.call0::<bool>().unwrap());
-    }
-
-    #[test]
-    fn if_true_branch_selected() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("if true { 1i32 } else { 2i32 }")
-            .expect("should parse");
-        assert_eq!(segment.call0::<i32>().unwrap(), 1);
-    }
-
-    #[test]
-    fn if_false_branch_selected() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("if false { 1i32 } else { 2i32 }")
-            .expect("should parse");
-        assert_eq!(segment.call0::<i32>().unwrap(), 2);
-    }
-
-    #[test]
-    fn if_else_if_first_branch() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("if true { 1i32 } else if false { 2i32 } else { 3i32 }")
-            .expect("should parse");
-        assert_eq!(segment.call0::<i32>().unwrap(), 1);
-    }
-
-    #[test]
-    fn if_else_if_middle_branch() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("if false { 1i32 } else if true { 2i32 } else { 3i32 }")
-            .expect("should parse");
-        assert_eq!(segment.call0::<i32>().unwrap(), 2);
-    }
-
-    #[test]
-    fn if_else_if_last_branch() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser
-            .parse_str("if false { 1i32 } else if false { 2i32 } else { 3i32 }")
-            .expect("should parse");
-        assert_eq!(segment.call0::<i32>().unwrap(), 3);
-    }
-
-    #[test]
-    fn if_omitted_else_unit_branch() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("if true { () }").expect("should parse");
-        segment.call0::<()>().expect("should execute");
-    }
-
-    #[test]
-    fn if_omitted_else_rejects_non_unit_then() {
-        // then-branch returns i32, implicit else returns () — types must match.
-        let mut parser = CELParser::new(OpLookup::new());
-        assert!(parser.parse_str("if false { 1i32 }").is_err());
-    }
-
-    #[test]
-    fn if_branch_type_mismatch_is_error() {
-        let mut parser = CELParser::new(OpLookup::new());
-        assert!(parser.parse_str("if true { 1i32 } else { true }").is_err());
-    }
-
-    #[test]
-    fn if_branch_tuple_arity_mismatch_is_error() {
-        // Regression test: every tuple shares the same erased `DynTuple`
-        // marker type, so a naive type_id comparison would accept branches
-        // with genuinely different tuple shapes — join2 must compare shapes,
-        // not just the marker type, and reject this.
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("if false { (1i32, 2i32) } else { (3i64, 4i64, 5i64) }.0");
-        assert!(
-            result.is_err(),
-            "branches with different tuple shapes must not be accepted"
-        );
-    }
-
-    #[test]
-    fn if_branch_tuple_element_type_mismatch_is_error() {
-        let mut parser = CELParser::new(OpLookup::new());
-        let result = parser.parse_str("if false { (1i32, 2i32) } else { (3i64, 4i64) }.0");
-        assert!(
-            result.is_err(),
-            "branches with the same arity but different element types must not be accepted"
-        );
-    }
-
-    #[test]
-    fn if_missing_open_brace_is_error() {
-        let mut parser = CELParser::new(OpLookup::new());
-        assert!(parser.parse_str("if true 1i32 } else { 2i32 }").is_err());
-    }
-
-    #[test]
-    fn if_missing_else_after_brace_is_fine() {
-        // Omitting else is allowed; result type must be ().
-        let mut parser = CELParser::new(OpLookup::new());
-        let mut segment = parser.parse_str("if false { () }").expect("should parse");
-        segment.call0::<()>().expect("should execute");
-    }
-
-    #[test]
-    fn if_trailing_else_is_error() {
-        // `else` with no body is a parse error.
-        let mut parser = CELParser::new(OpLookup::new());
-        assert!(parser.parse_str("if true { () } else").is_err());
-    }
-
-    #[test]
-    fn parse_or_expression_stops_before_comma() -> anyhow::Result<()> {
-        use lex_lexer::LexLexer;
-        let stream: proc_macro2::TokenStream = "10i32 + 20i32, 5i32".parse().unwrap();
-        let mut parser = CELParser::new(OpLookup::new());
-        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
-        let mut seg = parser
-            .parse_or_expression()
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let result: i32 = seg.call0()?;
-        assert_eq!(result, 30);
-        let remaining: Vec<_> = parser.take_lex_tokens().expect("tokens present").collect();
-        // The comma and "5i32" should remain unconsumed.
-        assert_eq!(
-            remaining.len(),
-            2,
-            "expected 2 remaining tokens (comma and 5i32)"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn parse_or_expression_on_empty_input_returns_error() {
-        use lex_lexer::LexLexer;
-        let stream: proc_macro2::TokenStream = "".parse().unwrap();
-        let mut parser = CELParser::new(OpLookup::new());
-        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
-        let result = parser.parse_or_expression();
-        assert!(result.is_err(), "expected Err for empty input");
-    }
-}
-
-#[cfg(test)]
-mod playground {
-    use super::*;
-    use annotate_snippets::Renderer;
-
-    #[test]
-    fn custom_scope_identifier() -> Result<()> {
-        let mut lookup = OpLookup::new();
-        lookup.push_scope(|name, segment, _num_operands, _span| {
-            if name == "constant" {
-                segment.just(42i64);
-                return Ok(true);
-            }
-            Ok(false)
-        });
-        let mut parser = CELParser::new(lookup);
-        let line = line!() + 1;
-        let source = r#"
-            (("hello" + " world") == constant) && (15i64 < constant)
-        "#;
-        match parser.parse_str(source) {
-            Ok(mut seg) => println!("{:?}", seg.call0::<bool>()),
-            Err(e) => println!(
-                "{}",
-                e.format_rustc_style(source, file!(), line, &Renderer::styled())
-            ),
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn expression_macro_error3() {
-        use CELParser;
-        use op_table::OpLookup;
-
-        let line = line!() + 1;
-        let source = r#"
-            "Hello" + "World" + 32.0
-        "#;
-        match CELParser::new(OpLookup::new()).parse_str(source) {
-            Ok(_) => panic!("expected parse error"),
-            Err(e) => println!(
-                "{}",
-                e.format_rustc_style(source, file!(), line, &Renderer::styled())
-            ),
-        }
-    }
-
-    #[test]
-    fn arithmetic_overflow_error() {
-        use error::FormatRustcStyle;
-
-        let line = line!() + 1;
-        let source = r#"
-           1 + 1 +
-                2147483646 + 1
-        "#;
-        let mut seg = CELParser::new(OpLookup::new())
-            .parse_str(source)
-            .expect("parses successfully");
-        match seg.call0::<i32>() {
-            Ok(v) => panic!("expected overflow, got {v}"),
-            Err(e) => println!(
-                "{}",
-                e.format_rustc_style(source, file!(), line, &Renderer::styled())
-            ),
-        }
-    }
-}
+Which approach?
