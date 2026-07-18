@@ -6,7 +6,7 @@
 //! are deferred to a later, separate compile-to-`Sheet` phase, mirroring
 //! [`cel_parser::AstContext`]'s design.
 
-use cel_parser::ExprSpan;
+pub use cel_parser::ExprSpan;
 use cel_parser::lex_lexer::Literal;
 
 /// A parsed pm-lang sheet declaration, with source spans on every node.

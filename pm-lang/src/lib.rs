@@ -20,12 +20,14 @@
 //! ```
 
 pub mod ast;
+mod ast_parser;
 mod parser;
 mod token_cursor;
 pub mod type_registry;
 
 // pm-lang reuses cel_parser::ParseError directly; no new error type is introduced.
 // All parse errors carry a proc_macro2::Span for source-location diagnostics.
+pub use ast_parser::PmAstParser;
 pub use cel_parser::ParseError;
 pub use parser::{ParsedSheet, PmParser};
 pub use type_registry::TypeRegistry;
