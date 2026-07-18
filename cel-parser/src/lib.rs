@@ -114,79 +114,116 @@ pub type Result<T> = std::result::Result<T, ParseError>;
 fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Result<()> {
     match lit {
         CelLiteral::Int(integer) => {
+            let span = integer.span();
             match integer.suffix() {
-                "" | "i32" => output.push_literal(integer.base10_parse::<i32>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid i32 literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
-                "u8" => output.push_literal(integer.base10_parse::<u8>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid u8 literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
-                "u16" => output.push_literal(integer.base10_parse::<u16>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid u16 literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
-                "u32" => output.push_literal(integer.base10_parse::<u32>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid u32 literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
-                "u64" => output.push_literal(integer.base10_parse::<u64>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid u64 literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
-                "u128" => output.push_literal(integer.base10_parse::<u128>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid u128 literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
-                "usize" => output.push_literal(integer.base10_parse::<usize>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid usize literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
-                "i8" => output.push_literal(integer.base10_parse::<i8>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid i8 literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
-                "i16" => output.push_literal(integer.base10_parse::<i16>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid i16 literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
-                "i64" => output.push_literal(integer.base10_parse::<i64>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid i64 literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
-                "i128" => output.push_literal(integer.base10_parse::<i128>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid i128 literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
-                "isize" => output.push_literal(integer.base10_parse::<isize>().map_err(|e| {
-                    ParseError::new(
-                        format!("invalid isize literal `{integer}`: {e}"),
-                        integer.span(),
-                    )
-                })?),
+                "" | "i32" => output.push_literal(
+                    integer.base10_parse::<i32>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid i32 literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
+                "u8" => output.push_literal(
+                    integer.base10_parse::<u8>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid u8 literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
+                "u16" => output.push_literal(
+                    integer.base10_parse::<u16>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid u16 literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
+                "u32" => output.push_literal(
+                    integer.base10_parse::<u32>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid u32 literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
+                "u64" => output.push_literal(
+                    integer.base10_parse::<u64>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid u64 literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
+                "u128" => output.push_literal(
+                    integer.base10_parse::<u128>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid u128 literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
+                "usize" => output.push_literal(
+                    integer.base10_parse::<usize>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid usize literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
+                "i8" => output.push_literal(
+                    integer.base10_parse::<i8>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid i8 literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
+                "i16" => output.push_literal(
+                    integer.base10_parse::<i16>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid i16 literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
+                "i64" => output.push_literal(
+                    integer.base10_parse::<i64>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid i64 literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
+                "i128" => output.push_literal(
+                    integer.base10_parse::<i128>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid i128 literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
+                "isize" => output.push_literal(
+                    integer.base10_parse::<isize>().map_err(|e| {
+                        ParseError::new(
+                            format!("invalid isize literal `{integer}`: {e}"),
+                            integer.span(),
+                        )
+                    })?,
+                    span,
+                ),
                 suffix => {
                     return Err(ParseError::new(
                         format!("invalid integer literal suffix: `{suffix}`"),
@@ -196,13 +233,20 @@ fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Resu
             };
         }
         CelLiteral::Float(float) => {
+            let span = float.span();
             match float.suffix() {
-                "" | "f64" => output.push_literal(float.base10_parse::<f64>().map_err(|e| {
-                    ParseError::new(format!("invalid f64 literal `{float}`: {e}"), float.span())
-                })?),
-                "f32" => output.push_literal(float.base10_parse::<f32>().map_err(|e| {
-                    ParseError::new(format!("invalid f32 literal `{float}`: {e}"), float.span())
-                })?),
+                "" | "f64" => output.push_literal(
+                    float.base10_parse::<f64>().map_err(|e| {
+                        ParseError::new(format!("invalid f64 literal `{float}`: {e}"), float.span())
+                    })?,
+                    span,
+                ),
+                "f32" => output.push_literal(
+                    float.base10_parse::<f32>().map_err(|e| {
+                        ParseError::new(format!("invalid f32 literal `{float}`: {e}"), float.span())
+                    })?,
+                    span,
+                ),
                 suffix => {
                     return Err(ParseError::new(
                         format!("invalid float literal suffix: `{suffix}`"),
@@ -212,22 +256,28 @@ fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Resu
             };
         }
         CelLiteral::Str(string) => {
-            output.push_literal(string.value());
+            let span = string.span();
+            output.push_literal(string.value(), span);
         }
         CelLiteral::Bool(lit_bool) => {
-            output.push_literal(lit_bool.value);
+            let span = lit_bool.span();
+            output.push_literal(lit_bool.value, span);
         }
         CelLiteral::Char(ch) => {
-            output.push_literal(ch.value());
+            let span = ch.span();
+            output.push_literal(ch.value(), span);
         }
         CelLiteral::Byte(byte) => {
-            output.push_literal(byte.value());
+            let span = byte.span();
+            output.push_literal(byte.value(), span);
         }
         CelLiteral::ByteStr(byte_str) => {
-            output.push_literal(byte_str.value());
+            let span = byte_str.span();
+            output.push_literal(byte_str.value(), span);
         }
         CelLiteral::CStr(c_str) => {
-            output.push_literal(c_str.value());
+            let span = c_str.span();
+            output.push_literal(c_str.value(), span);
         }
         other => {
             return Err(ParseError::new(
@@ -521,17 +571,12 @@ impl<C: ParserContext> Parser<C> {
                     return Err(self.error_at("expected and_expression"));
                 }
                 std::mem::swap(&mut self.context, &mut rhs_fragment);
-                let mut bypass_fragment = self.context.new_fragment();
-                bypass_fragment.push_literal(true);
-                self.context
-                    .join2(bypass_fragment, rhs_fragment)
-                    .map_err(|e| {
-                        ParseError::new_range(
-                            e.to_string(),
-                            start_span.expect("production has token at start"),
-                            self.last_span,
-                        )
-                    })?;
+                self.context.apply_logical(
+                    "||",
+                    rhs_fragment,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
             }
             Ok(true)
         } else {
@@ -555,17 +600,12 @@ impl<C: ParserContext> Parser<C> {
                     return Err(self.error_at("expected comparison_expression"));
                 }
                 std::mem::swap(&mut self.context, &mut rhs_fragment);
-                let mut bypass_fragment = self.context.new_fragment();
-                bypass_fragment.push_literal(false);
-                self.context
-                    .join2(rhs_fragment, bypass_fragment)
-                    .map_err(|e| {
-                        ParseError::new_range(
-                            e.to_string(),
-                            start_span.expect("production has token at start"),
-                            self.last_span,
-                        )
-                    })?;
+                self.context.apply_logical(
+                    "&&",
+                    rhs_fragment,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
             }
             Ok(true)
         } else {
@@ -861,7 +901,10 @@ impl<C: ParserContext> Parser<C> {
                         let index = integer.base10_parse::<usize>().map_err(|e| {
                             self.error_at(&format!("invalid tuple index `{integer}`: {e}"))
                         })?;
-                        self.apply_tuple_index(index)?;
+                        self.apply_tuple_index(
+                            index,
+                            start_span.expect("production has token at start"),
+                        )?;
                     }
                     Some(Token::Literal(CelLiteral::Float(float))) => {
                         let float = float.clone();
@@ -889,8 +932,9 @@ impl<C: ParserContext> Parser<C> {
                         let second_index = second.parse::<usize>().map_err(|e| {
                             self.error_at(&format!("invalid tuple index `{second}`: {e}"))
                         })?;
-                        self.apply_tuple_index(first_index)?;
-                        self.apply_tuple_index(second_index)?;
+                        let idx_start = start_span.expect("production has token at start");
+                        self.apply_tuple_index(first_index, idx_start)?;
+                        self.apply_tuple_index(second_index, idx_start)?;
                     }
                     _ => return Err(self.error_at("expected integer after '.'")),
                 }
@@ -902,12 +946,13 @@ impl<C: ParserContext> Parser<C> {
     }
 
     /// Applies a single `.N` tuple-index operation to the value currently on
-    /// top of the stack, replacing it with element `index`.
+    /// top of the stack, replacing it with element `index`. `start` is the span
+    /// of the base expression the index chain is rooted at.
     ///
     /// # Errors
     /// Returns an error if the top of stack isn't a tuple, or if `index` is
     /// out of range for its arity.
-    fn apply_tuple_index(&mut self, index: usize) -> Result<()> {
+    fn apply_tuple_index(&mut self, index: usize, start: Span) -> Result<()> {
         let arity = self
             .context
             .peek_tuple_arity()
@@ -917,7 +962,7 @@ impl<C: ParserContext> Parser<C> {
                 "tuple index `{index}` out of range for tuple of arity {arity}"
             )));
         }
-        self.context.tuple_index(index);
+        self.context.tuple_index(index, start, self.last_span);
         Ok(())
     }
 
@@ -964,7 +1009,7 @@ impl<C: ParserContext> Parser<C> {
                 self.advance();
 
                 if ident_name == "if" {
-                    return self.is_if_expression();
+                    return self.is_if_expression(ident_span);
                 }
 
                 self.context
@@ -992,6 +1037,9 @@ impl<C: ParserContext> Parser<C> {
     /// Returns an error if the parenthesized expression or tuple literal is malformed, has a
     /// missing or misplaced comma, or is missing its closing `)`.
     fn is_tuple_or_group(&mut self) -> Result<bool> {
+        let open_span = self
+            .peek_span()
+            .expect("tuple_or_group requires an opening '(' token");
         self.advance();
         // Unit expression: ()
         if matches!(
@@ -1002,7 +1050,7 @@ impl<C: ParserContext> Parser<C> {
             })
         ) {
             self.advance();
-            self.context.push_literal(());
+            self.context.push_literal((), self.last_span);
             return Ok(true);
         }
         let ambient_start = self.context.current_stack_offset();
@@ -1033,7 +1081,8 @@ impl<C: ParserContext> Parser<C> {
         ) {
             // Single element + trailing comma: 1-tuple.
             self.advance();
-            self.context.make_tuple(count, ambient_start);
+            self.context
+                .make_tuple(count, ambient_start, open_span, self.last_span);
             return Ok(true);
         }
         loop {
@@ -1055,13 +1104,15 @@ impl<C: ParserContext> Parser<C> {
                 return Err(self.error_at("expected ',' or closing parenthesis"));
             }
         }
-        self.context.make_tuple(count, ambient_start);
+        self.context
+            .make_tuple(count, ambient_start, open_span, self.last_span);
         Ok(true)
     }
 
     /// `if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].`
     ///
-    /// - Precondition: The `if` keyword has already been consumed by the caller.
+    /// - Precondition: The `if` keyword has already been consumed by the caller; `if_span` is
+    ///   its span.
     ///
     /// # Errors
     ///
@@ -1070,7 +1121,7 @@ impl<C: ParserContext> Parser<C> {
     /// branch types do not match (as detected by `join2`).
     ///
     /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
-    fn is_if_expression(&mut self) -> Result<bool> {
+    fn is_if_expression(&mut self, if_span: Span) -> Result<bool> {
         if !self.is_or_expression()? {
             return Err(self.error_at("expected condition after `if`"));
         }
@@ -1101,9 +1152,10 @@ impl<C: ParserContext> Parser<C> {
         let else_fragment = if self.is_keyword("else") {
             if self.is_keyword("if") {
                 // else if: recursively parse another if_expression
+                let elif_span = self.last_span;
                 let mut fragment = self.context.new_fragment();
                 std::mem::swap(&mut self.context, &mut fragment);
-                self.is_if_expression()?;
+                self.is_if_expression(elif_span)?;
                 std::mem::swap(&mut self.context, &mut fragment);
                 fragment
             } else {
@@ -1137,11 +1189,11 @@ impl<C: ParserContext> Parser<C> {
         } else {
             // Implicit else: () — then-branch must also return ()
             let mut fragment = self.context.new_fragment();
-            fragment.push_literal(());
+            fragment.push_literal((), self.last_span);
             fragment
         };
         self.context
-            .join2(then_fragment, else_fragment)
+            .join2(then_fragment, else_fragment, if_span, self.last_span)
             .map_err(|e| ParseError::new(e.to_string(), self.last_span))?;
         Ok(true)
     }
