@@ -21,6 +21,16 @@ pub(crate) struct TokenCursor {
     /// `take_tokens`/`set_tokens`) never pass through these methods, so they don't affect this
     /// counter — which is exactly what callers like [`skip_to_recovery_point`] need: a depth
     /// that reflects only pm-lang-grammar nesting, not CEL sub-expression internals.
+    ///
+    /// This separation holds only as long as a failed CEL sub-expression doesn't leave a dangling,
+    /// unmatched delimiter of a kind CEL also reuses for its own internal grouping. It holds for
+    /// `Delimiter::Parenthesis` (CEL owns all parens; pm-lang's grammar never uses them), but not
+    /// for `Delimiter::Brace`: CEL's `if`/`else` expressions use braces for their branches, the
+    /// same delimiter kind pm-lang uses for `relationship`/`conditional`/method bodies. A CEL `if`
+    /// expression whose then-branch fails to parse (e.g. `if a { }`) can leave a stray `}` in the
+    /// stream that this counter — and [`skip_to_recovery_point`], which reads it — has no way to
+    /// distinguish from a real pm-lang-tracked brace. See [`skip_to_recovery_point`]'s doc comment
+    /// for the resulting scope boundary.
     depth: i32,
 }
 
@@ -290,6 +300,20 @@ impl TokenCursor {
     /// reached — can leave a stray, PM-untracked paren in the stream for this method to skip
     /// past. Treating it as a brace/bracket-equivalent depth change would desync `depth` from
     /// the real pm-lang nesting it's meant to track.
+    ///
+    /// **Known limitation (accepted scope boundary):** this kind-based approach only works
+    /// because pm-lang's own grammar never uses `Parenthesis`/`None` delimiters, so treating them
+    /// as depth-neutral can never be confused with a real pm-lang brace/bracket. It does *not*
+    /// extend to a CEL expression failure that leaves a dangling, unmatched `Brace` — e.g. a CEL
+    /// `if` expression whose then-branch fails to parse (`if a { }`): CEL's `if`/`else` grammar
+    /// reuses `Delimiter::Brace` for its own branches, the same kind pm-lang uses for
+    /// `relationship`/`conditional`/method bodies, so there is no way to distinguish "a stray
+    /// brace CEL left dangling" from "a real pm-lang-tracked brace" by delimiter kind alone. In
+    /// that case this method (and the recovery it drives) may stop one brace too early, mistaking
+    /// the stray brace for a real pm-lang-tracked one, aborting the whole parse with `Err` rather
+    /// than isolating just the one malformed item. Fixing this in general requires
+    /// `cel_parser`'s `Parser<C>` to report back exactly what it left unbalanced on a failed
+    /// parse — out of scope here; see the tracking issue for the general fix.
     ///
     /// The keyword check matters when the malformed item has no `;` of its own — e.g.
     /// `cell bad unknown_syntax` immediately followed by a sibling `cell` declaration — so

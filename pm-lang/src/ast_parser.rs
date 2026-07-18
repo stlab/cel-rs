@@ -55,11 +55,25 @@ impl PmAstParser {
     /// malformed `method_decl` inside a `relationship`/`conditional` block causes the whole
     /// enclosing item to become one `SheetItem::Error`.
     ///
+    /// Recovery is reliable for syntax errors pm-lang's own grammar detects directly (malformed
+    /// `cell` declarations; `relationship`/`conditional`/`method_decl` structure outside their CEL
+    /// expression bodies) and for CEL expression errors that don't leave an unbalanced delimiter of
+    /// a kind CEL also uses for its own internal grouping — the common case, including a dangling
+    /// unmatched `)` (e.g. `(+)`). It is **not** guaranteed when a CEL expression's failure leaves
+    /// a dangling, unmatched delimiter of a kind CEL reuses for its own internal structure — e.g.
+    /// an `if`/`else` expression's braces, which are the same `Delimiter::Brace` kind pm-lang uses
+    /// for its own `relationship`/`conditional`/method bodies (`if a { }` is one such case). In
+    /// that narrower case recovery may abort the entire parse (returning `Err`) rather than
+    /// isolating the one malformed item; see [`TokenCursor::skip_to_recovery_point`]'s doc comment
+    /// for why a kind-based fix can't close this in general, and the tracking issue for the
+    /// general fix.
+    ///
     /// # Errors
     ///
     /// Returns `Err` for structural errors outside any sheet item (e.g. a missing `sheet`
     /// keyword, missing sheet name, missing top-level braces, or trailing tokens after the
-    /// sheet closes) — these can't be attributed to a single recoverable item.
+    /// sheet closes) — these can't be attributed to a single recoverable item. Also returns `Err`
+    /// in the known-limitation case described above.
     pub fn parse_str(&mut self, source: &str) -> Result<ast::Sheet> {
         use std::str::FromStr;
         let stream = proc_macro2::TokenStream::from_str(source)
@@ -604,5 +618,42 @@ mod tests {
         assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
         assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
+    }
+
+    /// Documents a KNOWN, accepted limitation of coarse error recovery — this test is not
+    /// "passing by accident"; it pins down today's actual (still-buggy) behavior so a future fix
+    /// has a concrete regression test to flip from "documents the bug" to "documents the fix."
+    ///
+    /// Unlike `recovery_malformed_cel_expr_with_dangling_paren_recovers` (a dangling `)` left by
+    /// a failed CEL sub-expression), a dangling `}` left by a failed CEL `if`-expression cannot be
+    /// fixed by the same kind-based approach: `is_if_expression` consumes the then-branch's
+    /// opening `{` directly (bypassing `TokenCursor`, exactly like the paren case) but fails
+    /// before consuming the matching `}` when the then-branch itself fails to parse (here, an
+    /// empty `{ }`). Because CEL's `if`/`else` grammar reuses `Delimiter::Brace` — the same kind
+    /// pm-lang's own `relationship`/`conditional`/method-body braces use — `skip_to_recovery_point`
+    /// cannot tell "a stray brace CEL left dangling" apart from "a real pm-lang-tracked brace" by
+    /// delimiter kind alone (contrast `Delimiter::Parenthesis`/`Delimiter::None`, which are never
+    /// used by pm-lang's own grammar and so could safely be made depth-neutral). The stray `}`
+    /// here is mistaken for the `relationship`'s own closing brace, so recovery stops one brace
+    /// early and the whole parse aborts with `Err` instead of isolating just this one item.
+    ///
+    /// Fixing this in general requires `cel_parser`'s `Parser<C>` to report back exactly what
+    /// delimiters it left unbalanced on a failed parse — a larger, cross-crate API change out of
+    /// scope for this recovery feature. See the tracking issue for the general fix.
+    #[test]
+    fn recovery_known_limitation_if_expr_dangling_brace_aborts_whole_parse() {
+        let result = PmAstParser::new().parse_str(
+            r#"
+                sheet s {
+                    cell good_before: i32 = 1;
+                    relationship { method [a] -> [b] { if a { } } }
+                    cell good_after: i32 = 2;
+                }
+            "#,
+        );
+        assert!(
+            result.is_err(),
+            "expected the whole parse to abort with Err (known limitation); got {result:?}"
+        );
     }
 }
