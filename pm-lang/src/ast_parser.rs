@@ -86,11 +86,12 @@ impl PmAstParser {
         let mut errors = Vec::new();
         while !cursor.at_close_brace() {
             let item_start = cursor.peek_span();
+            let target_depth = cursor.depth();
             match self.parse_sheet_item(cursor) {
                 Ok(item) => items.push(item),
                 Err(e) => {
                     errors.push(e);
-                    let item_end = cursor.skip_to_recovery_point();
+                    let item_end = cursor.skip_to_recovery_point(target_depth);
                     items.push(ast::SheetItem::Error {
                         span: ast::ExprSpan {
                             start: item_start,
@@ -498,5 +499,81 @@ mod tests {
             .parse_str("sheet s { cell x: i32 = 1; }")
             .unwrap();
         assert!(sheet.errors.is_empty());
+    }
+
+    /// Regression test for a bug where `skip_to_recovery_point` tracked nesting depth with a
+    /// fresh local counter starting at 0 on every call, instead of the cursor's actual running
+    /// depth. A malformed `relationship { .. }` item opens its own `{` before the inner error
+    /// (on `bad`, which isn't the `method` keyword) is detected, so recovery begins already one
+    /// delimiter deep; the old code treated the relationship's own closing `}` as if it were
+    /// back at sheet-item level, leaving it and everything after unconsumed and causing the
+    /// whole parse to abort with `Err` instead of recovering just this one item.
+    #[test]
+    fn recovery_malformed_relationship_item_recovers() {
+        let sheet = PmAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell good_before: i32 = 1;
+                    relationship { bad }
+                    cell good_after: i32 = 2;
+                }
+            "#,
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
+    }
+
+    /// Same regression as `recovery_malformed_relationship_item_recovers`, but for a malformed
+    /// `conditional` item, which — like `relationship` — unconditionally opens its own `{`
+    /// before any inner error can occur.
+    #[test]
+    fn recovery_malformed_conditional_item_recovers() {
+        let sheet = PmAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell good_before: i32 = 1;
+                    conditional m { bad }
+                    cell good_after: i32 = 2;
+                }
+            "#,
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
+    }
+
+    /// Deeper regression case: the syntax error occurs inside a method's own body brace (an
+    /// incomplete CEL expression), two delimiters below the sheet-item level (the relationship's
+    /// `{` plus the method body's own `{`). Recovery must still land at sheet-item level rather
+    /// than aborting the whole parse.
+    #[test]
+    fn recovery_malformed_method_body_recovers_at_sheet_item_level() {
+        let sheet = PmAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell good_before: i32 = 1;
+                    relationship {
+                        method [a] -> [b] { a + }
+                    }
+                    cell good_after: i32 = 2;
+                }
+            "#,
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 }

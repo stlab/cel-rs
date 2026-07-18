@@ -14,14 +14,33 @@ type Result<T> = std::result::Result<T, ParseError>;
 /// `property_model::Sheet` mutation, or a syntax tree node).
 pub(crate) struct TokenCursor {
     tokens: Option<std::iter::Peekable<LexLexer>>,
+    /// Running brace/bracket nesting depth, incremented/decremented only by this cursor's own
+    /// `expect_open_brace`/`expect_close_brace`/`expect_open_bracket`/`expect_close_bracket`
+    /// (brace and bracket delimiters are tracked uniformly as one counter). Tokens consumed
+    /// directly by an embedded `cel_parser::Parser` while it temporarily owns the stream (see
+    /// `take_tokens`/`set_tokens`) never pass through these methods, so they don't affect this
+    /// counter — which is exactly what callers like [`skip_to_recovery_point`] need: a depth
+    /// that reflects only pm-lang-grammar nesting, not CEL sub-expression internals.
+    depth: i32,
 }
 
 impl TokenCursor {
-    /// Creates a cursor over `tokens`.
+    /// Creates a cursor over `tokens`, at nesting depth 0.
     pub(crate) fn new(tokens: std::iter::Peekable<LexLexer>) -> Self {
         TokenCursor {
             tokens: Some(tokens),
+            depth: 0,
         }
+    }
+
+    /// Returns the cursor's current brace/bracket nesting depth.
+    ///
+    /// - Postcondition: reflects only delimiters consumed via this cursor's own
+    ///   `expect_open_brace`/`expect_close_brace`/`expect_open_bracket`/`expect_close_bracket`
+    ///   (and by [`skip_to_recovery_point`] internally); unaffected by tokens the embedded CEL
+    ///   sub-parser consumes directly while it owns the stream.
+    pub(crate) fn depth(&self) -> i32 {
+        self.depth
     }
 
     /// Takes the token stream, leaving `None` behind — used to hand the stream to an embedded
@@ -127,6 +146,8 @@ impl TokenCursor {
     /// # Errors
     ///
     /// Returns `Err` if the next token is not `{`.
+    ///
+    /// - Postcondition: on success, increments [`Self::depth`] by 1.
     pub(crate) fn expect_open_brace(&mut self) -> Result<Span> {
         let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
             Some(Token::OpenDelim {
@@ -137,6 +158,7 @@ impl TokenCursor {
         };
         if ok {
             self.advance();
+            self.depth += 1;
             Ok(span)
         } else {
             Err(ParseError::new("expected `{`", span))
@@ -148,6 +170,8 @@ impl TokenCursor {
     /// # Errors
     ///
     /// Returns `Err` if the next token is not `}`.
+    ///
+    /// - Postcondition: on success, decrements [`Self::depth`] by 1.
     pub(crate) fn expect_close_brace(&mut self) -> Result<Span> {
         let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
             Some(Token::CloseDelim {
@@ -158,6 +182,7 @@ impl TokenCursor {
         };
         if ok {
             self.advance();
+            self.depth -= 1;
             Ok(span)
         } else {
             Err(ParseError::new("expected `}`", span))
@@ -169,6 +194,8 @@ impl TokenCursor {
     /// # Errors
     ///
     /// Returns `Err` if the next token is not `[`.
+    ///
+    /// - Postcondition: on success, increments [`Self::depth`] by 1.
     pub(crate) fn expect_open_bracket(&mut self) -> Result<Span> {
         let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
             Some(Token::OpenDelim {
@@ -179,6 +206,7 @@ impl TokenCursor {
         };
         if ok {
             self.advance();
+            self.depth += 1;
             Ok(span)
         } else {
             Err(ParseError::new("expected `[`", span))
@@ -190,6 +218,8 @@ impl TokenCursor {
     /// # Errors
     ///
     /// Returns `Err` if the next token is not `]`.
+    ///
+    /// - Postcondition: on success, decrements [`Self::depth`] by 1.
     pub(crate) fn expect_close_bracket(&mut self) -> Result<Span> {
         let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
             Some(Token::CloseDelim {
@@ -200,6 +230,7 @@ impl TokenCursor {
         };
         if ok {
             self.advance();
+            self.depth -= 1;
             Ok(span)
         } else {
             Err(ParseError::new("expected `]`", span))
@@ -235,43 +266,59 @@ impl TokenCursor {
         )
     }
 
-    /// Skips tokens until a declaration-boundary recovery point: a `;` at the current nesting
-    /// depth (consumed); a `}` that closes back to the current nesting depth (not consumed, so
-    /// the caller's `at_close_brace` check still sees it); or the `cell`/`relationship`/
-    /// `conditional` keyword that starts the next sheet item, at the current nesting depth (not
-    /// consumed). The keyword check matters when the malformed item has no `;` of its own — e.g.
+    /// Skips tokens until a declaration-boundary recovery point relative to `target_depth` — the
+    /// cursor's [`Self::depth`] as observed by the caller *before* it dispatched to the
+    /// production that failed. A recovery point is: a `;` seen while at or below `target_depth`
+    /// (consumed); a `}` that closes back to at or below `target_depth` (not consumed, so the
+    /// caller's `at_close_brace` check still sees it); or the `cell`/`relationship`/`conditional`
+    /// keyword that starts the next sheet item, seen while at or below `target_depth` (not
+    /// consumed).
+    ///
+    /// The failed production may have already consumed one or more of its own opening delimiters
+    /// before the error occurred (e.g. a malformed `relationship { .. }`'s own `{`) — the running
+    /// [`Self::depth`] this method reads and updates reflects that, so this method first skips
+    /// back out through those still-open delimiters before applying the stopping conditions.
+    /// Comparing with `<=` rather than strict equality is a defensive guard: malformed input with
+    /// excess closing delimiters could otherwise dip `depth` below `target_depth` and never
+    /// satisfy an exact-equality check.
+    ///
+    /// The keyword check matters when the malformed item has no `;` of its own — e.g.
     /// `cell bad unknown_syntax` immediately followed by a sibling `cell` declaration — so
     /// recovery stops before the next item instead of skipping past it in search of a `;`
     /// belonging to that sibling. Used only by [`crate::PmAstParser`]'s coarse error recovery.
     ///
+    /// - Precondition: `target_depth` is the value [`Self::depth`] held immediately before the
+    ///   caller dispatched to the production that produced the error being recovered from.
     /// - Postcondition: returns the span of the last token inspected, so an `Error` placeholder
     ///   node can cover the skipped range.
+    /// - Postcondition: [`Self::depth`] is left at (or, only on malformed input, possibly below)
+    ///   `target_depth`, kept consistent with every `OpenDelim`/`CloseDelim` consumed here.
     ///
     /// - Complexity: O(n) in the number of tokens skipped.
-    pub(crate) fn skip_to_recovery_point(&mut self) -> Span {
+    pub(crate) fn skip_to_recovery_point(&mut self, target_depth: i32) -> Span {
         let mut last = self.peek_span();
-        let mut depth: i32 = 0;
         loop {
+            let at_or_below_target = self.depth <= target_depth;
             match self.peek_token() {
                 None => return last,
-                Some(Token::CloseDelim { .. }) if depth == 0 => return last,
+                Some(Token::CloseDelim { .. }) if at_or_below_target => return last,
                 Some(Token::CloseDelim { .. }) => {
-                    depth -= 1;
+                    self.depth -= 1;
                     last = self.peek_span();
                     self.advance();
                 }
                 Some(Token::OpenDelim { .. }) => {
-                    depth += 1;
+                    self.depth += 1;
                     last = self.peek_span();
                     self.advance();
                 }
-                Some(Token::Punct { op, .. }) if op == ";" && depth == 0 => {
+                Some(Token::Punct { op, .. }) if op == ";" && at_or_below_target => {
                     last = self.peek_span();
                     self.advance();
                     return last;
                 }
                 Some(Token::Identifier(id))
-                    if depth == 0
+                    if at_or_below_target
                         && (id == "cell" || id == "relationship" || id == "conditional") =>
                 {
                     return last;
