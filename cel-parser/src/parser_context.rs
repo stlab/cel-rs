@@ -50,12 +50,14 @@ pub trait ParserContext: Sized {
     /// condition value already present on `self` and folding in `rhs`, the already-parsed
     /// right-hand-side fragment.
     ///
-    /// - Precondition: `name` is `"||"` or `"&&"`.
+    /// - Precondition: `name` is `"||"` or `"&&"`, and `rhs` produces exactly one value.
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the leading condition value isn't a `bool`, or if `rhs` doesn't produce
-    /// exactly one value.
+    /// Implementations that validate operand types during parsing (e.g. [`DynSegmentContext`])
+    /// return `Err` if the leading condition value isn't a `bool`. Implementations that defer
+    /// type validation to a later phase (e.g. [`crate::ast::AstContext`]) never return `Err`
+    /// here.
     fn apply_logical(&mut self, name: &str, rhs: Self, start: Span, end: Span)
     -> crate::Result<()>;
 
@@ -64,11 +66,14 @@ pub trait ParserContext: Sized {
     /// `true`; `else_fragment`'s when `false`. `start`/`end` cover the whole `if`/`else`
     /// construct.
     ///
+    /// - Precondition: neither fragment takes arguments, and each produces exactly one value.
+    ///
     /// # Errors
     ///
-    /// Returns `Err` if the leading condition value isn't a `bool`, if either fragment takes
-    /// arguments, if either fragment doesn't produce exactly one value, or if the fragments'
-    /// produced types don't match.
+    /// Implementations that validate operand types during parsing (e.g. [`DynSegmentContext`])
+    /// return `Err` if the leading condition value isn't a `bool` or if the fragments' produced
+    /// types don't match. Implementations that defer type validation to a later phase (e.g.
+    /// [`crate::ast::AstContext`]) never return `Err` here.
     fn join2(
         &mut self,
         then_fragment: Self,

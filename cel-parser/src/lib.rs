@@ -1224,6 +1224,8 @@ impl Parser<DynSegmentContext> {
     /// # Errors
     ///
     /// Returns an error if the input does not contain a valid CEL expression.
+    ///
+    /// - Complexity: O(n) in the number of tokens.
     pub fn parse_tokens(&mut self, tokens: TokenStreamIter) -> Result<DynSegment> {
         self.parse_tokens_ctx(tokens)
             .map(DynSegmentContext::into_inner)
@@ -1237,6 +1239,8 @@ impl Parser<DynSegmentContext> {
     /// # Errors
     ///
     /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
+    ///
+    /// - Complexity: O(n) in the length of `s`.
     pub fn parse_str(&mut self, s: &str) -> Result<DynSegment> {
         self.parse_str_ctx(s).map(DynSegmentContext::into_inner)
     }
@@ -1265,6 +1269,8 @@ impl Parser<AstContext> {
     /// # Errors
     ///
     /// Returns an error if the input does not contain a valid CEL expression.
+    ///
+    /// - Complexity: O(n) in the number of tokens.
     pub fn parse_tokens_ast(&mut self, tokens: TokenStreamIter) -> Result<Expr> {
         self.parse_tokens_ctx(tokens).map(AstContext::into_expr)
     }
@@ -1277,6 +1283,8 @@ impl Parser<AstContext> {
     /// # Errors
     ///
     /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
+    ///
+    /// - Complexity: O(n) in the length of `s`.
     ///
     /// # Examples
     ///
