@@ -19,7 +19,6 @@
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
-use std::iter::Peekable;
 use std::str::FromStr;
 
 use indexmap::IndexMap;
@@ -27,7 +26,7 @@ use indexmap::IndexMap;
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Literal, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
 use cel_runtime::{BoxExtractor, DynSegment};
-use proc_macro2::{Delimiter, Span, TokenStream};
+use proc_macro2::{Span, TokenStream};
 use property_model::{CellId, Method, RelationshipId, Sheet};
 
 use crate::TypeRegistry;
@@ -71,211 +70,24 @@ impl std::ops::DerefMut for ParsedSheet {
 // ---------------------------------------------------------------------------
 
 struct ParseContext {
-    /// Token stream; `None` while temporarily owned by CELParser.
-    tokens: Option<Peekable<LexLexer>>,
+    cursor: crate::token_cursor::TokenCursor,
     sheet: Sheet,
     /// Maps cell name → (CellId, TypeId), in declaration order, for method and
     /// conditional compilation and for exposing to callers via `ParsedSheet`.
     cell_names: IndexMap<String, (CellId, TypeId)>,
 }
 
-impl ParseContext {
-    fn peek_token(&mut self) -> Option<&Token> {
-        self.tokens.as_mut()?.peek()
-    }
+impl std::ops::Deref for ParseContext {
+    type Target = crate::token_cursor::TokenCursor;
 
-    fn advance(&mut self) -> Option<Token> {
-        self.tokens.as_mut()?.next()
+    fn deref(&self) -> &crate::token_cursor::TokenCursor {
+        &self.cursor
     }
+}
 
-    fn peek_span(&mut self) -> Span {
-        self.tokens
-            .as_mut()
-            .and_then(|t| t.peek())
-            .map(|t| t.span())
-            .unwrap_or_else(Span::call_site)
-    }
-
-    fn err_at(&mut self, msg: impl Into<String>) -> ParseError {
-        ParseError::new(msg.into(), self.peek_span())
-    }
-
-    /// Consumes and returns `true` if the next token is an identifier matching `kw`.
-    fn is_keyword(&mut self, kw: &str) -> bool {
-        let ok = matches!(
-            self.tokens.as_mut().and_then(|t| t.peek()),
-            Some(Token::Identifier(id)) if id == kw
-        );
-        if ok {
-            self.advance();
-        }
-        ok
-    }
-
-    /// Consumes any identifier.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the next token is not an identifier.
-    fn consume_ident(&mut self) -> Result<(String, Span)> {
-        let span = match self.tokens.as_mut().and_then(|t| t.peek()) {
-            Some(Token::Identifier(id)) => {
-                let s = id.span();
-                let _ = id;
-                s
-            }
-            other => {
-                let s = other.map(|t| t.span()).unwrap_or(Span::call_site());
-                return Err(ParseError::new("expected identifier", s));
-            }
-        };
-        if let Some(Token::Identifier(id)) = self.advance() {
-            return Ok((id.to_string(), span));
-        }
-        unreachable!("peeked identifier, advance must return it")
-    }
-
-    /// Consumes a specific punctuation token.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the next token does not match `p`.
-    fn expect_punct(&mut self, p: &str) -> Result<Span> {
-        let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
-            Some(Token::Punct { op, span }) if op == p => (true, *span),
-            other => (false, other.map(|t| t.span()).unwrap_or(Span::call_site())),
-        };
-        if ok {
-            self.advance();
-            Ok(span)
-        } else {
-            Err(ParseError::new(format!("expected `{p}`"), span))
-        }
-    }
-
-    /// Consumes and returns `true` if the next token is punctuation matching `p`.
-    fn consume_punct(&mut self, p: &str) -> bool {
-        let ok = matches!(
-            self.tokens.as_mut().and_then(|t| t.peek()),
-            Some(Token::Punct { op, .. }) if op == p
-        );
-        if ok {
-            self.advance();
-        }
-        ok
-    }
-
-    /// Consumes `{`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the next token is not `{`.
-    fn expect_open_brace(&mut self) -> Result<Span> {
-        let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
-            Some(Token::OpenDelim {
-                delimiter: Delimiter::Brace,
-                span,
-            }) => (true, *span),
-            other => (false, other.map(|t| t.span()).unwrap_or(Span::call_site())),
-        };
-        if ok {
-            self.advance();
-            Ok(span)
-        } else {
-            Err(ParseError::new("expected `{`", span))
-        }
-    }
-
-    /// Consumes `}`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the next token is not `}`.
-    fn expect_close_brace(&mut self) -> Result<Span> {
-        let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
-            Some(Token::CloseDelim {
-                delimiter: Delimiter::Brace,
-                span,
-            }) => (true, *span),
-            other => (false, other.map(|t| t.span()).unwrap_or(Span::call_site())),
-        };
-        if ok {
-            self.advance();
-            Ok(span)
-        } else {
-            Err(ParseError::new("expected `}`", span))
-        }
-    }
-
-    /// Consumes `[`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the next token is not `[`.
-    fn expect_open_bracket(&mut self) -> Result<Span> {
-        let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
-            Some(Token::OpenDelim {
-                delimiter: Delimiter::Bracket,
-                span,
-            }) => (true, *span),
-            other => (false, other.map(|t| t.span()).unwrap_or(Span::call_site())),
-        };
-        if ok {
-            self.advance();
-            Ok(span)
-        } else {
-            Err(ParseError::new("expected `[`", span))
-        }
-    }
-
-    /// Consumes `]`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the next token is not `]`.
-    fn expect_close_bracket(&mut self) -> Result<Span> {
-        let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
-            Some(Token::CloseDelim {
-                delimiter: Delimiter::Bracket,
-                span,
-            }) => (true, *span),
-            other => (false, other.map(|t| t.span()).unwrap_or(Span::call_site())),
-        };
-        if ok {
-            self.advance();
-            Ok(span)
-        } else {
-            Err(ParseError::new("expected `]`", span))
-        }
-    }
-
-    /// Consumes and returns a literal token.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the next token is not a literal.
-    fn consume_literal(&mut self) -> Result<(Literal, Span)> {
-        let span = match self.tokens.as_mut().and_then(|t| t.peek()) {
-            Some(Token::Literal(lit)) => lit.span(),
-            other => {
-                let s = other.map(|t| t.span()).unwrap_or(Span::call_site());
-                return Err(ParseError::new("expected literal", s));
-            }
-        };
-        if let Some(Token::Literal(lit)) = self.advance() {
-            return Ok((lit, span));
-        }
-        unreachable!("peeked literal, advance must return it")
-    }
-
-    fn at_close_brace(&mut self) -> bool {
-        matches!(
-            self.tokens.as_mut().and_then(|t| t.peek()),
-            Some(Token::CloseDelim {
-                delimiter: Delimiter::Brace,
-                ..
-            }) | None
-        )
+impl std::ops::DerefMut for ParseContext {
+    fn deref_mut(&mut self) -> &mut crate::token_cursor::TokenCursor {
+        &mut self.cursor
     }
 }
 
@@ -330,7 +142,9 @@ impl PmParser {
         let stream =
             TokenStream::from_str(source).map_err(|e| ParseError::new(e.to_string(), e.span()))?;
         let mut ctx = ParseContext {
-            tokens: Some(LexLexer::new(stream.into_iter()).peekable()),
+            cursor: crate::token_cursor::TokenCursor::new(
+                LexLexer::new(stream.into_iter()).peekable(),
+            ),
             sheet: Sheet::new(),
             cell_names: IndexMap::new(),
         };
@@ -671,10 +485,11 @@ impl PmParser {
 
     /// Delegates one `or_expression` to CELParser, sharing the token stream.
     fn parse_cel_or_expression(&mut self, ctx: &mut ParseContext) -> Result<DynSegment> {
-        let tokens = ctx.tokens.take().expect("tokens present");
+        let tokens = ctx.cursor.take_tokens().expect("tokens present");
         self.cel.set_lex_tokens(tokens);
         let result = self.cel.parse_or_expression();
-        ctx.tokens = Some(self.cel.take_lex_tokens().expect("tokens set"));
+        ctx.cursor
+            .set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
         result
     }
 }

@@ -20,6 +20,7 @@
 //! ```
 
 mod parser;
+mod token_cursor;
 pub mod type_registry;
 
 // pm-lang reuses cel_parser::ParseError directly; no new error type is introduced.
