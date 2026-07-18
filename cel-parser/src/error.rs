@@ -99,6 +99,27 @@ impl SourceSpan {
             end: end.end(),
         }
     }
+
+    /// Converts this span (1-based lines, 0-based character columns) to a byte-offset range
+    /// within `source`.
+    ///
+    /// - Precondition: `source` is the exact original text this span's line/column positions
+    ///   were recorded against.
+    ///
+    /// - Complexity: O(n) in the length of `source`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::SourceSpan;
+    ///
+    /// let span = SourceSpan::new(1, 0, 1, 5);
+    /// let range = span.to_byte_range("hello world");
+    /// assert_eq!(&"hello world"[range], "hello");
+    /// ```
+    pub fn to_byte_range(&self, source: &str) -> std::ops::Range<usize> {
+        span_to_byte_range(source, *self)
+    }
 }
 
 /// A CEL parse error with a message and source location.
@@ -115,7 +136,7 @@ pub struct CELError {
 /// range within `source`.
 ///
 /// - Complexity: O(n) in the length of `source`.
-fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Range<usize> {
+pub(crate) fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Range<usize> {
     debug_assert!(
         span.start.line >= 1,
         "`span.start.line` must be 1-based (≥ 1)"
@@ -744,5 +765,13 @@ mod tests {
             &Renderer::plain(),
         );
         assert_eq!(output, "something went wrong");
+    }
+
+    #[test]
+    fn to_byte_range_matches_manual_slice() {
+        let source = "line one\nline two\nline three";
+        let span = SourceSpan::new(2, 5, 3, 4);
+        let range = span.to_byte_range(source);
+        assert_eq!(&source[range], "two\nline");
     }
 }
