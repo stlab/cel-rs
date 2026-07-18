@@ -4,8 +4,13 @@
 //! formatter, and the future macro-compilation backend. Carries no resolved types or operator
 //! overloads: resolution and type/range validation are deferred to a later, separate phase.
 
-use proc_macro2::Span;
+use std::any::Any;
 use std::ffi::CString;
+
+use proc_macro2::Span;
+
+use crate::op_table::OpLookup;
+use crate::parser_context::ParserContext;
 
 /// Source range of an AST node: start of its first token to end of its last.
 ///
@@ -195,11 +200,6 @@ impl Expr {
         }
     }
 }
-
-use std::any::Any;
-
-use crate::op_table::OpLookup;
-use crate::parser_context::ParserContext;
 
 /// Converts a statically-known literal value into its [`Literal`] variant.
 ///
@@ -424,6 +424,7 @@ impl ParserContext for AstContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Parser;
     use proc_macro2::Span;
 
     #[test]
@@ -476,9 +477,6 @@ mod tests {
         assert_eq!(LogicalOp::And, LogicalOp::And);
         assert_ne!(LogicalOp::And, LogicalOp::Or);
     }
-
-    use crate::op_table::OpLookup;
-    use crate::parser_context::ParserContext;
 
     #[test]
     fn push_literal_dispatches_every_concrete_literal_type() {
@@ -661,8 +659,6 @@ mod tests {
         ctx.push_literal(5i32, Span::call_site());
         assert_eq!(ctx.peek_tuple_arity(), Some(usize::MAX));
     }
-
-    use crate::Parser;
 
     #[test]
     fn additive_binds_looser_than_multiplicative() {
