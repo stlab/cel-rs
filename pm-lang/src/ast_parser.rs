@@ -105,7 +105,7 @@ impl PmAstParser {
                 Ok(item) => items.push(item),
                 Err(e) => {
                     errors.push(e);
-                    let item_end = cursor.skip_to_recovery_point(target_depth);
+                    let item_end = cursor.skip_to_recovery_point(target_depth, item_start);
                     items.push(ast::SheetItem::Error {
                         span: ast::ExprSpan {
                             start: item_start,

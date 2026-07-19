@@ -321,16 +321,27 @@ impl TokenCursor {
     /// recovery stops before the next item instead of skipping past it in search of a `;`
     /// belonging to that sibling. Used only by [`crate::PmAstParser`]'s coarse error recovery.
     ///
+    /// `fallback` is returned as-is when this method consumes zero tokens — i.e. the very next
+    /// token already satisfies a stopping condition (most commonly: the failed production
+    /// didn't consume the token that turned out to be a sibling `cell`/`relationship`/
+    /// `conditional` keyword). Without this, the first stopping check's `return last` would
+    /// return `last`'s pre-loop initial value, which — if nothing has been consumed yet — would
+    /// be the *next* item's own first token's span, not any part of the item that actually
+    /// failed to parse. Callers should pass the span of the failed item's own first token (its
+    /// start), so a zero-tokens-skipped recovery collapses to a zero-width span at that point
+    /// rather than overlapping into the sibling item that follows.
+    ///
     /// - Precondition: `target_depth` is the value [`Self::depth`] held immediately before the
     ///   caller dispatched to the production that produced the error being recovered from.
-    /// - Postcondition: returns the span of the last token inspected, so an `Error` placeholder
-    ///   node can cover the skipped range.
+    /// - Postcondition: returns the span of the last token actually consumed by this call, or
+    ///   `fallback` if it consumed none, so an `Error` placeholder node can cover the skipped
+    ///   range without ever extending past the start of the next, unconsumed token.
     /// - Postcondition: [`Self::depth`] is left at (or, only on malformed input, possibly below)
     ///   `target_depth`, kept consistent with every `OpenDelim`/`CloseDelim` consumed here.
     ///
     /// - Complexity: O(n) in the number of tokens skipped.
-    pub(crate) fn skip_to_recovery_point(&mut self, target_depth: i32) -> Span {
-        let mut last = self.peek_span();
+    pub(crate) fn skip_to_recovery_point(&mut self, target_depth: i32, fallback: Span) -> Span {
+        let mut last = fallback;
         loop {
             let at_or_below_target = self.depth <= target_depth;
             match self.peek_token() {

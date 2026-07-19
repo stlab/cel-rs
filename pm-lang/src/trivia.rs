@@ -203,4 +203,24 @@ mod tests {
         };
         assert_eq!(leading_comment.as_deref(), Some("fix me"));
     }
+
+    #[test]
+    fn recovery_span_that_abuts_the_next_keyword_does_not_invert_the_gap() {
+        // A malformed cell whose recovery stops immediately on the very next token (because
+        // that token is already the sibling item's own keyword, with nothing consumed by
+        // recovery itself) must not let the error item's end span leak into the next item's
+        // start -- otherwise attach_trivia's gap computation inverts (start byte > end byte)
+        // and `&source[start..end]` panics.
+        let source = "sheet s { cell bad relationship { method [x] -> [y] { x } } }";
+        let mut sheet = PmAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet); // must not panic
+        assert!(matches!(
+            sheet.items[0],
+            crate::ast::SheetItem::Error { .. }
+        ));
+        assert!(matches!(
+            sheet.items[1],
+            crate::ast::SheetItem::Relationship(_)
+        ));
+    }
 }
