@@ -658,4 +658,34 @@ mod tests {
             "expected the whole parse to abort with Err (known limitation); got {result:?}"
         );
     }
+
+    /// A variant of the same known limitation (see
+    /// `recovery_known_limitation_if_expr_dangling_brace_aborts_whole_parse`): here the CEL
+    /// sub-expression fails on a bare `+` (no valid expression follows it), which the failed
+    /// `is_or_expression` call doesn't consume — so the very next token `skip_to_recovery_point`
+    /// sees is a keyword-shaped identifier (`cell`) written just after it. Because that
+    /// identifier is encountered while `depth` is still elevated (still inside the
+    /// `relationship`/method-body braces, not yet unwound), the `at_or_below_target` guard on
+    /// the `cell`/`relationship`/`conditional` stopping check doesn't fire for it, so it's
+    /// swallowed as ordinary garbage rather than treated as a boundary.
+    ///
+    /// This does not corrupt the result or panic, and it does not silently drop a *subsequent,
+    /// well-formed* sheet item either: the swallow only ever consumes tokens up to the next real
+    /// pm-lang-tracked brace, at which point recovery hits the exact same dangling-brace
+    /// mis-stop as the sibling test above and the whole parse aborts with `Err` — never `Ok`
+    /// with a gap. Pinned here because the failure path differs (garbage-swallow before the
+    /// mis-stop, rather than mis-stop directly), even though the externally observable outcome
+    /// is the same accepted limitation tracked in
+    /// <https://github.com/stlab/cel-rs/issues/43>.
+    #[test]
+    fn recovery_known_limitation_keyword_shaped_garbage_still_aborts_cleanly() {
+        let result = PmAstParser::new().parse_str(
+            "sheet s { relationship { method [a] -> [b] { if a { + cell good: i32 = 1; } } } cell trailing: i32 = 2; }",
+        );
+        assert!(
+            result.is_err(),
+            "expected the whole parse to abort with Err (known limitation), not a corrupted \
+             Ok result; got {result:?}"
+        );
+    }
 }
