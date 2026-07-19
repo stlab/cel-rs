@@ -187,4 +187,20 @@ mod tests {
         };
         assert_eq!(c.leading_comment.as_deref(), Some("second"));
     }
+
+    #[test]
+    fn attaches_a_comment_preceding_a_recovered_error_item() {
+        // A comment immediately before a malformed declaration must still be recovered onto
+        // the SheetItem::Error placeholder, not silently dropped.
+        let source = "sheet s {\n    cell a: i32 = 1;\n    // fix me\n    cell bad unknown_syntax\n    cell c: i32 = 2;\n}";
+        let mut sheet = PmAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Error {
+            leading_comment, ..
+        } = &sheet.items[1]
+        else {
+            panic!("expected Error");
+        };
+        assert_eq!(leading_comment.as_deref(), Some("fix me"));
+    }
 }

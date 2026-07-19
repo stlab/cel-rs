@@ -111,6 +111,7 @@ impl PmAstParser {
                             start: item_start,
                             end: item_end,
                         },
+                        leading_comment: None,
                     });
                 }
             }

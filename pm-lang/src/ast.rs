@@ -41,6 +41,11 @@ pub enum SheetItem {
     Error {
         /// The span of the skipped, malformed item.
         span: ExprSpan,
+        /// A leading `//`/`/* */` comment immediately preceding this item, if recovered by
+        /// [`crate::trivia::attach_trivia`]. Preserved even though the item failed to parse, so
+        /// a comment explaining a broken declaration (e.g. `// TODO: fix this`) isn't silently
+        /// dropped.
+        leading_comment: Option<String>,
     },
 }
 
@@ -51,18 +56,19 @@ impl SheetItem {
             SheetItem::Cell(c) => c.span,
             SheetItem::Relationship(r) => r.span,
             SheetItem::Conditional(c) => c.span,
-            SheetItem::Error { span } => *span,
+            SheetItem::Error { span, .. } => *span,
         }
     }
 
-    /// Sets this item's leading comment, if the variant carries one. A no-op for the `Error`
-    /// variant, which has no comment field.
+    /// Sets this item's leading comment.
     pub(crate) fn set_leading_comment(&mut self, comment: String) {
         match self {
             SheetItem::Cell(c) => c.leading_comment = Some(comment),
             SheetItem::Relationship(r) => r.leading_comment = Some(comment),
             SheetItem::Conditional(c) => c.leading_comment = Some(comment),
-            SheetItem::Error { .. } => {}
+            SheetItem::Error {
+                leading_comment, ..
+            } => *leading_comment = Some(comment),
         }
     }
 }
@@ -206,7 +212,10 @@ mod tests {
     #[test]
     fn sheet_item_span_reads_the_error_variant() {
         let span = point(Span::call_site());
-        let item = SheetItem::Error { span };
+        let item = SheetItem::Error {
+            span,
+            leading_comment: None,
+        };
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
     }
 
@@ -229,10 +238,20 @@ mod tests {
     }
 
     #[test]
-    fn set_leading_comment_on_error_variant_is_a_no_op() {
+    fn set_leading_comment_sets_the_error_variant() {
         let span = point(Span::call_site());
-        let mut item = SheetItem::Error { span };
-        item.set_leading_comment("hi".to_string()); // must not panic
-        assert!(matches!(item, SheetItem::Error { .. }));
+        let mut item = SheetItem::Error {
+            span,
+            leading_comment: None,
+        };
+        item.set_leading_comment("hi".to_string());
+        match item {
+            SheetItem::Error {
+                leading_comment, ..
+            } => {
+                assert_eq!(leading_comment.as_deref(), Some("hi"))
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 }
