@@ -57,7 +57,6 @@ impl SheetItem {
 
     /// Sets this item's leading comment, if the variant carries one. A no-op for the `Error`
     /// variant, which has no comment field.
-    #[allow(dead_code)]
     pub(crate) fn set_leading_comment(&mut self, comment: String) {
         match self {
             SheetItem::Cell(c) => c.leading_comment = Some(comment),

@@ -10,7 +10,7 @@ use crate::ast;
 use crate::token_cursor::TokenCursor;
 
 /// Parser result type, matching `cel_parser::ParseError`.
-pub type Result<T> = std::result::Result<T, cel_parser::ParseError>;
+type Result<T> = std::result::Result<T, cel_parser::ParseError>;
 
 /// Parses pm-lang source strings into [`ast::Sheet`] trees, instead of executing into a live
 /// `property_model::Sheet` (see [`crate::PmParser`] for that path).
@@ -639,7 +639,8 @@ mod tests {
     ///
     /// Fixing this in general requires `cel_parser`'s `Parser<C>` to report back exactly what
     /// delimiters it left unbalanced on a failed parse — a larger, cross-crate API change out of
-    /// scope for this recovery feature. See the tracking issue for the general fix.
+    /// scope for this recovery feature. See the tracking issue for the general fix:
+    /// <https://github.com/stlab/cel-rs/issues/43>.
     #[test]
     fn recovery_known_limitation_if_expr_dangling_brace_aborts_whole_parse() {
         let result = PmAstParser::new().parse_str(

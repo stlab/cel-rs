@@ -313,7 +313,8 @@ impl TokenCursor {
     /// the stray brace for a real pm-lang-tracked one, aborting the whole parse with `Err` rather
     /// than isolating just the one malformed item. Fixing this in general requires
     /// `cel_parser`'s `Parser<C>` to report back exactly what it left unbalanced on a failed
-    /// parse — out of scope here; see the tracking issue for the general fix.
+    /// parse — out of scope here; see the tracking issue for the general fix:
+    /// <https://github.com/stlab/cel-rs/issues/43>.
     ///
     /// The keyword check matters when the malformed item has no `;` of its own — e.g.
     /// `cell bad unknown_syntax` immediately followed by a sibling `cell` declaration — so
