@@ -6,7 +6,8 @@
 
 use std::any::TypeId;
 
-use crate::Literal;
+use crate::op_table::builtin_operand_types;
+use crate::{Expr, ExprSpan, Literal, ParseError};
 
 /// A static type: one of the built-in primitives, or [`Ty::Any`] for anything pm-lang/CEL's
 /// extensible type system doesn't statically know about.
@@ -173,9 +174,148 @@ impl Ty {
     }
 }
 
+/// Infers `expr`'s type against `resolve_ident` (looks up a free identifier's declared type, or
+/// `Ty::Any` if unknown — e.g. a bare CEL builtin name, or a pm-lang cell with no `: type`
+/// annotation), returning the expression's inferred type plus every type diagnostic found.
+///
+/// Only [`Expr::Op`] (via [`builtin_operand_types`]) and [`Expr::Logical`] (CEL's fixed `&&`/`||`
+/// semantics: both operands must unify with `bool`) are checked directly. [`Expr::Apply`],
+/// [`Expr::Tuple`], [`Expr::TupleIndex`], and [`Expr::If`] are recursed into — so an `Op` nested
+/// inside one is still checked — but the node itself always infers as [`Ty::Any`]: checking call
+/// return types, tuple shapes, and if/else branch agreement is deferred to a later phase (see the
+/// design doc's "Type checking (v1)" section).
+///
+/// - Complexity: O(n) in the number of nodes in `expr`.
+pub fn check_expr(expr: &Expr, resolve_ident: &impl Fn(&str) -> Ty) -> (Ty, Vec<ParseError>) {
+    match expr {
+        Expr::Literal { value, .. } => (Ty::from_literal(value), Vec::new()),
+        Expr::Ident { name, .. } => (resolve_ident(name), Vec::new()),
+        Expr::Op {
+            name,
+            operands,
+            span,
+        } => check_op(name, operands, *span, resolve_ident),
+        Expr::Logical { lhs, rhs, span, .. } => check_logical(lhs, rhs, *span, resolve_ident),
+        Expr::Apply { callee, args, .. } => {
+            let mut diagnostics = check_expr(callee, resolve_ident).1;
+            for arg in args {
+                diagnostics.extend(check_expr(arg, resolve_ident).1);
+            }
+            (Ty::Any, diagnostics)
+        }
+        Expr::Tuple { elements, .. } => {
+            let mut diagnostics = Vec::new();
+            for element in elements {
+                diagnostics.extend(check_expr(element, resolve_ident).1);
+            }
+            (Ty::Any, diagnostics)
+        }
+        Expr::TupleIndex { base, .. } => (Ty::Any, check_expr(base, resolve_ident).1),
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let mut diagnostics = check_expr(cond, resolve_ident).1;
+            diagnostics.extend(check_expr(then_branch, resolve_ident).1);
+            diagnostics.extend(check_expr(else_branch, resolve_ident).1);
+            (Ty::Any, diagnostics)
+        }
+    }
+}
+
+/// Checks an [`Expr::Op`] node: infers each operand, then (only if every operand resolved to a
+/// concrete type) matches them against [`builtin_operand_types`]. An operator
+/// `builtin_operand_types` doesn't recognize at all (e.g. a tuple-shaped custom op registered
+/// only at runtime) can't be checked here and infers as `Ty::Any` — not an error.
+fn check_op(
+    name: &str,
+    operands: &[Expr],
+    span: ExprSpan,
+    resolve_ident: &impl Fn(&str) -> Ty,
+) -> (Ty, Vec<ParseError>) {
+    let mut diagnostics = Vec::new();
+    let operand_tys: Vec<Ty> = operands
+        .iter()
+        .map(|operand| {
+            let (ty, operand_diags) = check_expr(operand, resolve_ident);
+            diagnostics.extend(operand_diags);
+            ty
+        })
+        .collect();
+    if operand_tys.contains(&Ty::Any) {
+        return (Ty::Any, diagnostics);
+    }
+    let signatures = builtin_operand_types(name);
+    if signatures.is_empty() {
+        return (Ty::Any, diagnostics); // unregistered/custom operator: nothing to check
+    }
+    let matched = signatures.iter().find(|sig| {
+        sig.arity as usize == operand_tys.len()
+            && Some(sig.lhs) == operand_tys[0].type_id()
+            && (operand_tys.len() < 2 || Some(sig.rhs) == operand_tys[1].type_id())
+    });
+    match matched {
+        Some(_) => (result_ty_for_op(name, operand_tys[0]), diagnostics),
+        None => {
+            let described = operand_tys
+                .iter()
+                .map(Ty::name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            diagnostics.push(ParseError::new_range(
+                format!("`{name}` is not defined for operand type(s) `{described}`"),
+                span.start,
+                span.end,
+            ));
+            (Ty::Any, diagnostics)
+        }
+    }
+}
+
+/// Returns the result type of a matched built-in operator application: `Ty::Bool` for the
+/// comparison operators, otherwise the (matched, homogeneous) operand type — every built-in
+/// signature is either a comparison (returning `bool`) or same-type-in-same-type-out (arithmetic,
+/// bitwise, shifts, unary negation, logical not).
+fn result_ty_for_op(name: &str, operand_ty: Ty) -> Ty {
+    match name {
+        "==" | "!=" | "<" | "<=" | ">" | ">=" => Ty::Bool,
+        _ => operand_ty,
+    }
+}
+
+/// Checks an [`Expr::Logical`] (`&&`/`||`) node: both operands should unify with `Ty::Bool` (CEL's
+/// fixed short-circuit semantics, not table-driven like [`Expr::Op`]); the node's own type is
+/// always `Ty::Bool` regardless of whether a diagnostic was recorded.
+fn check_logical(
+    lhs: &Expr,
+    rhs: &Expr,
+    span: ExprSpan,
+    resolve_ident: &impl Fn(&str) -> Ty,
+) -> (Ty, Vec<ParseError>) {
+    let (lhs_ty, mut diagnostics) = check_expr(lhs, resolve_ident);
+    let (rhs_ty, rhs_diags) = check_expr(rhs, resolve_ident);
+    diagnostics.extend(rhs_diags);
+    for (side, ty) in [("left", lhs_ty), ("right", rhs_ty)] {
+        if !ty.unifies_with(&Ty::Bool) {
+            diagnostics.push(ParseError::new_range(
+                format!(
+                    "`&&`/`||` requires `bool`, found `{}` on the {side}",
+                    ty.name()
+                ),
+                span.start,
+                span.end,
+            ));
+        }
+    }
+    (Ty::Bool, diagnostics)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LogicalOp;
 
     #[test]
     fn from_literal_maps_every_concrete_variant() {
@@ -271,5 +411,200 @@ mod tests {
             unique.len(),
             "every listed Ty has a distinct name"
         );
+    }
+
+    fn any_resolver(_name: &str) -> Ty {
+        Ty::Any
+    }
+
+    fn point(span: proc_macro2::Span) -> ExprSpan {
+        ExprSpan {
+            start: span,
+            end: span,
+        }
+    }
+
+    fn lit_i32(v: i32) -> Expr {
+        Expr::Literal {
+            value: Literal::I32(v),
+            span: point(proc_macro2::Span::call_site()),
+        }
+    }
+
+    fn lit_bool(v: bool) -> Expr {
+        Expr::Literal {
+            value: Literal::Bool(v),
+            span: point(proc_macro2::Span::call_site()),
+        }
+    }
+
+    fn lit_str(v: &str) -> Expr {
+        Expr::Literal {
+            value: Literal::Str(v.to_string()),
+            span: point(proc_macro2::Span::call_site()),
+        }
+    }
+
+    fn op(name: &str, operands: Vec<Expr>) -> Expr {
+        Expr::Op {
+            name: name.to_string(),
+            operands,
+            span: point(proc_macro2::Span::call_site()),
+        }
+    }
+
+    #[test]
+    fn literal_infers_its_own_type() {
+        let (ty, diags) = check_expr(&lit_i32(1), &any_resolver);
+        assert_eq!(ty, Ty::I32);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn ident_resolves_via_the_supplied_resolver() {
+        let expr = Expr::Ident {
+            name: "width".to_string(),
+            span: point(proc_macro2::Span::call_site()),
+        };
+        let (ty, diags) = check_expr(&expr, &|name| {
+            if name == "width" { Ty::F64 } else { Ty::Any }
+        });
+        assert_eq!(ty, Ty::F64);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn unknown_ident_is_any_and_not_a_diagnostic() {
+        let expr = Expr::Ident {
+            name: "mystery".to_string(),
+            span: point(proc_macro2::Span::call_site()),
+        };
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Any);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn op_with_matching_signature_infers_the_operand_type() {
+        let expr = op("+", vec![lit_i32(1), lit_i32(2)]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::I32);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn comparison_op_always_infers_bool() {
+        let expr = op("==", vec![lit_i32(1), lit_i32(2)]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Bool);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn unary_negation_preserves_the_operand_type() {
+        let expr = op("-", vec![lit_i32(1)]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::I32);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn op_with_mismatched_operand_types_produces_one_diagnostic_and_infers_any() {
+        let expr = op("+", vec![lit_i32(1), lit_str("s")]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Any);
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn op_with_an_any_operand_produces_no_diagnostic() {
+        let expr = op(
+            "+",
+            vec![
+                Expr::Ident {
+                    name: "mystery".to_string(),
+                    span: point(proc_macro2::Span::call_site()),
+                },
+                lit_i32(1),
+            ],
+        );
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Any);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn unregistered_operator_name_is_any_and_not_a_diagnostic() {
+        // "greet" is only ever registered at runtime via OpLookup::register_tuple_op; the static
+        // checker can't see it and must not guess.
+        let expr = op("greet", vec![lit_i32(1)]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Any);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn logical_and_with_bool_operands_infers_bool_with_no_diagnostic() {
+        let expr = Expr::Logical {
+            op: LogicalOp::And,
+            lhs: Box::new(lit_bool(true)),
+            rhs: Box::new(lit_bool(false)),
+            span: point(proc_macro2::Span::call_site()),
+        };
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Bool);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn logical_or_with_a_non_bool_operand_produces_a_diagnostic_but_still_infers_bool() {
+        let expr = Expr::Logical {
+            op: LogicalOp::Or,
+            lhs: Box::new(lit_i32(1)),
+            rhs: Box::new(lit_bool(true)),
+            span: point(proc_macro2::Span::call_site()),
+        };
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Bool);
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn a_broken_op_nested_inside_a_tuple_still_surfaces_a_diagnostic() {
+        let expr = Expr::Tuple {
+            elements: vec![op("+", vec![lit_i32(1), lit_str("s")]), lit_i32(2)],
+            span: point(proc_macro2::Span::call_site()),
+        };
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Any, "Tuple itself is not type-checked in v1");
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn a_broken_op_nested_inside_an_if_condition_still_surfaces_a_diagnostic() {
+        let expr = Expr::If {
+            cond: Box::new(op("+", vec![lit_i32(1), lit_str("s")])),
+            then_branch: Box::new(lit_i32(1)),
+            else_branch: Box::new(lit_i32(2)),
+            span: point(proc_macro2::Span::call_site()),
+        };
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Any, "If itself is not type-checked in v1");
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn a_broken_op_nested_inside_a_call_argument_still_surfaces_a_diagnostic() {
+        let expr = Expr::Apply {
+            callee: Box::new(Expr::Ident {
+                name: "f".to_string(),
+                span: point(proc_macro2::Span::call_site()),
+            }),
+            args: vec![op("+", vec![lit_i32(1), lit_str("s")])],
+            span: point(proc_macro2::Span::call_site()),
+        };
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Any, "Apply itself is not type-checked in v1");
+        assert_eq!(diags.len(), 1);
     }
 }
