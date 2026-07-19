@@ -1,0 +1,319 @@
+//! A best-effort static type checker over [`crate::ast::Sheet`] trees, built on
+//! [`cel_parser::ty::check_expr`]. Checks each `cell`'s literal initializer against its `:
+//! type_name` annotation, and each `relationship`/`conditional` method's body against its declared
+//! outputs (arity: does the body actually produce as many values as declared; and per-output
+//! type). An absent annotation, an annotation naming a type [`crate::TypeRegistry`] doesn't
+//! recognize, or an operator [`cel_parser::op_table::builtin_operand_types`] doesn't recognize all
+//! resolve to [`cel_parser::Ty::Any`] and are never flagged — matching pm-lang/CEL's extensible
+//! type system. Not a complete type system; see the design doc's "Type checking (v1)" section.
+
+use cel_parser::lex_lexer::Literal as LexLiteral;
+use cel_parser::{Expr, ParseError, Ty, ty::check_expr};
+
+use crate::TypeRegistry;
+use crate::ast::{CellDecl, MethodDecl, Sheet, SheetItem};
+
+/// Checks `sheet` against `registry`'s registered types, returning every type diagnostic found.
+/// Never fails — an unrecognized annotation, an unresolved identifier, or a custom operator
+/// [`cel_parser::op_table::builtin_operand_types`] doesn't know about all resolve to
+/// [`cel_parser::Ty::Any`] and are silently skipped, not reported.
+///
+/// - Complexity: O(n) in the number of nodes across every item in `sheet`.
+pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
+    let mut diagnostics = Vec::new();
+    let cell_types = declared_cell_types(sheet, registry);
+    let resolve = |name: &str| -> Ty { cell_types.get(name).copied().unwrap_or(Ty::Any) };
+    for item in &sheet.items {
+        match item {
+            SheetItem::Cell(cell) => check_cell_initializer(cell, registry, &mut diagnostics),
+            SheetItem::Relationship(rel) => {
+                for method in &rel.methods {
+                    check_method(method, &resolve, &mut diagnostics);
+                }
+            }
+            SheetItem::Conditional(cond) => {
+                for branch in &cond.branches {
+                    for method in &branch.methods {
+                        check_method(method, &resolve, &mut diagnostics);
+                    }
+                }
+                if let Some(default_methods) = &cond.default {
+                    for method in default_methods {
+                        check_method(method, &resolve, &mut diagnostics);
+                    }
+                }
+            }
+            SheetItem::Error { .. } => {} // already reported as a syntax error; nothing to type-check
+        }
+    }
+    diagnostics
+}
+
+/// Maps every declared cell name to its `Ty` (from its `: type_name` annotation, resolved through
+/// `registry`), for use as the identifier resolver method bodies are checked against. A cell with
+/// no annotation, or one naming a type `registry` doesn't recognize, maps to `Ty::Any`.
+fn declared_cell_types(
+    sheet: &Sheet,
+    registry: &TypeRegistry,
+) -> std::collections::HashMap<String, Ty> {
+    let mut map = std::collections::HashMap::new();
+    for item in &sheet.items {
+        if let SheetItem::Cell(cell) = item {
+            let ty = cell
+                .type_name
+                .as_ref()
+                .and_then(|(name, _)| registry.get(name))
+                .map(|entry| Ty::from_type_id(entry.type_id))
+                .unwrap_or(Ty::Any);
+            map.insert(cell.name.clone(), ty);
+        }
+    }
+    map
+}
+
+/// Infers a pm-lang literal's type via `registry`'s suffix-defaulting convention (unsuffixed
+/// integer → `i32`, unsuffixed float → `f64`, mirroring `pm_lang::parser`'s existing
+/// `infer_and_parse_literal`), falling back to `Ty::Any` for an unregistered suffix or an
+/// unsupported literal kind (char/byte string/C string) — not an error.
+fn ty_of_lex_literal(lit: &LexLiteral, registry: &TypeRegistry) -> Ty {
+    use syn::Lit;
+    let type_name = match lit {
+        Lit::Int(i) if i.suffix().is_empty() => "i32",
+        Lit::Int(i) => i.suffix(),
+        Lit::Float(f) if f.suffix().is_empty() => "f64",
+        Lit::Float(f) => f.suffix(),
+        Lit::Bool(_) => "bool",
+        Lit::Str(_) => "String",
+        _ => return Ty::Any,
+    };
+    registry
+        .get(type_name)
+        .map(|entry| Ty::from_type_id(entry.type_id))
+        .unwrap_or(Ty::Any)
+}
+
+/// Checks one `cell`'s literal initializer against its `: type_name` annotation. A no-op if either
+/// half is absent, or if the annotation names a type `registry` doesn't recognize.
+fn check_cell_initializer(
+    cell: &CellDecl,
+    registry: &TypeRegistry,
+    diagnostics: &mut Vec<ParseError>,
+) {
+    let (Some((type_name, _)), Some((literal, lit_span))) = (&cell.type_name, &cell.initializer)
+    else {
+        return;
+    };
+    let Some(entry) = registry.get(type_name) else {
+        return;
+    };
+    let declared = Ty::from_type_id(entry.type_id);
+    let actual = ty_of_lex_literal(literal, registry);
+    if !declared.unifies_with(&actual) {
+        diagnostics.push(ParseError::new(
+            format!("expected `{}`, found `{}`", declared.name(), actual.name()),
+            lit_span.start,
+        ));
+    }
+}
+
+/// Checks one `method`'s body against its declared outputs: for a single output, the body's
+/// inferred type must unify with that output cell's declared type; for `n > 1` outputs, the body
+/// must be an `n`-element tuple, checked element-wise against each output cell. Operator-level
+/// diagnostics from inside the body (via [`check_expr`]) are always included exactly once,
+/// regardless of which branch below runs.
+fn check_method(
+    method: &MethodDecl,
+    resolve: &impl Fn(&str) -> Ty,
+    diagnostics: &mut Vec<ParseError>,
+) {
+    match method.outputs.as_slice() {
+        [] => {
+            let (_, body_diags) = check_expr(&method.body, resolve);
+            diagnostics.extend(body_diags);
+        }
+        [(name, _)] => {
+            let (body_ty, body_diags) = check_expr(&method.body, resolve);
+            diagnostics.extend(body_diags);
+            let declared = resolve(name);
+            if !declared.unifies_with(&body_ty) {
+                diagnostics.push(ParseError::new_range(
+                    format!(
+                        "method body produces `{}`, but `{name}` is declared `{}`",
+                        body_ty.name(),
+                        declared.name()
+                    ),
+                    method.body.span().start,
+                    method.body.span().end,
+                ));
+            }
+        }
+        outputs => {
+            let n = outputs.len();
+            match &method.body {
+                Expr::Tuple { elements, .. } if elements.len() == n => {
+                    for (element, (name, _)) in elements.iter().zip(outputs) {
+                        let (element_ty, element_diags) = check_expr(element, resolve);
+                        diagnostics.extend(element_diags);
+                        let declared = resolve(name);
+                        if !declared.unifies_with(&element_ty) {
+                            diagnostics.push(ParseError::new_range(
+                                format!(
+                                    "method output `{name}` produces `{}`, but is declared `{}`",
+                                    element_ty.name(),
+                                    declared.name()
+                                ),
+                                element.span().start,
+                                element.span().end,
+                            ));
+                        }
+                    }
+                }
+                other => {
+                    let (_, body_diags) = check_expr(other, resolve);
+                    diagnostics.extend(body_diags);
+                    diagnostics.push(ParseError::new_range(
+                        format!("method declares {n} outputs but its body is not a {n}-tuple"),
+                        other.span().start,
+                        other.span().end,
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PmAstParser;
+
+    fn parse(source: &str) -> Sheet {
+        PmAstParser::new().parse_str(source).unwrap()
+    }
+
+    #[test]
+    fn cell_initializer_matching_its_annotation_has_no_diagnostic() {
+        let sheet = parse("sheet s { cell x: i32 = 1; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn cell_initializer_mismatched_with_its_annotation_is_a_diagnostic() {
+        // Unsuffixed float literal defaults to f64, not i32.
+        let sheet = parse("sheet s { cell x: i32 = 1.0; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn cell_with_only_an_annotation_has_nothing_to_cross_check() {
+        let sheet = parse("sheet s { cell x: i32; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn cell_annotated_with_an_unregistered_type_name_is_never_flagged() {
+        let sheet = parse("sheet s { cell x: WidgetHandle = 1; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn method_single_output_matching_declared_type_has_no_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell width: f64; cell height: f64; cell area: f64; \
+             relationship { method [width, height] -> [area] { width * height } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn method_single_output_mismatched_with_declared_type_is_a_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell width: f64; cell height: f64; cell area: i32; \
+             relationship { method [width, height] -> [area] { width * height } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn method_multi_output_matching_tuple_has_no_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell a: i32; cell b: i32; cell sum: i32; cell diff: i32; \
+             relationship { method [a, b] -> [sum, diff] { (a + b, a - b) } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn method_multi_output_arity_mismatch_is_a_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell a: i32; cell b: i32; cell sum: i32; cell diff: i32; \
+             relationship { method [a, b] -> [sum, diff] { a + b } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn method_multi_output_per_element_type_mismatch_is_a_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell a: i32; cell b: i32; cell sum: i32; cell diff: f64; \
+             relationship { method [a, b] -> [sum, diff] { (a + b, a - b) } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn an_operator_error_inside_a_method_body_surfaces() {
+        let sheet = parse(
+            "sheet s { cell name: String; cell count: i32; cell out: i32; \
+             relationship { method [name, count] -> [out] { name + count } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn conditional_branch_and_default_methods_are_both_checked() {
+        let sheet = parse(
+            "sheet s { cell mode: i32; cell a: i32; cell b: i32; cell out: i32; \
+             conditional mode { \
+                 0i32 => { method [a] -> [out] { a } }, \
+                 _ => { method [b] -> [out] { b } }, \
+             } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn a_cell_with_no_type_annotation_unifies_with_anything_used_in_a_method() {
+        // `cell a = 1;` has an initializer but no `: type_name` — declared_cell_types maps it to
+        // Ty::Any, which must unify silently with `out`'s declared `i32`.
+        let sheet = parse(
+            "sheet s { cell a = 1; cell out: i32; \
+             relationship { method [a] -> [out] { a } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn recovered_error_items_are_skipped_without_panicking() {
+        let sheet =
+            parse("sheet s { cell good: i32 = 1; cell bad unknown_syntax cell after: i32 = 2; }");
+        assert!(
+            !sheet.errors.is_empty(),
+            "fixture must actually recover an error item"
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+}
