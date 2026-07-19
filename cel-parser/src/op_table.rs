@@ -937,6 +937,59 @@ static BUILTINS: phf::Map<&'static str, &'static [OpSignature]> = phf_map! {
     ">=" => GREATER_THAN_OR_EQUAL_SIGNATURES,
 };
 
+/// A single built-in overload's declared operand types, exposed for the static type checker
+/// (`cel_parser::ty::check_expr`) — never `op_fn`, which is execution-only and stays private.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OperandTypes {
+    /// Number of operands this overload accepts (1 or 2).
+    pub arity: u8,
+    /// The LHS (or sole, for arity 1) operand's `TypeId`.
+    pub lhs: TypeId,
+    /// The RHS operand's `TypeId`; equal to `lhs` for a homogeneous or arity-1 overload.
+    pub rhs: TypeId,
+}
+
+/// Returns every built-in overload's declared operand types for `name`, in registration order.
+///
+/// Reads the exact same static signature tables [`BuiltinScope::lookup`] dispatches against, so
+/// the static type checker and the runtime dispatcher share one source of truth and can't drift
+/// apart on which operand-type combinations a built-in operator accepts.
+///
+/// - Postcondition: returns an empty `Vec` if `name` names no built-in operator. A custom scope
+///   registered via [`OpLookup::push_scope`] or a tuple-shaped op registered via
+///   [`OpLookup::register_tuple_op`] is runtime-only (attached to one `OpLookup` instance, not
+///   this module's static tables) and is not visible here — the type checker treats such an
+///   operator as unchecked, not an error.
+///
+/// - Complexity: O(s) where s is the number of overloads registered for `name`.
+///
+/// # Examples
+///
+/// ```rust
+/// use cel_parser::op_table::builtin_operand_types;
+///
+/// assert!(builtin_operand_types("+").iter().any(|sig| sig.arity == 2));
+/// assert!(builtin_operand_types("not_an_operator").is_empty());
+/// ```
+pub fn builtin_operand_types(name: &str) -> Vec<OperandTypes> {
+    let signatures: &[OpSignature] = match name {
+        "<<" => &LEFT_SHIFT_SIGNATURES,
+        ">>" => &RIGHT_SHIFT_SIGNATURES,
+        _ => match BUILTINS.get(name) {
+            Some(s) => s,
+            None => return Vec::new(),
+        },
+    };
+    signatures
+        .iter()
+        .map(|sig| OperandTypes {
+            arity: sig.arity,
+            lhs: sig.lhs_type_id(),
+            rhs: sig.rhs_type_id(),
+        })
+        .collect()
+}
+
 /// Built-in operation scope.
 ///
 /// Provides lookup for standard operations using a compile-time hash table.
@@ -1710,5 +1763,66 @@ mod tests {
             result.is_err(),
             "empty-shape tuple signature must not match a non-tuple operand"
         );
+    }
+
+    #[test]
+    fn builtin_operand_types_reports_a_binary_arithmetic_overload() {
+        let sigs = builtin_operand_types("+");
+        assert!(
+            sigs.iter().any(|s| s.arity == 2
+                && s.lhs == TypeId::of::<i32>()
+                && s.rhs == TypeId::of::<i32>())
+        );
+    }
+
+    #[test]
+    fn builtin_operand_types_reports_a_unary_overload() {
+        let sigs = builtin_operand_types("!");
+        assert!(
+            sigs.iter()
+                .any(|s| s.arity == 1 && s.lhs == TypeId::of::<bool>())
+        );
+    }
+
+    #[test]
+    fn builtin_operand_types_includes_unary_negation_but_only_for_signed_and_float_types() {
+        let sigs = builtin_operand_types("-");
+        assert!(
+            sigs.iter()
+                .any(|s| s.arity == 1 && s.lhs == TypeId::of::<i32>())
+        );
+        assert!(
+            sigs.iter()
+                .any(|s| s.arity == 2 && s.lhs == TypeId::of::<i32>())
+        );
+        assert!(
+            !sigs
+                .iter()
+                .any(|s| s.arity == 1 && s.lhs == TypeId::of::<u32>()),
+            "unsigned types have no unary negation overload"
+        );
+    }
+
+    #[test]
+    fn builtin_operand_types_covers_heterogeneous_shift_signatures() {
+        let sigs = builtin_operand_types("<<");
+        assert!(
+            sigs.iter().any(|s| s.arity == 2
+                && s.lhs == TypeId::of::<u64>()
+                && s.rhs == TypeId::of::<u32>())
+        );
+    }
+
+    #[test]
+    fn builtin_operand_types_is_empty_for_an_unregistered_name() {
+        assert!(builtin_operand_types("not_an_operator").is_empty());
+    }
+
+    #[test]
+    fn builtin_operand_types_is_empty_for_a_runtime_only_tuple_op() {
+        // Tuple-shaped ops are registered on an OpLookup instance at runtime
+        // (OpLookup::register_tuple_op), never in the static BUILTINS table this function reads —
+        // confirming they're invisible here, not an oversight.
+        assert!(builtin_operand_types("greet").is_empty());
     }
 }
