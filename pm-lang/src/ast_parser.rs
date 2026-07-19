@@ -100,12 +100,14 @@ impl PmAstParser {
         let mut errors = Vec::new();
         while !cursor.at_close_brace() {
             let item_start = cursor.peek_span();
+            cursor.set_last_span(item_start);
             let target_depth = cursor.depth();
             match self.parse_sheet_item(cursor) {
                 Ok(item) => items.push(item),
                 Err(e) => {
                     errors.push(e);
-                    let item_end = cursor.skip_to_recovery_point(target_depth, item_start);
+                    let recovery_fallback = cursor.last_span();
+                    let item_end = cursor.skip_to_recovery_point(target_depth, recovery_fallback);
                     items.push(ast::SheetItem::Error {
                         span: ast::ExprSpan {
                             start: item_start,
@@ -489,6 +491,26 @@ mod tests {
         assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
         assert_eq!(sheet.errors.len(), 1);
+    }
+
+    #[test]
+    fn recovery_error_span_covers_tokens_actually_consumed_by_the_failed_item() {
+        // When recovery stops immediately (the very next token is already the sibling
+        // keyword, so skip_to_recovery_point consumes nothing itself), the Error item's span
+        // must still cover whatever the failed production consumed before giving up (here,
+        // "cell bad" -- the name it read before failing the ':'/'=' check) rather than
+        // collapsing to just its first token ("cell").
+        let source = "sheet s { cell bad relationship { method [x] -> [y] { x } } }";
+        let sheet = PmAstParser::new().parse_str(source).unwrap();
+        let ast::SheetItem::Error { span, .. } = &sheet.items[0] else {
+            panic!("expected Error");
+        };
+        let range = cel_parser::SourceSpan {
+            start: span.start.start(),
+            end: span.end.end(),
+        }
+        .to_byte_range(source);
+        assert_eq!(&source[range], "cell bad");
     }
 
     #[test]

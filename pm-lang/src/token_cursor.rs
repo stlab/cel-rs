@@ -32,6 +32,12 @@ pub(crate) struct TokenCursor {
     /// distinguish from a real pm-lang-tracked brace. See [`skip_to_recovery_point`]'s doc comment
     /// for the resulting scope boundary.
     depth: i32,
+    /// The span of the last token [`Self::advance`] actually consumed. Callers seed this to a
+    /// known-good starting point via [`Self::set_last_span`] before dispatching to a production
+    /// that might fail partway through, then read it back via [`Self::last_span`] after a
+    /// failure — the result is the span of whatever the failed production genuinely consumed
+    /// before giving up (or the seeded starting point, if it consumed nothing at all).
+    last_span: Span,
 }
 
 impl TokenCursor {
@@ -40,7 +46,23 @@ impl TokenCursor {
         TokenCursor {
             tokens: Some(tokens),
             depth: 0,
+            last_span: Span::call_site(),
         }
+    }
+
+    /// Returns the span of the last token [`Self::advance`] actually consumed since it was last
+    /// set via [`Self::set_last_span`].
+    pub(crate) fn last_span(&self) -> Span {
+        self.last_span
+    }
+
+    /// Sets the span [`Self::last_span`] returns until the next token is consumed. Callers use
+    /// this to seed a known starting point (e.g. a sheet item's own first token) immediately
+    /// before dispatching to a production that might fail partway through, so a subsequent
+    /// [`Self::last_span`] read reflects genuine progress within that one attempt rather than
+    /// carrying over a stale value from whatever was parsed previously.
+    pub(crate) fn set_last_span(&mut self, span: Span) {
+        self.last_span = span;
     }
 
     /// Returns the cursor's current brace/bracket nesting depth.
@@ -71,7 +93,9 @@ impl TokenCursor {
     }
 
     pub(crate) fn advance(&mut self) -> Option<Token> {
-        self.tokens.as_mut()?.next()
+        let token = self.tokens.as_mut()?.next()?;
+        self.last_span = token.span();
+        Some(token)
     }
 
     pub(crate) fn peek_span(&mut self) -> Span {
@@ -327,9 +351,13 @@ impl TokenCursor {
     /// `conditional` keyword). Without this, the first stopping check's `return last` would
     /// return `last`'s pre-loop initial value, which — if nothing has been consumed yet — would
     /// be the *next* item's own first token's span, not any part of the item that actually
-    /// failed to parse. Callers should pass the span of the failed item's own first token (its
-    /// start), so a zero-tokens-skipped recovery collapses to a zero-width span at that point
-    /// rather than overlapping into the sibling item that follows.
+    /// failed to parse. Callers should pass [`Self::last_span`] (read *after* the failed
+    /// production returns), seeded via [`Self::set_last_span`] to the failed item's own first
+    /// token immediately before dispatching to that production: this way, a zero-tokens-skipped
+    /// recovery reports the last token the failed production genuinely consumed before giving up
+    /// (e.g. a malformed `cell bad relationship { .. }`'s `Error` span covers `cell bad`, not
+    /// just `cell`) — never the seeded starting point alone when more was actually parsed, and
+    /// never overlapping into the sibling item that follows.
     ///
     /// - Precondition: `target_depth` is the value [`Self::depth`] held immediately before the
     ///   caller dispatched to the production that produced the error being recovered from.
