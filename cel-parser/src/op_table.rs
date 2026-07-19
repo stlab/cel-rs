@@ -951,7 +951,7 @@ pub struct OperandTypes {
 
 /// Returns every built-in overload's declared operand types for `name`, in registration order.
 ///
-/// Reads the exact same static signature tables [`BuiltinScope::lookup`] dispatches against, so
+/// Reads the exact same static signature tables `BuiltinScope::lookup` dispatches against, so
 /// the static type checker and the runtime dispatcher share one source of truth and can't drift
 /// apart on which operand-type combinations a built-in operator accepts.
 ///
