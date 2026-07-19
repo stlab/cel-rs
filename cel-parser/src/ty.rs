@@ -55,6 +55,15 @@ impl Ty {
     /// Maps a resolved [`Literal`] to its [`Ty`]. `Char`/`ByteStr`/`CStr`/`Unit` have no `Ty`
     /// variant and map to [`Ty::Any`] — not an error, matching this model's "unresolved falls
     /// back to `Any`" convention.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{Literal, Ty};
+    ///
+    /// assert_eq!(Ty::from_literal(&Literal::I32(1)), Ty::I32);
+    /// assert_eq!(Ty::from_literal(&Literal::Unit), Ty::Any);
+    /// ```
     pub fn from_literal(lit: &Literal) -> Ty {
         match lit {
             Literal::I8(_) => Ty::I8,
@@ -80,6 +89,16 @@ impl Ty {
     /// Maps a `TypeId` (e.g. from `pm_lang::TypeRegistry::TypeEntry::type_id`) to its [`Ty`].
     /// An unrecognized `TypeId` maps to [`Ty::Any`] — not an error, matching pm-lang/CEL's
     /// extensible type system (a host binary's custom registered types are invisible here).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::any::TypeId;
+    /// use cel_parser::Ty;
+    ///
+    /// assert_eq!(Ty::from_type_id(TypeId::of::<i32>()), Ty::I32);
+    /// assert_eq!(Ty::from_type_id(TypeId::of::<Vec<u8>>()), Ty::Any);
+    /// ```
     pub fn from_type_id(id: TypeId) -> Ty {
         if id == TypeId::of::<i8>() {
             Ty::I8
@@ -120,6 +139,16 @@ impl Ty {
 
     /// Returns this type's `TypeId`, or `None` for [`Ty::Any`] (which has no single concrete
     /// Rust type).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::any::TypeId;
+    /// use cel_parser::Ty;
+    ///
+    /// assert_eq!(Ty::I32.type_id(), Some(TypeId::of::<i32>()));
+    /// assert_eq!(Ty::Any.type_id(), None);
+    /// ```
     pub fn type_id(&self) -> Option<TypeId> {
         Some(match self {
             Ty::I8 => TypeId::of::<i8>(),
@@ -143,6 +172,15 @@ impl Ty {
     }
 
     /// A human-readable name for diagnostics (e.g. `"i32"`, `"<any>"`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::Ty;
+    ///
+    /// assert_eq!(Ty::I32.name(), "i32");
+    /// assert_eq!(Ty::Any.name(), "<any>");
+    /// ```
     pub fn name(&self) -> &'static str {
         match self {
             Ty::I8 => "i8",
@@ -169,6 +207,15 @@ impl Ty {
     /// equal. `Ty::Any` unifying silently with everything (in both directions) is the load-bearing
     /// property that lets unannotated cells and custom host types produce zero false-positive
     /// diagnostics.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::Ty;
+    ///
+    /// assert!(Ty::Any.unifies_with(&Ty::I32));
+    /// assert!(!Ty::I32.unifies_with(&Ty::F64));
+    /// ```
     pub fn unifies_with(&self, other: &Ty) -> bool {
         matches!(self, Ty::Any) || matches!(other, Ty::Any) || self == other
     }
@@ -186,6 +233,25 @@ impl Ty {
 /// design doc's "Type checking (v1)" section).
 ///
 /// - Complexity: O(n) in the number of nodes in `expr`.
+///
+/// # Examples
+///
+/// ```rust
+/// use cel_parser::{Expr, ExprSpan, Literal, Ty};
+/// use cel_parser::ty::check_expr;
+///
+/// let span = ExprSpan {
+///     start: proc_macro2::Span::call_site(),
+///     end: proc_macro2::Span::call_site(),
+/// };
+/// let expr = Expr::Literal {
+///     value: Literal::I32(1),
+///     span,
+/// };
+/// let (ty, diagnostics) = check_expr(&expr, &|_name| Ty::Any);
+/// assert_eq!(ty, Ty::I32);
+/// assert!(diagnostics.is_empty());
+/// ```
 pub fn check_expr(expr: &Expr, resolve_ident: &impl Fn(&str) -> Ty) -> (Ty, Vec<ParseError>) {
     match expr {
         Expr::Literal { value, .. } => (Ty::from_literal(value), Vec::new()),

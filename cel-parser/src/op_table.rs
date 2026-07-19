@@ -972,13 +972,8 @@ pub struct OperandTypes {
 /// assert!(builtin_operand_types("not_an_operator").is_empty());
 /// ```
 pub fn builtin_operand_types(name: &str) -> Vec<OperandTypes> {
-    let signatures: &[OpSignature] = match name {
-        "<<" => &LEFT_SHIFT_SIGNATURES,
-        ">>" => &RIGHT_SHIFT_SIGNATURES,
-        _ => match BUILTINS.get(name) {
-            Some(s) => s,
-            None => return Vec::new(),
-        },
+    let Some(signatures) = signatures_for(name) else {
+        return Vec::new();
     };
     signatures
         .iter()
@@ -988,6 +983,17 @@ pub fn builtin_operand_types(name: &str) -> Vec<OperandTypes> {
             rhs: sig.rhs_type_id(),
         })
         .collect()
+}
+
+/// Routes an operator name to its static signature table, or `None` if `name` names no built-in
+/// operator. Shared by [`builtin_operand_types`] and [`BuiltinScope::lookup`] so a future
+/// heterogeneous operator only needs its routing added in one place.
+fn signatures_for(name: &str) -> Option<&'static [OpSignature]> {
+    match name {
+        "<<" => Some(&LEFT_SHIFT_SIGNATURES),
+        ">>" => Some(&RIGHT_SHIFT_SIGNATURES),
+        _ => BUILTINS.get(name).copied(),
+    }
 }
 
 /// Built-in operation scope.
@@ -1009,13 +1015,8 @@ impl BuiltinScope {
         span: SourceSpan,
     ) -> Result<bool> {
         let stack_infos = segment.peek_stack_infos(num_operands);
-        let signatures: &[OpSignature] = match name {
-            "<<" => &LEFT_SHIFT_SIGNATURES,
-            ">>" => &RIGHT_SHIFT_SIGNATURES,
-            _ => match BUILTINS.get(name) {
-                Some(s) => s,
-                None => return Ok(false),
-            },
+        let Some(signatures) = signatures_for(name) else {
+            return Ok(false);
         };
         for sig in signatures {
             let arity = sig.arity as usize;

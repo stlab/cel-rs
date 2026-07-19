@@ -19,6 +19,18 @@ use crate::ast::{CellDecl, MethodDecl, Sheet, SheetItem};
 /// [`cel_parser::Ty::Any`] and are silently skipped, not reported.
 ///
 /// - Complexity: O(n) in the number of nodes across every item in `sheet`.
+///
+/// # Examples
+///
+/// ```rust
+/// use pm_lang::{PmAstParser, TypeRegistry, check_sheet};
+///
+/// let sheet = PmAstParser::new()
+///     .parse_str("sheet s { cell x: i32 = 1.0; }")
+///     .unwrap();
+/// let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+/// assert_eq!(diagnostics.len(), 1, "1.0 defaults to f64, mismatching the i32 annotation");
+/// ```
 pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
     let mut diagnostics = Vec::new();
     let cell_types = declared_cell_types(sheet, registry);
@@ -109,9 +121,10 @@ fn check_cell_initializer(
     let declared = Ty::from_type_id(entry.type_id);
     let actual = ty_of_lex_literal(literal, registry);
     if !declared.unifies_with(&actual) {
-        diagnostics.push(ParseError::new(
+        diagnostics.push(ParseError::new_range(
             format!("expected `{}`, found `{}`", declared.name(), actual.name()),
             lit_span.start,
+            lit_span.end,
         ));
     }
 }
@@ -134,6 +147,15 @@ fn check_method(
         [(name, _)] => {
             let (body_ty, body_diags) = check_expr(&method.body, resolve);
             diagnostics.extend(body_diags);
+            if let Expr::Tuple { elements, .. } = &method.body {
+                let n = elements.len();
+                diagnostics.push(ParseError::new_range(
+                    format!("method declares 1 output but its body is a {n}-tuple"),
+                    method.body.span().start,
+                    method.body.span().end,
+                ));
+                return;
+            }
             let declared = resolve(name);
             if !declared.unifies_with(&body_ty) {
                 diagnostics.push(ParseError::new_range(
@@ -255,6 +277,18 @@ mod tests {
         let sheet = parse(
             "sheet s { cell a: i32; cell b: i32; cell sum: i32; cell diff: i32; \
              relationship { method [a, b] -> [sum, diff] { a + b } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn method_single_output_with_a_tuple_shaped_body_is_a_diagnostic() {
+        // Body is a 2-tuple but only 1 output is declared: `check_expr` would otherwise infer
+        // `Ty::Any` for the tuple and let this slip through with no diagnostic at all.
+        let sheet = parse(
+            "sheet s { cell a: i32; cell b: i32; cell out: i32; \
+             relationship { method [a, b] -> [out] { (a, b) } } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
