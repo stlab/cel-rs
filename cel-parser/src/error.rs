@@ -105,6 +105,9 @@ impl SourceSpan {
     ///
     /// - Precondition: `source` is the exact original text this span's line/column positions
     ///   were recorded against.
+    /// - Precondition: `self.start.line >= 1` (spans use 1-based line numbers).
+    /// - Precondition: `self.end` does not precede `self.start` (`self.end.line > self.start.line`,
+    ///   or they're equal and `self.end.column >= self.start.column`).
     ///
     /// - Complexity: O(n) in the length of `source`.
     ///
