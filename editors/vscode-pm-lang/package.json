@@ -1,0 +1,56 @@
+{
+  "name": "pm-lang",
+  "displayName": "pm-lang",
+  "description": "Language support for pm-lang: diagnostics via the pm-lsp language server.",
+  "publisher": "stlab",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages"],
+  "main": "./out/src/extension.js",
+  "activationEvents": [
+    "onLanguage:pm-lang"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "pm-lang",
+        "aliases": ["pm-lang", "PM"],
+        "extensions": [".pm"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "pm-lang",
+        "scopeName": "source.pm-lang",
+        "path": "./syntaxes/pm-lang.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "pm-lang",
+      "properties": {
+        "pm-lang.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the pm-lsp language server binary. If empty, the extension searches the workspace's Cargo target directory (target/debug, then target/release) and then PATH."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "test": "tsc -p . && node --test out/test/"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.11.0",
+    "@types/vscode": "1.85.0",
+    "typescript": "5.7.3"
+  }
+}
