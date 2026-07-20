@@ -83,25 +83,46 @@ fn declared_cell_types(
     map
 }
 
-/// Infers a pm-lang literal's type via `registry`'s suffix-defaulting convention (unsuffixed
-/// integer → `i32`, unsuffixed float → `f64`, mirroring `pm_lang::parser`'s existing
-/// `infer_and_parse_literal`), falling back to `Ty::Any` for an unregistered suffix or an
-/// unsupported literal kind (char/byte string/C string) — not an error.
-fn ty_of_lex_literal(lit: &LexLiteral, registry: &TypeRegistry) -> Ty {
+/// Checks whether `lit` is compatible with `declared`, mirroring `pm_lang::parser`'s
+/// `parse_literal_as` — the function pm-lang's real `cell_decl` grammar actually uses once a cell
+/// has a `: type_name` annotation. `parse_literal_as` parses the literal's digits/value directly
+/// against the declared type, ignoring any suffix on the literal itself (unlike
+/// `infer_and_parse_literal`, used only when no annotation is present, which defaults an
+/// unsuffixed integer to `i32` and an unsuffixed float to `f64`) — so an unsuffixed integer
+/// literal is valid for *any* declared numeric type (`parse_literal_as` accepts it via
+/// `parse_int_literal`, which covers every integer width and both float types), and an unsuffixed
+/// float literal is valid only for `f32`/`f64`. `declared == Ty::Any` (an unregistered custom
+/// type) always matches — not statically checked.
+fn literal_matches_declared_ty(lit: &LexLiteral, declared: Ty) -> bool {
     use syn::Lit;
-    let type_name = match lit {
-        Lit::Int(i) if i.suffix().is_empty() => "i32",
-        Lit::Int(i) => i.suffix(),
-        Lit::Float(f) if f.suffix().is_empty() => "f64",
-        Lit::Float(f) => f.suffix(),
-        Lit::Bool(_) => "bool",
-        Lit::Str(_) => "String",
-        _ => return Ty::Any,
-    };
-    registry
-        .get(type_name)
-        .map(|entry| Ty::from_type_id(entry.type_id))
-        .unwrap_or(Ty::Any)
+    if declared == Ty::Any {
+        return true;
+    }
+    match lit {
+        Lit::Int(_) => matches!(
+            declared,
+            Ty::I8
+                | Ty::I16
+                | Ty::I32
+                | Ty::I64
+                | Ty::I128
+                | Ty::Isize
+                | Ty::U8
+                | Ty::U16
+                | Ty::U32
+                | Ty::U64
+                | Ty::U128
+                | Ty::Usize
+                | Ty::F32
+                | Ty::F64
+        ),
+        Lit::Float(_) => matches!(declared, Ty::F32 | Ty::F64),
+        Lit::Bool(_) => declared == Ty::Bool,
+        Lit::Str(_) => declared == Ty::String,
+        // char/byte-string/C-string: parse_literal_as has no arm for these against any
+        // registered type, so pm-lang's runtime rejects them unconditionally.
+        _ => false,
+    }
 }
 
 /// Checks one `cell`'s literal initializer against its `: type_name` annotation. A no-op if either
@@ -119,10 +140,9 @@ fn check_cell_initializer(
         return;
     };
     let declared = Ty::from_type_id(entry.type_id);
-    let actual = ty_of_lex_literal(literal, registry);
-    if !declared.unifies_with(&actual) {
+    if !literal_matches_declared_ty(literal, declared) {
         diagnostics.push(ParseError::new_range(
-            format!("expected `{}`, found `{}`", declared.name(), actual.name()),
+            format!("literal cannot be used as type `{}`", declared.name()),
             lit_span.start,
             lit_span.end,
         ));
@@ -233,6 +253,28 @@ mod tests {
         let sheet = parse("sheet s { cell x: i32; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn cell_initializer_unsuffixed_int_literal_matches_a_declared_unsigned_type() {
+        // pm_lang::parser's real cell_decl grammar parses an annotated initializer via
+        // parse_literal_as(entry, lit, span) — it parses the literal's digits directly as the
+        // declared type, ignoring the literal's own (absent) suffix. `cell x: u32 = 1;` is valid,
+        // accepted pm-lang; the checker must not falsely flag it.
+        let sheet = parse("sheet s { cell x: u32 = 1; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn cell_initializer_char_literal_against_any_registered_type_is_a_diagnostic() {
+        // parse_literal_as has no arm for a char literal against any registered type — pm-lang's
+        // runtime rejects `cell x: i32 = 'a';` unconditionally, so the checker must too (same root
+        // cause as the unsuffixed-int case above: the check must consult the declared type, not
+        // infer the literal's type independently).
+        let sheet = parse("sheet s { cell x: i32 = 'a'; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
     }
 
     #[test]
