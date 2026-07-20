@@ -14,6 +14,8 @@ use pm_lang::{PmAstParser, TypeRegistry, check_sheet};
 ///   [`PmAstParser::parse_str`] (syntax errors, including the single error produced when the
 ///   whole parse aborts instead of recovering one item) or returned by [`check_sheet`] (type
 ///   errors); returns an empty `Vec` for a syntactically and semantically clean sheet.
+/// - Complexity: O(n) in the length of `source` — parses and type-checks the whole sheet once,
+///   with no caching across calls.
 ///
 /// # Examples
 ///
