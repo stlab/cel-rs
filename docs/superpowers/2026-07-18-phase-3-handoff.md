@@ -1,6 +1,6 @@
 # pm-lang Language Server — Handoff into Phase 3
 
-Status snapshot as of 2026-07-19, written for whoever picks up the rest of Phase 3 in a new
+Status snapshot as of 2026-07-20, written for whoever picks up the rest of Phase 3 in a new
 conversation/context. Read `docs/superpowers/specs/2026-07-17-pm-lang-language-server-design.md`
 first for the full design and phasing — this doc only summarizes what's done, what's
 deliberately deferred, and what's left before Phase 3 is complete.
@@ -76,26 +76,52 @@ Built via subagent-driven development (4 tasks, each independently reviewed, plu
 whole-branch review whose Minor findings were fixed in a follow-up polish commit). Full plan:
 `docs/superpowers/plans/2026-07-18-pm-lang-type-checking-v1.md`.
 
+**Phase 3, sub-plan 2 (`pm-lsp`) — complete, PR pending
+(`worktree-language-server-vs-code-extension-3b`, commits `cc52b02`..`92d10ce`).**
+Added a new workspace crate, `pm-lsp` — the language server binary, built on `lsp-server` 0.10 +
+`lsp-types` 0.97 (synchronous, no async runtime, matching the design doc's choice). Resolved both
+open questions the previous handoff draft (above) flagged for this sub-plan up front, rather than
+letting them emerge mid-implementation:
+
+- **`ParseError → CELError` conversion point:** decided to convert immediately inside
+  `pm_lsp::diagnostics::diagnostics_for_source`, before the function returns — `PmAstParser`/
+  `check_sheet` themselves are unchanged and still return `cel_parser::ParseError`, matching every
+  other consumer. No `ParseError` is ever stored or passed across a thread/task boundary inside
+  `pm-lsp`.
+- **Name-resolution diagnostics (undeclared cell references):** explicitly *not* added in this
+  sub-plan. `check_sheet` still resolves unknown identifiers to `Ty::Any` and never flags them
+  (correct for a type checker); a separate resolution pass is deferred to whichever later phase
+  needs identifier resolution anyway (hover/goto-def/completion — Phase 3's phase 5 per the
+  design doc, which already plans to reuse `pm_lang::parser`'s `cell_names` scoping).
+
+Also decided, not previously flagged: **no in-memory document store.** Every diagnostic recompute
+(`didOpen`/`didChange`) already carries the client's full current text in its own notification
+params (the server declares `TextDocumentSyncKind::FULL`), so there's nothing to persist for a
+diagnostics-only server — adding a `Uri -> text` map now would sit unused until a later phase
+(hover/goto-def/completion) actually reads from it. `textDocument/didClose` is intentionally
+unhandled for the same reason.
+
+Structure: `pm_lsp::diagnostics::diagnostics_for_source(&str) -> Vec<lsp_types::Diagnostic>` is a
+pure function (`pm-lsp/src/diagnostics.rs`) wrapping `PmAstParser::parse_str` + `check_sheet`,
+tested directly with no LSP transport involved. `pm_lsp::{run, serve}` (`pm-lsp/src/dispatch.rs`)
+wire that function to `lsp-server`'s `Connection`: the initialize handshake, then
+`didOpen`/`didChange` → `publishDiagnostics`; a malformed notification is logged to stderr and
+skipped rather than crashing the server (added in a post-review fix pass), while a broken
+transport (a failed send) still ends the server, matching `lsp-server`'s own idiom for `shutdown`/
+`exit`. Tested via `lsp_server::Connection::memory()` (an in-process client/server pair) rather
+than a real subprocess — full handshake, `didOpen`, `didChange`, the malformed-notification path,
+and the unhandled-method-not-found fallback are all covered. Built via subagent-driven development
+(2 tasks, each independently reviewed, plus a final whole-branch review whose one Important and
+two Minor findings were fixed in a follow-up commit and re-reviewed clean). Full plan:
+`docs/superpowers/plans/2026-07-20-pm-lsp.md`.
+
 ## What's left
 
-The design doc's Phase 3 still needs, as separate sub-plans (not started):
+The design doc's Phase 3 still needs, as a separate sub-plan (not started):
 
-1. **`pm-lsp`** — new workspace member (`lsp-server` + `lsp-types`), surfacing `PmAstParser`'s
-   recovered syntax errors (`Sheet.errors`) and `check_sheet`'s type diagnostics as
-   `textDocument/publishDiagnostics`. **Load-bearing note from the final whole-branch review of
-   sub-plan 1:** `cel_parser::ParseError` is explicitly `!Send + !Sync` (it wraps a
-   `proc_macro2::Span`, a compiler-internal handle) — an async LSP server can't hold a
-   `Vec<ParseError>` across an `.await` or move it to another thread. `cel_parser::CELError`
-   (`impl From<ParseError> for CELError`, already shipped) is the `Send + Sync` bridge, built on
-   `SourceSpan` instead. Decide up front whether `pm-lsp` converts `ParseError → CELError`
-   immediately at the parse boundary, or whether `check_sheet`/`PmAstParser` should return
-   `CELError` directly — don't let this emerge ad hoc mid-implementation.
-   Related note: because unresolved identifiers resolve to `Ty::Any`, `check_sheet` will not flag
-   references to undeclared cells (a diagnostic editor users typically expect) — that's correctly
-   out of scope for a *type* checker, but `pm-lsp`'s plan should decide whether name-resolution
-   diagnostics are a separate pass, so expectations are set before implementation starts.
-2. **VS Code extension** (`editors/vscode-pm-lang/`) — TextMate grammar, `vscode-languageclient`
-   wiring to `pm-lsp` over stdio, `pm-lang.serverPath` setting. Depends on `pm-lsp` existing.
+1. **VS Code extension** (`editors/vscode-pm-lang/`) — TextMate grammar, `vscode-languageclient`
+   wiring to `pm-lsp` over stdio, `pm-lang.serverPath` setting. `pm-lsp` now exists (see above) —
+   nothing else blocks starting this sub-plan.
 
 Also still deliberately deferred (unchanged from before sub-plan 1, and not addressed by it):
 
@@ -138,10 +164,10 @@ picked up, not a blocker for the remaining Phase 3 work.
   the type checker (v1), this handoff's new addition.
 - `pm_lang::{PmAstParser, ast::*, attach_trivia, check_sheet}` — `pm-lang/src/ast.rs`,
   `ast_parser.rs`, `trivia.rs`, `token_cursor.rs`, `typecheck.rs`.
-- `cel_parser::{ParseError, CELError}` (`cel-parser/src/error.rs`) — `pm-lsp`'s diagnostic
-  boundary; see the `!Send + !Sync` note under "What's left" above before choosing where the
-  `ParseError → CELError` conversion happens.
-- New crate to create: `pm-lsp` (workspace member, `lsp-server` + `lsp-types`, depends on
-  `cel-parser`/`pm-lang` directly via their `AstContext`/`PmAstParser`/`check_sheet` entry points).
-- New top-level directory: `editors/vscode-pm-lang/` (TypeScript, own `package.json`, excluded
-  from the Cargo workspace).
+- `cel_parser::{ParseError, CELError}` (`cel-parser/src/error.rs`) — the `!Send + !Sync` bridge
+  `pm_lsp::diagnostics::diagnostics_for_source` converts across; see sub-plan 2 above.
+- `pm_lsp::{diagnostics::diagnostics_for_source, run, serve}` — `pm-lsp/src/diagnostics.rs`,
+  `dispatch.rs`. The VS Code extension's only dependency on this crate is the `pm-lsp` *binary*
+  (spawned over stdio by `vscode-languageclient`), not these Rust APIs directly.
+- New top-level directory to create: `editors/vscode-pm-lang/` (TypeScript, own `package.json`,
+  excluded from the Cargo workspace).

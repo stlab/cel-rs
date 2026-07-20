@@ -71,6 +71,13 @@ warnings — clippy's `-D warnings` does not catch everything a plain build/test
 can warn about (e.g. an unused `mut`). Read the build/test output and fix any warnings
 before opening the PR.
 
+For any multi-phase or multi-step piece of work (a design doc phased into several sub-plans, a
+plan executed across multiple sessions), create or update a dated handoff document under
+`docs/superpowers/` (e.g. `docs/superpowers/YYYY-MM-DD-phase-N-handoff.md`) summarizing what's
+done, what's deliberately deferred, and what's left, before opening a PR for that step — see
+`docs/superpowers/2026-07-18-phase-3-handoff.md` for the established format. This is what lets a
+new conversation/context pick up the remaining work without re-deriving status from git history.
+
 ## UI Verification (begin)
 
 `cargo build`/`cargo clippy` passing proves `begin`'s UI code compiles — it proves
