@@ -1,9 +1,9 @@
 # pm-lang Language Server — Handoff into Phase 3
 
-Status snapshot as of 2026-07-18, written for whoever picks up Phase 3 in a new
+Status snapshot as of 2026-07-19, written for whoever picks up the rest of Phase 3 in a new
 conversation/context. Read `docs/superpowers/specs/2026-07-17-pm-lang-language-server-design.md`
 first for the full design and phasing — this doc only summarizes what's done, what's
-deliberately deferred, and what Phase 3 needs to decide/do next.
+deliberately deferred, and what's left before Phase 3 is complete.
 
 ## What's done
 
@@ -19,9 +19,9 @@ deliberately deferred, and what Phase 3 needs to decide/do next.
 Entry points: `Parser::<AstContext>::parse_str_ast`/`parse_tokens_ast`/`parse_or_expression_ast`.
 See `docs/superpowers/plans/2026-07-17-cel-parser-ast-context.md`.
 
-**Phase 2, pm-lang half — complete, this branch (`worktree-language-server-vs-code-extension-2b`,
-commits `1b74787`..`3282746`).**
+**Phase 2, pm-lang half — complete, merged (PR #44).**
 Added to the `pm-lang` crate:
+
 - `pm_lang::TokenCursor` (private) — pure token-stream cursor shared by both parsers.
 - `pm_lang::ast::{Sheet, SheetItem, CellDecl, RelationshipDecl, ConditionalDecl,
   ConditionalBranch, MethodDecl}` — structural AST, referencing `cel_parser::Expr` for method
@@ -40,23 +40,76 @@ Added to the `pm-lang` crate:
 `begin`'s hot reload) is **completely untouched**. Full plan:
 `docs/superpowers/plans/2026-07-18-pm-lang-ast.md`.
 
-## Deliberately deferred / not done
+**Phase 3, sub-plan 1 (type checking v1) — complete, PR #45
+(`worktree-language-server-vs-code-extension-3`, commits `c280c2b`..`949032e`).**
+The design doc's Phase 3 was split into three sub-plans per writing-plans' scope-check guidance
+(type checking / `pm-lsp` / VS Code extension) rather than one plan spanning all three — see
+"What's left" below. This sub-plan resolved the "decide up front" sequencing question the previous
+handoff draft flagged (Option A: build directly on `PmAstParser`, leaving `PmParser`/`PmAstParser`
+unification for a later cleanup pass) and added:
 
-1. **`PmParser`'s grammar is still hand-duplicated against `PmAstParser`'s.** The 2026-07-18 plan's
-   Architecture section explains why (genericizing over a shared trait would thread a
-   `&TypeRegistry` parameter through methods half the implementations ignore — see that plan for
-   the full reasoning) and explicitly calls this out as a **required immediate follow-on plan**:
-   migrate `PmParser::parse_str` to be implemented as "parse via `PmAstParser`, then compile the
-   AST into a `Sheet`" (a new `pm_lang::compile` module doing `TypeRegistry` resolution + a new
-   `Expr → DynSegment` compiler reusing `cel_parser::ParserContext`'s existing trait against
-   `DynSegmentContext`), deleting the old inline grammar from `parser.rs` entirely. **This has not
-   been started.** Until it lands, the pm-lang grammar genuinely lives in two places — anyone
-   changing pm-lang's syntax must update both `parser.rs` and `ast_parser.rs` by hand.
-2. **Type checking (v1)** (design doc's own section) is not implemented at all — no `Ty` model, no
-   op-signature-table refactor out of `cel_parser::op_table`. Phase 3's diagnostics need this for
-   type errors (arity mismatches, incompatible operand types, output-type mismatches); syntax
-   errors alone (from `PmAstParser`'s recovery) don't need it.
-3. **Known, accepted limitation** in `PmAstParser`'s error recovery: a CEL `if`-expression whose
+- `cel_parser::Ty` (`cel-parser/src/ty.rs`) — a minimal static type model: the built-in primitives
+  `TypeRegistry::new()` registers by default, plus `Ty::Any`. `Ty::from_literal`,
+  `Ty::from_type_id`, `Ty::type_id`, `Ty::name`, and `Ty::unifies_with` (where `Any` unifies
+  silently with everything, in both directions — the hard correctness property the whole design
+  leans on).
+- `cel_parser::op_table::{OperandTypes, builtin_operand_types}` (`cel-parser/src/op_table.rs`) —
+  projects the existing runtime operator-dispatch tables (`BUILTINS`, `LEFT_SHIFT_SIGNATURES`,
+  `RIGHT_SHIFT_SIGNATURES`) into a checker-usable `(arity, lhs TypeId, rhs TypeId)` shape, via a
+  `signatures_for` helper now also shared internally by `BuiltinScope::lookup` — the static checker
+  and the runtime dispatcher read one source of truth and can't drift apart. Never exposes
+  `op_fn` (execution-only).
+- `cel_parser::ty::check_expr` (`cel-parser/src/ty.rs`) — walks a `cel_parser::Expr` tree. Checks
+  `Expr::Op` (via `builtin_operand_types`) and `Expr::Logical` (fixed `&&`/`||` bool semantics)
+  directly; recurses into `Expr::Apply`/`Expr::Tuple`/`Expr::TupleIndex`/`Expr::If` (so a nested
+  `Op` error still surfaces) but infers those node kinds themselves as `Ty::Any` — checking
+  call/tuple/if shapes is deferred, matching "not a complete type system."
+- `pm_lang::typecheck::check_sheet` (`pm-lang/src/typecheck.rs`) — the pm-lang-specific layer:
+  checks each `cell`'s literal initializer against its `: type_name` annotation (resolving the
+  raw, unresolved `cel_parser::lex_lexer::Literal`/`syn::Lit` via pm-lang's own suffix-defaulting
+  convention), and each `relationship`/`conditional` method's body against its declared outputs
+  (arity: single value vs. n-tuple, including a tuple-shaped body over-producing values for a
+  single declared output; and per-output type). Returns `Vec<cel_parser::ParseError>` — the same
+  diagnostic type `Sheet.errors` already uses for syntax errors.
+
+Built via subagent-driven development (4 tasks, each independently reviewed, plus a final
+whole-branch review whose Minor findings were fixed in a follow-up polish commit). Full plan:
+`docs/superpowers/plans/2026-07-18-pm-lang-type-checking-v1.md`.
+
+## What's left
+
+The design doc's Phase 3 still needs, as separate sub-plans (not started):
+
+1. **`pm-lsp`** — new workspace member (`lsp-server` + `lsp-types`), surfacing `PmAstParser`'s
+   recovered syntax errors (`Sheet.errors`) and `check_sheet`'s type diagnostics as
+   `textDocument/publishDiagnostics`. **Load-bearing note from the final whole-branch review of
+   sub-plan 1:** `cel_parser::ParseError` is explicitly `!Send + !Sync` (it wraps a
+   `proc_macro2::Span`, a compiler-internal handle) — an async LSP server can't hold a
+   `Vec<ParseError>` across an `.await` or move it to another thread. `cel_parser::CELError`
+   (`impl From<ParseError> for CELError`, already shipped) is the `Send + Sync` bridge, built on
+   `SourceSpan` instead. Decide up front whether `pm-lsp` converts `ParseError → CELError`
+   immediately at the parse boundary, or whether `check_sheet`/`PmAstParser` should return
+   `CELError` directly — don't let this emerge ad hoc mid-implementation.
+   Related note: because unresolved identifiers resolve to `Ty::Any`, `check_sheet` will not flag
+   references to undeclared cells (a diagnostic editor users typically expect) — that's correctly
+   out of scope for a *type* checker, but `pm-lsp`'s plan should decide whether name-resolution
+   diagnostics are a separate pass, so expectations are set before implementation starts.
+2. **VS Code extension** (`editors/vscode-pm-lang/`) — TextMate grammar, `vscode-languageclient`
+   wiring to `pm-lsp` over stdio, `pm-lang.serverPath` setting. Depends on `pm-lsp` existing.
+
+Also still deliberately deferred (unchanged from before sub-plan 1, and not addressed by it):
+
+1. **`PmParser`'s grammar is still hand-duplicated against `PmAstParser`'s.** The
+   2026-07-18 pm-lang-ast plan's Architecture section explains why (genericizing over a shared
+   trait would thread a `&TypeRegistry` parameter through methods half the implementations
+   ignore) and explicitly calls this out as a **required immediate follow-on plan**: migrate
+   `PmParser::parse_str` to be implemented as "parse via `PmAstParser`, then compile the AST into
+   a `Sheet`" (a new `pm_lang::compile` module doing `TypeRegistry` resolution + a new `Expr →
+   DynSegment` compiler reusing `cel_parser::ParserContext`'s existing trait against
+   `DynSegmentContext`), deleting the old inline grammar from `parser.rs` entirely. **This has
+   not been started.** Until it lands, the pm-lang grammar genuinely lives in two places —
+   anyone changing pm-lang's syntax must update both `parser.rs` and `ast_parser.rs` by hand.
+2. **Known, accepted limitation** in `PmAstParser`'s error recovery: a CEL `if`-expression whose
    then/else body fails to parse and leaves a dangling, unmatched `}` behind can still abort the
    *whole* `parse_str` call instead of recovering just the one malformed item (root cause: CEL's
    `if`/`else` grammar reuses `Delimiter::Brace`, the same kind pm-lang's own grammar tracks, so a
@@ -66,34 +119,29 @@ Added to the `pm-lang` crate:
    `pm-lang/src/ast_parser.rs`) that pins today's behavior. Tracked in
    [github.com/stlab/cel-rs#43](https://github.com/stlab/cel-rs/issues/43) — a general fix needs
    `cel_parser::Parser<C>` to report back what it left unbalanced on a failed parse.
+3. **A declared-type manifest or in-source syntax for richer static checking of custom types** —
+   the type checker (v1) only checks the built-in primitives `TypeRegistry::new()` registers by
+   default; any custom type a host binary registers resolves to `Ty::Any` and is never checked.
+   Explicitly out of scope per the design doc.
 
-## Decision Phase 3 needs to make early
+Neither `pm-lsp` nor the VS Code extension needs the `PmParser`/`PmAstParser` unification (item 1
+above) first — both build only on `PmAstParser`/`check_sheet`, which are already unaffected by
+that duplication. Flag the unification as a separate, independent cleanup task if/when it's
+picked up, not a blocker for the remaining Phase 3 work.
 
-The design doc's Phase 3 is "`pm-lsp` diagnostics + minimal VS Code extension... syntax errors
-(from `AstContext` recovery) and type errors... First end-to-end usable milestone." It doesn't
-explicitly require item 1 above (`PmParser`/`PmAstParser` unification) first. Decide up front:
-
-- **Option A:** Start Phase 3 (type checking + `pm-lsp` + VS Code extension) directly against
-  today's `PmAstParser`, leaving the `PmParser` duplication for a later cleanup pass. Faster to a
-  usable milestone; the duplication risk is real but contained (both parsers already have full
-  test coverage, so a drift would surface as a test failure, not silent breakage).
-- **Option B:** Do the `PmParser`/`PmAstParser` unification follow-on first, so pm-lang's grammar
-  lives in exactly one place before building more on top of `PmAstParser`. Safer long-term, delays
-  the first usable `pm-lsp` milestone.
-
-This is a real product-sequencing call, not a technical one — flag it to the user early in the
-Phase 3 conversation rather than assuming either way.
-
-## Key files for Phase 3 to build on
+## Key files for the remaining Phase 3 work to build on
 
 - `cel_parser::{Parser, AstContext, Expr, ExprSpan, Literal, LogicalOp}` — `cel-parser/src/ast.rs`,
   `cel-parser/src/parser_context.rs`, `cel-parser/src/lib.rs`.
-- `pm_lang::{PmAstParser, ast::*, attach_trivia}` — `pm-lang/src/ast.rs`, `ast_parser.rs`,
-  `trivia.rs`, `token_cursor.rs`.
-- `cel_parser::op_table::{OpLookup, BuiltinScope, OpSignature}` (`cel-parser/src/op_table.rs`) —
-  the existing runtime op-dispatch table Phase 3's type checker needs to refactor a shared
-  signature table out of (see design doc's "Type checking (v1)" section).
+- `cel_parser::{Ty, ty::check_expr}` (`cel-parser/src/ty.rs`) and
+  `cel_parser::op_table::{OperandTypes, builtin_operand_types}` (`cel-parser/src/op_table.rs`) —
+  the type checker (v1), this handoff's new addition.
+- `pm_lang::{PmAstParser, ast::*, attach_trivia, check_sheet}` — `pm-lang/src/ast.rs`,
+  `ast_parser.rs`, `trivia.rs`, `token_cursor.rs`, `typecheck.rs`.
+- `cel_parser::{ParseError, CELError}` (`cel-parser/src/error.rs`) — `pm-lsp`'s diagnostic
+  boundary; see the `!Send + !Sync` note under "What's left" above before choosing where the
+  `ParseError → CELError` conversion happens.
 - New crate to create: `pm-lsp` (workspace member, `lsp-server` + `lsp-types`, depends on
-  `cel-parser`/`pm-lang` directly via their `AstContext`/`PmAstParser` entry points).
+  `cel-parser`/`pm-lang` directly via their `AstContext`/`PmAstParser`/`check_sheet` entry points).
 - New top-level directory: `editors/vscode-pm-lang/` (TypeScript, own `package.json`, excluded
   from the Cargo workspace).
