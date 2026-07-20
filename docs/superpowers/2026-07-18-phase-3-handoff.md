@@ -76,7 +76,7 @@ Built via subagent-driven development (4 tasks, each independently reviewed, plu
 whole-branch review whose Minor findings were fixed in a follow-up polish commit). Full plan:
 `docs/superpowers/plans/2026-07-18-pm-lang-type-checking-v1.md`.
 
-**Phase 3, sub-plan 2 (`pm-lsp`) — complete, PR pending
+**Phase 3, sub-plan 2 (`pm-lsp`) — complete, PR #46
 (`worktree-language-server-vs-code-extension-3b`, commits `cc52b02`..`92d10ce`).**
 Added a new workspace crate, `pm-lsp` — the language server binary, built on `lsp-server` 0.10 +
 `lsp-types` 0.97 (synchronous, no async runtime, matching the design doc's choice). Resolved both
