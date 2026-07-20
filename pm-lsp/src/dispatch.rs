@@ -1,0 +1,186 @@
+//! Wires `lsp-server`'s stdio transport to [`crate::diagnostics::diagnostics_for_source`].
+
+use lsp_server::{Connection, Message, Notification as ServerNotification, Response};
+use lsp_types::{
+    DidChangeTextDocumentParams, DidOpenTextDocumentParams, PublishDiagnosticsParams,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    notification::{
+        DidChangeTextDocument, DidOpenTextDocument, Notification as _, PublishDiagnostics,
+    },
+};
+
+use crate::diagnostics::diagnostics_for_source;
+
+/// The JSON-RPC "Method not found" error code, reused by LSP for unhandled request methods.
+const METHOD_NOT_FOUND: i32 = -32601;
+
+/// Runs the pm-lang language server on stdin/stdout until the client sends `exit`.
+///
+/// # Errors
+///
+/// Returns `Err` if the initialize handshake fails, a message can't be read from or written to
+/// stdio, or the background reader/writer threads panic.
+pub fn run() -> anyhow::Result<()> {
+    let (connection, io_threads) = Connection::stdio();
+    serve(&connection)?;
+    io_threads.join()?;
+    Ok(())
+}
+
+/// Performs the LSP initialize handshake on `connection`, then serves `textDocument/didOpen`
+/// and `textDocument/didChange` notifications as `textDocument/publishDiagnostics` until the
+/// client shuts the server down.
+///
+/// Exposed separately from [`run`] so tests can drive an in-memory [`Connection::memory`] pair
+/// instead of real stdio.
+///
+/// # Errors
+///
+/// Returns `Err` under the same conditions as [`run`].
+pub fn serve(connection: &Connection) -> anyhow::Result<()> {
+    let capabilities = serde_json::to_value(ServerCapabilities {
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        ..Default::default()
+    })?;
+    connection.initialize(capabilities)?;
+    main_loop(connection)
+}
+
+/// Dispatches every message on `connection` until a `shutdown`/`exit` sequence ends the server.
+fn main_loop(connection: &Connection) -> anyhow::Result<()> {
+    for msg in &connection.receiver {
+        match msg {
+            Message::Request(req) => {
+                if connection.handle_shutdown(&req)? {
+                    return Ok(());
+                }
+                let response = Response::new_err(
+                    req.id.clone(),
+                    METHOD_NOT_FOUND,
+                    format!("unhandled method: {}", req.method),
+                );
+                connection.sender.send(Message::Response(response))?;
+            }
+            Message::Notification(not) => handle_notification(connection, not)?,
+            Message::Response(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Handles one client notification, publishing fresh diagnostics on `didOpen`/`didChange`.
+fn handle_notification(connection: &Connection, not: ServerNotification) -> anyhow::Result<()> {
+    match not.method.as_str() {
+        DidOpenTextDocument::METHOD => {
+            let params: DidOpenTextDocumentParams = not.extract(DidOpenTextDocument::METHOD)?;
+            publish(
+                connection,
+                &params.text_document.uri,
+                &params.text_document.text,
+            )?;
+        }
+        DidChangeTextDocument::METHOD => {
+            let params: DidChangeTextDocumentParams = not.extract(DidChangeTextDocument::METHOD)?;
+            if let Some(change) = params.content_changes.into_iter().last() {
+                publish(connection, &params.text_document.uri, &change.text)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Computes diagnostics for `source` and sends them as a `textDocument/publishDiagnostics`
+/// notification for `uri`.
+fn publish(connection: &Connection, uri: &Uri, source: &str) -> anyhow::Result<()> {
+    let params = PublishDiagnosticsParams {
+        uri: uri.clone(),
+        diagnostics: diagnostics_for_source(source),
+        version: None,
+    };
+    let notification = ServerNotification::new(PublishDiagnostics::METHOD.to_string(), params);
+    connection
+        .sender
+        .send(Message::Notification(notification))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use lsp_server::{Connection, Message, Notification as ServerNotification, Request, RequestId};
+    use lsp_types::{
+        DidOpenTextDocumentParams, PublishDiagnosticsParams, TextDocumentItem,
+        notification::{DidOpenTextDocument, Notification as _, PublishDiagnostics},
+    };
+
+    use super::serve;
+
+    #[test]
+    fn open_notification_triggers_a_publish_diagnostics_notification() {
+        let (server, client) = Connection::memory();
+        let server_thread = std::thread::spawn(move || serve(&server));
+
+        // Initialize handshake: request -> (ignore) response -> initialized notification.
+        client
+            .sender
+            .send(Message::Request(Request::new(
+                RequestId::from(1),
+                "initialize".to_string(),
+                serde_json::json!({}),
+            )))
+            .unwrap();
+        client.receiver.recv().unwrap();
+        client
+            .sender
+            .send(Message::Notification(ServerNotification::new(
+                "initialized".to_string(),
+                serde_json::json!({}),
+            )))
+            .unwrap();
+
+        let uri: lsp_types::Uri = "file:///test.pm".parse().unwrap();
+        client
+            .sender
+            .send(Message::Notification(ServerNotification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem {
+                        uri: uri.clone(),
+                        language_id: "pm-lang".to_string(),
+                        version: 1,
+                        text: "sheet s { cell x: i32 = 1.0; }".to_string(),
+                    },
+                },
+            )))
+            .unwrap();
+
+        let published = match client.receiver.recv().unwrap() {
+            Message::Notification(n) => n,
+            other => panic!("expected a notification, got {other:?}"),
+        };
+        assert_eq!(published.method, PublishDiagnostics::METHOD);
+        let params: PublishDiagnosticsParams = serde_json::from_value(published.params).unwrap();
+        assert_eq!(params.uri, uri);
+        assert_eq!(params.diagnostics.len(), 1);
+
+        // Shutdown handshake: request -> (ignore) response -> exit, then the server thread ends.
+        client
+            .sender
+            .send(Message::Request(Request::new(
+                RequestId::from(2),
+                "shutdown".to_string(),
+                serde_json::json!(null),
+            )))
+            .unwrap();
+        client.receiver.recv().unwrap();
+        client
+            .sender
+            .send(Message::Notification(ServerNotification::new(
+                "exit".to_string(),
+                serde_json::json!(null),
+            )))
+            .unwrap();
+
+        server_thread.join().unwrap().unwrap();
+    }
+}

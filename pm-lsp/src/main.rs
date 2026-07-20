@@ -1,3 +1,5 @@
 //! `pm-lsp` binary entry point.
 
-fn main() {}
+fn main() -> anyhow::Result<()> {
+    pm_lsp::run()
+}

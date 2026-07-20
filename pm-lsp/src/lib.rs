@@ -7,13 +7,13 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! fn main() -> anyhow::Result<()> {
 //!     pm_lsp::run()
 //! }
 //! ```
 
 pub mod diagnostics;
+mod dispatch;
 
-// `run`/`serve` are added in Task 2; `lib.rs` only declares `diagnostics` for now so this
-// module compiles and its tests can run standalone.
+pub use dispatch::{run, serve};

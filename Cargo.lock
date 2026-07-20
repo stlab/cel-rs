@@ -1703,6 +1703,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluent-uri"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17c704e9dbe1ddd863da1e6ff3567795087b1eb201ce80d8fa81162e1516500d"
+dependencies = [
+ "bitflags 1.3.2",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2946,6 +2955,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
+name = "lsp-server"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ee25a31f2e571e426eef2896179450cafc7e2f5be00d8a93b1c2d21c0ff7656"
+dependencies = [
+ "crossbeam-channel",
+ "log",
+ "serde",
+ "serde_derive",
+ "serde_json",
+]
+
+[[package]]
+name = "lsp-types"
+version = "0.97.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53353550a17c04ac46c585feb189c2db82154fc84b79c7a66c96c2c644f66071"
+dependencies = [
+ "bitflags 1.3.2",
+ "fluent-uri",
+ "serde",
+ "serde_json",
+ "serde_repr",
+]
+
+[[package]]
 name = "mac"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3763,6 +3798,18 @@ dependencies = [
  "proc-macro2",
  "property-model",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "pm-lsp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cel-parser",
+ "lsp-server",
+ "lsp-types",
+ "pm-lang",
+ "serde_json",
 ]
 
 [[package]]
