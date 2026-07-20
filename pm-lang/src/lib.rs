@@ -25,6 +25,7 @@ mod parser;
 mod token_cursor;
 mod trivia;
 pub mod type_registry;
+mod typecheck;
 
 // pm-lang reuses cel_parser::ParseError directly; no new error type is introduced.
 // All parse errors carry a proc_macro2::Span for source-location diagnostics.
@@ -33,3 +34,4 @@ pub use cel_parser::ParseError;
 pub use parser::{ParsedSheet, PmParser};
 pub use trivia::attach_trivia;
 pub use type_registry::TypeRegistry;
+pub use typecheck::check_sheet;
