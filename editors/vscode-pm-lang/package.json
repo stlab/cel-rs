@@ -43,7 +43,7 @@
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -w -p .",
-    "test": "tsc -p . && node --test out/test/"
+    "test": "tsc -p . && node --test out/test/*.test.js"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
