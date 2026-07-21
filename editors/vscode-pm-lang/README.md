@@ -42,19 +42,24 @@ happens to be focused.
    Extension" selected). This opens a **second** new window titled
    `[Extension Development Host]` with this extension loaded, with no folder open yet.
 
-4. In the `[Extension Development Host]` window, use **File > Open Folder...** to open the
-   repository root (`cel-rs`) — not just a single file. This matters: the extension looks for
-   `pm-lsp` under `target/debug`/`target/release` *relative to the open workspace folder* (see
-   Requirements above), so opening `demo.adm2` on its own, with no folder open, skips that check
-   entirely and the extension won't find the binary you already built. With the repo root open as
-   a folder, open `begin/assets/demo.adm2` (or any `.adm2` file) and confirm:
+4. In the `[Extension Development Host]` window, open `begin/assets/demo.adm2` (or any `.adm2`
+   file) via **File > Open File...** — not Open Folder (see note below) — and set the
+   `pm-lang.serverPath` setting so the extension can find the `pm-lsp` you already built, since
+   with no folder open the `target/debug`/`target/release` search step (Requirements above) never
+   runs: open Settings (Ctrl+,), search "pm-lang", and set `pm-lang.serverPath` to the absolute
+   path of `target/debug/pm-lsp.exe` in your checkout (e.g.
+   `D:\path\to\cel-rs\target\debug\pm-lsp.exe`). Then confirm:
    - Syntax highlighting: `sheet`/`cell`/`relationship`/`conditional`/`method` are colored as
      keywords, `f64`/`i32`/etc. as types, `//` comments dimmed.
    - Live diagnostics: edit a cell's initializer to the wrong type (e.g. change
      `cell a: f64 = 2.0;` to `cell a: f64 = 2;`) — a red squiggle and a Problems-panel entry
      should appear within about a second; fixing it back makes the diagnostic disappear.
-   - The `pm-lang.serverPath` setting (Settings → search "pm-lang") can override which `pm-lsp`
-     binary is launched; see Requirements above for the default search order.
+
+   > **Don't use File > Open Folder in this window.** Switching the open folder from inside a
+   > running Extension Development Host doesn't carry the `--extensionDevelopmentPath` flag
+   > forward — VS Code opens a plain, ordinary window for the new folder instead, without this
+   > extension loaded at all. Setting `pm-lang.serverPath` explicitly, as above, is the reliable
+   > way to try this out without fighting that limitation.
 
 5. To stop, close the `[Extension Development Host]` window, or press Shift+F5 in the original
    `editors/vscode-pm-lang` window.
