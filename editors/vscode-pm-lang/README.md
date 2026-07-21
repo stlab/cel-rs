@@ -40,11 +40,14 @@ happens to be focused.
 
 3. In that window, press F5 (or the Run and Debug panel's green play button, with "Run
    Extension" selected). This opens a **second** new window titled
-   `[Extension Development Host]` with this extension loaded. `launch.json` opens the repository
-   root as that window's workspace automatically — you don't need to open anything yourself.
+   `[Extension Development Host]` with this extension loaded, with no folder open yet.
 
-4. In the `[Extension Development Host]` window, open `begin/assets/demo.adm2` (or any `.adm2`
-   file). Confirm:
+4. In the `[Extension Development Host]` window, use **File > Open Folder...** to open the
+   repository root (`cel-rs`) — not just a single file. This matters: the extension looks for
+   `pm-lsp` under `target/debug`/`target/release` *relative to the open workspace folder* (see
+   Requirements above), so opening `demo.adm2` on its own, with no folder open, skips that check
+   entirely and the extension won't find the binary you already built. With the repo root open as
+   a folder, open `begin/assets/demo.adm2` (or any `.adm2` file) and confirm:
    - Syntax highlighting: `sheet`/`cell`/`relationship`/`conditional`/`method` are colored as
      keywords, `f64`/`i32`/etc. as types, `//` comments dimmed.
    - Live diagnostics: edit a cell's initializer to the wrong type (e.g. change
