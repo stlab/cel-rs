@@ -10,9 +10,6 @@
   },
   "categories": ["Programming Languages"],
   "main": "./out/src/extension.js",
-  "activationEvents": [
-    "onLanguage:pm-lang"
-  ],
   "contributes": {
     "languages": [
       {
