@@ -1,5 +1,4 @@
 {
-  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "pm-lang",
   "scopeName": "source.pm-lang",
   "fileTypes": ["pm"],
