@@ -1,7 +1,8 @@
 # pm-lang for VS Code
 
-Editor support for `.pm` (pm-lang) files: syntax highlighting and live diagnostics via the
-`pm-lsp` language server.
+Editor support for `.adm2` (pm-lang) files: syntax highlighting and live diagnostics via the
+`pm-lsp` language server. (`.adm2`, not `.pm`, to avoid colliding with the `.pm` extension VS
+Code already associates with Perl modules.)
 
 ## Requirements
 
@@ -42,7 +43,7 @@ happens to be focused.
    `[Extension Development Host]` with this extension loaded. `launch.json` opens the repository
    root as that window's workspace automatically — you don't need to open anything yourself.
 
-4. In the `[Extension Development Host]` window, open `begin/assets/demo.pm` (or any `.pm`
+4. In the `[Extension Development Host]` window, open `begin/assets/demo.adm2` (or any `.adm2`
    file). Confirm:
    - Syntax highlighting: `sheet`/`cell`/`relationship`/`conditional`/`method` are colored as
      keywords, `f64`/`i32`/etc. as types, `//` comments dimmed.

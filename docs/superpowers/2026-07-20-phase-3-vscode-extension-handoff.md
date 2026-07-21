@@ -11,11 +11,16 @@ All three Phase 3 sub-plans are complete:
 
 1. Type checking v1 (PR #45) — `cel_parser::Ty`/`check_expr`, `pm_lang::typecheck::check_sheet`.
 2. `pm-lsp` (PR #46) — the language server binary, `textDocument/publishDiagnostics` over stdio.
-3. **VS Code extension (`editors/vscode-pm-lang/`) — this sub-plan.** TextMate grammar for `.pm`
-   syntax highlighting, `vscode-languageclient` wiring to `pm-lsp` over stdio, a
+3. **VS Code extension (`editors/vscode-pm-lang/`) — this sub-plan.** TextMate grammar for
+   `.adm2` syntax highlighting, `vscode-languageclient` wiring to `pm-lsp` over stdio, a
    `pm-lang.serverPath` setting (falling back to the workspace's `target/debug`/`target/release`,
-   then `PATH`). First end-to-end usable milestone per the design doc's phasing: open a `.pm`
-   file in VS Code, get highlighting and live diagnostics.
+   then `PATH`). First end-to-end usable milestone per the design doc's phasing: open a `.adm2`
+   file in VS Code, get highlighting and live diagnostics. The plan and this handoff's earlier
+   draft used `.pm` as the file extension; it was changed to `.adm2` after implementation because
+   VS Code already strongly associates `.pm` with Perl modules — the demo asset
+   (`begin/assets/demo.pm`) was renamed to `begin/assets/demo.adm2` to match, along with every
+   hardcoded reference in `begin`'s hot-reload code (`begin/src/demo_source.rs`,
+   `begin/src/bridge.rs`, `begin/src/app.rs`).
 
 Full plan: `docs/superpowers/plans/2026-07-20-pm-lang-vscode-extension.md`.
 

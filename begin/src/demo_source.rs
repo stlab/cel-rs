@@ -1,4 +1,4 @@
-//! Loads the demo pm-lang source from `begin/assets/demo.pm` and builds a
+//! Loads the demo pm-lang source from `begin/assets/demo.adm2` and builds a
 //! [`Sheet`]/[`Labels`] pair from it.
 //!
 //! Two independent bidirectional constraint systems (`a × b = c` and `d × e = f`)
@@ -41,19 +41,19 @@ use crate::bridge::{
 /// registration for this file from being compiled away — see that function's doc
 /// comment for why that read is necessary, not incidental.
 #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
-static DEMO_ASSET: Asset = asset!("/assets/demo.pm");
+static DEMO_ASSET: Asset = asset!("/assets/demo.adm2");
 
 /// Compile-time snapshot of the demo source.
 ///
 /// Used as the non-desktop [`load_demo_source`] fallback and as the fixture for
 /// unit tests, both of which need a value that doesn't depend on desktop asset
 /// bundling being available. Compiled out entirely in an ordinary desktop build
-/// (not just lint-suppressed): `include_str!` registers `demo.pm` as a compile-time
+/// (not just lint-suppressed): `include_str!` registers `demo.adm2` as a compile-time
 /// dependency in cargo's dep-info, and `dx serve` treats any changed file that
 /// appears there as requiring a full rebuild — which would defeat this file's own
-/// asset-based hot reload (see [`spawn_hot_reload`]) every time `demo.pm` is edited.
+/// asset-based hot reload (see [`spawn_hot_reload`]) every time `demo.adm2` is edited.
 #[cfg(any(not(feature = "desktop"), test))]
-pub(crate) const DEMO_SOURCE_TEXT: &str = include_str!("../assets/demo.pm");
+pub(crate) const DEMO_SOURCE_TEXT: &str = include_str!("../assets/demo.adm2");
 
 /// The result of parsing and building a sheet from pm-lang source.
 ///
@@ -119,7 +119,7 @@ pub fn build_sheet(source: &str) -> BuildOutcome {
 /// save).
 #[cfg(feature = "desktop")]
 pub fn load_demo_source() -> Result<String, String> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/demo.pm");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/demo.adm2");
     std::fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))
 }
 
@@ -129,13 +129,13 @@ pub fn load_demo_source() -> Result<String, String> {
     Ok(DEMO_SOURCE_TEXT.to_string())
 }
 
-/// True if `msg` reports a change to a `.pm` asset (i.e. the demo source).
+/// True if `msg` reports a change to a `.adm2` asset (i.e. the demo source).
 ///
 /// Matches by extension rather than exact path: `dx`'s hot-reload message reports
-/// each changed asset as a short, bundled-name path (e.g. `/assets/demo.pm`), which
+/// each changed asset as a short, bundled-name path (e.g. `/assets/demo.adm2`), which
 /// has no reliable equality relationship to [`DEMO_ASSET`]'s own resolved path (in a
 /// `dx serve` dev session that resolves to the absolute source path instead — see
-/// [`load_demo_source`]). This crate has exactly one `.pm` asset, so matching by
+/// [`load_demo_source`]). This crate has exactly one `.adm2` asset, so matching by
 /// extension is both correct and robust to however `dx` names the bundled entry.
 ///
 /// Only called (outside of tests) from [`spawn_hot_reload`], which is desktop-only;
@@ -146,10 +146,10 @@ pub fn load_demo_source() -> Result<String, String> {
 fn hot_reload_targets_demo(msg: &HotReloadMsg) -> bool {
     msg.assets
         .iter()
-        .any(|p| p.extension().and_then(|ext| ext.to_str()) == Some("pm"))
+        .any(|p| p.extension().and_then(|ext| ext.to_str()) == Some("adm2"))
 }
 
-/// Connects to the `dx serve` devserver and calls `on_change` whenever `demo.pm`
+/// Connects to the `dx serve` devserver and calls `on_change` whenever `demo.adm2`
 /// changes on disk. A no-op if not running under `dx serve`
 /// (`dioxus_devtools::connect` itself returns immediately in that case).
 ///
@@ -157,7 +157,7 @@ fn hot_reload_targets_demo(msg: &HotReloadMsg) -> bool {
 /// not dead code: `manganis-macro`'s asset registration (unlike its FFI-metadata
 /// counterpart) never applies `#[used]` to the linker section holding `DEMO_ASSET`'s
 /// bundle entry, so if nothing ever reads the `Asset` value, `dx`'s build can
-/// legitimately end up with no record of `demo.pm` to track at all. Touching the
+/// legitimately end up with no record of `demo.adm2` to track at all. Touching the
 /// value once here is enough to keep it from being compiled away.
 ///
 /// - Complexity: spawns one background OS thread for the life of the process.
@@ -230,18 +230,18 @@ mod hot_reload_tests {
     use std::path::PathBuf;
 
     #[test]
-    fn hot_reload_targets_demo_true_for_pm_asset() {
+    fn hot_reload_targets_demo_true_for_adm2_asset() {
         let msg = HotReloadMsg {
-            assets: vec![PathBuf::from("/assets/demo.pm")],
+            assets: vec![PathBuf::from("/assets/demo.adm2")],
             ..Default::default()
         };
         assert!(hot_reload_targets_demo(&msg));
     }
 
     #[test]
-    fn hot_reload_targets_demo_true_for_hash_suffixed_pm_asset() {
+    fn hot_reload_targets_demo_true_for_hash_suffixed_adm2_asset() {
         let msg = HotReloadMsg {
-            assets: vec![PathBuf::from("/assets/demo-a1b2c3d4.pm")],
+            assets: vec![PathBuf::from("/assets/demo-a1b2c3d4.adm2")],
             ..Default::default()
         };
         assert!(hot_reload_targets_demo(&msg));

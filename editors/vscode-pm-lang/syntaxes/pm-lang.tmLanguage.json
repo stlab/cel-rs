@@ -1,7 +1,7 @@
 {
   "name": "pm-lang",
   "scopeName": "source.pm-lang",
-  "fileTypes": ["pm"],
+  "fileTypes": ["adm2"],
   "patterns": [
     { "include": "#comments" },
     { "include": "#keywords" },
