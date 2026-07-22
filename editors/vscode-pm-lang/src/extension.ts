@@ -33,7 +33,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   client = new LanguageClient('pm-lang', 'pm-lang Language Server', serverOptions, clientOptions);
   context.subscriptions.push({ dispose: () => void client?.stop() });
-  void client.start();
+  client.start().catch((error: unknown) => {
+    vscode.window.showErrorMessage(
+      `pm-lang: failed to start the pm-lsp language server: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });
 }
 
 /** Deactivates the extension, stopping the language client if it's running. */

@@ -27,11 +27,13 @@ Full plan: `docs/superpowers/plans/2026-07-20-pm-lang-vscode-extension.md`.
 ## Outstanding before merge
 
 The extension code and its unit tests are complete and committed, and `pm-lsp` builds cleanly
-(`cargo build -p pm-lsp` exits 0). However, the manual verification checklist — syntax
-highlighting, live diagnostics end-to-end, and the `pm-lang.serverPath` override behavior (see
-this same handoff commit's plan, Task 5 Steps 2-3 in
-`docs/superpowers/plans/2026-07-20-pm-lang-vscode-extension.md`) — has not yet been performed by
-a human and should be done before merging the branch.
+(`cargo build -p pm-lsp` exits 0). Manual verification (Task 5 Steps 2-3 in
+`docs/superpowers/plans/2026-07-20-pm-lang-vscode-extension.md`) is in progress and has already
+caught and fixed two dev-host issues along the way: `launch.json`'s auto-open-folder arg breaking
+`--extensionDevelopmentPath` recognition, and `File > Open Folder` inside a running dev host
+dropping the extension entirely (see the README's "Trying it out" section for the resulting
+workflow). Confirm the full checklist — syntax highlighting, live diagnostics end-to-end, and the
+`pm-lang.serverPath` override behavior — passes before merging the branch.
 
 ## What's left (design doc's later phases, not started)
 
