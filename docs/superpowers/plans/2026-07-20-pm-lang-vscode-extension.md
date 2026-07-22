@@ -208,9 +208,12 @@ export function deactivate(): void {}
 
 - [ ] **Step 5: Create `.vscode/launch.json`**
 
-Opens the repo root (two levels up from `editors/vscode-pm-lang/`) as the workspace in the
-Extension Development Host, so `target/debug/pm-lsp` (built from the repo root) is where the
-extension's workspace-search step expects it — see Task 5's manual verification.
+Only sets `--extensionDevelopmentPath`; deliberately does not add a second positional arg to
+auto-open the repo root (`${workspaceFolder}/../..`) alongside it — on the VS Code version this
+targets, that second arg breaks extension-development-path recognition entirely (the extension
+doesn't even show up under Extensions > Development). The Extension Development Host therefore
+opens with no folder; see Task 5's manual verification for how that changes the workspace
+`target/debug`/`target/release` search step.
 
 ```json
 {
@@ -221,8 +224,7 @@ extension's workspace-search step expects it — see Task 5's manual verificatio
       "type": "extensionHost",
       "request": "launch",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}",
-        "${workspaceFolder}/../.."
+        "--extensionDevelopmentPath=${workspaceFolder}"
       ],
       "outFiles": ["${workspaceFolder}/out/**/*.js"],
       "preLaunchTask": "npm: compile"
@@ -281,7 +283,8 @@ npm test          # unit tests for server-path resolution
 \`\`\`
 
 Press F5 (or Run > Start Debugging) to launch an Extension Development Host with this extension
-loaded, with the repository root opened as its workspace.
+loaded, with no folder open — use File > Open File (not Open Folder, which drops
+`--extensionDevelopmentPath` and loses the extension) to open a `.adm2` file in it.
 ```
 
 - [ ] **Step 8: Add generated directories to the root `.gitignore`**
@@ -425,8 +428,9 @@ manual verification checklist, no automated UI test suite for v1). Verify by han
 
 1. `cd editors/vscode-pm-lang && npm run compile`.
 2. Open the `editors/vscode-pm-lang` folder in VS Code, press F5 to launch the Extension
-   Development Host (it opens the repo root per `.vscode/launch.json`).
-3. In that new window, open `begin/assets/demo.adm2`.
+   Development Host (it opens with no folder, per `.vscode/launch.json`).
+3. In that new window, use File > Open File... (not Open Folder — see Task 5's launch.json note)
+   to open `begin/assets/demo.adm2`.
 4. Confirm: `sheet`/`cell`/`relationship`/`conditional`/`method` are colored as keywords;
    `f64`/`i32` are colored distinctly (as types); `//` or `/* */` comments (add one temporarily
    if none are present) are colored as comments; numeric literals like `0i32`/`2.0` are colored
@@ -732,27 +736,35 @@ Expected: exits 0, produces `target/debug/pm-lsp` (`.exe` on Windows).
 
 1. `cd editors/vscode-pm-lang && npm run compile`.
 2. Open the `editors/vscode-pm-lang` folder in VS Code, press F5. The Extension Development Host
-   opens with the repo root as its workspace (per `.vscode/launch.json`).
-3. In that window, create a scratch file `scratch.adm2` (anywhere under the repo root) with:
+   opens with no folder open (per `.vscode/launch.json`).
+3. In that window, open Settings (Ctrl+,), search "pm-lang", and set `pm-lang.serverPath` to the
+   absolute path of the `target/debug/pm-lsp` binary built in Step 1 (`.exe` on Windows) — with no
+   folder open, the workspace `target/debug`/`target/release` search step never runs, so this
+   setting is the only way the extension finds the binary in this dev host.
+4. Use File > Open File... (not Open Folder — switching folders inside a running Extension
+   Development Host drops `--extensionDevelopmentPath` and loses the extension) to create and
+   open a scratch file `scratch.adm2` anywhere on disk with:
    ```
    sheet s {
        cell x: i32 = 1.0;
    }
    ```
-4. Confirm a diagnostic (red squiggle) appears under `1.0`, matching the type mismatch
+5. Confirm a diagnostic (red squiggle) appears under `1.0`, matching the type mismatch
    `pm-lsp`'s own test (`pm-lsp/src/dispatch.rs`'s
    `open_notification_triggers_a_publish_diagnostics_notification`) asserts for the same source.
-5. Fix the file to `cell x: i32 = 1;` and confirm the diagnostic disappears on save/edit.
-6. Delete `scratch.adm2`.
+6. Fix the file to `cell x: i32 = 1;` and confirm the diagnostic disappears on save/edit.
+7. Delete `scratch.adm2`.
 
 - [ ] **Step 3: Manual verification — `pm-lang.serverPath` setting**
 
-1. In the Extension Development Host window, open Settings and set `pm-lang.serverPath` to a
-   nonexistent path (e.g. `/does/not/exist`).
+1. In the Extension Development Host window, set `pm-lang.serverPath` to a nonexistent path
+   (e.g. `/does/not/exist`).
 2. Reload the window (Developer: Reload Window).
 3. Confirm the "could not find the pm-lsp language server binary" error message appears (proving
    the configured-but-missing path does *not* silently fall back).
-4. Clear the setting and reload again; confirm diagnostics work again (Step 2 still passes).
+4. Restore `pm-lang.serverPath` to the working path from Step 2 and reload again; confirm
+   diagnostics work again. (With no folder open in this dev host there's no workspace/PATH
+   fallback to land on — the setting is the only thing making diagnostics work here at all.)
 
 - [ ] **Step 4: Write the Phase 3 completion handoff**
 

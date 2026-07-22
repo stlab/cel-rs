@@ -53,7 +53,8 @@ export function resolveServerPath(options: ResolveServerPathOptions): string | u
 
   if (pathEnv) {
     const delimiter = platform === 'win32' ? ';' : ':';
-    for (const dir of pathEnv.split(delimiter)) {
+    for (const rawDir of pathEnv.split(delimiter)) {
+      const dir = rawDir.trim();
       if (!dir) {
         continue;
       }

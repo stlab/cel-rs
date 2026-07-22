@@ -76,6 +76,17 @@ test('falls back to searching PATH when no workspace match exists', () => {
   assert.equal(result, '/usr/bin/pm-lsp');
 });
 
+test('trims whitespace around PATH entries before joining', () => {
+  const result = resolveServerPath(
+    options({
+      workspaceRoot: '/repo',
+      pathEnv: ' /usr/local/bin : /usr/bin ',
+      fileExists: (p) => p === '/usr/bin/pm-lsp',
+    }),
+  );
+  assert.equal(result, '/usr/bin/pm-lsp');
+});
+
 test('returns undefined when nothing is found anywhere', () => {
   const result = resolveServerPath(
     options({
