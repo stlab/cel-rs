@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a VS Code extension (`editors/vscode-pm-lang/`) that gives `.pm` files syntax
+**Goal:** Add a VS Code extension (`editors/vscode-pm-lang/`) that gives `.adm2` files syntax
 highlighting and live `pm-lsp` diagnostics — the design doc's Phase 3, final sub-plan (`pm-lsp`
 itself already ships; this is the client that talks to it).
 
@@ -21,7 +21,7 @@ pre-release, no-distribution-story-yet status.
 
 ## Global Constraints
 
-- Language id `pm-lang`, file extension `.pm` — must match the `languageId` string `pm-lsp`'s own
+- Language id `pm-lang`, file extension `.adm2` — must match the `languageId` string `pm-lsp`'s own
   tests already send (`pm-lsp/src/dispatch.rs`'s `TextDocumentItem { language_id: "pm-lang", .. }`).
 - `pm-lsp`'s binary name is `pm-lsp` (`pm-lsp/Cargo.toml`'s `[[bin]] name = "pm-lsp"`), built via
   `cargo build -p pm-lsp` into `target/debug/pm-lsp` (`.exe` on Windows) or `target/release/pm-lsp`.
@@ -105,7 +105,7 @@ existing `/begin/node_modules` per-package convention.
       {
         "id": "pm-lang",
         "aliases": ["pm-lang", "PM"],
-        "extensions": [".pm"],
+        "extensions": [".adm2"],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -254,7 +254,7 @@ extension's workspace-search step expects it — see Task 5's manual verificatio
 ```markdown
 # pm-lang for VS Code
 
-Editor support for `.pm` (pm-lang) files: syntax highlighting and live diagnostics via the
+Editor support for `.adm2` (pm-lang) files: syntax highlighting and live diagnostics via the
 `pm-lsp` language server.
 
 ## Requirements
@@ -338,7 +338,7 @@ all drawn directly from `pm-lang`'s grammar (`pm-lang/src/ast_parser.rs`'s `is_k
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "pm-lang",
   "scopeName": "source.pm-lang",
-  "fileTypes": ["pm"],
+  "fileTypes": ["adm2"],
   "patterns": [
     { "include": "#comments" },
     { "include": "#keywords" },
@@ -426,7 +426,7 @@ manual verification checklist, no automated UI test suite for v1). Verify by han
 1. `cd editors/vscode-pm-lang && npm run compile`.
 2. Open the `editors/vscode-pm-lang` folder in VS Code, press F5 to launch the Extension
    Development Host (it opens the repo root per `.vscode/launch.json`).
-3. In that new window, open `begin/assets/demo.pm`.
+3. In that new window, open `begin/assets/demo.adm2`.
 4. Confirm: `sheet`/`cell`/`relationship`/`conditional`/`method` are colored as keywords;
    `f64`/`i32` are colored distinctly (as types); `//` or `/* */` comments (add one temporarily
    if none are present) are colored as comments; numeric literals like `0i32`/`2.0` are colored
@@ -733,7 +733,7 @@ Expected: exits 0, produces `target/debug/pm-lsp` (`.exe` on Windows).
 1. `cd editors/vscode-pm-lang && npm run compile`.
 2. Open the `editors/vscode-pm-lang` folder in VS Code, press F5. The Extension Development Host
    opens with the repo root as its workspace (per `.vscode/launch.json`).
-3. In that window, create a scratch file `scratch.pm` (anywhere under the repo root) with:
+3. In that window, create a scratch file `scratch.adm2` (anywhere under the repo root) with:
    ```
    sheet s {
        cell x: i32 = 1.0;
@@ -743,7 +743,7 @@ Expected: exits 0, produces `target/debug/pm-lsp` (`.exe` on Windows).
    `pm-lsp`'s own test (`pm-lsp/src/dispatch.rs`'s
    `open_notification_triggers_a_publish_diagnostics_notification`) asserts for the same source.
 5. Fix the file to `cell x: i32 = 1;` and confirm the diagnostic disappears on save/edit.
-6. Delete `scratch.pm`.
+6. Delete `scratch.adm2`.
 
 - [ ] **Step 3: Manual verification — `pm-lang.serverPath` setting**
 
@@ -772,10 +772,10 @@ All three Phase 3 sub-plans are complete:
 
 1. Type checking v1 (PR #45) — `cel_parser::Ty`/`check_expr`, `pm_lang::typecheck::check_sheet`.
 2. `pm-lsp` (PR #46) — the language server binary, `textDocument/publishDiagnostics` over stdio.
-3. **VS Code extension (`editors/vscode-pm-lang/`) — this sub-plan.** TextMate grammar for `.pm`
+3. **VS Code extension (`editors/vscode-pm-lang/`) — this sub-plan.** TextMate grammar for `.adm2`
    syntax highlighting, `vscode-languageclient` wiring to `pm-lsp` over stdio, a
    `pm-lang.serverPath` setting (falling back to the workspace's `target/debug`/`target/release`,
-   then `PATH`). First end-to-end usable milestone per the design doc's phasing: open a `.pm`
+   then `PATH`). First end-to-end usable milestone per the design doc's phasing: open a `.adm2`
    file in VS Code, get highlighting and live diagnostics.
 
 Full plan: `docs/superpowers/plans/2026-07-20-pm-lang-vscode-extension.md`.
