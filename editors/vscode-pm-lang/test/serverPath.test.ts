@@ -33,6 +33,17 @@ test('trims whitespace around the configured path before checking it', () => {
   assert.equal(result, '/custom/pm-lsp');
 });
 
+test('treats a whitespace-only configured path as unset and falls back to auto-detection', () => {
+  const result = resolveServerPath(
+    options({
+      configuredPath: '   ',
+      workspaceRoot: '/repo',
+      fileExists: (p) => p === '/repo/target/debug/pm-lsp',
+    }),
+  );
+  assert.equal(result, '/repo/target/debug/pm-lsp');
+});
+
 test('returns undefined when the configured path does not exist, without falling back', () => {
   const result = resolveServerPath(
     options({

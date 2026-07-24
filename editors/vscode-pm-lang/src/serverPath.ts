@@ -26,8 +26,9 @@ function binaryName(platform: NodeJS.Platform): string {
  * Resolves the filesystem path of the `pm-lsp` binary to launch.
  *
  * Resolution order:
- * 1. `options.configuredPath`, if non-empty — used only if it exists; a configured path that
- *    doesn't exist is a user error and must not silently fall through to auto-detection.
+ * 1. `options.configuredPath`, trimmed, if non-empty — used only if it exists; a configured path
+ *    that doesn't exist is a user error and must not silently fall through to auto-detection. A
+ *    whitespace-only setting is treated as unset and falls through to step 2.
  * 2. `<workspaceRoot>/target/debug/<binary>`, then `<workspaceRoot>/target/release/<binary>`.
  * 3. Each directory in `options.pathEnv` (in order), joined with `<binary>`.
  *
@@ -38,9 +39,9 @@ export function resolveServerPath(options: ResolveServerPathOptions): string | u
   const binary = binaryName(platform);
   const pathModule = platform === 'win32' ? path.win32 : path.posix;
 
-  if (configuredPath) {
-    const trimmed = configuredPath.trim();
-    return fileExists(trimmed) ? trimmed : undefined;
+  const trimmedConfiguredPath = configuredPath?.trim();
+  if (trimmedConfiguredPath) {
+    return fileExists(trimmedConfiguredPath) ? trimmedConfiguredPath : undefined;
   }
 
   if (workspaceRoot) {

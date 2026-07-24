@@ -7,7 +7,10 @@ let client: LanguageClient | undefined;
 
 /** Activates the pm-lang extension: resolves the `pm-lsp` binary and starts the language client. */
 export function activate(context: vscode.ExtensionContext): void {
-  const configuredPath = vscode.workspace.getConfiguration('pm-lang').get<string>('serverPath');
+  const configuredPath = vscode.workspace
+    .getConfiguration('pm-lang')
+    .get<string>('serverPath')
+    ?.trim();
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
   const serverPath = resolveServerPath({
