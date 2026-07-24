@@ -2,7 +2,7 @@
 
 ## Goal
 
-Give `.pm` (pm-lang) source files real editor tooling in VS Code: diagnostics, an
+Give `.adm2` (pm-lang) source files real editor tooling in VS Code: diagnostics, an
 auto-formatter following `cargo fmt` conventions, hover, go-to-definition/find-references,
 completion, and document symbols — without duplicating the pm-lang/CEL grammar into a second,
 independently-maintained parser. pm-lang's operator/identifier/type system is extensible at
@@ -26,9 +26,10 @@ implementation plan (matching this repo's existing convention), executed one at 
   parser backend: compiling CEL directly to Rust via a macro," expected to live in
   `cel-rs-macros`). `proc_macro2::Span` bridges transparently to `proc_macro::Span` in that
   context.
-- `begin`'s hot-reload of `demo.pm` (editing the file, `dx serve` picking it up, diagnostics to
-  stderr) already exists and needs no changes — this project is purely about editor-side
-  tooling for authoring `.pm` files, not about the running-app reload path.
+- `begin`'s hot-reload of `demo.adm2` (editing the file, `dx serve` picking it up, diagnostics to
+  stderr) already exists; the only change it needs is the `.pm` → `.adm2` rename of the demo asset
+  and the `begin` codepaths that reference it — this project is purely about editor-side tooling
+  for authoring `.adm2` files, not about the running-app reload path.
 - No existing LSP or VS Code extension work exists in this repo to build on.
 
 ## Parser architecture
@@ -186,6 +187,6 @@ will already exist).
   `AstContext` tree) rather than full protocol round-trip tests where possible; a small number of
   real stdio-transport tests for the server entry point itself.
 - VS Code extension: no automated UI test suite planned for v1 (small, internal, pre-release
-  tool); manual verification checklist per phase (open a `.pm` file, confirm diagnostics /
+  tool); manual verification checklist per phase (open a `.adm2` file, confirm diagnostics /
   formatting / hover / goto-def / completion as each phase lands), similar in spirit to this
   repo's existing `verifying-begin-ui` manual-verification approach.

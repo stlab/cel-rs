@@ -1,0 +1,73 @@
+# pm-lang for VS Code
+
+Editor support for `.adm2` (pm-lang) files: syntax highlighting and live diagnostics via the
+`pm-lsp` language server. (`.adm2`, not `.pm`, to avoid colliding with the `.pm` extension VS
+Code already associates with Perl modules.)
+
+## Requirements
+
+Build `pm-lsp` first, from the repository root:
+
+```bash
+cargo build -p pm-lsp
+```
+
+The extension looks for the `pm-lsp` binary in this order:
+
+1. The `pm-lang.serverPath` setting, if set.
+2. `target/debug/pm-lsp` (or `.exe` on Windows), then `target/release/pm-lsp`, relative to the
+   open workspace folder.
+3. `pm-lsp` on `PATH`.
+
+## Trying it out
+
+The `.vscode/launch.json`/`tasks.json` in this folder only take effect when **this folder**
+(`editors/vscode-pm-lang`), not the repository root, is the folder VS Code has open — that's what
+makes F5 find the "Run Extension" debug config instead of just trying to run whatever file
+happens to be focused.
+
+1. Build `pm-lsp` (see Requirements above) and install/compile this extension:
+
+   ```bash
+   cd editors/vscode-pm-lang
+   npm install
+   npm run compile
+   ```
+
+2. Open **this folder** as its own VS Code window: `File > Open Folder...` →
+   `editors/vscode-pm-lang` (a separate window from any window you have the whole `cel-rs`
+   repo open in).
+
+3. In that window, press F5 (or the Run and Debug panel's green play button, with "Run
+   Extension" selected). This opens a **second** new window titled
+   `[Extension Development Host]` with this extension loaded, with no folder open yet.
+
+4. In the `[Extension Development Host]` window, open `begin/assets/demo.adm2` (or any `.adm2`
+   file) via **File > Open File...** — not Open Folder (see note below) — and set the
+   `pm-lang.serverPath` setting so the extension can find the `pm-lsp` you already built, since
+   with no folder open the `target/debug`/`target/release` search step (Requirements above) never
+   runs: open Settings (Ctrl+,), search "pm-lang", and set `pm-lang.serverPath` to the absolute
+   path of `target/debug/pm-lsp.exe` in your checkout (e.g.
+   `D:\path\to\cel-rs\target\debug\pm-lsp.exe`). Then confirm:
+   - Syntax highlighting: `sheet`/`cell`/`relationship`/`conditional`/`method` are colored as
+     keywords, `f64`/`i32`/etc. as types, `//` comments dimmed.
+   - Live diagnostics: edit a cell's initializer to the wrong type (e.g. change
+     `cell a: f64 = 2.0;` to `cell a: f64 = 2;`) — a red squiggle and a Problems-panel entry
+     should appear within about a second; fixing it back makes the diagnostic disappear.
+
+   > **Don't use File > Open Folder in this window.** Switching the open folder from inside a
+   > running Extension Development Host doesn't carry the `--extensionDevelopmentPath` flag
+   > forward — VS Code opens a plain, ordinary window for the new folder instead, without this
+   > extension loaded at all. Setting `pm-lang.serverPath` explicitly, as above, is the reliable
+   > way to try this out without fighting that limitation.
+
+5. To stop, close the `[Extension Development Host]` window, or press Shift+F5 in the original
+   `editors/vscode-pm-lang` window.
+
+## Development
+
+```bash
+npm install
+npm run compile   # or: npm run watch
+npm test          # unit tests for server-path resolution
+```

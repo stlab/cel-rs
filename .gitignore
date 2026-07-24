@@ -2,4 +2,6 @@
 .tokensave
 .claude/worktrees/
 /begin/node_modules
+/editors/vscode-pm-lang/node_modules
+/editors/vscode-pm-lang/out
 .DS_Store
