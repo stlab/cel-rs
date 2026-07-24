@@ -97,9 +97,6 @@ existing `/begin/node_modules` per-package convention.
   },
   "categories": ["Programming Languages"],
   "main": "./out/src/extension.js",
-  "activationEvents": [
-    "onLanguage:pm-lang"
-  ],
   "contributes": {
     "languages": [
       {
@@ -130,7 +127,7 @@ existing `/begin/node_modules` per-package convention.
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -w -p .",
-    "test": "tsc -p . && node --test out/test/"
+    "test": "tsc -p . && node --test out/test/*.test.js"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
