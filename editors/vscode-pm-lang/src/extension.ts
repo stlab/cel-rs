@@ -19,10 +19,16 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   if (!serverPath) {
-    vscode.window.showErrorMessage(
-      'pm-lang: could not find the pm-lsp language server binary. Build it with ' +
-        '"cargo build -p pm-lsp", or set the "pm-lang.serverPath" setting.',
-    );
+    if (configuredPath) {
+      vscode.window.showErrorMessage(
+        `pm-lang: the configured "pm-lang.serverPath" (${configuredPath}) does not exist.`,
+      );
+    } else {
+      vscode.window.showErrorMessage(
+        'pm-lang: could not find the pm-lsp language server binary. Build it with ' +
+          '"cargo build -p pm-lsp", or set the "pm-lang.serverPath" setting.',
+      );
+    }
     return;
   }
 

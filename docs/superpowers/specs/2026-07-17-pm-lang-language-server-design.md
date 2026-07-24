@@ -27,8 +27,9 @@ implementation plan (matching this repo's existing convention), executed one at 
   `cel-rs-macros`). `proc_macro2::Span` bridges transparently to `proc_macro::Span` in that
   context.
 - `begin`'s hot-reload of `demo.adm2` (editing the file, `dx serve` picking it up, diagnostics to
-  stderr) already exists and needs no changes — this project is purely about editor-side
-  tooling for authoring `.adm2` files, not about the running-app reload path.
+  stderr) already exists; the only change it needs is the `.pm` → `.adm2` rename of the demo asset
+  and the `begin` codepaths that reference it — this project is purely about editor-side tooling
+  for authoring `.adm2` files, not about the running-app reload path.
 - No existing LSP or VS Code extension work exists in this repo to build on.
 
 ## Parser architecture

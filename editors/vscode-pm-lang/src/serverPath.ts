@@ -39,7 +39,8 @@ export function resolveServerPath(options: ResolveServerPathOptions): string | u
   const pathModule = platform === 'win32' ? path.win32 : path.posix;
 
   if (configuredPath) {
-    return fileExists(configuredPath) ? configuredPath : undefined;
+    const trimmed = configuredPath.trim();
+    return fileExists(trimmed) ? trimmed : undefined;
   }
 
   if (workspaceRoot) {

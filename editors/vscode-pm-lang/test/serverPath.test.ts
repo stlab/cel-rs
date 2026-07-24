@@ -23,6 +23,16 @@ test('returns the configured path when it exists', () => {
   assert.equal(result, '/custom/pm-lsp');
 });
 
+test('trims whitespace around the configured path before checking it', () => {
+  const result = resolveServerPath(
+    options({
+      configuredPath: ' /custom/pm-lsp ',
+      fileExists: (p) => p === '/custom/pm-lsp',
+    }),
+  );
+  assert.equal(result, '/custom/pm-lsp');
+});
+
 test('returns undefined when the configured path does not exist, without falling back', () => {
   const result = resolveServerPath(
     options({
