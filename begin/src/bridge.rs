@@ -1,13 +1,13 @@
-//! Serialization bridge from [`property_model::Sheet`] to D3-ready JSON.
+//! Serialization bridge from [`adam_rs::Sheet`] to D3-ready JSON.
 //!
 //! [`Labels`] associates display metadata (names, type-erased display and write closures)
 //! with stable [`CellId`] and [`RelationshipId`] keys. [`to_graph_data`] serializes a
 //! [`Sheet`] and its [`Labels`] into a [`GraphData`] value ready for JSON encoding.
 
+use adam_rs::{CellId, ConditionalId, Error, RelationshipId, Sheet};
 use annotate_snippets::Renderer;
 use cel_parser::FormatRustcStyle;
 use indexmap::IndexMap;
-use property_model::{CellId, ConditionalId, Error, RelationshipId, Sheet};
 use serde::Serialize;
 use slotmap::Key;
 use std::any::TypeId;
@@ -76,10 +76,10 @@ impl Default for Labels {
     }
 }
 
-/// Builds a [`Labels`] from a pm-lang-style declaration-ordered cell name map.
+/// Builds a [`Labels`] from an adam-lang-style declaration-ordered cell name map.
 ///
 /// Matches each `TypeId` against the built-in primitive types
-/// `pm_lang::TypeRegistry::new()` registers. Cells whose `TypeId` is not one
+/// `adam_lang::TypeRegistry::new()` registers. Cells whose `TypeId` is not one
 /// of these are silently skipped — they simply won't appear in the sidebar.
 ///
 /// - Complexity: O(n) in the number of cells.
@@ -114,7 +114,7 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -
     labels
 }
 
-/// Display name for the pm-lang source file, shown in diagnostic headers
+/// Display name for the adam-lang source file, shown in diagnostic headers
 /// (e.g. `--> begin/assets/demo.adm2:8:11`).
 pub const SOURCE_FILE_NAME: &str = "begin/assets/demo.adm2";
 
@@ -126,7 +126,7 @@ pub const SOURCE_FILE_NAME: &str = "begin/assets/demo.adm2";
 /// renders a full caret diagnostic against `source`, ANSI-colored for a
 /// terminal. All other variants have no source span and fall back to their
 /// `Display` message.
-pub fn format_property_model_error(e: &Error, source: &str) -> String {
+pub fn format_adam_error(e: &Error, source: &str) -> String {
     match e {
         Error::MethodFailed(inner) => {
             inner.format_rustc_style(source, SOURCE_FILE_NAME, 1, &Renderer::styled())
@@ -197,11 +197,11 @@ pub struct GraphData {
     /// Stable IDs of cells that changed during the last `propagate()` call.
     pub changed: Vec<String>,
     /// Stable IDs of cells forced by an active relationship (see
-    /// [`property_model::Sheet::is_forced`]); consumers should disable input for these
+    /// [`adam_rs::Sheet::is_forced`]); consumers should disable input for these
     /// cells and may render them distinctly.
     pub forced: Vec<String>,
     /// Stable IDs of relationships forced by the planner (see
-    /// [`property_model::Sheet::is_relationship_forced`]); consumers may render them
+    /// [`adam_rs::Sheet::is_relationship_forced`]); consumers may render them
     /// distinctly, along with their constraint edges.
     pub forced_relationships: Vec<String>,
     /// `true` when at least one relationship has a cached plan and constraint links are directed
@@ -371,16 +371,16 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use property_model::{Method, Sheet};
+    use adam_rs::{Method, Sheet};
 
     #[test]
-    fn format_property_model_error_invalid_id_falls_back_to_display() {
-        let msg = format_property_model_error(&Error::InvalidId, "source text");
+    fn format_adam_error_invalid_id_falls_back_to_display() {
+        let msg = format_adam_error(&Error::InvalidId, "source text");
         assert_eq!(msg, "invalid cell or relationship id");
     }
 
     #[test]
-    fn format_property_model_error_method_failed_renders_caret_diagnostic() {
+    fn format_adam_error_method_failed_renders_caret_diagnostic() {
         use cel_parser::{SourceSpan, SpanContext};
 
         let source = "1i32 / 0i32";
@@ -388,7 +388,7 @@ mod tests {
         let inner = anyhow::anyhow!("division by zero").context(SpanContext::new(span));
         let err = Error::MethodFailed(inner);
 
-        let msg = format_property_model_error(&err, source);
+        let msg = format_adam_error(&err, source);
 
         assert!(msg.contains("division by zero"), "{msg}");
         assert!(msg.contains(source), "{msg}");

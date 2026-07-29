@@ -24,9 +24,9 @@ members = [
     "cel-runtime",
     "cel-parser",
     "cel-rs-macros",
-    "property-model",
-    "pm-lang",
-    "pm-lsp",
+    "adam-rs",
+    "adam-lang",
+    "adam-lsp",
     "begin",
     "xtask",
 ]

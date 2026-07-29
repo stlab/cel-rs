@@ -1,0 +1,76 @@
+{
+  "name": "adam-lang",
+  "scopeName": "source.adam-lang",
+  "fileTypes": ["adm2"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.adam-lang",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.adam-lang",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.declaration.adam-lang",
+          "match": "\\b(sheet|cell|relationship|conditional|method)\\b"
+        },
+        {
+          "name": "keyword.other.wildcard.adam-lang",
+          "match": "(?<!\\w)_(?!\\w)"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.adam-lang",
+          "match": "\\b(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64|bool|String)\\b"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.adam-lang",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.adam-lang", "match": "\\\\." }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.adam-lang",
+          "match": "\\b\\d+(\\.\\d+)?([eE][+-]?\\d+)?(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64)?\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.adam-lang",
+          "match": "->|=>"
+        },
+        {
+          "name": "keyword.operator.adam-lang",
+          "match": "&&|\\|\\||==|!=|<=|>=|<<|>>|[-+*/%<>=!&|^:;,]"
+        }
+      ]
+    }
+  }
+}

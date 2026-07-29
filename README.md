@@ -19,10 +19,11 @@ long-term direction behind each crate in this workspace.
 | [`cel-runtime`](cel-runtime) | Core stack-based runtime; all evaluation and stack machinery |
 | [`cel-parser`](cel-parser) | Recursive-descent CEL parser, lexer, and error types |
 | [`cel-rs-macros`](cel-rs-macros) | Proc-macro crate for compile-time CEL expression validation |
-| [`property-model`](property-model) | Multi-way constraint system for property models |
-| [`pm-lang`](pm-lang) | DSL that expresses `property-model` constraint systems as source text |
-| [`pm-lsp`](pm-lsp) | Language server for `pm-lang` |
+| [`adam-rs`](adam-rs) | Multi-way constraint system for property models |
+| [`adam-lang`](adam-lang) | DSL that expresses `adam-rs` constraint systems as source text |
+| [`adam-lsp`](adam-lsp) | Language server for `adam-lang` |
 | [`begin`](begin) | Dioxus-based UI application for developing property models |
+| [`editors/vscode-adam-lang`](editors/vscode-adam-lang) | VS Code extension: syntax highlighting and live diagnostics for `adam-lang`, via `adam-lsp` |
 | [`xtask`](xtask) | Repository automation and maintenance tasks |
 
 ## Getting started
@@ -103,3 +104,24 @@ Commit the regenerated `begin/assets/swc.js` along with any `begin/package.json`
 `begin/package-lock.json` changes. See
 [docs/superpowers/specs/2026-07-11-begin-spectrum2-theme-tokens-design.md](docs/superpowers/specs/2026-07-11-begin-spectrum2-theme-tokens-design.md)
 for why this needs to be one compiled bundle rather than separate vendored/live files.
+
+### adam-lang: VS Code extension
+
+`editors/vscode-adam-lang` is a VS Code extension providing syntax highlighting and live
+diagnostics for `.adm2` (adam-lang) files, backed by the `adam-lsp` language server.
+
+To install it locally:
+
+```bash
+cargo install --path adam-lsp
+cd editors/vscode-adam-lang
+npm install
+npm run package
+npm run install-extension
+```
+
+Both the cargo install and the two npm steps are also available as a single VS Code task,
+**Install adam-lsp + Extension (Local)**, runnable from the Command Palette's "Tasks: Run
+Task" with either the repository root or `editors/vscode-adam-lang` open. See
+[editors/vscode-adam-lang/README.md](editors/vscode-adam-lang/README.md) for the full
+Extension Development Host walkthrough and troubleshooting notes.

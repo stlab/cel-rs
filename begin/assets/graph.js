@@ -397,8 +397,8 @@
                 });
         }());
 
-        // Highlight forced cells (see property_model::Sheet::is_forced) and forced
-        // relationships (see property_model::Sheet::is_relationship_forced) — those
+        // Highlight forced cells (see adam_rs::Sheet::is_forced) and forced
+        // relationships (see adam_rs::Sheet::is_relationship_forced) — those
         // with only one viable method, regardless of cell strength — plus every
         // constraint edge touching either: the incoming edge into a forced
         // relationship, its outgoing edge(s), and any further edges carrying a

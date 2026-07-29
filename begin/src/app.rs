@@ -1,7 +1,7 @@
 //! Root [`App`] component.
 
+use adam_rs::Sheet;
 use dioxus::prelude::*;
-use property_model::Sheet;
 
 use crate::bridge::{Labels, to_graph_data};
 use crate::demo_source::{build_sheet, load_demo_source};
@@ -10,7 +10,7 @@ use crate::inspector::Inspector;
 use crate::spectrum::SpTheme;
 
 /// Root component: Spectrum theme wrapper with the graph and Inspector filling the
-/// viewport. The demo pm-lang source lives in `begin/assets/demo.adm2` — on desktop,
+/// viewport. The demo adam-lang source lives in `begin/assets/demo.adm2` — on desktop,
 /// editing it while running under `dx serve` hot-reloads the sheet into this running
 /// app via [`crate::demo_source::spawn_hot_reload`], exactly as if the old Apply
 /// button had been pressed.
