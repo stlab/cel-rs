@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - `@vscode/vsce` devDependency version: `^3.9.2`.
-- `.vscodeignore` patterns that name a top-level directory (`src`, `test`, `.vscode`) **must** have a leading `/` (e.g. `/src/**`, not `src/**`). Unrooted patterns match at any depth under gitignore-style semantics, so `src/**` would also match `out/src/**` and silently strip the compiled entrypoint (`out/src/extension.js`) out of the package — this was verified by reproduction during design (see Task 1, Step 3).
+- `.vscodeignore` patterns **must not** have a leading `/` (e.g. `src/**`, not `/src/**`). `@vscode/vsce@3.9.2` matches each pattern against collected file paths (which never carry a leading `/`) via plain `minimatch`, not gitignore semantics — a leading `/` in the pattern requires the compared string to also start with `/`, which none of vsce's paths do, so a rooted pattern silently matches nothing and the dev-only files it was meant to exclude (`src/`, `test/`, `.vscode/`, `tsconfig.json`) ship in the vsix anyway. Unrooted patterns are safe here specifically because this matcher anchors each pattern to the start of the string with no gitignore-style "at any depth" fallback, so `src/**` matches only paths literally starting with `src/` and never leaks into `out/src/**` — verified by reproduction during Task 1 (see the corrected `.vscodeignore` content there).
 - The `package`/`install-extension` npm scripts use a fixed output filename (`pm-lang.vsix`, via `vsce package --out pm-lang.vsix`), not the version-derived default name, so `install-extension` never needs to glob for the current version.
 - `pm-lsp`'s `cargo install` task's shell `cwd` must resolve to the repo root, not `editors/vscode-pm-lang` — VS Code's `${workspaceFolder}` in this folder's own `.vscode/tasks.json` is `editors/vscode-pm-lang` itself (this project's existing F5 workflow opens that folder on its own, not the repo root), so the repo root is `${workspaceFolder}/../..`.
 - **Known verification caveat:** `vsce package`'s default dependency-bundling step shells out to `npm list --production ...` as a child process. In some sandboxed/agentic shell environments (confirmed during this plan's design work), that specific nested child-process spawn causes the packaging step to silently collect zero files (every file, including the entrypoint, is reported "missing") even though the identical `npm list`/glob logic works correctly in isolation, and even with sandboxing explicitly disabled — this reproduces the same way whether invoked via PowerShell, Bash, or a raw `cmd.exe` batch file, and appears specific to nested-process stdio handling in that kind of wrapped shell, not to `vsce`, `glob`, or this project's configuration. If `npm run package` reports `ERROR Extension entrypoint(s) missing` despite the files genuinely existing on disk, retry it from a normal, non-agent-wrapped terminal (a real terminal window, or the VS Code integrated terminal run directly, not through an automation harness) before assuming the packaging config is wrong.
@@ -71,16 +71,16 @@ Expected: `package-lock.json` updates to include `@vscode/vsce` and its transiti
 Create `editors/vscode-pm-lang/.vscodeignore`:
 
 ```text
-/.vscode/**
-/src/**
-/test/**
-/out/test/**
-/tsconfig.json
-/package-lock.json
+.vscode/**
+src/**
+test/**
+out/test/**
+tsconfig.json
+package-lock.json
 **/*.map
 ```
 
-Every pattern naming a specific top-level directory or file is rooted with a leading `/`. This is required, not stylistic: `.vscodeignore` uses gitignore-style matching, where an unrooted pattern like `src/**` matches at *any* depth — including `out/src/**`, which would strip the compiled entrypoint `out/src/extension.js` out of the vsix and make `vsce package` fail with "Extension entrypoint(s) missing" even though the file exists on disk. `**/*.map` is deliberately left unrooted since source maps should be excluded wherever they appear.
+None of these patterns are rooted with a leading `/`. This is required, not stylistic: `@vscode/vsce` matches `.vscodeignore` patterns against collected file paths using plain `minimatch`, not gitignore semantics, and those paths never carry a leading `/` (e.g. `src/extension.ts`, `tsconfig.json`). A rooted pattern like `/src/**` requires the compared string to also start with `/`, which none of them do — so a rooted pattern silently excludes nothing, and the dev-only files it was meant to strip (`src/`, `test/`, `.vscode/`, `tsconfig.json`) ship in the vsix anyway. Unrooted patterns are safe from leaking into `out/src/**` specifically because this matcher has no gitignore-style "match at any depth" fallback: `src/**` matches only paths that literally start with `src/`.
 
 - [ ] **Step 4: Ignore the packaged vsix in git**
 
