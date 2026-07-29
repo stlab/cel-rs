@@ -5,6 +5,11 @@
   "publisher": "stlab",
   "version": "0.1.0",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stlab/cel-rs.git",
+    "directory": "editors/vscode-pm-lang"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
