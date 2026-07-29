@@ -95,7 +95,8 @@ this installs a real, working copy of `pm-lsp` and this extension into your regu
 
    Both steps together are also available as a single VS Code task,
    **Install pm-lsp + Extension (Local)**, runnable from the Command Palette's
-   "Tasks: Run Task" while this folder (`editors/vscode-pm-lang`) is open.
+   "Tasks: Run Task" — available whether you have the repository root or just this folder
+   (`editors/vscode-pm-lang`) open.
 
 3. Reopen VS Code (or run **Developer: Reload Window**) and open any `.adm2` file — syntax
    highlighting and diagnostics should now work in ordinary windows, not just the dev host.
