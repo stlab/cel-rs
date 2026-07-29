@@ -1,0 +1,52 @@
+name: Docs
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Only one Pages deployment may run at a time; let a newer push supersede an
+# in-flight one rather than queuing behind it.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+
+    # --lib skips `begin`/`xtask` automatically (they have no library target),
+    # so this covers every documentable crate without needing an --exclude list.
+    - name: Build documentation
+      run: cargo doc --workspace --no-deps --lib
+
+    - name: Redirect docs root to the cel-rs facade crate
+      run: echo '<meta http-equiv="refresh" content="0; url=cel_rs/index.html">' > target/doc/index.html
+
+    - uses: actions/upload-pages-artifact@v3
+      with:
+        path: target/doc
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - id: deployment
+      uses: actions/deploy-pages@v4

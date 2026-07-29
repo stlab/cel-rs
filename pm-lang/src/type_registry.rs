@@ -34,12 +34,12 @@ pub type CallDynFn = fn(&mut DynSegment, &[&dyn Any]) -> anyhow::Result<Box<dyn 
 
 /// Calls `Sheet::add_conditional` with the appropriate concrete type.
 ///
-/// Each branch carries a single boxed key value and the `RelationshipId` for that branch.
-/// The default is a list of `RelationshipId`s active when no branch key matches.
+/// Each branch carries a single boxed key value and the `RelationshipId`s active for that
+/// branch. The default is a list of `RelationshipId`s active when no branch key matches.
 pub type AddConditionalFn = fn(
     &mut Sheet,
     CellId,
-    Vec<(Box<dyn Any>, RelationshipId)>,
+    Vec<(Box<dyn Any>, Vec<RelationshipId>)>,
     Vec<RelationshipId>,
 ) -> Result<ConditionalId, property_model::Error>;
 
@@ -90,16 +90,16 @@ fn push_arg_impl<T: 'static + Clone>(segment: &mut DynSegment, index: usize) {
 fn add_conditional_impl<T: Any + PartialEq + 'static>(
     sheet: &mut Sheet,
     cell: CellId,
-    branches: Vec<(Box<dyn Any>, RelationshipId)>,
+    branches: Vec<(Box<dyn Any>, Vec<RelationshipId>)>,
     default: Vec<RelationshipId>,
 ) -> Result<ConditionalId, property_model::Error> {
     let typed_branches: Vec<(Vec<T>, Vec<RelationshipId>)> = branches
         .into_iter()
-        .map(|(val, rel_id)| {
+        .map(|(val, rel_ids)| {
             let v = *val
                 .downcast::<T>()
                 .expect("add_conditional_impl: type matches registration");
-            (vec![v], vec![rel_id])
+            (vec![v], rel_ids)
         })
         .collect();
     sheet.add_conditional::<T>(cell, typed_branches, default)

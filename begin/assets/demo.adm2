@@ -22,21 +22,24 @@ sheet demo {
 
     conditional p {
         0i32 => {
-            method [f] -> [c] { f }
-            method [c] -> [f] { c }
+            relationship {
+                method [f] -> [c] { f }
+                method [c] -> [f] { c }
+            }
         }
         1i32 => {
-            method [f] -> [c] { f * 2.0 }
-            method [c] -> [f] { c / 2.0 }
+            relationship {
+                method [f] -> [c] { f * 2.0 }
+                method [c] -> [f] { c / 2.0 }
+            }
+            relationship {
+                method [c] -> [g] { c * 10.0 }
+            }
         }
         _ => {
-            method [f] -> [c] { f }
-        }
-    }
-
-    conditional p {
-        1i32 => {
-            method [c] -> [g] { c * 10.0 }
+            relationship {
+                method [f] -> [c] { f }
+            }
         }
     }
 }
