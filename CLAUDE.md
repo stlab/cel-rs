@@ -104,7 +104,7 @@ This workspace is centered on `cel-runtime` and is split into libraries, a faça
 - **`cel-runtime`** — core stack-based runtime; all evaluation and stack machinery lives here
 - **`cel-parser`** — recursive-descent CEL parser, lexer, and parser error types
 - **`cel-rs-macros`** — proc-macro crate for compile-time CEL expression validation
-- **`adam-rs`**, **`adam-lang`**, and **`adam-lsp`** — supporting crates for the Adam property-model system: the constraint-graph runtime, its DSL, and its language server
+- **`adam-rs`**, **`adam-lang`**, and **`adam-lsp`** — supporting crates for the Adam property model system: the constraint-graph runtime, its DSL, and its language server
 - **`begin`** — Dioxus-based UI application
 - **`editors/vscode-adam-lang`** — VS Code extension providing syntax highlighting and diagnostics for adam-lang, backed by `adam-lsp`
 - **`xtask`** — repository automation and maintenance tasks
