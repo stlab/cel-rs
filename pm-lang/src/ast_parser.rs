@@ -234,28 +234,22 @@ impl PmAstParser {
                 cursor.advance();
                 cursor.expect_punct("=>")?;
                 cursor.expect_open_brace()?;
-                let mut methods = Vec::new();
-                while !cursor.at_close_brace() {
-                    methods.push(self.parse_method_decl(cursor)?);
-                }
+                let relationships = self.parse_branch_relationships(cursor)?;
                 cursor.expect_close_brace()?;
                 cursor.consume_punct(",");
-                default = Some(methods);
+                default = Some(relationships);
                 break; // default branch is always last
             }
             let (lit, lit_span) = cursor.consume_literal()?;
             cursor.expect_punct("=>")?;
             cursor.expect_open_brace()?;
-            let mut methods = Vec::new();
-            while !cursor.at_close_brace() {
-                methods.push(self.parse_method_decl(cursor)?);
-            }
+            let relationships = self.parse_branch_relationships(cursor)?;
             let close = cursor.expect_close_brace()?;
             cursor.consume_punct(",");
             branches.push(ast::ConditionalBranch {
                 literal: lit,
                 literal_span: point(lit_span),
-                methods,
+                relationships,
                 span: ast::ExprSpan {
                     start: lit_span,
                     end: close,
@@ -274,6 +268,23 @@ impl PmAstParser {
                 end: close_span,
             },
         })
+    }
+
+    /// Parses one `conditional_branch`/`default_branch`'s shared body: `"{" { relationship_decl }
+    /// "}"`, up to (not including) the closing `}`.
+    fn parse_branch_relationships(
+        &mut self,
+        cursor: &mut TokenCursor,
+    ) -> Result<Vec<ast::RelationshipDecl>> {
+        use cel_parser::lex_lexer::Token;
+        let mut relationships = Vec::new();
+        while !cursor.at_close_brace() {
+            if !matches!(cursor.peek_token(), Some(Token::Identifier(id)) if id == "relationship") {
+                return Err(cursor.err_at("expected `relationship`"));
+            }
+            relationships.push(self.parse_relationship_decl(cursor)?);
+        }
+        Ok(relationships)
     }
 
     /// `method_decl = "method" cell_list "->" cell_list method_body.`
@@ -429,8 +440,8 @@ mod tests {
                 r#"
                 sheet s {
                     conditional mode {
-                        0i32 => { method [width] -> [height] { width } },
-                        _ => { method [width] -> [height] { width } },
+                        0i32 => { relationship { method [width] -> [height] { width } } },
+                        _ => { relationship { method [width] -> [height] { width } } },
                     }
                 }
             "#,
@@ -442,6 +453,73 @@ mod tests {
         assert_eq!(cond.match_name, "mode");
         assert_eq!(cond.branches.len(), 1);
         assert!(cond.default.is_some());
+    }
+
+    #[test]
+    fn parse_conditional_branch_records_multiple_relationships() {
+        let sheet = PmAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        0i32 => {
+                            relationship { method [a] -> [b] { a } }
+                            relationship { method [c] -> [d] { c } }
+                        },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        let ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        assert_eq!(cond.branches[0].relationships.len(), 2);
+    }
+
+    #[test]
+    fn parse_conditional_default_branch_records_multiple_relationships() {
+        let sheet = PmAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        _ => {
+                            relationship { method [a] -> [b] { a } }
+                            relationship { method [c] -> [d] { c } }
+                        },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        let ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        assert_eq!(cond.default.as_ref().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn conditional_branch_bare_method_without_relationship_wrapper_recovers() {
+        // A branch body is now `{ relationship_decl }`, not `{ method_decl }` directly — a bare
+        // `method` is a syntax error, recovered at the enclosing conditional_decl's sheet-item
+        // level (see `recovery_malformed_conditional_item_recovers`).
+        let sheet = PmAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell good_before: i32 = 1;
+                    conditional mode { 0i32 => { method [a] -> [b] { a } } }
+                    cell good_after: i32 = 2;
+                }
+            "#,
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
     #[test]

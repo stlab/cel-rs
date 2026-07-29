@@ -76,7 +76,7 @@ impl SheetItem {
 /// `cell_decl = "cell" identifier cell_type_init ";".`
 ///
 /// `type_name`/`initializer` are unresolved — no `TypeRegistry` lookup, no literal validation.
-/// Exactly one of `type_name`, `initializer` may be absent, per the grammar's three
+/// Exactly one of `type_name`, `initializer` may be absent, per the grammar's two
 /// `cell_type_init` forms, but this is not enforced here (an all-`None` `CellDecl` cannot be
 /// produced by [`crate::PmAstParser`], which requires at least one of `:`/`=`).
 #[derive(Debug, Clone)]
@@ -118,23 +118,23 @@ pub struct ConditionalDecl {
     pub match_name_span: ExprSpan,
     /// The named (literal `=>`) branches, in declaration order.
     pub branches: Vec<ConditionalBranch>,
-    /// The `_ => { ... }` default branch's methods, if present.
-    pub default: Option<Vec<MethodDecl>>,
+    /// The `_ => { ... }` default branch's relationships, if present.
+    pub default: Option<Vec<RelationshipDecl>>,
     /// A leading comment immediately preceding this declaration, if recovered.
     pub leading_comment: Option<String>,
     /// The span of the whole `conditional ... { ... }` declaration.
     pub span: ExprSpan,
 }
 
-/// `conditional_branch = literal "=>" "{" { method_decl } "}" [ "," ].`
+/// `conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].`
 #[derive(Debug, Clone)]
 pub struct ConditionalBranch {
     /// The branch's unresolved match literal.
     pub literal: Literal,
     /// The literal token's span.
     pub literal_span: ExprSpan,
-    /// The branch's methods, in declaration order.
-    pub methods: Vec<MethodDecl>,
+    /// The branch's relationships, in declaration order.
+    pub relationships: Vec<RelationshipDecl>,
     /// The span from the branch's literal through its closing `}`.
     pub span: ExprSpan,
 }

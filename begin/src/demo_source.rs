@@ -2,22 +2,21 @@
 //! [`Sheet`]/[`Labels`] pair from it.
 //!
 //! Two independent bidirectional constraint systems (`a × b = c` and `d × e = f`)
-//! are linked by two conditionals on `p`:
+//! are linked by one conditional on `p`:
 //!
 //! - `p = 0`: the relationship `c = f` (bidirectional) becomes active.
-//! - `p = 1`: the relationship `c = f × 2` (bidirectional) becomes active, and a
-//!   single-method relationship `g = c × 10` also becomes active — `g` is *forced*
+//! - `p = 1`: the relationship `c = f × 2` (bidirectional) becomes active, alongside a
+//!   second, independent relationship `g = c × 10` in the same branch — `g` is *forced*
 //!   while this branch is active (see [`property_model::Sheet::is_forced`]), so its
 //!   Inspector field is disabled and it is highlighted in the graph.
 //! - Any other `p`: the two systems are independent and `g` is not forced.
 //!
-//! `g`'s relationship is declared in its own `conditional p { .. }` block rather than
-//! folded into the first: pm-lang groups every method in one branch into a single
-//! relationship, and a relationship's forced outputs are the *intersection* of its
-//! methods' pure outputs — mixing `[c] -> [g]` in with the `c`/`f` methods would make
-//! that intersection empty, forcing nothing. Two conditionals sharing the same match
-//! cell compose independently, so this is a distinct relationship gated on the same
-//! `p == 1` condition. This also means the graph renders two diamond nodes for `p`.
+//! `g`'s relationship is its own `relationship { .. }` block within the `1i32` branch,
+//! not folded into the `c`/`f` relationship's methods: a relationship's forced outputs
+//! are the *intersection* of its methods' pure outputs, so mixing `[c] -> [g]` in with
+//! the `c`/`f` methods would make that intersection empty, forcing nothing. A single
+//! `conditional` branch can hold any number of `relationship` blocks, each contributing
+//! its own independent forced-output set while that branch is active.
 
 use annotate_snippets::Renderer;
 use dioxus::prelude::*;
