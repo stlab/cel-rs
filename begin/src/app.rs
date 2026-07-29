@@ -10,14 +10,14 @@ use crate::inspector::Inspector;
 use crate::spectrum::SpTheme;
 
 /// Root component: Spectrum theme wrapper with the graph and Inspector filling the
-/// viewport. The demo pm-lang source lives in `begin/assets/demo.pm` — on desktop,
+/// viewport. The demo pm-lang source lives in `begin/assets/demo.adm2` — on desktop,
 /// editing it while running under `dx serve` hot-reloads the sheet into this running
 /// app via [`crate::demo_source::spawn_hot_reload`], exactly as if the old Apply
 /// button had been pressed.
 ///
 /// A read or parse failure at startup does not prevent the app from launching: it
 /// prints the diagnostic to stderr and starts with an empty sheet instead, so a
-/// syntax error in `demo.pm` can be fixed and hot-reloaded in without restarting.
+/// syntax error in `demo.adm2` can be fixed and hot-reloaded in without restarting.
 #[component]
 pub fn App() -> Element {
     // The webview always probes `/favicon.ico` at the origin root regardless of the
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn demo_source_g_not_forced_when_p_is_zero() {
         let outcome = build_sheet(DEMO_SOURCE_TEXT);
-        let (sheet, labels) = outcome.sheet_labels.expect("demo.pm must build");
+        let (sheet, labels) = outcome.sheet_labels.expect("demo.adm2 must build");
         let g_id = sheet
             .cells()
             .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("g"))
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn demo_source_g_forced_when_p_is_one() {
         let outcome = build_sheet(DEMO_SOURCE_TEXT);
-        let (mut sheet, labels) = outcome.sheet_labels.expect("demo.pm must build");
+        let (mut sheet, labels) = outcome.sheet_labels.expect("demo.adm2 must build");
         let p_id = sheet
             .cells()
             .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("p"))
@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn demo_source_g_unforced_again_after_p_returns_to_zero() {
         let outcome = build_sheet(DEMO_SOURCE_TEXT);
-        let (mut sheet, labels) = outcome.sheet_labels.expect("demo.pm must build");
+        let (mut sheet, labels) = outcome.sheet_labels.expect("demo.adm2 must build");
         let p_id = sheet
             .cells()
             .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("p"))

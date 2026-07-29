@@ -106,6 +106,55 @@
                 "panel": "dedicated"
             }
         },
+        // ============ pm-lang VS Code Extension Tasks ============
+        {
+            "label": "cargo: install pm-lsp",
+            "type": "cargo",
+            "command": "install",
+            "args": [
+                "--path",
+                "pm-lsp"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "vscode-pm-lang: package",
+            "type": "npm",
+            "script": "package",
+            "path": "editors/vscode-pm-lang",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "vscode-pm-lang: install extension",
+            "type": "npm",
+            "script": "install-extension",
+            "path": "editors/vscode-pm-lang",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "Install pm-lsp + Extension (Local)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "cargo: install pm-lsp",
+                "vscode-pm-lang: package",
+                "vscode-pm-lang: install extension"
+            ],
+            "problemMatcher": []
+        },
         // ============ Build Tasks ============
         {
             "label": "cargo build",
