@@ -1,6 +1,15 @@
 # pm → Adam Rename Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: complete.** Executed inline in a single session (not task-by-task subagent
+> dispatch, given the fully mechanical nature of the rename). Verified via `cargo fmt --all`,
+> `cargo build --workspace` (zero warnings), `cargo test --workspace` and `--doc` (all green),
+> all three `cargo clippy` invocations (clean), `cargo doc --lib --no-deps --workspace`
+> (pre-existing, unrelated warnings only), the VS Code extension's `npm run compile`/`npm test`,
+> and a final repo-wide grep sweep confirming no `pm-lang`/`pm-lsp`/`property-model`/`PmParser`/
+> `PmAstParser` mentions remain outside the excluded historical docs. Landed across commits
+> `beb9c90` and `63ef9d8` on `worktree-naming-cleanup`.
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Drop the `pm`/`property-model` nomenclature workspace-wide and rebrand the
 property-model system as "Adam" (crate: `adam-rs`, matching the `cel`/`cel-rs` naming
@@ -97,14 +106,14 @@ Directory/file renames (via `git mv`, preserves history):
 - Modify: `adam-rs/Cargo.toml`, `adam-rs/src/lib.rs`, `adam-rs/src/sheet.rs`, `adam-rs/tests/integration.rs`
 - Modify: `Cargo.toml` (workspace members: `"property-model"` → `"adam-rs"`)
 
-- [ ] **Step 1:** `git mv property-model adam-rs`
-- [ ] **Step 2:** In `adam-rs/Cargo.toml`, change `name = "property-model"` → `name = "adam-rs"`. Leave `description` unchanged (still-accurate descriptive prose).
-- [ ] **Step 3:** In `adam-rs/src/lib.rs`: `//! # property-model` → `//! # adam-rs`; `use property_model::{Sheet, Method};` → `use adam_rs::{Sheet, Method};`
-- [ ] **Step 4:** In `adam-rs/src/sheet.rs`: `use property_model::{Sheet, Method};` → `use adam_rs::{Sheet, Method};`
-- [ ] **Step 5:** In `adam-rs/tests/integration.rs`: `//! End-to-end integration tests for the property-model crate.` → `//! End-to-end integration tests for the adam-rs crate.`; `use property_model::{Error, Method, Sheet};` → `use adam_rs::{Error, Method, Sheet};`
-- [ ] **Step 6:** In root `Cargo.toml`, workspace `members`: `"property-model"` → `"adam-rs"`
-- [ ] **Step 7:** Run `cargo check -p adam-rs` — expect success (this crate has no internal deps, so it should compile standalone even before other crates are updated).
-- [ ] **Step 8:** Commit: `git add -A && git commit -m "rename: property-model crate to adam-rs"`
+- [x] **Step 1:** `git mv property-model adam-rs`
+- [x] **Step 2:** In `adam-rs/Cargo.toml`, change `name = "property-model"` → `name = "adam-rs"`. Leave `description` unchanged (still-accurate descriptive prose).
+- [x] **Step 3:** In `adam-rs/src/lib.rs`: `//! # property-model` → `//! # adam-rs`; `use property_model::{Sheet, Method};` → `use adam_rs::{Sheet, Method};`
+- [x] **Step 4:** In `adam-rs/src/sheet.rs`: `use property_model::{Sheet, Method};` → `use adam_rs::{Sheet, Method};`
+- [x] **Step 5:** In `adam-rs/tests/integration.rs`: `//! End-to-end integration tests for the property-model crate.` → `//! End-to-end integration tests for the adam-rs crate.`; `use property_model::{Error, Method, Sheet};` → `use adam_rs::{Error, Method, Sheet};`
+- [x] **Step 6:** In root `Cargo.toml`, workspace `members`: `"property-model"` → `"adam-rs"`
+- [x] **Step 7:** Run `cargo check -p adam-rs` — expect success (this crate has no internal deps, so it should compile standalone even before other crates are updated).
+- [x] **Step 8:** Commit: `git add -A && git commit -m "rename: property-model crate to adam-rs"`
 
 ### Task 2: Rename `pm-lang` → `adam-lang`
 
@@ -117,19 +126,19 @@ Directory/file renames (via `git mv`, preserves history):
 - Consumes: `adam-rs` crate (Task 1) via path dependency.
 - Produces: public symbols `AdamParser`, `AdamAstParser`, `ParsedSheet`, `TypeRegistry`, `check_sheet`, `attach_trivia`, `ParseError` (re-exported) — `pm-lsp` and `begin` (Tasks 3–4) depend on these exact names.
 
-- [ ] **Step 1:** `git mv pm-lang adam-lang`
-- [ ] **Step 2:** In `adam-lang/Cargo.toml`: `name = "pm-lang"` → `name = "adam-lang"`; dependency `property-model = { path = "../property-model" }` → `adam-rs = { path = "../adam-rs" }`. Leave `description` unchanged.
-- [ ] **Step 3:** In `adam-lang/src/lib.rs`: module doc header `//! # pm-lang` → `//! # adam-lang`; "Parses a pm-lang source string" → "Parses an adam-lang source string"; example `use pm_lang::{PmParser, TypeRegistry};` → `use adam_lang::{AdamParser, TypeRegistry};` and `let mut parser = PmParser::new(...)` → `AdamParser::new(...)`; comment "pm-lang reuses cel_parser::ParseError directly" → "adam-lang reuses..."; `pub use ast_parser::PmAstParser;` → `pub use ast_parser::AdamAstParser;`; `pub use parser::{ParsedSheet, PmParser};` → `pub use parser::{ParsedSheet, AdamParser};`
-- [ ] **Step 4:** In `adam-lang/src/ast.rs`: "a span-carrying pm-lang structural AST" → "adam-lang structural AST"; `[crate::PmAstParser]` → `[crate::AdamAstParser]`; `[crate::PmParser]'s direct property_model::Sheet construction` → `[crate::AdamParser]'s direct adam_rs::Sheet construction`
-- [ ] **Step 5:** In `adam-lang/src/ast_parser.rs`: replace every `PmAstParser` → `AdamAstParser` and every `PmParser` → `AdamParser` (struct def, `impl`/`impl Default` blocks, constructor body, all ~25 `PmAstParser::new()` test call sites, doc comments mentioning "pm-lang source", "property_model::Sheet"). Also: doc mentioning `use pm_lang::PmAstParser;` → `use adam_lang::AdamAstParser;`.
-- [ ] **Step 6:** In `adam-lang/src/parser.rs`: `pub struct PmParser {` → `pub struct AdamParser {`; `impl PmParser {` → `impl AdamParser {`; constructor body, doc comments (`[PmParser::parse_str]`, `// PmParser` section marker, `use pm_lang::{PmParser, TypeRegistry};` example), and all test-site `PmParser::new(...)` / `fn parser() -> PmParser` → `AdamParser`.
-- [ ] **Step 7:** In `adam-lang/src/token_cursor.rs`: `[crate::PmAstParser]'s coarse error recovery` → `[crate::AdamAstParser]'s coarse error recovery`.
-- [ ] **Step 8:** In `adam-lang/src/trivia.rs`: `use crate::PmAstParser;` → `use crate::AdamAstParser;`; all `PmAstParser::new()` call sites → `AdamAstParser::new()`.
-- [ ] **Step 9:** In `adam-lang/src/typecheck.rs`: doc example `use pm_lang::{PmAstParser, TypeRegistry, check_sheet};` → `use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};`; `let sheet = PmAstParser::new()` → `AdamAstParser::new()`; `use crate::PmAstParser;` → `use crate::AdamAstParser;`; `PmAstParser::new().parse_str(source).unwrap()` → `AdamAstParser::new()...`.
-- [ ] **Step 10:** In `adam-lang/src/type_registry.rs`: replace any remaining `property_model`/`property-model`/`pm-lang`/`pm_lang` mentions per the mapping table (grep this file first to see exact lines before editing).
-- [ ] **Step 11:** In root `Cargo.toml`, workspace `members`: `"pm-lang"` → `"adam-lang"`.
-- [ ] **Step 12:** Run `cargo check -p adam-lang` — expect success.
-- [ ] **Step 13:** Commit: `git add -A && git commit -m "rename: pm-lang crate to adam-lang, PmParser/PmAstParser to AdamParser/AdamAstParser"`
+- [x] **Step 1:** `git mv pm-lang adam-lang`
+- [x] **Step 2:** In `adam-lang/Cargo.toml`: `name = "pm-lang"` → `name = "adam-lang"`; dependency `property-model = { path = "../property-model" }` → `adam-rs = { path = "../adam-rs" }`. Leave `description` unchanged.
+- [x] **Step 3:** In `adam-lang/src/lib.rs`: module doc header `//! # pm-lang` → `//! # adam-lang`; "Parses a pm-lang source string" → "Parses an adam-lang source string"; example `use pm_lang::{PmParser, TypeRegistry};` → `use adam_lang::{AdamParser, TypeRegistry};` and `let mut parser = PmParser::new(...)` → `AdamParser::new(...)`; comment "pm-lang reuses cel_parser::ParseError directly" → "adam-lang reuses..."; `pub use ast_parser::PmAstParser;` → `pub use ast_parser::AdamAstParser;`; `pub use parser::{ParsedSheet, PmParser};` → `pub use parser::{ParsedSheet, AdamParser};`
+- [x] **Step 4:** In `adam-lang/src/ast.rs`: "a span-carrying pm-lang structural AST" → "adam-lang structural AST"; `[crate::PmAstParser]` → `[crate::AdamAstParser]`; `[crate::PmParser]'s direct property_model::Sheet construction` → `[crate::AdamParser]'s direct adam_rs::Sheet construction`
+- [x] **Step 5:** In `adam-lang/src/ast_parser.rs`: replace every `PmAstParser` → `AdamAstParser` and every `PmParser` → `AdamParser` (struct def, `impl`/`impl Default` blocks, constructor body, all ~25 `PmAstParser::new()` test call sites, doc comments mentioning "pm-lang source", "property_model::Sheet"). Also: doc mentioning `use pm_lang::PmAstParser;` → `use adam_lang::AdamAstParser;`.
+- [x] **Step 6:** In `adam-lang/src/parser.rs`: `pub struct PmParser {` → `pub struct AdamParser {`; `impl PmParser {` → `impl AdamParser {`; constructor body, doc comments (`[PmParser::parse_str]`, `// PmParser` section marker, `use pm_lang::{PmParser, TypeRegistry};` example), and all test-site `PmParser::new(...)` / `fn parser() -> PmParser` → `AdamParser`.
+- [x] **Step 7:** In `adam-lang/src/token_cursor.rs`: `[crate::PmAstParser]'s coarse error recovery` → `[crate::AdamAstParser]'s coarse error recovery`.
+- [x] **Step 8:** In `adam-lang/src/trivia.rs`: `use crate::PmAstParser;` → `use crate::AdamAstParser;`; all `PmAstParser::new()` call sites → `AdamAstParser::new()`.
+- [x] **Step 9:** In `adam-lang/src/typecheck.rs`: doc example `use pm_lang::{PmAstParser, TypeRegistry, check_sheet};` → `use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};`; `let sheet = PmAstParser::new()` → `AdamAstParser::new()`; `use crate::PmAstParser;` → `use crate::AdamAstParser;`; `PmAstParser::new().parse_str(source).unwrap()` → `AdamAstParser::new()...`.
+- [x] **Step 10:** In `adam-lang/src/type_registry.rs`: replace any remaining `property_model`/`property-model`/`pm-lang`/`pm_lang` mentions per the mapping table (grep this file first to see exact lines before editing).
+- [x] **Step 11:** In root `Cargo.toml`, workspace `members`: `"pm-lang"` → `"adam-lang"`.
+- [x] **Step 12:** Run `cargo check -p adam-lang` — expect success.
+- [x] **Step 13:** Commit: `git add -A && git commit -m "rename: pm-lang crate to adam-lang, PmParser/PmAstParser to AdamParser/AdamAstParser"`
 
 ### Task 3: Rename `pm-lsp` → `adam-lsp`
 
@@ -142,15 +151,15 @@ Directory/file renames (via `git mv`, preserves history):
 - Consumes: `adam_lang::{AdamAstParser, TypeRegistry, check_sheet}` (Task 2).
 - Produces: `adam_lsp::{run, serve}`, `adam_lsp::diagnostics::diagnostics_for_source` — unchanged signatures, just the crate/module path renamed from `pm_lsp` to `adam_lsp`.
 
-- [ ] **Step 1:** `git mv pm-lsp adam-lsp`
-- [ ] **Step 2:** In `adam-lsp/Cargo.toml`: `name = "pm-lsp"` → `name = "adam-lsp"`; `description = "Language server for pm-lang, ..."` → `"Language server for adam-lang, surfacing syntax and type diagnostics over LSP"`; dependency `pm-lang = { path = "../pm-lang" }` → `adam-lang = { path = "../adam-lang" }`; `[lib] name = "pm_lsp"` → `name = "adam_lsp"`; `[[bin]] name = "pm-lsp"` → `name = "adam-lsp"`.
-- [ ] **Step 3:** In `adam-lsp/src/lib.rs`: `//! # pm-lsp` → `//! # adam-lsp`; "for `pm-lang`, built on..." → "for `adam-lang`, built on..."; "`pm-lang`'s recovered syntax errors and [`pm_lang::check_sheet`]'s type diagnostics" → "`adam-lang`'s recovered syntax errors and [`adam_lang::check_sheet`]'s type diagnostics"; example `pm_lsp::run()` → `adam_lsp::run()`.
-- [ ] **Step 4:** In `adam-lsp/src/main.rs`: `//! \`pm-lsp\` binary entry point.` → `//! \`adam-lsp\` binary entry point.`; `pm_lsp::run()` → `adam_lsp::run()`.
-- [ ] **Step 5:** In `adam-lsp/src/diagnostics.rs`: "Computes LSP diagnostics for pm-lang source text" → "for adam-lang source text"; `use pm_lang::{PmAstParser, TypeRegistry, check_sheet};` → `use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};`; "Parses and type-checks pm-lang \`source\`" → "adam-lang"; `[PmAstParser::parse_str]` → `[AdamAstParser::parse_str]`; example `use pm_lsp::diagnostics::diagnostics_for_source;` → `use adam_lsp::diagnostics::diagnostics_for_source;`; `let mut parser = PmAstParser::new();` → `AdamAstParser::new();`; comments "pm-lang source is overwhelmingly ASCII" → "adam-lang source..."; "pm-lang's own \`check_sheet\` test suite (pm-lang/src/typecheck.rs)" → "adam-lang's own \`check_sheet\` test suite (adam-lang/src/typecheck.rs)"; "PmAstParser recovers it..." / "(pm-lang/src/ast_parser.rs's ...)" / "PmAstParser::parse_str's documented..." → `AdamAstParser` / `adam-lang/src/ast_parser.rs`.
-- [ ] **Step 6:** In `adam-lsp/src/dispatch.rs`: "Runs the pm-lang language server" → "Runs the adam-lang language server"; log strings `"pm-lsp: ignoring malformed {}: {error}"` → `"adam-lsp: ignoring malformed {}: {error}"` (2 sites); `language_id: "pm-lang".to_string()` → `"adam-lang".to_string()` (3 sites).
-- [ ] **Step 7:** In root `Cargo.toml`, workspace `members`: `"pm-lsp"` → `"adam-lsp"`.
-- [ ] **Step 8:** Run `cargo check -p adam-lsp` — expect success.
-- [ ] **Step 9:** Commit: `git add -A && git commit -m "rename: pm-lsp crate to adam-lsp"`
+- [x] **Step 1:** `git mv pm-lsp adam-lsp`
+- [x] **Step 2:** In `adam-lsp/Cargo.toml`: `name = "pm-lsp"` → `name = "adam-lsp"`; `description = "Language server for pm-lang, ..."` → `"Language server for adam-lang, surfacing syntax and type diagnostics over LSP"`; dependency `pm-lang = { path = "../pm-lang" }` → `adam-lang = { path = "../adam-lang" }`; `[lib] name = "pm_lsp"` → `name = "adam_lsp"`; `[[bin]] name = "pm-lsp"` → `name = "adam-lsp"`.
+- [x] **Step 3:** In `adam-lsp/src/lib.rs`: `//! # pm-lsp` → `//! # adam-lsp`; "for `pm-lang`, built on..." → "for `adam-lang`, built on..."; "`pm-lang`'s recovered syntax errors and [`pm_lang::check_sheet`]'s type diagnostics" → "`adam-lang`'s recovered syntax errors and [`adam_lang::check_sheet`]'s type diagnostics"; example `pm_lsp::run()` → `adam_lsp::run()`.
+- [x] **Step 4:** In `adam-lsp/src/main.rs`: `//! \`pm-lsp\` binary entry point.` → `//! \`adam-lsp\` binary entry point.`; `pm_lsp::run()` → `adam_lsp::run()`.
+- [x] **Step 5:** In `adam-lsp/src/diagnostics.rs`: "Computes LSP diagnostics for pm-lang source text" → "for adam-lang source text"; `use pm_lang::{PmAstParser, TypeRegistry, check_sheet};` → `use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};`; "Parses and type-checks pm-lang \`source\`" → "adam-lang"; `[PmAstParser::parse_str]` → `[AdamAstParser::parse_str]`; example `use pm_lsp::diagnostics::diagnostics_for_source;` → `use adam_lsp::diagnostics::diagnostics_for_source;`; `let mut parser = PmAstParser::new();` → `AdamAstParser::new();`; comments "pm-lang source is overwhelmingly ASCII" → "adam-lang source..."; "pm-lang's own \`check_sheet\` test suite (pm-lang/src/typecheck.rs)" → "adam-lang's own \`check_sheet\` test suite (adam-lang/src/typecheck.rs)"; "PmAstParser recovers it..." / "(pm-lang/src/ast_parser.rs's ...)" / "PmAstParser::parse_str's documented..." → `AdamAstParser` / `adam-lang/src/ast_parser.rs`.
+- [x] **Step 6:** In `adam-lsp/src/dispatch.rs`: "Runs the pm-lang language server" → "Runs the adam-lang language server"; log strings `"pm-lsp: ignoring malformed {}: {error}"` → `"adam-lsp: ignoring malformed {}: {error}"` (2 sites); `language_id: "pm-lang".to_string()` → `"adam-lang".to_string()` (3 sites).
+- [x] **Step 7:** In root `Cargo.toml`, workspace `members`: `"pm-lsp"` → `"adam-lsp"`.
+- [x] **Step 8:** Run `cargo check -p adam-lsp` — expect success.
+- [x] **Step 9:** Commit: `git add -A && git commit -m "rename: pm-lsp crate to adam-lsp"`
 
 ### Task 4: Update `begin` and `cel-parser` references
 
@@ -160,9 +169,9 @@ Directory/file renames (via `git mv`, preserves history):
 - Modify: `begin/assets/graph.js`
 - Modify: `cel-parser/src/{lib.rs,ast.rs,ty.rs}`
 
-- [ ] **Step 1:** In `begin/Cargo.toml`: `property-model = { path = "../property-model" }` → `adam-rs = { path = "../adam-rs" }`; `pm-lang = { path = "../pm-lang" }` → `adam-lang = { path = "../adam-lang" }`. Leave the crate's own `description` ("Cross-platform property model development environment") unchanged.
-- [ ] **Step 2:** In `begin/src/app.rs`: `use property_model::Sheet;` → `use adam_rs::Sheet;`; comment "The demo pm-lang source lives in..." → "The demo adam-lang source lives in...".
-- [ ] **Step 3:** In `begin/src/bridge.rs`:
+- [x] **Step 1:** In `begin/Cargo.toml`: `property-model = { path = "../property-model" }` → `adam-rs = { path = "../adam-rs" }`; `pm-lang = { path = "../pm-lang" }` → `adam-lang = { path = "../adam-lang" }`. Leave the crate's own `description` ("Cross-platform property model development environment") unchanged.
+- [x] **Step 2:** In `begin/src/app.rs`: `use property_model::Sheet;` → `use adam_rs::Sheet;`; comment "The demo pm-lang source lives in..." → "The demo adam-lang source lives in...".
+- [x] **Step 3:** In `begin/src/bridge.rs`:
   - `//! Serialization bridge from [\`property_model::Sheet\`] to D3-ready JSON.` → `[\`adam_rs::Sheet\`]`
   - `use property_model::{CellId, ConditionalId, Error, RelationshipId, Sheet};` → `use adam_rs::{CellId, ConditionalId, Error, RelationshipId, Sheet};`
   - "Builds a [\`Labels\`] from a pm-lang-style declaration-ordered cell name map." → "adam-lang-style"
@@ -171,14 +180,14 @@ Directory/file renames (via `git mv`, preserves history):
   - `pub fn format_property_model_error(e: &Error, source: &str) -> String` → `pub fn format_adam_error(e: &Error, source: &str) -> String`
   - Doc comments `[\`property_model::Sheet::is_forced\`]` and `[\`property_model::Sheet::is_relationship_forced\`]` → `adam_rs::Sheet::is_forced` / `adam_rs::Sheet::is_relationship_forced`
   - Test module: `use property_model::{Method, Sheet};` → `use adam_rs::{Method, Sheet};`; `fn format_property_model_error_invalid_id_falls_back_to_display()` → `fn format_adam_error_invalid_id_falls_back_to_display()`; `let msg = format_property_model_error(&Error::InvalidId, "source text");` → `format_adam_error(...)`; `fn format_property_model_error_method_failed_renders_caret_diagnostic()` → `fn format_adam_error_method_failed_renders_caret_diagnostic()`; `let msg = format_property_model_error(&err, source);` → `format_adam_error(&err, source);`
-- [ ] **Step 4:** In `begin/src/demo_source.rs`: "Loads the demo pm-lang source from..." → "Loads the demo adam-lang source from..."; `[\`property_model::Sheet::is_forced\`]` → `[\`adam_rs::Sheet::is_forced\`]`; `use pm_lang::{PmParser, TypeRegistry};` → `use adam_lang::{AdamParser, TypeRegistry};`; `use property_model::Sheet;` → `use adam_rs::Sheet;`; `format_property_model_error` import → `format_adam_error`; "The demo pm-lang source file" → "adam-lang"; "The result of parsing and building a sheet from pm-lang source." → "adam-lang source."; "Parses \`source\` as pm-lang" → "adam-lang"; `let mut parser = PmParser::new(...)` → `AdamParser::new(...)`; `format_property_model_error(&e, source)` call → `format_adam_error(&e, source)`.
-- [ ] **Step 5:** In `begin/src/inspector.rs`: `use property_model::{CellId, Sheet};` → `use adam_rs::{CellId, Sheet};`; `use crate::bridge::{Labels, format_property_model_error};` → `format_adam_error`; call site `format_property_model_error(&e, &source)` → `format_adam_error(&e, &source)`.
-- [ ] **Step 6:** In `begin/assets/graph.js`: comments `property_model::Sheet::is_forced` / `property_model::Sheet::is_relationship_forced` → `adam_rs::Sheet::is_forced` / `adam_rs::Sheet::is_relationship_forced`.
-- [ ] **Step 7:** In `cel-parser/src/ast.rs`: both "Consumed as-is by pm-lang" comments → "Consumed as-is by adam-lang".
-- [ ] **Step 8:** In `cel-parser/src/lib.rs`: all four "...pm-lang..." doc-comment mentions (token-stream sharing docs around `take_lex_tokens`) → "...adam-lang...".
-- [ ] **Step 9:** In `cel-parser/src/ty.rs`: `pm_lang::TypeRegistry::new()` → `adam_lang::TypeRegistry::new()`; "for anything pm-lang/CEL's" → "adam-lang/CEL's"; `pm_lang::TypeRegistry::TypeEntry::type_id` → `adam_lang::TypeRegistry::TypeEntry::type_id`; "matching pm-lang/CEL's" → "adam-lang/CEL's"; "a pm-lang cell with no \`: type\`" → "an adam-lang cell".
-- [ ] **Step 10:** Run `cargo check -p begin -p cel-parser` — expect success.
-- [ ] **Step 11:** Commit: `git add -A && git commit -m "rename: update begin and cel-parser references from pm-lang/property-model to adam-lang/adam-rs"`
+- [x] **Step 4:** In `begin/src/demo_source.rs`: "Loads the demo pm-lang source from..." → "Loads the demo adam-lang source from..."; `[\`property_model::Sheet::is_forced\`]` → `[\`adam_rs::Sheet::is_forced\`]`; `use pm_lang::{PmParser, TypeRegistry};` → `use adam_lang::{AdamParser, TypeRegistry};`; `use property_model::Sheet;` → `use adam_rs::Sheet;`; `format_property_model_error` import → `format_adam_error`; "The demo pm-lang source file" → "adam-lang"; "The result of parsing and building a sheet from pm-lang source." → "adam-lang source."; "Parses \`source\` as pm-lang" → "adam-lang"; `let mut parser = PmParser::new(...)` → `AdamParser::new(...)`; `format_property_model_error(&e, source)` call → `format_adam_error(&e, source)`.
+- [x] **Step 5:** In `begin/src/inspector.rs`: `use property_model::{CellId, Sheet};` → `use adam_rs::{CellId, Sheet};`; `use crate::bridge::{Labels, format_property_model_error};` → `format_adam_error`; call site `format_property_model_error(&e, &source)` → `format_adam_error(&e, &source)`.
+- [x] **Step 6:** In `begin/assets/graph.js`: comments `property_model::Sheet::is_forced` / `property_model::Sheet::is_relationship_forced` → `adam_rs::Sheet::is_forced` / `adam_rs::Sheet::is_relationship_forced`.
+- [x] **Step 7:** In `cel-parser/src/ast.rs`: both "Consumed as-is by pm-lang" comments → "Consumed as-is by adam-lang".
+- [x] **Step 8:** In `cel-parser/src/lib.rs`: all four "...pm-lang..." doc-comment mentions (token-stream sharing docs around `take_lex_tokens`) → "...adam-lang...".
+- [x] **Step 9:** In `cel-parser/src/ty.rs`: `pm_lang::TypeRegistry::new()` → `adam_lang::TypeRegistry::new()`; "for anything pm-lang/CEL's" → "adam-lang/CEL's"; `pm_lang::TypeRegistry::TypeEntry::type_id` → `adam_lang::TypeRegistry::TypeEntry::type_id`; "matching pm-lang/CEL's" → "adam-lang/CEL's"; "a pm-lang cell with no \`: type\`" → "an adam-lang cell".
+- [x] **Step 10:** Run `cargo check -p begin -p cel-parser` — expect success.
+- [x] **Step 11:** Commit: `git add -A && git commit -m "rename: update begin and cel-parser references from pm-lang/property-model to adam-lang/adam-rs"`
 
 ### Task 5: Rename the VS Code extension
 
@@ -187,16 +196,16 @@ Directory/file renames (via `git mv`, preserves history):
 - Move: `editors/vscode-adam-lang/syntaxes/pm-lang.tmLanguage.json` → `editors/vscode-adam-lang/syntaxes/adam-lang.tmLanguage.json` (`git mv`)
 - Modify: `editors/vscode-adam-lang/{package.json,README.md,src/extension.ts,src/serverPath.ts,test/serverPath.test.ts,.vscode/tasks.json,syntaxes/adam-lang.tmLanguage.json}`
 
-- [ ] **Step 1:** `git mv editors/vscode-pm-lang editors/vscode-adam-lang`
-- [ ] **Step 2:** `git mv editors/vscode-adam-lang/syntaxes/pm-lang.tmLanguage.json editors/vscode-adam-lang/syntaxes/adam-lang.tmLanguage.json`
-- [ ] **Step 3:** In `editors/vscode-adam-lang/package.json`: `"name": "pm-lang"` → `"name": "adam-lang"`; `"displayName": "pm-lang"` → `"displayName": "adam-lang"`; `"description": "Language support for pm-lang: diagnostics via the pm-lsp language server."` → `"Language support for adam-lang: diagnostics via the adam-lsp language server."`; `"directory": "editors/vscode-pm-lang"` → `"editors/vscode-adam-lang"`; `contributes.languages[0]`: `"id": "pm-lang"` → `"adam-lang"`, `"aliases": ["pm-lang", "PM"]` → `["adam-lang", "Adam"]` (extensions stay `[".adm2"]`); `contributes.grammars[0]`: `"language": "pm-lang"` → `"adam-lang"`, `"scopeName": "source.pm-lang"` → `"source.adam-lang"`, `"path": "./syntaxes/pm-lang.tmLanguage.json"` → `"./syntaxes/adam-lang.tmLanguage.json"`; `contributes.configuration`: `"title": "pm-lang"` → `"adam-lang"`, key `"pm-lang.serverPath"` → `"adam-lang.serverPath"`, its `"description"` mentioning "pm-lsp language server binary" → "adam-lsp language server binary"; `scripts.package`: `"vsce package --out pm-lang.vsix"` → `"vsce package --out adam-lang.vsix"`; `scripts.install-extension`: `"code --install-extension pm-lang.vsix --force"` → `"code --install-extension adam-lang.vsix --force"`.
-- [ ] **Step 4:** In `editors/vscode-adam-lang/syntaxes/adam-lang.tmLanguage.json`: replace every `pm-lang` → `adam-lang` (the top-level `"name"`, `"scopeName": "source.pm-lang"`, and every `*.pm-lang` suffix in the `repository` section's rule names — a uniform suffix, safe to blanket-replace within this file).
-- [ ] **Step 5:** In `editors/vscode-adam-lang/src/extension.ts`: doc comment "Activates the pm-lang extension: resolves the \`pm-lsp\` binary" → "Activates the adam-lang extension: resolves the \`adam-lsp\` binary"; `.getConfiguration('pm-lang')` → `.getConfiguration('adam-lang')`; error strings `` `pm-lang: the configured "pm-lang.serverPath" (${configuredPath}) does not exist.` `` → `` `adam-lang: the configured "adam-lang.serverPath" (${configuredPath}) does not exist.` ``; `` 'pm-lang: could not find the pm-lsp language server binary. Build it with ' + '"cargo build -p pm-lsp", or set the "pm-lang.serverPath" setting.' `` → adam-lang/adam-lsp equivalents; `documentSelector: [{ scheme: 'file', language: 'pm-lang' }]` → `'adam-lang'`; `new LanguageClient('pm-lang', 'pm-lang Language Server', ...)` → `new LanguageClient('adam-lang', 'adam-lang Language Server', ...)`; error string `` `pm-lang: failed to start the pm-lsp language server: ...` `` → adam-lang/adam-lsp.
-- [ ] **Step 6:** In `editors/vscode-adam-lang/src/serverPath.ts`: doc comments "the \`pm-lsp\` binary's" / "the \`pm-lang.serverPath\` setting" → adam-lsp/adam-lang.serverPath; `const PM_LSP_UNIX = 'pm-lsp';` → `const ADAM_LSP_UNIX = 'adam-lsp';`; `const PM_LSP_WINDOWS = 'pm-lsp.exe';` → `const ADAM_LSP_WINDOWS = 'adam-lsp.exe';`; both references in `binaryName()` → `ADAM_LSP_WINDOWS` / `ADAM_LSP_UNIX`; doc comment "Returns the \`pm-lsp\` binary name..." → "Returns the \`adam-lsp\` binary name...".
-- [ ] **Step 7:** In `editors/vscode-adam-lang/test/serverPath.test.ts`: replace every literal `pm-lsp` path fixture (`/custom/pm-lsp`, `/repo/target/debug/pm-lsp`, `/repo/target/release/pm-lsp`, `C:\\repo\\target\\debug\\pm-lsp.exe`, `/usr/bin/pm-lsp`) with the `adam-lsp` equivalent, so fixture data matches the renamed binary.
-- [ ] **Step 8:** In `editors/vscode-adam-lang/.vscode/tasks.json`: `"label": "cargo: install pm-lsp"` → `"cargo: install adam-lsp"`; `"args": ["install", "--path", "pm-lsp"]` → `["install", "--path", "adam-lsp"]`; `"label": "Install pm-lsp + Extension (Local)"` → `"Install adam-lsp + Extension (Local)"`; `"dependsOn": ["cargo: install pm-lsp", ...]` → `["cargo: install adam-lsp", ...]`.
-- [ ] **Step 9:** Run `cd editors/vscode-adam-lang && npm install` — this regenerates `package-lock.json` to match the renamed `package.json` (root `name` field). Then `npm run compile` and `npm test` — expect success.
-- [ ] **Step 10:** Commit: `git add -A && git commit -m "rename: VS Code extension vscode-pm-lang to vscode-adam-lang"`
+- [x] **Step 1:** `git mv editors/vscode-pm-lang editors/vscode-adam-lang`
+- [x] **Step 2:** `git mv editors/vscode-adam-lang/syntaxes/pm-lang.tmLanguage.json editors/vscode-adam-lang/syntaxes/adam-lang.tmLanguage.json`
+- [x] **Step 3:** In `editors/vscode-adam-lang/package.json`: `"name": "pm-lang"` → `"name": "adam-lang"`; `"displayName": "pm-lang"` → `"displayName": "adam-lang"`; `"description": "Language support for pm-lang: diagnostics via the pm-lsp language server."` → `"Language support for adam-lang: diagnostics via the adam-lsp language server."`; `"directory": "editors/vscode-pm-lang"` → `"editors/vscode-adam-lang"`; `contributes.languages[0]`: `"id": "pm-lang"` → `"adam-lang"`, `"aliases": ["pm-lang", "PM"]` → `["adam-lang", "Adam"]` (extensions stay `[".adm2"]`); `contributes.grammars[0]`: `"language": "pm-lang"` → `"adam-lang"`, `"scopeName": "source.pm-lang"` → `"source.adam-lang"`, `"path": "./syntaxes/pm-lang.tmLanguage.json"` → `"./syntaxes/adam-lang.tmLanguage.json"`; `contributes.configuration`: `"title": "pm-lang"` → `"adam-lang"`, key `"pm-lang.serverPath"` → `"adam-lang.serverPath"`, its `"description"` mentioning "pm-lsp language server binary" → "adam-lsp language server binary"; `scripts.package`: `"vsce package --out pm-lang.vsix"` → `"vsce package --out adam-lang.vsix"`; `scripts.install-extension`: `"code --install-extension pm-lang.vsix --force"` → `"code --install-extension adam-lang.vsix --force"`.
+- [x] **Step 4:** In `editors/vscode-adam-lang/syntaxes/adam-lang.tmLanguage.json`: replace every `pm-lang` → `adam-lang` (the top-level `"name"`, `"scopeName": "source.pm-lang"`, and every `*.pm-lang` suffix in the `repository` section's rule names — a uniform suffix, safe to blanket-replace within this file).
+- [x] **Step 5:** In `editors/vscode-adam-lang/src/extension.ts`: doc comment "Activates the pm-lang extension: resolves the \`pm-lsp\` binary" → "Activates the adam-lang extension: resolves the \`adam-lsp\` binary"; `.getConfiguration('pm-lang')` → `.getConfiguration('adam-lang')`; error strings `` `pm-lang: the configured "pm-lang.serverPath" (${configuredPath}) does not exist.` `` → `` `adam-lang: the configured "adam-lang.serverPath" (${configuredPath}) does not exist.` ``; `` 'pm-lang: could not find the pm-lsp language server binary. Build it with ' + '"cargo build -p pm-lsp", or set the "pm-lang.serverPath" setting.' `` → adam-lang/adam-lsp equivalents; `documentSelector: [{ scheme: 'file', language: 'pm-lang' }]` → `'adam-lang'`; `new LanguageClient('pm-lang', 'pm-lang Language Server', ...)` → `new LanguageClient('adam-lang', 'adam-lang Language Server', ...)`; error string `` `pm-lang: failed to start the pm-lsp language server: ...` `` → adam-lang/adam-lsp.
+- [x] **Step 6:** In `editors/vscode-adam-lang/src/serverPath.ts`: doc comments "the \`pm-lsp\` binary's" / "the \`pm-lang.serverPath\` setting" → adam-lsp/adam-lang.serverPath; `const PM_LSP_UNIX = 'pm-lsp';` → `const ADAM_LSP_UNIX = 'adam-lsp';`; `const PM_LSP_WINDOWS = 'pm-lsp.exe';` → `const ADAM_LSP_WINDOWS = 'adam-lsp.exe';`; both references in `binaryName()` → `ADAM_LSP_WINDOWS` / `ADAM_LSP_UNIX`; doc comment "Returns the \`pm-lsp\` binary name..." → "Returns the \`adam-lsp\` binary name...".
+- [x] **Step 7:** In `editors/vscode-adam-lang/test/serverPath.test.ts`: replace every literal `pm-lsp` path fixture (`/custom/pm-lsp`, `/repo/target/debug/pm-lsp`, `/repo/target/release/pm-lsp`, `C:\\repo\\target\\debug\\pm-lsp.exe`, `/usr/bin/pm-lsp`) with the `adam-lsp` equivalent, so fixture data matches the renamed binary.
+- [x] **Step 8:** In `editors/vscode-adam-lang/.vscode/tasks.json`: `"label": "cargo: install pm-lsp"` → `"cargo: install adam-lsp"`; `"args": ["install", "--path", "pm-lsp"]` → `["install", "--path", "adam-lsp"]`; `"label": "Install pm-lsp + Extension (Local)"` → `"Install adam-lsp + Extension (Local)"`; `"dependsOn": ["cargo: install pm-lsp", ...]` → `["cargo: install adam-lsp", ...]`.
+- [x] **Step 9:** Run `cd editors/vscode-adam-lang && npm install` — this regenerates `package-lock.json` to match the renamed `package.json` (root `name` field). Then `npm run compile` and `npm test` — expect success.
+- [x] **Step 10:** Commit: `git add -A && git commit -m "rename: VS Code extension vscode-pm-lang to vscode-adam-lang"`
 
 ### Task 6: Update repo-root config and living docs
 
@@ -207,12 +216,12 @@ Directory/file renames (via `git mv`, preserves history):
 - Modify: `docs/VISION.md`
 - Modify: `README.md`
 
-- [ ] **Step 1:** In `.gitignore`: `/editors/vscode-pm-lang/node_modules` → `/editors/vscode-adam-lang/node_modules`; `/editors/vscode-pm-lang/out` → `/editors/vscode-adam-lang/out`; `/editors/vscode-pm-lang/*.vsix` → `/editors/vscode-adam-lang/*.vsix`.
-- [ ] **Step 2:** In root `.vscode/tasks.json`: comment `// ============ pm-lang VS Code Extension Tasks ============` → `// ============ adam-lang VS Code Extension Tasks ============`; `"label": "cargo: install pm-lsp"` → `"cargo: install adam-lsp"` with `"args": [..., "pm-lsp"]` → `"adam-lsp"`; `"label": "vscode-pm-lang: package"` → `"vscode-adam-lang: package"` with `"path": "editors/vscode-pm-lang"` → `"editors/vscode-adam-lang"`; `"label": "vscode-pm-lang: install extension"` → `"vscode-adam-lang: install extension"` (same path fix); `"label": "Install pm-lsp + Extension (Local)"` → `"Install adam-lsp + Extension (Local)"` with its `dependsOn` list updated to the renamed labels.
-- [ ] **Step 3:** In `CLAUDE.md`: `**\`property-model\`** and **\`pm-lang\`** — supporting crates for the property-model and PM language features` → `**\`adam-rs\`** and **\`adam-lang\`** — supporting crates for the Adam property-model system`.
-- [ ] **Step 4:** In `docs/VISION.md`: `Dependency flow: \`cel-parser\`/\`cel-runtime\` → \`property-model\` → \`pm-lang\` → \`begin\`.` → `→ \`adam-rs\` → \`adam-lang\` → \`begin\`.`; `\`pm-lang\` is currently the only client...` → `\`adam-lang\` is currently the only client...`; `## property-model` heading → `## adam-rs`; `Additional clients beyond \`pm-lang\`, over time.` → `\`adam-lang\`, over time.`; `## pm-lang` heading → `## adam-lang`; `**Mission:** the DSL, built on \`cel-parser\` infrastructure, that expresses \`property-model\`` → `\`adam-rs\``; the three "property-model graph"/"pm-lang source panel" mentions in the `begin` section → "adam-rs graph" / "adam-lang source panel" (keep "property model graph" as a concept phrase only where it's not naming the crate — check each of the 3 occurrences in context before deciding whether it names the crate or describes the concept).
-- [ ] **Step 5:** In `README.md`'s workspace-layout table: `| [\`property-model\`](property-model) | Multi-way constraint system for property models |` → `| [\`adam-rs\`](adam-rs) | Multi-way constraint system for property models |`; `| [\`pm-lang\`](pm-lang) | DSL that expresses \`property-model\` constraint systems as source text |` → `| [\`adam-lang\`](adam-lang) | DSL that expresses \`adam-rs\` constraint systems as source text |`; `| [\`pm-lsp\`](pm-lsp) | Language server for \`pm-lang\` |` → `| [\`adam-lsp\`](adam-lsp) | Language server for \`adam-lang\` |`.
-- [ ] **Step 6:** Still in `README.md`: add a new subsection documenting the VS Code extension (currently missing entirely — this was the original ask that kicked off this cleanup). Add after the "begin: Spectrum Web Components bundle" section:
+- [x] **Step 1:** In `.gitignore`: `/editors/vscode-pm-lang/node_modules` → `/editors/vscode-adam-lang/node_modules`; `/editors/vscode-pm-lang/out` → `/editors/vscode-adam-lang/out`; `/editors/vscode-pm-lang/*.vsix` → `/editors/vscode-adam-lang/*.vsix`.
+- [x] **Step 2:** In root `.vscode/tasks.json`: comment `// ============ pm-lang VS Code Extension Tasks ============` → `// ============ adam-lang VS Code Extension Tasks ============`; `"label": "cargo: install pm-lsp"` → `"cargo: install adam-lsp"` with `"args": [..., "pm-lsp"]` → `"adam-lsp"`; `"label": "vscode-pm-lang: package"` → `"vscode-adam-lang: package"` with `"path": "editors/vscode-pm-lang"` → `"editors/vscode-adam-lang"`; `"label": "vscode-pm-lang: install extension"` → `"vscode-adam-lang: install extension"` (same path fix); `"label": "Install pm-lsp + Extension (Local)"` → `"Install adam-lsp + Extension (Local)"` with its `dependsOn` list updated to the renamed labels.
+- [x] **Step 3:** In `CLAUDE.md`: `**\`property-model\`** and **\`pm-lang\`** — supporting crates for the property-model and PM language features` → `**\`adam-rs\`** and **\`adam-lang\`** — supporting crates for the Adam property-model system`.
+- [x] **Step 4:** In `docs/VISION.md`: `Dependency flow: \`cel-parser\`/\`cel-runtime\` → \`property-model\` → \`pm-lang\` → \`begin\`.` → `→ \`adam-rs\` → \`adam-lang\` → \`begin\`.`; `\`pm-lang\` is currently the only client...` → `\`adam-lang\` is currently the only client...`; `## property-model` heading → `## adam-rs`; `Additional clients beyond \`pm-lang\`, over time.` → `\`adam-lang\`, over time.`; `## pm-lang` heading → `## adam-lang`; `**Mission:** the DSL, built on \`cel-parser\` infrastructure, that expresses \`property-model\`` → `\`adam-rs\``; the three "property-model graph"/"pm-lang source panel" mentions in the `begin` section → "adam-rs graph" / "adam-lang source panel" (keep "property model graph" as a concept phrase only where it's not naming the crate — check each of the 3 occurrences in context before deciding whether it names the crate or describes the concept).
+- [x] **Step 5:** In `README.md`'s workspace-layout table: `| [\`property-model\`](property-model) | Multi-way constraint system for property models |` → `| [\`adam-rs\`](adam-rs) | Multi-way constraint system for property models |`; `| [\`pm-lang\`](pm-lang) | DSL that expresses \`property-model\` constraint systems as source text |` → `| [\`adam-lang\`](adam-lang) | DSL that expresses \`adam-rs\` constraint systems as source text |`; `| [\`pm-lsp\`](pm-lsp) | Language server for \`pm-lang\` |` → `| [\`adam-lsp\`](adam-lsp) | Language server for \`adam-lang\` |`.
+- [x] **Step 6:** Still in `README.md`: add a new subsection documenting the VS Code extension (currently missing entirely — this was the original ask that kicked off this cleanup). Add after the "begin: Spectrum Web Components bundle" section:
 
   ```markdown
   ### adam-lang: VS Code extension
@@ -237,19 +246,19 @@ Directory/file renames (via `git mv`, preserves history):
   Extension Development Host walkthrough and troubleshooting notes.
   ```
 
-- [ ] **Step 7:** Commit: `git add -A && git commit -m "docs: update CLAUDE.md/VISION.md/README.md for adam-rs/adam-lang/adam-lsp rename, document the VS Code extension in README"`
+- [x] **Step 7:** Commit: `git add -A && git commit -m "docs: update CLAUDE.md/VISION.md/README.md for adam-rs/adam-lang/adam-lsp rename, document the VS Code extension in README"`
 
 ### Task 7: Full workspace verification
 
 **Files:** none (verification only)
 
-- [ ] **Step 1:** `cargo fmt --all`
-- [ ] **Step 2:** `cargo build --workspace 2>&1` — must produce zero warnings (per CLAUDE.md). Read the output; if any warning appears (not just errors), fix it before continuing.
-- [ ] **Step 3:** `cargo test --workspace 2>&1` and `cargo test --doc --workspace 2>&1` — must pass with zero warnings.
-- [ ] **Step 4:** `cargo clippy --workspace --exclude begin --all-targets -- -D warnings`
-- [ ] **Step 5:** `cargo clippy -p begin --no-default-features --all-targets -- -D warnings`
-- [ ] **Step 6:** `cargo clippy -p begin --all-targets -- -D warnings`
-- [ ] **Step 7:** Grep sweep for anything the mapping table missed, restricted to in-scope files (exclude the historical docs and lockfiles called out above):
+- [x] **Step 1:** `cargo fmt --all`
+- [x] **Step 2:** `cargo build --workspace 2>&1` — must produce zero warnings (per CLAUDE.md). Read the output; if any warning appears (not just errors), fix it before continuing.
+- [x] **Step 3:** `cargo test --workspace 2>&1` and `cargo test --doc --workspace 2>&1` — must pass with zero warnings.
+- [x] **Step 4:** `cargo clippy --workspace --exclude begin --all-targets -- -D warnings`
+- [x] **Step 5:** `cargo clippy -p begin --no-default-features --all-targets -- -D warnings`
+- [x] **Step 6:** `cargo clippy -p begin --all-targets -- -D warnings`
+- [x] **Step 7:** Grep sweep for anything the mapping table missed, restricted to in-scope files (exclude the historical docs and lockfiles called out above):
 
   ```bash
   grep -rniE "pm-lang|pm_lang|pm-lsp|pm_lsp|property-model|property_model|PmParser|PmAstParser" \
@@ -261,8 +270,8 @@ Directory/file renames (via `git mv`, preserves history):
   Expect no output outside `docs/superpowers/plans/2026-07-29-pm-to-adam-rename.md` itself
   (this plan legitimately names the old identifiers) and outside the excluded historical
   docs. Fix anything unexpected.
-- [ ] **Step 8:** Confirm `cargo doc --lib --no-deps --workspace` builds cleanly (catches broken intra-doc links from the renamed paths, e.g. any missed `[\`property_model::...\`]` link target).
-- [ ] **Step 9:** Commit any fixes from this task: `git add -A && git commit -m "fix: address warnings/leftover references found during rename verification"` (only if Steps 1–8 produced changes).
+- [x] **Step 8:** Confirm `cargo doc --lib --no-deps --workspace` builds cleanly (catches broken intra-doc links from the renamed paths, e.g. any missed `[\`property_model::...\`]` link target).
+- [x] **Step 9:** Commit any fixes from this task: `git add -A && git commit -m "fix: address warnings/leftover references found during rename verification"` (only if Steps 1–8 produced changes).
 
 ---
 
