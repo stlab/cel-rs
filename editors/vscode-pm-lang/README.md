@@ -64,6 +64,46 @@ happens to be focused.
 5. To stop, close the `[Extension Development Host]` window, or press Shift+F5 in the original
    `editors/vscode-pm-lang` window.
 
+## Local Install (for development)
+
+Unlike "Trying it out" above (which only runs inside a throwaway Extension Development Host),
+this installs a real, working copy of `pm-lsp` and this extension into your regular VS Code.
+
+1. Install `pm-lsp` onto your `PATH`, from the repository root:
+
+   ```bash
+   cargo install --path pm-lsp
+   ```
+
+   This copies the binary to `~/.cargo/bin` (normally already on `PATH`), which is the last
+   place `pm-lang.serverPath` resolution checks (see Requirements above) — so once it's there,
+   the extension finds it automatically, in any workspace, with no `pm-lang.serverPath` setting
+   needed.
+
+2. Package and install the extension itself:
+
+   ```bash
+   cd editors/vscode-pm-lang
+   npm install
+   npm run package
+   npm run install-extension
+   ```
+
+   `code` must be on your `PATH` for the second command to work — if it isn't, run
+   **Shell Command: Install 'code' command in PATH** from the Command Palette (Ctrl+Shift+P)
+   first.
+
+   Both steps together are also available as a single VS Code task,
+   **Install pm-lsp + Extension (Local)**, runnable from the Command Palette's
+   "Tasks: Run Task" while this folder (`editors/vscode-pm-lang`) is open.
+
+3. Reopen VS Code (or run **Developer: Reload Window**) and open any `.adm2` file — syntax
+   highlighting and diagnostics should now work in ordinary windows, not just the dev host.
+
+To pick up a code change to `pm-lsp` or the extension, re-run the relevant step above; both
+commands overwrite the previous install (`cargo install` overwrites the binary by default,
+and `install-extension` passes `--force`).
+
 ## Development
 
 ```bash
