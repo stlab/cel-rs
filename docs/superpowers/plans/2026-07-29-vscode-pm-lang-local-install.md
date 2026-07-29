@@ -66,7 +66,7 @@ npm install
 
 Expected: `package-lock.json` updates to include `@vscode/vsce` and its transitive dependencies; `node_modules/@vscode/vsce` exists afterward.
 
-- [ ] **Step 3: Create `.vscodeignore` with rooted patterns**
+- [ ] **Step 3: Create `.vscodeignore` with unrooted patterns**
 
 Create `editors/vscode-pm-lang/.vscodeignore`:
 
