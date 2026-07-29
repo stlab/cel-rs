@@ -115,8 +115,8 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -
 }
 
 /// Display name for the pm-lang source file, shown in diagnostic headers
-/// (e.g. `--> begin/assets/demo.pm:8:11`).
-pub const SOURCE_FILE_NAME: &str = "begin/assets/demo.pm";
+/// (e.g. `--> begin/assets/demo.adm2:8:11`).
+pub const SOURCE_FILE_NAME: &str = "begin/assets/demo.adm2";
 
 /// Formats an [`Error`] as a rustc-style diagnostic when possible.
 ///
