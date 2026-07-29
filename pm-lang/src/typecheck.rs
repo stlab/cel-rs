@@ -45,13 +45,17 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
             }
             SheetItem::Conditional(cond) => {
                 for branch in &cond.branches {
-                    for method in &branch.methods {
-                        check_method(method, &resolve, &mut diagnostics);
+                    for rel in &branch.relationships {
+                        for method in &rel.methods {
+                            check_method(method, &resolve, &mut diagnostics);
+                        }
                     }
                 }
-                if let Some(default_methods) = &cond.default {
-                    for method in default_methods {
-                        check_method(method, &resolve, &mut diagnostics);
+                if let Some(default_rels) = &cond.default {
+                    for rel in default_rels {
+                        for method in &rel.methods {
+                            check_method(method, &resolve, &mut diagnostics);
+                        }
                     }
                 }
             }
@@ -361,8 +365,8 @@ mod tests {
         let sheet = parse(
             "sheet s { cell mode: i32; cell a: i32; cell b: i32; cell out: i32; \
              conditional mode { \
-                 0i32 => { method [a] -> [out] { a } }, \
-                 _ => { method [b] -> [out] { b } }, \
+                 0i32 => { relationship { method [a] -> [out] { a } } }, \
+                 _ => { relationship { method [b] -> [out] { b } } }, \
              } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());

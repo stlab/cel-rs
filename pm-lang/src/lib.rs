@@ -3,6 +3,27 @@
 //! A DSL parser for property models. Parses a pm-lang source string and produces
 //! a live [`ParsedSheet`] (sheet plus cell names in declaration order).
 //!
+//! # Grammar
+//!
+//! ```text
+//! sheet              = "sheet" identifier "{" { sheet_item } "}".
+//! sheet_item         = cell_decl | relationship_decl | conditional_decl.
+//! cell_decl          = "cell" identifier cell_type_init ";".
+//! cell_type_init     = (":" type_name [ "=" literal ]) | ("=" literal).
+//! type_name          = identifier.
+//! relationship_decl  = "relationship" [ identifier ] "{" { method_decl } "}".
+//! conditional_decl   = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".
+//! conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].
+//! default_branch     = "_"   "=>" "{" { relationship_decl } "}" [ "," ].
+//! method_decl        = "method" cell_list "->" cell_list method_body.
+//! cell_list          = "[" identifier { "," identifier } "]".
+//! method_body        = "{" or_expression "}".
+//! ```
+//!
+//! `or_expression` and its descendants (`literal`, `identifier`, and the rest of the
+//! CEL expression grammar) are defined by `cel_parser` — see that crate's own
+//! [`# Grammar`](../cel_parser/index.html#grammar) section.
+//!
 //! # Example
 //!
 //! ```rust,no_run

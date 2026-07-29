@@ -1,21 +1,6 @@
 //! pm-lang parser — grammar productions and sheet construction.
 //!
-//! ```ebnf
-//! sheet          = "sheet" identifier "{" { sheet_item } "}".
-//! sheet_item     = cell_decl | relationship_decl | conditional_decl.
-//! cell_decl      = "cell" identifier cell_type_init ";".
-//! cell_type_init = ":" type_name "=" literal
-//!                | ":" type_name
-//!                | "=" literal.
-//! type_name = identifier.
-//! relationship_decl = "relationship" [ identifier ] "{" { method_decl } "}".
-//! method_decl = "method" cell_list "->" cell_list method_body.
-//! cell_list   = "[" identifier { "," identifier } "]".
-//! method_body = "{" or_expression "}".
-//! conditional_decl   = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".
-//! conditional_branch = literal "=>" "{" { method_decl } "}" [ "," ].
-//! default_branch     = "_"   "=>" "{" { method_decl } "}" [ "," ].
-//! ```
+//! See the crate root's [`# Grammar`](crate#grammar) section for the full EBNF.
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
@@ -181,7 +166,7 @@ impl PmParser {
         match ctx.peek_token() {
             Some(Token::Identifier(id)) if id == "cell" => self.parse_cell_decl(ctx),
             Some(Token::Identifier(id)) if id == "relationship" => {
-                self.parse_relationship_decl(ctx)
+                self.parse_relationship_decl(ctx).map(|_| ())
             }
             Some(Token::Identifier(id)) if id == "conditional" => self.parse_conditional_decl(ctx),
             Some(tok) => Err(ParseError::new(
@@ -197,9 +182,7 @@ impl PmParser {
 
     /// `cell_decl = "cell" identifier cell_type_init ";".`
     ///
-    /// `cell_type_init = ":" type_name "=" literal`
-    ///                 `| ":" type_name`
-    ///                 `| "=" literal.`
+    /// `cell_type_init = (":" type_name [ "=" literal ]) | ("=" literal).`
     fn parse_cell_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("cell"); // consume
         let (name, name_span) = ctx.consume_ident()?;
@@ -247,7 +230,10 @@ impl PmParser {
     }
 
     /// `relationship_decl = "relationship" [ identifier ] "{" { method_decl } "}".`
-    fn parse_relationship_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
+    ///
+    /// - Postcondition: the returned `RelationshipId` identifies the relationship just added to
+    ///   `ctx.sheet`.
+    fn parse_relationship_decl(&mut self, ctx: &mut ParseContext) -> Result<RelationshipId> {
         ctx.is_keyword("relationship"); // consume
         if matches!(ctx.peek_token(), Some(Token::Identifier(_))) {
             ctx.consume_ident()?; // optional name
@@ -260,8 +246,7 @@ impl PmParser {
         ctx.expect_close_brace()?;
         ctx.sheet
             .add_relationship(methods)
-            .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
-        Ok(())
+            .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))
     }
 
     /// `conditional_decl = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".`
@@ -279,7 +264,7 @@ impl PmParser {
             .add_conditional_fn;
         ctx.expect_open_brace()?;
 
-        let mut branches: Vec<(Box<dyn Any>, RelationshipId)> = Vec::new();
+        let mut branches: Vec<(Box<dyn Any>, Vec<RelationshipId>)> = Vec::new();
         let mut default_rel_ids: Vec<RelationshipId> = Vec::new();
 
         while !ctx.at_close_brace() {
@@ -288,17 +273,10 @@ impl PmParser {
                 ctx.advance(); // consume `_`
                 ctx.expect_punct("=>")?;
                 ctx.expect_open_brace()?;
-                let mut methods = Vec::new();
-                while !ctx.at_close_brace() {
-                    methods.push(self.parse_method_decl(ctx)?);
-                }
+                let rel_ids = self.parse_branch_relationships(ctx)?;
                 ctx.expect_close_brace()?;
                 ctx.consume_punct(",");
-                let rel_id = ctx
-                    .sheet
-                    .add_relationship(methods)
-                    .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
-                default_rel_ids.push(rel_id);
+                default_rel_ids = rel_ids;
                 break; // default branch is always last
             }
 
@@ -311,23 +289,32 @@ impl PmParser {
             let branch_val = parse_literal_as(entry, &lit, lit_span)?;
             ctx.expect_punct("=>")?;
             ctx.expect_open_brace()?;
-            let mut methods = Vec::new();
-            while !ctx.at_close_brace() {
-                methods.push(self.parse_method_decl(ctx)?);
-            }
+            let rel_ids = self.parse_branch_relationships(ctx)?;
             ctx.expect_close_brace()?;
             ctx.consume_punct(",");
-            let rel_id = ctx
-                .sheet
-                .add_relationship(methods)
-                .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
-            branches.push((branch_val, rel_id));
+            branches.push((branch_val, rel_ids));
         }
         ctx.expect_close_brace()?;
 
         add_cond_fn(&mut ctx.sheet, match_cell_id, branches, default_rel_ids)
             .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
         Ok(())
+    }
+
+    /// Parses one `conditional_branch`/`default_branch`'s shared body: `"{" { relationship_decl }
+    /// "}"`, up to (not including) the closing `}`.
+    fn parse_branch_relationships(
+        &mut self,
+        ctx: &mut ParseContext,
+    ) -> Result<Vec<RelationshipId>> {
+        let mut rel_ids = Vec::new();
+        while !ctx.at_close_brace() {
+            if !matches!(ctx.peek_token(), Some(Token::Identifier(id)) if id == "relationship") {
+                return Err(ctx.err_at("expected `relationship`"));
+            }
+            rel_ids.push(self.parse_relationship_decl(ctx)?);
+        }
+        Ok(rel_ids)
     }
 
     /// `method_decl = "method" cell_list "->" cell_list method_body.`
@@ -932,13 +919,13 @@ mod tests {
                 cell mode:   i32 = 0;
                 conditional mode {
                     0i32 => {
-                        method [width] -> [height] { width }
+                        relationship { method [width] -> [height] { width } }
                     },
                     1i32 => {
-                        method [width, ratio] -> [height] { width * ratio }
+                        relationship { method [width, ratio] -> [height] { width * ratio } }
                     },
                     _ => {
-                        method [width] -> [height] { width }
+                        relationship { method [width] -> [height] { width } }
                     },
                 }
             }
@@ -948,12 +935,54 @@ mod tests {
     }
 
     #[test]
+    fn parse_conditional_branch_with_multiple_relationships() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+            sheet s {
+                cell mode: i32 = 0;
+                cell a: f64 = 2.0;
+                cell b: f64 = 3.0;
+                cell c: f64;
+                cell d: f64 = 4.0;
+                cell e: f64 = 5.0;
+                cell f: f64;
+                conditional mode {
+                    0i32 => {
+                        relationship { method [a, b] -> [c] { a * b } }
+                        relationship { method [d, e] -> [f] { d * e } }
+                    }
+                }
+            }
+        "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+    }
+
+    #[test]
+    fn conditional_branch_bare_method_without_relationship_wrapper_is_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell x: i32 = 0;
+                conditional x { 0i32 => { method [x] -> [x] { x } } }
+            }
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "a conditional_branch body now requires relationship_decl, not a bare method_decl"
+        );
+    }
+
+    #[test]
     fn conditional_undeclared_match_cell_is_error() {
         let result = parser().parse_str(
             r#"
             sheet s {
                 cell x: i32 = 0;
-                conditional bogus { 0i32 => { method [x] -> [x] { x } } }
+                conditional bogus { 0i32 => { relationship { method [x] -> [x] { x } } } }
             }
         "#,
         );
@@ -970,7 +999,7 @@ mod tests {
             sheet s {
                 cell mode: i32 = 0;
                 cell x:    f64 = 0.0;
-                conditional mode { 1.0 => { method [x] -> [x] { x } } }
+                conditional mode { 1.0 => { relationship { method [x] -> [x] { x } } } }
             }
         "#,
         );
