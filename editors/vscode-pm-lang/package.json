@@ -38,9 +38,12 @@
     }
   },
   "scripts": {
+    "vscode:prepublish": "npm run compile",
     "compile": "tsc -p .",
     "watch": "tsc -w -p .",
-    "test": "tsc -p . && node --test out/test/*.test.js"
+    "test": "tsc -p . && node --test out/test/*.test.js",
+    "package": "vsce package --out pm-lang.vsix",
+    "install-extension": "code --install-extension pm-lang.vsix --force"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
@@ -48,6 +51,7 @@
   "devDependencies": {
     "@types/node": "20.11.0",
     "@types/vscode": "1.85.0",
+    "@vscode/vsce": "^3.9.2",
     "typescript": "5.7.3"
   }
 }

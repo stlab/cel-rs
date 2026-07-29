@@ -4,4 +4,5 @@
 /begin/node_modules
 /editors/vscode-pm-lang/node_modules
 /editors/vscode-pm-lang/out
+/editors/vscode-pm-lang/*.vsix
 .DS_Store
