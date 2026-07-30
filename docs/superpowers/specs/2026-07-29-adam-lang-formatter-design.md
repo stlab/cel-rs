@@ -143,8 +143,10 @@ Walks `Sheet` top-down in declaration order, emitting:
 - `relationship [name] { method_decl* }`, one `method [inputs] -> [outputs] { body }` per line,
   `body` delegated to `cel_parser::fmt::format_expr`.
 - `conditional match_name { branch* [default] }`, one `literal => { relationship_decl* }` per
-  branch (trailing comma per branch, matching the grammar), and `_ => { ... }` last if a default
-  branch is present.
+  branch and `_ => { ... }` last if a default branch is present. The grammar's trailing `","` after
+  each branch is optional (`conditional_branch = literal "=>" "{" { relationship_decl } "}" [
+  "," ].`); the formatter omits it, matching `begin/assets/demo.adm2`'s existing style rather than
+  the comma-separated style used in some of `adam-lang`'s own test fixtures.
 - 4-space indentation per nesting level, opening braces on the same line, `leading_comment` lines
   and `blank_line_before` separators emitted ahead of each item exactly as recovered.
 
