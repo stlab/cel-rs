@@ -58,16 +58,19 @@ against it.
 New module `cel-parser/src/fmt.rs`, exported as `cel_parser::format_expr`:
 
 ```rust
-pub fn format_expr(source: &str, expr: &Expr) -> String
+pub fn format_expr(expr: &Expr) -> String
 ```
 
 - **Literals are re-emitted via `Span::source_text()`** on the node's `ExprSpan`, not synthesized
   from the `Literal` enum — this is what `Expr`'s own module doc already flags as necessary
   (`Literal` can't distinguish `1920.0` from `1920.0f64`, or a byte literal from a `u8`-suffixed
-  integer literal, but the original span can). If `source_text()` returns `None` (possible for
-  spans without a live source file, e.g. in unit tests using `Span::call_site()`), fall back to
-  formatting the typed `Literal` value directly — this only affects hand-built `Expr` trees in
-  tests, never a real parse from source text.
+  integer literal, but the original span can). `Span::source_text()` is self-contained (it doesn't
+  need the original source string passed in separately — unlike `attach_trivia`'s gap-recovery,
+  which needs `source` because a *gap between* tokens isn't covered by any span, a literal's own
+  span already is), so `format_expr` takes no `source` parameter. If `source_text()` returns `None`
+  (possible for spans without a live source file, e.g. in unit tests using `Span::call_site()`),
+  fall back to formatting the typed `Literal` value directly — this only affects hand-built `Expr`
+  trees in tests, never a real parse from source text.
 - **Idents/operators are synthesized**, not re-sliced — normalizing to single-space-around-operator
   spacing is the point of the exercise, not something to preserve from source.
 - **Parenthesization is precedence-aware**, using a small table mirroring the grammar's twelve
@@ -133,14 +136,19 @@ introduced by the formatter. Tracked as
 New module `adam-lang/src/fmt.rs`, exported as `adam_lang::format_sheet`:
 
 ```rust
-pub fn format_sheet(source: &str, sheet: &ast::Sheet) -> String
+pub fn format_sheet(sheet: &ast::Sheet) -> String
 ```
+
+No `source` parameter, for the same reason `format_expr` doesn't need one: every text a formatter
+must reproduce exactly (a cell initializer's literal notation, a method body) is already covered
+by some node's own span, and `leading_comment`/`blank_line_before` (read, not recomputed, here)
+were already extracted from `source` by `attach_trivia` before formatting runs.
 
 Walks `Sheet` top-down in declaration order, emitting:
 
 - `sheet name {` / closing `}`.
 - `cell name: type = literal;` (or whichever of `type`/`initializer` is present) — the literal is
-  re-emitted via source-text re-slicing exactly as `cel_parser::fmt::format_expr` does for CEL
+  re-emitted via `Span::source_text()` exactly as `cel_parser::fmt::format_expr` does for CEL
   literals, for the same reason (preserve exact numeric/suffix notation).
 - `relationship [name] { method_decl* }`, one `method [inputs] -> [outputs] { body }` per line,
   `body` delegated to `cel_parser::fmt::format_expr`.
