@@ -215,6 +215,8 @@ fn publish(connection: &Connection, uri: &Uri, source: &str) -> anyhow::Result<(
 ///   returns `Err`) or parses with any recovered syntax error (`Sheet.errors` non-empty) —
 ///   refusing to format code it can't fully understand, matching `rustfmt`. Otherwise returns
 ///   exactly one [`TextEdit`] replacing the whole document with [`format_sheet`]'s output.
+/// - Complexity: O(n) in the length of `source` — parses, attaches trivia to, and formats the
+///   whole sheet once, with no caching across calls.
 fn format_edits(source: &str) -> Vec<TextEdit> {
     let mut parser = AdamAstParser::new();
     let mut sheet = match parser.parse_str(source) {
