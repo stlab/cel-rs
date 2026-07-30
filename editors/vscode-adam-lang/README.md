@@ -1,8 +1,7 @@
 # adam-lang for VS Code
 
 Editor support for `.adm2` (adam-lang) files: syntax highlighting and live diagnostics via the
-`adam-lsp` language server. (`.adm2`, not `.pm`, to avoid colliding with the `.pm` extension VS
-Code already associates with Perl modules.)
+`adam-lsp` language server.
 
 ## Requirements
 
