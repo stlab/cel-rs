@@ -87,7 +87,7 @@
 
 pub mod ast;
 mod error;
-pub mod fmt;
+mod fmt;
 pub mod lex_lexer;
 pub mod op_table;
 pub mod parser_context;
