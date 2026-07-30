@@ -1,10 +1,11 @@
 //! Pretty-prints an [`crate::ast::Sheet`] back to adam-lang source text: 4-space indentation,
 //! opening braces on the same line, `leading_comment`/`blank_line_before` reproduced exactly as
-//! [`crate::trivia::attach_trivia`] recovered them, and method bodies/cell initializers delegated
-//! to [`cel_parser::format_expr`] (bodies) or re-emitted via `Span::source_text()` directly
-//! (initializers/branch-match literals — see the design doc for why no `Literal` value is
-//! needed). Conditional branches omit the grammar's optional trailing `,`, matching
-//! `begin/assets/demo.adm2`'s existing style.
+//! [`crate::trivia::attach_trivia`] recovered them (including a file-header-style comment
+//! preceding the `sheet` keyword itself, `Sheet.leading_comment`), and method bodies/cell
+//! initializers delegated to [`cel_parser::format_expr`] (bodies) or re-emitted via
+//! `Span::source_text()` directly (initializers/branch-match literals — see the design doc for
+//! why no `Literal` value is needed). Conditional branches omit the grammar's optional trailing
+//! `,`, matching `begin/assets/demo.adm2`'s existing style.
 //!
 //! Never called on a sheet with any recorded syntax errors — see `adam-lsp`'s
 //! `textDocument/formatting` handler, which refuses to format in that case.
@@ -210,7 +211,9 @@ pub fn format_sheet(sheet: &ast::Sheet) -> String {
         sheet.errors.is_empty(),
         "format_sheet's precondition: no recorded syntax errors"
     );
-    let mut out = format!("sheet {} {{\n", sheet.name);
+    let mut out = String::new();
+    write_trivia(&mut out, false, sheet.leading_comment.as_deref(), 0);
+    out.push_str(&format!("sheet {} {{\n", sheet.name));
     for item in &sheet.items {
         write_sheet_item(&mut out, item, 1);
     }
@@ -232,6 +235,22 @@ mod tests {
     #[test]
     fn formats_an_empty_sheet() {
         assert_eq!(format("sheet s {}"), "sheet s {\n}\n");
+    }
+
+    #[test]
+    fn preserves_a_leading_comment_before_the_sheet_itself() {
+        assert_eq!(
+            format("// file header\nsheet s { cell x: i32 = 1; }"),
+            "// file header\nsheet s {\n    cell x: i32 = 1;\n}\n"
+        );
+    }
+
+    #[test]
+    fn no_leading_comment_before_the_sheet_emits_nothing_extra() {
+        assert_eq!(
+            format("sheet s { cell x: i32 = 1; }"),
+            "sheet s {\n    cell x: i32 = 1;\n}\n"
+        );
     }
 
     #[test]

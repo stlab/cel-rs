@@ -3,7 +3,10 @@
 //! for the identical problem — see `cel-parser/src/lex_lexer.rs`'s `test_span_preservation`), and
 //! attaches each to the nearest following node. Applied recursively to every sibling list in the
 //! tree — `Sheet.items`, a `RelationshipDecl`'s `methods`, a `ConditionalDecl`'s `branches` and
-//! `default`, and each `ConditionalBranch`'s `relationships` — not just the top level.
+//! `default`, and each `ConditionalBranch`'s `relationships` — not just the top level. Also
+//! recovers a comment preceding the `sheet` keyword itself (e.g. a file header) into
+//! `Sheet.leading_comment` — the one gap with no enclosing sibling list to attach via, so it's
+//! handled directly against the start of `source` rather than through [`attach_gaps`].
 //!
 //! A comment is attached only if nothing but whitespace-on-the-same-line separates it from the
 //! following item — a blank line between an earlier comment and the item breaks the attachment,
@@ -78,8 +81,9 @@ impl TriviaTarget for ConditionalBranch {
     }
 }
 
-/// Recovers comments/blank-lines from every gap in `sheet` — its own top-level items, and every
-/// nested `relationship`/`conditional` body — attaching each to the nearest following node.
+/// Recovers comments/blank-lines from every gap in `sheet` — a leading comment before the
+/// `sheet` keyword itself, its own top-level items, and every nested `relationship`/`conditional`
+/// body — attaching each to the nearest following node.
 ///
 /// - Precondition: `sheet` was parsed from exactly `source` (unmodified), so its items' spans'
 ///   line/column positions resolve correctly against it.
@@ -89,6 +93,9 @@ impl TriviaTarget for ConditionalBranch {
 ///   up front (see [`line_start_byte_offsets`]), rather than rescanning `source` per gap.
 pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
     let line_starts = line_start_byte_offsets(source);
+    let sheet_start = line_column_to_byte(source, &line_starts, sheet.span.start.start());
+    let (leading_comment, _) = analyze_gap(&source[..sheet_start]);
+    sheet.leading_comment = leading_comment;
     attach_gaps(source, &line_starts, &mut sheet.items);
     for item in &mut sheet.items {
         match item {
@@ -423,5 +430,29 @@ mod tests {
         };
         let default = cond.default.as_ref().expect("default branch present");
         assert_eq!(default[1].leading_comment.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn attaches_a_leading_comment_before_the_sheet_itself() {
+        let source = "// file header\nsheet s {\n    cell a: i32 = 1;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        assert_eq!(sheet.leading_comment.as_deref(), Some("file header"));
+    }
+
+    #[test]
+    fn attaches_a_multi_line_leading_comment_before_the_sheet_itself() {
+        let source = "// line one\n// line two\nsheet s {\n    cell a: i32 = 1;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        assert_eq!(sheet.leading_comment.as_deref(), Some("line one\nline two"));
+    }
+
+    #[test]
+    fn no_leading_comment_before_the_sheet_leaves_it_none() {
+        let source = "sheet s {\n    cell a: i32 = 1;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        assert_eq!(sheet.leading_comment, None);
     }
 }

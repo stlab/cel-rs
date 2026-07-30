@@ -124,6 +124,7 @@ impl AdamAstParser {
             name,
             name_span: point(name_span),
             items,
+            leading_comment: None,
             span: ast::ExprSpan {
                 start: sheet_start,
                 end: close_span,

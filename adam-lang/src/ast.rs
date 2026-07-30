@@ -21,6 +21,11 @@ pub struct Sheet {
     pub name_span: ExprSpan,
     /// The sheet's items, in declaration order.
     pub items: Vec<SheetItem>,
+    /// A leading `//`/`/* */` comment immediately preceding the `sheet` keyword (e.g. a file
+    /// header), if recovered by [`crate::trivia::attach_trivia`]. Unlike every other node's
+    /// `leading_comment`, this one has no enclosing sibling list to attach via — it covers the
+    /// gap between the start of the source and the sheet's own span.
+    pub leading_comment: Option<String>,
     /// The span of the whole `sheet ... { ... }` construct.
     pub span: ExprSpan,
     /// Syntax errors recovered while parsing, in source order. Empty for a syntactically clean
