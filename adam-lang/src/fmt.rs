@@ -314,4 +314,12 @@ mod tests {
         let twice = format(&once);
         assert_eq!(once, twice);
     }
+
+    #[test]
+    fn format_is_idempotent_through_a_reparse_with_a_conditional() {
+        let source = "sheet demo {\n    cell p: i32 = 0;\n    cell c: f64;\n\n    conditional p {\n        0i32 => {\n            relationship {\n                method [c] -> [c] { c }\n            }\n        }\n        _ => {\n            relationship {\n                method [c] -> [c] { c }\n            }\n        }\n    }\n}";
+        let once = format(source);
+        let twice = format(&once);
+        assert_eq!(once, twice);
+    }
 }

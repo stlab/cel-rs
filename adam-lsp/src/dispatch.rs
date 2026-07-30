@@ -100,6 +100,9 @@ fn handle_request(
             let id = req.id.clone();
             match req.extract::<DocumentFormattingParams>(Formatting::METHOD) {
                 Ok((id, params)) => {
+                    // A URI not present in `documents` (never seen via didOpen/didChange) silently
+                    // gets no edits, the same "nothing to do" response as a syntax error — not an error
+                    // response.
                     let edits = documents
                         .get(&params.text_document.uri)
                         .map(|source| format_edits(source))
