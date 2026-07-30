@@ -103,10 +103,12 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
     }
 }
 
+/// Recovers trivia for a relationship's methods.
 fn attach_relationship(source: &str, line_starts: &[usize], rel: &mut RelationshipDecl) {
     attach_gaps(source, line_starts, &mut rel.methods);
 }
 
+/// Recovers trivia for a conditional's branches, its default, and their nested relationships.
 fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut ConditionalDecl) {
     attach_gaps(source, line_starts, &mut cond.branches);
     for branch in &mut cond.branches {
