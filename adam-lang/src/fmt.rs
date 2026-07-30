@@ -43,6 +43,7 @@ fn source_text_or_empty(span: ast::ExprSpan) -> String {
     span.start.source_text().unwrap_or_default()
 }
 
+/// Writes a bracketed, comma-separated cell-name list (e.g. `[a, b]`).
 fn write_cell_list(out: &mut String, cells: &[(String, ast::ExprSpan)]) {
     out.push('[');
     for (i, (name, _)) in cells.iter().enumerate() {
@@ -54,6 +55,8 @@ fn write_cell_list(out: &mut String, cells: &[(String, ast::ExprSpan)]) {
     out.push(']');
 }
 
+/// Writes one `method [...] -> [...] { ... }` declaration, delegating its body to
+/// [`cel_parser::format_expr`].
 fn write_method(out: &mut String, method: &ast::MethodDecl, depth: usize) {
     write_trivia(
         out,
@@ -71,6 +74,7 @@ fn write_method(out: &mut String, method: &ast::MethodDecl, depth: usize) {
     out.push_str(" }\n");
 }
 
+/// Writes one `relationship [name] { ... }` declaration and its methods, in declaration order.
 fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usize) {
     write_trivia(
         out,
@@ -92,6 +96,8 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
     out.push_str("}\n");
 }
 
+/// Writes a `{ ... }` block of relationships, shared by both a named conditional branch and the
+/// default (`_ =>`) arm.
 fn write_branch_relationships(
     out: &mut String,
     relationships: &[ast::RelationshipDecl],
@@ -105,6 +111,8 @@ fn write_branch_relationships(
     out.push_str("}\n");
 }
 
+/// Writes one `literal => { ... }` conditional branch, re-emitting the match literal via its
+/// span rather than the (unused) `Literal` value.
 fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize) {
     write_trivia(
         out,
@@ -118,6 +126,8 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
     write_branch_relationships(out, &branch.relationships, depth);
 }
 
+/// Writes one `conditional match_name { ... }` declaration: its named branches in declaration
+/// order, followed by its optional `_ => { ... }` default arm.
 fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize) {
     write_trivia(
         out,
@@ -141,6 +151,8 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     out.push_str("}\n");
 }
 
+/// Writes one `cell name[: type][ = initializer];` declaration, re-emitting the initializer via
+/// its span rather than the (unused) `Literal` value.
 fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     write_trivia(
         out,
@@ -162,6 +174,10 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     out.push_str(";\n");
 }
 
+/// Dispatches to the writer for one top-level sheet item.
+///
+/// - Precondition: `item` is not `SheetItem::Error` — [`format_sheet`]'s own precondition
+///   (`sheet.errors.is_empty()`) guarantees no `Error` item ever reaches this function.
 fn write_sheet_item(out: &mut String, item: &ast::SheetItem, depth: usize) {
     match item {
         ast::SheetItem::Cell(cell) => write_cell(out, cell, depth),
