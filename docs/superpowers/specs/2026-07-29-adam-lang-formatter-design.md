@@ -69,8 +69,9 @@ pub fn format_expr(expr: &Expr) -> String
   which needs `source` because a *gap between* tokens isn't covered by any span, a literal's own
   span already is), so `format_expr` takes no `source` parameter. If `source_text()` returns `None`
   (possible for spans without a live source file, e.g. in unit tests using `Span::call_site()`),
-  fall back to formatting the typed `Literal` value directly — this only affects hand-built `Expr`
-  trees in tests, never a real parse from source text.
+  fall back to an empty string — this only affects hand-built `Expr` trees in tests (never a real
+  parse from source text), and those tests use `Expr::Ident` operands (rendered from their `name`
+  field, not a span) wherever they need non-trivial, readable operand text.
 - **Idents/operators are synthesized**, not re-sliced — normalizing to single-space-around-operator
   spacing is the point of the exercise, not something to preserve from source.
 - **Parenthesization is precedence-aware**, using a small table mirroring the grammar's twelve
@@ -148,8 +149,13 @@ Walks `Sheet` top-down in declaration order, emitting:
 
 - `sheet name {` / closing `}`.
 - `cell name: type = literal;` (or whichever of `type`/`initializer` is present) — the literal is
-  re-emitted via `Span::source_text()` exactly as `cel_parser::fmt::format_expr` does for CEL
-  literals, for the same reason (preserve exact numeric/suffix notation).
+  re-emitted via `Span::source_text()` on its own `ExprSpan` (falling back to an empty string in
+  the same never-hit-by-a-real-parse case `format_expr` handles), exactly as `cel_parser::fmt`
+  does for CEL literals and for the same reason (preserve exact numeric/suffix notation). Note
+  `adam_lang::ast::CellDecl`'s `initializer`/`ConditionalBranch`'s `literal` are
+  `cel_parser::lex_lexer::Literal`, which is just `pub type Literal = syn::Lit` — a token-level
+  type, not the `cel_parser::ast::Literal` enum `Expr::Literal` uses — so this rendering only ever
+  needs the stored `ExprSpan`, never the `Literal`/`syn::Lit` value itself.
 - `relationship [name] { method_decl* }`, one `method [inputs] -> [outputs] { body }` per line,
   `body` delegated to `cel_parser::fmt::format_expr`.
 - `conditional match_name { branch* [default] }`, one `literal => { relationship_decl* }` per
