@@ -1,8 +1,7 @@
 # adam-lang for VS Code
 
 Editor support for `.adm2` (adam-lang) files: syntax highlighting and live diagnostics via the
-`adam-lsp` language server. (`.adm2`, not `.pm`, to avoid colliding with the `.pm` extension VS
-Code already associates with Perl modules.)
+`adam-lsp` language server.
 
 ## Requirements
 
@@ -54,6 +53,8 @@ happens to be focused.
    - Live diagnostics: edit a cell's initializer to the wrong type (e.g. change
      `cell a: f64 = 2.0;` to `cell a: f64 = 2;`) — a red squiggle and a Problems-panel entry
      should appear within about a second; fixing it back makes the diagnostic disappear.
+   - Format-on-save: saving the file automatically formats it using `adam-lsp`'s formatting
+     capability, enabled by this extension's `editor.formatOnSave` default for adam-lang files.
 
    > **Don't use File > Open Folder in this window.** Switching the open folder from inside a
    > running Extension Development Host doesn't carry the `--extensionDevelopmentPath` flag

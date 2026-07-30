@@ -114,6 +114,7 @@ impl AdamAstParser {
                             end: item_end,
                         },
                         leading_comment: None,
+                        blank_line_before: false,
                     });
                 }
             }
@@ -123,6 +124,7 @@ impl AdamAstParser {
             name,
             name_span: point(name_span),
             items,
+            leading_comment: None,
             span: ast::ExprSpan {
                 start: sheet_start,
                 end: close_span,
@@ -182,6 +184,7 @@ impl AdamAstParser {
             type_name,
             initializer,
             leading_comment: None,
+            blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
                 end: semi_span,
@@ -213,6 +216,7 @@ impl AdamAstParser {
             name,
             methods,
             leading_comment: None,
+            blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
                 end: close_span,
@@ -250,6 +254,8 @@ impl AdamAstParser {
                 literal: lit,
                 literal_span: point(lit_span),
                 relationships,
+                leading_comment: None,
+                blank_line_before: false,
                 span: ast::ExprSpan {
                     start: lit_span,
                     end: close,
@@ -263,6 +269,7 @@ impl AdamAstParser {
             branches,
             default,
             leading_comment: None,
+            blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
                 end: close_span,
@@ -303,6 +310,8 @@ impl AdamAstParser {
             inputs,
             outputs,
             body,
+            leading_comment: None,
+            blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
                 end: close_span,

@@ -285,7 +285,9 @@ pub fn check_expr(expr: &Expr, resolve_ident: &impl Fn(&str) -> Ty) -> (Ty, Vec<
         } => {
             let mut diagnostics = check_expr(cond, resolve_ident).1;
             diagnostics.extend(check_expr(then_branch, resolve_ident).1);
-            diagnostics.extend(check_expr(else_branch, resolve_ident).1);
+            if let Some(else_branch) = else_branch {
+                diagnostics.extend(check_expr(else_branch, resolve_ident).1);
+            }
             (Ty::Any, diagnostics)
         }
     }
@@ -651,7 +653,7 @@ mod tests {
         let expr = Expr::If {
             cond: Box::new(op("+", vec![lit_i32(1), lit_str("s")])),
             then_branch: Box::new(lit_i32(1)),
-            else_branch: Box::new(lit_i32(2)),
+            else_branch: Some(Box::new(lit_i32(2))),
             span: point(proc_macro2::Span::call_site()),
         };
         let (ty, diags) = check_expr(&expr, &any_resolver);
