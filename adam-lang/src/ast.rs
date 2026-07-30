@@ -46,6 +46,9 @@ pub enum SheetItem {
         /// a comment explaining a broken declaration (e.g. `// TODO: fix this`) isn't silently
         /// dropped.
         leading_comment: Option<String>,
+        /// Whether the gap before this item contained a blank line, if recovered by
+        /// [`crate::trivia::attach_trivia`].
+        blank_line_before: bool,
     },
 }
 
@@ -71,6 +74,18 @@ impl SheetItem {
             } => *leading_comment = Some(comment),
         }
     }
+
+    /// Sets whether a blank line preceded this item.
+    pub(crate) fn set_blank_line_before(&mut self, value: bool) {
+        match self {
+            SheetItem::Cell(c) => c.blank_line_before = value,
+            SheetItem::Relationship(r) => r.blank_line_before = value,
+            SheetItem::Conditional(c) => c.blank_line_before = value,
+            SheetItem::Error {
+                blank_line_before, ..
+            } => *blank_line_before = value,
+        }
+    }
 }
 
 /// `cell_decl = "cell" identifier cell_type_init ";".`
@@ -92,6 +107,9 @@ pub struct CellDecl {
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<String>,
+    /// Whether a blank line preceded this declaration, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub blank_line_before: bool,
     /// The span of the whole `cell ...;` declaration.
     pub span: ExprSpan,
 }
@@ -105,6 +123,8 @@ pub struct RelationshipDecl {
     pub methods: Vec<MethodDecl>,
     /// A leading comment immediately preceding this declaration, if recovered.
     pub leading_comment: Option<String>,
+    /// Whether a blank line preceded this declaration, if recovered.
+    pub blank_line_before: bool,
     /// The span of the whole `relationship { ... }` declaration.
     pub span: ExprSpan,
 }
@@ -122,6 +142,8 @@ pub struct ConditionalDecl {
     pub default: Option<Vec<RelationshipDecl>>,
     /// A leading comment immediately preceding this declaration, if recovered.
     pub leading_comment: Option<String>,
+    /// Whether a blank line preceded this declaration, if recovered.
+    pub blank_line_before: bool,
     /// The span of the whole `conditional ... { ... }` declaration.
     pub span: ExprSpan,
 }
@@ -135,6 +157,12 @@ pub struct ConditionalBranch {
     pub literal_span: ExprSpan,
     /// The branch's relationships, in declaration order.
     pub relationships: Vec<RelationshipDecl>,
+    /// A leading comment immediately preceding this branch, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub leading_comment: Option<String>,
+    /// Whether a blank line preceded this branch, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub blank_line_before: bool,
     /// The span from the branch's literal through its closing `}`.
     pub span: ExprSpan,
 }
@@ -153,6 +181,12 @@ pub struct MethodDecl {
     pub outputs: Vec<(String, ExprSpan)>,
     /// The parsed method body expression.
     pub body: cel_parser::Expr,
+    /// A leading comment immediately preceding this method, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub leading_comment: Option<String>,
+    /// Whether a blank line preceded this method, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub blank_line_before: bool,
     /// The span of the whole `method [...] -> [...] { ... }` declaration.
     pub span: ExprSpan,
 }
@@ -178,6 +212,7 @@ mod tests {
             type_name: None,
             initializer: None,
             leading_comment: None,
+            blank_line_before: false,
             span,
         });
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
@@ -190,6 +225,7 @@ mod tests {
             name: None,
             methods: Vec::new(),
             leading_comment: None,
+            blank_line_before: false,
             span,
         });
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
@@ -204,6 +240,7 @@ mod tests {
             branches: Vec::new(),
             default: None,
             leading_comment: None,
+            blank_line_before: false,
             span,
         });
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
@@ -215,6 +252,7 @@ mod tests {
         let item = SheetItem::Error {
             span,
             leading_comment: None,
+            blank_line_before: false,
         };
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
     }
@@ -228,6 +266,7 @@ mod tests {
             type_name: None,
             initializer: None,
             leading_comment: None,
+            blank_line_before: false,
             span,
         });
         item.set_leading_comment("hi".to_string());
@@ -243,6 +282,7 @@ mod tests {
         let mut item = SheetItem::Error {
             span,
             leading_comment: None,
+            blank_line_before: false,
         };
         item.set_leading_comment("hi".to_string());
         match item {
@@ -252,6 +292,25 @@ mod tests {
                 assert_eq!(leading_comment.as_deref(), Some("hi"))
             }
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_blank_line_before_sets_the_cell_variant() {
+        let span = point(Span::call_site());
+        let mut item = SheetItem::Cell(CellDecl {
+            name: "x".to_string(),
+            name_span: span,
+            type_name: None,
+            initializer: None,
+            leading_comment: None,
+            blank_line_before: false,
+            span,
+        });
+        item.set_blank_line_before(true);
+        match item {
+            SheetItem::Cell(c) => assert!(c.blank_line_before),
+            other => panic!("expected Cell, got {other:?}"),
         }
     }
 }
