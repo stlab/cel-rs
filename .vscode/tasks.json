@@ -106,14 +106,14 @@
                 "panel": "dedicated"
             }
         },
-        // ============ pm-lang VS Code Extension Tasks ============
+        // ============ adam-lang VS Code Extension Tasks ============
         {
-            "label": "cargo: install pm-lsp",
+            "label": "cargo: install adam-lsp",
             "type": "cargo",
             "command": "install",
             "args": [
                 "--path",
-                "pm-lsp"
+                "adam-lsp"
             ],
             "problemMatcher": [
                 "$rustc"
@@ -124,10 +124,10 @@
             }
         },
         {
-            "label": "vscode-pm-lang: package",
+            "label": "vscode-adam-lang: package",
             "type": "npm",
             "script": "package",
-            "path": "editors/vscode-pm-lang",
+            "path": "editors/vscode-adam-lang",
             "problemMatcher": [],
             "presentation": {
                 "reveal": "always",
@@ -135,10 +135,10 @@
             }
         },
         {
-            "label": "vscode-pm-lang: install extension",
+            "label": "vscode-adam-lang: install extension",
             "type": "npm",
             "script": "install-extension",
-            "path": "editors/vscode-pm-lang",
+            "path": "editors/vscode-adam-lang",
             "problemMatcher": [],
             "presentation": {
                 "reveal": "always",
@@ -146,12 +146,12 @@
             }
         },
         {
-            "label": "Install pm-lsp + Extension (Local)",
+            "label": "Install adam-lsp + Extension (Local)",
             "dependsOrder": "sequence",
             "dependsOn": [
-                "cargo: install pm-lsp",
-                "vscode-pm-lang: package",
-                "vscode-pm-lang: install extension"
+                "cargo: install adam-lsp",
+                "vscode-adam-lang: package",
+                "vscode-adam-lang: install extension"
             ],
             "problemMatcher": []
         },

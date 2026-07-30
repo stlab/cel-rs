@@ -1,9 +1,9 @@
 //! [`Inspector`] — sidebar listing all cells with their current values and a write form.
 
+use adam_rs::{CellId, Sheet};
 use dioxus::prelude::*;
-use property_model::{CellId, Sheet};
 
-use crate::bridge::{Labels, format_property_model_error};
+use crate::bridge::{Labels, format_adam_error};
 use crate::spectrum::{SpDivider, SpFieldLabel, SpHeading, SpTextfield};
 
 /// Sidebar panel showing all cells with labels, current values, and text inputs for writing.
@@ -128,7 +128,7 @@ fn CellRow(
                             Err(e) => {
                                 has_error.set(true);
                                 let source = active_source.read().clone();
-                                eprintln!("{}", format_property_model_error(&e, &source));
+                                eprintln!("{}", format_adam_error(&e, &source));
                             }
                         }
                     });

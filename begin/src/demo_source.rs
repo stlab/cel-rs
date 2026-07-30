@@ -1,4 +1,4 @@
-//! Loads the demo pm-lang source from `begin/assets/demo.adm2` and builds a
+//! Loads the demo adam-lang source from `begin/assets/demo.adm2` and builds a
 //! [`Sheet`]/[`Labels`] pair from it.
 //!
 //! Two independent bidirectional constraint systems (`a × b = c` and `d × e = f`)
@@ -7,7 +7,7 @@
 //! - `p = 0`: the relationship `c = f` (bidirectional) becomes active.
 //! - `p = 1`: the relationship `c = f × 2` (bidirectional) becomes active, alongside a
 //!   second, independent relationship `g = c × 10` in the same branch — `g` is *forced*
-//!   while this branch is active (see [`property_model::Sheet::is_forced`]), so its
+//!   while this branch is active (see [`adam_rs::Sheet::is_forced`]), so its
 //!   Inspector field is disabled and it is highlighted in the graph.
 //! - Any other `p`: the two systems are independent and `g` is not forced.
 //!
@@ -18,17 +18,15 @@
 //! `conditional` branch can hold any number of `relationship` blocks, each contributing
 //! its own independent forced-output set while that branch is active.
 
+use adam_lang::{AdamParser, TypeRegistry};
+use adam_rs::Sheet;
 use annotate_snippets::Renderer;
 use dioxus::prelude::*;
 use dioxus_devtools::HotReloadMsg;
-use pm_lang::{PmParser, TypeRegistry};
-use property_model::Sheet;
 
-use crate::bridge::{
-    Labels, SOURCE_FILE_NAME, format_property_model_error, labels_from_cell_names,
-};
+use crate::bridge::{Labels, SOURCE_FILE_NAME, format_adam_error, labels_from_cell_names};
 
-/// The demo pm-lang source file, referenced individually (not via a folder) so
+/// The demo adam-lang source file, referenced individually (not via a folder) so
 /// `dx serve`'s file watcher tracks it and reports changes in hot-reload messages
 /// (see [`spawn_hot_reload`]).
 ///
@@ -54,7 +52,7 @@ static DEMO_ASSET: Asset = asset!("/assets/demo.adm2");
 #[cfg(any(not(feature = "desktop"), test))]
 pub(crate) const DEMO_SOURCE_TEXT: &str = include_str!("../assets/demo.adm2");
 
-/// The result of parsing and building a sheet from pm-lang source.
+/// The result of parsing and building a sheet from adam-lang source.
 ///
 /// `sheet_labels` is `None` only on parse failure. A successful parse that
 /// then fails to propagate still returns the built sheet and labels alongside
@@ -67,12 +65,12 @@ pub struct BuildOutcome {
     pub error: Option<String>,
 }
 
-/// Parses `source` as pm-lang, builds a `Sheet` and `Labels`, and propagates
+/// Parses `source` as adam-lang, builds a `Sheet` and `Labels`, and propagates
 /// once so initial derived values are populated.
 ///
 /// - Complexity: O(n) in the length of `source` plus the cost of one `propagate()`.
 pub fn build_sheet(source: &str) -> BuildOutcome {
-    let mut parser = PmParser::new(TypeRegistry::new(), cel_parser::OpLookup::new());
+    let mut parser = AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new());
     let mut parsed = match parser.parse_str(source) {
         Ok(p) => p,
         Err(e) => {
@@ -93,7 +91,7 @@ pub fn build_sheet(source: &str) -> BuildOutcome {
             }
         }
         Err(e) => {
-            let msg = format_property_model_error(&e, source);
+            let msg = format_adam_error(&e, source);
             BuildOutcome {
                 sheet_labels: Some((parsed.sheet, labels)),
                 error: Some(msg),

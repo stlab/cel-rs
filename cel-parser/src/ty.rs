@@ -1,4 +1,4 @@
-//! A minimal static type model for the built-in primitives `pm_lang::TypeRegistry::new()`
+//! A minimal static type model for the built-in primitives `adam_lang::TypeRegistry::new()`
 //! registers by default, plus [`Ty::Any`] for everything else (custom host-registered types,
 //! unannotated cells, unresolved identifiers). Used by [`check_expr`] to type-check
 //! [`crate::Expr`] trees built by [`crate::AstContext`]. Not a complete type system — see the
@@ -9,7 +9,7 @@ use std::any::TypeId;
 use crate::op_table::builtin_operand_types;
 use crate::{Expr, ExprSpan, Literal, ParseError};
 
-/// A static type: one of the built-in primitives, or [`Ty::Any`] for anything pm-lang/CEL's
+/// A static type: one of the built-in primitives, or [`Ty::Any`] for anything adam-lang/CEL's
 /// extensible type system doesn't statically know about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ty {
@@ -86,8 +86,8 @@ impl Ty {
         }
     }
 
-    /// Maps a `TypeId` (e.g. from `pm_lang::TypeRegistry::TypeEntry::type_id`) to its [`Ty`].
-    /// An unrecognized `TypeId` maps to [`Ty::Any`] — not an error, matching pm-lang/CEL's
+    /// Maps a `TypeId` (e.g. from `adam_lang::TypeRegistry::TypeEntry::type_id`) to its [`Ty`].
+    /// An unrecognized `TypeId` maps to [`Ty::Any`] — not an error, matching adam-lang/CEL's
     /// extensible type system (a host binary's custom registered types are invisible here).
     ///
     /// # Examples
@@ -222,7 +222,7 @@ impl Ty {
 }
 
 /// Infers `expr`'s type against `resolve_ident` (looks up a free identifier's declared type, or
-/// `Ty::Any` if unknown — e.g. a bare CEL builtin name, or a pm-lang cell with no `: type`
+/// `Ty::Any` if unknown — e.g. a bare CEL builtin name, or an adam-lang cell with no `: type`
 /// annotation), returning the expression's inferred type plus every type diagnostic found.
 ///
 /// Only [`Expr::Op`] (via [`builtin_operand_types`]) and [`Expr::Logical`] (CEL's fixed `&&`/`||`

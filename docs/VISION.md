@@ -18,8 +18,8 @@ in the style of Dioxus's developer experience — and its first serious applicat
 expressing multi-way UI constraints so a bound visual presentation becomes a functioning UI
 without hand-written event logic.
 
-Dependency flow: `cel-parser`/`cel-runtime` → `property-model` → `pm-lang` → `begin`.
-`pm-lang` is currently the only client of `cel-parser`/`cel-runtime`; more are expected over
+Dependency flow: `cel-parser`/`cel-runtime` → `adam-rs` → `adam-lang` → `begin`.
+`adam-lang` is currently the only client of `cel-parser`/`cel-runtime`; more are expected over
 time as the DSL-hosting story matures.
 
 ## cel-runtime / cel-parser
@@ -52,7 +52,7 @@ for release/performance. That second path does not yet exist.
   clamping a transform's translation to keep a content rect within a viewport. Another option would
   be [Euclid](https://docs.rs/euclid/latest/euclid/).
 
-## property-model
+## adam-rs
 
 **Mission:** a multi-way constraint system for property models — a graph of cells and
 relationships where writing one cell propagates derived values to others via whichever
@@ -69,11 +69,11 @@ imperative event handlers.
 - "Memory" so a derived cell's value/priority isn't clobbered when the cell is pinned or
   self-referential — the current working hypothesis for how to handle the Adam-solver
   "unlink" behavior automatically.
-- Additional clients beyond `pm-lang`, over time.
+- Additional clients beyond `adam-lang`, over time.
 
-## pm-lang
+## adam-lang
 
-**Mission:** the DSL, built on `cel-parser` infrastructure, that expresses `property-model`
+**Mission:** the DSL, built on `cel-parser` infrastructure, that expresses `adam-rs`
 constraint systems as source text (`sheet { cell ...; relationship { method ... } }`).
 
 **Current state:** functional parser covering cells, relationships, methods, and conditional
@@ -142,20 +142,22 @@ groups; the only `cel-parser` client so far.
 (implemented, in progress), and developing Dioxus applications that use property models
 (not yet implemented).
 
-**Current state:** desktop-first Dioxus app rendering the property-model graph (D3
+**Current state:** desktop-first Dioxus app rendering the adam-rs graph (D3
 force-directed layout) with an Inspector sidebar for reading/writing cells. A live-editable
-pm-lang source panel (`SourcePanel`) with rustc-style error diagnostics has just landed.
+adam-lang source panel (`SourcePanel`) with rustc-style error diagnostics has just landed.
 
-**Pivot — VSCode interop over in-app editing:** further investment shifts away from
-deepening the in-app editor toward interop with VSCode: edit `.pm` sources in VSCode,
-hot-load them into a running Dioxus app, bind them against `rsx!{}` descriptions, and open a
-side panel or window to visualize the property-model graph and edit cells directly, with
-errors and diagnostics reported back through the terminal/console where `dx serve` was
-invoked. **The in-app `SourcePanel` is scaffolding, not a permanent feature** — it's expected
-to be retired once VSCode interop covers the same editing/diagnostics ground.
+**Pivot — VSCode interop over in-app editing:** investment has shifted away from deepening
+the in-app editor toward interop with VS Code. The `adam-lang` VS Code extension (backed by
+the `adam-lsp` language server, see `editors/vscode-adam-lang`) now provides syntax
+highlighting and live diagnostics for `.adm2` sources. Still open: hot-loading edited `.adm2`
+sources into a running Dioxus app, binding them against `rsx!{}` descriptions, and opening a
+side panel or window to visualize the adam-rs graph and edit cells directly, with errors and
+diagnostics reported back through the terminal/console where `dx serve` was invoked. **The
+in-app `SourcePanel` is scaffolding, not a permanent feature** — it's expected to be retired
+once VSCode interop covers the same editing/diagnostics ground.
 
 **Long-term aspiration (speculative — no path yet):** fully configuring an application from
-`rsx!{}` and `.pm` files via a prebuilt Begin-like application, so no hand-written Dioxus
+`rsx!{}` and `.adm2` files via a prebuilt Begin-like application, so no hand-written Dioxus
 component code is needed at all. This is blocked on Dioxus/rsx not yet exposing a mechanism
 to do this; absent that, the focus stays on building tools that Dioxus developers can adopt
 directly, with `begin` itself serving as the example of how to use them.

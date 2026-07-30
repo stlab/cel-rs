@@ -1,0 +1,58 @@
+//! # adam-lang
+//!
+//! A DSL parser for property models. Parses an adam-lang source string and produces
+//! a live [`ParsedSheet`] (sheet plus cell names in declaration order).
+//!
+//! # Grammar
+//!
+//! ```text
+//! sheet              = "sheet" identifier "{" { sheet_item } "}".
+//! sheet_item         = cell_decl | relationship_decl | conditional_decl.
+//! cell_decl          = "cell" identifier cell_type_init ";".
+//! cell_type_init     = (":" type_name [ "=" literal ]) | ("=" literal).
+//! type_name          = identifier.
+//! relationship_decl  = "relationship" [ identifier ] "{" { method_decl } "}".
+//! conditional_decl   = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".
+//! conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].
+//! default_branch     = "_"   "=>" "{" { relationship_decl } "}" [ "," ].
+//! method_decl        = "method" cell_list "->" cell_list method_body.
+//! cell_list          = "[" identifier { "," identifier } "]".
+//! method_body        = "{" or_expression "}".
+//! ```
+//!
+//! `or_expression` and its descendants (`literal`, `identifier`, and the rest of the
+//! CEL expression grammar) are defined by `cel_parser` — see that crate's own
+//! [`# Grammar`](../cel_parser/index.html#grammar) section.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use adam_lang::{AdamParser, TypeRegistry};
+//! use cel_parser::OpLookup;
+//!
+//! let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+//! let parsed = parser.parse_str(r#"
+//!     sheet image_resize {
+//!         cell width:  f64 = 1920.0;
+//!         cell height: f64 = 1080.0;
+//!         cell area:   f64;
+//!     }
+//! "#).unwrap();
+//! ```
+
+pub mod ast;
+mod ast_parser;
+mod parser;
+mod token_cursor;
+mod trivia;
+pub mod type_registry;
+mod typecheck;
+
+// adam-lang reuses cel_parser::ParseError directly; no new error type is introduced.
+// All parse errors carry a proc_macro2::Span for source-location diagnostics.
+pub use ast_parser::AdamAstParser;
+pub use cel_parser::ParseError;
+pub use parser::{AdamParser, ParsedSheet};
+pub use trivia::attach_trivia;
+pub use type_registry::TypeRegistry;
+pub use typecheck::check_sheet;

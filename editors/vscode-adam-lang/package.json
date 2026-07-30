@@ -1,0 +1,63 @@
+{
+  "name": "adam-lang",
+  "displayName": "adam-lang",
+  "description": "Language support for adam-lang: diagnostics via the adam-lsp language server.",
+  "publisher": "stlab",
+  "version": "0.1.0",
+  "private": true,
+  "license": "BSL-1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stlab/cel-rs.git",
+    "directory": "editors/vscode-adam-lang"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages"],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "adam-lang",
+        "aliases": ["adam-lang", "Adam"],
+        "extensions": [".adm2"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "adam-lang",
+        "scopeName": "source.adam-lang",
+        "path": "./syntaxes/adam-lang.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "adam-lang",
+      "properties": {
+        "adam-lang.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the adam-lsp language server binary. If empty, the extension searches the workspace's Cargo target directory (target/debug, then target/release) and then PATH."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "test": "tsc -p . && node --test out/test/*.test.js",
+    "package": "vsce package --out adam-lang.vsix",
+    "install-extension": "code --install-extension adam-lang.vsix --force"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "20.11.0",
+    "@types/vscode": "1.85.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "5.7.3"
+  }
+}

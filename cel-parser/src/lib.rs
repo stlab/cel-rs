@@ -384,7 +384,7 @@ impl<C: ParserContext> Parser<C> {
     /// Sets the token stream from an existing [`LexLexer`] iterator for inline expression parsing.
     ///
     /// Resets the context. Use together with [`parse_or_expression_ctx`](Self::parse_or_expression_ctx)
-    /// and [`take_lex_tokens`](Self::take_lex_tokens) to share a token stream between pm-lang and
+    /// and [`take_lex_tokens`](Self::take_lex_tokens) to share a token stream between adam-lang and
     /// [`CELParser`].
     pub fn set_lex_tokens(&mut self, tokens: std::iter::Peekable<lex_lexer::LexLexer>) {
         self.tokens = Some(tokens);
@@ -395,7 +395,7 @@ impl<C: ParserContext> Parser<C> {
     /// Parses one `or_expression` from the current token stream and returns the built context.
     ///
     /// Unlike [`parse_str_ctx`](Self::parse_str_ctx), this method does not require
-    /// end-of-stream, allowing pm-lang to parse an expression embedded within a larger token
+    /// end-of-stream, allowing adam-lang to parse an expression embedded within a larger token
     /// stream.
     ///
     /// # Errors
@@ -413,7 +413,7 @@ impl<C: ParserContext> Parser<C> {
     /// Returns the remaining token stream after expression parsing.
     ///
     /// Call after [`parse_or_expression_ctx`](Self::parse_or_expression_ctx) to recover the
-    /// shared [`LexLexer`] for continued pm-lang parsing.
+    /// shared [`LexLexer`] for continued adam-lang parsing.
     pub fn take_lex_tokens(&mut self) -> Option<std::iter::Peekable<lex_lexer::LexLexer>> {
         self.tokens.take()
     }
@@ -1207,7 +1207,7 @@ impl Parser<DynSegmentContext> {
     /// Parses one `or_expression` from the current token stream and returns the segment.
     ///
     /// Unlike [`parse_str`](Self::parse_str), this method does not require end-of-stream,
-    /// allowing pm-lang to parse an expression embedded within a larger token stream.
+    /// allowing adam-lang to parse an expression embedded within a larger token stream.
     ///
     /// # Errors
     ///
@@ -1252,7 +1252,7 @@ impl Parser<AstContext> {
     /// Parses one `or_expression` from the current token stream and returns the built [`Expr`].
     ///
     /// Unlike [`parse_str_ast`](Self::parse_str_ast), this method does not require
-    /// end-of-stream, allowing pm-lang to parse an expression embedded within a larger token
+    /// end-of-stream, allowing adam-lang to parse an expression embedded within a larger token
     /// stream.
     ///
     /// # Errors

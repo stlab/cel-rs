@@ -2,7 +2,7 @@
 .tokensave
 .claude/worktrees/
 /begin/node_modules
-/editors/vscode-pm-lang/node_modules
-/editors/vscode-pm-lang/out
-/editors/vscode-pm-lang/*.vsix
+/editors/vscode-adam-lang/node_modules
+/editors/vscode-adam-lang/out
+/editors/vscode-adam-lang/*.vsix
 .DS_Store

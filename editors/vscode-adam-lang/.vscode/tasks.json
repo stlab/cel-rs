@@ -1,0 +1,42 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "npm",
+      "script": "compile",
+      "problemMatcher": "$tsc",
+      "isBackground": false,
+      "presentation": { "reveal": "silent" },
+      "group": { "kind": "build", "isDefault": true }
+    },
+    {
+      "label": "cargo: install adam-lsp",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["install", "--path", "adam-lsp"],
+      "options": { "cwd": "${workspaceFolder}/../.." },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+    {
+      "label": "npm: package",
+      "type": "npm",
+      "script": "package",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+    {
+      "label": "npm: install-extension",
+      "type": "npm",
+      "script": "install-extension",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Install adam-lsp + Extension (Local)",
+      "dependsOrder": "sequence",
+      "dependsOn": ["cargo: install adam-lsp", "npm: package", "npm: install-extension"],
+      "problemMatcher": []
+    }
+  ]
+}

@@ -3,6 +3,39 @@
 version = 4
 
 [[package]]
+name = "adam-lang"
+version = "0.1.0"
+dependencies = [
+ "adam-rs",
+ "anyhow",
+ "cel-parser",
+ "cel-runtime",
+ "indexmap",
+ "proc-macro2",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "adam-lsp"
+version = "0.1.0"
+dependencies = [
+ "adam-lang",
+ "anyhow",
+ "cel-parser",
+ "lsp-server",
+ "lsp-types",
+ "serde_json",
+]
+
+[[package]]
+name = "adam-rs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "slotmap",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -275,6 +308,8 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "begin"
 version = "0.1.0"
 dependencies = [
+ "adam-lang",
+ "adam-rs",
  "annotate-snippets",
  "anyhow",
  "cel-parser",
@@ -283,8 +318,6 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "indexmap",
- "pm-lang",
- "property-model",
  "serde",
  "serde_json",
  "slotmap",
@@ -3788,31 +3821,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
-name = "pm-lang"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cel-parser",
- "cel-runtime",
- "indexmap",
- "proc-macro2",
- "property-model",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "pm-lsp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cel-parser",
- "lsp-server",
- "lsp-types",
- "pm-lang",
- "serde_json",
-]
-
-[[package]]
 name = "png"
 version = "0.17.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3971,14 +3979,6 @@ checksum = "4488a4a36b9a4ba6b9334a32a39971f77c1436ec82c38707bce707699cc3bbcb"
 dependencies = [
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "property-model"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "slotmap",
 ]
 
 [[package]]
