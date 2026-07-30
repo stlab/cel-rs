@@ -119,12 +119,14 @@ existing `for i in 1..items.len()` boundary.
 **Known limitation, unchanged in spirit from the existing trivia docs:** a comment or blank line
 in the gap between the last item of a block and that block's closing `}` (nothing follows it) is
 not attached to anything and is dropped on format, the same way `attach_trivia` already only
-attaches a comment when something follows it.
+attaches a comment when something follows it. Tracked as
+[github.com/stlab/cel-rs#52](https://github.com/stlab/cel-rs/issues/52).
 
 Block vs. line comment style is not preserved — `trivia.rs` already collapses both into one
 `String` with no memory of which delimiter was used, so every recovered comment re-emits as one or
 more `//` lines regardless of its original form. This is an existing normalization, not a new one
-introduced by the formatter.
+introduced by the formatter. Tracked as
+[github.com/stlab/cel-rs#53](https://github.com/stlab/cel-rs/issues/53).
 
 ## `adam-lang` sheet formatter
 
@@ -202,10 +204,14 @@ golden-file-style tests are inline input/expected string-literal pairs within ea
 
 ## Explicitly deferred / out of scope
 
-- Column-aware line-wrapping (see above).
+- Column-aware line-wrapping (see above). Tracked as
+  [github.com/stlab/cel-rs#54](https://github.com/stlab/cel-rs/issues/54).
 - Preserving block-vs-line comment style, and comments/blank lines in the trailing gap before a
-  block's closing `}` (both existing normalizations/limitations, not newly introduced).
+  block's closing `}` (both existing normalizations/limitations, not newly introduced; tracked as
+  [#53](https://github.com/stlab/cel-rs/issues/53) and
+  [#52](https://github.com/stlab/cel-rs/issues/52) respectively).
 - A standalone formatting CLI — the parent design doc allows for one "later if wanted"; `format_sheet`
   and `format_expr` are plain functions, so nothing here blocks adding one, but it is not part of
   this phase.
 - Range formatting (`textDocument/rangeFormatting`) — only whole-document formatting is wired up.
+  Tracked as [github.com/stlab/cel-rs#55](https://github.com/stlab/cel-rs/issues/55).
