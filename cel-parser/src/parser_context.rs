@@ -61,10 +61,10 @@ pub trait ParserContext: Sized {
     fn apply_logical(&mut self, name: &str, rhs: Self, start: Span, end: Span)
     -> crate::Result<()>;
 
-    /// Joins two previously-built fragments into `self`, consuming a leading condition value
-    /// already present on `self`. `then_fragment`'s contribution is used when the condition is
-    /// `true`; `else_fragment`'s when `false`. `start`/`end` cover the whole `if`/`else`
-    /// construct.
+    /// Joins a previously-built fragment into `self`, consuming a leading condition value already
+    /// present on `self`. `then_fragment`'s contribution is used when the condition is `true`;
+    /// `else_fragment`'s when `false`, or `None` if the source had no `else`/`else if` at all.
+    /// `start`/`end` cover the whole `if`/`else` construct.
     ///
     /// - Precondition: neither fragment takes arguments, and each produces exactly one value.
     ///
@@ -72,12 +72,15 @@ pub trait ParserContext: Sized {
     ///
     /// Implementations that validate operand types during parsing (e.g. [`DynSegmentContext`])
     /// return `Err` if the leading condition value isn't a `bool` or if the fragments' produced
-    /// types don't match. Implementations that defer type validation to a later phase (e.g.
-    /// [`crate::ast::AstContext`]) never return `Err` here.
+    /// types don't match — including when `else_fragment` is `None`, which such implementations
+    /// treat as an implicit `()` fragment (so a non-`()` then-branch with no `else` is still an
+    /// error). Implementations that defer type validation to a later phase (e.g.
+    /// [`crate::ast::AstContext`]) never return `Err` here, and record whether `else_fragment` was
+    /// `None` directly (see [`crate::Expr::If`]) instead of synthesizing anything.
     fn join2(
         &mut self,
         then_fragment: Self,
-        else_fragment: Self,
+        else_fragment: Option<Self>,
         start: Span,
         end: Span,
     ) -> anyhow::Result<()>;
@@ -184,10 +187,19 @@ impl ParserContext for DynSegmentContext {
     fn join2(
         &mut self,
         then_fragment: Self,
-        else_fragment: Self,
-        _start: Span,
+        else_fragment: Option<Self>,
+        start: Span,
         _end: Span,
     ) -> anyhow::Result<()> {
+        // No `else`/`else if` in the source: synthesize the implicit `()` fragment here instead
+        // of receiving one pre-built from `is_if_expression` (lib.rs) — execution still needs a
+        // concrete fragment to select on `false`, even though `AstContext::join2` (ast.rs)
+        // records this case as `None` rather than a synthesized node.
+        let else_fragment = else_fragment.unwrap_or_else(|| {
+            let mut fragment = self.new_fragment();
+            fragment.push_literal((), start);
+            fragment
+        });
         self.0.join2(then_fragment.0, else_fragment.0)
     }
 
@@ -273,7 +285,7 @@ mod tests {
         else_fragment.push_literal(2i32, Span::call_site());
         ctx.join2(
             then_fragment,
-            else_fragment,
+            Some(else_fragment),
             Span::call_site(),
             Span::call_site(),
         )
@@ -291,12 +303,23 @@ mod tests {
         else_fragment.push_literal(2i32, Span::call_site());
         ctx.join2(
             then_fragment,
-            else_fragment,
+            Some(else_fragment),
             Span::call_site(),
             Span::call_site(),
         )
         .unwrap();
         assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 2);
+    }
+
+    #[test]
+    fn join2_with_none_synthesizes_an_implicit_unit_else_fragment() {
+        let mut ctx = DynSegmentContext::new_context();
+        ctx.push_literal(false, Span::call_site());
+        let mut then_fragment = ctx.new_fragment();
+        then_fragment.push_literal((), Span::call_site());
+        ctx.join2(then_fragment, None, Span::call_site(), Span::call_site())
+            .unwrap();
+        ctx.into_inner().call0::<()>().unwrap();
     }
 
     #[test]

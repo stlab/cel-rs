@@ -161,14 +161,14 @@ pub enum Expr {
         /// The span from the start of `base` through the index token.
         span: ExprSpan,
     },
-    /// An `if cond { then } else { else_ }` expression (implicit else is `Literal(Unit)`).
+    /// An `if cond { then } else { else_ }` expression.
     If {
         /// The condition.
         cond: Box<Expr>,
         /// The then-branch.
         then_branch: Box<Expr>,
-        /// The else-branch (a synthesized `Literal(Unit)` node if no `else` was written).
-        else_branch: Box<Expr>,
+        /// The else-branch, or `None` if no `else`/`else if` was written.
+        else_branch: Option<Box<Expr>>,
         /// The span of the whole `if`/`else` construct.
         span: ExprSpan,
     },
@@ -359,7 +359,7 @@ impl ParserContext for AstContext {
     fn join2(
         &mut self,
         mut then_fragment: Self,
-        mut else_fragment: Self,
+        else_fragment: Option<Self>,
         start: Span,
         end: Span,
     ) -> anyhow::Result<()> {
@@ -369,17 +369,19 @@ impl ParserContext for AstContext {
             1,
             "then fragment produces exactly one value"
         );
-        debug_assert_eq!(
-            else_fragment.values.len(),
-            1,
-            "else fragment produces exactly one value"
-        );
         let then_branch = then_fragment.pop();
-        let else_branch = else_fragment.pop();
+        let else_branch = else_fragment.map(|mut fragment| {
+            debug_assert_eq!(
+                fragment.values.len(),
+                1,
+                "else fragment produces exactly one value"
+            );
+            Box::new(fragment.pop())
+        });
         self.values.push(Expr::If {
             cond: Box::new(cond),
             then_branch: Box::new(then_branch),
-            else_branch: Box::new(else_branch),
+            else_branch,
             span: ExprSpan { start, end },
         });
         Ok(())
@@ -455,10 +457,10 @@ mod tests {
                 value: Literal::I32(1),
                 span: target,
             }),
-            else_branch: Box::new(Expr::Literal {
+            else_branch: Some(Box::new(Expr::Literal {
                 value: Literal::I32(2),
                 span: target,
-            }),
+            })),
             span: target,
         };
         assert_eq!(format!("{:?}", expr.span()), format!("{target:?}"));
@@ -597,7 +599,7 @@ mod tests {
         else_fragment.push_literal(2i32, Span::call_site());
         ctx.join2(
             then_fragment,
-            else_fragment,
+            Some(else_fragment),
             Span::call_site(),
             Span::call_site(),
         )
@@ -623,6 +625,7 @@ mod tests {
                         ..
                     }
                 ));
+                let else_branch = else_branch.expect("explicit else was given");
                 assert!(matches!(
                     *else_branch,
                     Expr::Literal {
@@ -631,6 +634,20 @@ mod tests {
                     }
                 ));
             }
+            other => panic!("expected If, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn join2_with_none_records_no_else_branch() {
+        let mut ctx = AstContext::new_context();
+        ctx.push_literal(true, Span::call_site());
+        let mut then_fragment = ctx.new_fragment();
+        then_fragment.push_literal(1i32, Span::call_site());
+        ctx.join2(then_fragment, None, Span::call_site(), Span::call_site())
+            .unwrap();
+        match ctx.into_expr() {
+            Expr::If { else_branch, .. } => assert!(else_branch.is_none()),
             other => panic!("expected If, got {other:?}"),
         }
     }
@@ -813,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn if_without_else_has_a_unit_else_branch() {
+    fn if_without_else_has_no_else_branch() {
         let mut parser = Parser::<AstContext>::new(OpLookup::new());
         let expr = parser.parse_str_ast("if true { 1i32 }").unwrap();
         let Expr::If {
@@ -839,13 +856,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(matches!(
-            *else_branch,
-            Expr::Literal {
-                value: Literal::Unit,
-                ..
-            }
-        ));
+        assert!(else_branch.is_none());
     }
 
     #[test]
@@ -858,11 +869,11 @@ mod tests {
             panic!("expected If");
         };
         assert!(matches!(
-            *else_branch,
-            Expr::Literal {
+            else_branch.as_deref(),
+            Some(Expr::Literal {
                 value: Literal::I32(2),
                 ..
-            }
+            })
         ));
 
         let mut parser = Parser::<AstContext>::new(OpLookup::new());
@@ -872,7 +883,7 @@ mod tests {
         let Expr::If { else_branch, .. } = expr else {
             panic!("expected outer If");
         };
-        assert!(matches!(*else_branch, Expr::If { .. }));
+        assert!(matches!(else_branch.as_deref(), Some(Expr::If { .. })));
     }
 
     #[test]

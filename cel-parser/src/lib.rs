@@ -1161,7 +1161,7 @@ impl<C: ParserContext> Parser<C> {
                 std::mem::swap(&mut self.context, &mut fragment);
                 self.is_if_expression(elif_span)?;
                 std::mem::swap(&mut self.context, &mut fragment);
-                fragment
+                Some(fragment)
             } else {
                 // else { expr }
                 match self.peek_token() {
@@ -1188,13 +1188,13 @@ impl<C: ParserContext> Parser<C> {
                     }
                     _ => return Err(self.error_at("expected `}` after else-branch")),
                 }
-                fragment
+                Some(fragment)
             }
         } else {
-            // Implicit else: () — then-branch must also return ()
-            let mut fragment = self.context.new_fragment();
-            fragment.push_literal((), self.last_span);
-            fragment
+            // No `else`/`else if` in the source — each ParserContext::join2 impl decides what
+            // this means (DynSegmentContext synthesizes an implicit `()` fragment;
+            // AstContext records `None` directly on Expr::If).
+            None
         };
         self.context
             .join2(then_fragment, else_fragment, if_span, self.last_span)
