@@ -41,6 +41,11 @@
           "description": "Path to the adam-lsp language server binary. If empty, the extension searches the workspace's Cargo target directory (target/debug, then target/release) and then PATH."
         }
       }
+    },
+    "configurationDefaults": {
+      "[adam-lang]": {
+        "editor.formatOnSave": true
+      }
     }
   },
   "scripts": {
