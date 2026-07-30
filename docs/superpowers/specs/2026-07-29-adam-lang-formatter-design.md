@@ -159,8 +159,15 @@ Walks `Sheet` top-down in declaration order, emitting:
 `dispatch.rs`:
 
 - `ServerCapabilities.document_formatting_provider = Some(OneOf::Left(true))`.
+- `textDocument/formatting`'s params (`DocumentFormattingParams`) carry only a `TextDocumentIdentifier`
+  (URI), not the document text — unlike the notifications diagnostics already handles, which
+  always carry the full current text inline. `pm-lsp`'s original "no in-memory document store"
+  decision (correct at the time: nothing needed one) no longer holds once a request needs to look
+  up text by URI. This adds the minimal store: a `HashMap<Uri, String>` updated on every
+  `didOpen`/`didChange` (the same text `publish` already receives), read (not removed) by the new
+  formatting handler.
 - `main_loop`'s `Message::Request(req)` arm gains a case for
-  `req.method == "textDocument/formatting"`: parse `source`, and
+  `req.method == "textDocument/formatting"`: look up `source` for the request's URI in the store, and
   - if `AdamAstParser::parse_str` returns `Err`, or the parsed `Sheet.errors` is non-empty, respond
     with an empty edit list (`vec![]`) — **refuse to format code that doesn't parse cleanly**,
     matching `rustfmt`'s behavior of declining to reformat code it can't fully understand, rather
