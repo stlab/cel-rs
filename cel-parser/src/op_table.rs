@@ -1032,6 +1032,98 @@ impl BuiltinScope {
     }
 }
 
+/// Marker pushed onto the stack for the `round` builtin's callee (see
+/// [`round_scope`]) - carries no data, it only lets the paired `"()"` match
+/// arm recognize "this call's callee is `round`" among any other
+/// same-arity callable that might one day share the stack.
+struct RoundFn;
+
+/// Scope function implementing the `round(x: f64) -> i32` builtin: rounds
+/// to the nearest integer (halfway values away from zero, matching
+/// `f64::round`), erroring rather than silently saturating if the result
+/// doesn't fit in `i32`.
+///
+/// Registered by every [`OpLookup::new()`] (see there), so `round` reads
+/// like any other builtin operator without a caller needing to set it up.
+///
+/// A function call parses as two independent lookups - an arity-0 lookup
+/// for the callee name, then an arity-`N+1` lookup for `"()"` with the
+/// callee and its arguments on the stack (see `cel-parser/src/lib.rs`'s
+/// primary/postfix expression grammar) - so this one scope function
+/// handles both halves: `("round", 0)` pushes the [`RoundFn`] marker,
+/// and `("()", 2)` peeks the stack to confirm this specific call's callee
+/// is that marker before consuming it, deferring to any other registered
+/// scope (`Ok(false)`) otherwise.
+///
+/// - Errors: the rounded value doesn't fit in `i32` (checked at the
+///   segment's execution time, not here at parse time - this function
+///   itself only returns `Err` for a stack.pop_types() mismatch on `"()"`,
+///   which can't happen once the `RoundFn` check above has passed).
+fn round_scope(
+    name: &str,
+    segment: &mut DynSegment,
+    num_operands: usize,
+    _span: SourceSpan,
+) -> Result<bool> {
+    match (name, num_operands) {
+        ("round", 0) => {
+            segment.op0(|| RoundFn);
+            Ok(true)
+        }
+        ("()", 2) => {
+            let top = segment.peek_stack_infos(2);
+            if top[0].type_id != TypeId::of::<RoundFn>() {
+                return Ok(false);
+            }
+            segment.op2r(|_callee: RoundFn, x: f64| -> Result<i32> {
+                let rounded = x.round();
+                if !rounded.is_finite() || !(i32::MIN as f64..=i32::MAX as f64).contains(&rounded) {
+                    return Err(anyhow!("`round` result {rounded} does not fit in `i32`"));
+                }
+                Ok(rounded as i32)
+            })?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// Marker pushed onto the stack for the `float` builtin's callee (see
+/// [`float_scope`]) - the `i32`-analog of [`RoundFn`].
+struct FloatFn;
+
+/// Scope function implementing the `float(x: i32) -> f64` builtin: widens
+/// an `i32` to `f64`, [`round`](round_scope)'s counterpart for going the
+/// other direction. Every `i32` value converts exactly - `f64` has 52
+/// mantissa bits, more than enough for the full `i32` range - so unlike
+/// `round` this never fails.
+///
+/// Registered by every [`OpLookup::new()`] (see there). See [`round_scope`]'s
+/// doc comment for why this is one function handling two lookups (the
+/// callee name, then `"()"`) rather than a single dispatch.
+fn float_scope(
+    name: &str,
+    segment: &mut DynSegment,
+    num_operands: usize,
+    _span: SourceSpan,
+) -> Result<bool> {
+    match (name, num_operands) {
+        ("float", 0) => {
+            segment.op0(|| FloatFn);
+            Ok(true)
+        }
+        ("()", 2) => {
+            let top = segment.peek_stack_infos(2);
+            if top[0].type_id != TypeId::of::<FloatFn>() {
+                return Ok(false);
+            }
+            segment.op2(|_callee: FloatFn, x: i32| x as f64)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// Operation lookup with scope stack support.
 ///
 /// Provides a stack of scopes for operation resolution, with built-in operations
@@ -1060,7 +1152,8 @@ pub struct OpLookup {
 }
 
 impl OpLookup {
-    /// Creates a new operation lookup with only built-in operations.
+    /// Creates a new operation lookup with only built-in operations - the
+    /// infix/prefix operators plus the `round` and `float` functions.
     ///
     /// # Examples
     ///
@@ -1070,11 +1163,14 @@ impl OpLookup {
     /// let lookup = OpLookup::new();
     /// ```
     pub fn new() -> Self {
-        OpLookup {
+        let mut lookup = OpLookup {
             scopes: Vec::new(),
             builtin_scope: BuiltinScope,
             tuple_signatures: Vec::new(),
-        }
+        };
+        lookup.push_scope(round_scope);
+        lookup.push_scope(float_scope);
+        lookup
     }
 
     /// Registers a tuple-shaped operator signature, matched by element
@@ -1450,6 +1546,122 @@ mod tests {
         lookup.lookup("+", &mut segment, 2, Span::call_site(), Span::call_site())?;
         assert_eq!(segment.call0::<u32>()?, 100);
 
+        Ok(())
+    }
+
+    #[test]
+    fn round_rounds_half_away_from_zero_to_nearest_i32() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        lookup.lookup(
+            "round",
+            &mut segment,
+            0,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        segment.just(3.6f64);
+        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        assert_eq!(segment.call0::<i32>()?, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn round_of_an_expression_result() -> Result<()> {
+        // The motivating case: converting a physical size times a resolution
+        // (both f64) into a whole pixel count.
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        lookup.lookup(
+            "round",
+            &mut segment,
+            0,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        segment.just(3.41333333f64);
+        segment.just(300.0f64);
+        lookup.lookup("*", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        assert_eq!(segment.call0::<i32>()?, 1024);
+        Ok(())
+    }
+
+    #[test]
+    fn round_errors_when_result_does_not_fit_in_i32() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        lookup.lookup(
+            "round",
+            &mut segment,
+            0,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        segment.just(1.0e20f64);
+        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        assert!(segment.call0::<i32>().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn round_scope_declines_a_call_whose_callee_is_not_round() -> Result<()> {
+        // Defensive case for round_scope's own ("()", 2) arm: a callee that
+        // isn't the `RoundFn` marker must be declined (Ok(false)), not
+        // mistaken for a round() call - see round_scope's doc comment.
+        let mut segment = DynSegment::new::<()>();
+        segment.just(7i32);
+        segment.just(3.0f64);
+        let handled = round_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
+        assert!(!handled);
+        Ok(())
+    }
+
+    #[test]
+    fn float_widens_i32_to_f64_exactly() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        lookup.lookup(
+            "float",
+            &mut segment,
+            0,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        segment.just(1024i32);
+        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        assert_eq!(segment.call0::<f64>()?, 1024.0);
+        Ok(())
+    }
+
+    #[test]
+    fn float_composes_with_round_for_a_round_trip() -> Result<()> {
+        // float(width_px) / dpi, mirrored back with round(... * dpi) - the
+        // actual pattern image_resize.adm2 needs for its width_px triangle.
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        lookup.lookup(
+            "float",
+            &mut segment,
+            0,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        segment.just(1024i32);
+        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        segment.just(300.0f64);
+        lookup.lookup("/", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        assert_eq!(segment.call0::<f64>()?, 1024.0 / 300.0);
+        Ok(())
+    }
+
+    #[test]
+    fn float_scope_declines_a_call_whose_callee_is_not_float() -> Result<()> {
+        let mut segment = DynSegment::new::<()>();
+        segment.just(7i32);
+        segment.just(3i32);
+        let handled = float_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
+        assert!(!handled);
         Ok(())
     }
 
