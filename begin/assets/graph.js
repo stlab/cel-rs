@@ -61,11 +61,12 @@
         return { x: cx - dx / dist * r, y: cy - dy / dist * r };
     }
 
-    // CHANGED: handles Cell, Relationship, and Conditional source/target kinds.
+    // CHANGED: handles Cell, Relationship, Conditional, and Branch source/target kinds.
     function linkEndpoints(d) {
         var s = d.source, t = d.target;
         function edgePt(node, ox, oy) {
             if (node.kind === 'Cell') return cellEdgePoint(ox, oy, node.x, node.y);
+            if (node.kind === 'Branch') return { x: node.x, y: node.y };
             var r = node.kind === 'Conditional' ? COND_COLLIDE_R : REL_R;
             return circleEdgePoint(ox, oy, node.x, node.y, r);
         }
@@ -351,7 +352,11 @@
             .join('line')
             .attr('class', 'link-control')
             .attr('stroke-dasharray', '5 3')
-            .attr('marker-end', 'url(#dot)')
+            .attr('marker-end', function (d) {
+                var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
+                var tgtNode = nodeMap.get(tgtId);
+                return (tgtNode && tgtNode.kind === 'Branch') ? null : 'url(#dot)';
+            })
             .style('stroke', function (d) { return d.branch_active ? null : INACTIVE_STROKE; });
 
         // Join cell rects
@@ -491,7 +496,9 @@
         controlLinkLayer.selectAll('line').each(function (d) {
             var ep = linkEndpoints(d);
             var t = d.target;
-            var tgtR = (t.kind === 'Conditional' ? COND_COLLIDE_R : REL_R) + NODE_STROKE_WIDTH / 2 + CONTROL_DOT_RADIUS;
+            var tgtR = t.kind === 'Branch'
+                ? 0
+                : (t.kind === 'Conditional' ? COND_COLLIDE_R : REL_R) + NODE_STROKE_WIDTH / 2 + CONTROL_DOT_RADIUS;
             var tgtPt = circleEdgePoint(d.source.x, d.source.y, t.x, t.y, tgtR);
             d3.select(this)
                 .attr('x1', ep.x1).attr('y1', ep.y1)
