@@ -86,6 +86,7 @@
             var hw, hh;
             if (n.kind === 'Cell') { hw = CELL_W / 2; hh = CELL_H / 2; }
             else if (n.kind === 'Conditional') { hw = COND_COLLIDE_R; hh = COND_COLLIDE_R; }
+            else if (n.kind === 'Branch') { hw = 0; hh = 0; }
             else { hw = REL_R; hh = REL_R; }
             minX = Math.min(minX, n.x - hw);
             minY = Math.min(minY, n.y - hh);
@@ -262,13 +263,18 @@
         svg.call(zoom);
 
         simulation = d3.forceSimulation()
-            .force('link', d3.forceLink().id(function (d) { return d.id; }).distance(LINK_DISTANCE))
+            .force('link', d3.forceLink().id(function (d) { return d.id; }).distance(function (d) {
+                var sKind = typeof d.source === 'object' ? d.source.kind : null;
+                var tKind = typeof d.target === 'object' ? d.target.kind : null;
+                return (sKind === 'Branch' || tKind === 'Branch') ? LINK_DISTANCE / 2 : LINK_DISTANCE;
+            }))
             .force('charge', d3.forceManyBody().strength(CHARGE_STRENGTH))
             .force('center', d3.forceCenter(width / 2, height / 2))
             // CHANGED: collision radius handles Conditional nodes.
             .force('collide', d3.forceCollide().radius(function (d) {
                 if (d.kind === 'Cell') return CELL_COLLIDE_R;
                 if (d.kind === 'Conditional') return COND_COLLIDE_R;
+                if (d.kind === 'Branch') return 0;
                 return REL_COLLIDE_R;
             }));
 
