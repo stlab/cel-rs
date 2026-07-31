@@ -996,6 +996,253 @@ fn signatures_for(name: &str) -> Option<&'static [OpSignature]> {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Numeric casts (`expr as Type`)
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Scoped to numeric-to-numeric conversions only (the 12 integer widths plus
+// `f32`/`f64`) - not `bool`/`String`, which Rust's own `as` treats as special
+// cases (bool -> integer only, one direction; nothing for String) and which
+// nothing in this language currently needs.
+//
+// Fallibility follows one rule, not Rust's `as` (which never fails - it
+// saturates or truncates silently): a conversion that can always represent
+// its source value exactly is infallible (`op1`); one that might not is
+// checked and returns `Err` rather than silently losing information,
+// matching this crate's established convention for arithmetic (see the
+// module doc comment's "Semantics" section) and `round`'s own design.
+//   - int -> int: checked via `TryFrom`, uniformly (including same-width and
+//     identity pairs, which just always succeed).
+//   - int -> float: infallible (`as`) - Rust's own behavior; precision loss
+//     for very large integers is accepted, matching Rust exactly.
+//   - float -> int: checked - `Err` for non-finite or out-of-range values;
+//     a value with a fractional part is *truncated* toward zero, same as
+//     Rust's `as` (checking is only about range/finiteness, not fractional
+//     truncation policy - `round(x) as i32` is the idiom for "round to
+//     nearest first").
+//   - f32 -> f64: infallible (always exact). f64 -> f32: checked (may not
+//     fit in `f32`'s finite range).
+
+/// A signature for a numeric cast (`expr as Type`): one per legal source
+/// type for a given target type.
+#[derive(Clone, Copy)]
+struct CastSignature {
+    /// Index into TYPE_IDS for the source (operand) type.
+    source_type_id_index: usize,
+    /// Function pointer to the conversion implementation.
+    op_fn: OpFn,
+}
+
+impl CastSignature {
+    /// Returns the `TypeId` of the source (operand) type.
+    fn source_type_id(&self) -> TypeId {
+        TYPE_IDS[self.source_type_id_index]
+    }
+}
+
+/// Pushes one checked int->int `CastSignature` (via `TryFrom`) onto `$v`.
+macro_rules! try_from_cast_push {
+    ($v:ident, $src_idx:expr, $src_ty:ty, $tgt_ty:ty) => {
+        $v.push(CastSignature {
+            source_type_id_index: $src_idx,
+            op_fn: |seg, span| {
+                seg.op1r(move |x: $src_ty| -> Result<$tgt_ty> {
+                    <$tgt_ty>::try_from(x).map_err(|_| {
+                        span_err(
+                            span,
+                            anyhow!(concat!("value does not fit in `", stringify!($tgt_ty), "`")),
+                        )
+                    })
+                })
+            },
+        });
+    };
+}
+
+/// Pushes all 12 checked int->int `CastSignature`s targeting `$tgt_ty` onto `$v`.
+macro_rules! all_int_to_int_casts {
+    ($v:ident, $tgt_ty:ty) => {
+        try_from_cast_push!($v, TYPE_U8, u8, $tgt_ty);
+        try_from_cast_push!($v, TYPE_U16, u16, $tgt_ty);
+        try_from_cast_push!($v, TYPE_U32, u32, $tgt_ty);
+        try_from_cast_push!($v, TYPE_U64, u64, $tgt_ty);
+        try_from_cast_push!($v, TYPE_U128, u128, $tgt_ty);
+        try_from_cast_push!($v, TYPE_USIZE, usize, $tgt_ty);
+        try_from_cast_push!($v, TYPE_I8, i8, $tgt_ty);
+        try_from_cast_push!($v, TYPE_I16, i16, $tgt_ty);
+        try_from_cast_push!($v, TYPE_I32, i32, $tgt_ty);
+        try_from_cast_push!($v, TYPE_I64, i64, $tgt_ty);
+        try_from_cast_push!($v, TYPE_I128, i128, $tgt_ty);
+        try_from_cast_push!($v, TYPE_ISIZE, isize, $tgt_ty);
+    };
+}
+
+/// Pushes one infallible int->float `CastSignature` (via `as`) onto `$v`.
+macro_rules! as_cast_push {
+    ($v:ident, $src_idx:expr, $src_ty:ty, $tgt_ty:ty) => {
+        $v.push(CastSignature {
+            source_type_id_index: $src_idx,
+            op_fn: |seg, _span| seg.op1(|x: $src_ty| x as $tgt_ty),
+        });
+    };
+}
+
+/// Pushes all 12 infallible int->float `CastSignature`s targeting `$tgt_ty` onto `$v`.
+macro_rules! all_int_to_float_casts {
+    ($v:ident, $tgt_ty:ty) => {
+        as_cast_push!($v, TYPE_U8, u8, $tgt_ty);
+        as_cast_push!($v, TYPE_U16, u16, $tgt_ty);
+        as_cast_push!($v, TYPE_U32, u32, $tgt_ty);
+        as_cast_push!($v, TYPE_U64, u64, $tgt_ty);
+        as_cast_push!($v, TYPE_U128, u128, $tgt_ty);
+        as_cast_push!($v, TYPE_USIZE, usize, $tgt_ty);
+        as_cast_push!($v, TYPE_I8, i8, $tgt_ty);
+        as_cast_push!($v, TYPE_I16, i16, $tgt_ty);
+        as_cast_push!($v, TYPE_I32, i32, $tgt_ty);
+        as_cast_push!($v, TYPE_I64, i64, $tgt_ty);
+        as_cast_push!($v, TYPE_I128, i128, $tgt_ty);
+        as_cast_push!($v, TYPE_ISIZE, isize, $tgt_ty);
+    };
+}
+
+/// Pushes one checked float->int `CastSignature` onto `$v`: `Err` for a
+/// non-finite or out-of-range value, otherwise truncates toward zero (same
+/// as Rust's `as`).
+macro_rules! float_to_int_cast_push {
+    ($v:ident, $src_idx:expr, $src_ty:ty, $tgt_ty:ty) => {
+        $v.push(CastSignature {
+            source_type_id_index: $src_idx,
+            op_fn: |seg, span| {
+                seg.op1r(move |x: $src_ty| -> Result<$tgt_ty> {
+                    if !x.is_finite() {
+                        return Err(span_err(span, anyhow!("value is not finite")));
+                    }
+                    if x < <$tgt_ty>::MIN as $src_ty || x > <$tgt_ty>::MAX as $src_ty {
+                        return Err(span_err(
+                            span,
+                            anyhow!(concat!("value does not fit in `", stringify!($tgt_ty), "`")),
+                        ));
+                    }
+                    Ok(x as $tgt_ty)
+                })
+            },
+        });
+    };
+}
+
+/// Pushes both checked float->int `CastSignature`s (`f32`, `f64`) targeting `$tgt_ty` onto `$v`.
+macro_rules! all_float_to_int_casts {
+    ($v:ident, $tgt_ty:ty) => {
+        float_to_int_cast_push!($v, TYPE_F32, f32, $tgt_ty);
+        float_to_int_cast_push!($v, TYPE_F64, f64, $tgt_ty);
+    };
+}
+
+// The `vec_init_then_push` allow below is deliberate: `v` is built by generator macros whose
+// entry count depends on `$tgt_ty` (12 vs. 14 depending on whether a float-source table is
+// merged in), so a `vec![]` literal can't express it - same rationale as
+// `LEFT_SHIFT_SIGNATURES`/`RIGHT_SHIFT_SIGNATURES` above.
+macro_rules! int_cast_sources {
+    ($name:ident, $tgt_ty:ty) => {
+        #[allow(clippy::vec_init_then_push)]
+        static $name: Lazy<Vec<CastSignature>> = Lazy::new(|| {
+            let mut v = Vec::with_capacity(14);
+            all_int_to_int_casts!(v, $tgt_ty);
+            all_float_to_int_casts!(v, $tgt_ty);
+            v
+        });
+    };
+}
+
+int_cast_sources!(U8_CAST_SOURCES, u8);
+int_cast_sources!(U16_CAST_SOURCES, u16);
+int_cast_sources!(U32_CAST_SOURCES, u32);
+int_cast_sources!(U64_CAST_SOURCES, u64);
+int_cast_sources!(U128_CAST_SOURCES, u128);
+int_cast_sources!(USIZE_CAST_SOURCES, usize);
+int_cast_sources!(I8_CAST_SOURCES, i8);
+int_cast_sources!(I16_CAST_SOURCES, i16);
+int_cast_sources!(I32_CAST_SOURCES, i32);
+int_cast_sources!(I64_CAST_SOURCES, i64);
+int_cast_sources!(I128_CAST_SOURCES, i128);
+int_cast_sources!(ISIZE_CAST_SOURCES, isize);
+
+#[allow(clippy::vec_init_then_push)]
+static F32_CAST_SOURCES: Lazy<Vec<CastSignature>> = Lazy::new(|| {
+    let mut v = Vec::with_capacity(14);
+    all_int_to_float_casts!(v, f32);
+    // f64 -> f32: checked (may not fit in f32's finite range).
+    v.push(CastSignature {
+        source_type_id_index: TYPE_F64,
+        op_fn: |seg, span| {
+            seg.op1r(move |x: f64| -> Result<f32> {
+                if !x.is_finite() {
+                    return Err(span_err(span, anyhow!("value is not finite")));
+                }
+                if x.abs() > f32::MAX as f64 {
+                    return Err(span_err(span, anyhow!("value does not fit in `f32`")));
+                }
+                Ok(x as f32)
+            })
+        },
+    });
+    v.push(CastSignature {
+        source_type_id_index: TYPE_F32,
+        op_fn: |seg, _span| seg.op1(|x: f32| x),
+    });
+    v
+});
+
+#[allow(clippy::vec_init_then_push)]
+static F64_CAST_SOURCES: Lazy<Vec<CastSignature>> = Lazy::new(|| {
+    let mut v = Vec::with_capacity(14);
+    all_int_to_float_casts!(v, f64);
+    // f32 -> f64: always exact.
+    v.push(CastSignature {
+        source_type_id_index: TYPE_F32,
+        op_fn: |seg, _span| seg.op1(|x: f32| x as f64),
+    });
+    v.push(CastSignature {
+        source_type_id_index: TYPE_F64,
+        op_fn: |seg, _span| seg.op1(|x: f64| x),
+    });
+    v
+});
+
+/// Routes a cast target type name to its static signature table (one legal
+/// source per entry), or `None` if `target_name` names no supported numeric
+/// type. Shared by [`cast_source_types`] (the type checker) and
+/// [`OpLookup::lookup_cast`] (execution) so they can't drift.
+fn signatures_for_cast(target_name: &str) -> Option<&'static [CastSignature]> {
+    match target_name {
+        "u8" => Some(&U8_CAST_SOURCES),
+        "u16" => Some(&U16_CAST_SOURCES),
+        "u32" => Some(&U32_CAST_SOURCES),
+        "u64" => Some(&U64_CAST_SOURCES),
+        "u128" => Some(&U128_CAST_SOURCES),
+        "usize" => Some(&USIZE_CAST_SOURCES),
+        "i8" => Some(&I8_CAST_SOURCES),
+        "i16" => Some(&I16_CAST_SOURCES),
+        "i32" => Some(&I32_CAST_SOURCES),
+        "i64" => Some(&I64_CAST_SOURCES),
+        "i128" => Some(&I128_CAST_SOURCES),
+        "isize" => Some(&ISIZE_CAST_SOURCES),
+        "f32" => Some(&F32_CAST_SOURCES),
+        "f64" => Some(&F64_CAST_SOURCES),
+        _ => None,
+    }
+}
+
+/// Lists every source `TypeId` with a registered cast to `target_name`, or an empty `Vec` if
+/// `target_name` names no supported numeric type. Used by the type checker (`ty.rs`) to validate
+/// a cast without needing to touch a [`DynSegment`] - reads the exact same tables
+/// [`OpLookup::lookup_cast`] does, so the two can't drift out of sync.
+pub fn cast_source_types(target_name: &str) -> Vec<TypeId> {
+    signatures_for_cast(target_name)
+        .map(|sigs| sigs.iter().map(CastSignature::source_type_id).collect())
+        .unwrap_or_default()
+}
+
 /// Built-in operation scope.
 ///
 /// Provides lookup for standard operations using a compile-time hash table.
@@ -1038,10 +1285,11 @@ impl BuiltinScope {
 /// same-arity callable that might one day share the stack.
 struct RoundFn;
 
-/// Scope function implementing the `round(x: f64) -> i32` builtin: rounds
-/// to the nearest integer (halfway values away from zero, matching
-/// `f64::round`), erroring rather than silently saturating if the result
-/// doesn't fit in `i32`.
+/// Scope function implementing the `round(x: f64) -> f64` builtin: rounds
+/// to the nearest integer, halfway values away from zero, matching
+/// `f64::round` exactly - narrowing to an integer type is a separate,
+/// explicit step (`round(x) as i32`) via the general cast operator (see
+/// the "Numeric casts" section above), not this function's job.
 ///
 /// Registered by every [`OpLookup::new()`] (see there), so `round` reads
 /// like any other builtin operator without a caller needing to set it up.
@@ -1054,11 +1302,6 @@ struct RoundFn;
 /// and `("()", 2)` peeks the stack to confirm this specific call's callee
 /// is that marker before consuming it, deferring to any other registered
 /// scope (`Ok(false)`) otherwise.
-///
-/// - Errors: the rounded value doesn't fit in `i32` (checked at the
-///   segment's execution time, not here at parse time - this function
-///   itself only returns `Err` for a stack.pop_types() mismatch on `"()"`,
-///   which can't happen once the `RoundFn` check above has passed).
 fn round_scope(
     name: &str,
     segment: &mut DynSegment,
@@ -1075,49 +1318,7 @@ fn round_scope(
             if top[0].type_id != TypeId::of::<RoundFn>() {
                 return Ok(false);
             }
-            segment.op2r(|_callee: RoundFn, x: f64| -> Result<i32> {
-                let rounded = x.round();
-                if !rounded.is_finite() || !(i32::MIN as f64..=i32::MAX as f64).contains(&rounded) {
-                    return Err(anyhow!("`round` result {rounded} does not fit in `i32`"));
-                }
-                Ok(rounded as i32)
-            })?;
-            Ok(true)
-        }
-        _ => Ok(false),
-    }
-}
-
-/// Marker pushed onto the stack for the `float` builtin's callee (see
-/// [`float_scope`]) - the `i32`-analog of [`RoundFn`].
-struct FloatFn;
-
-/// Scope function implementing the `float(x: i32) -> f64` builtin: widens
-/// an `i32` to `f64`, [`round`](round_scope)'s counterpart for going the
-/// other direction. Every `i32` value converts exactly - `f64` has 52
-/// mantissa bits, more than enough for the full `i32` range - so unlike
-/// `round` this never fails.
-///
-/// Registered by every [`OpLookup::new()`] (see there). See [`round_scope`]'s
-/// doc comment for why this is one function handling two lookups (the
-/// callee name, then `"()"`) rather than a single dispatch.
-fn float_scope(
-    name: &str,
-    segment: &mut DynSegment,
-    num_operands: usize,
-    _span: SourceSpan,
-) -> Result<bool> {
-    match (name, num_operands) {
-        ("float", 0) => {
-            segment.op0(|| FloatFn);
-            Ok(true)
-        }
-        ("()", 2) => {
-            let top = segment.peek_stack_infos(2);
-            if top[0].type_id != TypeId::of::<FloatFn>() {
-                return Ok(false);
-            }
-            segment.op2(|_callee: FloatFn, x: i32| x as f64)?;
+            segment.op2(|_callee: RoundFn, x: f64| x.round())?;
             Ok(true)
         }
         _ => Ok(false),
@@ -1153,7 +1354,8 @@ pub struct OpLookup {
 
 impl OpLookup {
     /// Creates a new operation lookup with only built-in operations - the
-    /// infix/prefix operators plus the `round` and `float` functions.
+    /// infix/prefix operators, the numeric cast operator (`as`), and the
+    /// `round` function.
     ///
     /// # Examples
     ///
@@ -1169,7 +1371,6 @@ impl OpLookup {
             tuple_signatures: Vec::new(),
         };
         lookup.push_scope(round_scope);
-        lookup.push_scope(float_scope);
         lookup
     }
 
@@ -1328,6 +1529,54 @@ impl OpLookup {
         }
         Err(crate::ParseError::new_range(
             format!("no operation `{name}` for types [{type_names}]"),
+            start,
+            end,
+        ))
+    }
+
+    /// Looks up and applies a numeric cast (`expr as Type`), attaching the expression span to
+    /// any error.
+    ///
+    /// - Precondition: exactly one value is on top of `segment`'s stack (the cast's operand).
+    /// - Postcondition: on success, that value is replaced in place by the converted value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::ParseError`] spanning `start..=end` if `type_name` isn't a recognized
+    /// numeric type, if no cast from the operand's type to it is registered, or if the
+    /// conversion itself fails (e.g. an out-of-range or non-finite value).
+    ///
+    /// - Complexity: O(s) in the number of registered sources for `type_name`.
+    pub fn lookup_cast(
+        &self,
+        type_name: &str,
+        segment: &mut DynSegment,
+        start: proc_macro2::Span,
+        end: proc_macro2::Span,
+    ) -> std::result::Result<(), crate::ParseError> {
+        let source_span = SourceSpan::from_proc_macro2_range(start, end);
+        let Some(signatures) = signatures_for_cast(type_name) else {
+            return Err(crate::ParseError::new_range(
+                format!("unknown type `{type_name}`"),
+                start,
+                end,
+            ));
+        };
+        let stack_infos = segment.peek_stack_infos(1);
+        let source_type_id = stack_infos[0].type_id;
+        for sig in signatures {
+            if sig.source_type_id() == source_type_id {
+                (sig.op_fn)(segment, source_span).map_err(|e| {
+                    crate::ParseError::new_range(format!("cast error: {}", e), start, end)
+                })?;
+                return Ok(());
+            }
+        }
+        Err(crate::ParseError::new_range(
+            format!(
+                "no cast from `{}` to `{type_name}`",
+                stack_infos[0].type_name
+            ),
             start,
             end,
         ))
@@ -1550,7 +1799,7 @@ mod tests {
     }
 
     #[test]
-    fn round_rounds_half_away_from_zero_to_nearest_i32() -> Result<()> {
+    fn round_rounds_half_away_from_zero() -> Result<()> {
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         lookup.lookup(
@@ -1562,14 +1811,15 @@ mod tests {
         )?;
         segment.just(3.6f64);
         lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<i32>()?, 4);
+        assert_eq!(segment.call0::<f64>()?, 4.0);
         Ok(())
     }
 
     #[test]
     fn round_of_an_expression_result() -> Result<()> {
         // The motivating case: converting a physical size times a resolution
-        // (both f64) into a whole pixel count.
+        // (both f64) into a whole pixel count, still as an `f64` - narrowing
+        // to `i32` is a separate `as` cast, tested in the cast tests below.
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         lookup.lookup(
@@ -1583,24 +1833,7 @@ mod tests {
         segment.just(300.0f64);
         lookup.lookup("*", &mut segment, 2, Span::call_site(), Span::call_site())?;
         lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<i32>()?, 1024);
-        Ok(())
-    }
-
-    #[test]
-    fn round_errors_when_result_does_not_fit_in_i32() -> Result<()> {
-        let lookup = OpLookup::new();
-        let mut segment = DynSegment::new::<()>();
-        lookup.lookup(
-            "round",
-            &mut segment,
-            0,
-            Span::call_site(),
-            Span::call_site(),
-        )?;
-        segment.just(1.0e20f64);
-        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert!(segment.call0::<i32>().is_err());
+        assert_eq!(segment.call0::<f64>()?, 1024.0);
         Ok(())
     }
 
@@ -1618,37 +1851,33 @@ mod tests {
     }
 
     #[test]
-    fn float_widens_i32_to_f64_exactly() -> Result<()> {
+    fn cast_widens_i32_to_f64_exactly() -> Result<()> {
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
-        lookup.lookup(
-            "float",
-            &mut segment,
-            0,
-            Span::call_site(),
-            Span::call_site(),
-        )?;
         segment.just(1024i32);
-        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        lookup.lookup_cast("f64", &mut segment, Span::call_site(), Span::call_site())?;
         assert_eq!(segment.call0::<f64>()?, 1024.0);
         Ok(())
     }
 
     #[test]
-    fn float_composes_with_round_for_a_round_trip() -> Result<()> {
-        // float(width_px) / dpi, mirrored back with round(... * dpi) - the
-        // actual pattern image_resize.adm2 needs for its width_px triangle.
+    fn cast_narrows_f64_to_i32_when_the_value_fits() -> Result<()> {
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
-        lookup.lookup(
-            "float",
-            &mut segment,
-            0,
-            Span::call_site(),
-            Span::call_site(),
-        )?;
+        segment.just(1024.0f64);
+        lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())?;
+        assert_eq!(segment.call0::<i32>()?, 1024);
+        Ok(())
+    }
+
+    #[test]
+    fn cast_composes_with_round_for_the_image_resize_pattern() -> Result<()> {
+        // (width_px as f64) / dpi, mirrored back with round(... * dpi) as i32 -
+        // the actual pattern image_resize.adm2 needs for its width_px triangle.
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
         segment.just(1024i32);
-        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        lookup.lookup_cast("f64", &mut segment, Span::call_site(), Span::call_site())?;
         segment.just(300.0f64);
         lookup.lookup("/", &mut segment, 2, Span::call_site(), Span::call_site())?;
         assert_eq!(segment.call0::<f64>()?, 1024.0 / 300.0);
@@ -1656,12 +1885,43 @@ mod tests {
     }
 
     #[test]
-    fn float_scope_declines_a_call_whose_callee_is_not_float() -> Result<()> {
+    fn cast_errors_when_the_value_does_not_fit_in_the_target_type() -> Result<()> {
+        // lookup_cast's own Result only reports type-checking failures (unknown type, no
+        // registered source) - a checked cast's own out-of-range failure is deferred to
+        // execution, same as any other fallible op (see round_errors_when_result_does_not_fit's
+        // predecessor test and DynSegment::op1r's doc comment), so it's asserted via call0.
+        let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
-        segment.just(7i32);
-        segment.just(3i32);
-        let handled = float_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
-        assert!(!handled);
+        segment.just(1.0e20f64);
+        lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())?;
+        assert!(segment.call0::<i32>().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cast_errors_for_an_unknown_target_type() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1i32);
+        let result = lookup.lookup_cast(
+            "nonsense",
+            &mut segment,
+            Span::call_site(),
+            Span::call_site(),
+        );
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cast_errors_for_an_unregistered_source_type() -> Result<()> {
+        // bool -> i32 has no registered cast (deliberately out of scope - see the
+        // "Numeric casts" section's doc comment).
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(true);
+        let result = lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site());
+        assert!(result.is_err());
         Ok(())
     }
 

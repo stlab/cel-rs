@@ -6,7 +6,7 @@
 
 use std::any::TypeId;
 
-use crate::op_table::builtin_operand_types;
+use crate::op_table::{builtin_operand_types, cast_source_types};
 use crate::{Expr, ExprSpan, Literal, ParseError};
 
 /// A static type: one of the built-in primitives, or [`Ty::Any`] for anything adam-lang/CEL's
@@ -203,6 +203,40 @@ impl Ty {
         }
     }
 
+    /// Maps a type's bare name (as written in source, e.g. in a cast's target position) to its
+    /// [`Ty`], or `None` if `name` isn't a recognized primitive - the inverse of [`Ty::name`],
+    /// except it has no input that maps to [`Ty::Any`] (nothing is spelled `<any>` in source).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::Ty;
+    ///
+    /// assert_eq!(Ty::from_name("i32"), Some(Ty::I32));
+    /// assert_eq!(Ty::from_name("nonsense"), None);
+    /// ```
+    pub fn from_name(name: &str) -> Option<Ty> {
+        match name {
+            "i8" => Some(Ty::I8),
+            "i16" => Some(Ty::I16),
+            "i32" => Some(Ty::I32),
+            "i64" => Some(Ty::I64),
+            "i128" => Some(Ty::I128),
+            "isize" => Some(Ty::Isize),
+            "u8" => Some(Ty::U8),
+            "u16" => Some(Ty::U16),
+            "u32" => Some(Ty::U32),
+            "u64" => Some(Ty::U64),
+            "u128" => Some(Ty::U128),
+            "usize" => Some(Ty::Usize),
+            "f32" => Some(Ty::F32),
+            "f64" => Some(Ty::F64),
+            "bool" => Some(Ty::Bool),
+            "String" => Some(Ty::String),
+            _ => None,
+        }
+    }
+
     /// Returns `true` if `self` and `other` are compatible: either is [`Ty::Any`], or they're
     /// equal. `Ty::Any` unifying silently with everything (in both directions) is the load-bearing
     /// property that lets unannotated cells and custom host types produce zero false-positive
@@ -277,6 +311,11 @@ pub fn check_expr(expr: &Expr, resolve_ident: &impl Fn(&str) -> Ty) -> (Ty, Vec<
             (Ty::Any, diagnostics)
         }
         Expr::TupleIndex { base, .. } => (Ty::Any, check_expr(base, resolve_ident).1),
+        Expr::Cast {
+            expr,
+            type_name,
+            span,
+        } => check_cast(expr, type_name, *span, resolve_ident),
         Expr::If {
             cond,
             then_branch,
@@ -351,6 +390,38 @@ fn result_ty_for_op(name: &str, operand_ty: Ty) -> Ty {
         "==" | "!=" | "<" | "<=" | ">" | ">=" => Ty::Bool,
         _ => operand_ty,
     }
+}
+
+/// Checks an [`Expr::Cast`] node (`expr as type_name`): infers `expr`'s type, then (only if it
+/// resolved to a concrete type) checks that a conversion to `type_name` is registered via
+/// [`cast_source_types`]. Unlike [`check_op`], the node always infers as the target type once
+/// `type_name` itself resolves - a cast declares its own result type - regardless of whether a
+/// diagnostic was recorded for the source, matching [`check_logical`]'s pattern.
+fn check_cast(
+    expr: &Expr,
+    type_name: &str,
+    span: ExprSpan,
+    resolve_ident: &impl Fn(&str) -> Ty,
+) -> (Ty, Vec<ParseError>) {
+    let (expr_ty, mut diagnostics) = check_expr(expr, resolve_ident);
+    let Some(target_ty) = Ty::from_name(type_name) else {
+        diagnostics.push(ParseError::new_range(
+            format!("unknown type `{type_name}`"),
+            span.start,
+            span.end,
+        ));
+        return (Ty::Any, diagnostics);
+    };
+    if let Some(source_type_id) = expr_ty.type_id()
+        && !cast_source_types(type_name).contains(&source_type_id)
+    {
+        diagnostics.push(ParseError::new_range(
+            format!("no cast from `{}` to `{type_name}`", expr_ty.name()),
+            span.start,
+            span.end,
+        ));
+    }
+    (target_ty, diagnostics)
 }
 
 /// Checks an [`Expr::Logical`] (`&&`/`||`) node: both operands should unify with `Ty::Bool` (CEL's

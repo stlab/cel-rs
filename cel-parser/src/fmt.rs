@@ -22,9 +22,10 @@ impl Level {
     const SHIFT: Level = Level(6);
     const ADDITIVE: Level = Level(7);
     const MULTIPLICATIVE: Level = Level(8);
-    const UNARY: Level = Level(9);
-    const POSTFIX: Level = Level(10);
-    const PRIMARY: Level = Level(11);
+    const CAST: Level = Level(9);
+    const UNARY: Level = Level(10);
+    const POSTFIX: Level = Level(11);
+    const PRIMARY: Level = Level(12);
 
     /// The next level up (strictly tighter-binding than `self`).
     fn tighter(self) -> Level {
@@ -98,6 +99,15 @@ fn render(expr: &Expr) -> (String, Level) {
             let lhs_s = format_at(&operands[0], lhs_min);
             let rhs_s = format_at(&operands[1], rhs_min);
             (format!("{lhs_s} {name} {rhs_s}"), level)
+        }
+        Expr::Cast {
+            expr, type_name, ..
+        } => {
+            // Left-associative, like multiplicative/additive: the operand only needs to be at
+            // least as tight as Cast itself, so a chain like `x as i32 as f64` reprints without
+            // extra parens.
+            let expr_s = format_at(expr, Level::CAST);
+            (format!("{expr_s} as {type_name}"), Level::CAST)
         }
         Expr::Apply { callee, args, .. } => {
             let callee_s = format_at(callee, Level::POSTFIX);

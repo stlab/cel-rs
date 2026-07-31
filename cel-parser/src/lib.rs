@@ -23,7 +23,8 @@
 //! bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
 //! bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.
 //! additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
-//! multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
+//! multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression }.
+//! cast_expression = unary_expression { "as" identifier }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
 //! postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.
 //! primary_expression = literal | identifier | tuple_or_group | if_expression.
@@ -792,10 +793,10 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.`
+    /// `multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression }.`
     fn is_multiplicative_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
-        if self.is_unary_expression()? {
+        if self.is_cast_expression()? {
             loop {
                 let op_name = if self.is_punctuation("*") {
                     Some("*")
@@ -808,8 +809,8 @@ impl<C: ParserContext> Parser<C> {
                 };
 
                 if let Some(op_name) = op_name {
-                    if !self.is_unary_expression()? {
-                        return Err(self.error_at("expected unary_expression"));
+                    if !self.is_cast_expression()? {
+                        return Err(self.error_at("expected cast_expression"));
                     }
                     self.context.apply_op(
                         &self.op_lookup,
@@ -821,6 +822,37 @@ impl<C: ParserContext> Parser<C> {
                 } else {
                     break;
                 }
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// `cast_expression = unary_expression { "as" identifier }.`
+    ///
+    /// Binds tighter than `* / %` but looser than unary prefix and postfix, matching Rust: `-x as
+    /// f64` is `(-x) as f64`, and `x as i32 as f64` applies left-to-right (`(x as i32) as f64`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `"as"` isn't followed by an identifier, or if any sub-expression
+    /// returns an error.
+    fn is_cast_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
+        if self.is_unary_expression()? {
+            while self.is_keyword("as") {
+                let type_name = match self.peek_token() {
+                    Some(Token::Identifier(ident)) => ident.to_string(),
+                    _ => return Err(self.error_at("expected type name after `as`")),
+                };
+                self.advance();
+                self.context.apply_cast(
+                    &self.op_lookup,
+                    &type_name,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
             }
             Ok(true)
         } else {
