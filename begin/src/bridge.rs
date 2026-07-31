@@ -241,6 +241,7 @@ fn branch_node_id(id: ConditionalId, branch: Option<usize>) -> String {
 ///   entry in `rels`, all sharing `branch_index`/`branch_active`. When `rels.len() <= 1`,
 ///   pushes at most one direct `conditional → relationship` control link (none if `rels` is
 ///   empty), matching the pre-junction-node behavior.
+/// - Complexity: O(k) where k = `rels.len()` (the number of relationships in this branch or default).
 fn push_branch_links(
     nodes: &mut Vec<NodeData>,
     links: &mut Vec<LinkData>,
