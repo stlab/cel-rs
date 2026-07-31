@@ -57,7 +57,5 @@ sheet image_resize {
                 method [height_in, orig_width, orig_height] -> [width_in] { height_in * orig_width / orig_height }
             }
         }
-        0i32 => {}
-        _ => {}
     }
 }
