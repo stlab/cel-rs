@@ -174,8 +174,10 @@ pub enum LinkKind {
 /// A single edge in the D3 graph.
 ///
 /// When [`GraphData::arrows`] is `false` constraint edges are undirected; when `true`
-/// they are directed from `source` to `target`. Control edges are always directed
-/// (conditional node → relationship) and styled by `branch_index` and `branch_active`.
+/// they are directed from `source` to `target`. Control edges are always directed — from a
+/// conditional node to a relationship, or, when a branch has more than one relationship, from
+/// the conditional to an intermediate `Branch` node and from that node to each relationship —
+/// and styled by `branch_index` and `branch_active`.
 #[derive(Serialize, Clone, PartialEq)]
 pub struct LinkData {
     /// Stable string ID of the source node.
@@ -296,7 +298,12 @@ fn push_branch_links(
 ///
 /// Conditional nodes: for each conditional, emits one `Conditional` node, one `Constraint` link
 /// from the match cell to the conditional node, and one `Control` link per relationship in each
-/// branch/default. Control links carry `branch_index` and `branch_active` for rendering.
+/// branch/default. When a branch (or the default) holds more than one relationship, its control
+/// links route through an intermediate `Branch` junction node (`conditional → branch →
+/// relationship`) instead of a direct edge, so the branch's relationships visually group
+/// together; branches with 0 or 1 relationships keep a direct edge. Control links carry
+/// `branch_index` and `branch_active` for rendering, shared identically across both hops of a
+/// junction-routed branch.
 ///
 /// - Complexity: O(c + r + e + cond·b·k) where c = cells, r = relationships, e = adjacency pairs,
 ///   cond = conditionals, b = branches per conditional, k = keys per branch.
@@ -409,15 +416,15 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
         // Control links for default relationships
         let default_active = active_branch.is_none();
         if let Some(default_rels) = sheet.conditional_default_relationships(cond_id) {
-            for &rel_id in default_rels {
-                links.push(LinkData {
-                    source: node_id.clone(),
-                    target: rel_node_id(rel_id),
-                    kind: LinkKind::Control,
-                    branch_index: None,
-                    branch_active: Some(default_active),
-                });
-            }
+            push_branch_links(
+                &mut nodes,
+                &mut links,
+                &node_id,
+                cond_id,
+                None,
+                default_active,
+                default_rels,
+            );
         }
     }
 
@@ -619,6 +626,33 @@ mod tests {
         (sheet, labels)
     }
 
+    fn sheet_with_multi_relationship_default() -> (Sheet, Labels) {
+        let mut sheet = Sheet::new();
+        let mut labels = Labels::new();
+
+        let a = sheet.add_cell(2.0_f64);
+        labels.add_cell::<f64>(a, "a");
+        let b = sheet.add_cell(0.0_f64);
+        labels.add_cell::<f64>(b, "b");
+        let c = sheet.add_cell(0.0_f64);
+        labels.add_cell::<f64>(c, "c");
+        let p = sheet.add_cell(0_i32);
+        labels.add_cell::<i32>(p, "p");
+
+        let rel1 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &f64| Ok(*v))])
+            .unwrap();
+        let rel2 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, c, |v: &f64| Ok(*v))])
+            .unwrap();
+
+        sheet
+            .add_conditional::<i32>(p, vec![], vec![rel1, rel2])
+            .unwrap();
+
+        (sheet, labels)
+    }
+
     #[test]
     fn to_graph_data_omits_branch_node_for_single_relationship_branch() {
         let (sheet, labels) = sheet_with_conditional();
@@ -675,6 +709,56 @@ mod tests {
                         && l.branch_index == Some(0)
                         && l.branch_active == Some(true)),
                 "expected a Control link from the branch node to relationship {rel_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn to_graph_data_routes_multi_relationship_default_through_branch_node() {
+        let (sheet, labels) = sheet_with_multi_relationship_default();
+        let data = to_graph_data(&sheet, &labels);
+
+        let cond_id = data
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Conditional)
+            .map(|n| n.id.clone())
+            .unwrap();
+        let branch_id = data
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Branch)
+            .map(|n| n.id.clone())
+            .expect("expected a Branch node for the default relationships");
+
+        assert!(
+            data.links
+                .iter()
+                .any(|l| matches!(l.kind, LinkKind::Control)
+                    && l.source == cond_id
+                    && l.target == branch_id
+                    && l.branch_index.is_none()
+                    && l.branch_active == Some(true)),
+            "expected a Control link from the conditional to the default branch node"
+        );
+
+        let rel_ids: Vec<_> = data
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Relationship)
+            .map(|n| n.id.clone())
+            .collect();
+        assert_eq!(rel_ids.len(), 2);
+        for rel_id in rel_ids {
+            assert!(
+                data.links
+                    .iter()
+                    .any(|l| matches!(l.kind, LinkKind::Control)
+                        && l.source == branch_id
+                        && l.target == rel_id
+                        && l.branch_index.is_none()
+                        && l.branch_active == Some(true)),
+                "expected a Control link from the default branch node to relationship {rel_id}"
             );
         }
     }
