@@ -152,13 +152,16 @@ pub enum NodeKind {
 /// A single node in the D3 graph.
 #[derive(Serialize, Clone, PartialEq)]
 pub struct NodeData {
-    /// Stable string ID: `"c{ffi}"` for cells, `"r{ffi}"` for relationships, `"cond{ffi}"` for conditionals.
+    /// Stable string ID: `"c{ffi}"` for cells, `"r{ffi}"` for relationships, `"cond{ffi}"` for
+    /// conditionals, `"br{ffi}_{branch}"` for a named branch's junction node, `"br{ffi}_def"`
+    /// for the default's junction node.
     pub id: String,
     /// The kind of node, determining its visual rendering.
     pub kind: NodeKind,
-    /// Cell label (e.g. `"a"`); empty string for relationships and conditionals.
+    /// Cell label (e.g. `"a"`); empty string for relationships, conditionals, and branch junction nodes.
     pub label: String,
-    /// Current cell value as a display string; empty string for relationships and conditionals.
+    /// Current cell value as a display string; empty string for relationships, conditionals, and
+    /// branch junction nodes.
     pub value: String,
 }
 
@@ -167,7 +170,10 @@ pub struct NodeData {
 pub enum LinkKind {
     /// A regular constraint edge (cell ↔ relationship, or match cell → conditional node).
     Constraint,
-    /// A control edge from a conditional node to a branch relationship.
+    /// A control edge from a conditional node toward a branch's relationship(s): a direct edge
+    /// to the relationship when the branch has at most one, or, when it has more than one, a
+    /// two-hop path through an intermediate `Branch` junction node (see [`LinkData`]'s doc for
+    /// the full two-hop description).
     Control,
 }
 
