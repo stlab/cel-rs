@@ -17,15 +17,15 @@ html, body {
 }
 
 .node-cell {
-    fill: #fff;
-    stroke: #444;
+    fill: rgba(42, 120, 214, 0.1);
+    stroke: #2a78d6;
     stroke-width: 1.5;
     cursor: default;
 }
 
 .node-relationship {
-    fill: #fff;
-    stroke: #444;
+    fill: rgba(235, 104, 52, 0.1);
+    stroke: #eb6834;
     stroke-width: 1.5;
     cursor: default;
 }
@@ -50,8 +50,8 @@ html, body {
 }
 
 .node-conditional {
-    fill: #fff;
-    stroke: #444;
+    fill: rgba(27, 175, 122, 0.1);
+    stroke: #1baf7a;
     stroke-width: 1.5;
     cursor: default;
 }

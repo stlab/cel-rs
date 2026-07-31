@@ -1,0 +1,63 @@
+sheet image_resize {
+    // Reference pixel dimensions of the original source image. These are
+    // never an output of any relationship below, so they stay fixed.
+    cell orig_width: f64 = 1024.0;
+    cell orig_height: f64 = 768.0;
+
+    // Cells intended to be *derived* now (declared early = lower initial
+    // strength): pixel dimensions and zoom percent follow from the physical
+    // size and resolution below.
+    cell width_px: f64 = 1024.0;
+    cell height_px: f64 = 768.0;
+    cell percent: f64;
+
+    // "Constrain Proportions": 1 = locked, 0 = unlocked.
+    cell constrain_proportions: i32 = 1;
+
+    // Cells intended to stay *sources* by default now (declared last =
+    // higher initial strength): physical size in inches and resolution.
+    // Changing dpi therefore recomputes width_px/height_px, holding these
+    // fixed, instead of the other way around.
+    cell width_in: f64 = 3.4133333333333336;
+    cell height_in: f64 = 2.56;
+    cell dpi: f64 = 300.0;
+
+    // width_px, width_in, and dpi are a three-way constraint: fix any two,
+    // the third follows.
+    relationship {
+        method [width_px, dpi] -> [width_in] { width_px / dpi }
+        method [width_in, dpi] -> [width_px] { width_in * dpi }
+        method [width_px, width_in] -> [dpi] { width_px / width_in }
+    }
+
+    // Same triangle for height, sharing the same dpi cell as the width
+    // triangle above.
+    relationship {
+        method [height_px, dpi] -> [height_in] { height_px / dpi }
+        method [height_in, dpi] -> [height_px] { height_in * dpi }
+        method [height_px, height_in] -> [dpi] { height_px / height_in }
+    }
+
+    // percent is just width_px expressed relative to the original width.
+    relationship {
+        method [width_px, orig_width] -> [percent] { width_px / orig_width * 100.0 }
+        method [percent, orig_width] -> [width_px] { orig_width * percent / 100.0 }
+    }
+
+    // Aspect-ratio lock, now expressed on the *inch* cells instead of the
+    // pixel cells: width_in/height_in are the sources that dpi divides
+    // into, so the lock has to constrain them directly - constraining
+    // width_px/height_px instead would double-claim cells the two
+    // triangles above already derive, which the planner would reject as
+    // a conflict.
+    conditional constrain_proportions {
+        1i32 => {
+            relationship {
+                method [width_in, orig_width, orig_height] -> [height_in] { width_in * orig_height / orig_width }
+                method [height_in, orig_width, orig_height] -> [width_in] { height_in * orig_width / orig_height }
+            }
+        }
+        0i32 => {}
+        _ => {}
+    }
+}

@@ -4,20 +4,24 @@ use adam_rs::Sheet;
 use dioxus::prelude::*;
 
 use crate::bridge::{Labels, to_graph_data};
-use crate::demo_source::{build_sheet, load_demo_source};
+use crate::demo_source::{ActiveSource, available_demos, build_sheet, load_demo_source};
 use crate::graph_view::GraphView;
 use crate::inspector::Inspector;
-use crate::spectrum::SpTheme;
+use crate::spectrum::{SpActionButton, SpActionGroup, SpTheme};
 
-/// Root component: Spectrum theme wrapper with the graph and Inspector filling the
-/// viewport. The demo adam-lang source lives in `begin/assets/demo.adm2` — on desktop,
-/// editing it while running under `dx serve` hot-reloads the sheet into this running
-/// app via [`crate::demo_source::spawn_hot_reload`], exactly as if the old Apply
-/// button had been pressed.
+/// Root component: Spectrum theme wrapper with a demo picker, the graph, and
+/// the Inspector filling the viewport. `begin` ships with several example
+/// property models (`begin/assets/*.adm2` — see
+/// [`crate::demo_source::available_demos`]); [`DemoPicker`] switches which
+/// one is loaded. On desktop, editing the *currently selected* demo's file
+/// while running under `dx serve` hot-reloads the sheet into this running
+/// app via [`crate::demo_source::spawn_hot_reload`], exactly as if the old
+/// Apply button had been pressed.
 ///
-/// A read or parse failure at startup does not prevent the app from launching: it
-/// prints the diagnostic to stderr and starts with an empty sheet instead, so a
-/// syntax error in `demo.adm2` can be fixed and hot-reloaded in without restarting.
+/// A read or parse failure loading a demo does not prevent the app from
+/// launching or switching: it prints the diagnostic to stderr and falls back
+/// to an empty sheet instead, so a syntax error can be fixed and
+/// hot-reloaded in without restarting.
 #[component]
 pub fn App() -> Element {
     // The webview always probes `/favicon.ico` at the origin root regardless of the
@@ -35,22 +39,8 @@ pub fn App() -> Element {
         responder.respond(response);
     });
 
-    let (initial_sheet, initial_labels, initial_active_source) = match load_demo_source() {
-        Ok(source) => {
-            let outcome = build_sheet(&source);
-            if let Some(err) = &outcome.error {
-                eprintln!("{err}");
-            }
-            match outcome.sheet_labels {
-                Some((sheet, labels)) => (sheet, labels, source),
-                None => (Sheet::new(), Labels::new(), String::new()),
-            }
-        }
-        Err(err) => {
-            eprintln!("{err}");
-            (Sheet::new(), Labels::new(), String::new())
-        }
-    };
+    let initial_demo_name = available_demos().first().copied().unwrap_or_default();
+    let (initial_sheet, initial_labels, initial_active_source) = load_demo(initial_demo_name);
     let sheet = use_signal(|| initial_sheet);
     let labels = use_signal(|| initial_labels);
     let active_source = use_signal(|| initial_active_source);
@@ -68,19 +58,23 @@ pub fn App() -> Element {
             spawn(async move {
                 use futures_util::StreamExt;
                 while rx.next().await.is_some() {
-                    eprintln!("loading {}", crate::bridge::SOURCE_FILE_NAME);
-                    let source = match crate::demo_source::load_demo_source() {
+                    let name = active_source.read().name.clone();
+                    eprintln!("loading begin/assets/{name}.adm2");
+                    let source = match crate::demo_source::load_demo_source(&name) {
                         Ok(source) => source,
                         Err(err) => {
                             eprintln!("{err}");
                             continue;
                         }
                     };
-                    let outcome = crate::demo_source::build_sheet(&source);
+                    let outcome = build_sheet(&source, &format!("begin/assets/{name}.adm2"));
                     if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
                         sheet.set(new_sheet);
                         labels.set(new_labels);
-                        active_source.set(source);
+                        active_source.set(ActiveSource {
+                            name: name.clone(),
+                            text: source,
+                        });
                     }
                     if let Some(msg) = outcome.error {
                         eprintln!("{msg}");
@@ -104,9 +98,84 @@ pub fn App() -> Element {
             scale: "medium".to_string(),
             system: "spectrum-two".to_string(),
             div {
-                style: "position: fixed; inset: 0; display: flex; overflow: hidden;",
-                GraphView { data: graph_data }
-                Inspector { sheet, labels, active_source }
+                style: "position: fixed; inset: 0; display: flex; flex-direction: column; overflow: hidden;",
+                DemoPicker { sheet, labels, active_source }
+                div {
+                    style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
+                    GraphView { data: graph_data }
+                    Inspector { sheet, labels, active_source }
+                }
+            }
+        }
+    }
+}
+
+/// Loads demo `name`, builds its sheet, and returns it alongside the
+/// [`ActiveSource`] describing what just loaded.
+///
+/// A read or parse failure prints the diagnostic to stderr and returns an
+/// empty sheet with a default (empty) [`ActiveSource`] instead of failing —
+/// see [`App`]'s doc comment for why.
+fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
+    match load_demo_source(name) {
+        Ok(source) => {
+            let outcome = build_sheet(&source, &format!("begin/assets/{name}.adm2"));
+            if let Some(err) = &outcome.error {
+                eprintln!("{err}");
+            }
+            match outcome.sheet_labels {
+                Some((sheet, labels)) => (
+                    sheet,
+                    labels,
+                    ActiveSource {
+                        name: name.to_string(),
+                        text: source,
+                    },
+                ),
+                None => (Sheet::new(), Labels::new(), ActiveSource::default()),
+            }
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            (Sheet::new(), Labels::new(), ActiveSource::default())
+        }
+    }
+}
+
+/// Picker row listing every demo from [`available_demos`]; clicking one
+/// loads it into `sheet`/`labels`/`active_source`, highlighting whichever
+/// name matches `active_source`'s current value.
+#[component]
+fn DemoPicker(
+    sheet: Signal<Sheet>,
+    labels: Signal<Labels>,
+    active_source: Signal<ActiveSource>,
+) -> Element {
+    let current = active_source.read().name.clone();
+
+    rsx! {
+        div {
+            style: "padding: 8px 12px; border-bottom: 1px solid #ccc; flex: none;",
+            SpActionGroup {
+                compact: true,
+                for &name in available_demos() {
+                    SpActionButton {
+                        key: "{name}",
+                        selected: name == current,
+                        onclick: {
+                            let mut sheet = sheet;
+                            let mut labels = labels;
+                            let mut active_source = active_source;
+                            move |_| {
+                                let (new_sheet, new_labels, new_active_source) = load_demo(name);
+                                sheet.set(new_sheet);
+                                labels.set(new_labels);
+                                active_source.set(new_active_source);
+                            }
+                        },
+                        "{name}"
+                    }
+                }
             }
         }
     }
@@ -115,12 +184,19 @@ pub fn App() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::demo_source::DEMO_SOURCE_TEXT;
+
+    fn toy_example_source() -> &'static str {
+        crate::demo_source::DEMOS_WITH_SOURCE
+            .iter()
+            .find(|&&(name, _)| name == "toy_example")
+            .map(|&(_, source)| source)
+            .expect("toy_example.adm2 must be bundled")
+    }
 
     #[test]
     fn demo_source_g_not_forced_when_p_is_zero() {
-        let outcome = build_sheet(DEMO_SOURCE_TEXT);
-        let (sheet, labels) = outcome.sheet_labels.expect("demo.adm2 must build");
+        let outcome = build_sheet(toy_example_source(), "toy_example.adm2");
+        let (sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
         let g_id = sheet
             .cells()
             .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("g"))
@@ -130,8 +206,8 @@ mod tests {
 
     #[test]
     fn demo_source_g_forced_when_p_is_one() {
-        let outcome = build_sheet(DEMO_SOURCE_TEXT);
-        let (mut sheet, labels) = outcome.sheet_labels.expect("demo.adm2 must build");
+        let outcome = build_sheet(toy_example_source(), "toy_example.adm2");
+        let (mut sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
         let p_id = sheet
             .cells()
             .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("p"))
@@ -149,8 +225,8 @@ mod tests {
 
     #[test]
     fn demo_source_g_unforced_again_after_p_returns_to_zero() {
-        let outcome = build_sheet(DEMO_SOURCE_TEXT);
-        let (mut sheet, labels) = outcome.sheet_labels.expect("demo.adm2 must build");
+        let outcome = build_sheet(toy_example_source(), "toy_example.adm2");
+        let (mut sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
         let p_id = sheet
             .cells()
             .find(|&id| labels.cells.get(&id).map(|m| m.label.as_str()) == Some("p"))
@@ -169,5 +245,13 @@ mod tests {
             !sheet.is_forced(g_id),
             "g should not be forced once p == 0 again"
         );
+    }
+
+    #[test]
+    fn load_demo_unknown_name_falls_back_to_empty_sheet() {
+        let (sheet, labels, active) = load_demo("does_not_exist");
+        assert_eq!(sheet.cells().count(), 0);
+        assert_eq!(labels.cells.len(), 0);
+        assert_eq!(active.name, "");
     }
 }
