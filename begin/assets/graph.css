@@ -17,14 +17,17 @@ html, body {
 }
 
 .node-cell {
-    fill: rgba(42, 120, 214, 0.1);
+    /* Opaque, not alpha-blended: an edge occasionally settles behind a
+       node in the force layout, and it must stay fully hidden rather
+       than show through the fill. */
+    fill: #eaf2fb;
     stroke: #2a78d6;
     stroke-width: 1.5;
     cursor: default;
 }
 
 .node-relationship {
-    fill: rgba(235, 104, 52, 0.1);
+    fill: #fdf0eb;
     stroke: #eb6834;
     stroke-width: 1.5;
     cursor: default;
@@ -50,7 +53,7 @@ html, body {
 }
 
 .node-conditional {
-    fill: rgba(27, 175, 122, 0.1);
+    fill: #e8f7f2;
     stroke: #1baf7a;
     stroke-width: 1.5;
     cursor: default;
