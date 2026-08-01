@@ -566,6 +566,14 @@
         valueLayer.selectAll('text')
             .attr('x', function (d) { return d.x; })
             .attr('y', function (d) { return d.y + 10; });
+
+        // ticked() only runs via the live simulation timer during and just
+        // after a drag/unpin (settleSimulation's synchronous tick(n) never
+        // dispatches the 'tick' event, only restart()'s timer does) — so
+        // this is what keeps the zoom-out floor and pan limits in sync with
+        // node positions as a drag grows or shrinks the graph's bounds,
+        // without adding recomputation on any other code path.
+        updateZoomConstraints();
     }
 
     // Called by the on-screen zoom controls in graph_view.rs.
