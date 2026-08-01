@@ -1277,14 +1277,26 @@ fn signatures_for_cast(target_name: &str) -> Option<&'static [CastSignature]> {
     }
 }
 
-/// Lists every source `TypeId` with a registered cast to `target_name`, or an empty `Vec` if
-/// `target_name` names no recognized cast-target type. Used by the type checker (`ty.rs`) to
-/// validate a cast without needing to touch a [`DynSegment`] - reads the exact same tables
-/// [`OpLookup::lookup_cast`] does, so the two can't drift out of sync.
-pub fn cast_source_types(target_name: &str) -> Vec<TypeId> {
+/// Lists every source `TypeId` with a registered cast to `target_name`. Used by the type checker
+/// (`ty.rs`) to validate a cast without needing to touch a [`DynSegment`] - reads the exact same
+/// tables [`OpLookup::lookup_cast`] does, so the two can't drift out of sync.
+///
+/// - Postcondition: yields no items if `target_name` names no recognized cast-target type.
+///
+/// - Complexity: O(s) where s is the number of registered sources for `target_name`.
+///
+/// # Examples
+///
+/// ```rust
+/// use cel_parser::op_table::cast_source_types;
+///
+/// assert!(cast_source_types("i32").count() > 0);
+/// assert_eq!(cast_source_types("not_a_type").count(), 0);
+/// ```
+pub fn cast_source_types(target_name: &str) -> impl Iterator<Item = TypeId> {
     signatures_for_cast(target_name)
-        .map(|sigs| sigs.iter().map(CastSignature::source_type_id).collect())
-        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|sigs| sigs.iter().map(CastSignature::source_type_id))
 }
 
 /// Built-in operation scope.

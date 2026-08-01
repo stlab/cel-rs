@@ -413,7 +413,7 @@ fn check_cast(
         return (Ty::Any, diagnostics);
     };
     if let Some(source_type_id) = expr_ty.type_id()
-        && !cast_source_types(type_name).contains(&source_type_id)
+        && !cast_source_types(type_name).any(|id| id == source_type_id)
     {
         diagnostics.push(ParseError::new_range(
             format!("no cast from `{}` to `{type_name}`", expr_ty.name()),
