@@ -284,6 +284,39 @@
         update(data);
     }
 
+    // Returns a d3.drag() behavior that pins a node's position while it's
+    // being dragged and reheats `sim` so the rest of the graph reacts live.
+    // Deliberately does NOT clear fx/fy on drag-end — the node stays exactly
+    // where it was dropped; see unpinNode() for how a node is released.
+    function dragBehavior(sim) {
+        return d3.drag()
+            .on('start', function (event, d) {
+                // Both d3.zoom (on the <svg>) and this drag (on the node
+                // shape) listen for pointer-down; without this the same
+                // gesture would also pan the canvas.
+                event.sourceEvent.stopPropagation();
+                if (!event.active) sim.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+                d3.select(this).classed('dragging', true);
+            })
+            .on('drag', function (event, d) {
+                d.fx = event.x;
+                d.fy = event.y;
+            })
+            .on('end', function (event, d) {
+                if (!event.active) sim.alphaTarget(0);
+                d3.select(this).classed('dragging', false);
+            });
+    }
+
+    // Releases a pinned node back into the free simulation.
+    function unpinNode(event, d) {
+        d.fx = null;
+        d.fy = null;
+        simulation.alpha(Math.max(simulation.alpha(), 0.3)).restart();
+    }
+
     function update(data) {
         latestData = data;
         // Guard: no-op if not yet initialized
@@ -366,14 +399,18 @@
             .attr('class', 'node-cell')
             .attr('width', CELL_W)
             .attr('height', CELL_H)
-            .attr('rx', CELL_RX);
+            .attr('rx', CELL_RX)
+            .call(dragBehavior(simulation))
+            .on('dblclick', unpinNode);
 
         // Join relationship circles
         relLayer.selectAll('circle')
             .data(relNodes, function (d) { return d.id; })
             .join('circle')
             .attr('class', 'node-relationship')
-            .attr('r', REL_R);
+            .attr('r', REL_R)
+            .call(dragBehavior(simulation))
+            .on('dblclick', unpinNode);
 
         // Dim inactive relationship circles and their constraint links.
         // A relationship is inactive if any control link targets it but none are active.
@@ -438,7 +475,9 @@
             .join('rect')
             .attr('class', 'node-conditional')
             .attr('width', COND_SIZE * 2)
-            .attr('height', COND_SIZE * 2);
+            .attr('height', COND_SIZE * 2)
+            .call(dragBehavior(simulation))
+            .on('dblclick', unpinNode);
 
         // Join cell name labels (centered inside rect)
         labelLayer.selectAll('text')

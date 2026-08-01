@@ -20,14 +20,14 @@ html, body {
     fill: #fff;
     stroke: #444;
     stroke-width: 1.5;
-    cursor: default;
+    cursor: grab;
 }
 
 .node-relationship {
     fill: #fff;
     stroke: #444;
     stroke-width: 1.5;
-    cursor: default;
+    cursor: grab;
 }
 
 .node-label {
@@ -53,7 +53,7 @@ html, body {
     fill: #fff;
     stroke: #444;
     stroke-width: 1.5;
-    cursor: default;
+    cursor: grab;
 }
 
 .link-control {
@@ -82,4 +82,10 @@ html, body {
     top: 8px;
     right: 8px;
     z-index: 10;
+}
+
+.node-cell.dragging,
+.node-relationship.dragging,
+.node-conditional.dragging {
+    cursor: grabbing;
 }
