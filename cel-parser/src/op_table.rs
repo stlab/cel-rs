@@ -1345,7 +1345,7 @@ struct RoundFn;
 /// to the nearest integer, halfway values away from zero, matching
 /// `f64::round` exactly - narrowing to an integer type is a separate,
 /// explicit step (`round(x) as i32`) via the general cast operator (see
-/// the "Numeric casts" section above), not this function's job.
+/// the "Casts" section above), not this function's job.
 ///
 /// Registered by every [`OpLookup::new()`] (see there), so `round` reads
 /// like any other builtin operator without a caller needing to set it up.
@@ -1355,9 +1355,10 @@ struct RoundFn;
 /// callee and its arguments on the stack (see `cel-parser/src/lib.rs`'s
 /// primary/postfix expression grammar) - so this one scope function
 /// handles both halves: `("round", 0)` pushes the [`RoundFn`] marker,
-/// and `("()", 2)` peeks the stack to confirm this specific call's callee
-/// is that marker before consuming it, deferring to any other registered
-/// scope (`Ok(false)`) otherwise.
+/// and `("()", 2)` peeks the stack to confirm both that it actually has
+/// two operands and that this specific call's callee is that marker
+/// before consuming it, deferring to any other registered scope
+/// (`Ok(false)`) otherwise.
 fn round_scope(
     name: &str,
     segment: &mut DynSegment,
@@ -1371,7 +1372,7 @@ fn round_scope(
         }
         ("()", 2) => {
             let top = segment.peek_stack_infos(2);
-            if top[0].type_id != TypeId::of::<RoundFn>() {
+            if top.len() != 2 || top[0].type_id != TypeId::of::<RoundFn>() {
                 return Ok(false);
             }
             segment.op2(|_callee: RoundFn, x: f64| x.round())?;
@@ -1592,14 +1593,15 @@ impl OpLookup {
 
     /// Looks up and applies a cast (`expr as Type`), attaching the expression span to any error.
     ///
-    /// - Precondition: exactly one value is on top of `segment`'s stack (the cast's operand).
-    /// - Postcondition: on success, that value is replaced in place by the converted value.
+    /// - Postcondition: on success, the operand on top of `segment`'s stack is replaced in place
+    ///   by the converted value.
     ///
     /// # Errors
     ///
-    /// Returns a [`crate::ParseError`] spanning `start..=end` if `type_name` isn't a recognized
-    /// cast-target type, if no cast from the operand's type to it is registered, or if the
-    /// conversion itself fails (e.g. an out-of-range or non-finite value).
+    /// Returns a [`crate::ParseError`] spanning `start..=end` if `segment`'s stack is empty, if
+    /// `type_name` isn't a recognized cast-target type, if no cast from the operand's type to it
+    /// is registered, or if the conversion itself fails (e.g. an out-of-range or non-finite
+    /// value).
     ///
     /// - Complexity: O(s) in the number of registered sources for `type_name`.
     pub fn lookup_cast(
@@ -1617,8 +1619,14 @@ impl OpLookup {
                 end,
             ));
         };
-        let stack_infos = segment.peek_stack_infos(1);
-        let source_type_id = stack_infos[0].type_id;
+        let Some(operand) = segment.peek_stack_infos(1).first() else {
+            return Err(crate::ParseError::new_range(
+                "cast requires an operand on the stack".to_string(),
+                start,
+                end,
+            ));
+        };
+        let source_type_id = operand.type_id;
         for sig in signatures {
             if sig.source_type_id() == source_type_id {
                 (sig.op_fn)(segment, source_span).map_err(|e| {
@@ -1628,10 +1636,7 @@ impl OpLookup {
             }
         }
         Err(crate::ParseError::new_range(
-            format!(
-                "no cast from `{}` to `{type_name}`",
-                stack_infos[0].type_name
-            ),
+            format!("no cast from `{}` to `{type_name}`", operand.type_name),
             start,
             end,
         ))
@@ -1918,6 +1923,35 @@ mod tests {
         segment.just(3.0f64);
         let handled = round_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
         assert!(!handled);
+        Ok(())
+    }
+
+    #[test]
+    fn round_scope_declines_rather_than_panics_on_an_undersized_stack() -> Result<()> {
+        // Regression test: `("()", 2)` used to index `peek_stack_infos(2)[0]` unconditionally,
+        // but `peek_stack_infos` returns an *empty* slice (not a short one) when the stack has
+        // fewer than the requested count - an empty stack here panicked instead of declining.
+        let mut segment = DynSegment::new::<()>();
+        let handled = round_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
+        assert!(!handled);
+
+        let mut segment = DynSegment::new::<()>();
+        segment.just(3.0f64); // only one of the two expected operands
+        let handled = round_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
+        assert!(!handled);
+        Ok(())
+    }
+
+    #[test]
+    fn lookup_cast_errors_rather_than_panics_on_an_empty_stack() -> Result<()> {
+        // Regression test: `lookup_cast` used to index `peek_stack_infos(1)[0]` unconditionally,
+        // which panicked (rather than returning a `ParseError`) when the stack was empty -
+        // reachable directly through this public API without going through the grammar, which
+        // always pushes the operand first.
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        let result = lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site());
+        assert!(result.is_err());
         Ok(())
     }
 
