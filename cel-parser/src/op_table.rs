@@ -1138,13 +1138,8 @@ macro_rules! all_float_to_int_casts {
     };
 }
 
-// The `vec_init_then_push` allow below is deliberate: `v` is built by generator macros whose
-// entry count depends on `$tgt_ty` (12 vs. 14 depending on whether a float-source table is
-// merged in), so a `vec![]` literal can't express it - same rationale as
-// `LEFT_SHIFT_SIGNATURES`/`RIGHT_SHIFT_SIGNATURES` above.
 macro_rules! int_cast_sources {
     ($name:ident, $tgt_ty:ty) => {
-        #[allow(clippy::vec_init_then_push)]
         static $name: Lazy<Vec<CastSignature>> = Lazy::new(|| {
             let mut v = Vec::with_capacity(14);
             all_int_to_int_casts!(v, $tgt_ty);
@@ -1167,45 +1162,45 @@ int_cast_sources!(I64_CAST_SOURCES, i64);
 int_cast_sources!(I128_CAST_SOURCES, i128);
 int_cast_sources!(ISIZE_CAST_SOURCES, isize);
 
-#[allow(clippy::vec_init_then_push)]
 static F32_CAST_SOURCES: Lazy<Vec<CastSignature>> = Lazy::new(|| {
-    let mut v = Vec::with_capacity(14);
-    all_int_to_float_casts!(v, f32);
-    // f64 -> f32: checked (may not fit in f32's finite range).
-    v.push(CastSignature {
-        source_type_id_index: TYPE_F64,
-        op_fn: |seg, span| {
-            seg.op1r(move |x: f64| -> Result<f32> {
-                if !x.is_finite() {
-                    return Err(span_err(span, anyhow!("value is not finite")));
-                }
-                if x.abs() > f32::MAX as f64 {
-                    return Err(span_err(span, anyhow!("value does not fit in `f32`")));
-                }
-                Ok(x as f32)
-            })
+    let mut v = vec![
+        // f64 -> f32: checked (may not fit in f32's finite range).
+        CastSignature {
+            source_type_id_index: TYPE_F64,
+            op_fn: |seg, span| {
+                seg.op1r(move |x: f64| -> Result<f32> {
+                    if !x.is_finite() {
+                        return Err(span_err(span, anyhow!("value is not finite")));
+                    }
+                    if x.abs() > f32::MAX as f64 {
+                        return Err(span_err(span, anyhow!("value does not fit in `f32`")));
+                    }
+                    Ok(x as f32)
+                })
+            },
         },
-    });
-    v.push(CastSignature {
-        source_type_id_index: TYPE_F32,
-        op_fn: |seg, _span| seg.op1(|x: f32| x),
-    });
+        CastSignature {
+            source_type_id_index: TYPE_F32,
+            op_fn: |seg, _span| seg.op1(|x: f32| x),
+        },
+    ];
+    all_int_to_float_casts!(v, f32);
     v
 });
 
-#[allow(clippy::vec_init_then_push)]
 static F64_CAST_SOURCES: Lazy<Vec<CastSignature>> = Lazy::new(|| {
-    let mut v = Vec::with_capacity(14);
+    let mut v = vec![
+        // f32 -> f64: always exact.
+        CastSignature {
+            source_type_id_index: TYPE_F32,
+            op_fn: |seg, _span| seg.op1(|x: f32| x as f64),
+        },
+        CastSignature {
+            source_type_id_index: TYPE_F64,
+            op_fn: |seg, _span| seg.op1(|x: f64| x),
+        },
+    ];
     all_int_to_float_casts!(v, f64);
-    // f32 -> f64: always exact.
-    v.push(CastSignature {
-        source_type_id_index: TYPE_F32,
-        op_fn: |seg, _span| seg.op1(|x: f32| x as f64),
-    });
-    v.push(CastSignature {
-        source_type_id_index: TYPE_F64,
-        op_fn: |seg, _span| seg.op1(|x: f64| x),
-    });
     v
 });
 
