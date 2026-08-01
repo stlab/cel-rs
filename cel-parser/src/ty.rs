@@ -336,6 +336,9 @@ pub fn check_expr(expr: &Expr, resolve_ident: &impl Fn(&str) -> Ty) -> (Ty, Vec<
 /// concrete type) matches them against [`builtin_operand_types`]. An operator
 /// `builtin_operand_types` doesn't recognize at all (e.g. a tuple-shaped custom op registered
 /// only at runtime) can't be checked here and infers as `Ty::Any` — not an error.
+///
+/// - Complexity: O(s) where s is the number of overloads [`builtin_operand_types`] registers for
+///   `name`, plus the cost of checking each operand (see [`check_expr`]'s own complexity note).
 fn check_op(
     name: &str,
     operands: &[Expr],
@@ -397,6 +400,10 @@ fn result_ty_for_op(name: &str, operand_ty: Ty) -> Ty {
 /// [`cast_source_types`]. Unlike [`check_op`], the node always infers as the target type once
 /// `type_name` itself resolves - a cast declares its own result type - regardless of whether a
 /// diagnostic was recorded for the source, matching [`check_logical`]'s pattern.
+///
+/// - Complexity: O(s) where s is the number of registered sources [`cast_source_types`] returns
+///   for `type_name`, plus the cost of checking `expr` (see [`check_expr`]'s own complexity
+///   note).
 fn check_cast(
     expr: &Expr,
     type_name: &str,

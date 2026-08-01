@@ -296,6 +296,40 @@ mod tests {
     }
 
     #[test]
+    fn cast_chain_reprints_without_extra_parens() {
+        assert_eq!(format_expr(&parse("x as i32 as f64")), "x as i32 as f64");
+    }
+
+    #[test]
+    fn unary_minus_before_a_cast_needs_no_parens() {
+        // Matches Rust: `-x as f64` parses as `(-x) as f64` - unary already binds tighter than
+        // Cast, so the printer doesn't need to add parens to preserve that grouping.
+        assert_eq!(format_expr(&parse("-x as f64")), "-x as f64");
+    }
+
+    #[test]
+    fn explicit_grouping_before_a_cast_keeps_its_parens() {
+        // `as` binds tighter than `+`, so without parens `(a + b) as i32` would reprint as
+        // `a + b as i32` - a different expression (`a + (b as i32)`). The parens must survive.
+        assert_eq!(format_expr(&parse("(a + b) as i32")), "(a + b) as i32");
+    }
+
+    #[test]
+    fn cast_operand_of_an_additive_expression_needs_no_parens() {
+        // `a + b as i32` already parses as `a + (b as i32)` (`as` binds tighter than `+`), so no
+        // parens are needed around the cast when reprinting.
+        assert_eq!(format_expr(&parse("a + b as i32")), "a + b as i32");
+    }
+
+    #[test]
+    fn explicit_grouping_around_a_cast_before_multiplicative_is_redundant_and_dropped() {
+        // `(x as i32) * y` parses to the exact same tree as `x as i32 * y` (cast already binds
+        // tighter than `*`), so the now-redundant parens are dropped on reprint - matching the
+        // module doc's "parens added only where required, not exhaustively".
+        assert_eq!(format_expr(&parse("(x as i32) * y")), "x as i32 * y");
+    }
+
+    #[test]
     fn one_tuple_keeps_its_trailing_comma() {
         assert_eq!(format_expr(&parse("(1i32,)")), "(1i32,)");
     }

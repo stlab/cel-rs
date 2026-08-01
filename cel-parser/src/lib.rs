@@ -1743,6 +1743,68 @@ mod tests {
     }
 
     #[test]
+    fn cast_expression_parses_and_executes() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("1024i32 as f64");
+        assert_eq!(result.unwrap().call0::<f64>().unwrap(), 1024.0);
+    }
+
+    #[test]
+    fn cast_expression_chains_left_to_right() {
+        // `x as i32 as f64` must apply left-to-right: `(x as i32) as f64`, not
+        // `x as (i32 as f64)` (which isn't even expressible - a cast target is a bare
+        // identifier, not another cast expression).
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("1.5f64 as i32 as f64");
+        assert_eq!(result.unwrap().call0::<f64>().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn cast_binds_tighter_than_unary_negation() {
+        // `-x as u32` must parse as `(-x) as u32` (matching Rust): the negative operand hits the
+        // checked int->int cast's own out-of-range check at execution, not a "no operation `-`
+        // for `u32`" error at parse time, which is what parsing it as `-(x as u32)` would
+        // produce instead - `u32` has no registered unary negation, matching Rust (u32 doesn't
+        // implement `Neg`).
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("-1i32 as u32").expect(
+            "parses: unary negation is registered for i32, and i32 -> u32 is a valid cast pair",
+        );
+        let err = seg.call0::<u32>().unwrap_err();
+        // The cast's own error is wrapped in a `SpanContext` (see `span_err`), which becomes the
+        // outermost context and so is what plain `Display`/`to_string()` shows - the underlying
+        // "does not fit" message is further down the `anyhow` chain, hence `{:#}`.
+        let full = format!("{err:#}");
+        assert!(
+            full.contains("does not fit"),
+            "expected an out-of-range cast error, got: {full}"
+        );
+    }
+
+    #[test]
+    fn cast_binds_tighter_than_multiplicative_operators() {
+        // `*` requires homogeneous operand types, so if `as` binds tighter than `*` (matching
+        // Rust), this parses as `2i32 * (3i32 as f64)` - an `i32 * f64` mismatch, which this
+        // grammar's eager, statically-typed segment construction rejects immediately at parse
+        // time (operator/operand-type matching isn't deferred to execution, unlike a cast's own
+        // value-range check). If `as` bound looser instead, this would parse as
+        // `(2i32 * 3i32) as f64` and succeed.
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("2i32 * 3i32 as f64");
+        assert!(result.is_err(), "expected a type-mismatch parse error");
+    }
+
+    #[test]
+    fn cast_binds_tighter_than_additive_operators() {
+        // Same reasoning as the multiplicative case: `1i32 + 2i32 as f64` must parse as
+        // `1i32 + (2i32 as f64)` (an `i32 + f64` mismatch, a parse-time error), not
+        // `(1i32 + 2i32) as f64` (which would succeed).
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("1i32 + 2i32 as f64");
+        assert!(result.is_err(), "expected a type-mismatch parse error");
+    }
+
+    #[test]
     fn invalid_expression() {
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str("+");
