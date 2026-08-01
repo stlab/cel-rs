@@ -5,6 +5,7 @@
     var CELL_W = 60;
     var CELL_H = 36;
     var CELL_RX = 4;
+    var CELL_LABEL_PADDING = 16;                          // horizontal padding added around the wider of the label/value text when sizing a cell's box
     var REL_R = 16;
     var COND_SIZE = 20;                                   // NEW: diamond half-width/height
     var CELL_COLLIDE_R = 38;
@@ -39,17 +40,27 @@
     var latestData = null;
 
     // Returns the point on the rect boundary of a cell centered at (tx,ty)
-    // along the approach line from (sx,sy) to (tx,ty).
-    function cellEdgePoint(sx, sy, tx, ty) {
+    // along the approach line from (sx,sy) to (tx,ty). `hw`/`hh` are that
+    // cell's own half-width/half-height (each cell can have a different
+    // width - see cellWidth()), defaulting to the base cell size.
+    function cellEdgePoint(sx, sy, tx, ty, hw, hh) {
+        if (hw === undefined) hw = CELL_W / 2;
+        if (hh === undefined) hh = CELL_H / 2;
         var dx = tx - sx, dy = ty - sy;
         var dist = Math.sqrt(dx * dx + dy * dy);
         if (dist < 1) return { x: tx, y: ty };
         var nx = dx / dist, ny = dy / dist;
-        var hw = CELL_W / 2, hh = CELL_H / 2;
         var td = Math.abs(nx) > 1e-9 ? hw / Math.abs(nx) : Infinity;
         var ld = Math.abs(ny) > 1e-9 ? hh / Math.abs(ny) : Infinity;
         var d = Math.min(td, ld);
         return { x: tx - nx * d, y: ty - ny * d };
+    }
+
+    // Returns cell node `d`'s rendered box width, falling back to the base
+    // cell width before it's been measured (see the "Size cell boxes to fit
+    // their label/value text" step in update()).
+    function cellWidth(d) {
+        return d.w || CELL_W;
     }
 
     // Returns the point on the boundary of a circle (centered at cx,cy, radius r)
@@ -65,7 +76,7 @@
     function linkEndpoints(d) {
         var s = d.source, t = d.target;
         function edgePt(node, ox, oy) {
-            if (node.kind === 'Cell') return cellEdgePoint(ox, oy, node.x, node.y);
+            if (node.kind === 'Cell') return cellEdgePoint(ox, oy, node.x, node.y, cellWidth(node) / 2, CELL_H / 2);
             if (node.kind === 'Branch') return { x: node.x, y: node.y };
             var r = node.kind === 'Conditional' ? COND_COLLIDE_R : REL_R;
             return circleEdgePoint(ox, oy, node.x, node.y, r);
@@ -85,7 +96,7 @@
         var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         nodes.forEach(function (n) {
             var hw, hh;
-            if (n.kind === 'Cell') { hw = CELL_W / 2; hh = CELL_H / 2; }
+            if (n.kind === 'Cell') { hw = cellWidth(n) / 2; hh = CELL_H / 2; }
             else if (n.kind === 'Conditional') { hw = COND_COLLIDE_R; hh = COND_COLLIDE_R; }
             else if (n.kind === 'Branch') { hw = 0; hh = 0; }
             else { hw = REL_R; hh = REL_R; }
@@ -115,10 +126,10 @@
     }
 
     // Recomputes zoom scale/pan bounds from the current node layout. On the
-    // first call after init(), snaps the view to fit; afterward, preserves
-    // the user's current pan/zoom, only re-clamping it if it now falls
-    // outside the new bounds.
-    function updateZoomConstraints() {
+    // first call after init(), or whenever `forceFit` is true, snaps the
+    // view to fit; otherwise preserves the user's current pan/zoom, only
+    // re-clamping it if it now falls outside the new bounds.
+    function updateZoomConstraints(forceFit) {
         var bbox = computeBBox();
         var fit = fitTransformFor(bbox);
         var maxScale = Math.max(fit.fitScale, MAX_ZOOM);
@@ -127,7 +138,7 @@
         zoom.scaleExtent([fit.fitScale, maxScale])
             .translateExtent(translateExtent)
             .extent(extent);
-        if (!hasInitialFit) {
+        if (!hasInitialFit || forceFit) {
             svg.call(zoom.transform, fit.transform);
             hasInitialFit = true;
         } else {
@@ -148,11 +159,13 @@
     }
 
     // Runs the simulation synchronously until settled, then updates the display.
-    function settleSimulation() {
+    // `forceFit` is passed straight through to updateZoomConstraints() - see
+    // its doc comment.
+    function settleSimulation(forceFit) {
         var n = Math.ceil(Math.log(simulation.alphaMin()) / Math.log(1 - simulation.alphaDecay()));
         simulation.stop().alpha(1).tick(n);
         ticked();
-        updateZoomConstraints();
+        updateZoomConstraints(forceFit);
     }
 
     function init(containerId, data) {
@@ -273,7 +286,7 @@
             .force('center', d3.forceCenter(width / 2, height / 2))
             // CHANGED: collision radius handles Conditional nodes.
             .force('collide', d3.forceCollide().radius(function (d) {
-                if (d.kind === 'Cell') return CELL_COLLIDE_R;
+                if (d.kind === 'Cell') return Math.max(CELL_COLLIDE_R, cellWidth(d) / 2 + 4);
                 if (d.kind === 'Conditional') return COND_COLLIDE_R;
                 if (d.kind === 'Branch') return 0;
                 return REL_COLLIDE_R;
@@ -391,12 +404,51 @@
             })
             .style('stroke', function (d) { return d.branch_active ? null : INACTIVE_STROKE; });
 
+        // Join cell name labels (centered inside rect)
+        var labelSel = labelLayer.selectAll('text')
+            .data(cellNodes, function (d) { return d.id; })
+            .join('text')
+            .attr('class', 'node-label')
+            .text(function (d) { return d.label; });
+
+        // Join cell value labels (below the name, inside rect)
+        var valueSel = valueLayer.selectAll('text')
+            .data(cellNodes, function (d) { return d.id; })
+            .join('text')
+            .attr('class', 'node-value')
+            .text(function (d) { return d.value || ''; });
+
+        // Size cell boxes to fit their label/value text: measure each cell's
+        // rendered label and value text (getBBox reflects the actual glyphs
+        // and CSS font in effect, so this tracks font/content changes without
+        // guessing at character widths), and grow the box to the wider of
+        // the two plus padding. Must run after the text joins above (so
+        // there's rendered text to measure) and before the rect join below
+        // (so rect widths can use the result).
+        //
+        // getBBox() forces SVG layout, so it's restricted to cells that can
+        // actually need remeasuring: a cell's label is fixed at creation (it
+        // never changes for an id that already existed), so it's only
+        // measured once, when the node is new; d.w (set here or on a prior
+        // update) persists on the reused node object across updates (see the
+        // node-merge step above) for every other cell. The value text does
+        // change at runtime, so it's remeasured for new cells plus whichever
+        // existing ones are in `changedSet`, rather than every cell on every update.
+        labelSel.each(function (d) {
+            if (oldNodeMap.has(d.id)) return;
+            d.w = Math.max(CELL_W, this.getBBox().width + CELL_LABEL_PADDING);
+        });
+        valueSel.each(function (d) {
+            if (oldNodeMap.has(d.id) && !changedSet.has(d.id)) return;
+            d.w = Math.max(d.w, this.getBBox().width + CELL_LABEL_PADDING);
+        });
+
         // Join cell rects
         cellLayer.selectAll('rect')
             .data(cellNodes, function (d) { return d.id; })
             .join('rect')
             .attr('class', 'node-cell')
-            .attr('width', CELL_W)
+            .attr('width', cellWidth)
             .attr('height', CELL_H)
             .attr('rx', CELL_RX)
             .call(dragBehavior(simulation))
@@ -478,20 +530,6 @@
             .call(dragBehavior(simulation))
             .on('dblclick', unpinNode);
 
-        // Join cell name labels (centered inside rect)
-        labelLayer.selectAll('text')
-            .data(cellNodes, function (d) { return d.id; })
-            .join('text')
-            .attr('class', 'node-label')
-            .text(function (d) { return d.label; });
-
-        // Join cell value labels (below the name, inside rect)
-        valueLayer.selectAll('text')
-            .data(cellNodes, function (d) { return d.id; })
-            .join('text')
-            .attr('class', 'node-value')
-            .text(function (d) { return d.value || ''; });
-
         // Pulse changed cells
         if (changedSet.size > 0) {
             cellLayer.selectAll('rect')
@@ -508,8 +546,12 @@
         simulation.force('link').links(links);
 
         if (structureChanged) {
-            // Settle synchronously so the graph is stable before display.
-            settleSimulation();
+            // Settle synchronously so the graph is stable before display, and
+            // fit the view to it: a structural change means a brand new
+            // Sheet (a different demo was picked, or the active demo's
+            // source hot-reloaded) with freshly laid-out node positions, so
+            // the old pan/zoom has nothing meaningful left to preserve.
+            settleSimulation(true);
         } else {
             // Only labels/values changed — node positions are unchanged.
             ticked();
@@ -544,7 +586,7 @@
         });
 
         cellLayer.selectAll('rect')
-            .attr('x', function (d) { return d.x - CELL_W / 2; })
+            .attr('x', function (d) { return d.x - cellWidth(d) / 2; })
             .attr('y', function (d) { return d.y - CELL_H / 2; });
 
         relLayer.selectAll('circle')

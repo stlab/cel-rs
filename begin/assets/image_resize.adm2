@@ -1,0 +1,66 @@
+sheet image_resize {
+    // Reference pixel dimensions of the original source image. These are
+    // never an output of any relationship below, so they stay fixed.
+    // Pixel counts are integers - there's no such thing as a fractional
+    // pixel - so this and width_px/height_px below are i32, not f64.
+    cell orig_width: i32 = 1024;
+    cell orig_height: i32 = 768;
+
+    // Cells intended to be *derived* now (declared early = lower initial
+    // strength): pixel dimensions and zoom percent follow from the physical
+    // size and resolution below.
+    cell width_px: i32 = 1024;
+    cell height_px: i32 = 768;
+    cell percent: f64;
+
+    // "Constrain Proportions": 1 = locked, 0 = unlocked.
+    cell constrain_proportions: i32 = 1;
+
+    // Cells intended to stay *sources* by default now (declared last =
+    // higher initial strength): physical size in inches and resolution.
+    // Changing dpi therefore recomputes width_px/height_px, holding these
+    // fixed, instead of the other way around.
+    cell width_in: f64 = 3.4133333333333336;
+    cell height_in: f64 = 2.56;
+    cell dpi: f64 = 300.0;
+
+    // width_px, width_in, and dpi are a three-way constraint: fix any two,
+    // the third follows. width_px is i32 while width_in/dpi are f64, so
+    // every method crossing that boundary explicitly casts: `as f64`
+    // widens i32->f64 exactly; `round(...) as i32` narrows f64->i32 to the
+    // nearest whole pixel, erroring rather than silently truncating if it
+    // doesn't fit in i32.
+    relationship {
+        method [width_px, dpi] -> [width_in] { width_px as f64 / dpi }
+        method [width_in, dpi] -> [width_px] { round(width_in * dpi) as i32 }
+        method [width_px, width_in] -> [dpi] { width_px as f64 / width_in }
+    }
+
+    // Same triangle for height, sharing the same dpi cell as the width
+    // triangle above.
+    relationship {
+        method [height_px, dpi] -> [height_in] { height_px as f64 / dpi }
+        method [height_in, dpi] -> [height_px] { round(height_in * dpi) as i32 }
+        method [height_px, height_in] -> [dpi] { height_px as f64 / height_in }
+    }
+
+    // percent is just width_px expressed relative to the original width.
+    relationship {
+        method [width_px, orig_width] -> [percent] { width_px as f64 / orig_width as f64 * 100.0 }
+        method [percent, orig_width] -> [width_px] { round(orig_width as f64 * percent / 100.0) as i32 }
+    }
+
+    // Aspect-ratio lock, expressed on the *inch* cells instead of the pixel
+    // cells: width_in/height_in are the sources that dpi divides into, so
+    // the lock has to constrain them directly - constraining width_px/
+    // height_px instead would double-claim cells the two triangles above
+    // already derive, which the planner would reject as a conflict.
+    conditional constrain_proportions {
+        1i32 => {
+            relationship {
+                method [width_in, orig_width, orig_height] -> [height_in] { width_in * orig_height as f64 / orig_width as f64 }
+                method [height_in, orig_width, orig_height] -> [width_in] { height_in * orig_width as f64 / orig_height as f64 }
+            }
+        }
+    }
+}

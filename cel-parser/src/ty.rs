@@ -6,7 +6,7 @@
 
 use std::any::TypeId;
 
-use crate::op_table::builtin_operand_types;
+use crate::op_table::{builtin_operand_types, cast_source_types};
 use crate::{Expr, ExprSpan, Literal, ParseError};
 
 /// A static type: one of the built-in primitives, or [`Ty::Any`] for anything adam-lang/CEL's
@@ -203,6 +203,40 @@ impl Ty {
         }
     }
 
+    /// Maps a type's bare name (as written in source, e.g. in a cast's target position) to its
+    /// [`Ty`], or `None` if `name` isn't a recognized primitive - the inverse of [`Ty::name`],
+    /// except it has no input that maps to [`Ty::Any`] (nothing is spelled `<any>` in source).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::Ty;
+    ///
+    /// assert_eq!(Ty::from_name("i32"), Some(Ty::I32));
+    /// assert_eq!(Ty::from_name("nonsense"), None);
+    /// ```
+    pub fn from_name(name: &str) -> Option<Ty> {
+        match name {
+            "i8" => Some(Ty::I8),
+            "i16" => Some(Ty::I16),
+            "i32" => Some(Ty::I32),
+            "i64" => Some(Ty::I64),
+            "i128" => Some(Ty::I128),
+            "isize" => Some(Ty::Isize),
+            "u8" => Some(Ty::U8),
+            "u16" => Some(Ty::U16),
+            "u32" => Some(Ty::U32),
+            "u64" => Some(Ty::U64),
+            "u128" => Some(Ty::U128),
+            "usize" => Some(Ty::Usize),
+            "f32" => Some(Ty::F32),
+            "f64" => Some(Ty::F64),
+            "bool" => Some(Ty::Bool),
+            "String" => Some(Ty::String),
+            _ => None,
+        }
+    }
+
     /// Returns `true` if `self` and `other` are compatible: either is [`Ty::Any`], or they're
     /// equal. `Ty::Any` unifying silently with everything (in both directions) is the load-bearing
     /// property that lets unannotated cells and custom host types produce zero false-positive
@@ -277,6 +311,11 @@ pub fn check_expr(expr: &Expr, resolve_ident: &impl Fn(&str) -> Ty) -> (Ty, Vec<
             (Ty::Any, diagnostics)
         }
         Expr::TupleIndex { base, .. } => (Ty::Any, check_expr(base, resolve_ident).1),
+        Expr::Cast {
+            expr,
+            type_name,
+            span,
+        } => check_cast(expr, type_name, *span, resolve_ident),
         Expr::If {
             cond,
             then_branch,
@@ -297,6 +336,9 @@ pub fn check_expr(expr: &Expr, resolve_ident: &impl Fn(&str) -> Ty) -> (Ty, Vec<
 /// concrete type) matches them against [`builtin_operand_types`]. An operator
 /// `builtin_operand_types` doesn't recognize at all (e.g. a tuple-shaped custom op registered
 /// only at runtime) can't be checked here and infers as `Ty::Any` — not an error.
+///
+/// - Complexity: O(s) where s is the number of overloads [`builtin_operand_types`] registers for
+///   `name`, plus the cost of checking each operand (see [`check_expr`]'s own complexity note).
 fn check_op(
     name: &str,
     operands: &[Expr],
@@ -351,6 +393,42 @@ fn result_ty_for_op(name: &str, operand_ty: Ty) -> Ty {
         "==" | "!=" | "<" | "<=" | ">" | ">=" => Ty::Bool,
         _ => operand_ty,
     }
+}
+
+/// Checks an [`Expr::Cast`] node (`expr as type_name`): infers `expr`'s type, then (only if it
+/// resolved to a concrete type) checks that a conversion to `type_name` is registered via
+/// [`cast_source_types`]. Unlike [`check_op`], the node always infers as the target type once
+/// `type_name` itself resolves - a cast declares its own result type - regardless of whether a
+/// diagnostic was recorded for the source, matching [`check_logical`]'s pattern.
+///
+/// - Complexity: O(s) where s is the number of registered sources [`cast_source_types`] returns
+///   for `type_name`, plus the cost of checking `expr` (see [`check_expr`]'s own complexity
+///   note).
+fn check_cast(
+    expr: &Expr,
+    type_name: &str,
+    span: ExprSpan,
+    resolve_ident: &impl Fn(&str) -> Ty,
+) -> (Ty, Vec<ParseError>) {
+    let (expr_ty, mut diagnostics) = check_expr(expr, resolve_ident);
+    let Some(target_ty) = Ty::from_name(type_name) else {
+        diagnostics.push(ParseError::new_range(
+            format!("unknown type `{type_name}`"),
+            span.start,
+            span.end,
+        ));
+        return (Ty::Any, diagnostics);
+    };
+    if let Some(source_type_id) = expr_ty.type_id()
+        && !cast_source_types(type_name).any(|id| id == source_type_id)
+    {
+        diagnostics.push(ParseError::new_range(
+            format!("no cast from `{}` to `{type_name}`", expr_ty.name()),
+            span.start,
+            span.end,
+        ));
+    }
+    (target_ty, diagnostics)
 }
 
 /// Checks an [`Expr::Logical`] (`&&`/`||`) node: both operands should unify with `Ty::Bool` (CEL's
@@ -674,5 +752,59 @@ mod tests {
         let (ty, diags) = check_expr(&expr, &any_resolver);
         assert_eq!(ty, Ty::Any, "Apply itself is not type-checked in v1");
         assert_eq!(diags.len(), 1);
+    }
+
+    fn cast(inner: Expr, type_name: &str) -> Expr {
+        Expr::Cast {
+            expr: Box::new(inner),
+            type_name: type_name.to_string(),
+            span: point(proc_macro2::Span::call_site()),
+        }
+    }
+
+    #[test]
+    fn cast_to_a_registered_numeric_target_infers_the_target_type_with_no_diagnostic() {
+        let (ty, diags) = check_expr(&cast(lit_i32(1), "f64"), &any_resolver);
+        assert_eq!(ty, Ty::F64);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn cast_from_bool_to_bool_produces_no_diagnostic() {
+        // Regression test for the `ty.rs`/`op_table.rs` "no cast from ... to bool" vs. "unknown
+        // type" inconsistency: bool is the one type Rust's own `as` allows as a source for `as
+        // bool` (a no-op identity conversion), so this must not be a diagnostic.
+        let (ty, diags) = check_expr(&cast(lit_bool(true), "bool"), &any_resolver);
+        assert_eq!(ty, Ty::Bool);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn cast_from_a_number_to_bool_is_a_diagnostic_not_an_unknown_type_error() {
+        // `bool` is a recognized cast target (matches [`op_table::signatures_for_cast`]), just one
+        // with no registered `i32` source - same "no cast from `i32` to `bool`" diagnostic
+        // `OpLookup::lookup_cast` would report at execution time, not "unknown type `bool`".
+        let (ty, diags) = check_expr(&cast(lit_i32(1), "bool"), &any_resolver);
+        assert_eq!(ty, Ty::Bool);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message().contains("no cast from"));
+    }
+
+    #[test]
+    fn cast_to_an_unrecognized_type_name_is_a_diagnostic_and_infers_any() {
+        let (ty, diags) = check_expr(&cast(lit_i32(1), "nonsense"), &any_resolver);
+        assert_eq!(ty, Ty::Any);
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn cast_of_an_any_typed_operand_produces_no_diagnostic() {
+        let expr = Expr::Ident {
+            name: "mystery".to_string(),
+            span: point(proc_macro2::Span::call_site()),
+        };
+        let (ty, diags) = check_expr(&cast(expr, "i32"), &any_resolver);
+        assert_eq!(ty, Ty::I32);
+        assert!(diags.is_empty());
     }
 }
