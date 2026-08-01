@@ -116,12 +116,20 @@ pub fn SpActionGroup(compact: bool, children: Element) -> Element {
 
 /// A single button within an `SpActionGroup` (or standalone).
 ///
-/// Maps to `<sp-action-button>`.
+/// Maps to `<sp-action-button>`. `selected` renders it in its pressed/active
+/// visual state (e.g. to highlight the current choice in a group of buttons
+/// used as a picker).
 #[component]
-pub fn SpActionButton(onclick: EventHandler<MouseEvent>, children: Element) -> Element {
+pub fn SpActionButton(
+    onclick: EventHandler<MouseEvent>,
+    #[props(default)] selected: bool,
+    children: Element,
+) -> Element {
     rsx! {
         sp-action-button {
             onclick: move |e| onclick.call(e),
+            // Boolean attribute: omit entirely when false; presence = selected.
+            "selected": if selected { "true" },
             {children}
         }
     }

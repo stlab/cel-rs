@@ -183,6 +183,17 @@ pub enum Expr {
         /// The span of the whole logical expression.
         span: ExprSpan,
     },
+    /// A cast (`expr as Type`). Whether `type_name` is a recognized type and whether a
+    /// conversion from `expr`'s type exists is unchecked here — deferred to the type-checking
+    /// phase (see the module doc comment), same as `TupleIndex`'s deferred bounds check.
+    Cast {
+        /// The expression being converted.
+        expr: Box<Expr>,
+        /// The target type's name, as written (e.g. `"i32"`) - unresolved.
+        type_name: String,
+        /// The span of the whole `expr as Type` construct.
+        span: ExprSpan,
+    },
 }
 
 impl Expr {
@@ -196,7 +207,8 @@ impl Expr {
             | Expr::Tuple { span, .. }
             | Expr::TupleIndex { span, .. }
             | Expr::If { span, .. }
-            | Expr::Logical { span, .. } => *span,
+            | Expr::Logical { span, .. }
+            | Expr::Cast { span, .. } => *span,
         }
     }
 }
@@ -420,6 +432,22 @@ impl ParserContext for AstContext {
 
     fn current_stack_offset(&self) -> usize {
         self.values.len()
+    }
+
+    fn apply_cast(
+        &mut self,
+        _op_lookup: &OpLookup,
+        type_name: &str,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        let expr = self.pop();
+        self.values.push(Expr::Cast {
+            expr: Box::new(expr),
+            type_name: type_name.to_string(),
+            span: ExprSpan { start, end },
+        });
+        Ok(())
     }
 }
 

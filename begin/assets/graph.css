@@ -17,15 +17,18 @@ html, body {
 }
 
 .node-cell {
-    fill: #fff;
-    stroke: #444;
+    /* Opaque, not alpha-blended: an edge occasionally settles behind a
+       node in the force layout, and it must stay fully hidden rather
+       than show through the fill. */
+    fill: #eaf2fb;
+    stroke: #2a78d6;
     stroke-width: 1.5;
     cursor: default;
 }
 
 .node-relationship {
-    fill: #fff;
-    stroke: #444;
+    fill: #fdf0eb;
+    stroke: #eb6834;
     stroke-width: 1.5;
     cursor: default;
 }
@@ -50,8 +53,8 @@ html, body {
 }
 
 .node-conditional {
-    fill: #fff;
-    stroke: #444;
+    fill: #e8f7f2;
+    stroke: #1baf7a;
     stroke-width: 1.5;
     cursor: default;
 }
@@ -82,4 +85,80 @@ html, body {
     top: 8px;
     right: 8px;
     z-index: 10;
+}
+
+.graph-legend {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    z-index: 10;
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid #e1e0d9;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 11px;
+    color: #333;
+    max-width: 220px;
+}
+
+.graph-legend-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.graph-legend-row:last-child {
+    margin-bottom: 0;
+}
+
+/* Fixed-width column every row's icon sits in, whatever the icon's own
+   size - the widest icon (a 22px-wide edge glyph) sets the column width,
+   so text after it always starts at the same x position. */
+.graph-legend-icon {
+    flex: none;
+    width: 22px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.graph-legend-shape {
+    width: 14px;
+    height: 14px;
+    box-sizing: border-box;
+}
+
+.graph-legend-shape.cell {
+    background: #eaf2fb;
+    border: 1.5px solid #2a78d6;
+    border-radius: 2px;
+}
+
+.graph-legend-shape.relationship {
+    background: #fdf0eb;
+    border: 1.5px solid #eb6834;
+    border-radius: 50%;
+}
+
+.graph-legend-shape.conditional {
+    width: 10px;
+    height: 10px;
+    background: #e8f7f2;
+    border: 1.5px solid #1baf7a;
+    transform: rotate(45deg);
+}
+
+.graph-legend-shape.forced {
+    background: #fff;
+    border: 2px solid #8e44ad;
+    border-radius: 2px;
+}
+
+.graph-legend-shape.inactive {
+    background: #fff;
+    border: 1.5px solid #ccc;
+    border-radius: 50%;
 }

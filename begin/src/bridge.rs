@@ -76,6 +76,32 @@ impl Default for Labels {
     }
 }
 
+/// Formats a floating-point value for display, rounded to 2 decimal places with
+/// trailing zeros (and a bare trailing decimal point) trimmed.
+///
+/// Used in place of plain `Display` for `f32`/`f64` cells so graph labels and
+/// Inspector fields show `86.67` and `300` rather than `86.666666666667` and
+/// `300.0`. Not applied to other cell types: precision has no meaningful effect
+/// on integers, and it would truncate `String` values outright.
+///
+/// # Examples
+///
+/// ```text
+/// format_rounded(86.666666666667) == "86.67"
+/// format_rounded(300.0)            == "300"
+/// format_rounded(-0.001)           == "0"
+/// ```
+pub fn format_rounded(v: f64) -> String {
+    let s = format!("{v:.2}");
+    let s = s.trim_end_matches('0');
+    let s = s.trim_end_matches('.');
+    if s == "-0" {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 /// Builds a [`Labels`] from an adam-lang-style declaration-ordered cell name map.
 ///
 /// Matches each `TypeId` against the built-in primitive types
@@ -106,17 +132,31 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -
         try_ty!(u64);
         try_ty!(u128);
         try_ty!(usize);
-        try_ty!(f32);
-        try_ty!(f64);
+
+        macro_rules! try_float_ty {
+            ($T:ty) => {
+                if type_id == TypeId::of::<$T>() {
+                    labels.add_cell::<$T>(id, name);
+                    if let Some(meta) = labels.cells.get_mut(&id) {
+                        meta.display = Box::new(move |sheet| {
+                            sheet
+                                .read::<$T>(id)
+                                .map(|v| format_rounded(*v as f64))
+                                .unwrap_or_else(|_| "?".to_owned())
+                        });
+                    }
+                    continue;
+                }
+            };
+        }
+        try_float_ty!(f32);
+        try_float_ty!(f64);
+
         try_ty!(bool);
         try_ty!(String);
     }
     labels
 }
-
-/// Display name for the adam-lang source file, shown in diagnostic headers
-/// (e.g. `--> begin/assets/demo.adm2:8:11`).
-pub const SOURCE_FILE_NAME: &str = "begin/assets/demo.adm2";
 
 /// Formats an [`Error`] as a rustc-style diagnostic when possible.
 ///
@@ -124,12 +164,13 @@ pub const SOURCE_FILE_NAME: &str = "begin/assets/demo.adm2";
 /// body; when that error carries a `SpanContext` (attached automatically by
 /// cel-parser's `span-diagnostics` feature for built-in arithmetic ops) this
 /// renders a full caret diagnostic against `source`, ANSI-colored for a
-/// terminal. All other variants have no source span and fall back to their
-/// `Display` message.
-pub fn format_adam_error(e: &Error, source: &str) -> String {
+/// terminal, with `file_name` (e.g. `"begin/assets/toy_example.adm2"`) shown
+/// in the diagnostic header. All other variants have no source span and fall
+/// back to their `Display` message, ignoring `file_name`.
+pub fn format_adam_error(e: &Error, source: &str, file_name: &str) -> String {
     match e {
         Error::MethodFailed(inner) => {
-            inner.format_rustc_style(source, SOURCE_FILE_NAME, 1, &Renderer::styled())
+            inner.format_rustc_style(source, file_name, 1, &Renderer::styled())
         }
         other => other.to_string(),
     }
@@ -375,7 +416,7 @@ mod tests {
 
     #[test]
     fn format_adam_error_invalid_id_falls_back_to_display() {
-        let msg = format_adam_error(&Error::InvalidId, "source text");
+        let msg = format_adam_error(&Error::InvalidId, "source text", "test.adm2");
         assert_eq!(msg, "invalid cell or relationship id");
     }
 
@@ -388,10 +429,39 @@ mod tests {
         let inner = anyhow::anyhow!("division by zero").context(SpanContext::new(span));
         let err = Error::MethodFailed(inner);
 
-        let msg = format_adam_error(&err, source);
+        let msg = format_adam_error(&err, source, "test.adm2");
 
         assert!(msg.contains("division by zero"), "{msg}");
         assert!(msg.contains(source), "{msg}");
+    }
+
+    #[test]
+    fn format_rounded_trims_trailing_zeros_and_point() {
+        assert_eq!(format_rounded(86.666666666667), "86.67");
+        assert_eq!(format_rounded(300.0), "300");
+        assert_eq!(format_rounded(2.5), "2.5");
+        assert_eq!(format_rounded(0.0), "0");
+    }
+
+    #[test]
+    fn format_rounded_negative_zero_has_no_minus_sign() {
+        assert_eq!(format_rounded(-0.0), "0");
+        assert_eq!(format_rounded(-0.001), "0");
+    }
+
+    #[test]
+    fn labels_from_cell_names_rounds_float_display_to_two_decimals() {
+        use std::any::TypeId;
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(86.666666666667_f64);
+
+        let mut cell_names = IndexMap::new();
+        cell_names.insert("a".to_string(), (a, TypeId::of::<f64>()));
+
+        let labels = labels_from_cell_names(&cell_names);
+
+        assert_eq!((labels.cells[&a].display)(&sheet), "86.67");
     }
 
     #[test]
