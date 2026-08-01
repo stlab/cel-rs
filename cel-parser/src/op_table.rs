@@ -1190,7 +1190,11 @@ int_cast_sources!(ISIZE_CAST_SOURCES, isize);
 
 static F32_CAST_SOURCES: Lazy<Vec<CastSignature>> = Lazy::new(|| {
     let mut v = vec![
-        // f64 -> f32: checked (may not fit in f32's finite range).
+        // f64 -> f32: checked (may not fit in f32's finite range). Unlike the int-narrowing
+        // checks below, comparing directly against `f32::MAX as f64` is safe here rather than
+        // needing the power-of-two-derived bound: f64's 53-bit mantissa always represents
+        // f32::MAX exactly (f32 needs at most 24 significant bits), so this conversion never
+        // rounds and the bound is exact.
         CastSignature {
             source_type_id_index: TYPE_F64,
             op_fn: |seg, span| {
@@ -1604,6 +1608,22 @@ impl OpLookup {
     /// value).
     ///
     /// - Complexity: O(s) in the number of registered sources for `type_name`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use proc_macro2::Span;
+    /// use cel_parser::OpLookup;
+    /// use cel_runtime::DynSegment;
+    ///
+    /// let lookup = OpLookup::new();
+    /// let mut seg = DynSegment::new::<()>();
+    /// seg.just(1024i32);
+    /// lookup
+    ///     .lookup_cast("f64", &mut seg, Span::call_site(), Span::call_site())
+    ///     .unwrap();
+    /// assert_eq!(seg.call0::<f64>().unwrap(), 1024.0);
+    /// ```
     pub fn lookup_cast(
         &self,
         type_name: &str,
