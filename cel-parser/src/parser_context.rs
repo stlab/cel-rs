@@ -102,17 +102,16 @@ pub trait ParserContext: Sized {
     /// Returns the current stack offset, used to compute tuple layouts.
     fn current_stack_offset(&self) -> usize;
 
-    /// Applies a numeric cast (`expr as Type`), consuming the operand already present on `self`
+    /// Applies a cast (`expr as Type`), consuming the operand already present on `self`
     /// and replacing it with the converted value. `type_name` is the target type's bare
-    /// identifier text (e.g. `"i32"`), unresolved by the grammar itself.
+    /// identifier text (e.g. `"i32"`, `"bool"`, `"String"`), unresolved by the grammar itself.
     ///
     /// # Errors
     ///
     /// Implementations that validate operand types during parsing (e.g. [`DynSegmentContext`])
-    /// return `Err` if `type_name` isn't a recognized primitive numeric type, or if no
-    /// conversion from the operand's current type to it is registered. Implementations that
-    /// defer type validation to a later phase (e.g. [`crate::ast::AstContext`]) never return
-    /// `Err` here.
+    /// return `Err` if `type_name` isn't a recognized cast-target type, or if no conversion
+    /// from the operand's current type to it is registered. Implementations that defer type
+    /// validation to a later phase (e.g. [`crate::ast::AstContext`]) never return `Err` here.
     fn apply_cast(
         &mut self,
         op_lookup: &OpLookup,

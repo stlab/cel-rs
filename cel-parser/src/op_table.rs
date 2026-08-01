@@ -1119,6 +1119,16 @@ macro_rules! all_int_to_float_casts {
 /// Pushes one checked float->int `CastSignature` onto `$v`: `Err` for a
 /// non-finite or out-of-range value, otherwise truncates toward zero (same
 /// as Rust's `as`).
+///
+/// The upper bound is deliberately not `<$tgt_ty>::MAX as $src_ty`: `MAX` (`0b0111...1`) is one
+/// less than the power of two `MAX + 1`, so whenever `$tgt_ty` has more value bits than
+/// `$src_ty`'s mantissa (e.g. `i32::MAX as f32`), the conversion has nowhere to round to but
+/// *up*, landing exactly on `MAX + 1` - a value that itself is genuinely out of range but would
+/// then compare equal to (not greater than) the bound, silently passing the check and letting
+/// Rust's `as` saturate it to `MAX` instead of returning `Err`. Deriving the exclusive upper
+/// bound directly as a power of two (`2^bits` unsigned, `2^(bits-1)` signed) sidesteps the
+/// rounding entirely: a power of two is always exactly representable in any float type, for
+/// every integer width this crate supports.
 macro_rules! float_to_int_cast_push {
     ($v:ident, $src_idx:expr, $src_ty:ty, $tgt_ty:ty) => {
         $v.push(CastSignature {
@@ -1128,7 +1138,11 @@ macro_rules! float_to_int_cast_push {
                     if !x.is_finite() {
                         return Err(span_err(span, anyhow!("value is not finite")));
                     }
-                    if x < <$tgt_ty>::MIN as $src_ty || x > <$tgt_ty>::MAX as $src_ty {
+                    let is_unsigned = <$tgt_ty>::MIN == 0;
+                    let bits = <$tgt_ty>::BITS as i32;
+                    let exponent = if is_unsigned { bits } else { bits - 1 };
+                    let upper_exclusive: $src_ty = (2.0 as $src_ty).powi(exponent);
+                    if x < <$tgt_ty>::MIN as $src_ty || x >= upper_exclusive {
                         return Err(span_err(
                             span,
                             anyhow!(concat!("value does not fit in `", stringify!($tgt_ty), "`")),
@@ -1829,6 +1843,10 @@ mod tests {
 
     #[test]
     fn round_rounds_half_away_from_zero() -> Result<()> {
+        // 3.5/-3.5 are the actual halfway cases (3.6 rounds to 4.0 regardless of which direction
+        // "away from zero" means, so it can't distinguish this rule from ordinary
+        // round-to-nearest); checking both signs also confirms "away from zero" rather than
+        // "toward positive infinity".
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         lookup.lookup(
@@ -1838,9 +1856,21 @@ mod tests {
             Span::call_site(),
             Span::call_site(),
         )?;
-        segment.just(3.6f64);
+        segment.just(3.5f64);
         lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
         assert_eq!(segment.call0::<f64>()?, 4.0);
+
+        let mut segment = DynSegment::new::<()>();
+        lookup.lookup(
+            "round",
+            &mut segment,
+            0,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        segment.just(-3.5f64);
+        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        assert_eq!(segment.call0::<f64>()?, -4.0);
         Ok(())
     }
 
@@ -1943,6 +1973,44 @@ mod tests {
         segment.just(1.0e20f64);
         lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())?;
         assert!(segment.call0::<i32>().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cast_errors_just_past_the_target_types_max_even_when_max_is_not_exactly_representable()
+    -> Result<()> {
+        // Regression test: `i32::MAX as f32` isn't exactly representable (f32's 24-bit mantissa
+        // can't hold all 31 value bits) and rounds *up* to exactly `i32::MAX as i64 + 1`
+        // (2147483648.0, a power of two). A bound check comparing against that rounded value
+        // with `>` would let this value silently pass, then Rust's saturating `as` would turn it
+        // into `i32::MAX` instead of the `Err` a genuinely out-of-range value should produce.
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(2147483648.0f32); // i32::MAX + 1, exactly representable in f32
+        lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())?;
+        assert!(segment.call0::<i32>().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cast_accepts_the_target_types_actual_max_value() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(2147483520.0f32); // largest f32 value below i32::MAX + 1
+        lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())?;
+        assert_eq!(segment.call0::<i32>()?, 2147483520);
+        Ok(())
+    }
+
+    #[test]
+    fn cast_errors_just_past_i64_max_from_f64() -> Result<()> {
+        // Same rounding pitfall as the f32 -> i32 case above, but for the f64 -> i64 pair (f64's
+        // 53-bit mantissa can't hold i64's 63 value bits either).
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(9223372036854775808.0f64); // i64::MAX + 1, exactly representable in f64
+        lookup.lookup_cast("i64", &mut segment, Span::call_site(), Span::call_site())?;
+        assert!(segment.call0::<i64>().is_err());
         Ok(())
     }
 
