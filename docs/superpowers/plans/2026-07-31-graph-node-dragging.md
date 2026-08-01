@@ -66,12 +66,17 @@ Replace it with (inserting the two new functions between `buildGraph`'s closing 
                 // shape) listen for pointer-down; without this the same
                 // gesture would also pan the canvas.
                 event.sourceEvent.stopPropagation();
-                if (!event.active) sim.alphaTarget(0.3).restart();
-                d.fx = d.x;
-                d.fy = d.y;
-                d3.select(this).classed('dragging', true);
             })
             .on('drag', function (event, d) {
+                // 'start'/'end' fire on every pointerdown/pointerup, even a
+                // plain click with no movement, but 'drag' only fires once
+                // actual movement occurs — so gate the reheat and cursor
+                // state on it (via the 'dragging' class, set at most once
+                // per gesture here) to keep a no-movement click a true no-op.
+                if (!d3.select(this).classed('dragging')) {
+                    sim.alphaTarget(0.3).restart();
+                    d3.select(this).classed('dragging', true);
+                }
                 d.fx = event.x;
                 d.fy = event.y;
             })
@@ -83,6 +88,7 @@ Replace it with (inserting the two new functions between `buildGraph`'s closing 
 
     // Releases a pinned node back into the free simulation.
     function unpinNode(event, d) {
+        event.stopPropagation();
         d.fx = null;
         d.fy = null;
         simulation.alpha(Math.max(simulation.alpha(), 0.3)).restart();

@@ -292,7 +292,14 @@
                 return REL_COLLIDE_R;
             }));
 
-        simulation.on('tick', ticked);
+        // The live simulation timer is the only driver of continuous position
+        // changes outside an explicit settleSimulation()/update() call (see
+        // updateZoomConstraints's call site below), so it's the only place
+        // that needs to recompute zoom bounds on every frame.
+        simulation.on('tick', function () {
+            ticked();
+            updateZoomConstraints();
+        });
 
         update(data);
     }
@@ -308,10 +315,17 @@
                 // shape) listen for pointer-down; without this the same
                 // gesture would also pan the canvas.
                 event.sourceEvent.stopPropagation();
-                if (!event.active) sim.alphaTarget(0.3).restart();
-                d3.select(this).classed('dragging', true);
             })
             .on('drag', function (event, d) {
+                // 'start'/'end' fire on every pointerdown/pointerup, even a
+                // plain click with no movement, but 'drag' only fires once
+                // actual movement occurs — so gate the reheat and cursor
+                // state on it (via the 'dragging' class, set at most once
+                // per gesture here) to keep a no-movement click a true no-op.
+                if (!d3.select(this).classed('dragging')) {
+                    sim.alphaTarget(0.3).restart();
+                    d3.select(this).classed('dragging', true);
+                }
                 d.fx = event.x;
                 d.fy = event.y;
             })
@@ -608,14 +622,6 @@
         valueLayer.selectAll('text')
             .attr('x', function (d) { return d.x; })
             .attr('y', function (d) { return d.y + 10; });
-
-        // ticked() only runs via the live simulation timer during and just
-        // after a drag/unpin (settleSimulation's synchronous tick(n) never
-        // dispatches the 'tick' event, only restart()'s timer does) — so
-        // this is what keeps the zoom-out floor and pan limits in sync with
-        // node positions as a drag grows or shrinks the graph's bounds,
-        // without adding recomputation on any other code path.
-        updateZoomConstraints();
     }
 
     // Called by the on-screen zoom controls in graph_view.rs.

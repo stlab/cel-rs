@@ -67,10 +67,8 @@ fn branch_node_id(cond_id: ConditionalId, branch: Option<usize>) -> String {
 
 ### `to_graph_data` changes
 
-Refactor the named-branch loop (currently [bridge.rs:326-340](../../../begin/src/bridge.rs#L326-L340))
-and the default-relationships block (currently
-[bridge.rs:343-354](../../../begin/src/bridge.rs#L343-L354)) to share one helper that, given
-`(cond_id, branch_index: Option<usize>, is_active: bool, rels: &[RelationshipId])`:
+Refactor the named-branch loop and the default-relationships block to share one helper that,
+given `(cond_id, branch_index: Option<usize>, is_active: bool, rels: &[RelationshipId])`:
 
 - If `rels.len() <= 1`: emit exactly today's behavior — a single direct `Control` link
   `conditional → relationship` (or nothing, if `rels` is empty), with `branch_index`/
@@ -87,7 +85,7 @@ relationships (`branch_index: None`).
 
 Update the `to_graph_data` doc comment and the `NodeKind`/`LinkData` field docs to describe the
 junction behavior. Add contract-style unit tests alongside the existing conditional tests
-(~[bridge.rs:683](../../../begin/src/bridge.rs#L683) onward):
+(added at [bridge.rs:732-841](../../../begin/src/bridge.rs#L732-L841)):
 
 - A `Branch` node is emitted iff a named branch has ≥2 relationships.
 - A `Branch` node is emitted iff the default has ≥2 relationships.
@@ -118,7 +116,7 @@ correctly:
 - **Dot marker**: currently every control-link line unconditionally gets
   `.attr('marker-end', 'url(#dot)')`. Change this to look up the target node's kind via the
   existing `nodeMap` (same pattern already used for the arrowhead lookup at
-  [graph.js:390-396](../../../begin/assets/graph.js#L390-L396)) and only add the dot marker when
+  [graph.js:503-510](../../../begin/assets/graph.js#L503-L510)) and only add the dot marker when
   the target is *not* a `Branch` node. This makes the trunk edge a plain dashed line with no cap,
   and only the leaf edges (branch→relationship) get the dot — so the whole path reads as one
   continuous dashed control edge with a single dot at its true endpoint.

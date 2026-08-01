@@ -24,7 +24,7 @@ they have no visible hit target.
 
 Pinned state persists automatically: `update()` already preserves node identity across data
 refreshes by reusing the existing node object when merging incoming data
-([graph.js:311-322](../../../begin/assets/graph.js#L311-L322)), so `fx`/`fy` set by a drag survive
+([graph.js:370-381](../../../begin/assets/graph.js#L370-L381)), so `fx`/`fy` set by a drag survive
 label/value updates and `settleSimulation()` re-ticks without extra code. A node that's
 structurally removed and later re-added starts fresh (unpinned) — this is expected.
 
@@ -44,13 +44,18 @@ structurally removed and later re-added starts fresh (unpinned) — this is expe
 
 Add a `dragBehavior(simulation)` factory returning a configured `d3.drag()`:
 
-- **`start`**: `event.sourceEvent.stopPropagation()` (prevents the SVG's own pan/zoom drag from
-  also firing on the same gesture — `zoom` and this drag are bound to different elements but both
-  listen for pointer-down); `if (!event.active) simulation.alphaTarget(0.3).restart();`; pin
-  `d.fx = d.x; d.fy = d.y;`.
-- **`drag`**: `d.fx = event.x; d.fy = event.y;`.
-- **`end`**: `if (!event.active) simulation.alphaTarget(0);` — deliberately does **not** clear
-  `fx`/`fy`, so the node stays where dropped.
+- **`start`**: `event.sourceEvent.stopPropagation()` only (prevents the SVG's own pan/zoom drag
+  from also firing on the same gesture — `zoom` and this drag are bound to different elements but
+  both listen for pointer-down). Deliberately does **not** reheat the simulation or pin `fx`/`fy`
+  here: `d3.drag()`'s `start`/`end` fire on every pointerdown/pointerup, even a plain click with no
+  movement, so doing either here would make a no-op click reheat the layout and toggle the
+  dragging cursor.
+- **`drag`** (only fires once actual pointer movement occurs): pins `d.fx = event.x; d.fy =
+  event.y;`; on the first `drag` event of a gesture (tracked via the `dragging` class not yet being
+  set), also `simulation.alphaTarget(0.3).restart();` and toggles the `dragging` class — so a
+  click-with-no-movement is a true no-op for both pinning and the reheat/cursor.
+- **`end`**: `if (!event.active) simulation.alphaTarget(0);` and clears the `dragging` class —
+  deliberately does **not** clear `fx`/`fy`, so the node stays where dropped.
 
 Apply `.call(dragBehavior(simulation))` to the `cellLayer`, `relLayer`, and `condLayer` join
 selections in `update()` (the same merged selections already used for attribute joins) — not to
