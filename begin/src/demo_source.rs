@@ -123,10 +123,15 @@ pub fn build_sheet(source: &str, file_name: &str) -> BuildOutcome {
 ///
 /// # Errors
 ///
-/// Returns `Err` if the file cannot be read (e.g. a transient race with an
-/// editor's save, or `name` matching no file under `assets/`).
+/// Returns `Err` if `name` isn't exactly one of [`DEMO_NAMES`] (rejected before
+/// touching the filesystem, so a name containing path separators or `..`
+/// can't resolve outside `assets/`), or if the file cannot be read (e.g. a
+/// transient race with an editor's save).
 #[cfg(feature = "desktop")]
 pub fn load_demo_source(name: &str) -> Result<String, String> {
+    if !DEMO_NAMES.contains(&name) {
+        return Err(format!("no bundled demo named {name:?}"));
+    }
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("assets/{name}.adm2"));
     std::fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))
 }
@@ -246,6 +251,16 @@ mod tests {
                 outcome.error
             );
         }
+    }
+
+    #[test]
+    #[cfg(feature = "desktop")]
+    fn load_demo_source_rejects_name_not_exactly_in_manifest() {
+        // Resolves (via `..`) to the same real file as "toy_example", but isn't
+        // literally in DEMO_NAMES; must still be rejected rather than trusting
+        // whatever `fs::read_to_string` happens to resolve.
+        let sneaky = "toy_example/../toy_example";
+        assert!(load_demo_source(sneaky).is_err());
     }
 
     #[test]
