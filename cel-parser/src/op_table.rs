@@ -2039,8 +2039,8 @@ mod tests {
     fn cast_errors_when_the_value_does_not_fit_in_the_target_type() -> Result<()> {
         // lookup_cast's own Result only reports type-checking failures (unknown type, no
         // registered source) - a checked cast's own out-of-range failure is deferred to
-        // execution, same as any other fallible op (see round_errors_when_result_does_not_fit's
-        // predecessor test and DynSegment::op1r's doc comment), so it's asserted via call0.
+        // execution, same as any other fallible op (see DynSegment::op1r's doc comment), so
+        // it's asserted via call0.
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         segment.just(1.0e20f64);
