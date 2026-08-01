@@ -23,6 +23,19 @@
             }
         },
         {
+            "label": "worktree: create from PR",
+            "type": "shell",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/.vscode/scripts/create-worktree-from-pr.ps1\"",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
             "label": "worktree: remove",
             "type": "shell",
             "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/.vscode/scripts/remove-worktree.ps1\"",
