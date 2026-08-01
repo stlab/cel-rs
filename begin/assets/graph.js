@@ -382,8 +382,21 @@
         // the two plus padding. Must run after the text joins above (so
         // there's rendered text to measure) and before the rect join below
         // (so rect widths can use the result).
-        labelSel.each(function (d) { d.w = Math.max(CELL_W, this.getBBox().width + CELL_LABEL_PADDING); });
+        //
+        // getBBox() forces SVG layout, so it's restricted to cells that can
+        // actually need remeasuring: a cell's label is fixed at creation (it
+        // never changes for an id that already existed), so it's only
+        // measured once, when the node is new; d.w (set here or on a prior
+        // update) persists on the reused node object across updates (see the
+        // node-merge step above) for every other cell. The value text does
+        // change at runtime, so it's remeasured for new cells plus whichever
+        // existing ones are in `changedSet`, rather than every cell on every update.
+        labelSel.each(function (d) {
+            if (oldNodeMap.has(d.id)) return;
+            d.w = Math.max(CELL_W, this.getBBox().width + CELL_LABEL_PADDING);
+        });
         valueSel.each(function (d) {
+            if (oldNodeMap.has(d.id) && !changedSet.has(d.id)) return;
             d.w = Math.max(d.w, this.getBBox().width + CELL_LABEL_PADDING);
         });
 

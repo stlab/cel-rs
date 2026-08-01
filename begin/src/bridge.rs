@@ -89,11 +89,17 @@ impl Default for Labels {
 /// ```text
 /// format_rounded(86.666666666667) == "86.67"
 /// format_rounded(300.0)            == "300"
+/// format_rounded(-0.001)           == "0"
 /// ```
 pub fn format_rounded(v: f64) -> String {
     let s = format!("{v:.2}");
     let s = s.trim_end_matches('0');
-    s.trim_end_matches('.').to_string()
+    let s = s.trim_end_matches('.');
+    if s == "-0" {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 /// Builds a [`Labels`] from an adam-lang-style declaration-ordered cell name map.
@@ -435,6 +441,12 @@ mod tests {
         assert_eq!(format_rounded(300.0), "300");
         assert_eq!(format_rounded(2.5), "2.5");
         assert_eq!(format_rounded(0.0), "0");
+    }
+
+    #[test]
+    fn format_rounded_negative_zero_has_no_minus_sign() {
+        assert_eq!(format_rounded(-0.0), "0");
+        assert_eq!(format_rounded(-0.001), "0");
     }
 
     #[test]
