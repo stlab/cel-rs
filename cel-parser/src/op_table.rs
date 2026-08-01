@@ -1597,15 +1597,19 @@ impl OpLookup {
 
     /// Looks up and applies a cast (`expr as Type`), attaching the expression span to any error.
     ///
-    /// - Postcondition: on success, the operand on top of `segment`'s stack is replaced in place
-    ///   by the converted value.
+    /// - Postcondition: on success, an operation is queued onto `segment` that replaces its
+    ///   top-of-stack operand with the converted value once the segment is run (e.g. via
+    ///   [`DynSegment::call0`]) - like every other op this crate queues rather than executes
+    ///   immediately.
     ///
     /// # Errors
     ///
     /// Returns a [`crate::ParseError`] spanning `start..=end` if `segment`'s stack is empty, if
-    /// `type_name` isn't a recognized cast-target type, if no cast from the operand's type to it
-    /// is registered, or if the conversion itself fails (e.g. an out-of-range or non-finite
-    /// value).
+    /// `type_name` isn't a recognized cast-target type, or if no cast from the operand's type to
+    /// it is registered. A registered conversion's own value-range failure (e.g. an out-of-range
+    /// or non-finite value) is deferred to execution - it surfaces from running the segment, not
+    /// from this function (see `cast_errors_when_the_value_does_not_fit_in_the_target_type`
+    /// below).
     ///
     /// - Complexity: O(s) in the number of registered sources for `type_name`.
     ///
