@@ -997,13 +997,17 @@ fn signatures_for(name: &str) -> Option<&'static [OpSignature]> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Numeric casts (`expr as Type`)
+// Casts (`expr as Type`)
 // ─────────────────────────────────────────────────────────────────────────
 //
-// Scoped to numeric-to-numeric conversions only (the 12 integer widths plus
-// `f32`/`f64`) - not `bool`/`String`, which Rust's own `as` treats as special
-// cases (bool -> integer only, one direction; nothing for String) and which
-// nothing in this language currently needs.
+// Covers every conversion Rust's own `as` operator supports among the
+// built-in types this crate's `Ty` model recognizes: the 12 integer widths,
+// `f32`/`f64`, `bool`, and `String`. A source/target pair not registered
+// here is one Rust's `as` itself rejects at compile time - e.g. `x as bool`
+// for a numeric `x` (E0054: "cannot cast ... as `bool`") or `x as f64` for
+// a `bool` `x` (E0606: "casting `bool` as `f64` is invalid") - so `bool` and
+// `String` are legitimate, fully-recognized cast *targets*, just ones with a
+// narrow set of legal sources, not omitted types.
 //
 // Fallibility follows one rule, not Rust's `as` (which never fails - it
 // saturates or truncates silently): a conversion that can always represent
@@ -1022,6 +1026,13 @@ fn signatures_for(name: &str) -> Option<&'static [OpSignature]> {
 //     nearest first").
 //   - f32 -> f64: infallible (always exact). f64 -> f32: checked (may not
 //     fit in `f32`'s finite range).
+//   - bool -> int: infallible (`as`), matching Rust exactly (`true` -> `1`,
+//     `false` -> `0`) for all 12 integer widths. Rust has no `bool -> float`
+//     `as` cast (E0606), so none is registered here either.
+//   - bool -> bool, String -> String: the only legal `as bool` / `as String`
+//     sources are their own identity conversions (Rust allows `e as T`
+//     whenever `e`'s type is already `T`, for any `T`, not just numerics);
+//     infallible, a plain pass-through.
 
 /// A signature for a numeric cast (`expr as Type`): one per legal source
 /// type for a given target type.
@@ -1141,9 +1152,10 @@ macro_rules! all_float_to_int_casts {
 macro_rules! int_cast_sources {
     ($name:ident, $tgt_ty:ty) => {
         static $name: Lazy<Vec<CastSignature>> = Lazy::new(|| {
-            let mut v = Vec::with_capacity(14);
+            let mut v = Vec::with_capacity(15);
             all_int_to_int_casts!(v, $tgt_ty);
             all_float_to_int_casts!(v, $tgt_ty);
+            as_cast_push!(v, TYPE_BOOL, bool, $tgt_ty);
             v
         });
     };
@@ -1204,10 +1216,31 @@ static F64_CAST_SOURCES: Lazy<Vec<CastSignature>> = Lazy::new(|| {
     v
 });
 
+/// `bool`'s only legal `as` source is `bool` itself (Rust has no
+/// int/float/String -> `bool` `as` cast - E0054): a no-op identity
+/// conversion.
+static BOOL_CAST_SOURCES: Lazy<Vec<CastSignature>> = Lazy::new(|| {
+    vec![CastSignature {
+        source_type_id_index: TYPE_BOOL,
+        op_fn: |seg, _span| seg.op1(|x: bool| x),
+    }]
+});
+
+/// `String`'s only legal `as` source is `String` itself (Rust's `as` has no
+/// conversion at all to `String` from any other type): a no-op identity
+/// conversion.
+static STRING_CAST_SOURCES: Lazy<Vec<CastSignature>> = Lazy::new(|| {
+    vec![CastSignature {
+        source_type_id_index: TYPE_STR,
+        op_fn: |seg, _span| seg.op1(|x: String| x),
+    }]
+});
+
 /// Routes a cast target type name to its static signature table (one legal
-/// source per entry), or `None` if `target_name` names no supported numeric
-/// type. Shared by [`cast_source_types`] (the type checker) and
-/// [`OpLookup::lookup_cast`] (execution) so they can't drift.
+/// source per entry), or `None` if `target_name` names no type this
+/// language's `as` operator recognizes as a cast target at all. Shared by
+/// [`cast_source_types`] (the type checker) and [`OpLookup::lookup_cast`]
+/// (execution) so they can't drift.
 fn signatures_for_cast(target_name: &str) -> Option<&'static [CastSignature]> {
     match target_name {
         "u8" => Some(&U8_CAST_SOURCES),
@@ -1224,13 +1257,15 @@ fn signatures_for_cast(target_name: &str) -> Option<&'static [CastSignature]> {
         "isize" => Some(&ISIZE_CAST_SOURCES),
         "f32" => Some(&F32_CAST_SOURCES),
         "f64" => Some(&F64_CAST_SOURCES),
+        "bool" => Some(&BOOL_CAST_SOURCES),
+        "String" => Some(&STRING_CAST_SOURCES),
         _ => None,
     }
 }
 
 /// Lists every source `TypeId` with a registered cast to `target_name`, or an empty `Vec` if
-/// `target_name` names no supported numeric type. Used by the type checker (`ty.rs`) to validate
-/// a cast without needing to touch a [`DynSegment`] - reads the exact same tables
+/// `target_name` names no recognized cast-target type. Used by the type checker (`ty.rs`) to
+/// validate a cast without needing to touch a [`DynSegment`] - reads the exact same tables
 /// [`OpLookup::lookup_cast`] does, so the two can't drift out of sync.
 pub fn cast_source_types(target_name: &str) -> Vec<TypeId> {
     signatures_for_cast(target_name)
@@ -1349,7 +1384,7 @@ pub struct OpLookup {
 
 impl OpLookup {
     /// Creates a new operation lookup with only built-in operations - the
-    /// infix/prefix operators, the numeric cast operator (`as`), and the
+    /// infix/prefix operators, the cast operator (`as`), and the
     /// `round` function.
     ///
     /// # Examples
@@ -1529,8 +1564,7 @@ impl OpLookup {
         ))
     }
 
-    /// Looks up and applies a numeric cast (`expr as Type`), attaching the expression span to
-    /// any error.
+    /// Looks up and applies a cast (`expr as Type`), attaching the expression span to any error.
     ///
     /// - Precondition: exactly one value is on top of `segment`'s stack (the cast's operand).
     /// - Postcondition: on success, that value is replaced in place by the converted value.
@@ -1538,7 +1572,7 @@ impl OpLookup {
     /// # Errors
     ///
     /// Returns a [`crate::ParseError`] spanning `start..=end` if `type_name` isn't a recognized
-    /// numeric type, if no cast from the operand's type to it is registered, or if the
+    /// cast-target type, if no cast from the operand's type to it is registered, or if the
     /// conversion itself fails (e.g. an out-of-range or non-finite value).
     ///
     /// - Complexity: O(s) in the number of registered sources for `type_name`.
@@ -1868,7 +1902,11 @@ mod tests {
     #[test]
     fn cast_composes_with_round_for_the_image_resize_pattern() -> Result<()> {
         // (width_px as f64) / dpi, mirrored back with round(... * dpi) as i32 -
-        // the actual pattern image_resize.adm2 needs for its width_px triangle.
+        // the actual pattern image_resize.adm2 needs for its width_px triangle. Exercises the
+        // full round trip: widening cast, round(), and the narrowing cast back to i32 - not just
+        // the widening half (see the PR review comment this regression-tests: a prior version of
+        // this test only checked `(width_px as f64) / dpi` and would not have caught a regression
+        // in `round`'s dispatch or the checked `f64 as i32` narrowing cast).
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         segment.just(1024i32);
@@ -1876,6 +1914,21 @@ mod tests {
         segment.just(300.0f64);
         lookup.lookup("/", &mut segment, 2, Span::call_site(), Span::call_site())?;
         assert_eq!(segment.call0::<f64>()?, 1024.0 / 300.0);
+
+        let mut segment = DynSegment::new::<()>();
+        lookup.lookup(
+            "round",
+            &mut segment,
+            0,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        segment.just(1024.0f64 / 300.0);
+        segment.just(300.0f64);
+        lookup.lookup("*", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
+        lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())?;
+        assert_eq!(segment.call0::<i32>()?, 1024);
         Ok(())
     }
 
@@ -1910,13 +1963,128 @@ mod tests {
 
     #[test]
     fn cast_errors_for_an_unregistered_source_type() -> Result<()> {
-        // bool -> i32 has no registered cast (deliberately out of scope - see the
-        // "Numeric casts" section's doc comment).
+        // String -> i32 has no registered cast: Rust's own `as` has no conversion from `String`
+        // to anything (see the "Casts" section's doc comment).
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just("1".to_string());
+        let result = lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site());
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cast_from_bool_is_registered_for_every_integer_width() -> Result<()> {
+        // Matches Rust's own `bool as <int>`: infallible for all 12 integer widths.
+        let lookup = OpLookup::new();
+        for target in [
+            "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+        ] {
+            let mut segment = DynSegment::new::<()>();
+            segment.just(true);
+            lookup.lookup_cast(target, &mut segment, Span::call_site(), Span::call_site())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cast_widens_bool_to_a_specific_integer_value() -> Result<()> {
+        // Matches Rust's own `bool as <int>`: `true` -> 1, `false` -> 0.
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         segment.just(true);
-        let result = lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site());
+        lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())?;
+        assert_eq!(segment.call0::<i32>()?, 1);
+
+        let mut segment = DynSegment::new::<()>();
+        segment.just(false);
+        lookup.lookup_cast("u64", &mut segment, Span::call_site(), Span::call_site())?;
+        assert_eq!(segment.call0::<u64>()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn cast_bool_to_bool_is_a_no_op_identity_conversion() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(true);
+        lookup.lookup_cast("bool", &mut segment, Span::call_site(), Span::call_site())?;
+        assert!(segment.call0::<bool>()?);
+        Ok(())
+    }
+
+    #[test]
+    fn cast_string_to_string_is_a_no_op_identity_conversion() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just("hello".to_string());
+        lookup.lookup_cast("String", &mut segment, Span::call_site(), Span::call_site())?;
+        assert_eq!(segment.call0::<String>()?, "hello");
+        Ok(())
+    }
+
+    #[test]
+    fn cast_errors_from_a_number_to_bool() -> Result<()> {
+        // Rust's own `as` rejects `<int> as bool` (E0054) - no int/float -> bool conversion is
+        // registered, matching Rust exactly, not just "unknown type".
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1i32);
+        let result = lookup.lookup_cast("bool", &mut segment, Span::call_site(), Span::call_site());
         assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cast_errors_from_bool_to_a_float() -> Result<()> {
+        // Rust's own `as` rejects `bool as f64` (E0606: "cast through an integer first").
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(true);
+        let result = lookup.lookup_cast("f64", &mut segment, Span::call_site(), Span::call_site());
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cast_errors_between_string_and_bool_in_both_directions() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(true);
+        assert!(
+            lookup
+                .lookup_cast("String", &mut segment, Span::call_site(), Span::call_site())
+                .is_err()
+        );
+
+        let mut segment = DynSegment::new::<()>();
+        segment.just("true".to_string());
+        assert!(
+            lookup
+                .lookup_cast("bool", &mut segment, Span::call_site(), Span::call_site())
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cast_errors_between_string_and_numbers_in_both_directions() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1i32);
+        assert!(
+            lookup
+                .lookup_cast("String", &mut segment, Span::call_site(), Span::call_site())
+                .is_err()
+        );
+
+        let mut segment = DynSegment::new::<()>();
+        segment.just("1".to_string());
+        assert!(
+            lookup
+                .lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())
+                .is_err()
+        );
         Ok(())
     }
 

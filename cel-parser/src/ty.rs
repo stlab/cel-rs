@@ -746,4 +746,58 @@ mod tests {
         assert_eq!(ty, Ty::Any, "Apply itself is not type-checked in v1");
         assert_eq!(diags.len(), 1);
     }
+
+    fn cast(inner: Expr, type_name: &str) -> Expr {
+        Expr::Cast {
+            expr: Box::new(inner),
+            type_name: type_name.to_string(),
+            span: point(proc_macro2::Span::call_site()),
+        }
+    }
+
+    #[test]
+    fn cast_to_a_registered_numeric_target_infers_the_target_type_with_no_diagnostic() {
+        let (ty, diags) = check_expr(&cast(lit_i32(1), "f64"), &any_resolver);
+        assert_eq!(ty, Ty::F64);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn cast_from_bool_to_bool_produces_no_diagnostic() {
+        // Regression test for the `ty.rs`/`op_table.rs` "no cast from ... to bool" vs. "unknown
+        // type" inconsistency: bool is the one type Rust's own `as` allows as a source for `as
+        // bool` (a no-op identity conversion), so this must not be a diagnostic.
+        let (ty, diags) = check_expr(&cast(lit_bool(true), "bool"), &any_resolver);
+        assert_eq!(ty, Ty::Bool);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn cast_from_a_number_to_bool_is_a_diagnostic_not_an_unknown_type_error() {
+        // `bool` is a recognized cast target (matches [`op_table::signatures_for_cast`]), just one
+        // with no registered `i32` source - same "no cast from `i32` to `bool`" diagnostic
+        // `OpLookup::lookup_cast` would report at execution time, not "unknown type `bool`".
+        let (ty, diags) = check_expr(&cast(lit_i32(1), "bool"), &any_resolver);
+        assert_eq!(ty, Ty::Bool);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message().contains("no cast from"));
+    }
+
+    #[test]
+    fn cast_to_an_unrecognized_type_name_is_a_diagnostic_and_infers_any() {
+        let (ty, diags) = check_expr(&cast(lit_i32(1), "nonsense"), &any_resolver);
+        assert_eq!(ty, Ty::Any);
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn cast_of_an_any_typed_operand_produces_no_diagnostic() {
+        let expr = Expr::Ident {
+            name: "mystery".to_string(),
+            span: point(proc_macro2::Span::call_site()),
+        };
+        let (ty, diags) = check_expr(&cast(expr, "i32"), &any_resolver);
+        assert_eq!(ty, Ty::I32);
+        assert!(diags.is_empty());
+    }
 }

@@ -183,7 +183,7 @@ pub enum Expr {
         /// The span of the whole logical expression.
         span: ExprSpan,
     },
-    /// A numeric cast (`expr as Type`). Whether `type_name` is a recognized type and whether a
+    /// A cast (`expr as Type`). Whether `type_name` is a recognized type and whether a
     /// conversion from `expr`'s type exists is unchecked here — deferred to the type-checking
     /// phase (see the module doc comment), same as `TupleIndex`'s deferred bounds check.
     Cast {
