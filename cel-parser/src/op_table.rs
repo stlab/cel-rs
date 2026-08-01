@@ -1127,8 +1127,11 @@ macro_rules! all_int_to_float_casts {
 /// then compare equal to (not greater than) the bound, silently passing the check and letting
 /// Rust's `as` saturate it to `MAX` instead of returning `Err`. Deriving the exclusive upper
 /// bound directly as a power of two (`2^bits` unsigned, `2^(bits-1)` signed) sidesteps the
-/// rounding entirely: a power of two is always exactly representable in any float type, for
-/// every integer width this crate supports.
+/// rounding entirely: whenever that power of two is within `$src_ty`'s finite range, it's exact
+/// (no mantissa bits are needed to represent a power of two, only the exponent). The one case
+/// where it isn't - `u128` (`2^128`) as an `f32` source, since `2^128` exceeds `f32::MAX` - falls
+/// back to `f32::INFINITY` as the bound, which is still correct: every finite `f32` value is
+/// already below `u128::MAX`, so a bound of infinity never wrongly accepts one.
 macro_rules! float_to_int_cast_push {
     ($v:ident, $src_idx:expr, $src_ty:ty, $tgt_ty:ty) => {
         $v.push(CastSignature {
