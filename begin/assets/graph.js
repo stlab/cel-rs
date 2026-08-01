@@ -312,6 +312,7 @@
 
     // Releases a pinned node back into the free simulation.
     function unpinNode(event, d) {
+        event.stopPropagation();
         d.fx = null;
         d.fy = null;
         simulation.alpha(Math.max(simulation.alpha(), 0.3)).restart();
