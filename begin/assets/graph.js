@@ -296,8 +296,6 @@
                 // gesture would also pan the canvas.
                 event.sourceEvent.stopPropagation();
                 if (!event.active) sim.alphaTarget(0.3).restart();
-                d.fx = d.x;
-                d.fy = d.y;
                 d3.select(this).classed('dragging', true);
             })
             .on('drag', function (event, d) {
