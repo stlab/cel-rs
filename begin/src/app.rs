@@ -114,8 +114,12 @@ pub fn App() -> Element {
 /// [`ActiveSource`] describing what just loaded.
 ///
 /// A read or parse failure prints the diagnostic to stderr and returns an
-/// empty sheet with a default (empty) [`ActiveSource`] instead of failing —
-/// see [`App`]'s doc comment for why.
+/// empty sheet instead of failing — see [`App`]'s doc comment for why. The
+/// returned [`ActiveSource`] still carries `name` (and, if the read
+/// succeeded, the source text that failed to parse) even on failure, so the
+/// desktop hot-reload loop keeps reloading the right file and can recover
+/// once the on-disk error is fixed, instead of losing track of which demo
+/// was selected.
 fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
     match load_demo_source(name) {
         Ok(source) => {
@@ -123,21 +127,25 @@ fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
             if let Some(err) = &outcome.error {
                 eprintln!("{err}");
             }
+            let active_source = ActiveSource {
+                name: name.to_string(),
+                text: source,
+            };
             match outcome.sheet_labels {
-                Some((sheet, labels)) => (
-                    sheet,
-                    labels,
-                    ActiveSource {
-                        name: name.to_string(),
-                        text: source,
-                    },
-                ),
-                None => (Sheet::new(), Labels::new(), ActiveSource::default()),
+                Some((sheet, labels)) => (sheet, labels, active_source),
+                None => (Sheet::new(), Labels::new(), active_source),
             }
         }
         Err(err) => {
             eprintln!("{err}");
-            (Sheet::new(), Labels::new(), ActiveSource::default())
+            (
+                Sheet::new(),
+                Labels::new(),
+                ActiveSource {
+                    name: name.to_string(),
+                    text: String::new(),
+                },
+            )
         }
     }
 }
@@ -252,6 +260,9 @@ mod tests {
         let (sheet, labels, active) = load_demo("does_not_exist");
         assert_eq!(sheet.cells().count(), 0);
         assert_eq!(labels.cells.len(), 0);
-        assert_eq!(active.name, "");
+        assert_eq!(
+            active.name, "does_not_exist",
+            "name must be preserved on failure so hot-reload keeps targeting the right file"
+        );
     }
 }
