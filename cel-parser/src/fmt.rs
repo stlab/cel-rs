@@ -22,9 +22,10 @@ impl Level {
     const SHIFT: Level = Level(6);
     const ADDITIVE: Level = Level(7);
     const MULTIPLICATIVE: Level = Level(8);
-    const UNARY: Level = Level(9);
-    const POSTFIX: Level = Level(10);
-    const PRIMARY: Level = Level(11);
+    const CAST: Level = Level(9);
+    const UNARY: Level = Level(10);
+    const POSTFIX: Level = Level(11);
+    const PRIMARY: Level = Level(12);
 
     /// The next level up (strictly tighter-binding than `self`).
     fn tighter(self) -> Level {
@@ -98,6 +99,15 @@ fn render(expr: &Expr) -> (String, Level) {
             let lhs_s = format_at(&operands[0], lhs_min);
             let rhs_s = format_at(&operands[1], rhs_min);
             (format!("{lhs_s} {name} {rhs_s}"), level)
+        }
+        Expr::Cast {
+            expr, type_name, ..
+        } => {
+            // Left-associative, like multiplicative/additive: the operand only needs to be at
+            // least as tight as Cast itself, so a chain like `x as i32 as f64` reprints without
+            // extra parens.
+            let expr_s = format_at(expr, Level::CAST);
+            (format!("{expr_s} as {type_name}"), Level::CAST)
         }
         Expr::Apply { callee, args, .. } => {
             let callee_s = format_at(callee, Level::POSTFIX);
@@ -283,6 +293,40 @@ mod tests {
     #[test]
     fn double_unary_minus_keeps_a_separating_space() {
         assert_eq!(format_expr(&parse("- -1i32")), "- -1i32");
+    }
+
+    #[test]
+    fn cast_chain_reprints_without_extra_parens() {
+        assert_eq!(format_expr(&parse("x as i32 as f64")), "x as i32 as f64");
+    }
+
+    #[test]
+    fn unary_minus_before_a_cast_needs_no_parens() {
+        // Matches Rust: `-x as f64` parses as `(-x) as f64` - unary already binds tighter than
+        // Cast, so the printer doesn't need to add parens to preserve that grouping.
+        assert_eq!(format_expr(&parse("-x as f64")), "-x as f64");
+    }
+
+    #[test]
+    fn explicit_grouping_before_a_cast_keeps_its_parens() {
+        // `as` binds tighter than `+`, so without parens `(a + b) as i32` would reprint as
+        // `a + b as i32` - a different expression (`a + (b as i32)`). The parens must survive.
+        assert_eq!(format_expr(&parse("(a + b) as i32")), "(a + b) as i32");
+    }
+
+    #[test]
+    fn cast_operand_of_an_additive_expression_needs_no_parens() {
+        // `a + b as i32` already parses as `a + (b as i32)` (`as` binds tighter than `+`), so no
+        // parens are needed around the cast when reprinting.
+        assert_eq!(format_expr(&parse("a + b as i32")), "a + b as i32");
+    }
+
+    #[test]
+    fn explicit_grouping_around_a_cast_before_multiplicative_is_redundant_and_dropped() {
+        // `(x as i32) * y` parses to the exact same tree as `x as i32 * y` (cast already binds
+        // tighter than `*`), so the now-redundant parens are dropped on reprint - matching the
+        // module doc's "parens added only where required, not exhaustively".
+        assert_eq!(format_expr(&parse("(x as i32) * y")), "x as i32 * y");
     }
 
     #[test]

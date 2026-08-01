@@ -23,7 +23,8 @@
 //! bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
 //! bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression }.
 //! additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression }.
-//! multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.
+//! multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression }.
+//! cast_expression = unary_expression { "as" identifier }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
 //! postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.
 //! primary_expression = literal | identifier | tuple_or_group | if_expression.
@@ -792,10 +793,10 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `multiplicative_expression = unary_expression { ("*" | "/" | "%") unary_expression }.`
+    /// `multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression }.`
     fn is_multiplicative_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
-        if self.is_unary_expression()? {
+        if self.is_cast_expression()? {
             loop {
                 let op_name = if self.is_punctuation("*") {
                     Some("*")
@@ -808,8 +809,8 @@ impl<C: ParserContext> Parser<C> {
                 };
 
                 if let Some(op_name) = op_name {
-                    if !self.is_unary_expression()? {
-                        return Err(self.error_at("expected unary_expression"));
+                    if !self.is_cast_expression()? {
+                        return Err(self.error_at("expected cast_expression"));
                     }
                     self.context.apply_op(
                         &self.op_lookup,
@@ -821,6 +822,37 @@ impl<C: ParserContext> Parser<C> {
                 } else {
                     break;
                 }
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// `cast_expression = unary_expression { "as" identifier }.`
+    ///
+    /// Binds tighter than `* / %` but looser than unary prefix and postfix, matching Rust: `-x as
+    /// f64` is `(-x) as f64`, and `x as i32 as f64` applies left-to-right (`(x as i32) as f64`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `"as"` isn't followed by an identifier, or if any sub-expression
+    /// returns an error.
+    fn is_cast_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
+        if self.is_unary_expression()? {
+            while self.is_keyword("as") {
+                let type_name = match self.peek_token() {
+                    Some(Token::Identifier(ident)) => ident.to_string(),
+                    _ => return Err(self.error_at("expected type name after `as`")),
+                };
+                self.advance();
+                self.context.apply_cast(
+                    &self.op_lookup,
+                    &type_name,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
             }
             Ok(true)
         } else {
@@ -1708,6 +1740,68 @@ mod tests {
         }
         assert!(result.is_ok(), "Failed to parse: {}", result.err().unwrap());
         assert!(result.unwrap().call0::<bool>().unwrap());
+    }
+
+    #[test]
+    fn cast_expression_parses_and_executes() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("1024i32 as f64");
+        assert_eq!(result.unwrap().call0::<f64>().unwrap(), 1024.0);
+    }
+
+    #[test]
+    fn cast_expression_chains_left_to_right() {
+        // `x as i32 as f64` must apply left-to-right: `(x as i32) as f64`, not
+        // `x as (i32 as f64)` (which isn't even expressible - a cast target is a bare
+        // identifier, not another cast expression).
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("1.5f64 as i32 as f64");
+        assert_eq!(result.unwrap().call0::<f64>().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn cast_binds_tighter_than_unary_negation() {
+        // `-x as u32` must parse as `(-x) as u32` (matching Rust): the negative operand hits the
+        // checked int->int cast's own out-of-range check at execution, not a "no operation `-`
+        // for `u32`" error at parse time, which is what parsing it as `-(x as u32)` would
+        // produce instead - `u32` has no registered unary negation, matching Rust (u32 doesn't
+        // implement `Neg`).
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("-1i32 as u32").expect(
+            "parses: unary negation is registered for i32, and i32 -> u32 is a valid cast pair",
+        );
+        let err = seg.call0::<u32>().unwrap_err();
+        // The cast's own error is wrapped in a `SpanContext` (see `span_err`), which becomes the
+        // outermost context and so is what plain `Display`/`to_string()` shows - the underlying
+        // "does not fit" message is further down the `anyhow` chain, hence `{:#}`.
+        let full = format!("{err:#}");
+        assert!(
+            full.contains("does not fit"),
+            "expected an out-of-range cast error, got: {full}"
+        );
+    }
+
+    #[test]
+    fn cast_binds_tighter_than_multiplicative_operators() {
+        // `*` requires homogeneous operand types, so if `as` binds tighter than `*` (matching
+        // Rust), this parses as `2i32 * (3i32 as f64)` - an `i32 * f64` mismatch, which this
+        // grammar's eager, statically-typed segment construction rejects immediately at parse
+        // time (operator/operand-type matching isn't deferred to execution, unlike a cast's own
+        // value-range check). If `as` bound looser instead, this would parse as
+        // `(2i32 * 3i32) as f64` and succeed.
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("2i32 * 3i32 as f64");
+        assert!(result.is_err(), "expected a type-mismatch parse error");
+    }
+
+    #[test]
+    fn cast_binds_tighter_than_additive_operators() {
+        // Same reasoning as the multiplicative case: `1i32 + 2i32 as f64` must parse as
+        // `1i32 + (2i32 as f64)` (an `i32 + f64` mismatch, a parse-time error), not
+        // `(1i32 + 2i32) as f64` (which would succeed).
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("1i32 + 2i32 as f64");
+        assert!(result.is_err(), "expected a type-mismatch parse error");
     }
 
     #[test]
