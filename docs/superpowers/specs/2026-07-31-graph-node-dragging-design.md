@@ -70,8 +70,9 @@ unrelated tick.
 ## Section 2 — Styling (`begin/assets/graph.css`)
 
 Change `cursor: default` to `cursor: grab` on `.node-cell`, `.node-relationship`, and
-`.node-conditional`. Add a `.dragging` modifier (toggled on the dragged element's class list in
-`start`/`end`) setting `cursor: grabbing`, so the cursor reflects active-drag state.
+`.node-conditional`. Add a `.dragging` modifier (set on the dragged element's class list on the
+first actual `drag` movement, cleared in `end`) setting `cursor: grabbing`, so the cursor reflects
+active-drag state.
 
 ## Section 3 — Testing & verification
 

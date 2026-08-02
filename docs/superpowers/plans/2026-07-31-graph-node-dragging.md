@@ -4,7 +4,7 @@
 
 **Goal:** Let the user drag Cell, Relationship, and Conditional nodes in the `begin` graph view to manually untangle crossing edges, while keeping the D3 force simulation live so dragging one node pulls on the rest of the graph. Dropped nodes stay pinned; double-clicking a pinned node releases it back into the simulation.
 
-**Architecture:** All logic lives in `begin/assets/graph.js` (a plain, unbundled script — no build step, no test runner) plus a small cursor-affordance addition in `begin/assets/graph.css`. A new `dragBehavior(simulation)` factory returns a configured `d3.drag()` that pins a node's `fx`/`fy` on drag-start, tracks the pointer during drag, and — critically — leaves `fx`/`fy` set on drag-end instead of clearing them. It's applied via `.call(...)` to the existing Cell/Relationship/Conditional join selections in `update()`. A separate `dblclick` handler clears `fx`/`fy` to unpin. No Rust changes are needed; `fx`/`fy` persistence across data updates falls out of the existing node-identity-preserving merge in `update()` with no code changes.
+**Architecture:** All logic lives in `begin/assets/graph.js` (a plain, unbundled script — no build step, no test runner) plus a small cursor-affordance addition in `begin/assets/graph.css`. A new `dragBehavior(simulation)` factory returns a configured `d3.drag()` that pins a node's `fx`/`fy` on the first actual `drag` movement (not `drag-start`, so a plain click with no movement stays a no-op), tracks the pointer during drag, and — critically — leaves `fx`/`fy` set on drag-end instead of clearing them. It's applied via `.call(...)` to the existing Cell/Relationship/Conditional join selections in `update()`. A separate `dblclick` handler clears `fx`/`fy` to unpin. No Rust changes are needed; `fx`/`fy` persistence across data updates falls out of the existing node-identity-preserving merge in `update()` with no code changes.
 
 **Tech Stack:** Dioxus (Rust), D3.js v7 (vendored at `begin/assets/d3.v7.min.js`), plain JS/CSS assets served via `asset!`.
 
@@ -24,10 +24,10 @@
 ## Task 1: Drag-to-pin, double-click-to-unpin, and cursor affordance
 
 **Files:**
-- Modify: `begin/assets/graph.js:285-287` (insert `dragBehavior`/`unpinNode` between `buildGraph` and `update`)
-- Modify: `begin/assets/graph.js:363-369` (cell rect join — add `.call()`/`.on('dblclick', ...)`)
-- Modify: `begin/assets/graph.js:372-376` (relationship circle join — same)
-- Modify: `begin/assets/graph.js:436-441` (conditional diamond join — same)
+- Modify: `begin/assets/graph.js:307-344` (insert `dragBehavior`/`unpinNode` between `buildGraph` and `update`)
+- Modify: `begin/assets/graph.js:461-469` (cell rect join — add `.call()`/`.on('dblclick', ...)`)
+- Modify: `begin/assets/graph.js:472-478` (relationship circle join — same)
+- Modify: `begin/assets/graph.js:538-545` (conditional diamond join — same)
 - Modify: `begin/assets/graph.css` (cursor styling for `.node-cell`, `.node-relationship`, `.node-conditional`, plus a new `.dragging` modifier)
 
 **Interfaces:**
@@ -39,7 +39,10 @@
 In `begin/assets/graph.js`, find the end of `buildGraph()` and the start of `update()`:
 
 ```javascript
-        simulation.on('tick', ticked);
+        simulation.on('tick', function () {
+            ticked();
+            updateZoomConstraints();
+        });
 
         update(data);
     }
@@ -50,7 +53,10 @@ In `begin/assets/graph.js`, find the end of `buildGraph()` and the start of `upd
 Replace it with (inserting the two new functions between `buildGraph`'s closing `}` and `update`):
 
 ```javascript
-        simulation.on('tick', ticked);
+        simulation.on('tick', function () {
+            ticked();
+            updateZoomConstraints();
+        });
 
         update(data);
     }
