@@ -15,9 +15,12 @@ new_key_type! {
 
 /// Internal storage for a single value cell.
 pub(crate) struct CellData {
-    /// The value from the most recent `write()`/`add_cell`. Never written by
-    /// `Sheet::propagate`; self-referencing methods and conditionally forced
-    /// relationships read/write around this field via `derived` instead.
+    /// The value from the most recent `write()`/`add_cell`. Also written directly by
+    /// `Sheet::propagate` for outputs that aren't shadowed (the common case: an ordinary
+    /// derived cell behaves exactly as it did before `derived` existed). Left untouched by
+    /// `propagate()` only for outputs that *are* shadowed — self-referencing methods and
+    /// conditionally forced relationships write those into `derived` instead, which is what
+    /// keeps this field holding the original value for exactly those cells.
     pub(crate) source: Box<dyn Any>,
     /// The value most recently produced by a method this round, if this cell was
     /// shadowed (a self-referencing output, or a pure output of a conditionally

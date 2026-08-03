@@ -37,7 +37,10 @@ outright — so no `Clone` bound is added anywhere.
 Every cell has two conceptual slots:
 
 - **`source`** — the value from the most recent `write()` (or the `add_cell` initializer). Set
-  **only** by `write()`/`add_cell`. Never touched by `propagate()`.
+  by `write()`/`add_cell`, and also written directly by `execute_plan()` for any output that
+  isn't shadowed (see below) — so it behaves exactly as the old single value field did for
+  ordinary derived cells. Left untouched by `execute_plan()` only for outputs that *are*
+  shadowed, which is exactly what preserves the original value for those cells.
 - **`derived`** — the value most recently produced by a method, for this round, if any. Set
   **only** by `execute_plan()`, and reset to absent at the start of every `propagate()` call
   before planning begins.
@@ -119,7 +122,8 @@ above (self-ref in the `p == 0` branch, conditional-pure-output in the default b
 
 ```rust
 pub(crate) struct CellData {
-    /// The value from the most recent `write()`/`add_cell`. Never written by `propagate()`.
+    /// The value from the most recent `write()`/`add_cell`. Also written directly by
+    /// `propagate()` for outputs that aren't shadowed; only left untouched for shadowed ones.
     pub(crate) source: Box<dyn Any>,       // renamed from `value`
     /// The value most recently produced by a method this round, if this cell was shadowed.
     /// Reset to `None` at the start of every `propagate()`, before planning.
@@ -128,8 +132,10 @@ pub(crate) struct CellData {
 }
 ```
 
-No `Clone` bound anywhere: `source` is moved in once by `write()`; `derived` is moved in once by
-`execute_plan()` from the method's own output. They are never copied into each other.
+No `Clone` bound anywhere: `source` is moved in by `write()`/`add_cell`, and also (for unshadowed
+outputs) by `execute_plan()`; `derived` is moved in only by `execute_plan()`, only for shadowed
+outputs. Whichever writer touches a given slot for a given cell in a given round, the value is
+always moved in from its single owning writer for that round, never copied into both.
 
 ## Changes
 

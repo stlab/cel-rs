@@ -352,9 +352,11 @@ impl Sheet {
             .expect("type checked above"))
     }
 
-    /// Returns the last explicitly written (source) value, ignoring any derived
-    /// override produced by a self-referencing method or a conditionally forced
-    /// relationship.
+    /// Returns the raw `source` slot: the last value written via `write()`/`add_cell`,
+    /// ignoring any `derived` override produced by a self-referencing method or a
+    /// conditionally forced relationship. For an ordinary (unshadowed) derived cell,
+    /// `propagate()` writes straight into this same slot, so `source()` agrees with
+    /// `read()`; the two diverge only for cells currently shadowed.
     ///
     /// # Errors
     ///
@@ -385,8 +387,10 @@ impl Sheet {
     /// Iterates over the cells that were updated during the last `propagate()` call.
     ///
     /// This includes cells written by selected methods and cells that reverted to their
-    /// source values due to deactivated forcing conditionals (Phase 5), even without being
-    /// written by a method. It does not attempt to compare old/new values for equality.
+    /// source values because the relationship that had been shadowing them (self-referencing
+    /// or conditionally forced) is no longer producing them this round (Phase 5), even though
+    /// no method wrote to them this round. It does not attempt to compare old/new values for
+    /// equality.
     ///
     /// - Complexity: O(n) where n is the number of changed cells.
     pub fn changed(&self) -> impl Iterator<Item = CellId> + '_ {
