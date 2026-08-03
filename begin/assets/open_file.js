@@ -47,6 +47,7 @@ window.beginOpenFile = {
         const text = await file.text();
         resolve({ id: null, name: file.name, text });
       });
+      input.addEventListener("cancel", () => resolve(null));
       input.click();
     });
   },
