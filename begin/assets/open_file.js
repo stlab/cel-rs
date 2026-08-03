@@ -10,11 +10,6 @@ window.beginOpenFile = {
   nextId: 0,
 
   open() {
-    // At most one file is ever "open" in this app's UI at a time, so any
-    // handle from a previously opened file is now stale — drop it rather
-    // than letting the map grow unbounded across a session.
-    this.handles = {};
-
     if (window.showOpenFilePicker) {
       return (async () => {
         let handle;
@@ -28,9 +23,16 @@ window.beginOpenFile = {
             ],
           });
         } catch (e) {
-          return null; // user cancelled the picker
+          return null; // user cancelled the picker — leave any existing handle alone
         }
         const id = this.nextId++;
+        // At most one file is ever "open" in this app's UI at a time, so any
+        // handle from a previously opened file is now stale — drop it rather
+        // than letting the map grow unbounded across a session. Cleared only
+        // here, on a successful pick, not unconditionally at the top of
+        // open(): clearing it before the picker resolves would silently kill
+        // a still-valid handle if the user then cancelled this pick.
+        this.handles = {};
         this.handles[id] = handle;
         const file = await handle.getFile();
         const text = await file.text();
