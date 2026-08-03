@@ -54,6 +54,33 @@ pub fn spawn_watch(
     Ok(watcher)
 }
 
+/// The result of a web-side `open()`/`refresh()` call, sent from JS via
+/// `dioxus.send()` and read back with `eval.recv::<Option<OpenedFilePayload>>()`.
+///
+/// `id` is `Some(handle_id)` when a re-readable `FileSystemFileHandle` backs
+/// this result (the File System Access path) — pass it to [`refresh_script`]
+/// to reload later. `None` means the `<input type="file">` fallback was used:
+/// the load is one-shot, with nothing to refresh from.
+#[derive(serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OpenedFilePayload {
+    pub id: Option<u32>,
+    pub name: String,
+    pub text: String,
+}
+
+/// `document::eval` script that opens the file picker (or its `<input
+/// type="file">` fallback) and sends the result back via `dioxus.send()`.
+/// Resolves to `null` on JS's side (received as `None`) if the user
+/// cancelled.
+pub const OPEN_SCRIPT: &str =
+    "(async () => { dioxus.send(await window.beginOpenFile.open()); })();";
+
+/// `document::eval` script that re-reads the file behind handle `id` and
+/// sends the refreshed `{id, name, text}` back via `dioxus.send()`.
+pub fn refresh_script(id: u32) -> String {
+    format!("(async () => {{ dioxus.send(await window.beginOpenFile.refresh({id})); }})();")
+}
+
 #[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::*;
@@ -85,5 +112,32 @@ mod tests {
         let result = read_opened_file(&path);
 
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod web_tests {
+    use super::*;
+
+    #[test]
+    fn opened_file_payload_deserializes_with_handle_id() {
+        let json = r#"{"id": 3, "name": "my_model.adm2", "text": "sheet s {}"}"#;
+        let payload: OpenedFilePayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.id, Some(3));
+        assert_eq!(payload.name, "my_model.adm2");
+        assert_eq!(payload.text, "sheet s {}");
+    }
+
+    #[test]
+    fn opened_file_payload_deserializes_without_handle_id() {
+        let json = r#"{"id": null, "name": "my_model.adm2", "text": "sheet s {}"}"#;
+        let payload: OpenedFilePayload = serde_json::from_str(json).unwrap();
+        assert_eq!(payload.id, None);
+    }
+
+    #[test]
+    fn refresh_script_embeds_the_given_id() {
+        let script = refresh_script(3);
+        assert!(script.contains("beginOpenFile.refresh(3)"), "{script}");
     }
 }
