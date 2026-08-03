@@ -47,36 +47,59 @@ pub fn App() -> Element {
     let labels = use_signal(|| initial_labels);
     let active_source = use_signal(|| initial_active_source);
 
+    // The reload channel is shared by two producers: `dx serve`'s hot-reload
+    // notifications for the currently selected demo (below), and, on desktop,
+    // a filesystem watcher on whichever file the user most recently opened
+    // (installed by `OpenFileControls`). Either producer sending on `tx` wakes
+    // the single consumer loop below, which reloads via `active_source`'s
+    // current `SourceOrigin` — so only one reload path ever runs regardless of
+    // which source is currently active.
+    // `reload_tx` is wrapped in a `Signal` (rather than passed as the bare
+    // `UnboundedSender`) purely so it can be a prop on `OpenFileControls`:
+    // `#[component]`-generated Props require `PartialEq`, which
+    // `UnboundedSender` doesn't implement but `Signal<T>` does regardless of
+    // `T` (it compares by the underlying slot's identity, not `T`'s value).
     #[cfg(feature = "desktop")]
-    {
+    let reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>> = {
         let mut sheet = sheet;
         let mut labels = labels;
         let mut active_source = active_source;
         use_hook(move || {
             let (tx, mut rx) = futures_channel::mpsc::unbounded::<()>();
-            crate::demo_source::spawn_hot_reload(move || {
-                let _ = tx.unbounded_send(());
+            crate::demo_source::spawn_hot_reload({
+                let tx = tx.clone();
+                move || {
+                    let _ = tx.unbounded_send(());
+                }
             });
             spawn(async move {
                 use futures_util::StreamExt;
                 while rx.next().await.is_some() {
-                    let name = active_source.read().name.clone();
-                    eprintln!("loading begin/assets/{name}.adm2");
-                    let source = match crate::demo_source::load_demo_source(&name) {
+                    let current = active_source.read().clone();
+                    let loaded = match &current.origin {
+                        SourceOrigin::Demo => {
+                            eprintln!("loading begin/assets/{}.adm2", current.name);
+                            load_demo_source(&current.name)
+                        }
+                        SourceOrigin::Opened(path) => {
+                            eprintln!("loading {path}");
+                            crate::open_file::read_opened_file(std::path::Path::new(path))
+                        }
+                    };
+                    let source = match loaded {
                         Ok(source) => source,
                         Err(err) => {
                             eprintln!("{err}");
                             continue;
                         }
                     };
-                    let outcome = build_sheet(&source, &format!("begin/assets/{name}.adm2"));
+                    let outcome = build_sheet(&source, &current.file_name());
                     if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
                         sheet.set(new_sheet);
                         labels.set(new_labels);
                         active_source.set(ActiveSource {
-                            name: name.clone(),
                             text: source,
-                            origin: SourceOrigin::Demo,
+                            ..current
                         });
                     }
                     if let Some(msg) = outcome.error {
@@ -84,10 +107,37 @@ pub fn App() -> Element {
                     }
                 }
             });
-        });
-    }
+            Signal::new(tx)
+        })
+    };
+
+    // Holds the `notify` watcher installed on the most recently opened file, if
+    // any. Replacing it (via `Signal::set` in `OpenFileControls`) drops the
+    // previous watcher, which stops its OS-level watch — so switching to a
+    // demo, or opening a different file, never leaves a stale watcher running.
+    #[cfg(feature = "desktop")]
+    let watcher_slot: Signal<Option<notify::RecommendedWatcher>> = use_signal(|| None);
 
     let graph_data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
+
+    // `rsx!` doesn't accept a bare `#[cfg(...)]` attribute on a child in this
+    // position (it expects an element/component name next), so the
+    // desktop-only `OpenFileControls` child is built as its own `Element`
+    // here — under a real `#[cfg]`, so nothing on a web build references
+    // `OpenFileControls` at all — and spliced into the tree below via `{..}`
+    // interpolation.
+    #[cfg(feature = "desktop")]
+    let open_file_controls = rsx! {
+        OpenFileControls {
+            sheet,
+            labels,
+            active_source,
+            reload_tx,
+            watcher_slot,
+        }
+    };
+    #[cfg(not(feature = "desktop"))]
+    let open_file_controls: Element = rsx! {};
 
     rsx! {
         document::Link { rel: "icon", r#type: "image/x-icon", href: "/favicon.ico" }
@@ -103,6 +153,7 @@ pub fn App() -> Element {
             div {
                 style: "position: fixed; inset: 0; display: flex; flex-direction: column; overflow: hidden;",
                 DemoPicker { sheet, labels, active_source }
+                {open_file_controls}
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
                     GraphView { data: graph_data }
@@ -151,6 +202,99 @@ fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
                     origin: SourceOrigin::Demo,
                 },
             )
+        }
+    }
+}
+
+/// Reads `path`, builds its sheet, and returns it alongside the
+/// [`ActiveSource`] describing what just loaded.
+///
+/// A read or parse failure prints the diagnostic to stderr and returns an
+/// empty sheet instead of failing — mirrors [`load_demo`]'s failure handling
+/// (see [`App`]'s doc comment for why). The returned [`ActiveSource`] still
+/// carries the opened path (and, if the read succeeded, the source text that
+/// failed to parse) even on failure, so the live-reload loop keeps targeting
+/// the right file.
+#[cfg(feature = "desktop")]
+fn load_opened(path: std::path::PathBuf) -> (Sheet, Labels, ActiveSource) {
+    let file_name = path.display().to_string();
+    match crate::open_file::read_opened_file(&path) {
+        Ok(source) => {
+            let outcome = build_sheet(&source, &file_name);
+            if let Some(err) = &outcome.error {
+                eprintln!("{err}");
+            }
+            let name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| file_name.clone());
+            let active_source = ActiveSource {
+                name,
+                text: source,
+                origin: SourceOrigin::Opened(file_name),
+            };
+            match outcome.sheet_labels {
+                Some((sheet, labels)) => (sheet, labels, active_source),
+                None => (Sheet::new(), Labels::new(), active_source),
+            }
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            (
+                Sheet::new(),
+                Labels::new(),
+                ActiveSource {
+                    name: file_name.clone(),
+                    text: String::new(),
+                    origin: SourceOrigin::Opened(file_name),
+                },
+            )
+        }
+    }
+}
+
+/// "Open…" button: opens the native file dialog, loads the picked file, and
+/// (re)installs a filesystem watcher on it so external edits reload it live —
+/// replacing any previously installed opened-file watcher (dropping the old
+/// `notify::RecommendedWatcher` stops its OS-level watch, so at most one
+/// opened-file watch is ever active).
+///
+/// - Precondition: `reload_tx` is the same channel the hot-reload consumer
+///   loop in [`App`] is reading from, so a watch event here drives the same
+///   origin-aware reload dispatch a demo's hot-reload does.
+#[cfg(feature = "desktop")]
+#[component]
+fn OpenFileControls(
+    sheet: Signal<Sheet>,
+    labels: Signal<Labels>,
+    active_source: Signal<ActiveSource>,
+    reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>>,
+    mut watcher_slot: Signal<Option<notify::RecommendedWatcher>>,
+) -> Element {
+    rsx! {
+        SpActionButton {
+            onclick: move |_| {
+                let mut sheet = sheet;
+                let mut labels = labels;
+                let mut active_source = active_source;
+                let reload_tx = reload_tx.read().clone();
+                spawn(async move {
+                    let Some(path) = crate::open_file::pick_file().await else {
+                        return;
+                    };
+                    let (new_sheet, new_labels, new_active) = load_opened(path.clone());
+                    sheet.set(new_sheet);
+                    labels.set(new_labels);
+                    active_source.set(new_active);
+                    match crate::open_file::spawn_watch(path, move || {
+                        let _ = reload_tx.unbounded_send(());
+                    }) {
+                        Ok(watcher) => watcher_slot.set(Some(watcher)),
+                        Err(err) => eprintln!("failed to watch opened file: {err}"),
+                    }
+                });
+            },
+            "Open…"
         }
     }
 }
