@@ -368,10 +368,21 @@
             || data.links.some(function (l) { return !oldLinkSet.has(linkKey(l.source, l.target)); });
 
         // Preserve existing node positions by merging into incoming data.
+        //
+        // Node ids are only unique *within* one Sheet: they're built from a
+        // cell's raw slotmap index (see cell_node_id() in bridge.rs), and a
+        // freshly loaded demo/opened file starts a brand new Sheet whose
+        // slotmap indices restart from the same small integers. So switching
+        // from one source to an unrelated one can easily reuse an old id for
+        // a completely different cell (e.g. the 6th cell allocated in each).
+        // relabeledIds tracks exactly that case so the width-measuring step
+        // below knows to remeasure even though oldNodeMap already has the id.
         var oldNodeMap = new Map(nodes.map(function (n) { return [n.id, n]; }));
+        var relabeledIds = new Set();
         nodes = data.nodes.map(function (n) {
             var existing = oldNodeMap.get(n.id);
             if (existing) {
+                if (existing.label !== n.label) relabeledIds.add(n.id);
                 existing.kind = n.kind;
                 existing.label = n.label;
                 existing.value = n.value;
@@ -442,18 +453,20 @@
         //
         // getBBox() forces SVG layout, so it's restricted to cells that can
         // actually need remeasuring: a cell's label is fixed at creation (it
-        // never changes for an id that already existed), so it's only
-        // measured once, when the node is new; d.w (set here or on a prior
-        // update) persists on the reused node object across updates (see the
-        // node-merge step above) for every other cell. The value text does
-        // change at runtime, so it's remeasured for new cells plus whichever
-        // existing ones are in `changedSet`, rather than every cell on every update.
+        // never changes for an id that already existed, unless relabeledIds
+        // says the id was actually recycled for a different cell — see the
+        // node-merge step above), so it's only measured once, when the node
+        // is new; d.w (set here or on a prior update) persists on the reused
+        // node object across updates for every other cell. The value text
+        // does change at runtime, so it's remeasured for new/relabeled cells
+        // plus whichever existing ones are in `changedSet`, rather than every
+        // cell on every update.
         labelSel.each(function (d) {
-            if (oldNodeMap.has(d.id)) return;
+            if (oldNodeMap.has(d.id) && !relabeledIds.has(d.id)) return;
             d.w = Math.max(CELL_W, this.getBBox().width + CELL_LABEL_PADDING);
         });
         valueSel.each(function (d) {
-            if (oldNodeMap.has(d.id) && !changedSet.has(d.id)) return;
+            if (oldNodeMap.has(d.id) && !changedSet.has(d.id) && !relabeledIds.has(d.id)) return;
             d.w = Math.max(d.w, this.getBBox().width + CELL_LABEL_PADDING);
         });
 
