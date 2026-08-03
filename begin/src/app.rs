@@ -160,7 +160,13 @@ pub fn App() -> Element {
         }
     };
     #[cfg(not(feature = "desktop"))]
-    let open_file_controls: Element = rsx! {};
+    let open_file_controls = rsx! {
+        OpenFileControls {
+            sheet,
+            labels,
+            active_source,
+        }
+    };
 
     rsx! {
         document::Link { rel: "icon", r#type: "image/x-icon", href: "/favicon.ico" }
@@ -168,6 +174,7 @@ pub fn App() -> Element {
         document::Script { src: asset!("/assets/d3.v7.min.js") }
         document::Script { src: asset!("/assets/graph.js") }
         document::Script { r#type: "module", src: asset!("/assets/swc.js") }
+        document::Script { src: asset!("/assets/open_file.js") }
 
         SpTheme {
             color: "light".to_string(),
@@ -318,6 +325,92 @@ fn OpenFileControls(
                 });
             },
             "Open…"
+        }
+    }
+}
+
+/// Builds a sheet from a web-side [`crate::open_file::OpenedFilePayload`] and
+/// returns it alongside the [`ActiveSource`] describing what just loaded.
+///
+/// A read or parse failure prints the diagnostic to stderr and returns an
+/// empty sheet instead of failing — mirrors [`load_demo`]/[`load_opened`]'s
+/// failure handling (see [`App`]'s doc comment for why).
+#[cfg(not(feature = "desktop"))]
+fn load_from_payload(
+    payload: crate::open_file::OpenedFilePayload,
+) -> (Sheet, Labels, ActiveSource) {
+    let outcome = build_sheet(&payload.text, &payload.name);
+    if let Some(err) = &outcome.error {
+        eprintln!("{err}");
+    }
+    let active_source = ActiveSource {
+        name: payload.name.clone(),
+        text: payload.text,
+        origin: SourceOrigin::Opened(payload.name),
+    };
+    match outcome.sheet_labels {
+        Some((sheet, labels)) => (sheet, labels, active_source),
+        None => (Sheet::new(), Labels::new(), active_source),
+    }
+}
+
+/// "Open…"/"Refresh" controls for the web build: "Open…" always calls
+/// `window.beginOpenFile.open()`; "Refresh" (rendered only once a
+/// re-readable handle exists) re-reads that same handle. Neither watches for
+/// changes automatically — browsers have no filesystem-watch API, so reload
+/// here is always user-triggered.
+#[cfg(not(feature = "desktop"))]
+#[component]
+fn OpenFileControls(
+    sheet: Signal<Sheet>,
+    labels: Signal<Labels>,
+    active_source: Signal<ActiveSource>,
+) -> Element {
+    let refresh_handle = use_signal(|| None::<u32>);
+
+    rsx! {
+        SpActionButton {
+            onclick: move |_| {
+                let mut sheet = sheet;
+                let mut labels = labels;
+                let mut active_source = active_source;
+                let mut refresh_handle = refresh_handle;
+                spawn(async move {
+                    let mut eval = document::eval(crate::open_file::OPEN_SCRIPT);
+                    let Ok(payload) = eval.recv::<Option<crate::open_file::OpenedFilePayload>>().await else {
+                        return;
+                    };
+                    let Some(payload) = payload else { return };
+                    refresh_handle.set(payload.id);
+                    let (new_sheet, new_labels, new_active) = load_from_payload(payload);
+                    sheet.set(new_sheet);
+                    labels.set(new_labels);
+                    active_source.set(new_active);
+                });
+            },
+            "Open…"
+        }
+        if let Some(id) = *refresh_handle.read() {
+            SpActionButton {
+                onclick: move |_| {
+                    let mut sheet = sheet;
+                    let mut labels = labels;
+                    let mut active_source = active_source;
+                    spawn(async move {
+                        let script = crate::open_file::refresh_script(id);
+                        let mut eval = document::eval(&script);
+                        let Ok(payload) = eval.recv::<Option<crate::open_file::OpenedFilePayload>>().await else {
+                            return;
+                        };
+                        let Some(payload) = payload else { return };
+                        let (new_sheet, new_labels, new_active) = load_from_payload(payload);
+                        sheet.set(new_sheet);
+                        labels.set(new_labels);
+                        active_source.set(new_active);
+                    });
+                },
+                "Refresh"
+            }
         }
     }
 }
