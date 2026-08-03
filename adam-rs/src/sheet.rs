@@ -384,8 +384,9 @@ impl Sheet {
 
     /// Iterates over the cells that were updated during the last `propagate()` call.
     ///
-    /// This tracks which cells were written by selected methods; it does not attempt to
-    /// compare old/new values for equality.
+    /// This includes cells written by selected methods and cells that reverted to their
+    /// source values due to deactivated forcing conditionals (Phase 5), even without being
+    /// written by a method. It does not attempt to compare old/new values for equality.
     ///
     /// - Complexity: O(n) where n is the number of changed cells.
     pub fn changed(&self) -> impl Iterator<Item = CellId> + '_ {
