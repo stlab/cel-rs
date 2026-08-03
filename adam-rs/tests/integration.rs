@@ -963,3 +963,57 @@ fn conditional_match_cell_is_derived_from_unconditional_relationship() {
     // b has no active relationship; it reverts to its source value (0).
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 0);
 }
+
+#[test]
+fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
+    // p == 0: a <= b enforced by a two-way self-referencing relationship.
+    // p != 0 (default): a and b are forced from each other directly, whichever
+    // is the stronger (more recently written) cell wins.
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(4_i32);
+    let b = sheet.add_cell(9_i32);
+
+    let rel_self_ref = sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    let rel_force = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(b, a, |y: &i32| Ok(*y)),
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(p, vec![(vec![0_i32], vec![rel_self_ref])], vec![rel_force])
+        .unwrap();
+
+    // p == 0: self-referencing branch. a=4, b=9 already satisfy a <= b: unchanged.
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 9);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.source::<i32>(b).unwrap(), 9);
+
+    // p == 1: default (forcing) branch. b is the more recently written cell,
+    // so a <- b.
+    sheet.write(a, 4_i32).unwrap();
+    sheet.write(b, 20_i32).unwrap();
+    sheet.write(p, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 20);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+    // Sources are untouched by the forcing branch.
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.source::<i32>(b).unwrap(), 20);
+
+    // Back to p == 0: self-ref recomputed fresh from each cell's own source
+    // (4 and 20), not from the stale forced value.
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+}
