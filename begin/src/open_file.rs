@@ -61,6 +61,7 @@ pub fn spawn_watch(
 /// this result (the File System Access path) — pass it to [`refresh_script`]
 /// to reload later. `None` means the `<input type="file">` fallback was used:
 /// the load is one-shot, with nothing to refresh from.
+#[cfg(not(feature = "desktop"))]
 #[derive(serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct OpenedFilePayload {
     pub id: Option<u32>,
@@ -72,11 +73,13 @@ pub struct OpenedFilePayload {
 /// type="file">` fallback) and sends the result back via `dioxus.send()`.
 /// Resolves to `null` on JS's side (received as `None`) if the user
 /// cancelled.
+#[cfg(not(feature = "desktop"))]
 pub const OPEN_SCRIPT: &str =
     "(async () => { dioxus.send(await window.beginOpenFile.open()); })();";
 
 /// `document::eval` script that re-reads the file behind handle `id` and
 /// sends the refreshed `{id, name, text}` back via `dioxus.send()`.
+#[cfg(not(feature = "desktop"))]
 pub fn refresh_script(id: u32) -> String {
     format!("(async () => {{ dioxus.send(await window.beginOpenFile.refresh({id})); }})();")
 }
@@ -115,7 +118,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "desktop")))]
 mod web_tests {
     use super::*;
 
