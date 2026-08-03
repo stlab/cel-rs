@@ -85,7 +85,8 @@ impl Sheet {
         self.next_strength += 1;
         let strength = self.next_strength | (1u64 << 63);
         self.cells.insert(CellData {
-            value: Box::new(value),
+            source: Box::new(value),
+            derived: None,
             type_id: TypeId::of::<T>(),
             strength,
             changed: false,
@@ -309,6 +310,8 @@ impl Sheet {
     /// the new value to `cell.strength`, so the most-recently-written cell always
     /// has the highest strength.
     ///
+    /// - Postcondition: any pending derived override is cleared, so the written value is immediately visible via `read()`.
+    ///
     /// # Errors
     ///
     /// - `Error::InvalidId` — `id` is not a cell in this sheet.
@@ -323,11 +326,13 @@ impl Sheet {
         }
         self.next_strength += 1;
         cell.strength = self.next_strength | (1u64 << 63);
-        cell.value = Box::new(value);
+        cell.source = Box::new(value);
+        cell.derived = None;
         Ok(())
     }
 
-    /// Returns a shared reference to the current value of a cell.
+    /// Returns a shared reference to the cell's effective current value: its derived
+    /// override if one exists, otherwise its source (last written) value.
     ///
     /// # Errors
     ///
@@ -341,7 +346,10 @@ impl Sheet {
                 found: TypeId::of::<T>(),
             });
         }
-        Ok(cell.value.downcast_ref::<T>().expect("type checked above"))
+        Ok(cell
+            .effective()
+            .downcast_ref::<T>()
+            .expect("type checked above"))
     }
 
     /// Iterates over the cells that were updated during the last `propagate()` call.
@@ -464,7 +472,7 @@ impl Sheet {
         for (_, cond) in &self.conditionals {
             let cell = &self.cells[cond.cell];
             let eq_fn = cell.eq_fn;
-            let value = cell.value.as_ref();
+            let value = cell.effective();
 
             let mut matched = false;
             for branch in &cond.branches {
@@ -590,7 +598,7 @@ impl Sheet {
                 let inputs: Vec<&dyn Any> = method
                     .inputs
                     .iter()
-                    .map(|&id| self.cells[id].value.as_ref())
+                    .map(|&id| self.cells[id].effective())
                     .collect();
                 let outputs = (method.function)(&inputs).map_err(Error::MethodFailed)?;
                 let output_ids = method.outputs.clone();
@@ -614,7 +622,7 @@ impl Sheet {
                         found,
                     });
                 }
-                cell.value = new_value;
+                cell.source = new_value;
                 if !cell.changed {
                     cell.changed = true;
                     self.changed_cells.push(cell_id);
@@ -775,7 +783,7 @@ impl Sheet {
         let cond = self.conditionals.get(id)?;
         let cell = &self.cells[cond.cell];
         let eq_fn = cell.eq_fn;
-        let value = cell.value.as_ref();
+        let value = cell.effective();
         cond.branches
             .iter()
             .enumerate()

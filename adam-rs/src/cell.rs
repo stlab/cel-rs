@@ -15,8 +15,15 @@ new_key_type! {
 
 /// Internal storage for a single value cell.
 pub(crate) struct CellData {
-    /// The type-erased current value.
-    pub(crate) value: Box<dyn Any>,
+    /// The value from the most recent `write()`/`add_cell`. Never written by
+    /// `Sheet::propagate`; self-referencing methods and conditionally forced
+    /// relationships read/write around this field via `derived` instead.
+    pub(crate) source: Box<dyn Any>,
+    /// The value most recently produced by a method this round, if this cell was
+    /// shadowed (a self-referencing output, or a pure output of a conditionally
+    /// registered relationship). Reset to `None` for every cell at the start of
+    /// every `Sheet::propagate` call, before planning begins.
+    pub(crate) derived: Option<Box<dyn Any>>,
     /// The `TypeId` of the value, fixed at cell creation.
     pub(crate) type_id: TypeId,
     /// Write-recency strength. High-order bit (bit 63) is set for cells that have been
@@ -32,6 +39,13 @@ pub(crate) struct CellData {
     pub(crate) eq_fn: fn(&dyn Any, &dyn Any) -> bool,
 }
 
+impl CellData {
+    /// Returns the effective current value: `derived` if present, else `source`.
+    pub(crate) fn effective(&self) -> &dyn Any {
+        self.derived.as_deref().unwrap_or(self.source.as_ref())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,7 +53,8 @@ mod tests {
     #[test]
     fn cell_data_initial_state() {
         let data = CellData {
-            value: Box::new(42_i32),
+            source: Box::new(42_i32),
+            derived: None,
             type_id: TypeId::of::<i32>(),
             strength: 0,
             changed: false,
@@ -50,7 +65,9 @@ mod tests {
         assert_eq!(data.strength, 0);
         assert!(!data.changed);
         assert!(data.adj.is_empty());
-        assert_eq!(*data.value.downcast_ref::<i32>().unwrap(), 42);
+        assert!(data.derived.is_none());
+        assert_eq!(*data.source.downcast_ref::<i32>().unwrap(), 42);
+        assert_eq!(*data.effective().downcast_ref::<i32>().unwrap(), 42);
         let x: i32 = 42;
         let y: i32 = 99;
         assert!((data.eq_fn)(&x, &x));
