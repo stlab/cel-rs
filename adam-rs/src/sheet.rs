@@ -352,6 +352,36 @@ impl Sheet {
             .expect("type checked above"))
     }
 
+    /// Returns the last explicitly written (source) value, ignoring any derived
+    /// override produced by a self-referencing method or a conditionally forced
+    /// relationship.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidId` — `id` is not a cell in this sheet.
+    /// - `Error::TypeMismatch` — `T` does not match the cell's registered `TypeId`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use adam_rs::Sheet;
+    ///
+    /// let mut sheet = Sheet::new();
+    /// let a = sheet.add_cell(3_i32);
+    /// sheet.write(a, 8_i32).unwrap();
+    /// assert_eq!(*sheet.source::<i32>(a).unwrap(), 8);
+    /// ```
+    pub fn source<T: Any + 'static>(&self, id: CellId) -> Result<&T, Error> {
+        let cell = self.cells.get(id).ok_or(Error::InvalidId)?;
+        if cell.type_id != TypeId::of::<T>() {
+            return Err(Error::TypeMismatch {
+                expected: cell.type_id,
+                found: TypeId::of::<T>(),
+            });
+        }
+        Ok(cell.source.downcast_ref::<T>().expect("type checked above"))
+    }
+
     /// Iterates over the cells that were updated during the last `propagate()` call.
     ///
     /// This tracks which cells were written by selected methods; it does not attempt to
@@ -998,6 +1028,37 @@ mod tests {
         let id = sheet.add_cell(0_i32);
         assert!(matches!(
             sheet.read::<f64>(id),
+            Err(Error::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn source_matches_read_for_a_plain_unshadowed_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(3_i32);
+        assert_eq!(*sheet.source::<i32>(a).unwrap(), 3);
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 3);
+
+        sheet.write(a, 8_i32).unwrap();
+        assert_eq!(*sheet.source::<i32>(a).unwrap(), 8);
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 8);
+    }
+
+    #[test]
+    fn source_returns_invalid_id_for_unknown_cell() {
+        let sheet = Sheet::new();
+        assert!(matches!(
+            sheet.source::<i32>(CellId::default()),
+            Err(Error::InvalidId)
+        ));
+    }
+
+    #[test]
+    fn source_wrong_type_returns_type_mismatch() {
+        let mut sheet = Sheet::new();
+        let id = sheet.add_cell(0_i32);
+        assert!(matches!(
+            sheet.source::<f64>(id),
             Err(Error::TypeMismatch { .. })
         ));
     }
