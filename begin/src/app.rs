@@ -318,32 +318,38 @@ fn OpenFileControls(
     mut watcher_slot: Signal<Option<notify::RecommendedWatcher>>,
 ) -> Element {
     rsx! {
-        SpActionButton {
-            onclick: move |_| {
-                let mut sheet = sheet;
-                let mut labels = labels;
-                let mut active_source = active_source;
-                let reload_tx = reload_tx.read().clone();
-                spawn(async move {
-                    let Some(path) = crate::open_file::pick_file().await else {
-                        return;
-                    };
-                    let (new_sheet, new_labels, new_active) = load_opened(path.clone());
-                    sheet.set(new_sheet);
-                    labels.set(new_labels);
-                    active_source.set(new_active);
-                    match crate::open_file::spawn_watch(path, move || {
-                        let _ = reload_tx.unbounded_send(());
-                    }) {
-                        Ok(watcher) => watcher_slot.set(Some(watcher)),
-                        Err(err) => eprintln!("failed to watch opened file: {err}"),
-                    }
-                });
-            },
-            "Open…"
-        }
-        if let SourceOrigin::Opened(_) = active_source.read().origin {
-            span { style: "padding-left: 8px;", "{active_source.read().name}" }
+        div {
+            style: "padding: 8px 12px; border-bottom: 1px solid #ccc; flex: none; display: flex; align-items: center;",
+            SpActionGroup {
+                compact: true,
+                SpActionButton {
+                    onclick: move |_| {
+                        let mut sheet = sheet;
+                        let mut labels = labels;
+                        let mut active_source = active_source;
+                        let reload_tx = reload_tx.read().clone();
+                        spawn(async move {
+                            let Some(path) = crate::open_file::pick_file().await else {
+                                return;
+                            };
+                            let (new_sheet, new_labels, new_active) = load_opened(path.clone());
+                            sheet.set(new_sheet);
+                            labels.set(new_labels);
+                            active_source.set(new_active);
+                            match crate::open_file::spawn_watch(path, move || {
+                                let _ = reload_tx.unbounded_send(());
+                            }) {
+                                Ok(watcher) => watcher_slot.set(Some(watcher)),
+                                Err(err) => eprintln!("failed to watch opened file: {err}"),
+                            }
+                        });
+                    },
+                    "Open…"
+                }
+            }
+            if let SourceOrigin::Opened(_) = active_source.read().origin {
+                span { style: "padding-left: 8px;", "{active_source.read().name}" }
+            }
         }
     }
 }
@@ -387,51 +393,57 @@ fn OpenFileControls(
     mut refresh_handle: Signal<Option<u32>>,
 ) -> Element {
     rsx! {
-        SpActionButton {
-            onclick: move |_| {
-                let mut sheet = sheet;
-                let mut labels = labels;
-                let mut active_source = active_source;
-                let mut refresh_handle = refresh_handle;
-                spawn(async move {
-                    let mut eval = document::eval(crate::open_file::OPEN_SCRIPT);
-                    let Ok(payload) = eval.recv::<Option<crate::open_file::OpenedFilePayload>>().await else {
-                        return;
-                    };
-                    let Some(payload) = payload else { return };
-                    refresh_handle.set(payload.id);
-                    let (new_sheet, new_labels, new_active) = load_from_payload(payload);
-                    sheet.set(new_sheet);
-                    labels.set(new_labels);
-                    active_source.set(new_active);
-                });
-            },
-            "Open…"
-        }
-        if let Some(id) = *refresh_handle.read() {
-            SpActionButton {
-                onclick: move |_| {
-                    let mut sheet = sheet;
-                    let mut labels = labels;
-                    let mut active_source = active_source;
-                    spawn(async move {
-                        let script = crate::open_file::refresh_script(id);
-                        let mut eval = document::eval(&script);
-                        let Ok(payload) = eval.recv::<Option<crate::open_file::OpenedFilePayload>>().await else {
-                            return;
-                        };
-                        let Some(payload) = payload else { return };
-                        let (new_sheet, new_labels, new_active) = load_from_payload(payload);
-                        sheet.set(new_sheet);
-                        labels.set(new_labels);
-                        active_source.set(new_active);
-                    });
-                },
-                "Refresh"
+        div {
+            style: "padding: 8px 12px; border-bottom: 1px solid #ccc; flex: none; display: flex; align-items: center;",
+            SpActionGroup {
+                compact: true,
+                SpActionButton {
+                    onclick: move |_| {
+                        let mut sheet = sheet;
+                        let mut labels = labels;
+                        let mut active_source = active_source;
+                        let mut refresh_handle = refresh_handle;
+                        spawn(async move {
+                            let mut eval = document::eval(crate::open_file::OPEN_SCRIPT);
+                            let Ok(payload) = eval.recv::<Option<crate::open_file::OpenedFilePayload>>().await else {
+                                return;
+                            };
+                            let Some(payload) = payload else { return };
+                            refresh_handle.set(payload.id);
+                            let (new_sheet, new_labels, new_active) = load_from_payload(payload);
+                            sheet.set(new_sheet);
+                            labels.set(new_labels);
+                            active_source.set(new_active);
+                        });
+                    },
+                    "Open…"
+                }
+                if let Some(id) = *refresh_handle.read() {
+                    SpActionButton {
+                        onclick: move |_| {
+                            let mut sheet = sheet;
+                            let mut labels = labels;
+                            let mut active_source = active_source;
+                            spawn(async move {
+                                let script = crate::open_file::refresh_script(id);
+                                let mut eval = document::eval(&script);
+                                let Ok(payload) = eval.recv::<Option<crate::open_file::OpenedFilePayload>>().await else {
+                                    return;
+                                };
+                                let Some(payload) = payload else { return };
+                                let (new_sheet, new_labels, new_active) = load_from_payload(payload);
+                                sheet.set(new_sheet);
+                                labels.set(new_labels);
+                                active_source.set(new_active);
+                            });
+                        },
+                        "Refresh"
+                    }
+                }
             }
-        }
-        if let SourceOrigin::Opened(_) = active_source.read().origin {
-            span { style: "padding-left: 8px;", "{active_source.read().name}" }
+            if let SourceOrigin::Opened(_) = active_source.read().origin {
+                span { style: "padding-left: 8px;", "{active_source.read().name}" }
+            }
         }
     }
 }
