@@ -30,6 +30,30 @@ pub async fn pick_file() -> Option<std::path::PathBuf> {
     Some(handle.path().to_path_buf())
 }
 
+/// Watches `path` for changes, calling `on_change` on every filesystem event.
+/// The returned watcher must be kept alive for as long as the watch should
+/// remain active — dropping it stops watching.
+///
+/// # Errors
+///
+/// Returns `Err` if the underlying OS watch could not be established (e.g.
+/// `path`'s parent directory doesn't exist).
+#[cfg(feature = "desktop")]
+pub fn spawn_watch(
+    path: std::path::PathBuf,
+    mut on_change: impl FnMut() + Send + 'static,
+) -> notify::Result<notify::RecommendedWatcher> {
+    use notify::Watcher;
+
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok() {
+            on_change();
+        }
+    })?;
+    watcher.watch(&path, notify::RecursiveMode::NonRecursive)?;
+    Ok(watcher)
+}
+
 #[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::*;
