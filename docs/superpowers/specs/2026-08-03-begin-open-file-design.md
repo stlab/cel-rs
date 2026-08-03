@@ -95,8 +95,12 @@ dual-tracking to reconcile.
   rather than watcher-triggered. No background timer, no polling.
 - **Fallback (Firefox/Safari)**: browsers without `showOpenFilePicker` use a
   plain `<input type="file" accept=".adm2">` — one-shot load, no handle
-  survives to refresh from. On this path the "Refresh" button is disabled with
-  a tooltip explaining the file must be re-opened instead.
+  survives to refresh from. On this path the "Refresh" button doesn't render
+  at all (rather than rendering disabled) — the plan's Global Constraints
+  section supersedes this doc's earlier draft wording of "disabled with a
+  tooltip": hiding it avoids adding a `disabled`/`title` prop to
+  `SpActionButton` for a Firefox/Safari-only corner case, and the implemented
+  behavior went through the plan's full task-and-final-review pipeline.
 - The "Refresh" button only renders on the web build. Desktop already gets
   automatic push-based reload via `notify`, so an extra manual control there
   would be redundant.

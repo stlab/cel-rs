@@ -12,6 +12,8 @@ use std::path::Path;
 ///
 /// Returns `Err` with a human-readable message if `path` cannot be read
 /// (missing, permission denied, not valid UTF-8, etc).
+///
+/// - Complexity: O(n) in the size of the file at `path`.
 #[cfg(feature = "desktop")]
 pub fn read_opened_file(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))
