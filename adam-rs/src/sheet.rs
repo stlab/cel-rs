@@ -620,6 +620,7 @@ impl Sheet {
     ///   plus per-method execution cost.
     fn execute_plan(&mut self, execution_order: &[(RelationshipId, usize)]) -> Result<(), Error> {
         for &(rel_id, method_idx) in execution_order {
+            let is_conditional = self.conditional_relationships.contains(&rel_id);
             let (outputs, output_ids, shadow_outputs) = {
                 let method = &self.relationships[rel_id].methods[method_idx];
                 let inputs: Vec<&dyn Any> = method
@@ -640,7 +641,7 @@ impl Sheet {
                 let shadow_outputs: Vec<bool> = method
                     .outputs
                     .iter()
-                    .map(|o| method.inputs.contains(o))
+                    .map(|o| method.inputs.contains(o) || is_conditional)
                     .collect();
                 (outputs, output_ids, shadow_outputs)
             };

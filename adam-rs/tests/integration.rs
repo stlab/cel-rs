@@ -601,6 +601,51 @@ fn conditional_activates_matching_branch() {
 }
 
 #[test]
+fn conditional_forced_cell_shadows_original_value() {
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(7_i32);
+    let b = sheet.add_cell(0_i32);
+
+    let rel_force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet
+        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .unwrap();
+
+    sheet.write(p, 1_i32).unwrap();
+    sheet.write(b, 42_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 42);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 7);
+}
+
+#[test]
+fn explicit_write_to_forced_cell_takes_immediate_effect() {
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(1_i32);
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+
+    let rel_force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet
+        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .unwrap();
+
+    sheet.write(p, 1_i32).unwrap();
+    sheet.write(b, 42_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 42);
+
+    // Direct write takes effect immediately, before the next propagate() re-forces it.
+    sheet.write(a, 99_i32).unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 99);
+}
+
+#[test]
 fn conditional_no_match_and_no_default_succeeds_silently() {
     // No branch matches, no default — propagate succeeds, b keeps its value.
     let mut sheet = Sheet::new();
