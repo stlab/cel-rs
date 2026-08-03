@@ -38,6 +38,7 @@
     var hasInitialFit = false;
     var MAX_ZOOM = 8;
     var latestData = null;
+    var currentSourceId = null;                          // which demo/file `nodes`/`links` currently belong to
 
     // Returns the point on the rect boundary of a cell centered at (tx,ty)
     // along the approach line from (sx,sy) to (tx,ty). `hw`/`hh` are that
@@ -168,7 +169,7 @@
         updateZoomConstraints(forceFit);
     }
 
-    function init(containerId, data) {
+    function init(containerId, data, sourceId) {
         // Tear down any previous init (component remount / hot-reload).
         if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
         if (simulation) { simulation.stop(); simulation = null; }
@@ -179,6 +180,7 @@
         nodes = [];
         links = [];
         latestData = data;
+        currentSourceId = sourceId;
 
         var container = document.getElementById(containerId);
 
@@ -343,10 +345,24 @@
         simulation.alpha(Math.max(simulation.alpha(), 0.3)).restart();
     }
 
-    function update(data) {
+    function update(data, sourceId) {
         latestData = data;
         // Guard: no-op if not yet initialized
         if (!svg) return;
+
+        // A different demo/file just became active: wipe the node/link cache
+        // entirely rather than let the id-based merge below run against it.
+        // Node ids are only unique within one Sheet (see cell_node_id() in
+        // bridge.rs), so without this, switching sources could silently
+        // recycle an old id for an unrelated cell and inherit its stale
+        // layout position — the same root cause the relabeledIds check below
+        // guards against for stale box widths, generalized to every other
+        // per-node field a stale reused object could carry over.
+        if (sourceId !== currentSourceId) {
+            nodes = [];
+            links = [];
+            currentSourceId = sourceId;
+        }
 
         // Detect structural changes before mutating node/link arrays. Link identity
         // is an unordered node-id pair: replanning can flip which end of an existing

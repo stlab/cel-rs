@@ -157,6 +157,16 @@ pub fn App() -> Element {
     };
 
     let graph_data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
+    // Identifies which source the current graph_data snapshot belongs to —
+    // stable across a hot-reload of the *same* file (so an in-place edit
+    // keeps the graph's live layout), but distinct whenever a different demo
+    // or opened file becomes active. See `GraphView`'s doc comment for why
+    // graph.js needs this: cell/relationship node ids are only unique within
+    // one Sheet, so without an explicit "did the source change" signal, a
+    // demo switch can silently recycle an old id for an unrelated node and
+    // carry over its stale layout position (and previously, its stale box
+    // width — see the graph.js fix this follows).
+    let source_id = use_memo(move || active_source.read().file_name());
 
     // `rsx!` doesn't accept a bare `#[cfg(...)]` attribute on a child in this
     // position (it expects an element/component name next), so the
@@ -202,7 +212,7 @@ pub fn App() -> Element {
                 {open_file_controls}
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
-                    GraphView { data: graph_data }
+                    GraphView { data: graph_data, source_id }
                     Inspector { sheet, labels, active_source }
                 }
             }
