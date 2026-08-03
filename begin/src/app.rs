@@ -82,7 +82,7 @@ pub fn App() -> Element {
                             load_demo_source(&current.name)
                         }
                         SourceOrigin::Opened(path) => {
-                            eprintln!("loading {path}");
+                            eprintln!("loading {}", path.to_string_lossy());
                             crate::open_file::read_opened_file(std::path::Path::new(path))
                         }
                     };
@@ -293,7 +293,7 @@ fn load_opened(path: std::path::PathBuf) -> (Sheet, Labels, ActiveSource) {
             let active_source = ActiveSource {
                 name,
                 text: source,
-                origin: SourceOrigin::Opened(file_name),
+                origin: SourceOrigin::Opened(path.into_os_string()),
             };
             match outcome.sheet_labels {
                 Some((sheet, labels)) => (sheet, labels, active_source),
@@ -306,9 +306,9 @@ fn load_opened(path: std::path::PathBuf) -> (Sheet, Labels, ActiveSource) {
                 Sheet::new(),
                 Labels::new(),
                 ActiveSource {
-                    name: file_name.clone(),
+                    name: file_name,
                     text: String::new(),
-                    origin: SourceOrigin::Opened(file_name),
+                    origin: SourceOrigin::Opened(path.into_os_string()),
                 },
             )
         }
@@ -398,7 +398,7 @@ fn load_from_payload(
     let active_source = ActiveSource {
         name: payload.name.clone(),
         text: payload.text,
-        origin: SourceOrigin::Opened(payload.name),
+        origin: SourceOrigin::Opened(payload.name.into()),
     };
     match outcome.sheet_labels {
         Some((sheet, labels)) => (sheet, labels, active_source),
@@ -505,6 +505,12 @@ fn DemoPicker(
     active_source: Signal<ActiveSource>,
     on_select: Callback<()>,
 ) -> Element {
+    // Gating on origin (not just name) matters: an opened file's name is
+    // never guaranteed to differ from a bundled demo's — a user could open
+    // a file that happens to be named exactly like one, and without the
+    // origin check that coincidence would incorrectly highlight the demo
+    // button while a totally different (opened) file is actually active.
+    let is_demo_active = matches!(active_source.read().origin, SourceOrigin::Demo);
     let current = active_source.read().name.clone();
 
     rsx! {
@@ -515,7 +521,7 @@ fn DemoPicker(
                 for &name in available_demos() {
                     SpActionButton {
                         key: "{name}",
-                        selected: name == current,
+                        selected: is_demo_active && name == current,
                         onclick: {
                             let mut sheet = sheet;
                             let mut labels = labels;

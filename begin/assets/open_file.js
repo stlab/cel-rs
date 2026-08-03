@@ -41,18 +41,20 @@ window.beginOpenFile = {
         // message that never arrives, so every path below must resolve, not
         // reject, no matter what.
         try {
-          const id = this.nextId++;
+          const file = await handle.getFile();
+          const text = await file.text();
           // At most one file is ever "open" in this app's UI at a time, so
           // any handle from a previously opened file is now stale — drop it
           // rather than letting the map grow unbounded across a session.
-          // Cleared only here, on a successful pick, not unconditionally at
-          // the top of open(): clearing it before the picker resolves would
-          // silently kill a still-valid handle if the user then cancelled
-          // this pick.
+          // Cleared only here, once the read has actually succeeded — not
+          // right after the picker resolves (before getFile()/text() ran):
+          // clearing it earlier would drop the *previous* file's still-valid
+          // handle before knowing whether the new one can even be read,
+          // silently turning that still-visible Refresh button into a
+          // permanent no-op if this read then failed.
+          const id = this.nextId++;
           this.handles = {};
           this.handles[id] = handle;
-          const file = await handle.getFile();
-          const text = await file.text();
           return { id, name: handle.name, text };
         } catch (e) {
           return { error: String((e && e.message) || e) };

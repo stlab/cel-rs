@@ -45,10 +45,13 @@ pub enum SourceOrigin {
     Demo,
     /// A file opened via the "Open…" action.
     ///
-    /// Desktop: the real absolute filesystem path (`Path::display()`
-    /// formatting). Web: the picked file's name only — browsers never expose
-    /// a real filesystem path.
-    Opened(String),
+    /// Desktop: the real absolute filesystem path, stored losslessly — not a
+    /// `Path::display()`-formatted `String`, which replaces invalid UTF-8
+    /// with U+FFFD on Unix and so can't be round-tripped back into the exact
+    /// same `Path`, breaking reload/re-read for non-UTF-8 paths. Web: the
+    /// picked file's name only — browsers never expose a real filesystem
+    /// path, and a browser-supplied name is always valid UTF-8 anyway.
+    Opened(std::ffi::OsString),
 }
 
 /// The currently active source: its display name, full text, and where it
@@ -66,11 +69,13 @@ pub struct ActiveSource {
 
 impl ActiveSource {
     /// The path shown in diagnostic headers: `begin/assets/<name>.adm2` for a
-    /// bundled demo, or the opened file's real path/name directly.
+    /// bundled demo, or the opened file's real path/name directly (lossily
+    /// converted to UTF-8 for this display string only — the stored
+    /// `OsString` itself stays lossless for reload; see [`SourceOrigin::Opened`]).
     pub fn file_name(&self) -> String {
         match &self.origin {
             SourceOrigin::Demo => format!("begin/assets/{}.adm2", self.name),
-            SourceOrigin::Opened(path) => path.clone(),
+            SourceOrigin::Opened(path) => path.to_string_lossy().into_owned(),
         }
     }
 }
@@ -308,9 +313,26 @@ mod tests {
         let active = ActiveSource {
             name: "my_model".to_string(),
             text: String::new(),
-            origin: SourceOrigin::Opened("/home/user/models/my_model.adm2".to_string()),
+            origin: SourceOrigin::Opened("/home/user/models/my_model.adm2".into()),
         };
         assert_eq!(active.file_name(), "/home/user/models/my_model.adm2");
+    }
+
+    #[test]
+    fn active_source_file_name_opened_is_lossy_for_non_utf8_path() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            // 0xFF is not valid UTF-8 on its own; to_string_lossy() must
+            // replace it with U+FFFD rather than panicking or truncating.
+            let non_utf8 = std::ffi::OsString::from_vec(vec![0xFF, b'.', b'a', b'd', b'm', b'2']);
+            let active = ActiveSource {
+                name: "weird".to_string(),
+                text: String::new(),
+                origin: SourceOrigin::Opened(non_utf8),
+            };
+            assert_eq!(active.file_name(), "\u{FFFD}.adm2");
+        }
     }
 }
 
