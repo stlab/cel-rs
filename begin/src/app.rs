@@ -230,6 +230,9 @@ pub fn App() -> Element {
 /// desktop hot-reload loop keeps reloading the right file and can recover
 /// once the on-disk error is fixed, instead of losing track of which demo
 /// was selected.
+///
+/// - Complexity: O(n) in the length of the demo's source, plus the cost of
+///   one `build_sheet` parse/propagate.
 fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
     match load_demo_source(name) {
         Ok(source) => {
@@ -271,6 +274,9 @@ fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
 /// carries the opened path (and, if the read succeeded, the source text that
 /// failed to parse) even on failure, so the live-reload loop keeps targeting
 /// the right file.
+///
+/// - Complexity: O(n) in the size of the file at `path`, plus the cost of
+///   one `build_sheet` parse/propagate.
 #[cfg(feature = "desktop")]
 fn load_opened(path: std::path::PathBuf) -> (Sheet, Labels, ActiveSource) {
     let file_name = path.display().to_string();
@@ -378,6 +384,9 @@ fn OpenFileControls(
 /// A read or parse failure prints the diagnostic to stderr and returns an
 /// empty sheet instead of failing — mirrors [`load_demo`]/[`load_opened`]'s
 /// failure handling (see [`App`]'s doc comment for why).
+///
+/// - Complexity: O(n) in the length of `payload.text`, plus the cost of one
+///   `build_sheet` parse/propagate.
 #[cfg(not(feature = "desktop"))]
 fn load_from_payload(
     payload: crate::open_file::OpenedFilePayload,

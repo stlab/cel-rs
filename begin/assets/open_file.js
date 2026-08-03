@@ -11,10 +11,17 @@ window.beginOpenFile = {
 
   open() {
     if (window.showOpenFilePicker) {
+      // The whole flow (not just the picker itself) is wrapped in one
+      // try/catch: a rejection anywhere here — cancelling the picker, or a
+      // read failing afterward (permission revoked, file deleted mid-flow)
+      // — must still resolve to null rather than reject. document::eval's
+      // scripts (OPEN_SCRIPT/refresh_script) always `await` this promise
+      // before calling dioxus.send(); an unhandled rejection here would
+      // skip that call entirely and leave Rust's eval.recv() awaiting a
+      // message that never arrives.
       return (async () => {
-        let handle;
         try {
-          [handle] = await window.showOpenFilePicker({
+          const [handle] = await window.showOpenFilePicker({
             types: [
               {
                 description: "adam property model",
@@ -22,21 +29,22 @@ window.beginOpenFile = {
               },
             ],
           });
+          const id = this.nextId++;
+          // At most one file is ever "open" in this app's UI at a time, so
+          // any handle from a previously opened file is now stale — drop it
+          // rather than letting the map grow unbounded across a session.
+          // Cleared only here, on a successful pick, not unconditionally at
+          // the top of open(): clearing it before the picker resolves would
+          // silently kill a still-valid handle if the user then cancelled
+          // this pick.
+          this.handles = {};
+          this.handles[id] = handle;
+          const file = await handle.getFile();
+          const text = await file.text();
+          return { id, name: handle.name, text };
         } catch (e) {
-          return null; // user cancelled the picker — leave any existing handle alone
+          return null;
         }
-        const id = this.nextId++;
-        // At most one file is ever "open" in this app's UI at a time, so any
-        // handle from a previously opened file is now stale — drop it rather
-        // than letting the map grow unbounded across a session. Cleared only
-        // here, on a successful pick, not unconditionally at the top of
-        // open(): clearing it before the picker resolves would silently kill
-        // a still-valid handle if the user then cancelled this pick.
-        this.handles = {};
-        this.handles[id] = handle;
-        const file = await handle.getFile();
-        const text = await file.text();
-        return { id, name: handle.name, text };
       })();
     }
 
@@ -51,8 +59,12 @@ window.beginOpenFile = {
           resolve(null);
           return;
         }
-        const text = await file.text();
-        resolve({ id: null, name: file.name, text });
+        try {
+          const text = await file.text();
+          resolve({ id: null, name: file.name, text });
+        } catch (e) {
+          resolve(null);
+        }
       });
       input.addEventListener("cancel", () => resolve(null));
       input.click();
@@ -62,10 +74,17 @@ window.beginOpenFile = {
   refresh(id) {
     const handle = this.handles[id];
     if (!handle) return Promise.resolve(null);
+    // See open()'s comment: any failure here must resolve to null, not reject,
+    // so the eval script's dioxus.send() still runs and Rust's eval.recv()
+    // doesn't hang forever.
     return (async () => {
-      const file = await handle.getFile();
-      const text = await file.text();
-      return { id, name: handle.name, text };
+      try {
+        const file = await handle.getFile();
+        const text = await file.text();
+        return { id, name: handle.name, text };
+      } catch (e) {
+        return null;
+      }
     })();
   },
 };
