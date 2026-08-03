@@ -558,6 +558,10 @@ impl Sheet {
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
+    /// **Phase 0 — Derived reset:** every cell's derived override is cleared before
+    /// planning begins, so no pure-input read this round can observe a derived value
+    /// left over from a previous round.
+    ///
     /// **Phase 1 — Pre-plan:** if any conditional match cells are derived (have an
     /// in-edge in the unconditional relationship graph), the minimal unconditional
     /// subgraph needed to compute them is planned and executed so their values are
@@ -571,6 +575,11 @@ impl Sheet {
     /// **Phase 4 — Strength post-processing:** derived cells receive low-order strengths
     /// in evaluation order, enforcing the stability invariant.
     ///
+    /// **Phase 5 — Reversion change-tracking:** a cell whose derived override existed
+    /// before this round but wasn't reclaimed by any method this round has effectively
+    /// reverted to its source value (e.g. its forcing conditional went inactive); it is
+    /// marked changed even though no method wrote to it this round.
+    ///
     /// # Errors
     ///
     /// - `Error::Conflict` — no valid method assignment exists.
@@ -580,6 +589,18 @@ impl Sheet {
     ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.clear_changed();
+
+        // Phase 0: snapshot cells with a live derived override (for Phase 5 only),
+        // then reset every cell's derived override before planning begins.
+        let previously_derived: Vec<CellId> = self
+            .cells
+            .iter()
+            .filter(|(_, cell)| cell.derived.is_some())
+            .map(|(id, _)| id)
+            .collect();
+        for (_, cell) in self.cells.iter_mut() {
+            cell.derived = None;
+        }
 
         // Phase 1: pre-plan for derived match cells.
         if !self.conditionals.is_empty() {
@@ -600,6 +621,18 @@ impl Sheet {
 
         // Phase 4: assign derived-cell strengths in evaluation order.
         self.post_process_strengths(&plan.execution_order);
+
+        // Phase 5: cells that reverted (had a derived override, didn't get a fresh one
+        // this round) need explicit change-tracking.
+        for id in previously_derived {
+            if let Some(cell) = self.cells.get_mut(id)
+                && cell.derived.is_none()
+                && !cell.changed
+            {
+                cell.changed = true;
+                self.changed_cells.push(id);
+            }
+        }
 
         self.last_forced = Some(plan.forced_outputs);
         self.last_forced_relationships = Some(plan.forced_relationships);
