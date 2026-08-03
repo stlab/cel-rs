@@ -10,6 +10,11 @@ window.beginOpenFile = {
   nextId: 0,
 
   open() {
+    // At most one file is ever "open" in this app's UI at a time, so any
+    // handle from a previously opened file is now stale — drop it rather
+    // than letting the map grow unbounded across a session.
+    this.handles = {};
+
     if (window.showOpenFilePicker) {
       return (async () => {
         let handle;

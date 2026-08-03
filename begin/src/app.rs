@@ -138,8 +138,23 @@ pub fn App() -> Element {
             watcher_slot.set(None);
         })
     };
+
+    // Web's equivalent of `watcher_slot`: holds the re-readable File System
+    // Access handle id for whichever file was most recently opened, if any
+    // (`None` means either nothing has been opened yet, or the browser only
+    // gave us a one-shot `<input type="file">` result with nothing to
+    // refresh). Lifted up to `App` — rather than living as a local
+    // `use_signal` inside the web `OpenFileControls` — so `on_demo_selected`
+    // below can clear it, exactly mirroring desktop's `watcher_slot` handling.
     #[cfg(not(feature = "desktop"))]
-    let on_demo_selected: Callback<()> = Callback::new(|()| {});
+    let refresh_handle: Signal<Option<u32>> = use_signal(|| None);
+    #[cfg(not(feature = "desktop"))]
+    let on_demo_selected: Callback<()> = {
+        let mut refresh_handle = refresh_handle;
+        Callback::new(move |()| {
+            refresh_handle.set(None);
+        })
+    };
 
     let graph_data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
 
@@ -165,6 +180,7 @@ pub fn App() -> Element {
             sheet,
             labels,
             active_source,
+            refresh_handle,
         }
     };
 
@@ -326,6 +342,9 @@ fn OpenFileControls(
             },
             "Open…"
         }
+        if let SourceOrigin::Opened(_) = active_source.read().origin {
+            span { style: "padding-left: 8px;", "{active_source.read().name}" }
+        }
     }
 }
 
@@ -365,9 +384,8 @@ fn OpenFileControls(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
     active_source: Signal<ActiveSource>,
+    mut refresh_handle: Signal<Option<u32>>,
 ) -> Element {
-    let refresh_handle = use_signal(|| None::<u32>);
-
     rsx! {
         SpActionButton {
             onclick: move |_| {
@@ -411,6 +429,9 @@ fn OpenFileControls(
                 },
                 "Refresh"
             }
+        }
+        if let SourceOrigin::Opened(_) = active_source.read().origin {
+            span { style: "padding-left: 8px;", "{active_source.read().name}" }
         }
     }
 }
