@@ -4,7 +4,9 @@ use adam_rs::Sheet;
 use dioxus::prelude::*;
 
 use crate::bridge::{Labels, to_graph_data};
-use crate::demo_source::{ActiveSource, available_demos, build_sheet, load_demo_source};
+use crate::demo_source::{
+    ActiveSource, SourceOrigin, available_demos, build_sheet, load_demo_source,
+};
 use crate::graph_view::GraphView;
 use crate::inspector::Inspector;
 use crate::spectrum::{SpActionButton, SpActionGroup, SpTheme};
@@ -74,6 +76,7 @@ pub fn App() -> Element {
                         active_source.set(ActiveSource {
                             name: name.clone(),
                             text: source,
+                            origin: SourceOrigin::Demo,
                         });
                     }
                     if let Some(msg) = outcome.error {
@@ -130,6 +133,7 @@ fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
             let active_source = ActiveSource {
                 name: name.to_string(),
                 text: source,
+                origin: SourceOrigin::Demo,
             };
             match outcome.sheet_labels {
                 Some((sheet, labels)) => (sheet, labels, active_source),
@@ -144,6 +148,7 @@ fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
                 ActiveSource {
                     name: name.to_string(),
                     text: String::new(),
+                    origin: SourceOrigin::Demo,
                 },
             )
         }

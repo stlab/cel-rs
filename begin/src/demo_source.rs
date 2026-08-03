@@ -36,21 +36,42 @@ use crate::bridge::{Labels, format_adam_error, labels_from_cell_names};
 // ordinary desktop builds.
 include!(concat!(env!("OUT_DIR"), "/demo_manifest.rs"));
 
-/// The currently active demo: its manifest name (used to resolve its asset
-/// path and build diagnostic headers) and full source text.
+/// Identifies where an [`ActiveSource`]'s content came from: a bundled demo
+/// discovered under `assets/`, or a file the user opened via the "Open…" action.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum SourceOrigin {
+    /// One of [`available_demos`], loaded from `begin/assets/`.
+    #[default]
+    Demo,
+    /// A file opened via the "Open…" action.
+    ///
+    /// Desktop: the real absolute filesystem path (`Path::display()`
+    /// formatting). Web: the picked file's name only — browsers never expose
+    /// a real filesystem path.
+    Opened(String),
+}
+
+/// The currently active source: its display name, full text, and where it
+/// came from (a bundled demo or a user-opened file) — see [`SourceOrigin`].
 #[derive(Clone, Default)]
 pub struct ActiveSource {
-    /// The demo's name, as it appears in [`available_demos`] (its filename
-    /// stem, e.g. `"toy_example"`).
+    /// Display label: the demo's name (its filename stem) or the opened
+    /// file's name.
     pub name: String,
-    /// The demo's full adam-lang source text.
+    /// The source's full adam-lang source text.
     pub text: String,
+    /// Where this source came from.
+    pub origin: SourceOrigin,
 }
 
 impl ActiveSource {
-    /// The `begin/assets/<name>.adm2` path shown in diagnostic headers.
+    /// The path shown in diagnostic headers: `begin/assets/<name>.adm2` for a
+    /// bundled demo, or the opened file's real path/name directly.
     pub fn file_name(&self) -> String {
-        format!("begin/assets/{}.adm2", self.name)
+        match &self.origin {
+            SourceOrigin::Demo => format!("begin/assets/{}.adm2", self.name),
+            SourceOrigin::Opened(path) => path.clone(),
+        }
     }
 }
 
@@ -273,12 +294,23 @@ mod tests {
     }
 
     #[test]
-    fn active_source_file_name_matches_convention() {
+    fn active_source_file_name_demo_matches_convention() {
         let active = ActiveSource {
             name: "toy_example".to_string(),
             text: String::new(),
+            origin: SourceOrigin::Demo,
         };
         assert_eq!(active.file_name(), "begin/assets/toy_example.adm2");
+    }
+
+    #[test]
+    fn active_source_file_name_opened_returns_path_directly() {
+        let active = ActiveSource {
+            name: "my_model".to_string(),
+            text: String::new(),
+            origin: SourceOrigin::Opened("/home/user/models/my_model.adm2".to_string()),
+        };
+        assert_eq!(active.file_name(), "/home/user/models/my_model.adm2");
     }
 }
 
