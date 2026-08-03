@@ -17,6 +17,19 @@ pub fn read_opened_file(path: &Path) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))
 }
 
+/// Opens the native "Open File" dialog restricted to `.adm2` files and
+/// returns the picked path, or `None` if the user cancelled.
+///
+/// - Complexity: awaits user interaction; no upper bound on wall-clock time.
+#[cfg(feature = "desktop")]
+pub async fn pick_file() -> Option<std::path::PathBuf> {
+    let handle = rfd::AsyncFileDialog::new()
+        .add_filter("adm2", &["adm2"])
+        .pick_file()
+        .await?;
+    Some(handle.path().to_path_buf())
+}
+
 #[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::*;
