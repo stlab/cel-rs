@@ -303,7 +303,11 @@
             updateZoomConstraints();
         });
 
-        update(data);
+        // currentSourceId, not a fresh parameter: init() already set it to the
+        // correct value before this (possibly-async, via ResizeObserver's
+        // first firing) call, so passing it straight through here can't
+        // diverge the way an `undefined` argument would.
+        update(data, currentSourceId);
     }
 
     // Returns a d3.drag() behavior that pins a node's position while it's

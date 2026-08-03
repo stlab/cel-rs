@@ -350,7 +350,15 @@ fn OpenFileControls(
                                 let _ = reload_tx.unbounded_send(());
                             }) {
                                 Ok(watcher) => watcher_slot.set(Some(watcher)),
-                                Err(err) => eprintln!("failed to watch opened file: {err}"),
+                                Err(err) => {
+                                    eprintln!("failed to watch opened file: {err}");
+                                    // Otherwise a failed watch on the new file would leave
+                                    // the *previous* file's watcher running, violating "at
+                                    // most one opened-file watch is ever active" — active_source
+                                    // has already switched to the new file above, so a stale
+                                    // watch on the old one is never correct to keep.
+                                    watcher_slot.set(None);
+                                }
                             }
                         });
                     },

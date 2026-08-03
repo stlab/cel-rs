@@ -52,10 +52,23 @@ pub enum SourceOrigin {
 "reload the active source by its origin": the same channel, the same
 `build_sheet()` call and error-reporting path, just dispatching on
 `SourceOrigin` for *how* to refetch the text (`load_demo_source(name)` vs. a
-direct read of the opened file/handle). Only one reload source is ever wired
-up at a time — opening a file tears down the demo hot-reload watch, and
-picking a demo afterward tears down the opened-file watch/handle. There is no
-dual-tracking to reconcile.
+direct read of the opened file/handle). Only the opened-file watcher is ever
+torn down/replaced this way — picking a demo clears it, and opening a
+different file replaces it. The demo-hot-reload connection itself
+(`spawn_hot_reload`'s `dioxus_devtools::connect`) is not something this
+feature tears down: it's a single, persistent devserver connection
+established once at `App` mount, unconditionally, for the whole app
+session — that's pre-existing behavior, unchanged here. Because it fires
+whenever *any* bundled `.adm2` asset changes (see
+`hot_reload_targets_demo`'s doc comment), not just the currently active one,
+it was already possible before this feature to edit an inactive demo and
+have the *active* one needlessly rebuild — origin-aware dispatch just
+extends that same "coarse trigger, current-origin re-read" pattern to
+opened files too: a demo-hot-reload signal while an opened file is active
+harmlessly re-reads that same (unchanged) file instead of the demo that
+actually changed. No wrong content is ever loaded either way, since
+dispatch always follows `active_source`'s *current* origin, not whichever
+producer fired.
 
 ## Desktop implementation
 
