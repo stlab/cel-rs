@@ -112,11 +112,34 @@ pub fn App() -> Element {
     };
 
     // Holds the `notify` watcher installed on the most recently opened file, if
-    // any. Replacing it (via `Signal::set` in `OpenFileControls`) drops the
-    // previous watcher, which stops its OS-level watch — so switching to a
-    // demo, or opening a different file, never leaves a stale watcher running.
+    // any. Replacing it drops the previous watcher, which stops its OS-level
+    // watch — both `OpenFileControls` (opening a different file) and
+    // `DemoPicker` (switching back to a demo, via `on_demo_selected` below)
+    // clear/replace this slot, so neither ever leaves a stale opened-file
+    // watcher running.
     #[cfg(feature = "desktop")]
     let watcher_slot: Signal<Option<notify::RecommendedWatcher>> = use_signal(|| None);
+
+    // `DemoPicker` itself has no notion of "desktop" or file watchers — it
+    // just calls this after switching demos. On desktop this clears
+    // `watcher_slot`, dropping (and so stopping) any watcher left over from a
+    // previously opened file; on other platforms there's no watcher to clear.
+    // Threading this through a platform-agnostic `Callback<()>` (rather than
+    // giving `DemoPicker` a `#[cfg(feature = "desktop")]`-gated `watcher_slot`
+    // parameter directly) sidesteps a `#[component]`-macro limitation: a
+    // `#[cfg]` on one parameter correctly omits that field from the generated
+    // Props struct, but the generated function body still unconditionally
+    // destructures it, so cfg-gating an individual prop that way fails to
+    // compile on the excluded platform.
+    #[cfg(feature = "desktop")]
+    let on_demo_selected: Callback<()> = {
+        let mut watcher_slot = watcher_slot;
+        Callback::new(move |()| {
+            watcher_slot.set(None);
+        })
+    };
+    #[cfg(not(feature = "desktop"))]
+    let on_demo_selected: Callback<()> = Callback::new(|()| {});
 
     let graph_data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
 
@@ -124,8 +147,8 @@ pub fn App() -> Element {
     // position (it expects an element/component name next), so the
     // desktop-only `OpenFileControls` child is built as its own `Element`
     // here — under a real `#[cfg]`, so nothing on a web build references
-    // `OpenFileControls` at all — and spliced into the tree below via `{..}`
-    // interpolation.
+    // `OpenFileControls`/`watcher_slot`/`notify` at all — and spliced into
+    // the tree below via `{..}` interpolation.
     #[cfg(feature = "desktop")]
     let open_file_controls = rsx! {
         OpenFileControls {
@@ -152,7 +175,7 @@ pub fn App() -> Element {
             system: "spectrum-two".to_string(),
             div {
                 style: "position: fixed; inset: 0; display: flex; flex-direction: column; overflow: hidden;",
-                DemoPicker { sheet, labels, active_source }
+                DemoPicker { sheet, labels, active_source, on_select: on_demo_selected }
                 {open_file_controls}
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
@@ -301,12 +324,15 @@ fn OpenFileControls(
 
 /// Picker row listing every demo from [`available_demos`]; clicking one
 /// loads it into `sheet`/`labels`/`active_source`, highlighting whichever
-/// name matches `active_source`'s current value.
+/// name matches `active_source`'s current value, then calls `on_select` —
+/// on desktop, `App` uses this to clear any watcher left over from a
+/// previously opened file (see `App`'s `on_demo_selected`).
 #[component]
 fn DemoPicker(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
     active_source: Signal<ActiveSource>,
+    on_select: Callback<()>,
 ) -> Element {
     let current = active_source.read().name.clone();
 
@@ -328,6 +354,7 @@ fn DemoPicker(
                                 sheet.set(new_sheet);
                                 labels.set(new_labels);
                                 active_source.set(new_active_source);
+                                on_select.call(());
                             }
                         },
                         "{name}"
