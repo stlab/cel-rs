@@ -548,6 +548,37 @@ fn self_ref_le_chain() {
 }
 
 #[test]
+fn self_ref_pressure_persists_without_rewriting_anchor() {
+    // a = min(a, b): b applies downward pressure on a, but a's original written
+    // value must survive across rounds where only b is rewritten.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| {
+            Ok((*x).min(*y))
+        })])
+        .unwrap();
+
+    sheet.write(a, 10_i32).unwrap();
+    sheet.write(b, 3_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 3);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 10);
+
+    // Only b changes; a's original 10 (not the previous derived 3) is used.
+    sheet.write(b, 20_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 10);
+
+    sheet.write(b, 5_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 10);
+}
+
+#[test]
 fn conditional_activates_matching_branch() {
     // mode=1 activates rel_on which doubles `a` into `b`.
     let mut sheet = Sheet::new();

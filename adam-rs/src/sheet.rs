@@ -620,19 +620,29 @@ impl Sheet {
     ///   plus per-method execution cost.
     fn execute_plan(&mut self, execution_order: &[(RelationshipId, usize)]) -> Result<(), Error> {
         for &(rel_id, method_idx) in execution_order {
-            // Gather outputs in a scoped block so the shared borrows on
-            // `self.relationships` and `self.cells` are released before the
-            // mutable borrow of `self.cells` below.
-            let (outputs, output_ids) = {
+            let (outputs, output_ids, shadow_outputs) = {
                 let method = &self.relationships[rel_id].methods[method_idx];
                 let inputs: Vec<&dyn Any> = method
                     .inputs
                     .iter()
-                    .map(|&id| self.cells[id].effective())
+                    .map(|&id| {
+                        if method.outputs.contains(&id) {
+                            // Self-referencing input: always the pre-execution source,
+                            // never a derived override from a previous execution.
+                            self.cells[id].source.as_ref()
+                        } else {
+                            self.cells[id].effective()
+                        }
+                    })
                     .collect();
                 let outputs = (method.function)(&inputs).map_err(Error::MethodFailed)?;
                 let output_ids = method.outputs.clone();
-                (outputs, output_ids)
+                let shadow_outputs: Vec<bool> = method
+                    .outputs
+                    .iter()
+                    .map(|o| method.inputs.contains(o))
+                    .collect();
+                (outputs, output_ids, shadow_outputs)
             };
 
             if outputs.len() != output_ids.len() {
@@ -643,7 +653,9 @@ impl Sheet {
                 )));
             }
 
-            for (cell_id, new_value) in output_ids.into_iter().zip(outputs) {
+            for ((cell_id, new_value), shadow) in
+                output_ids.into_iter().zip(outputs).zip(shadow_outputs)
+            {
                 let cell = &mut self.cells[cell_id];
                 let found = new_value.as_ref().type_id();
                 if found != cell.type_id {
@@ -652,7 +664,11 @@ impl Sheet {
                         found,
                     });
                 }
-                cell.source = new_value;
+                if shadow {
+                    cell.derived = Some(new_value);
+                } else {
+                    cell.source = new_value;
+                }
                 if !cell.changed {
                     cell.changed = true;
                     self.changed_cells.push(cell_id);
