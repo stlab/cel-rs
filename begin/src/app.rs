@@ -432,10 +432,19 @@ fn OpenFileControls(
                         let mut refresh_handle = refresh_handle;
                         spawn(async move {
                             let mut eval = document::eval(crate::open_file::OPEN_SCRIPT);
-                            let Ok(payload) = eval.recv::<Option<crate::open_file::OpenedFilePayload>>().await else {
+                            let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
+                            let Ok(result) = result else {
+                                eprintln!("failed to open file: eval channel error: {result:?}");
                                 return;
                             };
-                            let Some(payload) = payload else { return };
+                            let Some(result) = result else { return }; // cancelled — silent no-op
+                            let payload = match result {
+                                crate::open_file::OpenResult::Payload(payload) => payload,
+                                crate::open_file::OpenResult::Failed { error } => {
+                                    eprintln!("failed to open file: {error}");
+                                    return;
+                                }
+                            };
                             refresh_handle.set(payload.id);
                             let (new_sheet, new_labels, new_active) = load_from_payload(payload);
                             sheet.set(new_sheet);
@@ -454,10 +463,19 @@ fn OpenFileControls(
                             spawn(async move {
                                 let script = crate::open_file::refresh_script(id);
                                 let mut eval = document::eval(&script);
-                                let Ok(payload) = eval.recv::<Option<crate::open_file::OpenedFilePayload>>().await else {
+                                let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
+                                let Ok(result) = result else {
+                                    eprintln!("failed to refresh file: eval channel error: {result:?}");
                                     return;
                                 };
-                                let Some(payload) = payload else { return };
+                                let Some(result) = result else { return }; // stale/unknown id — silent no-op
+                                let payload = match result {
+                                    crate::open_file::OpenResult::Payload(payload) => payload,
+                                    crate::open_file::OpenResult::Failed { error } => {
+                                        eprintln!("failed to refresh file: {error}");
+                                        return;
+                                    }
+                                };
                                 let (new_sheet, new_labels, new_active) = load_from_payload(payload);
                                 sheet.set(new_sheet);
                                 labels.set(new_labels);

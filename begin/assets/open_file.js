@@ -2,26 +2,26 @@
 // the browser's File System Access API, with a plain <input type="file">
 // fallback for browsers that don't support it (Firefox, Safari).
 //
-// open() resolves to `{ id, name, text }` or `null` if the user cancelled.
-// `id` is a number (a re-readable handle exists; pass it to refresh()) or
-// `null` (the input-fallback path: one-shot only, nothing to refresh).
+// open()/refresh() resolve to one of three shapes, matching Rust's
+// `Option<OpenResult>`:
+// - `null` if the user cancelled — a silent no-op, never an error.
+// - `{ id, name, text }` on success. `id` is a number (a re-readable handle
+//   exists; pass it to refresh()) or `null` (the input-fallback path:
+//   one-shot only, nothing to refresh).
+// - `{ error }` if a read genuinely failed after the picker/refresh started
+//   (permission revoked, file deleted mid-flow) — distinct from `null` so
+//   Rust can still report a real failure to stderr instead of treating it
+//   identically to the user just cancelling.
 window.beginOpenFile = {
   handles: {},
   nextId: 0,
 
   open() {
     if (window.showOpenFilePicker) {
-      // The whole flow (not just the picker itself) is wrapped in one
-      // try/catch: a rejection anywhere here — cancelling the picker, or a
-      // read failing afterward (permission revoked, file deleted mid-flow)
-      // — must still resolve to null rather than reject. document::eval's
-      // scripts (OPEN_SCRIPT/refresh_script) always `await` this promise
-      // before calling dioxus.send(); an unhandled rejection here would
-      // skip that call entirely and leave Rust's eval.recv() awaiting a
-      // message that never arrives.
       return (async () => {
+        let handle;
         try {
-          const [handle] = await window.showOpenFilePicker({
+          [handle] = await window.showOpenFilePicker({
             types: [
               {
                 description: "adam property model",
@@ -29,6 +29,18 @@ window.beginOpenFile = {
               },
             ],
           });
+        } catch (e) {
+          return null; // user cancelled the picker — leave any existing handle alone
+        }
+        // A failure past this point is a genuine read failure, not a
+        // cancellation, so it gets its own try/catch resolving `{ error }`
+        // rather than reusing the cancel path's `null`. document::eval's
+        // scripts (OPEN_SCRIPT/refresh_script) always `await` this promise
+        // before calling dioxus.send(); an unhandled rejection here would
+        // skip that call entirely and leave Rust's eval.recv() awaiting a
+        // message that never arrives, so every path below must resolve, not
+        // reject, no matter what.
+        try {
           const id = this.nextId++;
           // At most one file is ever "open" in this app's UI at a time, so
           // any handle from a previously opened file is now stale — drop it
@@ -43,7 +55,7 @@ window.beginOpenFile = {
           const text = await file.text();
           return { id, name: handle.name, text };
         } catch (e) {
-          return null;
+          return { error: String((e && e.message) || e) };
         }
       })();
     }
@@ -56,14 +68,14 @@ window.beginOpenFile = {
       input.addEventListener("change", async () => {
         const file = input.files[0];
         if (!file) {
-          resolve(null);
+          resolve(null); // no file selected — treat like cancel, not a failure
           return;
         }
         try {
           const text = await file.text();
           resolve({ id: null, name: file.name, text });
         } catch (e) {
-          resolve(null);
+          resolve({ error: String((e && e.message) || e) });
         }
       });
       input.addEventListener("cancel", () => resolve(null));
@@ -73,17 +85,14 @@ window.beginOpenFile = {
 
   refresh(id) {
     const handle = this.handles[id];
-    if (!handle) return Promise.resolve(null);
-    // See open()'s comment: any failure here must resolve to null, not reject,
-    // so the eval script's dioxus.send() still runs and Rust's eval.recv()
-    // doesn't hang forever.
+    if (!handle) return Promise.resolve(null); // stale/unknown id — no-op, not a failure
     return (async () => {
       try {
         const file = await handle.getFile();
         const text = await file.text();
         return { id, name: handle.name, text };
       } catch (e) {
-        return null;
+        return { error: String((e && e.message) || e) };
       }
     })();
   },

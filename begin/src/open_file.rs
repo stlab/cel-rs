@@ -57,7 +57,7 @@ pub fn spawn_watch(
 }
 
 /// The result of a web-side `open()`/`refresh()` call, sent from JS via
-/// `dioxus.send()` and read back with `eval.recv::<Option<OpenedFilePayload>>()`.
+/// `dioxus.send()` and read back with `eval.recv::<Option<OpenResult>>()`.
 ///
 /// `id` is `Some(handle_id)` when a re-readable `FileSystemFileHandle` backs
 /// this result (the File System Access path) — pass it to [`refresh_script`]
@@ -71,10 +71,35 @@ pub struct OpenedFilePayload {
     pub text: String,
 }
 
+/// A web-side `open()`/`refresh()` call's outcome once it did resolve (i.e.
+/// excluding the `None`/cancel case, which never reaches Rust as this type at
+/// all — see [`OPEN_SCRIPT`]/[`refresh_script`]'s doc comments).
+///
+/// Distinguishing `Failed` from cancellation matters: a cancelled pick is a
+/// silent no-op by design, but a genuine failure (permission revoked, file
+/// deleted mid-flow) must still be reported to stderr, matching desktop's
+/// `Result`-based handling of the equivalent read — collapsing both into the
+/// same `null`/`None` would make real failures indistinguishable from the
+/// user simply closing the dialog.
+#[cfg(not(feature = "desktop"))]
+#[derive(serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum OpenResult {
+    /// Loaded successfully.
+    Payload(OpenedFilePayload),
+    /// A read failed after the picker resolved (or `refresh()`'s re-read
+    /// failed) — never produced for a cancelled pick, which resolves to
+    /// `null`/`None` instead.
+    Failed {
+        /// The underlying JS error's message.
+        error: String,
+    },
+}
+
 /// `document::eval` script that opens the file picker (or its `<input
 /// type="file">` fallback) and sends the result back via `dioxus.send()`.
 /// Resolves to `null` on JS's side (received as `None`) if the user
-/// cancelled.
+/// cancelled; otherwise sends an [`OpenResult`].
 #[cfg(not(feature = "desktop"))]
 pub const OPEN_SCRIPT: &str =
     "(async () => { dioxus.send(await window.beginOpenFile.open()); })();";
@@ -144,5 +169,31 @@ mod web_tests {
     fn refresh_script_embeds_the_given_id() {
         let script = refresh_script(3);
         assert!(script.contains("beginOpenFile.refresh(3)"), "{script}");
+    }
+
+    #[test]
+    fn open_result_deserializes_payload_variant() {
+        let json = r#"{"id": 3, "name": "my_model.adm2", "text": "sheet s {}"}"#;
+        let result: OpenResult = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            result,
+            OpenResult::Payload(OpenedFilePayload {
+                id: Some(3),
+                name: "my_model.adm2".to_string(),
+                text: "sheet s {}".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn open_result_deserializes_failed_variant() {
+        let json = r#"{"error": "permission denied"}"#;
+        let result: OpenResult = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            result,
+            OpenResult::Failed {
+                error: "permission denied".to_string()
+            }
+        );
     }
 }
