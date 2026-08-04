@@ -177,7 +177,7 @@
         {
             "label": "Install adam-lsp + Extension (Local)",
             "type": "shell",
-            "command": "pwsh -NoProfile -ExecutionPolicy RemoteSigned -File \"${workspaceFolder}/.vscode/scripts/install-adam-lsp-local.ps1\"",
+            "command": "powershell -NoProfile -ExecutionPolicy RemoteSigned -File \"${workspaceFolder}/.vscode/scripts/install-adam-lsp-local.ps1\"",
             "options": {
                 "cwd": "${workspaceFolder}"
             },
