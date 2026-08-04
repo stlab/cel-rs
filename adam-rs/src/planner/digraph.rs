@@ -12,9 +12,12 @@ use super::scc::tarjan_scc;
 
 /// A node in the planner's dependency digraph: either a cell or a relationship.
 ///
-/// Modeling relationships as their own nodes (rather than only cells) ensures a
-/// relationship whose chosen method has zero pure outputs (a purely self-referencing
-/// method) still appears exactly once in a topological ordering of this graph.
+/// Modeling relationships as their own nodes (rather than only cells) allows a
+/// relationship with no pure outputs to still appear in this graph if it has at least
+/// one plain (non-self-referencing) input. A relationship with neither plain inputs
+/// nor pure outputs (fully self-referencing) contributes no edges and does not appear
+/// in this graph; callers that require every active relationship represented must
+/// account for that case separately.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Node {
     Cell(crate::cell::CellId),
