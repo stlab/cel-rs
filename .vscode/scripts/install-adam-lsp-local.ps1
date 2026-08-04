@@ -10,6 +10,12 @@ if (-not (Get-Command robocopy -ErrorAction SilentlyContinue)) {
     Write-Error "robocopy not found. This script stages the workspace copy via robocopy and is Windows-only."
     exit 1
 }
+foreach ($cmd in "cargo", "npm") {
+    if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
+        Write-Error "$cmd not found on PATH; required to build/package/install from the staged copy."
+        exit 1
+    }
+}
 if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
     Write-Error "LOCALAPPDATA is not set; cannot pick a staging directory outside the worktree."
     exit 1
