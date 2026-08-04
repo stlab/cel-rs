@@ -268,45 +268,45 @@ fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
 /// Reads `path`, builds its sheet, and returns it alongside the
 /// [`ActiveSource`] describing what just loaded.
 ///
-/// A read or parse failure prints the diagnostic to stderr and returns an
-/// empty sheet instead of failing — mirrors [`load_demo`]'s failure handling
-/// (see [`App`]'s doc comment for why). The returned [`ActiveSource`] still
-/// carries the opened path (and, if the read succeeded, the source text that
-/// failed to parse) even on failure, so the live-reload loop keeps targeting
-/// the right file.
+/// A read or parse failure prints the diagnostic to stderr and returns `None`
+/// in place of a sheet/labels pair, leaving the caller's last-good sheet and
+/// labels in place instead of replacing them with an empty one — unlike
+/// [`load_demo`] (used only for the initial pick of a *demo*, which has no
+/// "last-good" state to preserve across a switch), this is what the design's
+/// Global Constraints require for opening/refreshing a file specifically. The
+/// returned [`ActiveSource`] still carries the opened path (and, if the read
+/// succeeded, the source text that failed to parse) even on failure, so the
+/// live-reload loop keeps targeting the right file and can recover once it's
+/// fixed.
 ///
 /// - Complexity: O(n) in the size of the file at `path`, plus the cost of
 ///   one `build_sheet` parse/propagate.
 #[cfg(feature = "desktop")]
-fn load_opened(path: std::path::PathBuf) -> (Sheet, Labels, ActiveSource) {
+fn load_opened(path: std::path::PathBuf) -> (Option<(Sheet, Labels)>, ActiveSource) {
     let file_name = path.display().to_string();
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file_name.clone());
     match crate::open_file::read_opened_file(&path) {
         Ok(source) => {
             let outcome = build_sheet(&source, &file_name);
             if let Some(err) = &outcome.error {
                 eprintln!("{err}");
             }
-            let name = path
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| file_name.clone());
             let active_source = ActiveSource {
                 name,
                 text: source,
                 origin: SourceOrigin::Opened(path.into_os_string()),
             };
-            match outcome.sheet_labels {
-                Some((sheet, labels)) => (sheet, labels, active_source),
-                None => (Sheet::new(), Labels::new(), active_source),
-            }
+            (outcome.sheet_labels, active_source)
         }
         Err(err) => {
             eprintln!("{err}");
             (
-                Sheet::new(),
-                Labels::new(),
+                None,
                 ActiveSource {
-                    name: file_name,
+                    name,
                     text: String::new(),
                     origin: SourceOrigin::Opened(path.into_os_string()),
                 },
@@ -348,9 +348,11 @@ fn OpenFileControls(
                             let Some(path) = crate::open_file::pick_file().await else {
                                 return;
                             };
-                            let (new_sheet, new_labels, new_active) = load_opened(path.clone());
-                            sheet.set(new_sheet);
-                            labels.set(new_labels);
+                            let (new_sheet_labels, new_active) = load_opened(path.clone());
+                            if let Some((new_sheet, new_labels)) = new_sheet_labels {
+                                sheet.set(new_sheet);
+                                labels.set(new_labels);
+                            }
                             active_source.set(new_active);
                             match crate::open_file::spawn_watch(path, move || {
                                 let _ = reload_tx.unbounded_send(());
@@ -381,16 +383,17 @@ fn OpenFileControls(
 /// Builds a sheet from a web-side [`crate::open_file::OpenedFilePayload`] and
 /// returns it alongside the [`ActiveSource`] describing what just loaded.
 ///
-/// A read or parse failure prints the diagnostic to stderr and returns an
-/// empty sheet instead of failing — mirrors [`load_demo`]/[`load_opened`]'s
-/// failure handling (see [`App`]'s doc comment for why).
+/// A read or parse failure prints the diagnostic to stderr and returns `None`
+/// in place of a sheet/labels pair, leaving the caller's last-good sheet and
+/// labels in place instead of replacing them with an empty one (see
+/// [`load_opened`]'s doc comment for why this differs from [`load_demo`]).
 ///
 /// - Complexity: O(n) in the length of `payload.text`, plus the cost of one
 ///   `build_sheet` parse/propagate.
 #[cfg(not(feature = "desktop"))]
 fn load_from_payload(
     payload: crate::open_file::OpenedFilePayload,
-) -> (Sheet, Labels, ActiveSource) {
+) -> (Option<(Sheet, Labels)>, ActiveSource) {
     let outcome = build_sheet(&payload.text, &payload.name);
     if let Some(err) = &outcome.error {
         eprintln!("{err}");
@@ -400,10 +403,7 @@ fn load_from_payload(
         text: payload.text,
         origin: SourceOrigin::Opened(payload.name.into()),
     };
-    match outcome.sheet_labels {
-        Some((sheet, labels)) => (sheet, labels, active_source),
-        None => (Sheet::new(), Labels::new(), active_source),
-    }
+    (outcome.sheet_labels, active_source)
 }
 
 /// "Open…"/"Refresh" controls for the web build: "Open…" always calls
@@ -446,9 +446,11 @@ fn OpenFileControls(
                                 }
                             };
                             refresh_handle.set(payload.id);
-                            let (new_sheet, new_labels, new_active) = load_from_payload(payload);
-                            sheet.set(new_sheet);
-                            labels.set(new_labels);
+                            let (new_sheet_labels, new_active) = load_from_payload(payload);
+                            if let Some((new_sheet, new_labels)) = new_sheet_labels {
+                                sheet.set(new_sheet);
+                                labels.set(new_labels);
+                            }
                             active_source.set(new_active);
                         });
                     },
@@ -476,9 +478,11 @@ fn OpenFileControls(
                                         return;
                                     }
                                 };
-                                let (new_sheet, new_labels, new_active) = load_from_payload(payload);
-                                sheet.set(new_sheet);
-                                labels.set(new_labels);
+                                let (new_sheet_labels, new_active) = load_from_payload(payload);
+                                if let Some((new_sheet, new_labels)) = new_sheet_labels {
+                                    sheet.set(new_sheet);
+                                    labels.set(new_labels);
+                                }
                                 active_source.set(new_active);
                             });
                         },
@@ -617,5 +621,53 @@ mod tests {
             active.name, "does_not_exist",
             "name must be preserved on failure so hot-reload keeps targeting the right file"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "desktop")]
+    fn load_opened_missing_file_returns_none_sheet_labels() {
+        let path = std::path::PathBuf::from("/definitely/does/not/exist/nope.adm2");
+
+        let (sheet_labels, active) = load_opened(path);
+
+        assert!(
+            sheet_labels.is_none(),
+            "a read failure must return None, not an empty sheet, so the caller can leave its last-good sheet/labels in place"
+        );
+        assert_eq!(active.name, "nope.adm2");
+    }
+
+    #[test]
+    #[cfg(feature = "desktop")]
+    fn load_opened_parse_error_returns_none_sheet_labels() {
+        let path = std::env::temp_dir().join("begin_app_test_load_opened_parse_error.adm2");
+        std::fs::write(&path, "sheet s { cell x }").unwrap();
+
+        let (sheet_labels, active) = load_opened(path.clone());
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            sheet_labels.is_none(),
+            "a parse failure must return None, not an empty sheet, so the caller can leave its last-good sheet/labels in place"
+        );
+        assert_eq!(active.name, "begin_app_test_load_opened_parse_error.adm2");
+    }
+
+    #[test]
+    #[cfg(not(feature = "desktop"))]
+    fn load_from_payload_parse_error_returns_none_sheet_labels() {
+        let payload = crate::open_file::OpenedFilePayload {
+            id: None,
+            name: "broken.adm2".to_string(),
+            text: "sheet s { cell x }".to_string(),
+        };
+
+        let (sheet_labels, active) = load_from_payload(payload);
+
+        assert!(
+            sheet_labels.is_none(),
+            "a parse failure must return None, not an empty sheet, so the caller can leave its last-good sheet/labels in place"
+        );
+        assert_eq!(active.name, "broken.adm2");
     }
 }
