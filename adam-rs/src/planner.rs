@@ -382,30 +382,29 @@ mod tests {
 
     #[test]
     fn relationship_selected_at_most_once() {
-        // x is inserted first so it sorts before a (equal strength, stable sort).
-        // Without selected_set, flood-fill selects R1 twice (Method 0 then Method 1),
-        // x becomes a source before R2 can run, and propagate() falsely returns Ok.
         let mut sheet = Sheet::new();
         let x = sheet.add_cell(0_i32);
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
         let c = sheet.add_cell(0_i32);
 
-        // R1: two chained methods — Method 0: a→b, Method 1: b→c
-        sheet
+        // R1: two methods, both referencing {a, b, c} -- method 0 ignores c, method 1
+        // ignores a.
+        let r1 = sheet
             .add_relationship(vec![
-                Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
-                Method::from_fn_1_1(b, c, |v: &i32| Ok(*v)),
+                Method::from_fn_2_1([a, c], b, |a: &i32, _c: &i32| Ok(*a)),
+                Method::from_fn_2_1([a, b], c, |_a: &i32, b: &i32| Ok(*b)),
             ])
             .unwrap();
         // R2: single method c→x
-        sheet
+        let r2 = sheet
             .add_relationship(vec![Method::from_fn_1_1(c, x, |v: &i32| Ok(*v))])
             .unwrap();
 
-        // Both relationships must be assigned exactly one method; if R1 were selected
-        // twice the count check would pass and R2 would silently be skipped.
-        assert!(sheet.propagate().is_err());
+        // Both relationships must be assigned exactly one method each.
+        assert!(sheet.propagate().is_ok());
+        assert!(sheet.selected_method(r1).is_some());
+        assert!(sheet.selected_method(r2).is_some());
     }
 
     #[test]
@@ -542,12 +541,14 @@ mod tests {
     fn dead_method_not_selected_before_owning_relationship() {
         // R_A: p -> b (single method, forces b).
         // R_B: q -> c (single method, forces c).
-        // R2: three methods — M0 (x -> b) and M1 (y -> c) are dead, since b and c are
-        // each forced by a *different* relationship; M2 ([b, c] -> d) is the sole
-        // survivor. x's strength is bumped above every other cell's, so if the
-        // flood-fill doesn't know M0 is dead, it selects M0 (using x) before R_A ever
-        // runs, permanently determining b via the wrong relationship and leaving R_A's
-        // real method ineligible — a spurious conflict on an otherwise solvable sheet.
+        // R2: three methods, all referencing {x, y, b, c, d} -- M0 (produces b from x,
+        // ignoring y/c/d) and M1 (produces c from y, ignoring x/b/d) are dead, since b
+        // and c are each forced by a *different* relationship; M2 (produces d from
+        // b + c, ignoring x/y) is the sole survivor. x's strength is bumped above every
+        // other cell's, so if the flood-fill doesn't know M0 is dead, it selects M0
+        // (using x) before R_A ever runs, permanently determining b via the wrong
+        // relationship and leaving R_A's real method ineligible — a spurious conflict on
+        // an otherwise solvable sheet.
         let mut sheet = Sheet::new();
         let p = sheet.add_cell(2_i32);
         let x = sheet.add_cell(0_i32);
@@ -556,6 +557,7 @@ mod tests {
         let b = sheet.add_cell(0_i32);
         let c = sheet.add_cell(0_i32);
         let d = sheet.add_cell(0_i32);
+        let i32_type = std::any::TypeId::of::<i32>();
 
         sheet
             .add_relationship(vec![Method::from_fn_1_1(p, b, |v: &i32| Ok(*v))])
@@ -565,9 +567,31 @@ mod tests {
             .unwrap();
         sheet
             .add_relationship(vec![
-                Method::from_fn_1_1(x, b, |v: &i32| Ok(*v)),
-                Method::from_fn_1_1(y, c, |v: &i32| Ok(*v)),
-                Method::from_fn_2_1([b, c], d, |bb: &i32, cc: &i32| Ok(*bb + *cc)),
+                Method::new(
+                    vec![x, y, c, d],
+                    vec![b],
+                    vec![i32_type, i32_type, i32_type, i32_type],
+                    vec![i32_type],
+                    |args| Ok(vec![Box::new(*args[0].downcast_ref::<i32>().unwrap())]),
+                ),
+                Method::new(
+                    vec![y, x, b, d],
+                    vec![c],
+                    vec![i32_type, i32_type, i32_type, i32_type],
+                    vec![i32_type],
+                    |args| Ok(vec![Box::new(*args[0].downcast_ref::<i32>().unwrap())]),
+                ),
+                Method::new(
+                    vec![b, c, x, y],
+                    vec![d],
+                    vec![i32_type, i32_type, i32_type, i32_type],
+                    vec![i32_type],
+                    |args| {
+                        let bb = args[0].downcast_ref::<i32>().unwrap();
+                        let cc = args[1].downcast_ref::<i32>().unwrap();
+                        Ok(vec![Box::new(bb + cc)])
+                    },
+                ),
             ])
             .unwrap();
 

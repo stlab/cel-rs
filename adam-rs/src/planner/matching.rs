@@ -331,16 +331,20 @@ mod tests {
         let r1 = sheet
             .add_relationship(vec![Method::from_fn_1_1(p, x, |v: &i32| Ok(*v))])
             .unwrap();
+        // R2's two methods both reference {q, x, y} -- method 0 ignores y, method 1
+        // ignores x.
         let r2 = sheet
             .add_relationship(vec![
-                Method::from_fn_1_1(q, x, |v: &i32| Ok(*v)),
-                Method::from_fn_1_1(q, y, |v: &i32| Ok(*v)),
+                Method::from_fn_2_1([q, y], x, |v: &i32, _y: &i32| Ok(*v)),
+                Method::from_fn_2_1([q, x], y, |v: &i32, _x: &i32| Ok(*v)),
             ])
             .unwrap();
+        // R3's two methods both reference {s, q, y} -- method 0 ignores q, method 1
+        // ignores y.
         let r3 = sheet
             .add_relationship(vec![
-                Method::from_fn_1_1(s, y, |v: &i32| Ok(*v)),
-                Method::from_fn_1_1(s, q, |v: &i32| Ok(*v)),
+                Method::from_fn_2_1([s, q], y, |v: &i32, _q: &i32| Ok(*v)),
+                Method::from_fn_2_1([s, y], q, |v: &i32, _y: &i32| Ok(*v)),
             ])
             .unwrap();
         let active: HashSet<_> = [r1, r2, r3].into_iter().collect();

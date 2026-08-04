@@ -107,7 +107,9 @@ impl Sheet {
     /// # Errors
     ///
     /// - `Error::InvalidMethod` — `methods` is empty, a method has no inputs,
-    ///   or a method has no outputs.
+    ///   a method has no outputs, or two methods in `methods` reference different
+    ///   sets of cells (the union of a method's `inputs` and `outputs` must be
+    ///   identical, as a set, across every method in the relationship).
     /// - `Error::InvalidId` — a `CellId` in any method is not found in this sheet.
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
@@ -148,6 +150,31 @@ impl Sheet {
                         expected: cell.type_id,
                         found: declared,
                     });
+                }
+            }
+        }
+
+        // Every method in a relationship must reference the same set of cells: the
+        // union of a method's inputs and outputs (as a set) must be identical across
+        // all methods. A relationship models a fixed set of related cells; methods
+        // differ only in which subset of that set they treat as outputs (using the
+        // "ignore an input" pattern), not in which cells they reference at all.
+        if let Some(first_method) = methods.first() {
+            let first_set: HashSet<CellId> = first_method
+                .inputs
+                .iter()
+                .chain(first_method.outputs.iter())
+                .copied()
+                .collect();
+            for method in &methods[1..] {
+                let method_set: HashSet<CellId> = method
+                    .inputs
+                    .iter()
+                    .chain(method.outputs.iter())
+                    .copied()
+                    .collect();
+                if method_set != first_set {
+                    return Err(Error::InvalidMethod);
                 }
             }
         }
@@ -1155,6 +1182,35 @@ mod tests {
             sheet.add_relationship(vec![method]),
             Err(Error::InvalidMethod)
         ));
+    }
+
+    #[test]
+    fn add_relationship_consistent_cell_sets_across_methods_succeeds() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // Triangle relationship: every method references {a, b, c}.
+        let result = sheet.add_relationship(vec![
+            Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(x + y)),
+            Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok(y - x)),
+            Method::from_fn_2_1([b, c], a, |x: &i32, y: &i32| Ok(y - x)),
+        ]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn add_relationship_inconsistent_cell_sets_across_methods_returns_invalid_method() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // Method 0 references {a, b}; method 1 references {b, c} -- inconsistent.
+        let result = sheet.add_relationship(vec![
+            Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+            Method::from_fn_1_1(b, c, |v: &i32| Ok(*v)),
+        ]);
+        assert!(matches!(result, Err(Error::InvalidMethod)));
     }
 
     #[test]

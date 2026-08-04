@@ -30,7 +30,8 @@ pub enum Error {
     MethodFailed(anyhow::Error),
 
     /// A method is structurally invalid (e.g. inputs ∩ outputs is non-empty,
-    /// or the outputs list is empty).
+    /// the outputs list is empty, or a relationship's methods reference
+    /// different sets of cells).
     InvalidMethod,
 
     /// A conditional is structurally invalid: the cell was not found, a referenced
