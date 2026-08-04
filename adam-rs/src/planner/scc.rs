@@ -31,6 +31,9 @@ where
         components: Vec<Vec<N>>,
     }
 
+    /// Visits node `v`, assigns index/lowlink values, recurses into unvisited successors, and pops completed SCC when `v` is a root.
+    ///
+    /// - Complexity: O(V + E) across all recursive calls in the full Tarjan run; each node/edge visited once.
     fn strongconnect<N>(v: N, adj: &HashMap<N, Vec<N>>, s: &mut State<N>)
     where
         N: Copy + Eq + Hash,
