@@ -6,6 +6,15 @@
 # copy means only *updating* the install requires an uninstall first (to
 # release the lock on the binary being replaced) — deleting the worktree never
 # does.
+if (-not (Get-Command robocopy -ErrorAction SilentlyContinue)) {
+    Write-Error "robocopy not found. This script stages the workspace copy via robocopy and is Windows-only."
+    exit 1
+}
+if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    Write-Error "LOCALAPPDATA is not set; cannot pick a staging directory outside the worktree."
+    exit 1
+}
+
 $repoRoot = (Get-Location).Path
 $stageDir = Join-Path $env:LOCALAPPDATA "cel-rs\adam-lsp-install"
 
