@@ -29,6 +29,7 @@ pub(crate) fn pure_outputs(method: &Method) -> HashSet<CellId> {
         .collect()
 }
 
+/// Records enough information to undo one mutation to an `Assignment`, for `try_assign`'s backtracking.
 enum Change {
     Assigned(RelationshipId, Option<usize>),
     Claimed(CellId, Option<RelationshipId>),
@@ -154,22 +155,27 @@ impl Assignment {
         false
     }
 
+    /// Records `rel`'s previous method choice in `trail` before assigning it to `idx`.
     fn set_assignment(&mut self, rel: RelationshipId, idx: usize, trail: &mut Vec<Change>) {
         trail.push(Change::Assigned(rel, self.chosen.insert(rel, idx)));
     }
 
+    /// Records `rel`'s current method choice in `trail` before removing it.
     fn clear_assignment(&mut self, rel: RelationshipId, trail: &mut Vec<Change>) {
         trail.push(Change::Assigned(rel, self.chosen.remove(&rel)));
     }
 
+    /// Records `cell`'s previous claim (if any) in `trail` before claiming it for `rel`.
     fn set_claim(&mut self, cell: CellId, rel: RelationshipId, trail: &mut Vec<Change>) {
         trail.push(Change::Claimed(cell, self.claimed.insert(cell, rel)));
     }
 
+    /// Records `cell`'s current claim in `trail` before removing it.
     fn clear_claim(&mut self, cell: CellId, trail: &mut Vec<Change>) {
         trail.push(Change::Claimed(cell, self.claimed.remove(&cell)));
     }
 
+    /// Reverts every change recorded in `trail` since `mark`.
     fn undo(&mut self, trail: &mut Vec<Change>, mark: usize) {
         while trail.len() > mark {
             match trail.pop().expect("loop condition checked len > mark") {
