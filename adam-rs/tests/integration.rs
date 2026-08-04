@@ -548,6 +548,37 @@ fn self_ref_le_chain() {
 }
 
 #[test]
+fn self_ref_pressure_persists_without_rewriting_anchor() {
+    // a = min(a, b): b applies downward pressure on a, but a's original written
+    // value must survive across rounds where only b is rewritten.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| {
+            Ok((*x).min(*y))
+        })])
+        .unwrap();
+
+    sheet.write(a, 10_i32).unwrap();
+    sheet.write(b, 3_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 3);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 10);
+
+    // Only b changes; a's original 10 (not the previous derived 3) is used.
+    sheet.write(b, 20_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 10);
+
+    sheet.write(b, 5_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 10);
+}
+
+#[test]
 fn conditional_activates_matching_branch() {
     // mode=1 activates rel_on which doubles `a` into `b`.
     let mut sheet = Sheet::new();
@@ -567,6 +598,144 @@ fn conditional_activates_matching_branch() {
     sheet.write(a, 3_i32).unwrap();
     sheet.propagate().unwrap();
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
+}
+
+#[test]
+fn conditional_forced_cell_shadows_original_value() {
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(7_i32);
+    let b = sheet.add_cell(0_i32);
+
+    let rel_force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet
+        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .unwrap();
+
+    sheet.write(p, 1_i32).unwrap();
+    sheet.write(b, 42_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 42);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 7);
+}
+
+#[test]
+fn conditional_forced_cell_reverts_to_source_when_deactivated() {
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(7_i32);
+    let b = sheet.add_cell(0_i32);
+
+    let rel_force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet
+        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .unwrap();
+
+    sheet.write(p, 1_i32).unwrap();
+    sheet.write(b, 42_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 42);
+
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(
+        *sheet.read::<i32>(a).unwrap(),
+        7,
+        "a must revert to its original value, not stay at the stale forced 42"
+    );
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 7);
+}
+
+#[test]
+fn changed_reports_cell_reverted_by_conditional_deactivation() {
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(7_i32);
+    let b = sheet.add_cell(0_i32);
+
+    let rel_force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet
+        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .unwrap();
+
+    sheet.write(p, 1_i32).unwrap();
+    sheet.write(b, 42_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(
+        sheet.changed().any(|id| id == a),
+        "a's effective value changed (42 -> 7) even though no method wrote to it this round"
+    );
+}
+
+#[test]
+fn pure_input_never_observes_stale_derived_after_conditional_deactivates() {
+    // a is forced to b's value only when p == 1. c always reads a directly
+    // (c = a * 10), regardless of the conditional. When p flips back to 0, a
+    // must revert to its own source value (7) before c is recomputed — c must
+    // never see a's stale forced value from the previous round.
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(7_i32);
+    let b = sheet.add_cell(0_i32);
+    let c = sheet.add_cell(0_i32);
+
+    let rel_force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, c, |x: &i32| Ok(*x * 10))])
+        .unwrap();
+    sheet
+        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .unwrap();
+
+    sheet.write(p, 1_i32).unwrap();
+    sheet.write(b, 42_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 42);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 420);
+
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 7);
+    assert_eq!(
+        *sheet.read::<i32>(c).unwrap(),
+        70,
+        "c must be derived from a's reverted source value, not the stale forced 42"
+    );
+}
+
+#[test]
+fn explicit_write_to_forced_cell_takes_immediate_effect() {
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(1_i32);
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+
+    let rel_force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet
+        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .unwrap();
+
+    sheet.write(p, 1_i32).unwrap();
+    sheet.write(b, 42_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 42);
+
+    // Direct write takes effect immediately, before the next propagate() re-forces it.
+    sheet.write(a, 99_i32).unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 99);
 }
 
 #[test]
@@ -652,11 +821,11 @@ fn conditional_multi_key_branch_matches_any_key() {
     sheet.propagate().unwrap();
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 7);
 
-    // mode=1 does not match; b stays at its last derived value.
+    // mode=1 does not match; b reverts to its original source value.
     sheet.write(mode, 1_i32).unwrap();
     sheet.propagate().unwrap();
-    // b is no longer derived; it keeps the last value (7).
-    assert_eq!(*sheet.read::<i32>(b).unwrap(), 7);
+    // b is no longer derived; it reverts to its source value (0), not the stale forced 7.
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 0);
 }
 
 #[test]
@@ -754,8 +923,8 @@ fn conditional_match_cell_derived_from_multi_method_unconditional_relationship()
     sheet.write(x, 0_i32).unwrap();
     sheet.propagate().unwrap();
     assert!(!*sheet.read::<bool>(flag).unwrap());
-    // b keeps its last derived value (6) since rel_active is no longer active.
-    assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
+    // b reverts to its source value (0) since rel_active is no longer active.
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 0);
 }
 
 #[test]
@@ -791,6 +960,60 @@ fn conditional_match_cell_is_derived_from_unconditional_relationship() {
     sheet.write(x, -1_i32).unwrap();
     sheet.propagate().unwrap();
     assert!(!*sheet.read::<bool>(flag).unwrap());
-    // b has no active relationship; it keeps its previous value.
-    assert_eq!(*sheet.read::<i32>(b).unwrap(), 6);
+    // b has no active relationship; it reverts to its source value (0).
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 0);
+}
+
+#[test]
+fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
+    // p == 0: a <= b enforced by a two-way self-referencing relationship.
+    // p != 0 (default): a and b are forced from each other directly, whichever
+    // is the stronger (more recently written) cell wins.
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(4_i32);
+    let b = sheet.add_cell(9_i32);
+
+    let rel_self_ref = sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    let rel_force = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(b, a, |y: &i32| Ok(*y)),
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(p, vec![(vec![0_i32], vec![rel_self_ref])], vec![rel_force])
+        .unwrap();
+
+    // p == 0: self-referencing branch. a=4, b=9 already satisfy a <= b: unchanged.
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 9);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.source::<i32>(b).unwrap(), 9);
+
+    // p == 1: default (forcing) branch. b is the more recently written cell,
+    // so a <- b.
+    sheet.write(a, 4_i32).unwrap();
+    sheet.write(b, 20_i32).unwrap();
+    sheet.write(p, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 20);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+    // Sources are untouched by the forcing branch.
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.source::<i32>(b).unwrap(), 20);
+
+    // Back to p == 0: self-ref recomputed fresh from each cell's own source
+    // (4 and 20), not from the stale forced value.
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
 }

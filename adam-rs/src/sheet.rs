@@ -85,7 +85,8 @@ impl Sheet {
         self.next_strength += 1;
         let strength = self.next_strength | (1u64 << 63);
         self.cells.insert(CellData {
-            value: Box::new(value),
+            source: Box::new(value),
+            derived: None,
             type_id: TypeId::of::<T>(),
             strength,
             changed: false,
@@ -309,6 +310,8 @@ impl Sheet {
     /// the new value to `cell.strength`, so the most-recently-written cell always
     /// has the highest strength.
     ///
+    /// - Postcondition: any pending derived override is cleared, so the written value is immediately visible via `read()`.
+    ///
     /// # Errors
     ///
     /// - `Error::InvalidId` — `id` is not a cell in this sheet.
@@ -323,11 +326,13 @@ impl Sheet {
         }
         self.next_strength += 1;
         cell.strength = self.next_strength | (1u64 << 63);
-        cell.value = Box::new(value);
+        cell.source = Box::new(value);
+        cell.derived = None;
         Ok(())
     }
 
-    /// Returns a shared reference to the current value of a cell.
+    /// Returns a shared reference to the cell's effective current value: its derived
+    /// override if one exists, otherwise its source (last written) value.
     ///
     /// # Errors
     ///
@@ -341,13 +346,51 @@ impl Sheet {
                 found: TypeId::of::<T>(),
             });
         }
-        Ok(cell.value.downcast_ref::<T>().expect("type checked above"))
+        Ok(cell
+            .effective()
+            .downcast_ref::<T>()
+            .expect("type checked above"))
+    }
+
+    /// Returns the raw `source` slot: the last value written via `write()`/`add_cell`,
+    /// ignoring any `derived` override produced by a self-referencing method or a
+    /// conditionally forced relationship. For an ordinary (unshadowed) derived cell,
+    /// `propagate()` writes straight into this same slot, so `source()` agrees with
+    /// `read()`; the two diverge only for cells currently shadowed.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidId` — `id` is not a cell in this sheet.
+    /// - `Error::TypeMismatch` — `T` does not match the cell's registered `TypeId`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use adam_rs::Sheet;
+    ///
+    /// let mut sheet = Sheet::new();
+    /// let a = sheet.add_cell(3_i32);
+    /// sheet.write(a, 8_i32).unwrap();
+    /// assert_eq!(*sheet.source::<i32>(a).unwrap(), 8);
+    /// ```
+    pub fn source<T: Any + 'static>(&self, id: CellId) -> Result<&T, Error> {
+        let cell = self.cells.get(id).ok_or(Error::InvalidId)?;
+        if cell.type_id != TypeId::of::<T>() {
+            return Err(Error::TypeMismatch {
+                expected: cell.type_id,
+                found: TypeId::of::<T>(),
+            });
+        }
+        Ok(cell.source.downcast_ref::<T>().expect("type checked above"))
     }
 
     /// Iterates over the cells that were updated during the last `propagate()` call.
     ///
-    /// This tracks which cells were written by selected methods; it does not attempt to
-    /// compare old/new values for equality.
+    /// This includes cells written by selected methods and cells that reverted to their
+    /// source values because the relationship that had been shadowing them (self-referencing
+    /// or conditionally forced) is no longer producing them this round (Phase 5), even though
+    /// no method wrote to them this round. It does not attempt to compare old/new values for
+    /// equality.
     ///
     /// - Complexity: O(n) where n is the number of changed cells.
     pub fn changed(&self) -> impl Iterator<Item = CellId> + '_ {
@@ -464,7 +507,7 @@ impl Sheet {
         for (_, cond) in &self.conditionals {
             let cell = &self.cells[cond.cell];
             let eq_fn = cell.eq_fn;
-            let value = cell.value.as_ref();
+            let value = cell.effective();
 
             let mut matched = false;
             for branch in &cond.branches {
@@ -520,6 +563,10 @@ impl Sheet {
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
+    /// **Phase 0 — Derived reset:** every cell's derived override is cleared before
+    /// planning begins, so no pure-input read this round can observe a derived value
+    /// left over from a previous round.
+    ///
     /// **Phase 1 — Pre-plan:** if any conditional match cells are derived (have an
     /// in-edge in the unconditional relationship graph), the minimal unconditional
     /// subgraph needed to compute them is planned and executed so their values are
@@ -533,6 +580,11 @@ impl Sheet {
     /// **Phase 4 — Strength post-processing:** derived cells receive low-order strengths
     /// in evaluation order, enforcing the stability invariant.
     ///
+    /// **Phase 5 — Reversion change-tracking:** a cell whose derived override existed
+    /// before this round but wasn't reclaimed by any method this round has effectively
+    /// reverted to its source value (e.g. its forcing conditional went inactive); it is
+    /// marked changed even though no method wrote to it this round.
+    ///
     /// # Errors
     ///
     /// - `Error::Conflict` — no valid method assignment exists.
@@ -542,6 +594,18 @@ impl Sheet {
     ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.clear_changed();
+
+        // Phase 0: snapshot cells with a live derived override (for Phase 5 only),
+        // then reset every cell's derived override before planning begins.
+        let previously_derived: Vec<CellId> = self
+            .cells
+            .iter()
+            .filter(|(_, cell)| cell.derived.is_some())
+            .map(|(id, _)| id)
+            .collect();
+        for (_, cell) in self.cells.iter_mut() {
+            cell.derived = None;
+        }
 
         // Phase 1: pre-plan for derived match cells.
         if !self.conditionals.is_empty() {
@@ -563,6 +627,18 @@ impl Sheet {
         // Phase 4: assign derived-cell strengths in evaluation order.
         self.post_process_strengths(&plan.execution_order);
 
+        // Phase 5: cells that reverted (had a derived override, didn't get a fresh one
+        // this round) need explicit change-tracking.
+        for id in previously_derived {
+            if let Some(cell) = self.cells.get_mut(id)
+                && cell.derived.is_none()
+                && !cell.changed
+            {
+                cell.changed = true;
+                self.changed_cells.push(id);
+            }
+        }
+
         self.last_forced = Some(plan.forced_outputs);
         self.last_forced_relationships = Some(plan.forced_relationships);
         self.last_plan = Some(plan.execution_order);
@@ -582,19 +658,30 @@ impl Sheet {
     ///   plus per-method execution cost.
     fn execute_plan(&mut self, execution_order: &[(RelationshipId, usize)]) -> Result<(), Error> {
         for &(rel_id, method_idx) in execution_order {
-            // Gather outputs in a scoped block so the shared borrows on
-            // `self.relationships` and `self.cells` are released before the
-            // mutable borrow of `self.cells` below.
-            let (outputs, output_ids) = {
+            let is_conditional = self.conditional_relationships.contains(&rel_id);
+            let (outputs, output_ids, shadow_outputs) = {
                 let method = &self.relationships[rel_id].methods[method_idx];
                 let inputs: Vec<&dyn Any> = method
                     .inputs
                     .iter()
-                    .map(|&id| self.cells[id].value.as_ref())
+                    .map(|&id| {
+                        if method.outputs.contains(&id) {
+                            // Self-referencing input: always the pre-execution source,
+                            // never a derived override from a previous execution.
+                            self.cells[id].source.as_ref()
+                        } else {
+                            self.cells[id].effective()
+                        }
+                    })
                     .collect();
                 let outputs = (method.function)(&inputs).map_err(Error::MethodFailed)?;
                 let output_ids = method.outputs.clone();
-                (outputs, output_ids)
+                let shadow_outputs: Vec<bool> = method
+                    .outputs
+                    .iter()
+                    .map(|o| method.inputs.contains(o) || is_conditional)
+                    .collect();
+                (outputs, output_ids, shadow_outputs)
             };
 
             if outputs.len() != output_ids.len() {
@@ -605,7 +692,9 @@ impl Sheet {
                 )));
             }
 
-            for (cell_id, new_value) in output_ids.into_iter().zip(outputs) {
+            for ((cell_id, new_value), shadow) in
+                output_ids.into_iter().zip(outputs).zip(shadow_outputs)
+            {
                 let cell = &mut self.cells[cell_id];
                 let found = new_value.as_ref().type_id();
                 if found != cell.type_id {
@@ -614,7 +703,11 @@ impl Sheet {
                         found,
                     });
                 }
-                cell.value = new_value;
+                if shadow {
+                    cell.derived = Some(new_value);
+                } else {
+                    cell.source = new_value;
+                }
                 if !cell.changed {
                     cell.changed = true;
                     self.changed_cells.push(cell_id);
@@ -775,7 +868,7 @@ impl Sheet {
         let cond = self.conditionals.get(id)?;
         let cell = &self.cells[cond.cell];
         let eq_fn = cell.eq_fn;
-        let value = cell.value.as_ref();
+        let value = cell.effective();
         cond.branches
             .iter()
             .enumerate()
@@ -990,6 +1083,37 @@ mod tests {
         let id = sheet.add_cell(0_i32);
         assert!(matches!(
             sheet.read::<f64>(id),
+            Err(Error::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn source_matches_read_for_a_plain_unshadowed_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(3_i32);
+        assert_eq!(*sheet.source::<i32>(a).unwrap(), 3);
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 3);
+
+        sheet.write(a, 8_i32).unwrap();
+        assert_eq!(*sheet.source::<i32>(a).unwrap(), 8);
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 8);
+    }
+
+    #[test]
+    fn source_returns_invalid_id_for_unknown_cell() {
+        let sheet = Sheet::new();
+        assert!(matches!(
+            sheet.source::<i32>(CellId::default()),
+            Err(Error::InvalidId)
+        ));
+    }
+
+    #[test]
+    fn source_wrong_type_returns_type_mismatch() {
+        let mut sheet = Sheet::new();
+        let id = sheet.add_cell(0_i32);
+        assert!(matches!(
+            sheet.source::<f64>(id),
             Err(Error::TypeMismatch { .. })
         ));
     }
