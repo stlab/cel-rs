@@ -160,13 +160,18 @@
         },
         {
             "label": "Install adam-lsp + Extension (Local)",
-            "dependsOrder": "sequence",
-            "dependsOn": [
-                "cargo: install adam-lsp",
-                "vscode-adam-lang: package",
-                "vscode-adam-lang: install extension"
+            "type": "shell",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/.vscode/scripts/install-adam-lsp-local.ps1\"",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$rustc"
             ],
-            "problemMatcher": []
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
         },
         // ============ Build Tasks ============
         {
