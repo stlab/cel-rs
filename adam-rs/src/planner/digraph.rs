@@ -7,17 +7,21 @@ use slotmap::SlotMap;
 
 use crate::relationship::{RelationshipData, RelationshipId};
 
-use super::matching::{pure_outputs, Assignment};
+use super::matching::Assignment;
 use super::scc::tarjan_scc;
 
 /// A node in the planner's dependency digraph: either a cell or a relationship.
 ///
 /// Modeling relationships as their own nodes (rather than only cells) allows a
-/// relationship with no pure outputs to still appear in this graph if it has at least
-/// one plain (non-self-referencing) input. A relationship with neither plain inputs
-/// nor pure outputs (fully self-referencing) contributes no edges and does not appear
-/// in this graph; callers that require every active relationship represented must
-/// account for that case separately.
+/// relationship with no plain inputs to still appear in this graph via its output
+/// edges. Every relationship with a valid method (at least one input, at least one
+/// output — enforced by `Sheet::add_relationship`) contributes at least one edge and
+/// therefore always appears in this graph: a fully self-referencing method (every cell
+/// is both an input and an output) contributes no input edges (they're all
+/// self-referencing and thus skipped), but still contributes an output edge for each of
+/// its outputs, since `build_digraph` draws output edges from *all* of a method's
+/// outputs, not just its pure ones — it is exactly this output edge that guarantees
+/// the relationship is never absent from the graph.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Node {
     Cell(crate::cell::CellId),
@@ -26,7 +30,10 @@ pub(crate) enum Node {
 
 /// Builds the dependency digraph induced by `assignment`: an edge from each of a
 /// relationship's plain (non-self-referencing) input cells to the relationship, and
-/// from the relationship to each of its pure-output cells.
+/// from the relationship to each of its output cells (including self-referencing
+/// ones: a self-referencing output still overwrites the cell with a freshly computed
+/// value that same round, so any other relationship reading it as a plain input
+/// genuinely depends on this one executing first).
 ///
 /// - Complexity: O(R · K) where R = assigned relationships, K = cells per chosen method.
 pub(crate) fn build_digraph(
@@ -40,10 +47,14 @@ pub(crate) fn build_digraph(
             if method.outputs.contains(&input) {
                 continue; // self-referencing input: pre-round value, no dependency edge
             }
-            adj.entry(Node::Cell(input)).or_default().push(Node::Relationship(rel_id));
+            adj.entry(Node::Cell(input))
+                .or_default()
+                .push(Node::Relationship(rel_id));
         }
-        for output in pure_outputs(method) {
-            adj.entry(Node::Relationship(rel_id)).or_default().push(Node::Cell(output));
+        for &output in &method.outputs {
+            adj.entry(Node::Relationship(rel_id))
+                .or_default()
+                .push(Node::Cell(output));
         }
     }
     adj
@@ -59,7 +70,9 @@ pub(crate) fn is_acyclic(
     relationships: &SlotMap<RelationshipId, RelationshipData>,
 ) -> bool {
     let adj = build_digraph(assignment, relationships);
-    tarjan_scc(&adj).iter().all(|component| component.len() == 1)
+    tarjan_scc(&adj)
+        .iter()
+        .all(|component| component.len() == 1)
 }
 
 #[cfg(test)]
@@ -92,10 +105,14 @@ mod tests {
         let c = sheet.add_cell(0.0_f64);
         let d = sheet.add_cell(0.0_f64);
         let r1 = sheet
-            .add_relationship(vec![Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| Ok(x * y))])
+            .add_relationship(vec![Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| {
+                Ok(x * y)
+            })])
             .unwrap();
         let r2 = sheet
-            .add_relationship(vec![Method::from_fn_2_1([c, d], b, |x: &f64, y: &f64| Ok(y / x))])
+            .add_relationship(vec![Method::from_fn_2_1([c, d], b, |x: &f64, y: &f64| {
+                Ok(y / x)
+            })])
             .unwrap();
         let active: HashSet<_> = [r1, r2].into_iter().collect();
         let assignment = Assignment::solve(&sheet.relationships, &active, &HashSet::new()).unwrap();
@@ -112,10 +129,12 @@ mod tests {
         let active: HashSet<_> = [rel].into_iter().collect();
         let assignment = Assignment::solve(&sheet.relationships, &active, &HashSet::new()).unwrap();
         let adj = build_digraph(&assignment, &sheet.relationships);
-        // Zero pure outputs (a is excluded, self-referencing) and zero plain inputs
-        // (a is the only input, also self-referencing): the relationship contributes
-        // no edges at all, so it must not appear as a key in `adj`.
-        assert!(!adj.contains_key(&Node::Relationship(rel)));
+        // Zero plain inputs (a is the only input, and it's self-referencing, so the
+        // input-edge loop skips it) but a's self-referencing output still contributes
+        // an output edge: the relationship must appear as a key in `adj`, with exactly
+        // one edge to Cell(a).
+        assert!(adj.contains_key(&Node::Relationship(rel)));
+        assert_eq!(adj[&Node::Relationship(rel)], vec![Node::Cell(a)]);
         assert!(is_acyclic(&assignment, &sheet.relationships));
     }
 }
