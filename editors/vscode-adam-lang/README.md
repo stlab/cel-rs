@@ -85,7 +85,7 @@ this installs a real, working copy of `adam-lsp` and this extension into your re
 
    ```bash
    cd editors/vscode-adam-lang
-   npm install
+   npm ci
    npm run package
    npm run install-extension
    ```

@@ -115,7 +115,7 @@ To install it locally:
 ```bash
 cargo install --path adam-lsp
 cd editors/vscode-adam-lang
-npm install
+npm ci
 npm run package
 npm run install-extension
 ```
