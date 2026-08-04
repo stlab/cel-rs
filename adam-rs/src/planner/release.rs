@@ -31,7 +31,10 @@ use super::matching::Assignment;
 /// no assignment exists whatsoever).
 ///
 /// - Complexity: O(C · solve) where C = cells and `solve` is [`Assignment::solve`]'s
-///   cost -- each cell triggers at most one full re-solve attempt.
+///   cost -- each cell triggers at most one full re-solve attempt. This omits two
+///   further per-cell costs not folded into `solve`: [`is_acyclic`]'s own traversal of
+///   the candidate's digraph, and cloning `released` (an O(C)-sized `HashSet`) to build
+///   each `candidate_released` -- together closer to O(C²) for this part alone.
 pub(crate) fn resolve(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,

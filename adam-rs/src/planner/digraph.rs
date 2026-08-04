@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use slotmap::SlotMap;
 
+use crate::cell::CellId;
 use crate::relationship::{RelationshipData, RelationshipId};
 
 use super::matching::Assignment;
@@ -24,7 +25,7 @@ use super::scc::tarjan_scc;
 /// the relationship is never absent from the graph.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Node {
-    Cell(crate::cell::CellId),
+    Cell(CellId),
     Relationship(RelationshipId),
 }
 

@@ -34,6 +34,7 @@ pub(crate) fn pure_outputs(method: &Method) -> HashSet<CellId> {
 enum Change {
     Assigned(RelationshipId, Option<usize>),
     Claimed(CellId, Option<RelationshipId>),
+    Visited(RelationshipId),
 }
 
 /// One method chosen per active relationship, and which relationship currently claims
@@ -50,7 +51,12 @@ impl Assignment {
     ///
     /// Relationships are considered in `relationships`' natural (insertion-stable)
     /// order restricted to `active`, so the result is deterministic across calls with
-    /// the same inputs.
+    /// the same inputs, with one caveat: whenever a single candidate method has more
+    /// than one simultaneous blocker, they are resolved in `HashSet<RelationshipId>`
+    /// iteration order, which is not sorted. Feasibility and soundness do not depend on
+    /// this order -- only, potentially, the tie-break of *which* valid assignment is
+    /// found is not guaranteed deterministic across builds/runs when more than one
+    /// exists.
     ///
     /// Returns `None` if no such assignment exists for any combination of method
     /// choices.
@@ -87,7 +93,16 @@ impl Assignment {
     /// Attempts to find (and commit) a method for `rel_id` whose outputs avoid
     /// `forbidden`, recursively displacing other relationships' claims via augmenting
     /// search when a candidate method's outputs are already claimed. `visited` prevents
-    /// re-entering a relationship already being displaced earlier in this same search.
+    /// re-entering a relationship already being displaced (or exhausted) elsewhere in
+    /// this search; the entry is undoable via the same `trail` mechanism as `chosen`/
+    /// `claimed`, so a relationship marked visited while being unsuccessfully displaced
+    /// during one candidate method of `rel_id` is un-poisoned before the next candidate
+    /// method is tried -- it must not stay marked past the specific attempt that
+    /// introduced it, or a later attempt would wrongly treat it as already resolved
+    /// even though its claim was restored by `undo` and never actually vacated. `rel_id`
+    /// itself is the one exception: its own entry is pushed before this function's
+    /// per-candidate-method loop begins (and therefore before that loop's own `mark`),
+    /// so it remains marked for this call's entire duration, preventing self-recursion.
     ///
     /// - Complexity: O(M · (R + K)) per call, recursively bounded by the number of
     ///   distinct relationships in `visited` (at most R).
@@ -102,6 +117,7 @@ impl Assignment {
         if !visited.insert(rel_id) {
             return false;
         }
+        trail.push(Change::Visited(rel_id));
 
         let rel = &relationships[rel_id];
         for (method_idx, method) in rel.methods.iter().enumerate() {
@@ -132,7 +148,11 @@ impl Assignment {
                     continue;
                 }
                 if let Some(&old_idx) = self.chosen.get(&blocker) {
-                    let old_outputs = pure_outputs(&relationships[blocker].methods[old_idx]);
+                    let old_outputs: HashSet<CellId> = relationships[blocker].methods[old_idx]
+                        .outputs
+                        .iter()
+                        .copied()
+                        .collect();
                     self.clear_assignment(blocker, trail);
                     for c in old_outputs {
                         if self.claimed.get(&c) == Some(&blocker) {
@@ -154,7 +174,7 @@ impl Assignment {
                 return true;
             }
 
-            self.undo(trail, mark);
+            self.undo(trail, mark, visited);
         }
         false
     }
@@ -179,8 +199,16 @@ impl Assignment {
         trail.push(Change::Claimed(cell, self.claimed.remove(&cell)));
     }
 
-    /// Reverts every change recorded in `trail` since `mark`.
-    fn undo(&mut self, trail: &mut Vec<Change>, mark: usize) {
+    /// Reverts every change recorded in `trail` since `mark`, including any
+    /// `visited` markings introduced after `mark` (so a relationship that was marked
+    /// visited while being unsuccessfully displaced during the undone attempt becomes
+    /// eligible for a fresh displacement attempt again).
+    fn undo(
+        &mut self,
+        trail: &mut Vec<Change>,
+        mark: usize,
+        visited: &mut HashSet<RelationshipId>,
+    ) {
         while trail.len() > mark {
             match trail.pop().expect("loop condition checked len > mark") {
                 Change::Assigned(rel, Some(idx)) => {
@@ -194,6 +222,9 @@ impl Assignment {
                 }
                 Change::Claimed(cell, None) => {
                     self.claimed.remove(&cell);
+                }
+                Change::Visited(rel) => {
+                    visited.remove(&rel);
                 }
             }
         }
@@ -364,5 +395,114 @@ mod tests {
         assert_eq!(assignment.chosen.len(), 3);
         let unique: HashSet<_> = assignment.claimed.values().collect();
         assert_eq!(unique.len(), assignment.claimed.len());
+    }
+
+    /// Asserts that `assignment` is internally consistent: for every relationship's
+    /// chosen method, every cell that method outputs must be claimed by that same
+    /// relationship. A stale or incorrectly-skipped blocker resolution can silently
+    /// desynchronize `claimed` from `chosen` without ever violating the weaker
+    /// "no two relationships claim the same cell" check other tests use (since the
+    /// desync manifests as a claim silently pointing to the *wrong* relationship, not
+    /// as two relationships both claiming the same cell in `claimed`).
+    fn assert_chosen_claims_consistent(
+        assignment: &Assignment,
+        relationships: &SlotMap<RelationshipId, RelationshipData>,
+    ) {
+        for (&rel, &idx) in &assignment.chosen {
+            for &cell in &relationships[rel].methods[idx].outputs {
+                assert_eq!(
+                    assignment.claimed.get(&cell),
+                    Some(&rel),
+                    "cell {cell:?} is output by {rel:?}'s chosen method but claimed by a \
+                     different relationship (or unclaimed)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn undone_blocker_displacement_does_not_leave_stale_visited_poisoning() {
+        // Regression test: `try_assign`'s shared `visited` set must be rolled back
+        // (via the same `trail`/`undo` mechanism as `chosen`/`claimed`) when a
+        // candidate method's blocker resolution fails, not just left to accumulate for
+        // the rest of the call. Before that fix, a relationship marked `visited` while
+        // being unsuccessfully displaced during one candidate method stayed
+        // "poisoned" for the rest of the caller's candidate-method loop: a later
+        // candidate encountering the same relationship as a blocker would then treat
+        // it as "already resolved" (via `if visited.contains(&blocker) { continue; }`)
+        // even though `undo` had restored its original claim -- silently overwriting
+        // that still-valid claim instead of properly re-displacing it.
+        //
+        // R_B has two methods: B0 (default) claims {u, v}; B1 claims {u} only (frees
+        // v, using v as a plain input instead).
+        // R_A has two methods: A0 wants u; A1 wants v.
+        //
+        // Displacing R_B for A0 (forbidding u) fails: B1 also outputs u, so no
+        // candidate of R_B can free u -- this is the "first displacement fails"
+        // attempt, and it marks R_B (and, transitively, nothing else) visited before
+        // failing and fully undoing.
+        //
+        // A1 (wanting v) then encounters R_B as a blocker again. With the fix, R_B is
+        // no longer stuck in `visited` and is freshly re-displaced: B1 is tried, and
+        // since it doesn't output v, it succeeds, freeing v for R_A. The resulting
+        // assignment is valid and mutually consistent.
+        //
+        // Before the fix, R_B's stale `visited` entry caused R_A's second attempt to
+        // skip re-displacing it entirely, silently claiming v for R_A while R_B's
+        // unchanged, still-active chosen method (B0) also genuinely outputs v --
+        // exactly the double-write this invariant check catches.
+        let mut sheet = Sheet::new();
+        let p_b = sheet.add_cell(0_i32);
+        let u = sheet.add_cell(0_i32);
+        let v = sheet.add_cell(0_i32);
+        let i32_ty = std::any::TypeId::of::<i32>();
+
+        let r_b = sheet
+            .add_relationship(vec![
+                Method::new(
+                    vec![p_b],
+                    vec![u, v],
+                    vec![i32_ty],
+                    vec![i32_ty, i32_ty],
+                    |args| {
+                        let p = *args[0].downcast_ref::<i32>().unwrap();
+                        Ok(vec![Box::new(p), Box::new(p)])
+                    },
+                ),
+                Method::new(
+                    vec![p_b, v],
+                    vec![u],
+                    vec![i32_ty, i32_ty],
+                    vec![i32_ty],
+                    |args| {
+                        let p = *args[0].downcast_ref::<i32>().unwrap();
+                        Ok(vec![Box::new(p)])
+                    },
+                ),
+            ])
+            .unwrap();
+
+        let r_a = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(v, u, |x: &i32| Ok(*x)),
+                Method::from_fn_1_1(u, v, |x: &i32| Ok(*x)),
+            ])
+            .unwrap();
+
+        let active: HashSet<_> = [r_b, r_a].into_iter().collect();
+        let assignment = Assignment::solve(&sheet.relationships, &active, &HashSet::new())
+            .expect("a valid assignment exists: R_B falls back to freeing v while keeping u");
+
+        assert_chosen_claims_consistent(&assignment, &sheet.relationships);
+        assert_eq!(
+            assignment.chosen[&r_b], 1,
+            "R_B must fall back to B1 to free v for R_A"
+        );
+        assert_eq!(
+            assignment.chosen[&r_a], 1,
+            "R_A must fall back to A1 (wants v)"
+        );
+        assert_eq!(assignment.claimed[&u], r_b);
+        assert_eq!(assignment.claimed[&v], r_a);
     }
 }
