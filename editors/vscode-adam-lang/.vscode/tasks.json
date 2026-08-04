@@ -34,8 +34,10 @@
     },
     {
       "label": "Install adam-lsp + Extension (Local)",
-      "dependsOrder": "sequence",
-      "dependsOn": ["cargo: install adam-lsp", "npm: package", "npm: install-extension"],
+      "type": "shell",
+      "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/../../.vscode/scripts/install-adam-lsp-local.ps1\"",
+      "options": { "cwd": "${workspaceFolder}/../.." },
+      "presentation": { "reveal": "always", "panel": "shared" },
       "problemMatcher": []
     }
   ]
