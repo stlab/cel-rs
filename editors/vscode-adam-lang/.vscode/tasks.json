@@ -39,6 +39,12 @@
       "options": { "cwd": "${workspaceFolder}/../.." },
       "presentation": { "reveal": "always", "panel": "shared" },
       "problemMatcher": []
+    },
+    {
+      "label": "Install adam-lsp + Extension (Local, in-worktree, macOS/Linux)",
+      "dependsOrder": "sequence",
+      "dependsOn": ["cargo: install adam-lsp", "npm: package", "npm: install-extension"],
+      "problemMatcher": []
     }
   ]
 }

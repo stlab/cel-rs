@@ -15,8 +15,13 @@ if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
     exit 1
 }
 
-$repoRoot = (Get-Location).Path
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $stageDir = Join-Path $env:LOCALAPPDATA "cel-rs\adam-lsp-install"
+
+if (-not (Test-Path (Join-Path $repoRoot "adam-lsp\Cargo.toml"))) {
+    Write-Error "Expected to find adam-lsp\Cargo.toml under '$repoRoot' (derived from this script's location). Is the script still at .vscode/scripts/ in the repo root?"
+    exit 1
+}
 
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 Write-Host "Staging workspace copy at: $stageDir"

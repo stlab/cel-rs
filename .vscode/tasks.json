@@ -173,6 +173,19 @@
                 "panel": "dedicated"
             }
         },
+        {
+            // Windows-only worktree deletion locks (see the task above) don't occur on
+            // macOS/Linux, so this cross-platform chain — installing straight from the
+            // worktree — is fine there.
+            "label": "Install adam-lsp + Extension (Local, in-worktree, macOS/Linux)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "cargo: install adam-lsp",
+                "vscode-adam-lang: package",
+                "vscode-adam-lang: install extension"
+            ],
+            "problemMatcher": []
+        },
         // ============ Build Tasks ============
         {
             "label": "cargo build",
