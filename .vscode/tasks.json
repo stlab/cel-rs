@@ -137,6 +137,22 @@
             }
         },
         {
+            "label": "vscode-adam-lang: npm ci",
+            "type": "shell",
+            "command": "npm",
+            "args": [
+                "ci"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/editors/vscode-adam-lang"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
             "label": "vscode-adam-lang: package",
             "type": "npm",
             "script": "package",
@@ -181,6 +197,7 @@
             "dependsOrder": "sequence",
             "dependsOn": [
                 "cargo: install adam-lsp",
+                "vscode-adam-lang: npm ci",
                 "vscode-adam-lang: package",
                 "vscode-adam-lang: install extension"
             ],

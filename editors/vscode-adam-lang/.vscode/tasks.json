@@ -19,6 +19,14 @@
       "problemMatcher": []
     },
     {
+      "label": "npm: ci",
+      "type": "shell",
+      "command": "npm",
+      "args": ["ci"],
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+    {
       "label": "npm: package",
       "type": "npm",
       "script": "package",
@@ -43,7 +51,7 @@
     {
       "label": "Install adam-lsp + Extension (Local, in-worktree, macOS/Linux)",
       "dependsOrder": "sequence",
-      "dependsOn": ["cargo: install adam-lsp", "npm: package", "npm: install-extension"],
+      "dependsOn": ["cargo: install adam-lsp", "npm: ci", "npm: package", "npm: install-extension"],
       "problemMatcher": []
     }
   ]

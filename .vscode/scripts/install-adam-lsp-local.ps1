@@ -26,6 +26,9 @@ if (-not (Test-Path (Join-Path $repoRoot "adam-lsp\Cargo.toml"))) {
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 Write-Host "Staging workspace copy at: $stageDir"
 
+# ".git" is listed in both /XD and /XF: in a worktree it's a plain file (pointing at the
+# main checkout's gitdir), which only /XF matches; in an ordinary clone it's a directory,
+# which only /XD matches. Both are excluded either way, since this script may run from either.
 robocopy $repoRoot $stageDir /MIR `
     /XD ".git" "target" "node_modules" ".claude" ".tokensave" `
     /XF "*.vsix" ".git" `
