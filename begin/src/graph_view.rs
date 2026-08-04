@@ -5,6 +5,14 @@
 //! writes to `window.__beginGraphData` so that `onmounted`'s polling loop
 //! always calls `init` with the latest snapshot rather than the one captured
 //! at mount time.
+//!
+//! `source_id` (see `App`'s doc comment for how it's derived) is passed
+//! alongside every `init`/`update` call so `graph.js` can tell "the same
+//! source got a new snapshot" (e.g. a hot-reloaded edit — keep the live
+//! layout) apart from "a different demo/file just became active" (wipe the
+//! layout cache instead of risking a stale position/width bleeding in from
+//! an unrelated node that happens to reuse the same id — cell/relationship
+//! node ids are only unique within one `Sheet`, not across different ones).
 
 use dioxus::prelude::*;
 
@@ -19,13 +27,14 @@ use crate::spectrum::{SpActionButton, SpActionGroup, SpIconZoomIn, SpIconZoomOut
 /// `window.__beginGraphData` and calls `window.beginGraph.update`. The JS
 /// guard in `graph.js` makes any `update` call before `init` a no-op.
 #[component]
-pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
+pub fn GraphView(data: ReadSignal<GraphData>, source_id: ReadSignal<String>) -> Element {
     use_effect(move || {
         let json = serde_json::to_string(&*data.read()).unwrap_or_default();
+        let source_id_json = serde_json::to_string(&*source_id.read()).unwrap_or_default();
         spawn(async move {
             let _ = document::eval(&format!(
-                "window.__beginGraphData = {}; if (typeof window.beginGraph !== 'undefined') window.beginGraph.update(window.__beginGraphData);",
-                json
+                "window.__beginGraphData = {}; if (typeof window.beginGraph !== 'undefined') window.beginGraph.update(window.__beginGraphData, {});",
+                json, source_id_json
             ))
             .await;
         });
@@ -37,6 +46,7 @@ pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
             style: "flex: 1; height: 100%; overflow: hidden; position: relative;",
             onmounted: move |_evt| async move {
                 let json = serde_json::to_string(&data.peek().clone()).unwrap_or_default();
+                let source_id_json = serde_json::to_string(&source_id.peek().clone()).unwrap_or_default();
                 // Seed __beginGraphData with the current snapshot; use_effect may
                 // update it if the sheet changes before D3 finishes loading.
                 // document::Script injects <script> tags asynchronously.
@@ -44,7 +54,7 @@ pub fn GraphView(data: ReadSignal<GraphData>) -> Element {
                     r#"if (!window.__beginGraphData) window.__beginGraphData = {json};
                        (function tryInit(n) {{
                            if (typeof d3 !== 'undefined' && typeof window.beginGraph !== 'undefined') {{
-                               window.beginGraph.init('graph-container', window.__beginGraphData);
+                               window.beginGraph.init('graph-container', window.__beginGraphData, {source_id_json});
                            }} else if (n > 0) {{
                                setTimeout(function() {{ tryInit(n - 1); }}, 50);
                            }}
