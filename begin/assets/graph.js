@@ -72,11 +72,12 @@
         return { x: cx - dx / dist * r, y: cy - dy / dist * r };
     }
 
-    // CHANGED: handles Cell, Relationship, and Conditional source/target kinds.
+    // CHANGED: handles Cell, Relationship, Conditional, and Branch source/target kinds.
     function linkEndpoints(d) {
         var s = d.source, t = d.target;
         function edgePt(node, ox, oy) {
             if (node.kind === 'Cell') return cellEdgePoint(ox, oy, node.x, node.y, cellWidth(node) / 2, CELL_H / 2);
+            if (node.kind === 'Branch') return { x: node.x, y: node.y };
             var r = node.kind === 'Conditional' ? COND_COLLIDE_R : REL_R;
             return circleEdgePoint(ox, oy, node.x, node.y, r);
         }
@@ -97,6 +98,7 @@
             var hw, hh;
             if (n.kind === 'Cell') { hw = cellWidth(n) / 2; hh = CELL_H / 2; }
             else if (n.kind === 'Conditional') { hw = COND_COLLIDE_R; hh = COND_COLLIDE_R; }
+            else if (n.kind === 'Branch') { hw = 0; hh = 0; }
             else { hw = REL_R; hh = REL_R; }
             minX = Math.min(minX, n.x - hw);
             minY = Math.min(minY, n.y - hh);
@@ -275,19 +277,70 @@
         svg.call(zoom);
 
         simulation = d3.forceSimulation()
-            .force('link', d3.forceLink().id(function (d) { return d.id; }).distance(LINK_DISTANCE))
+            .force('link', d3.forceLink().id(function (d) { return d.id; }).distance(function (d) {
+                var sKind = typeof d.source === 'object' ? d.source.kind : null;
+                var tKind = typeof d.target === 'object' ? d.target.kind : null;
+                return (sKind === 'Branch' || tKind === 'Branch') ? LINK_DISTANCE / 2 : LINK_DISTANCE;
+            }))
             .force('charge', d3.forceManyBody().strength(CHARGE_STRENGTH))
             .force('center', d3.forceCenter(width / 2, height / 2))
             // CHANGED: collision radius handles Conditional nodes.
             .force('collide', d3.forceCollide().radius(function (d) {
                 if (d.kind === 'Cell') return Math.max(CELL_COLLIDE_R, cellWidth(d) / 2 + 4);
                 if (d.kind === 'Conditional') return COND_COLLIDE_R;
+                if (d.kind === 'Branch') return 0;
                 return REL_COLLIDE_R;
             }));
 
-        simulation.on('tick', ticked);
+        // The live simulation timer is the only driver of continuous position
+        // changes outside an explicit settleSimulation()/update() call (see
+        // updateZoomConstraints's call site below), so it's the only place
+        // that needs to recompute zoom bounds on every frame.
+        simulation.on('tick', function () {
+            ticked();
+            updateZoomConstraints();
+        });
 
         update(data);
+    }
+
+    // Returns a d3.drag() behavior that pins a node's position while it's
+    // being dragged and reheats `sim` so the rest of the graph reacts live.
+    // Deliberately does NOT clear fx/fy on drag-end — the node stays exactly
+    // where it was dropped; see unpinNode() for how a node is released.
+    function dragBehavior(sim) {
+        return d3.drag()
+            .on('start', function (event, d) {
+                // Both d3.zoom (on the <svg>) and this drag (on the node
+                // shape) listen for pointer-down; without this the same
+                // gesture would also pan the canvas.
+                event.sourceEvent.stopPropagation();
+            })
+            .on('drag', function (event, d) {
+                // 'start'/'end' fire on every pointerdown/pointerup, even a
+                // plain click with no movement, but 'drag' only fires once
+                // actual movement occurs — so gate the reheat and cursor
+                // state on it (via the 'dragging' class, set at most once
+                // per gesture here) to keep a no-movement click a true no-op.
+                if (!d3.select(this).classed('dragging')) {
+                    sim.alphaTarget(0.3).restart();
+                    d3.select(this).classed('dragging', true);
+                }
+                d.fx = event.x;
+                d.fy = event.y;
+            })
+            .on('end', function (event, d) {
+                if (!event.active) sim.alphaTarget(0);
+                d3.select(this).classed('dragging', false);
+            });
+    }
+
+    // Releases a pinned node back into the free simulation.
+    function unpinNode(event, d) {
+        event.stopPropagation();
+        d.fx = null;
+        d.fy = null;
+        simulation.alpha(Math.max(simulation.alpha(), 0.3)).restart();
     }
 
     function update(data) {
@@ -358,7 +411,11 @@
             .join('line')
             .attr('class', 'link-control')
             .attr('stroke-dasharray', '5 3')
-            .attr('marker-end', 'url(#dot)')
+            .attr('marker-end', function (d) {
+                var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
+                var tgtNode = nodeMap.get(tgtId);
+                return (tgtNode && tgtNode.kind === 'Branch') ? null : 'url(#dot)';
+            })
             .style('stroke', function (d) { return d.branch_active ? null : INACTIVE_STROKE; });
 
         // Join cell name labels (centered inside rect)
@@ -407,14 +464,18 @@
             .attr('class', 'node-cell')
             .attr('width', cellWidth)
             .attr('height', CELL_H)
-            .attr('rx', CELL_RX);
+            .attr('rx', CELL_RX)
+            .call(dragBehavior(simulation))
+            .on('dblclick', unpinNode);
 
         // Join relationship circles
         relLayer.selectAll('circle')
             .data(relNodes, function (d) { return d.id; })
             .join('circle')
             .attr('class', 'node-relationship')
-            .attr('r', REL_R);
+            .attr('r', REL_R)
+            .call(dragBehavior(simulation))
+            .on('dblclick', unpinNode);
 
         // Dim inactive relationship circles and their constraint links.
         // A relationship is inactive if any control link targets it but none are active.
@@ -479,7 +540,9 @@
             .join('rect')
             .attr('class', 'node-conditional')
             .attr('width', COND_SIZE * 2)
-            .attr('height', COND_SIZE * 2);
+            .attr('height', COND_SIZE * 2)
+            .call(dragBehavior(simulation))
+            .on('dblclick', unpinNode);
 
         // Pulse changed cells
         if (changedSet.size > 0) {
@@ -527,7 +590,9 @@
         controlLinkLayer.selectAll('line').each(function (d) {
             var ep = linkEndpoints(d);
             var t = d.target;
-            var tgtR = (t.kind === 'Conditional' ? COND_COLLIDE_R : REL_R) + NODE_STROKE_WIDTH / 2 + CONTROL_DOT_RADIUS;
+            var tgtR = t.kind === 'Branch'
+                ? 0
+                : (t.kind === 'Conditional' ? COND_COLLIDE_R : REL_R) + NODE_STROKE_WIDTH / 2 + CONTROL_DOT_RADIUS;
             var tgtPt = circleEdgePoint(d.source.x, d.source.y, t.x, t.y, tgtR);
             d3.select(this)
                 .attr('x1', ep.x1).attr('y1', ep.y1)
