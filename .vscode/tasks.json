@@ -177,14 +177,30 @@
         {
             "label": "Install adam-lsp + Extension (Local)",
             "type": "shell",
-            "command": "powershell",
-            "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "RemoteSigned",
-                "-File",
-                "${workspaceFolder}/.vscode/scripts/install-adam-lsp-local.ps1"
-            ],
+            "windows": {
+                "command": "powershell",
+                "args": [
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "RemoteSigned",
+                    "-File",
+                    "${workspaceFolder}/.vscode/scripts/install-adam-lsp-local.ps1"
+                ]
+            },
+            "linux": {
+                "command": "sh",
+                "args": [
+                    "-c",
+                    "echo \"This task is Windows-only. Run 'Install adam-lsp + Extension (Local, in-worktree, macOS/Linux)' instead.\" >&2; exit 1"
+                ]
+            },
+            "osx": {
+                "command": "sh",
+                "args": [
+                    "-c",
+                    "echo \"This task is Windows-only. Run 'Install adam-lsp + Extension (Local, in-worktree, macOS/Linux)' instead.\" >&2; exit 1"
+                ]
+            },
             "options": {
                 "cwd": "${workspaceFolder}"
             },
