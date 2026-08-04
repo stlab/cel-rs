@@ -4,7 +4,9 @@ use adam_rs::Sheet;
 use dioxus::prelude::*;
 
 use crate::bridge::{Labels, to_graph_data};
-use crate::demo_source::{ActiveSource, available_demos, build_sheet, load_demo_source};
+use crate::demo_source::{
+    ActiveSource, SourceOrigin, available_demos, build_sheet, load_demo_source,
+};
 use crate::graph_view::GraphView;
 use crate::inspector::Inspector;
 use crate::spectrum::{SpActionButton, SpActionGroup, SpTheme};
@@ -45,35 +47,59 @@ pub fn App() -> Element {
     let labels = use_signal(|| initial_labels);
     let active_source = use_signal(|| initial_active_source);
 
+    // The reload channel is shared by two producers: `dx serve`'s hot-reload
+    // notifications for the currently selected demo (below), and, on desktop,
+    // a filesystem watcher on whichever file the user most recently opened
+    // (installed by `OpenFileControls`). Either producer sending on `tx` wakes
+    // the single consumer loop below, which reloads via `active_source`'s
+    // current `SourceOrigin` — so only one reload path ever runs regardless of
+    // which source is currently active.
+    // `reload_tx` is wrapped in a `Signal` (rather than passed as the bare
+    // `UnboundedSender`) purely so it can be a prop on `OpenFileControls`:
+    // `#[component]`-generated Props require `PartialEq`, which
+    // `UnboundedSender` doesn't implement but `Signal<T>` does regardless of
+    // `T` (it compares by the underlying slot's identity, not `T`'s value).
     #[cfg(feature = "desktop")]
-    {
+    let reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>> = {
         let mut sheet = sheet;
         let mut labels = labels;
         let mut active_source = active_source;
         use_hook(move || {
             let (tx, mut rx) = futures_channel::mpsc::unbounded::<()>();
-            crate::demo_source::spawn_hot_reload(move || {
-                let _ = tx.unbounded_send(());
+            crate::demo_source::spawn_hot_reload({
+                let tx = tx.clone();
+                move || {
+                    let _ = tx.unbounded_send(());
+                }
             });
             spawn(async move {
                 use futures_util::StreamExt;
                 while rx.next().await.is_some() {
-                    let name = active_source.read().name.clone();
-                    eprintln!("loading begin/assets/{name}.adm2");
-                    let source = match crate::demo_source::load_demo_source(&name) {
+                    let current = active_source.read().clone();
+                    let loaded = match &current.origin {
+                        SourceOrigin::Demo => {
+                            eprintln!("loading begin/assets/{}.adm2", current.name);
+                            load_demo_source(&current.name)
+                        }
+                        SourceOrigin::Opened(path) => {
+                            eprintln!("loading {}", path.to_string_lossy());
+                            crate::open_file::read_opened_file(std::path::Path::new(path))
+                        }
+                    };
+                    let source = match loaded {
                         Ok(source) => source,
                         Err(err) => {
                             eprintln!("{err}");
                             continue;
                         }
                     };
-                    let outcome = build_sheet(&source, &format!("begin/assets/{name}.adm2"));
+                    let outcome = build_sheet(&source, &current.file_name());
                     if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
                         sheet.set(new_sheet);
                         labels.set(new_labels);
                         active_source.set(ActiveSource {
-                            name: name.clone(),
                             text: source,
+                            ..current
                         });
                     }
                     if let Some(msg) = outcome.error {
@@ -81,10 +107,92 @@ pub fn App() -> Element {
                     }
                 }
             });
-        });
-    }
+            Signal::new(tx)
+        })
+    };
+
+    // Holds the `notify` watcher installed on the most recently opened file, if
+    // any. Replacing it drops the previous watcher, which stops its OS-level
+    // watch — both `OpenFileControls` (opening a different file) and
+    // `DemoPicker` (switching back to a demo, via `on_demo_selected` below)
+    // clear/replace this slot, so neither ever leaves a stale opened-file
+    // watcher running.
+    #[cfg(feature = "desktop")]
+    let watcher_slot: Signal<Option<notify::RecommendedWatcher>> = use_signal(|| None);
+
+    // `DemoPicker` itself has no notion of "desktop" or file watchers — it
+    // just calls this after switching demos. On desktop this clears
+    // `watcher_slot`, dropping (and so stopping) any watcher left over from a
+    // previously opened file; on other platforms there's no watcher to clear.
+    // Threading this through a platform-agnostic `Callback<()>` (rather than
+    // giving `DemoPicker` a `#[cfg(feature = "desktop")]`-gated `watcher_slot`
+    // parameter directly) sidesteps a `#[component]`-macro limitation: a
+    // `#[cfg]` on one parameter correctly omits that field from the generated
+    // Props struct, but the generated function body still unconditionally
+    // destructures it, so cfg-gating an individual prop that way fails to
+    // compile on the excluded platform.
+    #[cfg(feature = "desktop")]
+    let on_demo_selected: Callback<()> = {
+        let mut watcher_slot = watcher_slot;
+        Callback::new(move |()| {
+            watcher_slot.set(None);
+        })
+    };
+
+    // Web's equivalent of `watcher_slot`: holds the re-readable File System
+    // Access handle id for whichever file was most recently opened, if any
+    // (`None` means either nothing has been opened yet, or the browser only
+    // gave us a one-shot `<input type="file">` result with nothing to
+    // refresh). Lifted up to `App` — rather than living as a local
+    // `use_signal` inside the web `OpenFileControls` — so `on_demo_selected`
+    // below can clear it, exactly mirroring desktop's `watcher_slot` handling.
+    #[cfg(not(feature = "desktop"))]
+    let refresh_handle: Signal<Option<u32>> = use_signal(|| None);
+    #[cfg(not(feature = "desktop"))]
+    let on_demo_selected: Callback<()> = {
+        let mut refresh_handle = refresh_handle;
+        Callback::new(move |()| {
+            refresh_handle.set(None);
+        })
+    };
 
     let graph_data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
+    // Identifies which source the current graph_data snapshot belongs to —
+    // stable across a hot-reload of the *same* file (so an in-place edit
+    // keeps the graph's live layout), but distinct whenever a different demo
+    // or opened file becomes active. See `GraphView`'s doc comment for why
+    // graph.js needs this: cell/relationship node ids are only unique within
+    // one Sheet, so without an explicit "did the source change" signal, a
+    // demo switch can silently recycle an old id for an unrelated node and
+    // carry over its stale layout position (and previously, its stale box
+    // width — see the graph.js fix this follows).
+    let source_id = use_memo(move || active_source.read().file_name());
+
+    // `rsx!` doesn't accept a bare `#[cfg(...)]` attribute on a child in this
+    // position (it expects an element/component name next), so the
+    // desktop-only `OpenFileControls` child is built as its own `Element`
+    // here — under a real `#[cfg]`, so nothing on a web build references
+    // `OpenFileControls`/`watcher_slot`/`notify` at all — and spliced into
+    // the tree below via `{..}` interpolation.
+    #[cfg(feature = "desktop")]
+    let open_file_controls = rsx! {
+        OpenFileControls {
+            sheet,
+            labels,
+            active_source,
+            reload_tx,
+            watcher_slot,
+        }
+    };
+    #[cfg(not(feature = "desktop"))]
+    let open_file_controls = rsx! {
+        OpenFileControls {
+            sheet,
+            labels,
+            active_source,
+            refresh_handle,
+        }
+    };
 
     rsx! {
         document::Link { rel: "icon", r#type: "image/x-icon", href: "/favicon.ico" }
@@ -92,6 +200,7 @@ pub fn App() -> Element {
         document::Script { src: asset!("/assets/d3.v7.min.js") }
         document::Script { src: asset!("/assets/graph.js") }
         document::Script { r#type: "module", src: asset!("/assets/swc.js") }
+        document::Script { src: asset!("/assets/open_file.js") }
 
         SpTheme {
             color: "light".to_string(),
@@ -99,10 +208,11 @@ pub fn App() -> Element {
             system: "spectrum-two".to_string(),
             div {
                 style: "position: fixed; inset: 0; display: flex; flex-direction: column; overflow: hidden;",
-                DemoPicker { sheet, labels, active_source }
+                DemoPicker { sheet, labels, active_source, on_select: on_demo_selected }
+                {open_file_controls}
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
-                    GraphView { data: graph_data }
+                    GraphView { data: graph_data, source_id }
                     Inspector { sheet, labels, active_source }
                 }
             }
@@ -120,6 +230,9 @@ pub fn App() -> Element {
 /// desktop hot-reload loop keeps reloading the right file and can recover
 /// once the on-disk error is fixed, instead of losing track of which demo
 /// was selected.
+///
+/// - Complexity: O(n) in the length of the demo's source, plus the cost of
+///   one `build_sheet` parse/propagate.
 fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
     match load_demo_source(name) {
         Ok(source) => {
@@ -130,6 +243,7 @@ fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
             let active_source = ActiveSource {
                 name: name.to_string(),
                 text: source,
+                origin: SourceOrigin::Demo,
             };
             match outcome.sheet_labels {
                 Some((sheet, labels)) => (sheet, labels, active_source),
@@ -144,21 +258,263 @@ fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
                 ActiveSource {
                     name: name.to_string(),
                     text: String::new(),
+                    origin: SourceOrigin::Demo,
                 },
             )
         }
     }
 }
 
+/// Reads `path`, builds its sheet, and returns it alongside the
+/// [`ActiveSource`] describing what just loaded.
+///
+/// A read or parse failure prints the diagnostic to stderr and returns `None`
+/// in place of a sheet/labels pair, leaving the caller's last-good sheet and
+/// labels in place instead of replacing them with an empty one — unlike
+/// [`load_demo`] (used only for the initial pick of a *demo*, which has no
+/// "last-good" state to preserve across a switch), this is what the design's
+/// Global Constraints require for opening/refreshing a file specifically. The
+/// returned [`ActiveSource`] still carries the opened path (and, if the read
+/// succeeded, the source text that failed to parse) even on failure, so the
+/// live-reload loop keeps targeting the right file and can recover once it's
+/// fixed.
+///
+/// - Complexity: O(n) in the size of the file at `path`, plus the cost of
+///   one `build_sheet` parse/propagate.
+#[cfg(feature = "desktop")]
+fn load_opened(path: std::path::PathBuf) -> (Option<(Sheet, Labels)>, ActiveSource) {
+    let file_name = path.display().to_string();
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file_name.clone());
+    match crate::open_file::read_opened_file(&path) {
+        Ok(source) => {
+            let outcome = build_sheet(&source, &file_name);
+            if let Some(err) = &outcome.error {
+                eprintln!("{err}");
+            }
+            let active_source = ActiveSource {
+                name,
+                text: source,
+                origin: SourceOrigin::Opened(path.into_os_string()),
+            };
+            (outcome.sheet_labels, active_source)
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            (
+                None,
+                ActiveSource {
+                    name,
+                    text: String::new(),
+                    origin: SourceOrigin::Opened(path.into_os_string()),
+                },
+            )
+        }
+    }
+}
+
+/// "Open…" button: opens the native file dialog, loads the picked file, and
+/// (re)installs a filesystem watcher on it so external edits reload it live —
+/// replacing any previously installed opened-file watcher (dropping the old
+/// `notify::RecommendedWatcher` stops its OS-level watch, so at most one
+/// opened-file watch is ever active).
+///
+/// - Precondition: `reload_tx` is the same channel the hot-reload consumer
+///   loop in [`App`] is reading from, so a watch event here drives the same
+///   origin-aware reload dispatch a demo's hot-reload does.
+#[cfg(feature = "desktop")]
+#[component]
+fn OpenFileControls(
+    sheet: Signal<Sheet>,
+    labels: Signal<Labels>,
+    active_source: Signal<ActiveSource>,
+    reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>>,
+    mut watcher_slot: Signal<Option<notify::RecommendedWatcher>>,
+) -> Element {
+    rsx! {
+        div {
+            style: "padding: 8px 12px; border-bottom: 1px solid #ccc; flex: none; display: flex; align-items: center;",
+            SpActionGroup {
+                compact: true,
+                SpActionButton {
+                    onclick: move |_| {
+                        let mut sheet = sheet;
+                        let mut labels = labels;
+                        let mut active_source = active_source;
+                        let reload_tx = reload_tx.read().clone();
+                        spawn(async move {
+                            let Some(path) = crate::open_file::pick_file().await else {
+                                return;
+                            };
+                            let (new_sheet_labels, new_active) = load_opened(path.clone());
+                            if let Some((new_sheet, new_labels)) = new_sheet_labels {
+                                sheet.set(new_sheet);
+                                labels.set(new_labels);
+                            }
+                            active_source.set(new_active);
+                            match crate::open_file::spawn_watch(path, move || {
+                                let _ = reload_tx.unbounded_send(());
+                            }) {
+                                Ok(watcher) => watcher_slot.set(Some(watcher)),
+                                Err(err) => {
+                                    eprintln!("failed to watch opened file: {err}");
+                                    // Otherwise a failed watch on the new file would leave
+                                    // the *previous* file's watcher running, violating "at
+                                    // most one opened-file watch is ever active" — active_source
+                                    // has already switched to the new file above, so a stale
+                                    // watch on the old one is never correct to keep.
+                                    watcher_slot.set(None);
+                                }
+                            }
+                        });
+                    },
+                    "Open…"
+                }
+            }
+            if let SourceOrigin::Opened(_) = active_source.read().origin {
+                span { style: "padding-left: 8px;", "{active_source.read().name}" }
+            }
+        }
+    }
+}
+
+/// Builds a sheet from a web-side [`crate::open_file::OpenedFilePayload`] and
+/// returns it alongside the [`ActiveSource`] describing what just loaded.
+///
+/// A read or parse failure prints the diagnostic to stderr and returns `None`
+/// in place of a sheet/labels pair, leaving the caller's last-good sheet and
+/// labels in place instead of replacing them with an empty one (see
+/// [`load_opened`]'s doc comment for why this differs from [`load_demo`]).
+///
+/// - Complexity: O(n) in the length of `payload.text`, plus the cost of one
+///   `build_sheet` parse/propagate.
+#[cfg(not(feature = "desktop"))]
+fn load_from_payload(
+    payload: crate::open_file::OpenedFilePayload,
+) -> (Option<(Sheet, Labels)>, ActiveSource) {
+    let outcome = build_sheet(&payload.text, &payload.name);
+    if let Some(err) = &outcome.error {
+        eprintln!("{err}");
+    }
+    let active_source = ActiveSource {
+        name: payload.name.clone(),
+        text: payload.text,
+        origin: SourceOrigin::Opened(payload.name.into()),
+    };
+    (outcome.sheet_labels, active_source)
+}
+
+/// "Open…"/"Refresh" controls for the web build: "Open…" always calls
+/// `window.beginOpenFile.open()`; "Refresh" (rendered only once a
+/// re-readable handle exists) re-reads that same handle. Neither watches for
+/// changes automatically — browsers have no filesystem-watch API, so reload
+/// here is always user-triggered.
+#[cfg(not(feature = "desktop"))]
+#[component]
+fn OpenFileControls(
+    sheet: Signal<Sheet>,
+    labels: Signal<Labels>,
+    active_source: Signal<ActiveSource>,
+    mut refresh_handle: Signal<Option<u32>>,
+) -> Element {
+    rsx! {
+        div {
+            style: "padding: 8px 12px; border-bottom: 1px solid #ccc; flex: none; display: flex; align-items: center;",
+            SpActionGroup {
+                compact: true,
+                SpActionButton {
+                    onclick: move |_| {
+                        let mut sheet = sheet;
+                        let mut labels = labels;
+                        let mut active_source = active_source;
+                        let mut refresh_handle = refresh_handle;
+                        spawn(async move {
+                            let mut eval = document::eval(crate::open_file::OPEN_SCRIPT);
+                            let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
+                            let Ok(result) = result else {
+                                eprintln!("failed to open file: eval channel error: {result:?}");
+                                return;
+                            };
+                            let Some(result) = result else { return }; // cancelled — silent no-op
+                            let payload = match result {
+                                crate::open_file::OpenResult::Payload(payload) => payload,
+                                crate::open_file::OpenResult::Failed { error } => {
+                                    eprintln!("failed to open file: {error}");
+                                    return;
+                                }
+                            };
+                            refresh_handle.set(payload.id);
+                            let (new_sheet_labels, new_active) = load_from_payload(payload);
+                            if let Some((new_sheet, new_labels)) = new_sheet_labels {
+                                sheet.set(new_sheet);
+                                labels.set(new_labels);
+                            }
+                            active_source.set(new_active);
+                        });
+                    },
+                    "Open…"
+                }
+                if let Some(id) = *refresh_handle.read() {
+                    SpActionButton {
+                        onclick: move |_| {
+                            let mut sheet = sheet;
+                            let mut labels = labels;
+                            let mut active_source = active_source;
+                            spawn(async move {
+                                let script = crate::open_file::refresh_script(id);
+                                let mut eval = document::eval(&script);
+                                let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
+                                let Ok(result) = result else {
+                                    eprintln!("failed to refresh file: eval channel error: {result:?}");
+                                    return;
+                                };
+                                let Some(result) = result else { return }; // stale/unknown id — silent no-op
+                                let payload = match result {
+                                    crate::open_file::OpenResult::Payload(payload) => payload,
+                                    crate::open_file::OpenResult::Failed { error } => {
+                                        eprintln!("failed to refresh file: {error}");
+                                        return;
+                                    }
+                                };
+                                let (new_sheet_labels, new_active) = load_from_payload(payload);
+                                if let Some((new_sheet, new_labels)) = new_sheet_labels {
+                                    sheet.set(new_sheet);
+                                    labels.set(new_labels);
+                                }
+                                active_source.set(new_active);
+                            });
+                        },
+                        "Refresh"
+                    }
+                }
+            }
+            if let SourceOrigin::Opened(_) = active_source.read().origin {
+                span { style: "padding-left: 8px;", "{active_source.read().name}" }
+            }
+        }
+    }
+}
+
 /// Picker row listing every demo from [`available_demos`]; clicking one
 /// loads it into `sheet`/`labels`/`active_source`, highlighting whichever
-/// name matches `active_source`'s current value.
+/// name matches `active_source`'s current value, then calls `on_select` —
+/// on desktop, `App` uses this to clear any watcher left over from a
+/// previously opened file (see `App`'s `on_demo_selected`).
 #[component]
 fn DemoPicker(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
     active_source: Signal<ActiveSource>,
+    on_select: Callback<()>,
 ) -> Element {
+    // Gating on origin (not just name) matters: an opened file's name is
+    // never guaranteed to differ from a bundled demo's — a user could open
+    // a file that happens to be named exactly like one, and without the
+    // origin check that coincidence would incorrectly highlight the demo
+    // button while a totally different (opened) file is actually active.
+    let is_demo_active = matches!(active_source.read().origin, SourceOrigin::Demo);
     let current = active_source.read().name.clone();
 
     rsx! {
@@ -169,7 +525,7 @@ fn DemoPicker(
                 for &name in available_demos() {
                     SpActionButton {
                         key: "{name}",
-                        selected: name == current,
+                        selected: is_demo_active && name == current,
                         onclick: {
                             let mut sheet = sheet;
                             let mut labels = labels;
@@ -179,6 +535,7 @@ fn DemoPicker(
                                 sheet.set(new_sheet);
                                 labels.set(new_labels);
                                 active_source.set(new_active_source);
+                                on_select.call(());
                             }
                         },
                         "{name}"
@@ -264,5 +621,53 @@ mod tests {
             active.name, "does_not_exist",
             "name must be preserved on failure so hot-reload keeps targeting the right file"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "desktop")]
+    fn load_opened_missing_file_returns_none_sheet_labels() {
+        let path = std::path::PathBuf::from("/definitely/does/not/exist/nope.adm2");
+
+        let (sheet_labels, active) = load_opened(path);
+
+        assert!(
+            sheet_labels.is_none(),
+            "a read failure must return None, not an empty sheet, so the caller can leave its last-good sheet/labels in place"
+        );
+        assert_eq!(active.name, "nope.adm2");
+    }
+
+    #[test]
+    #[cfg(feature = "desktop")]
+    fn load_opened_parse_error_returns_none_sheet_labels() {
+        let path = std::env::temp_dir().join("begin_app_test_load_opened_parse_error.adm2");
+        std::fs::write(&path, "sheet s { cell x }").unwrap();
+
+        let (sheet_labels, active) = load_opened(path.clone());
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            sheet_labels.is_none(),
+            "a parse failure must return None, not an empty sheet, so the caller can leave its last-good sheet/labels in place"
+        );
+        assert_eq!(active.name, "begin_app_test_load_opened_parse_error.adm2");
+    }
+
+    #[test]
+    #[cfg(not(feature = "desktop"))]
+    fn load_from_payload_parse_error_returns_none_sheet_labels() {
+        let payload = crate::open_file::OpenedFilePayload {
+            id: None,
+            name: "broken.adm2".to_string(),
+            text: "sheet s { cell x }".to_string(),
+        };
+
+        let (sheet_labels, active) = load_from_payload(payload);
+
+        assert!(
+            sheet_labels.is_none(),
+            "a parse failure must return None, not an empty sheet, so the caller can leave its last-good sheet/labels in place"
+        );
+        assert_eq!(active.name, "broken.adm2");
     }
 }

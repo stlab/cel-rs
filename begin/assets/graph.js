@@ -38,6 +38,7 @@
     var hasInitialFit = false;
     var MAX_ZOOM = 8;
     var latestData = null;
+    var currentSourceId = null;                          // which demo/file `nodes`/`links` currently belong to
 
     // Returns the point on the rect boundary of a cell centered at (tx,ty)
     // along the approach line from (sx,sy) to (tx,ty). `hw`/`hh` are that
@@ -168,7 +169,7 @@
         updateZoomConstraints(forceFit);
     }
 
-    function init(containerId, data) {
+    function init(containerId, data, sourceId) {
         // Tear down any previous init (component remount / hot-reload).
         if (resizeObserver) { resizeObserver.disconnect(); resizeObserver = null; }
         if (simulation) { simulation.stop(); simulation = null; }
@@ -179,6 +180,7 @@
         nodes = [];
         links = [];
         latestData = data;
+        currentSourceId = sourceId;
 
         var container = document.getElementById(containerId);
 
@@ -301,7 +303,11 @@
             updateZoomConstraints();
         });
 
-        update(data);
+        // currentSourceId, not a fresh parameter: init() already set it to the
+        // correct value before this (possibly-async, via ResizeObserver's
+        // first firing) call, so passing it straight through here can't
+        // diverge the way an `undefined` argument would.
+        update(data, currentSourceId);
     }
 
     // Returns a d3.drag() behavior that pins a node's position while it's
@@ -343,10 +349,24 @@
         simulation.alpha(Math.max(simulation.alpha(), 0.3)).restart();
     }
 
-    function update(data) {
+    function update(data, sourceId) {
         latestData = data;
         // Guard: no-op if not yet initialized
         if (!svg) return;
+
+        // A different demo/file just became active: wipe the node/link cache
+        // entirely rather than let the id-based merge below run against it.
+        // Node ids are only unique within one Sheet (see cell_node_id() in
+        // bridge.rs), so without this, switching sources could silently
+        // recycle an old id for an unrelated cell and inherit its stale
+        // layout position — the same root cause the relabeledIds check below
+        // guards against for stale box widths, generalized to every other
+        // per-node field a stale reused object could carry over.
+        if (sourceId !== currentSourceId) {
+            nodes = [];
+            links = [];
+            currentSourceId = sourceId;
+        }
 
         // Detect structural changes before mutating node/link arrays. Link identity
         // is an unordered node-id pair: replanning can flip which end of an existing
@@ -368,10 +388,21 @@
             || data.links.some(function (l) { return !oldLinkSet.has(linkKey(l.source, l.target)); });
 
         // Preserve existing node positions by merging into incoming data.
+        //
+        // Node ids are only unique *within* one Sheet: they're built from a
+        // cell's raw slotmap index (see cell_node_id() in bridge.rs), and a
+        // freshly loaded demo/opened file starts a brand new Sheet whose
+        // slotmap indices restart from the same small integers. So switching
+        // from one source to an unrelated one can easily reuse an old id for
+        // a completely different cell (e.g. the 6th cell allocated in each).
+        // relabeledIds tracks exactly that case so the width-measuring step
+        // below knows to remeasure even though oldNodeMap already has the id.
         var oldNodeMap = new Map(nodes.map(function (n) { return [n.id, n]; }));
+        var relabeledIds = new Set();
         nodes = data.nodes.map(function (n) {
             var existing = oldNodeMap.get(n.id);
             if (existing) {
+                if (existing.label !== n.label) relabeledIds.add(n.id);
                 existing.kind = n.kind;
                 existing.label = n.label;
                 existing.value = n.value;
@@ -442,18 +473,20 @@
         //
         // getBBox() forces SVG layout, so it's restricted to cells that can
         // actually need remeasuring: a cell's label is fixed at creation (it
-        // never changes for an id that already existed), so it's only
-        // measured once, when the node is new; d.w (set here or on a prior
-        // update) persists on the reused node object across updates (see the
-        // node-merge step above) for every other cell. The value text does
-        // change at runtime, so it's remeasured for new cells plus whichever
-        // existing ones are in `changedSet`, rather than every cell on every update.
+        // never changes for an id that already existed, unless relabeledIds
+        // says the id was actually recycled for a different cell — see the
+        // node-merge step above), so it's only measured once, when the node
+        // is new; d.w (set here or on a prior update) persists on the reused
+        // node object across updates for every other cell. The value text
+        // does change at runtime, so it's remeasured for new/relabeled cells
+        // plus whichever existing ones are in `changedSet`, rather than every
+        // cell on every update.
         labelSel.each(function (d) {
-            if (oldNodeMap.has(d.id)) return;
+            if (oldNodeMap.has(d.id) && !relabeledIds.has(d.id)) return;
             d.w = Math.max(CELL_W, this.getBBox().width + CELL_LABEL_PADDING);
         });
         valueSel.each(function (d) {
-            if (oldNodeMap.has(d.id) && !changedSet.has(d.id)) return;
+            if (oldNodeMap.has(d.id) && !changedSet.has(d.id) && !relabeledIds.has(d.id)) return;
             d.w = Math.max(d.w, this.getBBox().width + CELL_LABEL_PADDING);
         });
 
