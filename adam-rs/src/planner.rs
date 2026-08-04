@@ -77,14 +77,7 @@ pub(crate) fn plan(
 
     let assignment = release::resolve(cells, relationships, active).ok_or(Error::Conflict)?;
 
-    let mut adj = build_digraph(&assignment, relationships);
-    // Ensure every active relationship appears as a node even if its chosen method has
-    // zero pure outputs and zero plain inputs (fully self-referencing, e.g. a -> a):
-    // such a relationship contributes no edges via build_digraph and would otherwise be
-    // silently missing from the topological order below.
-    for &rel_id in active {
-        adj.entry(Node::Relationship(rel_id)).or_default();
-    }
+    let adj = build_digraph(&assignment, relationships);
 
     let mut components = scc::tarjan_scc(&adj);
     components.reverse();
