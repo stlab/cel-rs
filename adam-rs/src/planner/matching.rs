@@ -1,6 +1,7 @@
 //! Bipartite/hypergraph matching: assigns each active relationship one of its methods
-//! such that no two relationships claim the same cell as a pure (non-self-referencing)
-//! output, optionally forbidding specific cells from being claimed by anyone at all.
+//! such that no two relationships claim the same cell as an output (self-referencing
+//! outputs included), optionally forbidding specific cells from being claimed by anyone
+//! at all.
 
 use std::collections::{HashMap, HashSet};
 
@@ -36,7 +37,7 @@ enum Change {
 }
 
 /// One method chosen per active relationship, and which relationship currently claims
-/// each pure-output cell.
+/// each output cell (self-referencing outputs included).
 pub(crate) struct Assignment {
     pub(crate) chosen: HashMap<RelationshipId, usize>,
     pub(crate) claimed: HashMap<CellId, RelationshipId>,
@@ -44,7 +45,7 @@ pub(crate) struct Assignment {
 
 impl Assignment {
     /// Finds an assignment of one method per relationship in `active` such that no cell
-    /// in `forbidden` is claimed as a pure output by anyone, and no two relationships
+    /// in `forbidden` is claimed as an output by anyone, and no two relationships
     /// claim the same cell.
     ///
     /// Relationships are considered in `relationships`' natural (insertion-stable)
@@ -66,7 +67,10 @@ impl Assignment {
             chosen: HashMap::new(),
             claimed: HashMap::new(),
         };
-        let order: Vec<RelationshipId> = relationships.keys().filter(|r| active.contains(r)).collect();
+        let order: Vec<RelationshipId> = relationships
+            .keys()
+            .filter(|r| active.contains(r))
+            .collect();
         for rel_id in order {
             if this.chosen.contains_key(&rel_id) {
                 continue; // already assigned as a side effect of an earlier displacement
@@ -80,7 +84,7 @@ impl Assignment {
         Some(this)
     }
 
-    /// Attempts to find (and commit) a method for `rel_id` whose pure outputs avoid
+    /// Attempts to find (and commit) a method for `rel_id` whose outputs avoid
     /// `forbidden`, recursively displacing other relationships' claims via augmenting
     /// search when a candidate method's outputs are already claimed. `visited` prevents
     /// re-entering a relationship already being displaced earlier in this same search.
@@ -101,7 +105,7 @@ impl Assignment {
 
         let rel = &relationships[rel_id];
         for (method_idx, method) in rel.methods.iter().enumerate() {
-            let outputs = pure_outputs(method);
+            let outputs: HashSet<CellId> = method.outputs.iter().copied().collect();
             if !outputs.is_disjoint(forbidden) {
                 continue;
             }
@@ -256,11 +260,15 @@ mod tests {
         let active: HashSet<_> = [r1, r2].into_iter().collect();
         let assignment = Assignment::solve(&sheet.relationships, &active, &HashSet::new()).unwrap();
         let unique: HashSet<_> = assignment.claimed.values().collect();
-        assert_eq!(unique.len(), assignment.claimed.len(), "no two relationships may claim the same cell");
+        assert_eq!(
+            unique.len(),
+            assignment.claimed.len(),
+            "no two relationships may claim the same cell"
+        );
     }
 
     #[test]
-    fn self_referencing_output_does_not_conflict_with_a_different_relationship() {
+    fn self_referencing_output_is_claimed_and_does_not_conflict_with_a_different_relationship() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -273,7 +281,7 @@ mod tests {
         let active: HashSet<_> = [r1, r2].into_iter().collect();
         let assignment = Assignment::solve(&sheet.relationships, &active, &HashSet::new()).unwrap();
         assert_eq!(assignment.chosen.len(), 2);
-        assert!(!assignment.claimed.contains_key(&a));
+        assert_eq!(assignment.claimed[&a], r1);
         assert_eq!(assignment.claimed[&b], r2);
     }
 
@@ -290,7 +298,10 @@ mod tests {
                     vec![c],
                     vec![a, b],
                     vec![std::any::TypeId::of::<String>()],
-                    vec![std::any::TypeId::of::<String>(), std::any::TypeId::of::<String>()],
+                    vec![
+                        std::any::TypeId::of::<String>(),
+                        std::any::TypeId::of::<String>(),
+                    ],
                     |args| {
                         let z = args[0].downcast_ref::<String>().unwrap();
                         let mut chars = z.chars();
@@ -303,7 +314,8 @@ mod tests {
             .unwrap();
         let active: HashSet<_> = [rel].into_iter().collect();
 
-        let unconstrained = Assignment::solve(&sheet.relationships, &active, &HashSet::new()).unwrap();
+        let unconstrained =
+            Assignment::solve(&sheet.relationships, &active, &HashSet::new()).unwrap();
         assert_eq!(unconstrained.chosen[&rel], 0);
         assert_eq!(unconstrained.claimed[&c], rel);
 
