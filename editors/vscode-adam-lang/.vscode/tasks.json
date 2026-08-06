@@ -19,6 +19,14 @@
       "problemMatcher": []
     },
     {
+      "label": "npm: ci",
+      "type": "shell",
+      "command": "npm",
+      "args": ["ci"],
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+    {
       "label": "npm: package",
       "type": "npm",
       "script": "package",
@@ -34,8 +42,39 @@
     },
     {
       "label": "Install adam-lsp + Extension (Local)",
+      "type": "shell",
+      "windows": {
+        "command": "powershell",
+        "args": [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "RemoteSigned",
+          "-File",
+          "${workspaceFolder}/../../.vscode/scripts/install-adam-lsp-local.ps1"
+        ]
+      },
+      "linux": {
+        "command": "sh",
+        "args": [
+          "-c",
+          "echo \"This task is Windows-only. Run 'Install adam-lsp + Extension (Local, in-worktree, macOS/Linux)' instead.\" >&2; exit 1"
+        ]
+      },
+      "osx": {
+        "command": "sh",
+        "args": [
+          "-c",
+          "echo \"This task is Windows-only. Run 'Install adam-lsp + Extension (Local, in-worktree, macOS/Linux)' instead.\" >&2; exit 1"
+        ]
+      },
+      "options": { "cwd": "${workspaceFolder}/../.." },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Install adam-lsp + Extension (Local, in-worktree, macOS/Linux)",
       "dependsOrder": "sequence",
-      "dependsOn": ["cargo: install adam-lsp", "npm: package", "npm: install-extension"],
+      "dependsOn": ["cargo: install adam-lsp", "npm: ci", "npm: package", "npm: install-extension"],
       "problemMatcher": []
     }
   ]

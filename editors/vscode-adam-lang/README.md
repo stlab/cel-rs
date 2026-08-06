@@ -85,7 +85,7 @@ this installs a real, working copy of `adam-lsp` and this extension into your re
 
    ```bash
    cd editors/vscode-adam-lang
-   npm install
+   npm ci
    npm run package
    npm run install-extension
    ```
@@ -97,7 +97,11 @@ this installs a real, working copy of `adam-lsp` and this extension into your re
    Both steps together are also available as a single VS Code task,
    **Install adam-lsp + Extension (Local)**, runnable from the Command Palette's
    "Tasks: Run Task" — available whether you have the repository root or just this folder
-   (`editors/vscode-adam-lang`) open.
+   (`editors/vscode-adam-lang`) open. On Windows, this task builds/packages from a copy of
+   the workspace staged outside any git worktree, to avoid a Windows-only file-locking issue
+   where installing directly from a worktree blocks `git worktree remove` until the extension
+   is uninstalled. On macOS/Linux, where that lock doesn't occur, use **Install adam-lsp +
+   Extension (Local, in-worktree, macOS/Linux)** instead, which runs steps 1-2 above directly.
 
 3. Reopen VS Code (or run **Developer: Reload Window**) and open any `.adm2` file — syntax
    highlighting and diagnostics should now work in ordinary windows, not just the dev host.
