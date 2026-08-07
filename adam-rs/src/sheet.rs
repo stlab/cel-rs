@@ -157,7 +157,11 @@ impl Sheet {
             }
         }
 
-        // Every method in a relationship must reference the same combined set of cells.
+        // Every method in a relationship must reference the same set of cells: the
+        // union of a method's inputs and outputs (as a set) must be identical across
+        // all methods. A relationship models a fixed set of related cells; methods
+        // differ only in which subset of that set they treat as outputs (using the
+        // "ignore an input" pattern), not in which cells they reference at all.
         let cell_sets: Vec<HashSet<CellId>> = methods
             .iter()
             .map(|m| m.inputs.iter().chain(m.outputs.iter()).copied().collect())
@@ -166,8 +170,10 @@ impl Sheet {
             return Err(Error::MismatchedMethodCells);
         }
 
-        // A method's own outputs must be duplicate-free, and no two methods may share
-        // an outputs set.
+        // A method's own outputs must be duplicate-free, and no two methods in a
+        // relationship may claim the same output set: the planner's matching stage
+        // treats a method's pure-output set as an indivisible claim, so two methods
+        // sharing an output set would make that claim ambiguous.
         let mut seen_output_sets: Vec<HashSet<CellId>> = Vec::with_capacity(methods.len());
         for method in &methods {
             let output_set: HashSet<CellId> = method.outputs.iter().copied().collect();
@@ -1180,6 +1186,66 @@ mod tests {
             sheet.add_relationship(vec![method]),
             Err(Error::InvalidMethod)
         ));
+    }
+
+    #[test]
+    fn add_relationship_consistent_cell_sets_across_methods_succeeds() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // Triangle relationship: every method references {a, b, c}.
+        let result = sheet.add_relationship(vec![
+            Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(x + y)),
+            Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok(y - x)),
+            Method::from_fn_2_1([b, c], a, |x: &i32, y: &i32| Ok(y - x)),
+        ]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn add_relationship_inconsistent_cell_sets_across_methods_returns_mismatched_method_cells() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // Method 0 references {a, b}; method 1 references {b, c} -- inconsistent.
+        let result = sheet.add_relationship(vec![
+            Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
+            Method::from_fn_1_1(b, c, |v: &i32| Ok(*v)),
+        ]);
+        assert!(matches!(result, Err(Error::MismatchedMethodCells)));
+    }
+
+    #[test]
+    fn add_relationship_distinct_output_sets_across_methods_succeeds() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // Triangle relationship: every method has a distinct single-cell output set
+        // ({c}, {b}, {a}).
+        let result = sheet.add_relationship(vec![
+            Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(x + y)),
+            Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok(y - x)),
+            Method::from_fn_2_1([b, c], a, |x: &i32, y: &i32| Ok(y - x)),
+        ]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn add_relationship_duplicate_output_set_across_methods_returns_duplicate_method_outputs() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        // Both methods reference {a, b} (so the cell-set-consistency check passes) but
+        // both output {b} from different inputs -- their output sets are identical,
+        // which must be rejected.
+        let result = sheet.add_relationship(vec![
+            Method::from_fn_2_1([a, b], b, |x: &i32, _y: &i32| Ok(*x)),
+            Method::from_fn_2_1([a, b], b, |_x: &i32, y: &i32| Ok(*y)),
+        ]);
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
     }
 
     #[test]
