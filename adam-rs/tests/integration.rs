@@ -403,11 +403,11 @@ fn method_returning_error_propagates_as_method_failed() {
 }
 
 #[test]
-fn mutually_dependent_relationships_return_conflict() {
-    // a→b and b→a: Adam marks a as a source, flows to b via the first
-    // relationship, then the second relationship's only method (b→a) cannot
-    // fire because a is already determined. The second relationship is left
-    // unassigned, which is reported as a Conflict.
+fn mutually_dependent_relationships_return_cycle() {
+    // a→b and b→a: both are single-method relationships, so each is trivially
+    // selected (one candidate each) regardless of cell strength. Neither method's
+    // input is ever produced by anything outside this pair, so there is no valid
+    // execution order between them — a genuine cycle, not an under-constrained plan.
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -418,7 +418,7 @@ fn mutually_dependent_relationships_return_conflict() {
         .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
         .unwrap();
 
-    assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
+    assert!(matches!(sheet.propagate(), Err(Error::Cycle)));
 }
 
 #[test]
