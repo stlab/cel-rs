@@ -6,7 +6,7 @@ description = "A stack-based runtime for developing domain specific languages"
 
 [dependencies]
 anyhow = "1.0"
-typenum = "1.18.0"
+typenum = "1.20.1"
 
 [features]
 playground = []
