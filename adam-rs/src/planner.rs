@@ -381,14 +381,12 @@ mod tests {
     }
 
     #[test]
-    fn relationship_selected_at_most_once() {
-        // R1: two self-referencing methods over {a, b}, both simultaneously eligible when
-        // both a and b are sources. The planner's selected_set guard prevents double-selection
-        // of a single relationship: without it, when processing cells in strength order, both
-        // methods could potentially be considered eligible at different points in the queue,
-        // causing R1 to be selected twice (pick Method 0 for a, then Method 1 for b).
-        // selected_set ensures R1 is marked as claimed after the first selection, blocking
-        // further selection attempts within the same flood-fill pass.
+    fn relationship_selects_exactly_one_method_when_multiple_are_eligible() {
+        // R1 has two self-referencing methods over {a, b} (min→a, max→b). Once both
+        // a and b are written, both methods become simultaneously eligible — the
+        // selection logic must still choose exactly one, so R1 contributes exactly
+        // one entry to the plan and R2 (which depends on the chosen output) is still
+        // assigned correctly.
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(10_i32);
         let b = sheet.add_cell(5_i32);
@@ -404,14 +402,13 @@ mod tests {
                 Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok(*x.max(y))),
             ])
             .unwrap();
-        // R2: depends on a or b. If only one method of R1 is selected (as required),
-        // exactly one of a or b changes. This test verifies the invariant holds.
+        // R2: depends on a. Verifies that exactly one method of R1 is selected.
         sheet
             .add_relationship(vec![Method::from_fn_1_1(a, c, |x: &i32| Ok(*x))])
             .unwrap();
 
         assert!(sheet.propagate().is_ok());
-        // Verify one method was selected: a is now either 5 or 10 (not a derived value from both methods).
+        // Verify one method was selected: a is now either 5 or 10 (one of the two eligible methods).
         let a_val = *sheet.read::<i32>(a).unwrap();
         assert!(a_val == 5 || a_val == 10);
     }
