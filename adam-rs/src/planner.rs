@@ -9,7 +9,12 @@
 //! relationship's candidates narrow to exactly one, that method is selected and each of
 //! its output cells becomes determined too, cascading the same elimination outward. A
 //! relationship whose candidates narrow to zero cannot be assigned — see
-//! [`Error::Conflict`].
+//! [`Error::Conflict`]. So is a cell that ends up with two or more inedges: if two
+//! different relationships each narrow to a sole candidate that produces the same cell
+//! (possible when neither relationship has had a chance to eliminate against the
+//! other's pending output yet), the cell's value is indeterminate and cannot satisfy
+//! every relationship that writes it — this is reported as [`Error::Conflict`] too,
+//! regardless of which relationship's candidate happened to narrow down first.
 //!
 //! Because every method's `outputs` set is unique within its relationship (enforced by
 //! [`crate::sheet::Sheet::add_relationship`]), this single mechanism handles
@@ -161,12 +166,16 @@ pub(crate) fn plan(
 /// [`forced_output_cells`] to) a single candidate, and after each candidate
 /// elimination in [`drain`].
 ///
-/// - Postcondition: if selected, each output cell not already in `determined` is
-///   inserted into `determined` and pushed onto `queue` for cascading elimination.
+/// - Postcondition: if selected, each output cell is inserted into `determined` and
+///   pushed onto `queue` for cascading elimination.
 ///
 /// # Errors
 ///
-/// - `Error::Conflict` — `rel_id` has zero surviving candidates.
+/// - `Error::Conflict` — `rel_id` has zero surviving candidates, or its sole surviving
+///   candidate has an output cell already in `determined`. The latter means some other
+///   relationship's selected method also produces that cell — a cell with two or more
+///   inedges has an indeterminate value and cannot satisfy every relationship that
+///   writes it, regardless of which producer "wins" a race to select first.
 ///
 /// - Complexity: O(M), where M is the number of methods in the relationship.
 fn select_if_sole_candidate(
@@ -186,11 +195,14 @@ fn select_if_sole_candidate(
         (None, _) => Err(Error::Conflict),
         (Some(_), Some(_)) => Ok(()),
         (Some((idx, _)), None) => {
+            let outputs = &relationships[rel_id].methods[idx].outputs;
+            if outputs.iter().any(|output| determined.contains(output)) {
+                return Err(Error::Conflict);
+            }
             selected.insert(rel_id, idx);
-            for &output in &relationships[rel_id].methods[idx].outputs {
-                if determined.insert(output) {
-                    queue.push_back(output);
-                }
+            for &output in outputs {
+                determined.insert(output);
+                queue.push_back(output);
             }
             Ok(())
         }
@@ -491,6 +503,42 @@ mod tests {
         sheet
             .add_relationship(vec![Method::from_fn_1_1(b, out, |x: &i32| Ok(*x))])
             .unwrap();
+
+        assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
+    }
+
+    #[test]
+    fn conflict_returns_error_when_cell_has_two_inedges_in_diamond() {
+        // Diamond: R1 relates {a, b, c}, R2 relates {b, c, d}, sharing b and c.
+        // Writing a bumps it above b and c in strength (d is already above them from
+        // creation order alone), so a and d seed as sources first without resolving
+        // either relationship. The next-strongest shared cell (b or c) then seeds as a
+        // source too, and its determination independently narrows *both* relationships
+        // to a sole candidate that produces the other shared cell — a genuine
+        // two-inedge conflict that must be reported, not silently resolved by whichever
+        // relationship narrows down first.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0.0_f64);
+        let b = sheet.add_cell(0.0_f64);
+        let c = sheet.add_cell(0.0_f64);
+        let d = sheet.add_cell(0.0_f64);
+
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| Ok(x * y)),
+                Method::from_fn_2_1([a, c], b, |x: &f64, y: &f64| Ok(y / x)),
+                Method::from_fn_2_1([b, c], a, |x: &f64, y: &f64| Ok(y / x)),
+            ])
+            .unwrap();
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([b, c], d, |x: &f64, y: &f64| Ok(x * y)),
+                Method::from_fn_2_1([b, d], c, |x: &f64, y: &f64| Ok(y / x)),
+                Method::from_fn_2_1([c, d], b, |x: &f64, y: &f64| Ok(y / x)),
+            ])
+            .unwrap();
+
+        sheet.write(a, 2.0_f64).unwrap();
 
         assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
     }
