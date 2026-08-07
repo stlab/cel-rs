@@ -113,7 +113,8 @@ impl Method {
 /// Internal storage for a relationship; fields are used by `Sheet` (added in a later task).
 pub(crate) struct RelationshipData {
     pub(crate) methods: Vec<Method>,
-    /// Union of all cell IDs referenced by any method in this relationship (union across all methods).
+    /// The set of cells referenced by every method in this relationship — every method
+    /// references the same set (enforced by `Sheet::add_relationship`).
     pub(crate) adj: Vec<CellId>,
 }
 

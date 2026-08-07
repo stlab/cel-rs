@@ -35,6 +35,15 @@ pub enum Error {
     /// identical output set).
     InvalidMethod,
 
+    /// Two methods in the same relationship have `inputs ∪ outputs` sets that don't
+    /// match. Every method in a relationship must reference exactly the same set of
+    /// cells.
+    MismatchedMethodCells,
+
+    /// A method's own `outputs` list names a cell more than once, or two methods in
+    /// the same relationship have identical `outputs` sets.
+    DuplicateMethodOutputs,
+
     /// A conditional is structurally invalid: the cell was not found, a referenced
     /// relationship was not found, a branch relationship that shares a cell with the match
     /// cell or any of its unconditional upstream contributors has more than one method, a
@@ -54,6 +63,15 @@ impl std::fmt::Display for Error {
             Error::Cycle => write!(f, "selected methods form a cycle"),
             Error::MethodFailed(e) => write!(f, "method execution failed: {e}"),
             Error::InvalidMethod => write!(f, "method is structurally invalid"),
+            Error::MismatchedMethodCells => write!(
+                f,
+                "methods in a relationship must reference the same set of cells"
+            ),
+            Error::DuplicateMethodOutputs => write!(
+                f,
+                "a method's outputs must be duplicate-free, and no two methods in a \
+                 relationship may share an outputs set"
+            ),
             Error::InvalidConditional => write!(f, "conditional is structurally invalid"),
         }
     }
@@ -153,6 +171,8 @@ mod tests {
             })
             .is_none()
         );
+        assert!(std::error::Error::source(&Error::MismatchedMethodCells).is_none());
+        assert!(std::error::Error::source(&Error::DuplicateMethodOutputs).is_none());
     }
 
     #[test]
@@ -167,5 +187,19 @@ mod tests {
     #[test]
     fn invalid_conditional_has_no_source() {
         assert!(std::error::Error::source(&Error::InvalidConditional).is_none());
+    }
+
+    #[test]
+    fn mismatched_method_cells_display_contains_cells() {
+        assert!(Error::MismatchedMethodCells.to_string().contains("cells"));
+    }
+
+    #[test]
+    fn duplicate_method_outputs_display_contains_outputs() {
+        assert!(
+            Error::DuplicateMethodOutputs
+                .to_string()
+                .contains("outputs")
+        );
     }
 }

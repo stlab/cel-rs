@@ -115,13 +115,19 @@ To install it locally:
 ```bash
 cargo install --path adam-lsp
 cd editors/vscode-adam-lang
-npm install
+npm ci
 npm run package
 npm run install-extension
 ```
 
-Both the cargo install and the two npm steps are also available as a single VS Code task,
+Both the cargo install and the three npm steps are also available as a single VS Code task,
 **Install adam-lsp + Extension (Local)**, runnable from the Command Palette's "Tasks: Run
-Task" with either the repository root or `editors/vscode-adam-lang` open. See
+Task" with either the repository root or `editors/vscode-adam-lang` open. On Windows, this
+task builds/packages from a copy of the workspace staged outside any git worktree (under
+`%LOCALAPPDATA%\cel-rs\adam-lsp-install`), since installing directly from a worktree leaves
+the running LSP binary/extension referencing files inside it, which blocks `git worktree
+remove` until the extension is uninstalled — a Windows-only file-locking issue. On
+macOS/Linux, where that lock doesn't occur, use **Install adam-lsp + Extension (Local,
+in-worktree, macOS/Linux)** instead, which runs the four steps above directly. See
 [editors/vscode-adam-lang/README.md](editors/vscode-adam-lang/README.md) for the full
 Extension Development Host walkthrough and troubleshooting notes.
