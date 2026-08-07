@@ -76,7 +76,7 @@ pub(crate) struct Plan {
 /// - `Error::Cycle` — the selected methods have no valid execution order.
 ///
 /// - Complexity: O(D · R · M · K²) for [`forced_output_cells`] (D = methods eliminated
-///   across its fixpoint), plus O(C log C) to sort cells by strength, plus O(R·M·K) for
+///   across its fixpoint), plus O(C log C) to sort cells by strength, plus O(R·M·K²) for
 ///   the elimination pass (each cell triggers one elimination scan per adjacent
 ///   relationship), plus O(R·K) for the final topological sort. C = cells, R = active
 ///   relationships, M = methods per relationship, K = cells per method.
@@ -540,6 +540,45 @@ mod tests {
         assert!(plan.forced_outputs.contains(&c));
         assert!(!plan.forced_outputs.contains(&a));
         assert_eq!(plan.execution_order.len(), 2);
+    }
+
+    #[test]
+    fn execution_order_respects_producer_consumer_dependency() {
+        // r_bc (b -> c) is added to the sheet *before* r_ab (a -> b). Both are
+        // single-method (structurally forced) relationships, so both are selected
+        // during the bootstrap loop — over a `HashSet`, whose iteration order need
+        // not match insertion order. If `topological_order` were broken and just
+        // returned selection order unchanged, this insertion order (consumer before
+        // producer) is exactly the arrangement that would surface the bug: c's
+        // producer (r_bc) reads b, which is only produced by r_ab.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+
+        let r_bc = sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, c, |x: &i32| Ok(*x + 1))])
+            .unwrap();
+        let r_ab = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+
+        let mut active = HashSet::new();
+        active.insert(r_bc);
+        active.insert(r_ab);
+
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        let position_of = |rel_id| {
+            plan.execution_order
+                .iter()
+                .position(|&(id, _)| id == rel_id)
+                .expect("relationship must appear in execution_order")
+        };
+
+        // r_ab produces b; r_bc consumes b to produce c. The producer of b must
+        // come before the producer of c, regardless of selection/insertion order.
+        assert!(position_of(r_ab) < position_of(r_bc));
     }
 
     #[test]
