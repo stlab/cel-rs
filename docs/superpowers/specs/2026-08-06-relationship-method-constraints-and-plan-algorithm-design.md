@@ -19,7 +19,7 @@ input-eligibility/pre-claiming machinery in favor of one mechanism.
 
 ## 1. Structural validation (`Sheet::add_relationship`)
 
-Two new checks are added alongside the existing ones (empty methods, empty
+Three new checks are added alongside the existing ones (empty methods, empty
 inputs/outputs, type mismatches):
 
 - **Matching cell sets.** For every method `M` in a relationship,
@@ -28,18 +28,23 @@ inputs/outputs, type mismatches):
   IDs referenced by any method (union across all methods)" — becomes simply *the*
   shared cell set, since every method now spans it.
 - **Unique output sets.** No two methods in the same relationship may have the same
-  `outputs` set (as a set, ignoring order). A given method's own `outputs` list is not
-  required to be duplicate-free by this constraint (unchanged from today).
+  `outputs` set (as a set, ignoring order).
+- **Duplicate-free outputs within a method.** A single method's own `outputs` list may
+  not name the same cell twice. A duplicated output cell is either redundant (both
+  occurrences would always agree, adding nothing) or contradictory (the method's
+  function could return two different values for the same cell) — neither is useful, so
+  it's rejected outright rather than left as unspecified behavior.
 
 Violations return new `Error` variants (matching the existing granular style —
 `TypeMismatch`, `InvalidId`, `InvalidConditional`, etc.):
 
 - `Error::MismatchedMethodCells` — some method's `inputs ∪ outputs` differs from
   another method's in the same relationship.
-- `Error::DuplicateMethodOutputs` — two methods in the same relationship have
-  identical `outputs` sets.
+- `Error::DuplicateMethodOutputs` — either a method's own `outputs` list names the same
+  cell more than once, or two methods in the same relationship have identical `outputs`
+  sets.
 
-Both checks run in `add_relationship` alongside the existing per-method validation,
+All three checks run in `add_relationship` alongside the existing per-method validation,
 before the relationship is inserted into `self.relationships`.
 
 ## 2. Dynamic method selection: elimination by output set
