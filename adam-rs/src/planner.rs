@@ -1,42 +1,44 @@
 //! Planning pass: selects one method per relationship and returns them in dependency order.
 //!
-//! Implements the Adam algorithm: cells are visited in descending strength (write-recency)
-//! order. The first time a cell is visited it becomes a *source* — its current value is
-//! taken as given. After each cell is determined (either as a source or as the output of
-//! a selected method), the planner flood-fills through adjacent relationships: any
-//! relationship whose method has all inputs determined and all outputs still undetermined
-//! is selected and its outputs are enqueued. In a standard (non-self-referencing)
-//! multi-way constraint, at most one method per relationship can be eligible at any given
-//! point (the inputs of each method are the outputs of the other methods). Self-referencing
-//! methods — where a cell appears in both inputs and outputs — can have multiple eligible
-//! methods simultaneously when all participating cells are sources; disambiguation is
-//! described in [`plan`].
+//! Implements the Adam algorithm: cells are visited in descending strength
+//! (write-recency) order. The first time a cell is visited it becomes a *source* — its
+//! current value is taken as given. A relationship's methods are *candidates* for
+//! selection; whenever a cell becomes determined (as a source, or as the output of some
+//! other relationship's already-selected method), every relationship adjacent to that
+//! cell eliminates any candidate whose `outputs` set contains it. The instant a
+//! relationship's candidates narrow to exactly one, that method is selected and each of
+//! its output cells becomes determined too, cascading the same elimination outward. A
+//! relationship whose candidates narrow to zero cannot be assigned — see
+//! [`Error::Conflict`]. So is a cell that ends up with two or more inedges: if two
+//! different relationships each narrow to a sole candidate that produces the same cell
+//! (possible when neither relationship has had a chance to eliminate against the
+//! other's pending output yet), the cell's value is indeterminate and cannot satisfy
+//! every relationship that writes it — this is reported as [`Error::Conflict`] too,
+//! regardless of which relationship's candidate happened to narrow down first.
 //!
-//! **Pre-claiming**: when a determined cell eliminates all but one feasible method for a
-//! relationship (a method is infeasible if it would overwrite a determined or pre-claimed
-//! cell), that sole method's outputs are *pre-claimed*: they can never become sources, even
-//! before all of the method's inputs are determined. Excluding pre-claimed outputs from
-//! feasibility prevents a method whose output is pre-claimed by the current flood-fill pass
-//! from being counted as a second viable option. This allows the planner to correctly handle
-//! constraints where the highest-strength cell is one of several inputs to the selected
-//! method.
+//! Because every method's `outputs` set is unique within its relationship (enforced by
+//! [`crate::sheet::Sheet::add_relationship`]), this single mechanism handles
+//! self-referencing methods (a cell in both a method's `inputs` and `outputs`) without
+//! special-casing: whichever of two candidate cells resolves first eliminates exactly
+//! the method that would have produced it, leaving the other as sole survivor.
 //!
-//! **Forced outputs**: a cell that is a pure output — present in a method's `outputs`
-//! but not its `inputs` — in every currently-viable method of some relationship can
-//! never be a source, regardless of strength: that relationship has no alternative but
-//! to produce it. [`forced_output_cells`] computes this as a fixpoint over all active
-//! relationships (eliminating a method whose pure output is guaranteed to be produced by
-//! a *different* relationship can force further cells), and the result is excluded from
-//! source candidacy before the strength-ordered pass below begins. The methods eliminated
-//! along the way are dead: the flood-fill below must also refuse to select them, even
-//! when their own pure output happens to still be undetermined at the time they're
-//! considered — otherwise a higher-strength cell reachable only through a dead method can
-//! be flood-filled first, permanently claiming a cell the *other* relationship was meant
-//! to produce and turning an otherwise solvable sheet into a spurious conflict.
+//! **Structurally forced cells**: some cells are guaranteed to be produced by a method
+//! regardless of cell strength — e.g. the sole output of a single-method relationship.
+//! [`forced_output_cells`] computes this set as a fixpoint over all active
+//! relationships, independent of any specific run's cell strengths (needed because
+//! [`crate::sheet::Sheet::is_forced`] must answer "can this cell ever meaningfully be
+//! written?" regardless of what a caller might write). Relationships already narrowed to
+//! one candidate by this fixpoint are selected immediately, before any cell is chosen as
+//! a fresh source; every other structurally forced cell is excluded from source
+//! candidacy in the strength-ordered pass.
 //!
-//! Because a method is only selected once all its inputs are determined, any method that
-//! writes an input to a later method necessarily appears earlier in the selection order.
-//! The selection order is therefore already a valid topological execution order.
+//! **Execution order**: because a relationship can be selected before its inputs are
+//! actually resolved (a structurally forced single-method relationship is selected
+//! immediately, regardless of when its input arrives), the order relationships are
+//! *selected* in is not necessarily a valid execution order. [`topological_order`]
+//! computes one separately from the final selection, and reports [`Error::Cycle`] if the
+//! selected methods have no valid order (e.g. two single-method relationships that each
+//! require the other's output).
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -65,194 +67,267 @@ pub(crate) struct Plan {
 /// Assigns one method per active relationship and returns them in dependency order.
 ///
 /// Only relationships in `active` are planned; relationships outside `active` are
-/// invisible to the flood-fill. The conflict check counts against `active.len()`.
+/// invisible to the elimination process. The conflict check counts against
+/// `active.len()`.
 ///
-/// A method may have cells in both `inputs` and `outputs` (self-referencing). Such a cell is
-/// read at its pre-execution value and overwritten with the result. A self-referencing method
-/// is only selected when every self-referencing cell is a *source* — determined by the outer
-/// flood-fill pass, not as the output of another method.
-///
-/// When two methods in one relationship are simultaneously eligible (possible when all
-/// participating cells are sources), the method whose self-referencing output matches the cell
-/// currently being processed from the queue is preferred.
+/// A method may have cells in both `inputs` and `outputs` (self-referencing); see the
+/// module documentation for why this needs no special handling here. Such a cell is
+/// read at its pre-execution value and overwritten with the result.
 ///
 /// # Errors
 ///
-/// - `Error::Conflict` — not every active relationship could be assigned a method.
+/// - `Error::Conflict` — some active relationship's candidates narrowed to zero, or not
+///   every active relationship could be assigned a method.
+/// - `Error::Cycle` — the selected methods have no valid execution order.
 ///
-/// - Complexity: O(C log C + R·M·K² + D·R·M·K²) where C = cells, R = active
-///   relationships, M = methods per relationship, K = cells per method, and
-///   D = methods eliminated while computing [`forced_output_cells`] (bounded by the
-///   total method count).
+/// - Complexity: O(D · R · M · K²) for [`forced_output_cells`] (D = methods eliminated
+///   across its fixpoint), plus O(C log C) to sort cells by strength, plus O(R·M·K²) for
+///   the elimination pass (each cell triggers one elimination scan per adjacent
+///   relationship), plus O(R·K) for the final topological sort. C = cells, R = active
+///   relationships, M = methods per relationship, K = cells per method.
 pub(crate) fn plan(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
 ) -> Result<Plan, Error> {
+    let (forced_outputs, structural_alive) = forced_output_cells(relationships, active);
+    let forced_relationships: HashSet<RelationshipId> = structural_alive
+        .iter()
+        .filter(|(_, methods)| methods.iter().filter(|&&is_alive| is_alive).count() == 1)
+        .map(|(&rel_id, _)| rel_id)
+        .collect();
+
+    let mut candidates = structural_alive;
     let mut determined: HashSet<CellId> = HashSet::new();
-    // Subset of `determined`: cells whose value came from write(), not from a selected method.
-    // Only source cells may serve as self-referencing inputs.
-    let mut source_cells: HashSet<CellId> = HashSet::new();
-    let mut pre_claimed: HashSet<CellId> = HashSet::new();
-    let mut selected: Vec<(RelationshipId, usize)> = Vec::new();
-    let mut selected_set: HashSet<RelationshipId> = HashSet::new();
+    let mut selected: HashMap<RelationshipId, usize> = HashMap::new();
+    let mut queue: VecDeque<CellId> = VecDeque::new();
 
-    // Cells that some active relationship's method structure guarantees will always
-    // be produced by a method, regardless of strength. These can never be a source.
-    // `alive` marks, per relationship, which methods survive the fixpoint: a method is
-    // dead when it would double-write a cell a *different* relationship forces: such a
-    // method must never be selected by the flood-fill below, regardless of timing.
-    let (forced_outputs, alive) = forced_output_cells(relationships, active);
+    // Bootstrap: relationships already down to one candidate — either genuinely
+    // single-method, or narrowed by the forced-output fixpoint above — are selected
+    // immediately, before any cell is chosen as a fresh source.
+    for &rel_id in active {
+        select_if_sole_candidate(
+            rel_id,
+            relationships,
+            &mut candidates,
+            &mut determined,
+            &mut selected,
+            &mut queue,
+        )?;
+        drain(
+            &mut queue,
+            cells,
+            relationships,
+            active,
+            &mut candidates,
+            &mut determined,
+            &mut selected,
+        )?;
+    }
 
+    // Strength-ordered seeding: the highest-strength cell not already determined or
+    // structurally forced becomes a fresh source.
     let mut cells_sorted: Vec<CellId> = cells.keys().collect();
     cells_sorted.sort_by_key(|&id| Reverse(cells[id].strength));
-
-    for &source in &cells_sorted {
-        if determined.contains(&source)
-            || pre_claimed.contains(&source)
-            || forced_outputs.contains(&source)
-        {
+    for &cell in &cells_sorted {
+        if determined.contains(&cell) || forced_outputs.contains(&cell) {
             continue;
         }
-        determined.insert(source);
-        source_cells.insert(source);
-
-        let mut queue: VecDeque<CellId> = VecDeque::new();
-        queue.push_back(source);
-
-        while let Some(cell) = queue.pop_front() {
-            for &rel_id in &cells[cell].adj {
-                if !active.contains(&rel_id) {
-                    continue;
-                }
-                if selected_set.contains(&rel_id) {
-                    continue;
-                }
-                let rel = &relationships[rel_id];
-                let rel_alive = &alive[&rel_id];
-
-                // A method is eligible when:
-                //   alive        : it survived the forced-output fixpoint (see `alive`)
-                //   pure inputs  (inputs ∖ outputs): all in `determined`
-                //   self-ref     (inputs ∩ outputs): all in `source_cells`
-                //   pure outputs (outputs ∖ inputs): none in `determined`
-                let is_eligible = |idx: usize, m: &Method| {
-                    rel_alive[idx]
-                        && m.inputs
-                            .iter()
-                            .filter(|i| !m.outputs.contains(i))
-                            .all(|i| determined.contains(i))
-                        && m.inputs
-                            .iter()
-                            .filter(|i| m.outputs.contains(i))
-                            .all(|i| source_cells.contains(i))
-                        && m.outputs
-                            .iter()
-                            .filter(|o| !m.inputs.contains(o))
-                            .all(|o| !determined.contains(o))
-                };
-
-                // Prefer the eligible method whose self-referencing output is `cell`
-                // (the cell currently being processed). This resolves ties when two
-                // methods are simultaneously eligible: `cell` is the weakest source
-                // processed so far, so the method that adjusts it should be chosen.
-                // Fall back to the first eligible method for non-self-referencing cases.
-                let chosen = rel
-                    .methods
-                    .iter()
-                    .enumerate()
-                    .find(|(idx, m)| {
-                        is_eligible(*idx, m)
-                            && m.outputs.contains(&cell)
-                            && m.inputs.contains(&cell)
-                    })
-                    .or_else(|| {
-                        rel.methods
-                            .iter()
-                            .enumerate()
-                            .find(|(idx, m)| is_eligible(*idx, m))
-                    });
-
-                if let Some((method_idx, method)) = chosen {
-                    for &output in &method.outputs {
-                        // Guard: self-referencing outputs are already in `determined`
-                        // (as sources); only re-queue cells that are newly determined.
-                        let newly_determined = determined.insert(output);
-                        pre_claimed.remove(&output);
-                        // A method's output is no longer a source: remove it so that
-                        // subsequent self-referencing eligibility checks cannot treat
-                        // a method-derived value as a source value.
-                        source_cells.remove(&output);
-                        if newly_determined {
-                            queue.push_back(output);
-                        }
-                    }
-                    selected_set.insert(rel_id);
-                    selected.push((rel_id, method_idx));
-                } else {
-                    // No method is immediately selectable. If exactly one method remains
-                    // feasible — meaning no other alive method can run without overwriting a
-                    // cell that is already determined or pre-claimed — and the current cell
-                    // is one of its inputs, pre-claim its pure outputs so the flood-fill
-                    // propagates further. Dead methods are never feasible: they must not be
-                    // pre-claimed for, nor counted as competing alternatives to, a live method.
-                    //
-                    // A self-referencing output that is a source is feasible (the method
-                    // may overwrite its own source cell). A self-referencing output that
-                    // was derived by another method (in `determined` but not `source_cells`)
-                    // is infeasible. Pure outputs must not be determined or pre-claimed.
-                    //
-                    // Only pure outputs are pre-claimed; self-referencing outputs are
-                    // already committed as sources and do not need pre-claiming.
-                    let is_feasible = |idx: usize, m: &Method| {
-                        rel_alive[idx]
-                            && m.outputs.iter().all(|o| {
-                                if m.inputs.contains(o) {
-                                    !pre_claimed.contains(o)
-                                        && (!determined.contains(o) || source_cells.contains(o))
-                                } else {
-                                    !determined.contains(o) && !pre_claimed.contains(o)
-                                }
-                            })
-                    };
-
-                    let mut feasible = rel
-                        .methods
-                        .iter()
-                        .enumerate()
-                        .filter(|(idx, m)| is_feasible(*idx, m))
-                        .map(|(_, m)| m);
-                    let first = feasible.next();
-                    let second = feasible.next();
-                    if let (Some(sole), None) = (first, second)
-                        && sole.inputs.contains(&cell)
-                    {
-                        for &output in &sole.outputs {
-                            if !sole.inputs.contains(&output) && pre_claimed.insert(output) {
-                                queue.push_back(output);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        determined.insert(cell);
+        queue.push_back(cell);
+        drain(
+            &mut queue,
+            cells,
+            relationships,
+            active,
+            &mut candidates,
+            &mut determined,
+            &mut selected,
+        )?;
     }
 
     if selected.len() != active.len() {
         return Err(Error::Conflict);
     }
 
-    let forced_relationships: HashSet<RelationshipId> = alive
-        .iter()
-        .filter(|(_, methods)| methods.iter().filter(|&&is_alive| is_alive).count() == 1)
-        .map(|(&rel_id, _)| rel_id)
-        .collect();
+    let execution_order = topological_order(relationships, &selected)?;
 
     Ok(Plan {
-        execution_order: selected,
+        execution_order,
         forced_outputs,
         forced_relationships,
     })
+}
+
+/// Selects `rel_id`'s sole surviving candidate method, if exactly one remains.
+///
+/// Does nothing if `rel_id` is already selected or if more than one candidate remains.
+/// Used both to bootstrap relationships that start with (or are narrowed by
+/// [`forced_output_cells`] to) a single candidate, and after each candidate
+/// elimination in [`drain`].
+///
+/// - Postcondition: if selected, each output cell is inserted into `determined` and
+///   pushed onto `queue` for cascading elimination.
+///
+/// # Errors
+///
+/// - `Error::Conflict` — `rel_id` has zero surviving candidates, or its sole surviving
+///   candidate has an output cell already in `determined`. The latter means some other
+///   relationship's selected method also produces that cell — a cell with two or more
+///   inedges has an indeterminate value and cannot satisfy every relationship that
+///   writes it, regardless of which producer "wins" a race to select first.
+///
+/// - Complexity: O(M), where M is the number of methods in the relationship.
+fn select_if_sole_candidate(
+    rel_id: RelationshipId,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    candidates: &mut HashMap<RelationshipId, Vec<bool>>,
+    determined: &mut HashSet<CellId>,
+    selected: &mut HashMap<RelationshipId, usize>,
+    queue: &mut VecDeque<CellId>,
+) -> Result<(), Error> {
+    if selected.contains_key(&rel_id) {
+        return Ok(());
+    }
+    let alive = &candidates[&rel_id];
+    let mut survivors = alive.iter().enumerate().filter(|&(_, &is_alive)| is_alive);
+    match (survivors.next(), survivors.next()) {
+        (None, _) => Err(Error::Conflict),
+        (Some(_), Some(_)) => Ok(()),
+        (Some((idx, _)), None) => {
+            let outputs = &relationships[rel_id].methods[idx].outputs;
+            if outputs.iter().any(|output| determined.contains(output)) {
+                return Err(Error::Conflict);
+            }
+            selected.insert(rel_id, idx);
+            for &output in outputs {
+                determined.insert(output);
+                queue.push_back(output);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Processes `queue`, eliminating candidates in every relationship adjacent to each
+/// dequeued cell and selecting any relationship whose candidates narrow to one.
+///
+/// - Precondition: every cell in `queue` is already present in `determined`.
+///
+/// # Errors
+///
+/// - `Error::Conflict` — some relationship's candidates narrow to zero.
+///
+/// - Complexity: O(Q·R·M·K), where Q is the queue size, R is the number of
+///   relationships adjacent to each cell, M is the number of methods per
+///   relationship, and K is the number of cells per method.
+fn drain(
+    queue: &mut VecDeque<CellId>,
+    cells: &SlotMap<CellId, CellData>,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    active: &HashSet<RelationshipId>,
+    candidates: &mut HashMap<RelationshipId, Vec<bool>>,
+    determined: &mut HashSet<CellId>,
+    selected: &mut HashMap<RelationshipId, usize>,
+) -> Result<(), Error> {
+    while let Some(cell) = queue.pop_front() {
+        for &rel_id in &cells[cell].adj {
+            if !active.contains(&rel_id) || selected.contains_key(&rel_id) {
+                continue;
+            }
+            {
+                let alive = candidates
+                    .get_mut(&rel_id)
+                    .expect("seeded for every active id");
+                for (idx, method) in relationships[rel_id].methods.iter().enumerate() {
+                    if alive[idx] && method.outputs.contains(&cell) {
+                        alive[idx] = false;
+                    }
+                }
+            }
+            select_if_sole_candidate(
+                rel_id,
+                relationships,
+                candidates,
+                determined,
+                selected,
+                queue,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Orders `selected` so each method appears after the methods producing its pure
+/// inputs (inputs not also present in its own outputs).
+///
+/// - Precondition: every cell produced by an entry of `selected` is produced by at
+///   most one entry — guaranteed by the elimination in [`plan`], since a cell is
+///   inserted into `determined` (and thus becomes an output of exactly one selected
+///   method) at most once.
+///
+/// # Errors
+///
+/// - `Error::Cycle` — the dependency graph over `selected` contains a cycle.
+///
+/// - Complexity: O(R·K) where R = `selected.len()` and K = max cells per method.
+fn topological_order(
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    selected: &HashMap<RelationshipId, usize>,
+) -> Result<Vec<(RelationshipId, usize)>, Error> {
+    let producer: HashMap<CellId, RelationshipId> = selected
+        .iter()
+        .flat_map(|(&rel_id, &idx)| {
+            relationships[rel_id].methods[idx]
+                .outputs
+                .iter()
+                .map(move |&output| (output, rel_id))
+        })
+        .collect();
+
+    let mut dependents: HashMap<RelationshipId, Vec<RelationshipId>> = selected
+        .keys()
+        .map(|&rel_id| (rel_id, Vec::new()))
+        .collect();
+    let mut in_degree: HashMap<RelationshipId, usize> =
+        selected.keys().map(|&rel_id| (rel_id, 0)).collect();
+
+    for (&rel_id, &idx) in selected {
+        let method = &relationships[rel_id].methods[idx];
+        for input in method.inputs.iter().filter(|i| !method.outputs.contains(i)) {
+            if let Some(&producer_rel) = producer.get(input) {
+                dependents
+                    .get_mut(&producer_rel)
+                    .expect("seeded for every relationship in `selected`")
+                    .push(rel_id);
+                *in_degree
+                    .get_mut(&rel_id)
+                    .expect("seeded for every relationship in `selected`") += 1;
+            }
+        }
+    }
+
+    let mut ready: VecDeque<RelationshipId> = in_degree
+        .iter()
+        .filter(|&(_, &degree)| degree == 0)
+        .map(|(&rel_id, _)| rel_id)
+        .collect();
+    let mut order = Vec::with_capacity(selected.len());
+    while let Some(rel_id) = ready.pop_front() {
+        order.push((rel_id, selected[&rel_id]));
+        for &dependent in &dependents[&rel_id] {
+            let degree = in_degree.get_mut(&dependent).expect("seeded above");
+            *degree -= 1;
+            if *degree == 0 {
+                ready.push_back(dependent);
+            }
+        }
+    }
+
+    if order.len() != selected.len() {
+        return Err(Error::Cycle);
+    }
+    Ok(order)
 }
 
 /// Returns the cells `method` writes but does not read.
@@ -381,31 +456,36 @@ mod tests {
     }
 
     #[test]
-    fn relationship_selected_at_most_once() {
-        // x is inserted first so it sorts before a (equal strength, stable sort).
-        // Without selected_set, flood-fill selects R1 twice (Method 0 then Method 1),
-        // x becomes a source before R2 can run, and propagate() falsely returns Ok.
+    fn relationship_selects_exactly_one_method_when_multiple_are_eligible() {
+        // R1 has two self-referencing methods over {a, b} (min→a, max→b). Once both
+        // a and b are written, both methods become simultaneously eligible — the
+        // selection logic must still choose exactly one, so R1 contributes exactly
+        // one entry to the plan and R2 (which depends on the chosen output) is still
+        // assigned correctly.
         let mut sheet = Sheet::new();
-        let x = sheet.add_cell(0_i32);
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
+        let a = sheet.add_cell(10_i32);
+        let b = sheet.add_cell(5_i32);
         let c = sheet.add_cell(0_i32);
 
-        // R1: two chained methods — Method 0: a→b, Method 1: b→c
+        // R1: two self-referencing methods — min and max.
+        // Both methods reference {a, b} and output to one of {a, b}.
+        // When both a and b are sources, both methods are eligible (all self-ref inputs in source_cells,
+        // no pure outputs in determined).
         sheet
             .add_relationship(vec![
-                Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
-                Method::from_fn_1_1(b, c, |v: &i32| Ok(*v)),
+                Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok(*x.min(y))),
+                Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok(*x.max(y))),
             ])
             .unwrap();
-        // R2: single method c→x
+        // R2: depends on a. Verifies that exactly one method of R1 is selected.
         sheet
-            .add_relationship(vec![Method::from_fn_1_1(c, x, |v: &i32| Ok(*v))])
+            .add_relationship(vec![Method::from_fn_1_1(a, c, |x: &i32| Ok(*x))])
             .unwrap();
 
-        // Both relationships must be assigned exactly one method; if R1 were selected
-        // twice the count check would pass and R2 would silently be skipped.
-        assert!(sheet.propagate().is_err());
+        assert!(sheet.propagate().is_ok());
+        // Verify one method was selected: a is now either 5 or 10 (one of the two eligible methods).
+        let a_val = *sheet.read::<i32>(a).unwrap();
+        assert!(a_val == 5 || a_val == 10);
     }
 
     #[test]
@@ -423,6 +503,42 @@ mod tests {
         sheet
             .add_relationship(vec![Method::from_fn_1_1(b, out, |x: &i32| Ok(*x))])
             .unwrap();
+
+        assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
+    }
+
+    #[test]
+    fn conflict_returns_error_when_cell_has_two_inedges_in_diamond() {
+        // Diamond: R1 relates {a, b, c}, R2 relates {b, c, d}, sharing b and c.
+        // Writing a bumps it above b and c in strength (d is already above them from
+        // creation order alone), so a and d seed as sources first without resolving
+        // either relationship. The next-strongest shared cell (b or c) then seeds as a
+        // source too, and its determination independently narrows *both* relationships
+        // to a sole candidate that produces the other shared cell — a genuine
+        // two-inedge conflict that must be reported, not silently resolved by whichever
+        // relationship narrows down first.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0.0_f64);
+        let b = sheet.add_cell(0.0_f64);
+        let c = sheet.add_cell(0.0_f64);
+        let d = sheet.add_cell(0.0_f64);
+
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| Ok(x * y)),
+                Method::from_fn_2_1([a, c], b, |x: &f64, y: &f64| Ok(y / x)),
+                Method::from_fn_2_1([b, c], a, |x: &f64, y: &f64| Ok(y / x)),
+            ])
+            .unwrap();
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([b, c], d, |x: &f64, y: &f64| Ok(x * y)),
+                Method::from_fn_2_1([b, d], c, |x: &f64, y: &f64| Ok(y / x)),
+                Method::from_fn_2_1([c, d], b, |x: &f64, y: &f64| Ok(y / x)),
+            ])
+            .unwrap();
+
+        sheet.write(a, 2.0_f64).unwrap();
 
         assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
     }
@@ -472,6 +588,45 @@ mod tests {
         assert!(plan.forced_outputs.contains(&c));
         assert!(!plan.forced_outputs.contains(&a));
         assert_eq!(plan.execution_order.len(), 2);
+    }
+
+    #[test]
+    fn execution_order_respects_producer_consumer_dependency() {
+        // r_bc (b -> c) is added to the sheet *before* r_ab (a -> b). Both are
+        // single-method (structurally forced) relationships, so both are selected
+        // during the bootstrap loop — over a `HashSet`, whose iteration order need
+        // not match insertion order. If `topological_order` were broken and just
+        // returned selection order unchanged, this insertion order (consumer before
+        // producer) is exactly the arrangement that would surface the bug: c's
+        // producer (r_bc) reads b, which is only produced by r_ab.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+
+        let r_bc = sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, c, |x: &i32| Ok(*x + 1))])
+            .unwrap();
+        let r_ab = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+
+        let mut active = HashSet::new();
+        active.insert(r_bc);
+        active.insert(r_ab);
+
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        let position_of = |rel_id| {
+            plan.execution_order
+                .iter()
+                .position(|&(id, _)| id == rel_id)
+                .expect("relationship must appear in execution_order")
+        };
+
+        // r_ab produces b; r_bc consumes b to produce c. The producer of b must
+        // come before the producer of c, regardless of selection/insertion order.
+        assert!(position_of(r_ab) < position_of(r_bc));
     }
 
     #[test]
@@ -536,45 +691,5 @@ mod tests {
 
         assert!(plan.forced_relationships.contains(&r1));
         assert!(plan.forced_relationships.contains(&r2));
-    }
-
-    #[test]
-    fn dead_method_not_selected_before_owning_relationship() {
-        // R_A: p -> b (single method, forces b).
-        // R_B: q -> c (single method, forces c).
-        // R2: three methods — M0 (x -> b) and M1 (y -> c) are dead, since b and c are
-        // each forced by a *different* relationship; M2 ([b, c] -> d) is the sole
-        // survivor. x's strength is bumped above every other cell's, so if the
-        // flood-fill doesn't know M0 is dead, it selects M0 (using x) before R_A ever
-        // runs, permanently determining b via the wrong relationship and leaving R_A's
-        // real method ineligible — a spurious conflict on an otherwise solvable sheet.
-        let mut sheet = Sheet::new();
-        let p = sheet.add_cell(2_i32);
-        let x = sheet.add_cell(0_i32);
-        let q = sheet.add_cell(3_i32);
-        let y = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        let c = sheet.add_cell(0_i32);
-        let d = sheet.add_cell(0_i32);
-
-        sheet
-            .add_relationship(vec![Method::from_fn_1_1(p, b, |v: &i32| Ok(*v))])
-            .unwrap();
-        sheet
-            .add_relationship(vec![Method::from_fn_1_1(q, c, |v: &i32| Ok(*v))])
-            .unwrap();
-        sheet
-            .add_relationship(vec![
-                Method::from_fn_1_1(x, b, |v: &i32| Ok(*v)),
-                Method::from_fn_1_1(y, c, |v: &i32| Ok(*v)),
-                Method::from_fn_2_1([b, c], d, |bb: &i32, cc: &i32| Ok(*bb + *cc)),
-            ])
-            .unwrap();
-
-        // Bump x's strength above every other cell so it is chosen as a source first.
-        sheet.write(x, 10_i32).unwrap();
-
-        assert!(sheet.propagate().is_ok());
-        assert_eq!(*sheet.read::<i32>(d).unwrap(), 5); // p(2) + q(3)
     }
 }

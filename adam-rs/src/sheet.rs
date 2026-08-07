@@ -108,12 +108,17 @@ impl Sheet {
     ///
     /// - `Error::InvalidMethod` — `methods` is empty, a method has no inputs,
     ///   or a method has no outputs.
+    /// - `Error::MismatchedMethodCells` — some method's `inputs ∪ outputs` differs
+    ///   from another method's in the same relationship.
+    /// - `Error::DuplicateMethodOutputs` — a method's own `outputs` list names a cell
+    ///   more than once, or two methods in the same relationship have identical
+    ///   `outputs` sets.
     /// - `Error::InvalidId` — a `CellId` in any method is not found in this sheet.
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
     ///
-    /// - Complexity: O(m × c) where m is the total number of methods and c is the
-    ///   maximum number of cells per method.
+    /// - Complexity: O(m² × c) where m is the total number of methods and c is the
+    ///   maximum number of cells per method (due to duplicate output set comparison).
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
             return Err(Error::InvalidMethod);
@@ -150,6 +155,26 @@ impl Sheet {
                     });
                 }
             }
+        }
+
+        // Every method in a relationship must reference the same combined set of cells.
+        let cell_sets: Vec<HashSet<CellId>> = methods
+            .iter()
+            .map(|m| m.inputs.iter().chain(m.outputs.iter()).copied().collect())
+            .collect();
+        if cell_sets[1..].iter().any(|set| set != &cell_sets[0]) {
+            return Err(Error::MismatchedMethodCells);
+        }
+
+        // A method's own outputs must be duplicate-free, and no two methods may share
+        // an outputs set.
+        let mut seen_output_sets: Vec<HashSet<CellId>> = Vec::with_capacity(methods.len());
+        for method in &methods {
+            let output_set: HashSet<CellId> = method.outputs.iter().copied().collect();
+            if output_set.len() != method.outputs.len() || seen_output_sets.contains(&output_set) {
+                return Err(Error::DuplicateMethodOutputs);
+            }
+            seen_output_sets.push(output_set);
         }
 
         // Collect the union of all adjacent cells in insertion order, deduplicated.
@@ -1170,6 +1195,55 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(b, c, |x: &i32| Ok(*x))])
             .unwrap();
         assert_ne!(r1, r2);
+    }
+
+    #[test]
+    fn add_relationship_mismatched_cells_returns_error() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        let d = sheet.add_cell(0_i32);
+        // Method 0 spans {a, b}; Method 1 spans {c, d} — mismatched cell sets.
+        let result = sheet.add_relationship(vec![
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            Method::from_fn_1_1(c, d, |x: &i32| Ok(*x)),
+        ]);
+        assert!(matches!(result, Err(Error::MismatchedMethodCells)));
+    }
+
+    #[test]
+    fn add_relationship_duplicate_output_sets_across_methods_returns_error() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // Both methods span {a, b, c} and both output {c} — identical output sets.
+        let result = sheet.add_relationship(vec![
+            Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x + *y)),
+            Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x - *y)),
+        ]);
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
+    }
+
+    #[test]
+    fn add_relationship_duplicate_cell_within_own_outputs_returns_error() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        // The method's own outputs list names `b` twice.
+        let method = Method::new(
+            vec![a],
+            vec![b, b],
+            vec![TypeId::of::<i32>()],
+            vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+            |args| {
+                let x = args[0].downcast_ref::<i32>().unwrap();
+                Ok(vec![Box::new(*x), Box::new(*x)])
+            },
+        );
+        let result = sheet.add_relationship(vec![method]);
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
     }
 
     #[test]
