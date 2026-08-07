@@ -167,6 +167,8 @@ pub(crate) fn plan(
 /// # Errors
 ///
 /// - `Error::Conflict` — `rel_id` has zero surviving candidates.
+///
+/// - Complexity: O(M), where M is the number of methods in the relationship.
 fn select_if_sole_candidate(
     rel_id: RelationshipId,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
@@ -203,6 +205,10 @@ fn select_if_sole_candidate(
 /// # Errors
 ///
 /// - `Error::Conflict` — some relationship's candidates narrow to zero.
+///
+/// - Complexity: O(Q·R·M·K), where Q is the queue size, R is the number of
+///   relationships adjacent to each cell, M is the number of methods per
+///   relationship, and K is the number of cells per method.
 fn drain(
     queue: &mut VecDeque<CellId>,
     cells: &SlotMap<CellId, CellData>,
