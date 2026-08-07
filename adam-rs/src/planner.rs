@@ -42,6 +42,7 @@ mod scc;
 
 use digraph::{Node, build_digraph};
 use matching::pure_outputs;
+use release::ReleaseFailure;
 
 /// The output of the planning pass.
 pub(crate) struct Plan {
@@ -63,7 +64,9 @@ pub(crate) struct Plan {
 ///
 /// # Errors
 ///
-/// - `Error::Conflict` — no valid, acyclic method assignment exists for `active`.
+/// - `Error::Conflict` — no valid method assignment exists for `active`, acyclic or not.
+/// - `Error::Cycle` — a valid method assignment exists, but every one of them is
+///   cyclic: a genuine algebraic loop with no external input, regardless of strength.
 ///
 /// - Complexity: O(C · R² · M · K) where C = cells, R = active relationships, M =
 ///   methods per relationship, K = cells per method — [`release::resolve`] attempts up
@@ -75,7 +78,10 @@ pub(crate) fn plan(
 ) -> Result<Plan, Error> {
     let (forced_outputs, alive) = forced_output_cells(relationships, active);
 
-    let assignment = release::resolve(cells, relationships, active).ok_or(Error::Conflict)?;
+    let assignment = release::resolve(cells, relationships, active).map_err(|e| match e {
+        ReleaseFailure::NoAssignment => Error::Conflict,
+        ReleaseFailure::NoAcyclicAssignment => Error::Cycle,
+    })?;
 
     let adj = build_digraph(&assignment, relationships);
 

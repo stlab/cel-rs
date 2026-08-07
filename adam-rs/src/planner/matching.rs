@@ -199,6 +199,42 @@ impl Assignment {
         trail.push(Change::Claimed(cell, self.claimed.remove(&cell)));
     }
 
+    /// Finds an assignment of one method per relationship in `active`, forbidding any
+    /// cell in `forbidden` from being claimed as an output by anyone, such that no two
+    /// relationships claim the same cell *and* the resulting dependency digraph
+    /// ([`super::digraph::is_acyclic`]) has no cycle.
+    ///
+    /// Unlike [`Assignment::solve`], which stops at the first assignment satisfying only
+    /// the disjoint-claims constraint, this exhaustively searches the combinatorial
+    /// space of method choices (in relationship and method-index order) for one that is
+    /// *also* acyclic. `solve`'s augmenting-path search has no notion of acyclicity, so
+    /// it can settle on a valid-but-cyclic assignment even when an acyclic alternative
+    /// exists for the same `forbidden` set -- silently treating a releasable cell as
+    /// unreleasable.
+    ///
+    /// Returns `None` if no combination of method choices satisfies every constraint.
+    ///
+    /// - Complexity: O(M^R · R·K) worst case (M = max methods per relationship, R =
+    ///   active relationships, K = cells per method) -- exponential in the number of
+    ///   active relationships. Acceptable at `adam-rs`'s target scale (UI property
+    ///   models: tens of cells, small relationship counts); see the design doc's "Future
+    ///   Work" section for the incremental alternative if this ever needs to scale up.
+    pub(crate) fn solve_acyclic(
+        relationships: &SlotMap<RelationshipId, RelationshipData>,
+        active: &HashSet<RelationshipId>,
+        forbidden: &HashSet<CellId>,
+    ) -> Option<Self> {
+        let order: Vec<RelationshipId> = relationships
+            .keys()
+            .filter(|r| active.contains(r))
+            .collect();
+        let mut assignment = Assignment {
+            chosen: HashMap::new(),
+            claimed: HashMap::new(),
+        };
+        search_acyclic(&order, 0, relationships, forbidden, &mut assignment).then_some(assignment)
+    }
+
     /// Reverts every change recorded in `trail` since `mark`, including any
     /// `visited` markings introduced after `mark` (so a relationship that was marked
     /// visited while being unsuccessfully displaced during the undone attempt becomes
@@ -229,6 +265,54 @@ impl Assignment {
             }
         }
     }
+}
+
+/// Recursive backtracking search over every combination of method choices for
+/// `order[idx..]`, used by [`Assignment::solve_acyclic`].
+///
+/// At each relationship, tries every method whose outputs are disjoint from `forbidden`
+/// and from cells already claimed earlier in this same combination, recursing before
+/// checking the next candidate. The base case (`idx == order.len()`) accepts the
+/// combination only if its induced digraph is acyclic; a rejected base case or a
+/// dead-end mid-recursion unwinds the claim/assignment it just made and tries the next
+/// method, so `assignment` is restored to its pre-call state whenever this returns
+/// `false`.
+///
+/// - Complexity: O(M^(len(order) - idx)) branches explored in the worst case.
+fn search_acyclic(
+    order: &[RelationshipId],
+    idx: usize,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    forbidden: &HashSet<CellId>,
+    assignment: &mut Assignment,
+) -> bool {
+    let Some(&rel_id) = order.get(idx) else {
+        return super::digraph::is_acyclic(assignment, relationships);
+    };
+
+    for (method_idx, method) in relationships[rel_id].methods.iter().enumerate() {
+        let outputs: HashSet<CellId> = method.outputs.iter().copied().collect();
+        if !outputs.is_disjoint(forbidden)
+            || outputs.iter().any(|c| assignment.claimed.contains_key(c))
+        {
+            continue;
+        }
+
+        for &c in &outputs {
+            assignment.claimed.insert(c, rel_id);
+        }
+        assignment.chosen.insert(rel_id, method_idx);
+
+        if search_acyclic(order, idx + 1, relationships, forbidden, assignment) {
+            return true;
+        }
+
+        assignment.chosen.remove(&rel_id);
+        for &c in &outputs {
+            assignment.claimed.remove(&c);
+        }
+    }
+    false
 }
 
 #[cfg(test)]

@@ -12,58 +12,80 @@ use crate::{
     relationship::{RelationshipData, RelationshipId},
 };
 
-use super::digraph::is_acyclic;
 use super::matching::Assignment;
+
+/// Why [`resolve`] could not find a strength-optimal acyclic assignment.
+#[derive(Debug)]
+pub(crate) enum ReleaseFailure {
+    /// No method assignment exists at all for `active`, acyclic or not -- e.g. two
+    /// relationships whose only methods both claim the same cell.
+    NoAssignment,
+    /// A method assignment exists, but every one of them is cyclic: a genuine
+    /// algebraic loop with no external input, regardless of cell strength.
+    NoAcyclicAssignment,
+}
 
 /// Finds the strength-optimal acyclic assignment: an [`Assignment`] where the set of
 /// cells left unclaimed (sources) is lexicographically maximal in descending strength
 /// order among all assignments whose induced digraph is acyclic.
 ///
-/// Processes cells in descending strength order; for each currently-claimed cell,
-/// tentatively adds it to the forbidden set and re-solves. If a matching still exists
-/// and its induced digraph is acyclic, the release is kept; otherwise the cell remains
-/// claimed. This single mechanism handles both ordinary strength-based method
+/// Processes every cell in descending strength order, tentatively adding it to the
+/// forbidden set and searching for an assignment that is both valid (no double claims)
+/// and acyclic with that cell -- and every previously accepted release -- forbidden from
+/// being claimed ([`Assignment::solve_acyclic`]). The release is kept only when such an
+/// assignment exists. This single mechanism handles both ordinary strength-based method
 /// selection (an uncontested relationship's choice of which cell to leave exogenous)
 /// and cyclic ("diamond") resolution uniformly -- both are just instances of "does
 /// releasing this cell still admit a valid acyclic assignment".
 ///
-/// Returns `None` if no acyclic assignment exists at all (a genuine algebraic loop, or
-/// no assignment exists whatsoever).
+/// Every cell is re-checked this way, even one that happens not to be claimed by the
+/// current best assignment: a cell being currently unclaimed is an artifact of
+/// `solve_acyclic`'s deterministic method-choice order, not proof that leaving it a
+/// source is compatible with releasing every higher-strength cell still to come, so it
+/// cannot be adopted as released without the same check every other cell gets.
 ///
-/// - Complexity: O(C · solve) where C = cells and `solve` is [`Assignment::solve`]'s
-///   cost -- each cell triggers at most one full re-solve attempt. This omits two
-///   further per-cell costs not folded into `solve`: [`is_acyclic`]'s own traversal of
-///   the candidate's digraph, and cloning `released` (an O(C)-sized `HashSet`) to build
-///   each `candidate_released` -- together closer to O(C²) for this part alone.
+/// # Errors
+///
+/// - [`ReleaseFailure::NoAssignment`] — no method assignment exists at all, cyclic or
+///   not.
+/// - [`ReleaseFailure::NoAcyclicAssignment`] — a method assignment exists, but none of
+///   them is acyclic.
+///
+/// - Complexity: O(C · `solve_acyclic`) where C = cells -- each cell triggers one
+///   `solve_acyclic` attempt, itself exponential in the number of active relationships
+///   in the worst case (see its own doc comment).
 pub(crate) fn resolve(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
-) -> Option<Assignment> {
+) -> Result<Assignment, ReleaseFailure> {
     let mut released: HashSet<CellId> = HashSet::new();
-    let mut current = Assignment::solve(relationships, active, &released)?;
+    let Some(mut current) = Assignment::solve_acyclic(relationships, active, &released) else {
+        return Err(
+            if Assignment::solve(relationships, active, &released).is_some() {
+                ReleaseFailure::NoAcyclicAssignment
+            } else {
+                ReleaseFailure::NoAssignment
+            },
+        );
+    };
 
     let mut cells_sorted: Vec<CellId> = cells.keys().collect();
     cells_sorted.sort_by_key(|&id| Reverse(cells[id].strength));
 
     for cell in cells_sorted {
-        if !current.claimed.contains_key(&cell) {
-            released.insert(cell);
-            continue;
-        }
-
         let mut candidate_released = released.clone();
         candidate_released.insert(cell);
 
-        if let Some(candidate) = Assignment::solve(relationships, active, &candidate_released)
-            && is_acyclic(&candidate, relationships)
+        if let Some(candidate) =
+            Assignment::solve_acyclic(relationships, active, &candidate_released)
         {
             released = candidate_released;
             current = candidate;
         }
     }
 
-    is_acyclic(&current, relationships).then_some(current)
+    Ok(current)
 }
 
 #[cfg(test)]
@@ -72,7 +94,7 @@ mod tests {
     use crate::{Method, Sheet};
 
     #[test]
-    fn no_assignment_returns_none() {
+    fn no_assignment_returns_no_assignment_failure() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -84,11 +106,14 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(b, out, |x: &i32| Ok(*x))])
             .unwrap();
         let active: HashSet<_> = [r1, r2].into_iter().collect();
-        assert!(resolve(&sheet.cells, &sheet.relationships, &active).is_none());
+        assert!(matches!(
+            resolve(&sheet.cells, &sheet.relationships, &active),
+            Err(ReleaseFailure::NoAssignment)
+        ));
     }
 
     #[test]
-    fn genuinely_unsolvable_cycle_returns_none() {
+    fn genuinely_unsolvable_cycle_returns_no_acyclic_assignment_failure() {
         // x = f(y); y = g(x), each with only one method and no other cell involved:
         // no acyclic assignment exists no matter which cell is released.
         let mut sheet = Sheet::new();
@@ -101,7 +126,10 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v + 1))])
             .unwrap();
         let active: HashSet<_> = [r1, r2].into_iter().collect();
-        assert!(resolve(&sheet.cells, &sheet.relationships, &active).is_none());
+        assert!(matches!(
+            resolve(&sheet.cells, &sheet.relationships, &active),
+            Err(ReleaseFailure::NoAcyclicAssignment)
+        ));
     }
 
     #[test]
@@ -132,8 +160,10 @@ mod tests {
     #[test]
     fn diamond_collision_pattern_resolves_instead_of_failing() {
         // R1{a,b,c}, R2{b,c,d}: a and d outrank b and c (the collision pattern from
-        // begin/examples/diamond.adm2). resolve() must still find a valid, acyclic
-        // assignment -- not return None.
+        // begin/examples/diamond.adm2). {a, d} can never both be sources for this
+        // structure, so the strength-optimal resolution keeps d (strength 24, the
+        // higher of the two) and sacrifices a, promoting c (the next-highest
+        // remaining cell) as the other source instead of b.
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0.0_f64);
         let b = sheet.add_cell(0.0_f64);
@@ -161,5 +191,19 @@ mod tests {
         assert_eq!(assignment.chosen.len(), 2);
         let unique: HashSet<_> = assignment.claimed.values().collect();
         assert_eq!(unique.len(), assignment.claimed.len());
+
+        assert!(!assignment.claimed.contains_key(&d), "d must stay a source");
+        assert!(
+            assignment.claimed.contains_key(&a),
+            "a cannot coexist with d as a source: must be claimed (derived)"
+        );
+        assert!(
+            !assignment.claimed.contains_key(&c),
+            "c outranks b among the remaining candidates: must be the other source"
+        );
+        assert!(
+            assignment.claimed.contains_key(&b),
+            "b must be claimed (derived)"
+        );
     }
 }

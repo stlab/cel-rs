@@ -1204,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn add_relationship_inconsistent_cell_sets_across_methods_returns_invalid_method() {
+    fn add_relationship_inconsistent_cell_sets_across_methods_returns_mismatched_method_cells() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -1214,7 +1214,7 @@ mod tests {
             Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
             Method::from_fn_1_1(b, c, |v: &i32| Ok(*v)),
         ]);
-        assert!(matches!(result, Err(Error::InvalidMethod)));
+        assert!(matches!(result, Err(Error::MismatchedMethodCells)));
     }
 
     #[test]
@@ -1234,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn add_relationship_duplicate_output_set_across_methods_returns_invalid_method() {
+    fn add_relationship_duplicate_output_set_across_methods_returns_duplicate_method_outputs() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -1245,7 +1245,7 @@ mod tests {
             Method::from_fn_2_1([a, b], b, |x: &i32, _y: &i32| Ok(*x)),
             Method::from_fn_2_1([a, b], b, |_x: &i32, y: &i32| Ok(*y)),
         ]);
-        assert!(matches!(result, Err(Error::InvalidMethod)));
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
     }
 
     #[test]

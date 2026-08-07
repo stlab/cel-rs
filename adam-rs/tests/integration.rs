@@ -1021,9 +1021,16 @@ fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
 #[test]
 fn diamond_relationships_resolve_when_outer_cells_outrank_shared_cells() {
     // Reproduces begin/examples/diamond.adm2: R1{a,b,c} and R2{b,c,d} are triangle
-    // relationships sharing b and c. Before this change, writing a and d (making them
-    // outrank the never-written b and c) made propagate() return Error::Conflict --
-    // see docs/superpowers/specs/2026-08-04-cyclic-constraint-planner-design.md.
+    // relationships sharing b and c. Writing a then d makes them outrank the
+    // never-written b and c (strength order: d > a > c > b). {a, d} can never both be
+    // sources for this structure -- whichever of R1/R2 is fixed to use the other's
+    // shared cell as input needs that cell already determined, but only the other
+    // relationship can determine it, and it has the same problem in reverse. Since a
+    // and d can't coexist, the strength-optimal resolution must sacrifice the *lower*
+    // of the two (a) and promote the next-highest remaining cell (c) instead --
+    // keeping d and c as sources, deriving a and b. Before this change, propagate()
+    // returned Error::Conflict for this exact case -- see
+    // docs/superpowers/specs/2026-08-04-cyclic-constraint-planner-design.md.
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0.0_f64);
     let b = sheet.add_cell(0.0_f64);
@@ -1058,13 +1065,26 @@ fn diamond_relationships_resolve_when_outer_cells_outrank_shared_cells() {
         r1_out, r2_out,
         "no double-write between the two relationships"
     );
-    let sources = [a, b, c, d]
-        .into_iter()
-        .filter(|&x| sheet.is_source(x))
-        .count();
-    assert_eq!(
-        sources, 2,
-        "exactly one input cell per relationship remains a source"
+
+    // Strength order is d(24) > a(3) > c(0, default) > b(0, default). {a, d} can't
+    // both be sources, so the strength-optimal plan sacrifices the lower of the two
+    // (a) and keeps the higher (d); the next-highest remaining cell (c) becomes the
+    // other source, not b.
+    assert!(
+        sheet.is_source(d),
+        "d has the highest strength: must stay a source"
+    );
+    assert!(
+        !sheet.is_source(a),
+        "a cannot coexist with d as a source for this structure: must be derived"
+    );
+    assert!(
+        sheet.is_source(c),
+        "c outranks b among the remaining candidates: must be the other source"
+    );
+    assert!(
+        !sheet.is_source(b),
+        "b is the lowest-strength cell: must be derived"
     );
 }
 
@@ -1129,10 +1149,12 @@ fn overlapping_diamond_chain_resolves_via_cascade() {
 }
 
 #[test]
-fn mutually_dependent_relationships_with_no_external_input_remain_conflict() {
+fn mutually_dependent_relationships_with_no_external_input_remain_cycle() {
     // x = f(y); y = g(x), each with only one method and no other cell involved: a
     // genuine algebraic loop with no valid acyclic execution order, regardless of
-    // strength. Must still return Error::Conflict.
+    // strength. Must return Error::Cycle, not Error::Conflict -- a method assignment
+    // exists (each relationship's sole method is trivially selected), it's just
+    // inescapably cyclic.
     let mut sheet = Sheet::new();
     let x = sheet.add_cell(0_i32);
     let y = sheet.add_cell(0_i32);
@@ -1142,5 +1164,5 @@ fn mutually_dependent_relationships_with_no_external_input_remain_conflict() {
     sheet
         .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v + 1))])
         .unwrap();
-    assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
+    assert!(matches!(sheet.propagate(), Err(Error::Cycle)));
 }
