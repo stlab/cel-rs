@@ -117,8 +117,8 @@ impl Sheet {
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
     ///
-    /// - Complexity: O(m × c) where m is the total number of methods and c is the
-    ///   maximum number of cells per method.
+    /// - Complexity: O(m² × c) where m is the total number of methods and c is the
+    ///   maximum number of cells per method (due to duplicate output set comparison).
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
             return Err(Error::InvalidMethod);
