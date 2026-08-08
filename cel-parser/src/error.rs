@@ -188,6 +188,28 @@ pub(crate) fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Ra
     start_byte..end_byte
 }
 
+/// Classifies a lex failure by inspecting the character at `span`'s start in `source`.
+///
+/// Returns `None` when the span doesn't resolve to a character (e.g. it points past the end of
+/// `source`), so the caller can fall back to a generic message.
+fn lex_failure_message(source: &str, span: proc_macro2::Span) -> Option<String> {
+    let byte_range = span_to_byte_range(source, SourceSpan::from_proc_macro2(span));
+    let rest = &source[byte_range.start..];
+    Some(match rest.chars().next()? {
+        '(' => "unclosed delimiter `(`: expected a matching `)`".to_string(),
+        '[' => "unclosed delimiter `[`: expected a matching `]`".to_string(),
+        '{' => "unclosed delimiter `{`: expected a matching `}`".to_string(),
+        ')' => "unexpected closing delimiter `)`".to_string(),
+        ']' => "unexpected closing delimiter `]`".to_string(),
+        '}' => "unexpected closing delimiter `}`".to_string(),
+        '"' => "unterminated string literal".to_string(),
+        '\'' => "invalid or unterminated character literal".to_string(),
+        '`' => "invalid character `` ` ``".to_string(),
+        '/' if rest.starts_with("/*") => "unterminated block comment".to_string(),
+        ch => format!("invalid character `{ch}`"),
+    })
+}
+
 impl CELError {
     /// Creates a new error with the given message and source span.
     ///
@@ -379,6 +401,34 @@ impl ParseError {
     /// `None` for errors created with [`new`](Self::new).
     pub fn end_span(&self) -> Option<proc_macro2::Span> {
         self.end_span
+    }
+
+    /// Converts a lex failure (e.g. from `proc_macro2::TokenStream::from_str`) into a
+    /// `ParseError` with a message describing the likely cause.
+    ///
+    /// `proc_macro2::LexError`'s `Display` is the same generic string ("cannot parse string
+    /// into token stream") regardless of cause, but its span reliably points at the offending
+    /// character. This inspects that character in `source` to report *why* lexing failed —
+    /// unclosed/unexpected delimiter, unterminated string or character literal, unterminated
+    /// block comment, or another invalid character — falling back to `err`'s own message only
+    /// when the span doesn't resolve to a character in `source` (e.g. it points past the end).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::ParseError;
+    /// use proc_macro2::TokenStream;
+    /// use std::str::FromStr;
+    ///
+    /// let source = "(1 + 2";
+    /// let lex_err = TokenStream::from_str(source).unwrap_err();
+    /// let err = ParseError::from_lex_error(source, lex_err);
+    /// assert_eq!(err.message(), "unclosed delimiter `(`: expected a matching `)`");
+    /// ```
+    pub fn from_lex_error(source: &str, err: proc_macro2::LexError) -> Self {
+        let span = err.span();
+        let message = lex_failure_message(source, span).unwrap_or_else(|| err.to_string());
+        ParseError::new(message, span)
     }
 
     /// Formats this error in rustc diagnostic style with source context.
@@ -635,6 +685,88 @@ mod tests {
         let e = ParseError::new_range("type mismatch", start, end);
         assert_eq!(e.message(), "type mismatch");
         assert!(e.end_span().is_some());
+    }
+
+    #[test]
+    fn from_lex_error_unclosed_paren_names_expected_close() {
+        let source = "(1 + 2";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(
+            e.message(),
+            "unclosed delimiter `(`: expected a matching `)`"
+        );
+    }
+
+    #[test]
+    fn from_lex_error_unclosed_bracket_names_expected_close() {
+        let source = "[1, 2";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(
+            e.message(),
+            "unclosed delimiter `[`: expected a matching `]`"
+        );
+    }
+
+    #[test]
+    fn from_lex_error_unclosed_brace_names_expected_close() {
+        let source = "{1: 2";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(
+            e.message(),
+            "unclosed delimiter `{`: expected a matching `}`"
+        );
+    }
+
+    #[test]
+    fn from_lex_error_unexpected_closing_delimiter() {
+        let source = "1 + 2)";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(e.message(), "unexpected closing delimiter `)`");
+    }
+
+    #[test]
+    fn from_lex_error_mismatched_delimiter_reports_actual_closer() {
+        let source = "(1 + 2]";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(e.message(), "unexpected closing delimiter `]`");
+    }
+
+    #[test]
+    fn from_lex_error_unterminated_string_literal() {
+        let source = "1 + \"abc";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(e.message(), "unterminated string literal");
+    }
+
+    #[test]
+    fn from_lex_error_unterminated_block_comment() {
+        let source = "/* unterminated";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(e.message(), "unterminated block comment");
+    }
+
+    #[test]
+    fn from_lex_error_invalid_character_names_the_character() {
+        let source = "1 + `";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(e.message(), "invalid character `` ` ``");
+    }
+
+    #[test]
+    fn from_lex_error_preserves_lex_error_span() {
+        let source = "(1 + 2";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let expected_span = SourceSpan::from_proc_macro2(lex_err.span());
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(SourceSpan::from_proc_macro2(e.span()), expected_span);
     }
 
     #[test]

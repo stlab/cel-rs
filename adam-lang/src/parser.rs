@@ -125,7 +125,7 @@ impl AdamParser {
     /// method's declared outputs.
     pub fn parse_str(&mut self, source: &str) -> Result<ParsedSheet> {
         let stream =
-            TokenStream::from_str(source).map_err(|e| ParseError::new(e.to_string(), e.span()))?;
+            TokenStream::from_str(source).map_err(|e| ParseError::from_lex_error(source, e))?;
         let mut ctx = ParseContext {
             cursor: crate::token_cursor::TokenCursor::new(
                 LexLexer::new(stream.into_iter()).peekable(),
