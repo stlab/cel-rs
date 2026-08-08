@@ -69,3 +69,35 @@ try {
 Write-Host ""
 Write-Host "Installed adam-lsp + adam-lang extension from staged copy: $stageDir"
 Write-Host "To update: uninstall the extension (and 'cargo uninstall adam-lsp' if the binary is locked) before rerunning this task."
+
+# The extension's server-path resolution checks <workspaceRoot>/target/debug before PATH (see
+# editors/vscode-adam-lang/src/serverPath.ts), so if this repo's own target/debug/adam-lsp.exe
+# ever gets built (e.g. by `cargo build --workspace`), the extension picks that up instead of
+# the installed copy — silently defeating the point of installing outside the worktree. Pinning
+# adam-lang.serverPath explicitly (highest-priority in that resolution order) avoids that.
+$installedBinary = (Get-Command adam-lsp.exe -ErrorAction SilentlyContinue).Source
+if (-not $installedBinary) {
+    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE ".cargo" }
+    $installedBinary = Join-Path $cargoHome "bin\adam-lsp.exe"
+}
+if (-not (Test-Path $installedBinary)) {
+    Write-Warning "Could not locate the installed adam-lsp.exe to pin; set the `"adam-lang.serverPath`" VS Code setting manually."
+} else {
+    $vsCodeSettingsPath = Join-Path $env:APPDATA "Code\User\settings.json"
+    if (-not (Test-Path $vsCodeSettingsPath)) {
+        Write-Warning "VS Code user settings.json not found at '$vsCodeSettingsPath'; set `"adam-lang.serverPath`" to `"$installedBinary`" manually."
+    } else {
+        $content = Get-Content -Raw -Path $vsCodeSettingsPath
+        $escapedValue = $installedBinary -replace '\\', '\\'
+        $newEntry = "`"adam-lang.serverPath`": `"$escapedValue`""
+        $existingPattern = [regex]::new('"adam-lang\.serverPath"\s*:\s*"(?:[^"\\]|\\.)*"')
+        if ($existingPattern.IsMatch($content)) {
+            $newContent = $existingPattern.Replace($content, $newEntry, 1)
+        } else {
+            $braceIndex = $content.IndexOf('{')
+            $newContent = $content.Substring(0, $braceIndex + 1) + "`r`n    $newEntry," + $content.Substring($braceIndex + 1)
+        }
+        Set-Content -Path $vsCodeSettingsPath -Value $newContent -NoNewline
+        Write-Host "Pinned VS Code setting adam-lang.serverPath -> $installedBinary"
+    }
+}
