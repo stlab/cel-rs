@@ -445,8 +445,7 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// Returns an error on lex failure or if the input does not contain a valid CEL expression.
     pub fn parse_str_ctx(&mut self, s: &str) -> Result<C> {
-        let input =
-            TokenStream::from_str(s).map_err(|e| ParseError::new(e.to_string(), e.span()))?;
+        let input = TokenStream::from_str(s).map_err(|e| ParseError::from_lex_error(s, e))?;
         self.parse_tokens_ctx(input.into_iter())
     }
 
