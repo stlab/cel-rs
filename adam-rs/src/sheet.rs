@@ -121,6 +121,8 @@ impl Sheet {
     /// - `Error::InvalidId` — a `CellId` in any method is not found in this sheet.
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
+    /// - `Error::TerminalCell` — a method input or output cell already belongs to
+    ///   an existing output.
     ///
     /// - Complexity: O(m² × c) where m is the total number of methods and c is the
     ///   maximum number of cells per method (due to duplicate output set comparison).
@@ -239,6 +241,7 @@ impl Sheet {
     ///   a referenced relationship does not exist; a branch relationship that shares a cell with
     ///   the match cell or any of its unconditional upstream contributors has more than one method;
     ///   a relationship already appears in another conditional branch; or a branch has no keys.
+    /// - `Error::TerminalCell` — the match cell already belongs to an existing output.
     ///
     /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R = relationships per branch.
     pub fn add_conditional<T: Any + PartialEq + 'static>(
@@ -361,6 +364,7 @@ impl Sheet {
     ///
     /// - `Error::InvalidId` — `id` is not a cell in this sheet.
     /// - `Error::TypeMismatch` — `T` does not match the cell's registered `TypeId`.
+    /// - `Error::TerminalCell` — `id` already belongs to an existing output.
     pub fn write<T: Any + 'static>(&mut self, id: CellId, value: T) -> Result<(), Error> {
         if self.terminal_cells.contains(&id) {
             return Err(Error::TerminalCell);
