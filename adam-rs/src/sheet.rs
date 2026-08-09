@@ -378,8 +378,6 @@ impl Sheet {
     /// may be any cells in the sheet, including the output's own cell, but not a cell that
     /// already belongs to a different output.
     ///
-    /// - Precondition: no two conditions in `conditions` share a name.
-    ///
     /// # Errors
     ///
     /// - `Error::InvalidOutput` — `writer` does not have exactly one output cell, a
@@ -392,6 +390,10 @@ impl Sheet {
     /// - `Error::TypeMismatch` — a condition input's declared type does not match the
     ///   cell's registered type.
     /// - Any error `add_relationship` can return, for `writer`'s own validation.
+    ///
+    /// - Complexity: O(k + m²×c) where k is the number of conditions (each validated
+    ///   in a single pass over its inputs), plus the cost of `add_relationship` for
+    ///   `writer` alone (m = 1 method, c = cells in that method).
     pub fn add_output(
         &mut self,
         writer: Method,
