@@ -54,6 +54,10 @@ pub struct Sheet {
     /// Union of all RelationshipIds assigned to any conditional branch or default.
     /// Used to exclude them from the unconditional active set.
     pub(crate) conditional_relationships: HashSet<RelationshipId>,
+    /// Cells belonging to a registered output (see [`Sheet::add_output`]). Such a cell
+    /// can never be referenced as an input to a relationship, conditional, condition, or
+    /// another output, and can never be the target of `write`.
+    terminal_cells: HashSet<CellId>,
 }
 
 impl Sheet {
@@ -69,6 +73,7 @@ impl Sheet {
             last_forced_relationships: None,
             conditionals: SlotMap::with_key(),
             conditional_relationships: HashSet::new(),
+            terminal_cells: HashSet::new(),
         }
     }
 
@@ -137,6 +142,9 @@ impl Sheet {
             }
 
             for (&cell_id, &declared) in method.inputs.iter().zip(method.input_types.iter()) {
+                if self.terminal_cells.contains(&cell_id) {
+                    return Err(Error::TerminalCell);
+                }
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                 if cell.type_id != declared {
                     return Err(Error::TypeMismatch {
@@ -147,6 +155,9 @@ impl Sheet {
             }
 
             for (&cell_id, &declared) in method.outputs.iter().zip(method.output_types.iter()) {
+                if self.terminal_cells.contains(&cell_id) {
+                    return Err(Error::TerminalCell);
+                }
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                 if cell.type_id != declared {
                     return Err(Error::TypeMismatch {
@@ -237,6 +248,9 @@ impl Sheet {
         default: Vec<RelationshipId>,
     ) -> Result<ConditionalId, Error> {
         let cell_data = self.cells.get(cell).ok_or(Error::InvalidId)?;
+        if self.terminal_cells.contains(&cell) {
+            return Err(Error::TerminalCell);
+        }
         if cell_data.type_id != TypeId::of::<T>() {
             return Err(Error::InvalidConditional);
         }
@@ -348,6 +362,9 @@ impl Sheet {
     /// - `Error::InvalidId` — `id` is not a cell in this sheet.
     /// - `Error::TypeMismatch` — `T` does not match the cell's registered `TypeId`.
     pub fn write<T: Any + 'static>(&mut self, id: CellId, value: T) -> Result<(), Error> {
+        if self.terminal_cells.contains(&id) {
+            return Err(Error::TerminalCell);
+        }
         let cell = self.cells.get_mut(id).ok_or(Error::InvalidId)?;
         if cell.type_id != TypeId::of::<T>() {
             return Err(Error::TypeMismatch {
@@ -1088,6 +1105,43 @@ mod tests {
         let a = sheet.add_cell(1_i32);
         let b = sheet.add_cell(2_i32);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn write_returns_terminal_cell_for_terminal_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        sheet.terminal_cells.insert(a);
+        assert!(matches!(sheet.write(a, 1_i32), Err(Error::TerminalCell)));
+    }
+
+    #[test]
+    fn add_relationship_returns_terminal_cell_for_terminal_input() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet.terminal_cells.insert(a);
+        let result = sheet.add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))]);
+        assert!(matches!(result, Err(Error::TerminalCell)));
+    }
+
+    #[test]
+    fn add_relationship_returns_terminal_cell_for_terminal_output() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet.terminal_cells.insert(b);
+        let result = sheet.add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))]);
+        assert!(matches!(result, Err(Error::TerminalCell)));
+    }
+
+    #[test]
+    fn add_conditional_returns_terminal_cell_for_terminal_match_cell() {
+        let mut sheet = Sheet::new();
+        let p = sheet.add_cell(0_i32);
+        sheet.terminal_cells.insert(p);
+        let result = sheet.add_conditional::<i32>(p, vec![], vec![]);
+        assert!(matches!(result, Err(Error::TerminalCell)));
     }
 
     #[test]
