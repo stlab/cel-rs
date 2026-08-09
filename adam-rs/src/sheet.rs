@@ -805,11 +805,16 @@ impl Sheet {
     /// reverted to its source value (e.g. its forcing conditional went inactive); it is
     /// marked changed even though no method wrote to it this round.
     ///
+    /// **Phase 6 — Condition evaluation:** every registered condition is evaluated
+    /// against current cell values, rebuilding `last_violated` from scratch, so
+    /// [`Sheet::output_valid`] and [`Sheet::violated_conditions`] reflect this round.
+    ///
     /// # Errors
     ///
     /// - `Error::Conflict` — no valid method assignment exists.
-    /// - `Error::MethodFailed` — a method's function returned an error, or a method
-    ///   produced the wrong number of outputs.
+    /// - `Error::MethodFailed` — a method's function returned an error, a method
+    ///   produced the wrong number of outputs, or a condition's function returned
+    ///   an error.
     /// - `Error::TypeMismatch` — a method output's runtime type does not match the
     ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
