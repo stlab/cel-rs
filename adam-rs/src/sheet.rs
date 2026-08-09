@@ -520,6 +520,73 @@ impl Sheet {
         self.last_violated.get(&id).into_iter().flatten().copied()
     }
 
+    /// Returns the set of root source cells currently determining `id`'s value, as of the
+    /// last `propagate()` call.
+    ///
+    /// Walks backward from `id` through the last plan's selected methods. A
+    /// self-referencing input (present in both a method's inputs and its outputs) is
+    /// treated as one of its own roots, since it is read at its pre-execution value rather
+    /// than derived further.
+    ///
+    /// - Postcondition: returns `{id}` if no propagation has run yet, or if `id` is
+    ///   currently a source.
+    ///
+    /// - Complexity: O(N) where N is the number of cells reachable upstream of `id`.
+    pub fn contributing_cells(&self, id: CellId) -> HashSet<CellId> {
+        let mut result = HashSet::new();
+        let mut visited: HashSet<CellId> = HashSet::new();
+        let mut stack = vec![id];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            if self.is_source(current) {
+                result.insert(current);
+                continue;
+            }
+            let producing = self.last_plan.as_ref().and_then(|plan| {
+                plan.iter()
+                    .find(|&&(rel, idx)| {
+                        self.relationships[rel].methods[idx]
+                            .outputs
+                            .contains(&current)
+                    })
+                    .copied()
+            });
+            let Some((rel_id, method_idx)) = producing else {
+                result.insert(current);
+                continue;
+            };
+            let method = &self.relationships[rel_id].methods[method_idx];
+            for &input in &method.inputs {
+                if method.outputs.contains(&input) {
+                    result.insert(input);
+                } else {
+                    stack.push(input);
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns the union of [`Sheet::contributing_cells`] over condition `id`'s own
+    /// declared inputs.
+    ///
+    /// Returns an empty set if `id` is not a live condition in this sheet.
+    ///
+    /// - Complexity: O(K·N) where K is the condition's input count and N is the size of
+    ///   each input's contributing set.
+    pub fn condition_contributing_cells(&self, id: ConditionId) -> HashSet<CellId> {
+        let Some(condition) = self.conditions.get(id) else {
+            return HashSet::new();
+        };
+        condition
+            .inputs
+            .iter()
+            .flat_map(|&input| self.contributing_cells(input))
+            .collect()
+    }
+
     /// Writes a value to a cell, incrementing the cell's write-recency strength.
     ///
     /// Each successful `write` increments a global monotonic counter and assigns

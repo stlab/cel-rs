@@ -1,6 +1,7 @@
 //! End-to-end integration tests for the adam-rs crate.
 
 use std::any::TypeId;
+use std::collections::HashSet;
 
 use adam_rs::{CellId, Condition, ConditionId, Error, Method, OutputId, Sheet};
 
@@ -1535,4 +1536,109 @@ fn condition_function_error_aborts_propagate_with_method_failed() {
         )
         .unwrap();
     assert!(matches!(sheet.propagate(), Err(Error::MethodFailed(_))));
+}
+
+#[test]
+fn contributing_cells_returns_self_for_plain_source_cell() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(5_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.contributing_cells(a), HashSet::from([a]));
+}
+
+#[test]
+fn contributing_cells_returns_singleton_before_propagate() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .unwrap();
+    assert_eq!(sheet.contributing_cells(b), HashSet::from([b]));
+}
+
+#[test]
+fn contributing_cells_returns_root_sources_for_derived_chain() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(2_i32);
+    let b = sheet.add_cell(0_i32);
+    let c = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+        .unwrap();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, c, |x: &i32| Ok(*x + 1))])
+        .unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.contributing_cells(c), HashSet::from([a]));
+}
+
+#[test]
+fn contributing_cells_includes_self_and_other_inputs_for_self_referencing_cell() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(3_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| {
+            Ok((*x).min(*y))
+        })])
+        .unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 3);
+    let contrib = sheet.contributing_cells(a);
+    assert!(contrib.contains(&a));
+    assert!(contrib.contains(&b));
+}
+
+#[test]
+fn contributing_cells_scoped_to_active_conditional_branch() {
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(1_i32);
+    let b = sheet.add_cell(2_i32);
+    let rel0 = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .unwrap();
+    let rel1 = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet
+        .add_conditional(
+            p,
+            vec![(vec![0_i32], vec![rel0]), (vec![1_i32], vec![rel1])],
+            vec![],
+        )
+        .unwrap();
+
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.contributing_cells(b), HashSet::from([a]));
+
+    sheet.write(p, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.contributing_cells(a), HashSet::from([b]));
+}
+
+#[test]
+fn condition_contributing_cells_unions_inputs_outside_writer() {
+    let (mut sheet, output, width, height, max_area) = sheet_with_area_output();
+    sheet.write(width, 5_i32).unwrap();
+    sheet.write(height, 4_i32).unwrap();
+    sheet.propagate().unwrap();
+    let id = sheet.output_conditions(output).unwrap()[0];
+    let contrib = sheet.condition_contributing_cells(id);
+    assert_eq!(contrib, HashSet::from([width, height, max_area]));
+}
+
+#[test]
+fn condition_contributing_cells_returns_empty_for_invalid_id() {
+    let sheet = Sheet::new();
+    assert_eq!(
+        sheet.condition_contributing_cells(ConditionId::default()),
+        HashSet::new()
+    );
 }
