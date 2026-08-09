@@ -1195,7 +1195,9 @@ impl Sheet {
     ///   since the last `propagate()`. Violation produces incorrect branch activation.
     ///
     /// `is_forced` and `forced_cells` continue to reflect the last full `propagate()`
-    /// call; this method does not recompute them.
+    /// call; this method does not recompute them. Likewise, `output_valid` and
+    /// `violated_conditions` continue to reflect the last full `propagate()` call; this
+    /// method does not re-evaluate output conditions.
     ///
     /// # Errors
     ///

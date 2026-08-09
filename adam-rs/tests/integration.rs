@@ -1509,6 +1509,44 @@ fn violated_conditions_lists_the_failing_condition() {
 }
 
 #[test]
+fn violated_conditions_returns_only_the_failing_subset_of_multiple_conditions() {
+    let mut sheet = Sheet::new();
+    let width = sheet.add_cell(0_i32);
+    let height = sheet.add_cell(0_i32);
+    let max_width = sheet.add_cell(50_i32);
+    let max_height = sheet.add_cell(50_i32);
+    let area = sheet.add_cell(0_i32);
+    let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| {
+        w.checked_mul(*h).ok_or_else(|| anyhow::anyhow!("overflow"))
+    });
+    let output = sheet
+        .add_output(
+            writer,
+            vec![
+                (
+                    "max_width",
+                    Condition::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
+                ),
+                (
+                    "max_height",
+                    Condition::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
+                ),
+            ],
+        )
+        .unwrap();
+
+    // width passes (10 <= 50); height fails (60 > 50).
+    sheet.write(width, 10_i32).unwrap();
+    sheet.write(height, 60_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    assert!(!sheet.output_valid(output));
+    let violated: Vec<_> = sheet.violated_conditions(output).collect();
+    assert_eq!(violated.len(), 1);
+    assert_eq!(sheet.condition_name(violated[0]), Some("max_height"));
+}
+
+#[test]
 fn output_valid_updates_across_propagate_calls() {
     let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
