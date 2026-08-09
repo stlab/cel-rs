@@ -2,7 +2,7 @@
 
 use std::any::TypeId;
 
-use adam_rs::{Error, Method, Sheet};
+use adam_rs::{Condition, ConditionId, Error, Method, OutputId, Sheet};
 
 #[test]
 fn single_method_executes_correctly() {
@@ -1165,4 +1165,287 @@ fn mutually_dependent_relationships_with_no_external_input_remain_cycle() {
         .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v + 1))])
         .unwrap();
     assert!(matches!(sheet.propagate(), Err(Error::Cycle)));
+}
+
+#[test]
+fn add_output_succeeds_with_no_conditions() {
+    let mut sheet = Sheet::new();
+    let width = sheet.add_cell(0_i32);
+    let height = sheet.add_cell(0_i32);
+    let area = sheet.add_cell(0_i32);
+    let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h));
+    let output = sheet
+        .add_output(writer, Vec::<(&str, Condition)>::new())
+        .unwrap();
+    assert_eq!(sheet.output_cell(output), Some(area));
+}
+
+#[test]
+fn add_output_succeeds_with_one_condition() {
+    let mut sheet = Sheet::new();
+    let width = sheet.add_cell(0_i32);
+    let height = sheet.add_cell(0_i32);
+    let max_area = sheet.add_cell(100_i32);
+    let area = sheet.add_cell(0_i32);
+    let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| {
+        w.checked_mul(*h).ok_or_else(|| anyhow::anyhow!("overflow"))
+    });
+    let output = sheet
+        .add_output(
+            writer,
+            vec![(
+                "max_area",
+                Condition::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
+            )],
+        )
+        .unwrap();
+    assert_eq!(sheet.output_conditions(output).unwrap().len(), 1);
+}
+
+#[test]
+fn add_output_succeeds_with_multiple_conditions() {
+    let mut sheet = Sheet::new();
+    let width = sheet.add_cell(0_i32);
+    let height = sheet.add_cell(0_i32);
+    let max_width = sheet.add_cell(50_i32);
+    let max_height = sheet.add_cell(50_i32);
+    let area = sheet.add_cell(0_i32);
+    let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| {
+        w.checked_mul(*h).ok_or_else(|| anyhow::anyhow!("overflow"))
+    });
+    let output = sheet
+        .add_output(
+            writer,
+            vec![
+                (
+                    "max_width",
+                    Condition::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
+                ),
+                (
+                    "max_height",
+                    Condition::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
+                ),
+            ],
+        )
+        .unwrap();
+    assert_eq!(sheet.output_conditions(output).unwrap().len(), 2);
+}
+
+#[test]
+fn add_output_returns_invalid_output_for_writer_with_zero_outputs() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let writer = Method::new(vec![a], vec![], vec![TypeId::of::<i32>()], vec![], |_| {
+        Ok(vec![])
+    });
+    let result = sheet.add_output(writer, Vec::<(&str, Condition)>::new());
+    assert!(matches!(result, Err(Error::InvalidOutput)));
+}
+
+#[test]
+fn add_output_returns_invalid_output_for_writer_with_two_outputs() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let c = sheet.add_cell(0_i32);
+    let writer = Method::new(
+        vec![a],
+        vec![b, c],
+        vec![TypeId::of::<i32>()],
+        vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+        |args| {
+            let x = args[0].downcast_ref::<i32>().unwrap();
+            Ok(vec![Box::new(*x), Box::new(*x)])
+        },
+    );
+    let result = sheet.add_output(writer, Vec::<(&str, Condition)>::new());
+    assert!(matches!(result, Err(Error::InvalidOutput)));
+}
+
+#[test]
+fn add_output_returns_invalid_output_for_duplicate_condition_names() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let writer = Method::from_fn_1_1(a, b, |x: &i32| Ok(*x));
+    let result = sheet.add_output(
+        writer,
+        vec![
+            ("check", Condition::from_fn_1(a, |x: &i32| Ok(*x >= 0))),
+            ("check", Condition::from_fn_1(a, |x: &i32| Ok(*x < 100))),
+        ],
+    );
+    assert!(matches!(result, Err(Error::InvalidOutput)));
+}
+
+#[test]
+fn add_output_returns_invalid_output_for_empty_condition_name() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let writer = Method::from_fn_1_1(a, b, |x: &i32| Ok(*x));
+    let result = sheet.add_output(
+        writer,
+        vec![("", Condition::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
+    );
+    assert!(matches!(result, Err(Error::InvalidOutput)));
+}
+
+#[test]
+fn add_output_returns_terminal_cell_when_output_cell_already_has_a_relationship() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    // b already has an incoming relationship before add_output is attempted on it.
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .unwrap();
+    let c = sheet.add_cell(0_i32);
+    let writer = Method::from_fn_1_1(c, b, |x: &i32| Ok(*x));
+    let result = sheet.add_output(writer, Vec::<(&str, Condition)>::new());
+    assert!(matches!(result, Err(Error::TerminalCell)));
+}
+
+#[test]
+fn add_output_returns_terminal_cell_when_output_cell_is_a_conditional_match_cell() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    sheet.add_conditional::<i32>(mode, vec![], vec![]).unwrap();
+    let a = sheet.add_cell(0_i32);
+    let writer = Method::from_fn_1_1(a, mode, |x: &i32| Ok(*x));
+    let result = sheet.add_output(writer, Vec::<(&str, Condition)>::new());
+    assert!(matches!(result, Err(Error::TerminalCell)));
+}
+
+#[test]
+fn add_output_returns_terminal_cell_when_writer_input_is_already_an_output_cell() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_output(
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            Vec::<(&str, Condition)>::new(),
+        )
+        .unwrap();
+    let c = sheet.add_cell(0_i32);
+    // b is already terminal; using it as a new writer's input must be rejected.
+    let result = sheet.add_output(
+        Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)),
+        Vec::<(&str, Condition)>::new(),
+    );
+    assert!(matches!(result, Err(Error::TerminalCell)));
+}
+
+#[test]
+fn add_output_returns_terminal_cell_when_condition_input_is_already_an_output_cell() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_output(
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            Vec::<(&str, Condition)>::new(),
+        )
+        .unwrap();
+    let c = sheet.add_cell(0_i32);
+    let d = sheet.add_cell(0_i32);
+    // b is already terminal; referencing it from another output's condition must be rejected.
+    let result = sheet.add_output(
+        Method::from_fn_1_1(c, d, |x: &i32| Ok(*x)),
+        vec![("uses_b", Condition::from_fn_1(b, |x: &i32| Ok(*x >= 0)))],
+    );
+    assert!(matches!(result, Err(Error::TerminalCell)));
+}
+
+#[test]
+fn add_output_allows_a_condition_to_reference_the_outputs_own_cell() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let result = sheet.add_output(
+        Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+        vec![("positive", Condition::from_fn_1(b, |x: &i32| Ok(*x >= 0)))],
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn write_returns_terminal_cell_for_an_output_cell() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_output(
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            Vec::<(&str, Condition)>::new(),
+        )
+        .unwrap();
+    assert!(matches!(sheet.write(b, 5_i32), Err(Error::TerminalCell)));
+}
+
+#[test]
+fn add_relationship_returns_terminal_cell_for_an_output_cell() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_output(
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            Vec::<(&str, Condition)>::new(),
+        )
+        .unwrap();
+    let c = sheet.add_cell(0_i32);
+    let result = sheet.add_relationship(vec![Method::from_fn_1_1(b, c, |x: &i32| Ok(*x))]);
+    assert!(matches!(result, Err(Error::TerminalCell)));
+}
+
+#[test]
+fn output_cell_returns_none_for_invalid_id() {
+    let sheet = Sheet::new();
+    assert_eq!(sheet.output_cell(OutputId::default()), None);
+}
+
+#[test]
+fn output_conditions_returns_condition_ids_in_declaration_order() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let output = sheet
+        .add_output(
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            vec![
+                ("first", Condition::from_fn_1(a, |x: &i32| Ok(*x >= 0))),
+                ("second", Condition::from_fn_1(a, |x: &i32| Ok(*x < 100))),
+            ],
+        )
+        .unwrap();
+    let ids = sheet.output_conditions(output).unwrap();
+    assert_eq!(sheet.condition_name(ids[0]), Some("first"));
+    assert_eq!(sheet.condition_name(ids[1]), Some("second"));
+}
+
+#[test]
+fn condition_output_and_inputs_return_correct_values() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let output = sheet
+        .add_output(
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            vec![("check", Condition::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
+        )
+        .unwrap();
+    let id = sheet.output_conditions(output).unwrap()[0];
+    assert_eq!(sheet.condition_output(id), Some(output));
+    assert_eq!(sheet.condition_inputs(id), Some([a].as_slice()));
+}
+
+#[test]
+fn condition_name_output_inputs_return_none_for_invalid_id() {
+    let sheet = Sheet::new();
+    let id = ConditionId::default();
+    assert_eq!(sheet.condition_name(id), None);
+    assert_eq!(sheet.condition_output(id), None);
+    assert_eq!(sheet.condition_inputs(id), None);
 }

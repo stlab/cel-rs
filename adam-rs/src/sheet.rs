@@ -10,8 +10,10 @@ use slotmap::SlotMap;
 
 use crate::{
     cell::{CellData, CellId},
+    condition::{Condition, ConditionData, ConditionId},
     conditional::{Branch, ConditionalData, ConditionalId},
     error::Error,
+    output::{OutputData, OutputId},
     relationship::{Method, RelationshipData, RelationshipId},
 };
 
@@ -58,6 +60,10 @@ pub struct Sheet {
     /// can never be referenced as an input to a relationship, conditional, condition, or
     /// another output, and can never be the target of `write`.
     terminal_cells: HashSet<CellId>,
+    /// All outputs registered on this sheet.
+    outputs: SlotMap<OutputId, OutputData>,
+    /// All conditions registered on this sheet, across all outputs.
+    conditions: SlotMap<ConditionId, ConditionData>,
 }
 
 impl Sheet {
@@ -74,6 +80,8 @@ impl Sheet {
             conditionals: SlotMap::with_key(),
             conditional_relationships: HashSet::new(),
             terminal_cells: HashSet::new(),
+            outputs: SlotMap::with_key(),
+            conditions: SlotMap::with_key(),
         }
     }
 
@@ -350,6 +358,138 @@ impl Sheet {
             branches: typed_branches,
             default,
         }))
+    }
+
+    /// Returns `true` if `id` already has adjacency (a relationship referencing it, or
+    /// use as some conditional's match cell) — i.e. it cannot legally become an output's
+    /// terminal cell, since that would retroactively violate the terminal invariant for
+    /// whatever already references it.
+    fn cell_has_prior_use(&self, id: CellId) -> bool {
+        self.cells.get(id).is_some_and(|cell| !cell.adj.is_empty())
+            || self.conditionals.values().any(|c| c.cell == id)
+    }
+
+    /// Registers an output: a cell written by exactly one method, together with zero or
+    /// more named conditions checked after every `propagate()`.
+    ///
+    /// `writer` must have exactly one output cell — that cell becomes terminal: it can
+    /// never afterward be referenced as an input to a relationship, conditional,
+    /// condition, or another output, nor be the target of `write`. A condition's inputs
+    /// may be any cells in the sheet, including the output's own cell, but not a cell that
+    /// already belongs to a different output.
+    ///
+    /// - Precondition: no two conditions in `conditions` share a name.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidOutput` — `writer` does not have exactly one output cell, a
+    ///   condition name is empty, or two conditions share a name.
+    /// - `Error::TerminalCell` — a condition input is already another output's cell, or
+    ///   the writer's output cell already has prior use (see [`Sheet::cell_has_prior_use`])
+    ///   and so cannot become terminal.
+    /// - `Error::InvalidId` — a cell referenced by `writer` or a condition is not in this
+    ///   sheet.
+    /// - `Error::TypeMismatch` — a condition input's declared type does not match the
+    ///   cell's registered type.
+    /// - Any error `add_relationship` can return, for `writer`'s own validation.
+    pub fn add_output(
+        &mut self,
+        writer: Method,
+        conditions: Vec<(&str, Condition)>,
+    ) -> Result<OutputId, Error> {
+        if writer.outputs.len() != 1 {
+            return Err(Error::InvalidOutput);
+        }
+        let output_cell = writer.outputs[0];
+
+        let mut seen_names: HashSet<&str> = HashSet::new();
+        for &(name, _) in &conditions {
+            if name.is_empty() || !seen_names.insert(name) {
+                return Err(Error::InvalidOutput);
+            }
+        }
+
+        for (_, condition) in &conditions {
+            if condition.inputs.len() != condition.input_types.len() {
+                return Err(Error::InvalidOutput);
+            }
+            for (&cell_id, &declared) in condition.inputs.iter().zip(condition.input_types.iter()) {
+                if self.terminal_cells.contains(&cell_id) {
+                    return Err(Error::TerminalCell);
+                }
+                let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
+                if cell.type_id != declared {
+                    return Err(Error::TypeMismatch {
+                        expected: cell.type_id,
+                        found: declared,
+                    });
+                }
+            }
+        }
+
+        if self.cell_has_prior_use(output_cell) {
+            return Err(Error::TerminalCell);
+        }
+
+        let relationship = self.add_relationship(vec![writer])?;
+        self.terminal_cells.insert(output_cell);
+
+        let output_id = self.outputs.insert(OutputData {
+            cell: output_cell,
+            relationship,
+            conditions: Vec::new(),
+        });
+
+        let condition_ids: Vec<ConditionId> = conditions
+            .into_iter()
+            .map(|(name, condition)| {
+                self.conditions.insert(ConditionData {
+                    name: name.to_string(),
+                    output: output_id,
+                    inputs: condition.inputs,
+                    input_types: condition.input_types,
+                    function: condition.function,
+                })
+            })
+            .collect();
+        self.outputs[output_id].conditions = condition_ids;
+
+        Ok(output_id)
+    }
+
+    /// Returns the terminal cell backing output `id`. Read its value with [`Sheet::read`].
+    ///
+    /// Returns `None` if `id` is not a live output in this sheet.
+    pub fn output_cell(&self, id: OutputId) -> Option<CellId> {
+        self.outputs.get(id).map(|o| o.cell)
+    }
+
+    /// Returns the conditions registered on output `id`, in declaration order.
+    ///
+    /// Returns `None` if `id` is not a live output in this sheet.
+    pub fn output_conditions(&self, id: OutputId) -> Option<&[ConditionId]> {
+        self.outputs.get(id).map(|o| o.conditions.as_slice())
+    }
+
+    /// Returns the name of condition `id`.
+    ///
+    /// Returns `None` if `id` is not a live condition in this sheet.
+    pub fn condition_name(&self, id: ConditionId) -> Option<&str> {
+        self.conditions.get(id).map(|c| c.name.as_str())
+    }
+
+    /// Returns the output that condition `id` belongs to.
+    ///
+    /// Returns `None` if `id` is not a live condition in this sheet.
+    pub fn condition_output(&self, id: ConditionId) -> Option<OutputId> {
+        self.conditions.get(id).map(|c| c.output)
+    }
+
+    /// Returns the cells condition `id` reads.
+    ///
+    /// Returns `None` if `id` is not a live condition in this sheet.
+    pub fn condition_inputs(&self, id: ConditionId) -> Option<&[CellId]> {
+        self.conditions.get(id).map(|c| c.inputs.as_slice())
     }
 
     /// Writes a value to a cell, incrementing the cell's write-recency strength.
