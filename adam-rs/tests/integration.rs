@@ -2,7 +2,28 @@
 
 use std::any::TypeId;
 
-use adam_rs::{Condition, ConditionId, Error, Method, OutputId, Sheet};
+use adam_rs::{CellId, Condition, ConditionId, Error, Method, OutputId, Sheet};
+
+fn sheet_with_area_output() -> (Sheet, OutputId, CellId, CellId, CellId) {
+    let mut sheet = Sheet::new();
+    let width = sheet.add_cell(0_i32);
+    let height = sheet.add_cell(0_i32);
+    let max_area = sheet.add_cell(100_i32);
+    let area = sheet.add_cell(0_i32);
+    let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| {
+        w.checked_mul(*h).ok_or_else(|| anyhow::anyhow!("overflow"))
+    });
+    let output = sheet
+        .add_output(
+            writer,
+            vec![(
+                "max_area",
+                Condition::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
+            )],
+        )
+        .unwrap();
+    (sheet, output, width, height, max_area)
+}
 
 #[test]
 fn single_method_executes_correctly() {
@@ -1448,4 +1469,70 @@ fn condition_name_output_inputs_return_none_for_invalid_id() {
     assert_eq!(sheet.condition_name(id), None);
     assert_eq!(sheet.condition_output(id), None);
     assert_eq!(sheet.condition_inputs(id), None);
+}
+
+#[test]
+fn output_valid_false_before_propagate() {
+    let (sheet, output, ..) = sheet_with_area_output();
+    assert!(!sheet.output_valid(output));
+}
+
+#[test]
+fn output_valid_true_when_condition_holds() {
+    let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
+    sheet.write(width, 5_i32).unwrap();
+    sheet.write(height, 4_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.output_valid(output));
+    assert_eq!(sheet.violated_conditions(output).count(), 0);
+}
+
+#[test]
+fn output_valid_false_when_condition_fails() {
+    let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
+    sheet.write(width, 50_i32).unwrap();
+    sheet.write(height, 40_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(!sheet.output_valid(output));
+}
+
+#[test]
+fn violated_conditions_lists_the_failing_condition() {
+    let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
+    sheet.write(width, 50_i32).unwrap();
+    sheet.write(height, 40_i32).unwrap();
+    sheet.propagate().unwrap();
+    let violated: Vec<_> = sheet.violated_conditions(output).collect();
+    assert_eq!(violated.len(), 1);
+    assert_eq!(sheet.condition_name(violated[0]), Some("max_area"));
+}
+
+#[test]
+fn output_valid_updates_across_propagate_calls() {
+    let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
+    sheet.write(width, 50_i32).unwrap();
+    sheet.write(height, 40_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(!sheet.output_valid(output));
+
+    sheet.write(height, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(sheet.output_valid(output));
+}
+
+#[test]
+fn condition_function_error_aborts_propagate_with_method_failed() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet
+        .add_output(
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            vec![(
+                "always_errors",
+                Condition::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("check failed"))),
+            )],
+        )
+        .unwrap();
+    assert!(matches!(sheet.propagate(), Err(Error::MethodFailed(_))));
 }

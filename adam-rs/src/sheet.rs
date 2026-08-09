@@ -4,7 +4,7 @@
 //! destroyed when the sheet is dropped.
 
 use std::any::{Any, TypeId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use slotmap::SlotMap;
 
@@ -64,6 +64,10 @@ pub struct Sheet {
     outputs: SlotMap<OutputId, OutputData>,
     /// All conditions registered on this sheet, across all outputs.
     conditions: SlotMap<ConditionId, ConditionData>,
+    /// Conditions that evaluated `false` as of the last `propagate()` call, grouped by
+    /// output. Sparse: an output with no entry had all its conditions hold. Not
+    /// recomputed by `propagate_without_replan`.
+    last_violated: HashMap<OutputId, Vec<ConditionId>>,
 }
 
 impl Sheet {
@@ -82,6 +86,7 @@ impl Sheet {
             terminal_cells: HashSet::new(),
             outputs: SlotMap::with_key(),
             conditions: SlotMap::with_key(),
+            last_violated: HashMap::new(),
         }
     }
 
@@ -494,6 +499,27 @@ impl Sheet {
         self.conditions.get(id).map(|c| c.inputs.as_slice())
     }
 
+    /// Returns `true` if every condition on `id` held as of the last `propagate()` call.
+    ///
+    /// Returns `false` if no propagation has run yet. Also returns `true` for an `id`
+    /// that is not a live output in this sheet, since no condition can have failed
+    /// for an output that doesn't exist.
+    pub fn output_valid(&self, id: OutputId) -> bool {
+        if self.last_plan.is_none() {
+            return false;
+        }
+        !self.last_violated.contains_key(&id)
+    }
+
+    /// Iterates the conditions on `id` that evaluated to `false` as of the last
+    /// `propagate()` call.
+    ///
+    /// - Postcondition: empty if `id`'s conditions all held, `id` is not a live
+    ///   output in this sheet, or no propagation has run yet.
+    pub fn violated_conditions(&self, id: OutputId) -> impl Iterator<Item = ConditionId> + '_ {
+        self.last_violated.get(&id).into_iter().flatten().copied()
+    }
+
     /// Writes a value to a cell, incrementing the cell's write-recency strength.
     ///
     /// Each successful `write` increments a global monotonic counter and assigns
@@ -832,6 +858,24 @@ impl Sheet {
                 self.changed_cells.push(id);
             }
         }
+
+        // Phase 6: evaluate every registered condition against current cell values.
+        let mut last_violated: HashMap<OutputId, Vec<ConditionId>> = HashMap::new();
+        for (condition_id, condition) in self.conditions.iter() {
+            let inputs: Vec<&dyn Any> = condition
+                .inputs
+                .iter()
+                .map(|&id| self.cells[id].effective())
+                .collect();
+            let holds = (condition.function)(&inputs).map_err(Error::MethodFailed)?;
+            if !holds {
+                last_violated
+                    .entry(condition.output)
+                    .or_default()
+                    .push(condition_id);
+            }
+        }
+        self.last_violated = last_violated;
 
         self.last_forced = Some(plan.forced_outputs);
         self.last_forced_relationships = Some(plan.forced_relationships);
