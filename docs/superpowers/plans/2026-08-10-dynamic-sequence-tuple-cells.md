@@ -10,15 +10,18 @@ evaluation — all demonstrated end-to-end through `adam-rs`'s existing, unmodif
 
 **Architecture:** `DynamicSequence` owns a `RawStack` (sized to its own elements' actual max
 alignment, never a blanket constant) plus a `Vec<SequenceElement>` shape descriptor carrying each
-element's `TypeId`, offset, size, align, and per-element `drop`/`clone`/`eq` function pointers. A
-new `TupleSequence` trait (hand-written per arity, mirroring `list_traits.rs`'s existing `IntoList`
-convention) converts a concrete Rust tuple to/from that byte layout. `DynSegment` gains a method to
-reconstruct a live on-stack CEL tuple result directly as a concrete Rust tuple. `adam-rs` itself is
-not modified at all — its `Sheet`/`Method`/`Condition` API is already fully generic over
-`Any + PartialEq + 'static`.
+element's `TypeId`, offset, size, align, and per-element `drop`/`clone`/`eq` function pointers. All
+the actual byte-layout work (offsets, writes, reads, clones) is implemented exactly once,
+generically, via a `SequenceList` trait over the cons-list `tuple_list.rs`'s existing
+`IntoTupleList` already produces (`()` and `(H, T)` — two impls cover every arity). A thin
+`TupleSequence` trait then bridges each concrete Rust tuple arity to/from that cons-list via a
+single, fully-safe destructuring line per arity (the reverse of `IntoTupleList::into_tuple_list`).
+`DynSegment` gains a method to reconstruct a live on-stack CEL tuple result directly as a concrete
+Rust tuple. `adam-rs` itself is not modified at all — its `Sheet`/`Method`/`Condition` API is
+already fully generic over `Any + PartialEq + 'static`.
 
-**Tech Stack:** Rust, `cel-runtime` (`RawStack`, `DynSegment`), `anyhow` for fallible ops,
-`adam-rs` (dev-dependency only, for the acceptance tests).
+**Tech Stack:** Rust, `cel-runtime` (`RawStack`, `DynSegment`, `tuple_list::IntoTupleList`),
+`anyhow` for fallible ops, `adam-rs` (dev-dependency only, for the acceptance tests).
 
 **Reference:** `docs/superpowers/specs/2026-08-10-dynamic-sequence-tuple-cells-design.md`.
 
@@ -32,7 +35,7 @@ not modified at all — its `Sheet`/`Method`/`Condition` API is already fully ge
 - Unit tests are derived from contract/public interface only — never from implementation internals.
 - Run `cargo test -p cel-runtime` after every task's implementation step; run the full
   `cargo test --workspace` and `cargo clippy --workspace --exclude begin --all-targets -- -D warnings`
-  before the final commit of the whole plan (Task 13).
+  before the final commit of the whole plan (Task 11).
 - No heap allocation beyond exactly one per `DynamicSequence` (its own `RawStack`'s backing buffer).
 
 ---
@@ -177,7 +180,9 @@ module only — no production code yet):
 //! `DynSegment` evaluation, and can be stored directly as an `adam_rs::Sheet` cell's value.
 //!
 //! Converts type-safely to and from concrete, nestable Rust tuples via the [`TupleSequence`]
-//! trait, implemented for arities 1 through 12.
+//! trait, implemented for arities 1 through 12. All the actual byte-layout work is implemented
+//! exactly once, generically, by [`SequenceList`], over the cons-list `tuple_list.rs`'s
+//! `IntoTupleList` already produces.
 
 use crate::memory::align_index;
 use std::any::TypeId;
@@ -346,14 +351,19 @@ git commit -m "feat(cel-runtime): add dynamic_sequence module with SequenceEleme
 
 ---
 
-### Task 3: `TupleSequence` trait + arities 1–3
+### Task 3: `SequenceList` — the generic cons-list layout engine
 
 **Files:**
 - Modify: `cel-runtime/src/dynamic_sequence.rs`
 
 **Interfaces:**
 - Consumes: `push_element`, `SequenceElement` (Task 2).
-- Produces: `pub trait TupleSequence { fn append_shape(...) -> usize; unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]); unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self; unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self; }`, implemented for `(A,)`, `(A, B)`, `(A, B, C)`.
+- Produces: `pub trait SequenceList: Sized { fn append_shape(...) -> usize; unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]); unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self; unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self; }`, implemented for `()` and `(H, T)`.
+
+This is the entire mechanical, unsafe, byte-layout engine — written exactly twice, covering every
+tuple arity generically. `()` and `(H, T)` are precisely the two shapes `tuple_list.rs`'s
+`IntoTupleList::into_tuple_list()` ever produces (e.g. `(1, 2, 3).into_tuple_list() == (1, (2, (3,
+())))`), so no per-arity duplication of this logic is needed anywhere in this plan.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -361,197 +371,142 @@ Add to the `tests` module in `cel-runtime/src/dynamic_sequence.rs`:
 
 ```rust
     #[test]
-    fn arity_1_shape_write_read_clone_round_trip() {
+    fn sequence_list_base_case_is_a_no_op() {
         let mut shape = Vec::new();
         let mut max_align = 1usize;
-        <(i32,)>::append_shape(&mut shape, 0, &mut max_align);
-        let offsets: Vec<usize> = shape.iter().map(|e| e.offset).collect();
-
-        let mut buf = [0u8; 4];
-        unsafe { (42i32,).write_into(buf.as_mut_ptr(), &offsets) };
-        let cloned: (i32,) = unsafe { <(i32,)>::clone_from(buf.as_ptr(), &offsets) };
-        assert_eq!(cloned, (42,));
-        let read: (i32,) = unsafe { <(i32,)>::read_from(buf.as_ptr(), &offsets) };
-        assert_eq!(read, (42,));
+        let end = <()>::append_shape(&mut shape, 0, &mut max_align);
+        assert_eq!(end, 0);
+        assert!(shape.is_empty());
     }
 
     #[test]
-    fn arity_2_shape_write_read_clone_round_trip() {
+    fn sequence_list_cons_case_round_trips_two_elements() {
         let mut shape = Vec::new();
         let mut max_align = 1usize;
-        <(i32, f64)>::append_shape(&mut shape, 0, &mut max_align);
+        <(i32, (f64, ()))>::append_shape(&mut shape, 0, &mut max_align);
         assert_eq!(shape[0].offset, 0);
-        assert_eq!(shape[1].offset, 8); // i32 at [0,4), f64 aligned up to 8
+        assert_eq!(shape[1].offset, 8); // i32 at [0,4); f64 aligned up to 8
         let offsets: Vec<usize> = shape.iter().map(|e| e.offset).collect();
 
         let mut buf = [0u8; 16];
-        unsafe { (7i32, 2.5f64).write_into(buf.as_mut_ptr(), &offsets) };
-        let cloned: (i32, f64) = unsafe { <(i32, f64)>::clone_from(buf.as_ptr(), &offsets) };
-        assert_eq!(cloned, (7, 2.5));
-        let read: (i32, f64) = unsafe { <(i32, f64)>::read_from(buf.as_ptr(), &offsets) };
-        assert_eq!(read, (7, 2.5));
+        let list = (7i32, (2.5f64, ()));
+        unsafe { list.write_into(buf.as_mut_ptr(), &offsets) };
+        let cloned = unsafe { <(i32, (f64, ()))>::clone_from(buf.as_ptr(), &offsets) };
+        assert_eq!(cloned, (7, (2.5, ())));
+        let read = unsafe { <(i32, (f64, ()))>::read_from(buf.as_ptr(), &offsets) };
+        assert_eq!(read, (7, (2.5, ())));
     }
 
     #[test]
-    fn arity_3_with_nested_tuple_element_round_trips() {
+    fn sequence_list_supports_nested_tuple_elements() {
         // A nested tuple field needs no special handling: (i32, i32) is just an
         // ordinary 'static + Clone + PartialEq element type here.
         let mut shape = Vec::new();
         let mut max_align = 1usize;
-        <(i32, (i32, i32), bool)>::append_shape(&mut shape, 0, &mut max_align);
+        <(i32, ((i32, i32), (bool, ())))>::append_shape(&mut shape, 0, &mut max_align);
         let offsets: Vec<usize> = shape.iter().map(|e| e.offset).collect();
 
         let mut buf = [0u8; 16];
-        let value = (1i32, (2i32, 3i32), true);
-        unsafe { value.write_into(buf.as_mut_ptr(), &offsets) };
-        let cloned: (i32, (i32, i32), bool) =
-            unsafe { <(i32, (i32, i32), bool)>::clone_from(buf.as_ptr(), &offsets) };
-        assert_eq!(cloned, (1, (2, 3), true));
-        let read: (i32, (i32, i32), bool) =
-            unsafe { <(i32, (i32, i32), bool)>::read_from(buf.as_ptr(), &offsets) };
-        assert_eq!(read, (1, (2, 3), true));
+        let list = (1i32, ((2i32, 3i32), (true, ())));
+        unsafe { list.write_into(buf.as_mut_ptr(), &offsets) };
+        let read = unsafe { <(i32, ((i32, i32), (bool, ())))>::read_from(buf.as_ptr(), &offsets) };
+        assert_eq!(read, (1, ((2, 3), (true, ()))));
     }
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p cel-runtime dynamic_sequence:: -- --exact arity_1_shape_write_read_clone_round_trip arity_2_shape_write_read_clone_round_trip arity_3_with_nested_tuple_element_round_trips`
+Run: `cargo test -p cel-runtime dynamic_sequence:: -- --exact sequence_list_base_case_is_a_no_op sequence_list_cons_case_round_trips_two_elements sequence_list_supports_nested_tuple_elements`
 Expected: FAIL with "no method named `append_shape`" (trait doesn't exist yet).
 
-- [ ] **Step 3: Implement the trait and arities 1–3**
+- [ ] **Step 3: Implement `SequenceList`**
 
 Add to `cel-runtime/src/dynamic_sequence.rs`, after `push_element` (before the `tests` module):
 
 ```rust
-/// Describes a concrete, `'static` Rust tuple's byte layout as a sequence of
-/// [`SequenceElement`]s, and converts between that layout and `Self` by value.
+/// Cons-list (`()` or `(H, T)`, matching `tuple_list.rs`'s `IntoTupleList` output) that knows how
+/// to lay itself out as a [`DynamicSequence`] shape and move/clone itself to and from raw bytes
+/// at that layout.
 ///
-/// Implemented for tuples of arity 1 through 12 — the same range `cel-runtime`'s `IntoList`
-/// supports. A nested tuple field needs no special handling: it's simply an ordinary
-/// `'static + Clone + PartialEq` element type to its enclosing tuple's own impl.
-pub trait TupleSequence: Sized {
-    /// Appends this tuple's elements (declaration order) to `out`, computing each one's offset
+/// Implemented exactly twice — for `()` and `(H, T)` — covering every tuple arity generically; no
+/// per-arity unsafe code is needed here or anywhere downstream.
+pub trait SequenceList: Sized {
+    /// Appends this list's own elements (head-first order) to `out`, computing each one's offset
     /// from `offset` (the byte position immediately after the previous element) and folding each
     /// element's alignment into `*max_align`. Returns the byte position immediately after the
     /// last element appended.
     ///
-    /// - Complexity: O(arity).
+    /// - Complexity: O(length).
     fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize;
 
-    /// Writes this tuple's fields into `dst`, at the positions in `offsets` (which must be
-    /// exactly this tuple's own element offsets, in declaration order, as produced by
+    /// Writes this list's fields into `dst`, at the positions in `offsets` (which must be
+    /// exactly this list's own element offsets, head-first, as produced by
     /// [`append_shape`](Self::append_shape)), consuming `self`.
     ///
-    /// - Complexity: O(arity).
+    /// - Complexity: O(length).
     ///
     /// # Safety
-    /// `dst` must be valid for writes covering every offset + size of this tuple's elements.
+    /// `dst` must be valid for writes covering every offset + size of this list's elements.
     unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]);
 
-    /// Reads this tuple back out of `src` by moving each field's bytes, at the positions in
+    /// Reads this list back out of `src` by moving each field's bytes, at the positions in
     /// `offsets`.
     ///
-    /// - Complexity: O(arity).
+    /// - Complexity: O(length).
     ///
     /// # Safety
     /// `src` must point to a live value whose layout matches `offsets`; the caller must not
     /// separately drop those bytes afterward.
     unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self;
 
-    /// Reads this tuple back out of `src` by cloning each field's bytes, at the positions in
+    /// Reads this list back out of `src` by cloning each field's bytes, at the positions in
     /// `offsets`, leaving `src` untouched.
     ///
-    /// - Complexity: O(arity).
+    /// - Complexity: O(length).
     ///
     /// # Safety
     /// `src` must point to a live value whose layout matches `offsets`.
     unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self;
 }
 
-impl<A: 'static + Clone + PartialEq> TupleSequence for (A,) {
-    fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        push_element::<A>(out, offset, max_align)
+impl SequenceList for () {
+    fn append_shape(_out: &mut Vec<SequenceElement>, offset: usize, _max_align: &mut usize) -> usize {
+        offset
     }
 
-    unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
-        unsafe { std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0) };
-    }
+    unsafe fn write_into(self, _dst: *mut u8, _offsets: &[usize]) {}
 
-    unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
-        (unsafe { std::ptr::read(src.add(offsets[0]).cast::<A>()) },)
-    }
+    unsafe fn read_from(_src: *const u8, _offsets: &[usize]) -> Self {}
 
-    unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
-        (unsafe { (*src.add(offsets[0]).cast::<A>()).clone() },)
-    }
+    unsafe fn clone_from(_src: *const u8, _offsets: &[usize]) -> Self {}
 }
 
-impl<A: 'static + Clone + PartialEq, B: 'static + Clone + PartialEq> TupleSequence for (A, B) {
+impl<H: 'static + Clone + PartialEq, T: SequenceList> SequenceList for (H, T) {
     fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        let offset = push_element::<A>(out, offset, max_align);
-        push_element::<B>(out, offset, max_align)
+        let offset = push_element::<H>(out, offset, max_align);
+        T::append_shape(out, offset, max_align)
     }
 
     unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
         unsafe {
-            std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0);
-            std::ptr::write(dst.add(offsets[1]).cast::<B>(), self.1);
+            std::ptr::write(dst.add(offsets[0]).cast::<H>(), self.0);
+            T::write_into(self.1, dst, &offsets[1..]);
         }
     }
 
     unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
         unsafe {
-            (
-                std::ptr::read(src.add(offsets[0]).cast::<A>()),
-                std::ptr::read(src.add(offsets[1]).cast::<B>()),
-            )
+            let h = std::ptr::read(src.add(offsets[0]).cast::<H>());
+            let t = T::read_from(src, &offsets[1..]);
+            (h, t)
         }
     }
 
     unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
         unsafe {
-            (
-                (*src.add(offsets[0]).cast::<A>()).clone(),
-                (*src.add(offsets[1]).cast::<B>()).clone(),
-            )
-        }
-    }
-}
-
-impl<A: 'static + Clone + PartialEq, B: 'static + Clone + PartialEq, C: 'static + Clone + PartialEq>
-    TupleSequence for (A, B, C)
-{
-    fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        let offset = push_element::<A>(out, offset, max_align);
-        let offset = push_element::<B>(out, offset, max_align);
-        push_element::<C>(out, offset, max_align)
-    }
-
-    unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
-        unsafe {
-            std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0);
-            std::ptr::write(dst.add(offsets[1]).cast::<B>(), self.1);
-            std::ptr::write(dst.add(offsets[2]).cast::<C>(), self.2);
-        }
-    }
-
-    unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                std::ptr::read(src.add(offsets[0]).cast::<A>()),
-                std::ptr::read(src.add(offsets[1]).cast::<B>()),
-                std::ptr::read(src.add(offsets[2]).cast::<C>()),
-            )
-        }
-    }
-
-    unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                (*src.add(offsets[0]).cast::<A>()).clone(),
-                (*src.add(offsets[1]).cast::<B>()).clone(),
-                (*src.add(offsets[2]).cast::<C>()).clone(),
-            )
+            let h = (*src.add(offsets[0]).cast::<H>()).clone();
+            let t = T::clone_from(src, &offsets[1..]);
+            (h, t)
         }
     }
 }
@@ -567,54 +522,113 @@ Expected: PASS (all tests in the module).
 ```bash
 cargo fmt --all
 git add cel-runtime/src/dynamic_sequence.rs
-git commit -m "feat(cel-runtime): add TupleSequence trait and impls for arity 1-3"
+git commit -m "feat(cel-runtime): add SequenceList generic cons-list layout engine"
 ```
 
 ---
 
-### Task 4: `TupleSequence` arities 4–6
+### Task 4: `TupleSequence` — arity 1–12 via one-line reversal of `IntoTupleList`
 
 **Files:**
 - Modify: `cel-runtime/src/dynamic_sequence.rs`
+- Modify: `cel-runtime/src/lib.rs` (re-export `tuple_list`)
 
 **Interfaces:**
-- Consumes: `TupleSequence`, `push_element` (Tasks 2–3).
-- Produces: `TupleSequence` impls for `(A,B,C,D)`, `(A,B,C,D,E)`, `(A,B,C,D,E,F)`.
+- Consumes: `SequenceList` (Task 3); `crate::tuple_list::IntoTupleList` (existing).
+- Produces: `pub trait TupleSequence: IntoTupleList + Sized where Self::Output: SequenceList { fn from_list(list: Self::Output) -> Self; }`, implemented for tuples of arity 1 through 12.
 
-- [ ] **Step 1: Write the failing test**
+Each per-arity impl is now a single, fully-safe destructuring line — the reverse of
+`IntoTupleList::into_tuple_list`. `IntoTupleList` itself (the forward direction, `T -> Self::Output`)
+already exists for every one of these arities via the existing blanket
+`impl<T: IntoList> IntoTupleList for T` in `tuple_list.rs`, backed by `list_traits.rs`'s existing
+`IntoList` impls — nothing about that forward direction needs to be written in this plan.
+
+- [ ] **Step 1: Write the failing tests**
 
 Add to the `tests` module in `cel-runtime/src/dynamic_sequence.rs`:
 
 ```rust
     #[test]
-    fn arity_6_shape_write_read_clone_round_trip() {
-        let mut shape = Vec::new();
-        let mut max_align = 1usize;
-        <(i32, i32, i32, i32, i32, i32)>::append_shape(&mut shape, 0, &mut max_align);
-        let offsets: Vec<usize> = shape.iter().map(|e| e.offset).collect();
-
-        let mut buf = [0u8; 24];
-        let value = (1i32, 2i32, 3i32, 4i32, 5i32, 6i32);
-        unsafe { value.write_into(buf.as_mut_ptr(), &offsets) };
-        let cloned: (i32, i32, i32, i32, i32, i32) =
-            unsafe { <(i32, i32, i32, i32, i32, i32)>::clone_from(buf.as_ptr(), &offsets) };
-        assert_eq!(cloned, (1, 2, 3, 4, 5, 6));
-        let read: (i32, i32, i32, i32, i32, i32) =
-            unsafe { <(i32, i32, i32, i32, i32, i32)>::read_from(buf.as_ptr(), &offsets) };
-        assert_eq!(read, (1, 2, 3, 4, 5, 6));
+    fn tuple_sequence_from_list_reverses_into_tuple_list_for_several_arities() {
+        assert_eq!(<(i32,)>::from_list((1i32, ())), (1,));
+        assert_eq!(
+            <(i32, f64)>::from_list((1i32, (2.5f64, ()))),
+            (1, 2.5)
+        );
+        assert_eq!(
+            <(i32, f64, bool)>::from_list((1i32, (2.5f64, (true, ())))),
+            (1, 2.5, true)
+        );
+        let full_arity_12 = (1i32, 2i32, 3i32, 4i32, 5i32, 6i32, 7i32, 8i32, 9i32, 10i32, 11i32, 12i32);
+        assert_eq!(
+            <(i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32)>::from_list(
+                full_arity_12.into_tuple_list()
+            ),
+            full_arity_12
+        );
     }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p cel-runtime dynamic_sequence::tests::arity_6_shape_write_read_clone_round_trip`
-Expected: FAIL — `TupleSequence` is not implemented for a 6-tuple.
+Run: `cargo test -p cel-runtime dynamic_sequence::tests::tuple_sequence_from_list_reverses_into_tuple_list_for_several_arities`
+Expected: FAIL with "no function or associated item named `from_list`" (trait doesn't exist yet).
 
-- [ ] **Step 3: Implement arities 4–6**
+- [ ] **Step 3: Implement `TupleSequence` and arities 1–12**
 
-Add to `cel-runtime/src/dynamic_sequence.rs`, after the arity-3 impl:
+Add `use crate::tuple_list::IntoTupleList;` to the imports at the top of
+`cel-runtime/src/dynamic_sequence.rs`.
+
+Add to `cel-runtime/src/lib.rs`, in the `pub use` block, un-commenting the existing line:
 
 ```rust
+pub use tuple_list::*;
+```
+
+Add to `cel-runtime/src/dynamic_sequence.rs`, after the `(H, T)` `SequenceList` impl (before the
+`tests` module):
+
+```rust
+/// Bridges a concrete Rust tuple `T` to and from its [`IntoTupleList`] cons-list representation,
+/// so [`DynamicSequence`] can convert to/from `T` while all the actual byte-layout work is
+/// handled generically by [`SequenceList`].
+///
+/// Implemented for tuples of arity 1 through 12 — the same range `cel-runtime`'s `IntoList`
+/// supports — via a single-line reversal of [`IntoTupleList::into_tuple_list`]; no unsafe code
+/// appears in any of these impls. A nested tuple field needs no special handling: it's simply an
+/// ordinary `'static + Clone + PartialEq` element type to its enclosing tuple's own impl.
+pub trait TupleSequence: IntoTupleList + Sized
+where
+    Self::Output: SequenceList,
+{
+    /// Reconstructs `Self` from its cons-list representation — the reverse of
+    /// [`IntoTupleList::into_tuple_list`].
+    fn from_list(list: Self::Output) -> Self;
+}
+
+impl<A: 'static + Clone + PartialEq> TupleSequence for (A,) {
+    fn from_list(list: Self::Output) -> Self {
+        let (a, ()) = list;
+        (a,)
+    }
+}
+
+impl<A: 'static + Clone + PartialEq, B: 'static + Clone + PartialEq> TupleSequence for (A, B) {
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, ())) = list;
+        (a, b)
+    }
+}
+
+impl<A: 'static + Clone + PartialEq, B: 'static + Clone + PartialEq, C: 'static + Clone + PartialEq>
+    TupleSequence for (A, B, C)
+{
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, ()))) = list;
+        (a, b, c)
+    }
+}
+
 impl<
     A: 'static + Clone + PartialEq,
     B: 'static + Clone + PartialEq,
@@ -622,42 +636,9 @@ impl<
     D: 'static + Clone + PartialEq,
 > TupleSequence for (A, B, C, D)
 {
-    fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        let offset = push_element::<A>(out, offset, max_align);
-        let offset = push_element::<B>(out, offset, max_align);
-        let offset = push_element::<C>(out, offset, max_align);
-        push_element::<D>(out, offset, max_align)
-    }
-
-    unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
-        unsafe {
-            std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0);
-            std::ptr::write(dst.add(offsets[1]).cast::<B>(), self.1);
-            std::ptr::write(dst.add(offsets[2]).cast::<C>(), self.2);
-            std::ptr::write(dst.add(offsets[3]).cast::<D>(), self.3);
-        }
-    }
-
-    unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                std::ptr::read(src.add(offsets[0]).cast::<A>()),
-                std::ptr::read(src.add(offsets[1]).cast::<B>()),
-                std::ptr::read(src.add(offsets[2]).cast::<C>()),
-                std::ptr::read(src.add(offsets[3]).cast::<D>()),
-            )
-        }
-    }
-
-    unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                (*src.add(offsets[0]).cast::<A>()).clone(),
-                (*src.add(offsets[1]).cast::<B>()).clone(),
-                (*src.add(offsets[2]).cast::<C>()).clone(),
-                (*src.add(offsets[3]).cast::<D>()).clone(),
-            )
-        }
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, ())))) = list;
+        (a, b, c, d)
     }
 }
 
@@ -669,46 +650,9 @@ impl<
     E: 'static + Clone + PartialEq,
 > TupleSequence for (A, B, C, D, E)
 {
-    fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        let offset = push_element::<A>(out, offset, max_align);
-        let offset = push_element::<B>(out, offset, max_align);
-        let offset = push_element::<C>(out, offset, max_align);
-        let offset = push_element::<D>(out, offset, max_align);
-        push_element::<E>(out, offset, max_align)
-    }
-
-    unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
-        unsafe {
-            std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0);
-            std::ptr::write(dst.add(offsets[1]).cast::<B>(), self.1);
-            std::ptr::write(dst.add(offsets[2]).cast::<C>(), self.2);
-            std::ptr::write(dst.add(offsets[3]).cast::<D>(), self.3);
-            std::ptr::write(dst.add(offsets[4]).cast::<E>(), self.4);
-        }
-    }
-
-    unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                std::ptr::read(src.add(offsets[0]).cast::<A>()),
-                std::ptr::read(src.add(offsets[1]).cast::<B>()),
-                std::ptr::read(src.add(offsets[2]).cast::<C>()),
-                std::ptr::read(src.add(offsets[3]).cast::<D>()),
-                std::ptr::read(src.add(offsets[4]).cast::<E>()),
-            )
-        }
-    }
-
-    unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                (*src.add(offsets[0]).cast::<A>()).clone(),
-                (*src.add(offsets[1]).cast::<B>()).clone(),
-                (*src.add(offsets[2]).cast::<C>()).clone(),
-                (*src.add(offsets[3]).cast::<D>()).clone(),
-                (*src.add(offsets[4]).cast::<E>()).clone(),
-            )
-        }
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, ()))))) = list;
+        (a, b, c, d, e)
     }
 }
 
@@ -721,114 +665,12 @@ impl<
     F: 'static + Clone + PartialEq,
 > TupleSequence for (A, B, C, D, E, F)
 {
-    fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        let offset = push_element::<A>(out, offset, max_align);
-        let offset = push_element::<B>(out, offset, max_align);
-        let offset = push_element::<C>(out, offset, max_align);
-        let offset = push_element::<D>(out, offset, max_align);
-        let offset = push_element::<E>(out, offset, max_align);
-        push_element::<F>(out, offset, max_align)
-    }
-
-    unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
-        unsafe {
-            std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0);
-            std::ptr::write(dst.add(offsets[1]).cast::<B>(), self.1);
-            std::ptr::write(dst.add(offsets[2]).cast::<C>(), self.2);
-            std::ptr::write(dst.add(offsets[3]).cast::<D>(), self.3);
-            std::ptr::write(dst.add(offsets[4]).cast::<E>(), self.4);
-            std::ptr::write(dst.add(offsets[5]).cast::<F>(), self.5);
-        }
-    }
-
-    unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                std::ptr::read(src.add(offsets[0]).cast::<A>()),
-                std::ptr::read(src.add(offsets[1]).cast::<B>()),
-                std::ptr::read(src.add(offsets[2]).cast::<C>()),
-                std::ptr::read(src.add(offsets[3]).cast::<D>()),
-                std::ptr::read(src.add(offsets[4]).cast::<E>()),
-                std::ptr::read(src.add(offsets[5]).cast::<F>()),
-            )
-        }
-    }
-
-    unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                (*src.add(offsets[0]).cast::<A>()).clone(),
-                (*src.add(offsets[1]).cast::<B>()).clone(),
-                (*src.add(offsets[2]).cast::<C>()).clone(),
-                (*src.add(offsets[3]).cast::<D>()).clone(),
-                (*src.add(offsets[4]).cast::<E>()).clone(),
-                (*src.add(offsets[5]).cast::<F>()).clone(),
-            )
-        }
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, ())))))) = list;
+        (a, b, c, d, e, f)
     }
 }
-```
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cargo test -p cel-runtime dynamic_sequence::`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-cargo fmt --all
-git add cel-runtime/src/dynamic_sequence.rs
-git commit -m "feat(cel-runtime): add TupleSequence impls for arity 4-6"
-```
-
----
-
-### Task 5: `TupleSequence` arities 7–9
-
-**Files:**
-- Modify: `cel-runtime/src/dynamic_sequence.rs`
-
-**Interfaces:**
-- Consumes: `TupleSequence`, `push_element` (Tasks 2–4).
-- Produces: `TupleSequence` impls for `(A..G)`, `(A..H)`, `(A..I)` (7, 8, 9 elements).
-
-- [ ] **Step 1: Write the failing test**
-
-Add to the `tests` module in `cel-runtime/src/dynamic_sequence.rs`:
-
-```rust
-    #[test]
-    fn arity_9_shape_write_read_clone_round_trip() {
-        let mut shape = Vec::new();
-        let mut max_align = 1usize;
-        <(i32, i32, i32, i32, i32, i32, i32, i32, i32)>::append_shape(&mut shape, 0, &mut max_align);
-        let offsets: Vec<usize> = shape.iter().map(|e| e.offset).collect();
-
-        let mut buf = [0u8; 36];
-        let value = (1i32, 2i32, 3i32, 4i32, 5i32, 6i32, 7i32, 8i32, 9i32);
-        unsafe { value.write_into(buf.as_mut_ptr(), &offsets) };
-        let cloned: (i32, i32, i32, i32, i32, i32, i32, i32, i32) = unsafe {
-            <(i32, i32, i32, i32, i32, i32, i32, i32, i32)>::clone_from(buf.as_ptr(), &offsets)
-        };
-        assert_eq!(cloned, (1, 2, 3, 4, 5, 6, 7, 8, 9));
-        let read: (i32, i32, i32, i32, i32, i32, i32, i32, i32) = unsafe {
-            <(i32, i32, i32, i32, i32, i32, i32, i32, i32)>::read_from(buf.as_ptr(), &offsets)
-        };
-        assert_eq!(read, (1, 2, 3, 4, 5, 6, 7, 8, 9));
-    }
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p cel-runtime dynamic_sequence::tests::arity_9_shape_write_read_clone_round_trip`
-Expected: FAIL — `TupleSequence` is not implemented for a 9-tuple.
-
-- [ ] **Step 3: Implement arities 7–9**
-
-Add to `cel-runtime/src/dynamic_sequence.rs`, after the arity-6 impl:
-
-```rust
 impl<
     A: 'static + Clone + PartialEq,
     B: 'static + Clone + PartialEq,
@@ -839,54 +681,9 @@ impl<
     G: 'static + Clone + PartialEq,
 > TupleSequence for (A, B, C, D, E, F, G)
 {
-    fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        let offset = push_element::<A>(out, offset, max_align);
-        let offset = push_element::<B>(out, offset, max_align);
-        let offset = push_element::<C>(out, offset, max_align);
-        let offset = push_element::<D>(out, offset, max_align);
-        let offset = push_element::<E>(out, offset, max_align);
-        let offset = push_element::<F>(out, offset, max_align);
-        push_element::<G>(out, offset, max_align)
-    }
-
-    unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
-        unsafe {
-            std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0);
-            std::ptr::write(dst.add(offsets[1]).cast::<B>(), self.1);
-            std::ptr::write(dst.add(offsets[2]).cast::<C>(), self.2);
-            std::ptr::write(dst.add(offsets[3]).cast::<D>(), self.3);
-            std::ptr::write(dst.add(offsets[4]).cast::<E>(), self.4);
-            std::ptr::write(dst.add(offsets[5]).cast::<F>(), self.5);
-            std::ptr::write(dst.add(offsets[6]).cast::<G>(), self.6);
-        }
-    }
-
-    unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                std::ptr::read(src.add(offsets[0]).cast::<A>()),
-                std::ptr::read(src.add(offsets[1]).cast::<B>()),
-                std::ptr::read(src.add(offsets[2]).cast::<C>()),
-                std::ptr::read(src.add(offsets[3]).cast::<D>()),
-                std::ptr::read(src.add(offsets[4]).cast::<E>()),
-                std::ptr::read(src.add(offsets[5]).cast::<F>()),
-                std::ptr::read(src.add(offsets[6]).cast::<G>()),
-            )
-        }
-    }
-
-    unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                (*src.add(offsets[0]).cast::<A>()).clone(),
-                (*src.add(offsets[1]).cast::<B>()).clone(),
-                (*src.add(offsets[2]).cast::<C>()).clone(),
-                (*src.add(offsets[3]).cast::<D>()).clone(),
-                (*src.add(offsets[4]).cast::<E>()).clone(),
-                (*src.add(offsets[5]).cast::<F>()).clone(),
-                (*src.add(offsets[6]).cast::<G>()).clone(),
-            )
-        }
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, ()))))))) = list;
+        (a, b, c, d, e, f, g)
     }
 }
 
@@ -901,58 +698,9 @@ impl<
     H: 'static + Clone + PartialEq,
 > TupleSequence for (A, B, C, D, E, F, G, H)
 {
-    fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        let offset = push_element::<A>(out, offset, max_align);
-        let offset = push_element::<B>(out, offset, max_align);
-        let offset = push_element::<C>(out, offset, max_align);
-        let offset = push_element::<D>(out, offset, max_align);
-        let offset = push_element::<E>(out, offset, max_align);
-        let offset = push_element::<F>(out, offset, max_align);
-        let offset = push_element::<G>(out, offset, max_align);
-        push_element::<H>(out, offset, max_align)
-    }
-
-    unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
-        unsafe {
-            std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0);
-            std::ptr::write(dst.add(offsets[1]).cast::<B>(), self.1);
-            std::ptr::write(dst.add(offsets[2]).cast::<C>(), self.2);
-            std::ptr::write(dst.add(offsets[3]).cast::<D>(), self.3);
-            std::ptr::write(dst.add(offsets[4]).cast::<E>(), self.4);
-            std::ptr::write(dst.add(offsets[5]).cast::<F>(), self.5);
-            std::ptr::write(dst.add(offsets[6]).cast::<G>(), self.6);
-            std::ptr::write(dst.add(offsets[7]).cast::<H>(), self.7);
-        }
-    }
-
-    unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                std::ptr::read(src.add(offsets[0]).cast::<A>()),
-                std::ptr::read(src.add(offsets[1]).cast::<B>()),
-                std::ptr::read(src.add(offsets[2]).cast::<C>()),
-                std::ptr::read(src.add(offsets[3]).cast::<D>()),
-                std::ptr::read(src.add(offsets[4]).cast::<E>()),
-                std::ptr::read(src.add(offsets[5]).cast::<F>()),
-                std::ptr::read(src.add(offsets[6]).cast::<G>()),
-                std::ptr::read(src.add(offsets[7]).cast::<H>()),
-            )
-        }
-    }
-
-    unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                (*src.add(offsets[0]).cast::<A>()).clone(),
-                (*src.add(offsets[1]).cast::<B>()).clone(),
-                (*src.add(offsets[2]).cast::<C>()).clone(),
-                (*src.add(offsets[3]).cast::<D>()).clone(),
-                (*src.add(offsets[4]).cast::<E>()).clone(),
-                (*src.add(offsets[5]).cast::<F>()).clone(),
-                (*src.add(offsets[6]).cast::<G>()).clone(),
-                (*src.add(offsets[7]).cast::<H>()).clone(),
-            )
-        }
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, (h, ())))))))) = list;
+        (a, b, c, d, e, f, g, h)
     }
 }
 
@@ -968,134 +716,12 @@ impl<
     I: 'static + Clone + PartialEq,
 > TupleSequence for (A, B, C, D, E, F, G, H, I)
 {
-    fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        let offset = push_element::<A>(out, offset, max_align);
-        let offset = push_element::<B>(out, offset, max_align);
-        let offset = push_element::<C>(out, offset, max_align);
-        let offset = push_element::<D>(out, offset, max_align);
-        let offset = push_element::<E>(out, offset, max_align);
-        let offset = push_element::<F>(out, offset, max_align);
-        let offset = push_element::<G>(out, offset, max_align);
-        let offset = push_element::<H>(out, offset, max_align);
-        push_element::<I>(out, offset, max_align)
-    }
-
-    unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
-        unsafe {
-            std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0);
-            std::ptr::write(dst.add(offsets[1]).cast::<B>(), self.1);
-            std::ptr::write(dst.add(offsets[2]).cast::<C>(), self.2);
-            std::ptr::write(dst.add(offsets[3]).cast::<D>(), self.3);
-            std::ptr::write(dst.add(offsets[4]).cast::<E>(), self.4);
-            std::ptr::write(dst.add(offsets[5]).cast::<F>(), self.5);
-            std::ptr::write(dst.add(offsets[6]).cast::<G>(), self.6);
-            std::ptr::write(dst.add(offsets[7]).cast::<H>(), self.7);
-            std::ptr::write(dst.add(offsets[8]).cast::<I>(), self.8);
-        }
-    }
-
-    unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                std::ptr::read(src.add(offsets[0]).cast::<A>()),
-                std::ptr::read(src.add(offsets[1]).cast::<B>()),
-                std::ptr::read(src.add(offsets[2]).cast::<C>()),
-                std::ptr::read(src.add(offsets[3]).cast::<D>()),
-                std::ptr::read(src.add(offsets[4]).cast::<E>()),
-                std::ptr::read(src.add(offsets[5]).cast::<F>()),
-                std::ptr::read(src.add(offsets[6]).cast::<G>()),
-                std::ptr::read(src.add(offsets[7]).cast::<H>()),
-                std::ptr::read(src.add(offsets[8]).cast::<I>()),
-            )
-        }
-    }
-
-    unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                (*src.add(offsets[0]).cast::<A>()).clone(),
-                (*src.add(offsets[1]).cast::<B>()).clone(),
-                (*src.add(offsets[2]).cast::<C>()).clone(),
-                (*src.add(offsets[3]).cast::<D>()).clone(),
-                (*src.add(offsets[4]).cast::<E>()).clone(),
-                (*src.add(offsets[5]).cast::<F>()).clone(),
-                (*src.add(offsets[6]).cast::<G>()).clone(),
-                (*src.add(offsets[7]).cast::<H>()).clone(),
-                (*src.add(offsets[8]).cast::<I>()).clone(),
-            )
-        }
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, (h, (i, ()))))))))) = list;
+        (a, b, c, d, e, f, g, h, i)
     }
 }
-```
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cargo test -p cel-runtime dynamic_sequence::`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-cargo fmt --all
-git add cel-runtime/src/dynamic_sequence.rs
-git commit -m "feat(cel-runtime): add TupleSequence impls for arity 7-9"
-```
-
----
-
-### Task 6: `TupleSequence` arities 10–12
-
-**Files:**
-- Modify: `cel-runtime/src/dynamic_sequence.rs`
-
-**Interfaces:**
-- Consumes: `TupleSequence`, `push_element` (Tasks 2–5).
-- Produces: `TupleSequence` impls for `(A..J)`, `(A..K)`, `(A..L)` (10, 11, 12 elements).
-
-- [ ] **Step 1: Write the failing test**
-
-Add to the `tests` module in `cel-runtime/src/dynamic_sequence.rs`:
-
-```rust
-    #[test]
-    fn arity_12_shape_write_read_clone_round_trip() {
-        let mut shape = Vec::new();
-        let mut max_align = 1usize;
-        <(i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32)>::append_shape(
-            &mut shape, 0, &mut max_align,
-        );
-        let offsets: Vec<usize> = shape.iter().map(|e| e.offset).collect();
-
-        let mut buf = [0u8; 48];
-        let value = (1i32, 2i32, 3i32, 4i32, 5i32, 6i32, 7i32, 8i32, 9i32, 10i32, 11i32, 12i32);
-        unsafe { value.write_into(buf.as_mut_ptr(), &offsets) };
-        let cloned: (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32) = unsafe {
-            <(i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32)>::clone_from(
-                buf.as_ptr(),
-                &offsets,
-            )
-        };
-        assert_eq!(cloned, (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12));
-        let read: (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32) = unsafe {
-            <(i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32)>::read_from(
-                buf.as_ptr(),
-                &offsets,
-            )
-        };
-        assert_eq!(read, (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12));
-    }
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test -p cel-runtime dynamic_sequence::tests::arity_12_shape_write_read_clone_round_trip`
-Expected: FAIL — `TupleSequence` is not implemented for a 12-tuple.
-
-- [ ] **Step 3: Implement arities 10–12**
-
-Add to `cel-runtime/src/dynamic_sequence.rs`, after the arity-9 impl:
-
-```rust
 impl<
     A: 'static + Clone + PartialEq,
     B: 'static + Clone + PartialEq,
@@ -1109,66 +735,9 @@ impl<
     J: 'static + Clone + PartialEq,
 > TupleSequence for (A, B, C, D, E, F, G, H, I, J)
 {
-    fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        let offset = push_element::<A>(out, offset, max_align);
-        let offset = push_element::<B>(out, offset, max_align);
-        let offset = push_element::<C>(out, offset, max_align);
-        let offset = push_element::<D>(out, offset, max_align);
-        let offset = push_element::<E>(out, offset, max_align);
-        let offset = push_element::<F>(out, offset, max_align);
-        let offset = push_element::<G>(out, offset, max_align);
-        let offset = push_element::<H>(out, offset, max_align);
-        let offset = push_element::<I>(out, offset, max_align);
-        push_element::<J>(out, offset, max_align)
-    }
-
-    unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
-        unsafe {
-            std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0);
-            std::ptr::write(dst.add(offsets[1]).cast::<B>(), self.1);
-            std::ptr::write(dst.add(offsets[2]).cast::<C>(), self.2);
-            std::ptr::write(dst.add(offsets[3]).cast::<D>(), self.3);
-            std::ptr::write(dst.add(offsets[4]).cast::<E>(), self.4);
-            std::ptr::write(dst.add(offsets[5]).cast::<F>(), self.5);
-            std::ptr::write(dst.add(offsets[6]).cast::<G>(), self.6);
-            std::ptr::write(dst.add(offsets[7]).cast::<H>(), self.7);
-            std::ptr::write(dst.add(offsets[8]).cast::<I>(), self.8);
-            std::ptr::write(dst.add(offsets[9]).cast::<J>(), self.9);
-        }
-    }
-
-    unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                std::ptr::read(src.add(offsets[0]).cast::<A>()),
-                std::ptr::read(src.add(offsets[1]).cast::<B>()),
-                std::ptr::read(src.add(offsets[2]).cast::<C>()),
-                std::ptr::read(src.add(offsets[3]).cast::<D>()),
-                std::ptr::read(src.add(offsets[4]).cast::<E>()),
-                std::ptr::read(src.add(offsets[5]).cast::<F>()),
-                std::ptr::read(src.add(offsets[6]).cast::<G>()),
-                std::ptr::read(src.add(offsets[7]).cast::<H>()),
-                std::ptr::read(src.add(offsets[8]).cast::<I>()),
-                std::ptr::read(src.add(offsets[9]).cast::<J>()),
-            )
-        }
-    }
-
-    unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                (*src.add(offsets[0]).cast::<A>()).clone(),
-                (*src.add(offsets[1]).cast::<B>()).clone(),
-                (*src.add(offsets[2]).cast::<C>()).clone(),
-                (*src.add(offsets[3]).cast::<D>()).clone(),
-                (*src.add(offsets[4]).cast::<E>()).clone(),
-                (*src.add(offsets[5]).cast::<F>()).clone(),
-                (*src.add(offsets[6]).cast::<G>()).clone(),
-                (*src.add(offsets[7]).cast::<H>()).clone(),
-                (*src.add(offsets[8]).cast::<I>()).clone(),
-                (*src.add(offsets[9]).cast::<J>()).clone(),
-            )
-        }
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, (h, (i, (j, ())))))))))) = list;
+        (a, b, c, d, e, f, g, h, i, j)
     }
 }
 
@@ -1186,70 +755,9 @@ impl<
     K: 'static + Clone + PartialEq,
 > TupleSequence for (A, B, C, D, E, F, G, H, I, J, K)
 {
-    fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        let offset = push_element::<A>(out, offset, max_align);
-        let offset = push_element::<B>(out, offset, max_align);
-        let offset = push_element::<C>(out, offset, max_align);
-        let offset = push_element::<D>(out, offset, max_align);
-        let offset = push_element::<E>(out, offset, max_align);
-        let offset = push_element::<F>(out, offset, max_align);
-        let offset = push_element::<G>(out, offset, max_align);
-        let offset = push_element::<H>(out, offset, max_align);
-        let offset = push_element::<I>(out, offset, max_align);
-        let offset = push_element::<J>(out, offset, max_align);
-        push_element::<K>(out, offset, max_align)
-    }
-
-    unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
-        unsafe {
-            std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0);
-            std::ptr::write(dst.add(offsets[1]).cast::<B>(), self.1);
-            std::ptr::write(dst.add(offsets[2]).cast::<C>(), self.2);
-            std::ptr::write(dst.add(offsets[3]).cast::<D>(), self.3);
-            std::ptr::write(dst.add(offsets[4]).cast::<E>(), self.4);
-            std::ptr::write(dst.add(offsets[5]).cast::<F>(), self.5);
-            std::ptr::write(dst.add(offsets[6]).cast::<G>(), self.6);
-            std::ptr::write(dst.add(offsets[7]).cast::<H>(), self.7);
-            std::ptr::write(dst.add(offsets[8]).cast::<I>(), self.8);
-            std::ptr::write(dst.add(offsets[9]).cast::<J>(), self.9);
-            std::ptr::write(dst.add(offsets[10]).cast::<K>(), self.10);
-        }
-    }
-
-    unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                std::ptr::read(src.add(offsets[0]).cast::<A>()),
-                std::ptr::read(src.add(offsets[1]).cast::<B>()),
-                std::ptr::read(src.add(offsets[2]).cast::<C>()),
-                std::ptr::read(src.add(offsets[3]).cast::<D>()),
-                std::ptr::read(src.add(offsets[4]).cast::<E>()),
-                std::ptr::read(src.add(offsets[5]).cast::<F>()),
-                std::ptr::read(src.add(offsets[6]).cast::<G>()),
-                std::ptr::read(src.add(offsets[7]).cast::<H>()),
-                std::ptr::read(src.add(offsets[8]).cast::<I>()),
-                std::ptr::read(src.add(offsets[9]).cast::<J>()),
-                std::ptr::read(src.add(offsets[10]).cast::<K>()),
-            )
-        }
-    }
-
-    unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                (*src.add(offsets[0]).cast::<A>()).clone(),
-                (*src.add(offsets[1]).cast::<B>()).clone(),
-                (*src.add(offsets[2]).cast::<C>()).clone(),
-                (*src.add(offsets[3]).cast::<D>()).clone(),
-                (*src.add(offsets[4]).cast::<E>()).clone(),
-                (*src.add(offsets[5]).cast::<F>()).clone(),
-                (*src.add(offsets[6]).cast::<G>()).clone(),
-                (*src.add(offsets[7]).cast::<H>()).clone(),
-                (*src.add(offsets[8]).cast::<I>()).clone(),
-                (*src.add(offsets[9]).cast::<J>()).clone(),
-                (*src.add(offsets[10]).cast::<K>()).clone(),
-            )
-        }
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, (h, (i, (j, (k, ()))))))))))) = list;
+        (a, b, c, d, e, f, g, h, i, j, k)
     }
 }
 
@@ -1268,74 +776,9 @@ impl<
     L: 'static + Clone + PartialEq,
 > TupleSequence for (A, B, C, D, E, F, G, H, I, J, K, L)
 {
-    fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
-        let offset = push_element::<A>(out, offset, max_align);
-        let offset = push_element::<B>(out, offset, max_align);
-        let offset = push_element::<C>(out, offset, max_align);
-        let offset = push_element::<D>(out, offset, max_align);
-        let offset = push_element::<E>(out, offset, max_align);
-        let offset = push_element::<F>(out, offset, max_align);
-        let offset = push_element::<G>(out, offset, max_align);
-        let offset = push_element::<H>(out, offset, max_align);
-        let offset = push_element::<I>(out, offset, max_align);
-        let offset = push_element::<J>(out, offset, max_align);
-        let offset = push_element::<K>(out, offset, max_align);
-        push_element::<L>(out, offset, max_align)
-    }
-
-    unsafe fn write_into(self, dst: *mut u8, offsets: &[usize]) {
-        unsafe {
-            std::ptr::write(dst.add(offsets[0]).cast::<A>(), self.0);
-            std::ptr::write(dst.add(offsets[1]).cast::<B>(), self.1);
-            std::ptr::write(dst.add(offsets[2]).cast::<C>(), self.2);
-            std::ptr::write(dst.add(offsets[3]).cast::<D>(), self.3);
-            std::ptr::write(dst.add(offsets[4]).cast::<E>(), self.4);
-            std::ptr::write(dst.add(offsets[5]).cast::<F>(), self.5);
-            std::ptr::write(dst.add(offsets[6]).cast::<G>(), self.6);
-            std::ptr::write(dst.add(offsets[7]).cast::<H>(), self.7);
-            std::ptr::write(dst.add(offsets[8]).cast::<I>(), self.8);
-            std::ptr::write(dst.add(offsets[9]).cast::<J>(), self.9);
-            std::ptr::write(dst.add(offsets[10]).cast::<K>(), self.10);
-            std::ptr::write(dst.add(offsets[11]).cast::<L>(), self.11);
-        }
-    }
-
-    unsafe fn read_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                std::ptr::read(src.add(offsets[0]).cast::<A>()),
-                std::ptr::read(src.add(offsets[1]).cast::<B>()),
-                std::ptr::read(src.add(offsets[2]).cast::<C>()),
-                std::ptr::read(src.add(offsets[3]).cast::<D>()),
-                std::ptr::read(src.add(offsets[4]).cast::<E>()),
-                std::ptr::read(src.add(offsets[5]).cast::<F>()),
-                std::ptr::read(src.add(offsets[6]).cast::<G>()),
-                std::ptr::read(src.add(offsets[7]).cast::<H>()),
-                std::ptr::read(src.add(offsets[8]).cast::<I>()),
-                std::ptr::read(src.add(offsets[9]).cast::<J>()),
-                std::ptr::read(src.add(offsets[10]).cast::<K>()),
-                std::ptr::read(src.add(offsets[11]).cast::<L>()),
-            )
-        }
-    }
-
-    unsafe fn clone_from(src: *const u8, offsets: &[usize]) -> Self {
-        unsafe {
-            (
-                (*src.add(offsets[0]).cast::<A>()).clone(),
-                (*src.add(offsets[1]).cast::<B>()).clone(),
-                (*src.add(offsets[2]).cast::<C>()).clone(),
-                (*src.add(offsets[3]).cast::<D>()).clone(),
-                (*src.add(offsets[4]).cast::<E>()).clone(),
-                (*src.add(offsets[5]).cast::<F>()).clone(),
-                (*src.add(offsets[6]).cast::<G>()).clone(),
-                (*src.add(offsets[7]).cast::<H>()).clone(),
-                (*src.add(offsets[8]).cast::<I>()).clone(),
-                (*src.add(offsets[9]).cast::<J>()).clone(),
-                (*src.add(offsets[10]).cast::<K>()).clone(),
-                (*src.add(offsets[11]).cast::<L>()).clone(),
-            )
-        }
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, (h, (i, (j, (k, (l, ())))))))))))) = list;
+        (a, b, c, d, e, f, g, h, i, j, k, l)
     }
 }
 ```
@@ -1349,19 +792,19 @@ Expected: PASS.
 
 ```bash
 cargo fmt --all
-git add cel-runtime/src/dynamic_sequence.rs
-git commit -m "feat(cel-runtime): add TupleSequence impls for arity 10-12"
+git add cel-runtime/src/dynamic_sequence.rs cel-runtime/src/lib.rs
+git commit -m "feat(cel-runtime): add TupleSequence for arity 1-12 via IntoTupleList reversal"
 ```
 
 ---
 
-### Task 7: `DynamicSequence` struct, `from_tuple`, and `Drop`
+### Task 5: `DynamicSequence` struct, `from_tuple`, and `Drop`
 
 **Files:**
 - Modify: `cel-runtime/src/dynamic_sequence.rs`
 
 **Interfaces:**
-- Consumes: `TupleSequence`, `SequenceElement` (Tasks 2–6); `RawStack::{with_base_alignment, reserve_and_write, drop_at}` (Task 1, and existing `cel-runtime` API).
+- Consumes: `TupleSequence`, `SequenceList`, `SequenceElement` (Tasks 2–4); `RawStack::{with_base_alignment, reserve_and_write, drop_at}` (Task 1, and existing `cel-runtime` API).
 - Produces: `pub struct DynamicSequence`, `DynamicSequence::from_tuple<T: TupleSequence>(value: T) -> Self`, `DynamicSequence::arity(&self) -> usize`, `impl Drop for DynamicSequence`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1430,16 +873,17 @@ impl DynamicSequence {
     /// - Complexity: O(arity) time; exactly one heap allocation.
     #[must_use]
     pub fn from_tuple<T: TupleSequence>(value: T) -> Self {
+        let list = value.into_tuple_list();
         let mut shape = Vec::new();
         let mut max_align = 1usize;
-        let end = T::append_shape(&mut shape, 0, &mut max_align);
+        let end = T::Output::append_shape(&mut shape, 0, &mut max_align);
         let total_size = align_index(max_align, end);
         let offsets: Vec<usize> = shape.iter().map(|e| e.offset).collect();
 
         let mut buffer = crate::raw_stack::RawStack::with_base_alignment(max_align);
         unsafe {
             buffer.reserve_and_write(max_align, total_size, |dst| {
-                unsafe { value.write_into(dst, &offsets) };
+                unsafe { list.write_into(dst, &offsets) };
             });
         }
         DynamicSequence {
@@ -1480,13 +924,13 @@ git commit -m "feat(cel-runtime): add DynamicSequence struct, from_tuple, and Dr
 
 ---
 
-### Task 8: `DynamicSequence::Clone` and `PartialEq`
+### Task 6: `DynamicSequence::Clone` and `PartialEq`
 
 **Files:**
 - Modify: `cel-runtime/src/dynamic_sequence.rs`
 
 **Interfaces:**
-- Consumes: `DynamicSequence` (Task 7); `RawStack::{read_at, reserve_and_write, with_base_alignment}`.
+- Consumes: `DynamicSequence` (Task 5); `RawStack::{read_at, reserve_and_write, with_base_alignment}`.
 - Produces: `impl Clone for DynamicSequence`, `impl PartialEq for DynamicSequence`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1580,11 +1024,8 @@ impl PartialEq for DynamicSequence {
                 .zip(&other.shape)
                 .all(|(a, b)| a.type_id == b.type_id)
             && self.shape.iter().all(|elem| unsafe {
-                self.buffer.read_at(elem.offset, |a| {
-                    other
-                        .buffer
-                        .read_at(elem.offset, |b| (elem.eq)(a, b))
-                })
+                self.buffer
+                    .read_at(elem.offset, |a| other.buffer.read_at(elem.offset, |b| (elem.eq)(a, b)))
             })
     }
 }
@@ -1605,13 +1046,13 @@ git commit -m "feat(cel-runtime): add Clone and PartialEq for DynamicSequence"
 
 ---
 
-### Task 9: `DynamicSequence::try_into_tuple` and `try_to_tuple`
+### Task 7: `DynamicSequence::try_into_tuple` and `try_to_tuple`
 
 **Files:**
 - Modify: `cel-runtime/src/dynamic_sequence.rs`
 
 **Interfaces:**
-- Consumes: `DynamicSequence`, `TupleSequence` (Tasks 3–8).
+- Consumes: `DynamicSequence`, `TupleSequence` (Tasks 4–6).
 - Produces: `DynamicSequence::try_into_tuple<T: TupleSequence>(self) -> anyhow::Result<T>`, `DynamicSequence::try_to_tuple<T: TupleSequence>(&self) -> anyhow::Result<T>`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1667,7 +1108,7 @@ Add to `impl DynamicSequence` in `cel-runtime/src/dynamic_sequence.rs`, after `a
     fn shape_matches<T: TupleSequence>(&self) -> bool {
         let mut expected = Vec::new();
         let mut max_align = 1usize;
-        T::append_shape(&mut expected, 0, &mut max_align);
+        T::Output::append_shape(&mut expected, 0, &mut max_align);
         self.shape.len() == expected.len()
             && self
                 .shape
@@ -1689,12 +1130,12 @@ Add to `impl DynamicSequence` in `cel-runtime/src/dynamic_sequence.rs`, after `a
             "DynamicSequence::try_into_tuple: shape mismatch"
         );
         let offsets: Vec<usize> = self.shape.iter().map(|e| e.offset).collect();
-        let result = unsafe { self.buffer.read_at(0, |base| T::read_from(base, &offsets)) };
+        let list = unsafe { self.buffer.read_at(0, |base| T::Output::read_from(base, &offsets)) };
         // Fields were just moved out of `self.buffer`'s bytes above; clearing `shape` makes
         // `Drop`'s element loop a no-op so those fields aren't dropped a second time. `buffer`'s
         // own backing allocation is still freed normally when `self` goes out of scope below.
         self.shape.clear();
-        Ok(result)
+        Ok(T::from_list(list))
     }
 
     /// Reconstructs the concrete tuple `T` by cloning this sequence's elements, leaving `self`
@@ -1711,7 +1152,8 @@ Add to `impl DynamicSequence` in `cel-runtime/src/dynamic_sequence.rs`, after `a
             "DynamicSequence::try_to_tuple: shape mismatch"
         );
         let offsets: Vec<usize> = self.shape.iter().map(|e| e.offset).collect();
-        Ok(unsafe { self.buffer.read_at(0, |base| T::clone_from(base, &offsets)) })
+        let list = unsafe { self.buffer.read_at(0, |base| T::Output::clone_from(base, &offsets)) };
+        Ok(T::from_list(list))
     }
 ```
 
@@ -1730,13 +1172,13 @@ git commit -m "feat(cel-runtime): add DynamicSequence::try_into_tuple and try_to
 
 ---
 
-### Task 10: `DynamicSequence::adapt_fn_1`
+### Task 8: `DynamicSequence::adapt_fn_1`
 
 **Files:**
 - Modify: `cel-runtime/src/dynamic_sequence.rs`
 
 **Interfaces:**
-- Consumes: `DynamicSequence::try_to_tuple` (Task 9).
+- Consumes: `DynamicSequence::try_to_tuple` (Task 7).
 - Produces: `DynamicSequence::adapt_fn_1<A: TupleSequence, R, F: Fn(&A) -> anyhow::Result<R>>(f: F) -> impl Fn(&DynamicSequence) -> anyhow::Result<R>`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1808,17 +1250,21 @@ git commit -m "feat(cel-runtime): add DynamicSequence::adapt_fn_1"
 
 ---
 
-### Task 11: `DynSegment::call_dyn_as_tuple`
+### Task 9: `DynSegment::call_dyn_as_tuple`
 
 **Files:**
 - Modify: `cel-runtime/src/dyn_segment.rs`
 
 **Interfaces:**
-- Consumes: `TupleSequence` (Task 3); existing `DynSegment` internals (`stack_ids`, `argument_ids`, `segment`, `CALL_DYN_PTR`/`CALL_DYN_LEN`/`DynCallGuard`, `drop_tuple`, `DynTuple`).
+- Consumes: `TupleSequence`, `SequenceList` (Tasks 3–4); existing `DynSegment` internals (`stack_ids`, `argument_ids`, `segment`, `CALL_DYN_PTR`/`CALL_DYN_LEN`/`DynCallGuard`, `drop_tuple`, `DynTuple`).
 - Produces: `DynSegment::call_dyn_as_tuple<T: TupleSequence>(&mut self, inputs: &[&dyn Any]) -> anyhow::Result<T>`.
 
 This mirrors the existing `call_dyn_tuple` (which splits a tuple result into N separately-boxed
 elements) but reconstructs one concrete `T` directly, by move, with no heap allocation of its own.
+Note that extraction reads bytes at the *live tuple's own* `associated` offsets (already correctly
+computed by `make_tuple`), not at freshly-recomputed `TupleSequence`/`SequenceList` offsets — the
+two are independent, purpose-specific offset computations that are never required to agree with
+each other.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1881,7 +1327,7 @@ Expected: FAIL — `call_dyn_as_tuple` doesn't exist yet.
 
 - [ ] **Step 3: Implement `call_dyn_as_tuple`**
 
-Add `use crate::dynamic_sequence::TupleSequence;` to the imports at the top of
+Add `use crate::dynamic_sequence::{SequenceList, TupleSequence};` to the imports at the top of
 `cel-runtime/src/dyn_segment.rs`.
 
 Add to `impl DynSegment` in `cel-runtime/src/dyn_segment.rs`, immediately after `call_dyn_tuple`:
@@ -1920,7 +1366,7 @@ Add to `impl DynSegment` in `cel-runtime/src/dyn_segment.rs`, immediately after 
 
         let mut expected = Vec::new();
         let mut max_align = 1usize;
-        T::append_shape(&mut expected, 0, &mut max_align);
+        T::Output::append_shape(&mut expected, 0, &mut max_align);
         ensure!(
             info.associated.len() == expected.len()
                 && info
@@ -1951,9 +1397,11 @@ Add to `impl DynSegment` in `cel-runtime/src/dyn_segment.rs`, immediately after 
         let tuple_base = stack.len() - tuple_size;
         // `associated`'s offsets describe the tuple's actual, already-correct on-stack layout
         // (computed by `make_tuple`) — using them, not a freshly-recomputed layout, is what
-        // makes this sound regardless of any layout convention `TupleSequence` uses internally.
+        // makes this sound regardless of any layout convention `SequenceList` uses internally.
         let offsets: Vec<usize> = associated.iter().map(|a| a.offset).collect();
-        let result: T = unsafe { stack.read_at(tuple_base, |base| T::read_from(base, &offsets)) };
+        let list: T::Output =
+            unsafe { stack.read_at(tuple_base, |base| T::Output::read_from(base, &offsets)) };
+        let result = T::from_list(list);
 
         unsafe {
             stack.drop_at(tuple_base, |ptr| drop_tuple(ptr, &associated));
@@ -1979,14 +1427,14 @@ git commit -m "feat(cel-runtime): add DynSegment::call_dyn_as_tuple"
 
 ---
 
-### Task 12: End-to-end acceptance test — `Method::from_fn_1_1` via `adapt_fn_1`
+### Task 10: End-to-end acceptance test — `Method::from_fn_1_1` via `adapt_fn_1`
 
 **Files:**
 - Modify: `cel-runtime/Cargo.toml` (add `adam-rs` dev-dependency)
 - Create: `cel-runtime/tests/dynamic_sequence_adam_rs.rs`
 
 **Interfaces:**
-- Consumes: `DynamicSequence::{from_tuple, adapt_fn_1}` (Tasks 7, 10); `adam_rs::{Sheet, Method}` (existing, unmodified).
+- Consumes: `DynamicSequence::{from_tuple, adapt_fn_1}` (Tasks 5, 8); `adam_rs::{Sheet, Method}` (existing, unmodified).
 
 This is the concrete demonstration that a `DynamicSequence`-typed cell works with `adam-rs`'s
 existing, unmodified `Method`/`Sheet` API — no `adam-rs` source changes, no adam-lang text parsing.
@@ -2028,7 +1476,7 @@ fn dynamic_sequence_cell_works_with_unmodified_method_from_fn_1_1() {
 
 Run: `cargo test -p cel-runtime --test dynamic_sequence_adam_rs`
 Expected: FAIL to compile (`adam-rs` not yet a dependency) until Step 1 is applied; after Step 1,
-FAIL only if `DynamicSequence`/`adapt_fn_1` have a bug — but per Tasks 1–10 these already exist and
+FAIL only if `DynamicSequence`/`adapt_fn_1` have a bug — but per Tasks 1–8 these already exist and
 pass their own unit tests, so this test is expected to already PASS once the dev-dependency is
 added. Run it anyway to confirm.
 
@@ -2047,13 +1495,13 @@ git commit -m "test(cel-runtime): add end-to-end DynamicSequence + adam-rs Metho
 
 ---
 
-### Task 13: Acceptance test — `add_conditional` match-cell via `PartialEq`, and final workspace verification
+### Task 11: Acceptance test — `add_conditional` match-cell via `PartialEq`, and final workspace verification
 
 **Files:**
 - Modify: `cel-runtime/tests/dynamic_sequence_adam_rs.rs`
 
 **Interfaces:**
-- Consumes: `DynamicSequence: PartialEq` (Task 8); `adam_rs::{Sheet, Method}` (existing, unmodified).
+- Consumes: `DynamicSequence: PartialEq` (Task 6); `adam_rs::{Sheet, Method}` (existing, unmodified).
 
 This demonstrates the specific reason `DynamicSequence` must implement `PartialEq` (per the design
 spec): `Sheet::add_conditional`'s branch-key matching, via `CellData.eq_fn`.
@@ -2090,7 +1538,7 @@ fn dynamic_sequence_cell_selects_conditional_branch_via_partial_eq() {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cargo test -p cel-runtime --test dynamic_sequence_adam_rs dynamic_sequence_cell_selects_conditional_branch_via_partial_eq`
-Expected: given `PartialEq` already exists from Task 8, this is expected to already PASS — run it
+Expected: given `PartialEq` already exists from Task 6, this is expected to already PASS — run it
 to confirm the whole path (branch matching, relationship activation, propagation) behaves as
 described.
 
@@ -2127,17 +1575,20 @@ git commit -m "test(cel-runtime): add conditional-branch-matching acceptance tes
 
 ## Self-Review Notes
 
-- **Spec coverage:** `DynamicSequence` type built on `RawStack` (Tasks 1, 7–9); type-safe,
-  nestable, arity 1–12 conversions to/from Rust tuples (Tasks 2–6, 9); extraction from a live
-  `DynSegment` evaluation (Task 11); `adapt_fn_1` (Task 10); demonstration through unmodified
-  `adam-rs` `Method`/`Sheet` (Task 12); the `PartialEq`/`add_conditional` rationale from the spec
-  (Task 13). No `adam-rs` source file is modified anywhere in this plan.
+- **Spec coverage:** `DynamicSequence` type built on `RawStack` (Tasks 1, 5–7); type-safe,
+  nestable, arity 1–12 conversions to/from Rust tuples (Tasks 2–4, 7), implemented via a generic
+  `SequenceList` layout engine (Task 3) plus a one-line-per-arity `TupleSequence` reversal of the
+  existing `IntoTupleList` (Task 4) rather than 12 fully-duplicated unsafe impls; extraction from a
+  live `DynSegment` evaluation (Task 9); `adapt_fn_1` (Task 8); demonstration through unmodified
+  `adam-rs` `Method`/`Sheet` (Task 10); the `PartialEq`/`add_conditional` rationale from the spec
+  (Task 11). No `adam-rs` source file is modified anywhere in this plan.
 - **Deferred per spec's "Out of scope":** adam-lang grammar/parser changes, the broader
   `RawStack`/`RawSequence`/CEL-tuple-representation redesign (tracked in
   [stlab/cel-rs#80](https://github.com/stlab/cel-rs/issues/80)), and `adapt_fn_2`/`adapt_fn_2_1`
   are intentionally not tasks here.
 - **Type/name consistency:** `SequenceElement`'s fields (`type_id`, `type_name`, `offset`, `size`,
   `align`, `drop`, `clone`, `eq`) introduced in Task 2 are used identically by `push_element`
-  (Task 2), every `TupleSequence` impl (Tasks 3–6), and `DynamicSequence`'s `Drop`/`Clone`/
-  `PartialEq` (Tasks 7–8). `TupleSequence::{append_shape, write_into, read_from, clone_from}`
-  signatures introduced in Task 3 are used identically through Tasks 4–11.
+  (Task 2), `SequenceList`'s two impls (Task 3), and `DynamicSequence`'s `Drop`/`Clone`/`PartialEq`
+  (Tasks 5–6). `SequenceList::{append_shape, write_into, read_from, clone_from}` (Task 3) and
+  `TupleSequence::from_list` (Task 4) signatures are used identically through Tasks 5–9 via
+  `T::Output` (never re-derived or renamed).
