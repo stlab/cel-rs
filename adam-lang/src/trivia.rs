@@ -23,7 +23,8 @@
 use proc_macro2::LineColumn;
 
 use crate::ast::{
-    ConditionalBranch, ConditionalDecl, ExprSpan, MethodDecl, RelationshipDecl, Sheet,
+    ConditionDecl, ConditionalBranch, ConditionalDecl, ExprSpan, MethodDecl, OutDecl,
+    RelationshipDecl, Sheet,
 };
 
 /// An AST node that can carry recovered leading trivia, attached by [`attach_gaps`].
@@ -81,6 +82,18 @@ impl TriviaTarget for ConditionalBranch {
     }
 }
 
+impl TriviaTarget for ConditionDecl {
+    fn span(&self) -> ExprSpan {
+        self.span
+    }
+    fn set_leading_comment(&mut self, comment: String) {
+        self.leading_comment = Some(comment);
+    }
+    fn set_blank_line_before(&mut self, value: bool) {
+        self.blank_line_before = value;
+    }
+}
+
 /// Recovers comments/blank-lines from every gap in `sheet` — a leading comment before the
 /// `sheet` keyword itself, its own top-level items, and every nested `relationship`/`conditional`
 /// body — attaching each to the nearest following node.
@@ -105,9 +118,7 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
             crate::ast::SheetItem::Conditional(cond) => {
                 attach_conditional(source, &line_starts, cond)
             }
-            crate::ast::SheetItem::Out(_out) => {
-                // TODO: attach trivia to Out declaration (Task 2)
-            }
+            crate::ast::SheetItem::Out(out_decl) => attach_out(source, &line_starts, out_decl),
             crate::ast::SheetItem::Cell(_) | crate::ast::SheetItem::Error { .. } => {}
         }
     }
@@ -133,6 +144,31 @@ fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut Conditiona
             attach_relationship(source, line_starts, rel);
         }
     }
+}
+
+/// Recovers trivia for an out declaration's conditions. The writer method itself is always
+/// first in the block — nothing precedes it to attach a comment to, the same limitation
+/// documented in this module's doc comment for the first item of any sibling list.
+fn attach_out(source: &str, line_starts: &[usize], out_decl: &mut OutDecl) {
+    if !out_decl.conditions.is_empty() {
+        // Handle gap between writer and first condition
+        let start = line_column_to_byte(source, line_starts, out_decl.writer.span.end.end());
+        let end = line_column_to_byte(
+            source,
+            line_starts,
+            out_decl.conditions[0].span.start.start(),
+        );
+        if start < end {
+            let gap_text = &source[start..end];
+            let (comment, blank_line_before) = analyze_gap(gap_text);
+            out_decl.conditions[0].set_blank_line_before(blank_line_before);
+            if let Some(comment) = comment {
+                out_decl.conditions[0].set_leading_comment(comment);
+            }
+        }
+    }
+    // Then attach gaps between conditions (if there are multiple)
+    attach_gaps(source, line_starts, &mut out_decl.conditions);
 }
 
 /// Recovers comments/blank-lines from the gaps between consecutive `items`, attaching each to the
@@ -457,5 +493,16 @@ mod tests {
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         assert_eq!(sheet.leading_comment, None);
+    }
+
+    #[test]
+    fn attaches_a_comment_to_a_condition_inside_an_out_block() {
+        let source = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n        // second\n        condition c [width] { width <= 10.0 }\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Out(out) = &sheet.items[0] else {
+            panic!("expected Out");
+        };
+        assert_eq!(out.conditions[0].leading_comment.as_deref(), Some("second"));
     }
 }

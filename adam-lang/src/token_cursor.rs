@@ -401,7 +401,10 @@ impl TokenCursor {
                 }
                 Some(Token::Identifier(id))
                     if at_or_below_target
-                        && (id == "cell" || id == "relationship" || id == "conditional") =>
+                        && (id == "cell"
+                            || id == "relationship"
+                            || id == "conditional"
+                            || id == "out") =>
                 {
                     return last;
                 }

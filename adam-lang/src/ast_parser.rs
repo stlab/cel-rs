@@ -133,7 +133,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `sheet_item = cell_decl | relationship_decl | conditional_decl.`
+    /// `sheet_item = cell_decl | relationship_decl | conditional_decl | out_decl.`
     fn parse_sheet_item(&mut self, cursor: &mut TokenCursor) -> Result<ast::SheetItem> {
         use cel_parser::lex_lexer::{HasSpan, Token};
         match cursor.peek_token() {
@@ -146,8 +146,11 @@ impl AdamAstParser {
             Some(Token::Identifier(id)) if id == "conditional" => self
                 .parse_conditional_decl(cursor)
                 .map(ast::SheetItem::Conditional),
+            Some(Token::Identifier(id)) if id == "out" => {
+                self.parse_out_decl(cursor).map(ast::SheetItem::Out)
+            }
             Some(tok) => Err(cel_parser::ParseError::new(
-                "expected `cell`, `relationship`, or `conditional`",
+                "expected `cell`, `relationship`, `conditional`, or `out`",
                 tok.span(),
             )),
             None => Err(cel_parser::ParseError::new(
@@ -292,6 +295,85 @@ impl AdamAstParser {
             relationships.push(self.parse_relationship_decl(cursor)?);
         }
         Ok(relationships)
+    }
+
+    /// `out_decl = "out" identifier [ ":" type_name ] "{" out_method { condition_decl } "}".`
+    fn parse_out_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::OutDecl> {
+        let decl_start = cursor.peek_span();
+        cursor.is_keyword("out");
+        let (name, name_span) = cursor.consume_ident()?;
+        let type_name = if cursor.consume_punct(":") {
+            let (type_name, type_span) = cursor.consume_ident()?;
+            Some((type_name, point(type_span)))
+        } else {
+            None
+        };
+        cursor.expect_open_brace()?;
+        let writer = self.parse_out_method(cursor)?;
+        let mut conditions = Vec::new();
+        while matches!(cursor.peek_token(), Some(cel_parser::lex_lexer::Token::Identifier(id)) if id == "condition")
+        {
+            conditions.push(self.parse_condition_decl(cursor)?);
+        }
+        let close_span = cursor.expect_close_brace()?;
+        Ok(ast::OutDecl {
+            name,
+            name_span: point(name_span),
+            type_name,
+            writer,
+            conditions,
+            leading_comment: None,
+            blank_line_before: false,
+            span: ast::ExprSpan {
+                start: decl_start,
+                end: close_span,
+            },
+        })
+    }
+
+    /// `out_method = "method" cell_list method_body.`
+    fn parse_out_method(&mut self, cursor: &mut TokenCursor) -> Result<ast::OutMethodDecl> {
+        let decl_start = cursor.peek_span();
+        if !cursor.is_keyword("method") {
+            return Err(cursor.err_at("expected `method`"));
+        }
+        let inputs = parse_cell_list(cursor)?;
+        cursor.expect_open_brace()?;
+        let body = self.parse_cel_or_expression(cursor)?;
+        let close_span = cursor.expect_close_brace()?;
+        Ok(ast::OutMethodDecl {
+            inputs,
+            body,
+            leading_comment: None,
+            blank_line_before: false,
+            span: ast::ExprSpan {
+                start: decl_start,
+                end: close_span,
+            },
+        })
+    }
+
+    /// `condition_decl = "condition" identifier cell_list "{" or_expression "}".`
+    fn parse_condition_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::ConditionDecl> {
+        let decl_start = cursor.peek_span();
+        cursor.is_keyword("condition");
+        let (name, name_span) = cursor.consume_ident()?;
+        let inputs = parse_cell_list(cursor)?;
+        cursor.expect_open_brace()?;
+        let body = self.parse_cel_or_expression(cursor)?;
+        let close_span = cursor.expect_close_brace()?;
+        Ok(ast::ConditionDecl {
+            name,
+            name_span: point(name_span),
+            inputs,
+            body,
+            leading_comment: None,
+            blank_line_before: false,
+            span: ast::ExprSpan {
+                start: decl_start,
+                end: close_span,
+            },
+        })
     }
 
     /// `method_decl = "method" cell_list "->" cell_list method_body.`
@@ -796,5 +878,85 @@ mod tests {
             "expected the whole parse to abort with Err (known limitation), not a corrupted \
              Ok result; got {result:?}"
         );
+    }
+
+    #[test]
+    fn parse_out_with_explicit_type_and_no_conditions() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+            sheet s {
+                cell width: f64 = 4.0;
+                cell height: f64 = 3.0;
+                out area: f64 {
+                    method [width, height] { width * height }
+                }
+            }
+        "#,
+            )
+            .unwrap();
+        assert!(sheet.errors.is_empty());
+        let ast::SheetItem::Out(out) = &sheet.items[2] else {
+            panic!("expected Out");
+        };
+        assert_eq!(out.name, "area");
+        assert_eq!(out.type_name.as_ref().map(|(n, _)| n.as_str()), Some("f64"));
+        assert_eq!(out.writer.inputs.len(), 2);
+        assert!(out.conditions.is_empty());
+    }
+
+    #[test]
+    fn parse_out_with_no_type_annotation() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { out area { method [width] { width } } }")
+            .unwrap();
+        let ast::SheetItem::Out(out) = &sheet.items[0] else {
+            panic!("expected Out");
+        };
+        assert!(out.type_name.is_none());
+    }
+
+    #[test]
+    fn parse_out_with_conditions_in_declaration_order() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+            sheet s {
+                out area: f64 {
+                    method [width, height] { width * height }
+                    condition max_area [width, height, max_area] { width * height <= max_area }
+                    condition max_width [width, max_width] { width <= max_width }
+                }
+            }
+        "#,
+            )
+            .unwrap();
+        let ast::SheetItem::Out(out) = &sheet.items[0] else {
+            panic!("expected Out");
+        };
+        assert_eq!(out.conditions.len(), 2);
+        assert_eq!(out.conditions[0].name, "max_area");
+        assert_eq!(out.conditions[0].inputs.len(), 3);
+        assert_eq!(out.conditions[1].name, "max_width");
+    }
+
+    #[test]
+    fn parse_malformed_out_is_recorded_as_an_error_item() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+            sheet s {
+                cell good_before: i32 = 1;
+                out area { bad }
+                cell good_after: i32 = 2;
+            }
+        "#,
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 }

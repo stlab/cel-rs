@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! sheet              = "sheet" identifier "{" { sheet_item } "}".
-//! sheet_item         = cell_decl | relationship_decl | conditional_decl.
+//! sheet_item         = cell_decl | relationship_decl | conditional_decl | out_decl.
 //! cell_decl          = "cell" identifier cell_type_init ";".
 //! cell_type_init     = (":" type_name [ "=" literal ]) | ("=" literal).
 //! type_name          = identifier.
@@ -16,6 +16,9 @@
 //! conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].
 //! default_branch     = "_"   "=>" "{" { relationship_decl } "}" [ "," ].
 //! method_decl        = "method" cell_list "->" cell_list method_body.
+//! out_decl           = "out" identifier [ ":" type_name ] "{" out_method { condition_decl } "}".
+//! out_method         = "method" cell_list method_body.
+//! condition_decl     = "condition" identifier cell_list "{" or_expression "}".
 //! cell_list          = "[" identifier { "," identifier } "]".
 //! method_body        = "{" or_expression "}".
 //! ```
