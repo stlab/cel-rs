@@ -366,6 +366,63 @@ impl<
     }
 }
 
+/// An owned, type-erased CEL tuple value that persists beyond any single `DynSegment`
+/// evaluation, suitable for storing directly as an `adam_rs::Sheet` cell's value.
+///
+/// Converts type-safely to and from concrete Rust tuples via [`TupleSequence`] — see
+/// [`from_tuple`](Self::from_tuple), [`try_into_tuple`](Self::try_into_tuple), and
+/// [`try_to_tuple`](Self::try_to_tuple).
+pub struct DynamicSequence {
+    buffer: crate::raw_stack::RawStack,
+    shape: Vec<SequenceElement>,
+    #[allow(dead_code)]
+    max_align: usize,
+}
+
+impl DynamicSequence {
+    /// Builds a `DynamicSequence` from a concrete Rust tuple, consuming it.
+    ///
+    /// - Complexity: O(arity) time; exactly one heap allocation.
+    #[must_use]
+    pub fn from_tuple<T: TupleSequence>(value: T) -> Self
+    where
+        T::Output: SequenceList,
+    {
+        let list = value.into_tuple_list();
+        let mut shape = Vec::new();
+        let mut max_align = 1usize;
+        let end = T::Output::append_shape(&mut shape, 0, &mut max_align);
+        let total_size = align_index(max_align, end);
+        let offsets: Vec<usize> = shape.iter().map(|e| e.offset).collect();
+
+        let mut buffer = crate::raw_stack::RawStack::with_base_alignment(max_align);
+        unsafe {
+            buffer.reserve_and_write(max_align, total_size, |dst| {
+                list.write_into(dst, &offsets);
+            });
+        }
+        DynamicSequence {
+            buffer,
+            shape,
+            max_align,
+        }
+    }
+
+    /// Returns the number of elements this sequence holds.
+    #[must_use]
+    pub fn arity(&self) -> usize {
+        self.shape.len()
+    }
+}
+
+impl Drop for DynamicSequence {
+    fn drop(&mut self) {
+        for elem in self.shape.iter().rev() {
+            unsafe { self.buffer.drop_at(elem.offset, |ptr| (elem.drop)(ptr)) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +536,48 @@ mod tests {
             ),
             full_arity_12
         );
+    }
+
+    #[test]
+    fn from_tuple_records_correct_arity() {
+        let seq = DynamicSequence::from_tuple((1i32, 2.5f64, true));
+        assert_eq!(seq.arity(), 3);
+    }
+
+    #[test]
+    fn from_tuple_and_drop_drops_every_element_exactly_once_in_reverse_order() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DropCounter(Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<u8>>>, u8);
+        impl Clone for DropCounter {
+            fn clone(&self) -> Self {
+                DropCounter(self.0.clone(), self.1.clone(), self.2)
+            }
+        }
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                self.2 == other.2
+                    && Arc::ptr_eq(&self.0, &other.0)
+                    && Arc::ptr_eq(&self.1, &other.1)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                self.1.lock().unwrap().push(self.2);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let a = DropCounter(count.clone(), order.clone(), 1);
+        let b = DropCounter(count.clone(), order.clone(), 2);
+
+        let seq = DynamicSequence::from_tuple((a, b));
+        drop(seq);
+
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        assert_eq!(*order.lock().unwrap(), vec![2, 1]); // reverse of declaration order
     }
 }
