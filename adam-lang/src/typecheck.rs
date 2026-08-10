@@ -1,11 +1,13 @@
 //! A best-effort static type checker over [`crate::ast::Sheet`] trees, built on
 //! [`cel_parser::ty::check_expr`]. Checks each `cell`'s literal initializer against its `:
-//! type_name` annotation, and each `relationship`/`conditional` method's body against its declared
+//! type_name` annotation, each `relationship`/`conditional` method's body against its declared
 //! outputs (arity: does the body actually produce as many values as declared; and per-output
-//! type). An absent annotation, an annotation naming a type [`crate::TypeRegistry`] doesn't
-//! recognize, or an operator [`cel_parser::op_table::builtin_operand_types`] doesn't recognize all
-//! resolve to [`cel_parser::Ty::Any`] and are never flagged — matching adam-lang/CEL's extensible
-//! type system. Not a complete type system; see the design doc's "Type checking (v1)" section.
+//! type), and each `out`'s writer body against its optional `: type_name` annotation, with each
+//! `condition` body checked to produce `bool` type. An absent annotation, an annotation naming a
+//! type [`crate::TypeRegistry`] doesn't recognize, or an operator [`cel_parser::op_table::builtin_operand_types`]
+//! doesn't recognize all resolve to [`cel_parser::Ty::Any`] and are never flagged — matching
+//! adam-lang/CEL's extensible type system. Not a complete type system; see the design doc's
+//! "Type checking (v1)" section.
 
 use cel_parser::lex_lexer::Literal as LexLiteral;
 use cel_parser::{Expr, ParseError, Ty, ty::check_expr};
