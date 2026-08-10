@@ -9,7 +9,6 @@ use slotmap::new_key_type;
 
 use crate::cell::CellId;
 use crate::condition::ConditionId;
-use crate::relationship::RelationshipId;
 
 new_key_type! {
     /// A stable handle to an output in a [`crate::sheet::Sheet`].
@@ -17,12 +16,9 @@ new_key_type! {
 }
 
 /// Internal storage for a single output.
-#[allow(dead_code)]
 pub(crate) struct OutputData {
     /// The terminal cell this output writes.
     pub(crate) cell: CellId,
-    /// The single-method relationship backing the writer.
-    pub(crate) relationship: RelationshipId,
     /// This output's conditions, in declaration order.
     pub(crate) conditions: Vec<ConditionId>,
 }

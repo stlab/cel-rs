@@ -21,7 +21,6 @@ new_key_type! {
 type MethodFn = Box<dyn Fn(&[&dyn Any]) -> Result<Vec<Box<dyn Any>>, anyhow::Error>>;
 
 /// A single method within a relationship.
-#[allow(dead_code)]
 pub struct Method {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) outputs: Vec<CellId>,

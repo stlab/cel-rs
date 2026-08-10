@@ -438,12 +438,11 @@ impl Sheet {
             return Err(Error::TerminalCell);
         }
 
-        let relationship = self.add_relationship(vec![writer])?;
+        self.add_relationship(vec![writer])?;
         self.terminal_cells.insert(output_cell);
 
         let output_id = self.outputs.insert(OutputData {
             cell: output_cell,
-            relationship,
             conditions: Vec::new(),
         });
 
@@ -454,7 +453,6 @@ impl Sheet {
                     name: name.to_string(),
                     output: output_id,
                     inputs: condition.inputs,
-                    input_types: condition.input_types,
                     function: condition.function,
                 })
             })

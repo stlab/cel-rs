@@ -21,7 +21,6 @@ new_key_type! {
 type ConditionFn = Box<dyn Fn(&[&dyn Any]) -> Result<bool, anyhow::Error>>;
 
 /// A single named boolean check over some set of cells, attached to an output.
-#[allow(dead_code)]
 pub struct Condition {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) input_types: Vec<TypeId>,
@@ -93,12 +92,10 @@ impl Condition {
 }
 
 /// Internal storage for a single condition.
-#[allow(dead_code)]
 pub(crate) struct ConditionData {
     pub(crate) name: String,
     pub(crate) output: OutputId,
     pub(crate) inputs: Vec<CellId>,
-    pub(crate) input_types: Vec<TypeId>,
     pub(crate) function: ConditionFn,
 }
 
