@@ -59,6 +59,9 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                     }
                 }
             }
+            SheetItem::Out(_out) => {
+                // TODO: type-check Out declaration (Task 4)
+            }
             SheetItem::Error { .. } => {} // already reported as a syntax error; nothing to type-check
         }
     }

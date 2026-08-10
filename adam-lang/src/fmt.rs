@@ -184,6 +184,7 @@ fn write_sheet_item(out: &mut String, item: &ast::SheetItem, depth: usize) {
         ast::SheetItem::Cell(cell) => write_cell(out, cell, depth),
         ast::SheetItem::Relationship(rel) => write_relationship(out, rel, depth),
         ast::SheetItem::Conditional(cond) => write_conditional(out, cond, depth),
+        ast::SheetItem::Out(_out) => todo!("format Out declaration"),
         ast::SheetItem::Error { .. } => {
             unreachable!("format_sheet is only called on a sheet with no recorded syntax errors")
         }

@@ -42,6 +42,8 @@ pub enum SheetItem {
     Relationship(RelationshipDecl),
     /// A `conditional` declaration.
     Conditional(ConditionalDecl),
+    /// An `out` declaration.
+    Out(OutDecl),
     /// A syntax error recovered at declaration granularity; `span` covers the skipped tokens.
     Error {
         /// The span of the skipped, malformed item.
@@ -64,6 +66,7 @@ impl SheetItem {
             SheetItem::Cell(c) => c.span,
             SheetItem::Relationship(r) => r.span,
             SheetItem::Conditional(c) => c.span,
+            SheetItem::Out(o) => o.span,
             SheetItem::Error { span, .. } => *span,
         }
     }
@@ -74,6 +77,7 @@ impl SheetItem {
             SheetItem::Cell(c) => c.leading_comment = Some(comment),
             SheetItem::Relationship(r) => r.leading_comment = Some(comment),
             SheetItem::Conditional(c) => c.leading_comment = Some(comment),
+            SheetItem::Out(o) => o.leading_comment = Some(comment),
             SheetItem::Error {
                 leading_comment, ..
             } => *leading_comment = Some(comment),
@@ -86,6 +90,7 @@ impl SheetItem {
             SheetItem::Cell(c) => c.blank_line_before = value,
             SheetItem::Relationship(r) => r.blank_line_before = value,
             SheetItem::Conditional(c) => c.blank_line_before = value,
+            SheetItem::Out(o) => o.blank_line_before = value,
             SheetItem::Error {
                 blank_line_before, ..
             } => *blank_line_before = value,
@@ -131,6 +136,78 @@ pub struct RelationshipDecl {
     /// Whether a blank line preceded this declaration, if recovered.
     pub blank_line_before: bool,
     /// The span of the whole `relationship { ... }` declaration.
+    pub span: ExprSpan,
+}
+
+/// `out_decl = "out" identifier [ ":" type_name ] "{" out_method { condition_decl } "}".`
+///
+/// `type_name` is unresolved here (no `TypeRegistry` lookup), matching `CellDecl`. When
+/// absent, the cell's type is inferred from `writer.body`'s result type by the compile phase
+/// (`crate::parser::AdamParser`) — never here.
+#[derive(Debug, Clone)]
+pub struct OutDecl {
+    /// The declared cell's name.
+    pub name: String,
+    /// The name token's span.
+    pub name_span: ExprSpan,
+    /// The `: type_name` annotation, if present.
+    pub type_name: Option<(String, ExprSpan)>,
+    /// The single writer method that computes this cell's value.
+    pub writer: OutMethodDecl,
+    /// This output's conditions, in declaration order.
+    pub conditions: Vec<ConditionDecl>,
+    /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub leading_comment: Option<String>,
+    /// Whether a blank line preceded this declaration, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub blank_line_before: bool,
+    /// The span of the whole `out ... { ... }` declaration.
+    pub span: ExprSpan,
+}
+
+/// `out_method = "method" cell_list method_body.`
+///
+/// Unlike [`MethodDecl`], carries no `outputs` list: an out cell's writer always writes
+/// exactly the enclosing [`OutDecl`]'s cell, so naming it again would be redundant.
+#[derive(Debug, Clone)]
+pub struct OutMethodDecl {
+    /// The method's input cell names.
+    pub inputs: Vec<(String, ExprSpan)>,
+    /// The parsed method body expression.
+    pub body: cel_parser::Expr,
+    /// A leading comment immediately preceding this method, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub leading_comment: Option<String>,
+    /// Whether a blank line preceded this method, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub blank_line_before: bool,
+    /// The span of the whole `method [...] { ... }` declaration.
+    pub span: ExprSpan,
+}
+
+/// `condition_decl = "condition" identifier cell_list "{" or_expression "}".`
+///
+/// `name` is a plain string label passed to `adam_rs::Sheet::add_output`, not a cell
+/// reference — it may coincide with a cell name declared elsewhere in the sheet but doesn't
+/// have to.
+#[derive(Debug, Clone)]
+pub struct ConditionDecl {
+    /// The condition's declared name.
+    pub name: String,
+    /// The name token's span.
+    pub name_span: ExprSpan,
+    /// The condition's input cell names.
+    pub inputs: Vec<(String, ExprSpan)>,
+    /// The parsed condition body expression; must type-check as `bool`.
+    pub body: cel_parser::Expr,
+    /// A leading comment immediately preceding this condition, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub leading_comment: Option<String>,
+    /// Whether a blank line preceded this condition, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub blank_line_before: bool,
+    /// The span of the whole `condition ... { ... }` declaration.
     pub span: ExprSpan,
 }
 
@@ -316,6 +393,60 @@ mod tests {
         match item {
             SheetItem::Cell(c) => assert!(c.blank_line_before),
             other => panic!("expected Cell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sheet_item_span_reads_the_out_variant() {
+        let span = point(Span::call_site());
+        let item = SheetItem::Out(OutDecl {
+            name: "o".to_string(),
+            name_span: span,
+            type_name: None,
+            writer: OutMethodDecl {
+                inputs: Vec::new(),
+                body: cel_parser::Expr::Ident {
+                    name: "x".to_string(),
+                    span,
+                },
+                leading_comment: None,
+                blank_line_before: false,
+                span,
+            },
+            conditions: Vec::new(),
+            leading_comment: None,
+            blank_line_before: false,
+            span,
+        });
+        assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
+    }
+
+    #[test]
+    fn set_leading_comment_sets_the_out_variant() {
+        let span = point(Span::call_site());
+        let mut item = SheetItem::Out(OutDecl {
+            name: "o".to_string(),
+            name_span: span,
+            type_name: None,
+            writer: OutMethodDecl {
+                inputs: Vec::new(),
+                body: cel_parser::Expr::Ident {
+                    name: "x".to_string(),
+                    span,
+                },
+                leading_comment: None,
+                blank_line_before: false,
+                span,
+            },
+            conditions: Vec::new(),
+            leading_comment: None,
+            blank_line_before: false,
+            span,
+        });
+        item.set_leading_comment("hi".to_string());
+        match item {
+            SheetItem::Out(o) => assert_eq!(o.leading_comment.as_deref(), Some("hi")),
+            other => panic!("expected Out, got {other:?}"),
         }
     }
 }

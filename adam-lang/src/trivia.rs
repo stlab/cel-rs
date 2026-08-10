@@ -105,6 +105,9 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
             crate::ast::SheetItem::Conditional(cond) => {
                 attach_conditional(source, &line_starts, cond)
             }
+            crate::ast::SheetItem::Out(_out) => {
+                // TODO: attach trivia to Out declaration (Task 2)
+            }
             crate::ast::SheetItem::Cell(_) | crate::ast::SheetItem::Error { .. } => {}
         }
     }
