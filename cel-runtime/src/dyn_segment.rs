@@ -950,8 +950,12 @@ impl DynSegment {
             unsafe { stack.read_at(tuple_base, |base| T::Output::read_from(base, &offsets)) };
         let result = T::from_list(list);
 
+        // `read_from` already moved every element's bytes out into `result` (per its own safety
+        // contract: the caller must not separately drop those bytes afterward). The tuple's
+        // vacated bytes are dead space now, not a live value — truncate the stack's tracked
+        // length without running any destructor over them, or every element with a real `Drop`
+        // impl would be dropped twice (once here, once when `result` itself drops).
         unsafe {
-            stack.drop_at(tuple_base, |ptr| drop_tuple(ptr, &associated));
             stack.truncate_to(tuple_base, tuple_padding);
         }
 
@@ -1688,6 +1692,52 @@ mod tests {
 
         let result = seg.call_dyn_as_tuple::<(i32, f64)>(&[]);
         assert!(result.is_err(), "(i32, i32) should not match (i32, f64)");
+    }
+
+    #[test]
+    fn call_dyn_as_tuple_moves_fields_without_double_dropping_or_leaking() {
+        // Regression test: read_from moves each element's bytes out of the tuple by
+        // std::ptr::read (per its own safety contract, the caller must not separately drop
+        // those bytes afterward). If call_dyn_as_tuple also ran the tuple's drop glue over the
+        // same bytes, any element with a real Drop impl would be dropped twice.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &other.0)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let tracker = DropCounter(drop_count.clone());
+
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(move || tracker.clone());
+        seg.op0(|| 7i32);
+        seg.make_tuple(2, ambient_start);
+
+        let (extracted, n): (DropCounter, i32) = seg.call_dyn_as_tuple(&[]).unwrap();
+        assert_eq!(n, 7);
+        assert_eq!(
+            drop_count.load(Ordering::SeqCst),
+            0,
+            "moving out must not drop the element"
+        );
+        drop(extracted);
+        assert_eq!(
+            drop_count.load(Ordering::SeqCst),
+            1,
+            "the moved-out value must still drop exactly once, on its own schedule"
+        );
     }
 
     #[test]
