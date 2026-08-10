@@ -481,6 +481,29 @@ impl DynamicSequence {
         };
         Ok(T::from_list(list))
     }
+
+    /// Wraps a closure over a concrete tuple `A` so it can be passed directly as the `F` in
+    /// `adam_rs::Method::from_fn_1_1::<DynamicSequence, R, _>` or
+    /// `adam_rs::Condition::from_fn_1::<DynamicSequence, _>`.
+    ///
+    /// Every call clones `A`'s fields out of the `&DynamicSequence` (via
+    /// [`try_to_tuple`](Self::try_to_tuple)) into a temporary `A`, calls `f` with a reference to
+    /// it, then drops the temporary.
+    ///
+    /// # Errors
+    /// The returned closure returns `Err` if `A`'s element `TypeId` sequence doesn't match the
+    /// `DynamicSequence`'s actual elements.
+    pub fn adapt_fn_1<A, R, F>(f: F) -> impl Fn(&DynamicSequence) -> anyhow::Result<R>
+    where
+        A: TupleSequence,
+        A::Output: SequenceList,
+        F: Fn(&A) -> anyhow::Result<R>,
+    {
+        move |seq: &DynamicSequence| {
+            let a: A = seq.try_to_tuple()?;
+            f(&a)
+        }
+    }
 }
 
 impl Drop for DynamicSequence {
@@ -808,5 +831,20 @@ mod tests {
             "the moved-out value must still drop exactly once, on its own schedule"
         );
         Ok(())
+    }
+
+    #[test]
+    fn adapt_fn_1_calls_the_wrapped_closure_with_a_concrete_tuple() -> anyhow::Result<()> {
+        let seq = DynamicSequence::from_tuple((3i32, 4.5f64));
+        let wrapped = DynamicSequence::adapt_fn_1(|t: &(i32, f64)| Ok(t.0 as f64 + t.1));
+        assert_eq!(wrapped(&seq)?, 7.5);
+        Ok(())
+    }
+
+    #[test]
+    fn adapt_fn_1_returns_err_on_shape_mismatch() {
+        let seq = DynamicSequence::from_tuple((3i32, 4i32));
+        let wrapped = DynamicSequence::adapt_fn_1(|t: &(i32, f64)| Ok(t.0 as f64 + t.1));
+        assert!(wrapped(&seq).is_err());
     }
 }
