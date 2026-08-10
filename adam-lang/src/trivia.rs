@@ -146,9 +146,13 @@ fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut Conditiona
     }
 }
 
-/// Recovers trivia for an out declaration's conditions. The writer method itself is always
-/// first in the block — nothing precedes it to attach a comment to, the same limitation
-/// documented in this module's doc comment for the first item of any sibling list.
+/// Recovers trivia for an out declaration's conditions. Unlike other lists where the first
+/// item's only possible predecessor is the enclosing `{`, `OutDecl.conditions[0]`'s immediate
+/// predecessor is the `out_decl.writer` method — a real sibling node with a trackable span.
+/// The gap between writer and the first condition is therefore recovered (computed manually
+/// because `OutMethodDecl` and `ConditionDecl` are different types and cannot share a single
+/// homogeneous `attach_gaps::<T>` call). Gaps between multiple conditions (if present) are
+/// handled via the standard `attach_gaps` path.
 fn attach_out(source: &str, line_starts: &[usize], out_decl: &mut OutDecl) {
     if !out_decl.conditions.is_empty() {
         // Handle gap between writer and first condition
