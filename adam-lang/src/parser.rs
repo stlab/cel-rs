@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use indexmap::IndexMap;
 
-use adam_rs::{CellId, Method, RelationshipId, Sheet};
+use adam_rs::{CellId, Condition, Method, OutputId, RelationshipId, Sheet};
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Literal, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
 use cel_runtime::{BoxExtractor, DynSegment};
@@ -34,6 +34,9 @@ pub struct ParsedSheet {
     pub sheet: Sheet,
     /// Cell name → `(CellId, TypeId)`, in declaration order.
     pub cell_names: IndexMap<String, (CellId, TypeId)>,
+    /// Output name → `OutputId`, in declaration order — parity with `cell_names`, for callers
+    /// that need to look up `Sheet::output_valid`/`Sheet::violated_conditions` by name.
+    pub output_names: IndexMap<String, OutputId>,
 }
 
 impl std::ops::Deref for ParsedSheet {
@@ -60,6 +63,9 @@ struct ParseContext {
     /// Maps cell name → (CellId, TypeId), in declaration order, for method and
     /// conditional compilation and for exposing to callers via `ParsedSheet`.
     cell_names: IndexMap<String, (CellId, TypeId)>,
+    /// Maps output name → `OutputId`, in declaration order, for exposing to callers via
+    /// `ParsedSheet`.
+    output_names: IndexMap<String, OutputId>,
 }
 
 impl std::ops::Deref for ParseContext {
@@ -132,6 +138,7 @@ impl AdamParser {
             ),
             sheet: Sheet::new(),
             cell_names: IndexMap::new(),
+            output_names: IndexMap::new(),
         };
         self.parse_sheet(&mut ctx)?;
         if let Some(tok) = ctx.peek_token() {
@@ -140,6 +147,7 @@ impl AdamParser {
         Ok(ParsedSheet {
             sheet: ctx.sheet,
             cell_names: ctx.cell_names,
+            output_names: ctx.output_names,
         })
     }
 
@@ -161,7 +169,7 @@ impl AdamParser {
         Ok(())
     }
 
-    /// `sheet_item = cell_decl | relationship_decl | conditional_decl.`
+    /// `sheet_item = cell_decl | relationship_decl | conditional_decl | out_decl.`
     fn parse_sheet_item(&mut self, ctx: &mut ParseContext) -> Result<()> {
         match ctx.peek_token() {
             Some(Token::Identifier(id)) if id == "cell" => self.parse_cell_decl(ctx),
@@ -169,8 +177,9 @@ impl AdamParser {
                 self.parse_relationship_decl(ctx).map(|_| ())
             }
             Some(Token::Identifier(id)) if id == "conditional" => self.parse_conditional_decl(ctx),
+            Some(Token::Identifier(id)) if id == "out" => self.parse_out_decl(ctx),
             Some(tok) => Err(ParseError::new(
-                "expected `cell`, `relationship`, or `conditional`",
+                "expected `cell`, `relationship`, `conditional`, or `out`",
                 tok.span(),
             )),
             None => Err(ParseError::new(
@@ -317,6 +326,155 @@ impl AdamParser {
         Ok(rel_ids)
     }
 
+    /// `out_decl = "out" identifier [ ":" type_name ] "{" out_method { condition_decl } "}".`
+    fn parse_out_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
+        ctx.is_keyword("out"); // consume
+        let (name, name_span) = ctx.consume_ident()?;
+        if ctx.cell_names.contains_key(&name) {
+            return Err(ParseError::new(
+                format!("duplicate cell `{name}`"),
+                name_span,
+            ));
+        }
+
+        let declared: Option<(TypeId, AddCellFn)> = if ctx.consume_punct(":") {
+            let (type_name, type_span) = ctx.consume_ident()?;
+            let entry = self
+                .types
+                .get(&type_name)
+                .ok_or_else(|| ParseError::new(format!("unknown type `{type_name}`"), type_span))?;
+            Some((entry.type_id, entry.add_cell_fn))
+        } else {
+            None
+        };
+
+        ctx.expect_open_brace()?;
+
+        if !ctx.is_keyword("method") {
+            return Err(ctx.err_at("expected `method`"));
+        }
+        let inputs = self.parse_cell_list(ctx)?;
+        let segment = self.parse_body_with_input_scope(ctx, &inputs)?;
+
+        let actual_type_id = segment
+            .peek_output_type_id()
+            .ok_or_else(|| ctx.err_at(format!("out `{name}`: expression produced no value")))?;
+
+        let (out_type_id, add_fn) = match declared {
+            Some((declared_type_id, add_fn)) => {
+                if actual_type_id != declared_type_id {
+                    let expected = self
+                        .types
+                        .entry_by_type_id(declared_type_id)
+                        .map(|e| e.type_name)
+                        .unwrap_or("?");
+                    let got = self
+                        .types
+                        .entry_by_type_id(actual_type_id)
+                        .map(|e| e.type_name)
+                        .unwrap_or("?");
+                    return Err(ctx.err_at(format!(
+                        "out `{name}`: type mismatch: expected `{expected}`, got `{got}`"
+                    )));
+                }
+                (declared_type_id, add_fn)
+            }
+            None => {
+                let entry = self.types.entry_by_type_id(actual_type_id).ok_or_else(|| {
+                    ctx.err_at(format!(
+                        "out `{name}`: cannot infer a type for this expression; register a type \
+                         name for it or add an explicit `: type_name` annotation"
+                    ))
+                })?;
+                (entry.type_id, entry.add_cell_fn)
+            }
+        };
+
+        let default_fn = self
+            .types
+            .entry_by_type_id(out_type_id)
+            .and_then(|e| e.default_fn)
+            .ok_or_else(|| ctx.err_at(format!("out `{name}`: type has no default value")))?;
+
+        let cell_id = add_fn(&mut ctx.sheet, default_fn());
+        ctx.cell_names.insert(name.clone(), (cell_id, out_type_id));
+
+        let call_fn = self
+            .types
+            .entry_by_type_id(out_type_id)
+            .expect("output cell type registered")
+            .call_dyn_fn;
+        let writer = build_method(
+            inputs,
+            vec![(name.clone(), cell_id, out_type_id)],
+            segment,
+            CompiledOutputs::Single(call_fn),
+        );
+
+        let mut condition_names: Vec<String> = Vec::new();
+        let mut conditions: Vec<Condition> = Vec::new();
+        while matches!(ctx.peek_token(), Some(Token::Identifier(id)) if id == "condition") {
+            let (cond_name, condition) = self.parse_condition_decl(ctx)?;
+            condition_names.push(cond_name);
+            conditions.push(condition);
+        }
+
+        ctx.expect_close_brace()?;
+
+        let named_conditions: Vec<(&str, Condition)> = condition_names
+            .iter()
+            .map(String::as_str)
+            .zip(conditions)
+            .collect();
+
+        let output_id = ctx
+            .sheet
+            .add_output(writer, named_conditions)
+            .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
+        ctx.output_names.insert(name, output_id);
+
+        Ok(())
+    }
+
+    /// `condition_decl = "condition" identifier cell_list "{" or_expression "}".`
+    fn parse_condition_decl(&mut self, ctx: &mut ParseContext) -> Result<(String, Condition)> {
+        ctx.is_keyword("condition"); // consume
+        let (name, _name_span) = ctx.consume_ident()?;
+        let inputs = self.parse_cell_list(ctx)?;
+        let segment = self.parse_body_with_input_scope(ctx, &inputs)?;
+
+        let bool_type_id = TypeId::of::<bool>();
+        let actual_type_id = segment.peek_output_type_id().ok_or_else(|| {
+            ctx.err_at(format!("condition `{name}`: expression produced no value"))
+        })?;
+        if actual_type_id != bool_type_id {
+            let got = self
+                .types
+                .entry_by_type_id(actual_type_id)
+                .map(|e| e.type_name)
+                .unwrap_or("?");
+            return Err(ctx.err_at(format!("condition `{name}`: expected `bool`, got `{got}`")));
+        }
+
+        let call_fn = self
+            .types
+            .get("bool")
+            .expect("bool always registered")
+            .call_dyn_fn;
+        let input_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
+        let input_types: Vec<TypeId> = inputs.iter().map(|(_, _, tid)| *tid).collect();
+        let segment = RefCell::new(segment);
+        let condition = Condition::new(input_ids, input_types, move |args| {
+            let seg = &mut *segment.borrow_mut();
+            let boxed = call_fn(seg, args)?;
+            Ok(*boxed
+                .downcast::<bool>()
+                .expect("checked TypeId::of::<bool>() above"))
+        });
+
+        Ok((name, condition))
+    }
+
     /// `method_decl = "method" cell_list "->" cell_list method_body.`
     fn parse_method_decl(&mut self, ctx: &mut ParseContext) -> Result<Method> {
         if !ctx.is_keyword("method") {
@@ -349,21 +507,19 @@ impl AdamParser {
         Ok(cells)
     }
 
-    /// `method_body = "{" or_expression "}".`
+    /// Parses a `{ or_expression }` body with `inputs` cells available as a resolvable
+    /// identifier scope, pushed for the duration of the parse and popped afterward regardless of
+    /// success or failure of the body's own parse (mirrors the push/pop pairing already used by
+    /// `parse_method_body`'s single call site before this extraction).
     ///
-    /// Returns the compiled body segment and how to split its result across `outputs`:
-    /// one output takes the segment's single result directly; more than one requires
-    /// the result to be a tuple of matching arity and element types, split via
-    /// `call_dyn_tuple`.
-    fn parse_method_body(
+    /// - Complexity: O(k) to build the scope's dispatch table, where k = `inputs.len()`.
+    fn parse_body_with_input_scope(
         &mut self,
         ctx: &mut ParseContext,
         inputs: &[(String, CellId, TypeId)],
-        outputs: &[(String, CellId, TypeId)],
-    ) -> Result<(DynSegment, CompiledOutputs)> {
+    ) -> Result<DynSegment> {
         ctx.expect_open_brace()?;
 
-        // Pre-compute push_arg dispatch table for input scope.
         let scope_data: Vec<(String, PushArgFn, usize)> = inputs
             .iter()
             .enumerate()
@@ -377,7 +533,6 @@ impl AdamParser {
             })
             .collect();
 
-        // Push scope: CELParser resolves input cell names to push_arg ops.
         self.cel
             .op_lookup_mut()
             .push_scope(move |name, segment, arity, _span| {
@@ -398,6 +553,22 @@ impl AdamParser {
         let segment = result?;
 
         ctx.expect_close_brace()?;
+        Ok(segment)
+    }
+
+    /// `method_body = "{" or_expression "}".`
+    ///
+    /// Returns the compiled body segment and how to split its result across `outputs`:
+    /// one output takes the segment's single result directly; more than one requires
+    /// the result to be a tuple of matching arity and element types, split via
+    /// `call_dyn_tuple`.
+    fn parse_method_body(
+        &mut self,
+        ctx: &mut ParseContext,
+        inputs: &[(String, CellId, TypeId)],
+        outputs: &[(String, CellId, TypeId)],
+    ) -> Result<(DynSegment, CompiledOutputs)> {
+        let segment = self.parse_body_with_input_scope(ctx, inputs)?;
 
         let compiled = if outputs.len() == 1 {
             let (out_name, _, out_type_id) = &outputs[0];
@@ -1076,5 +1247,158 @@ mod tests {
         let mut parsed = parser().parse_str("sheet s { cell x: i32 = 1; }").unwrap();
         // Deref/DerefMut must make Sheet's methods directly callable.
         parsed.propagate().unwrap();
+    }
+
+    #[test]
+    fn parse_out_with_explicit_type_propagates_correctly() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell width: f64 = 4.0;
+                    cell height: f64 = 3.0;
+                    out area: f64 {
+                        method [width, height] { width * height }
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let output_id = *sheet.output_names.get("area").expect("area registered");
+        let cell_id = sheet.output_cell(output_id).expect("output has a cell");
+        assert_eq!(*sheet.read::<f64>(cell_id).unwrap(), 12.0);
+    }
+
+    #[test]
+    fn parse_out_with_no_annotation_infers_type_from_writer_body() {
+        let sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell width: f64 = 4.0;
+                    out doubled { method [width] { width + width } }
+                }
+            "#,
+            )
+            .unwrap();
+        let (_, type_id) = *sheet.cell_names.get("doubled").unwrap();
+        assert_eq!(type_id, std::any::TypeId::of::<f64>());
+    }
+
+    #[test]
+    fn parse_out_type_mismatch_is_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell width: f64 = 4.0;
+                out area: i32 { method [width] { width } }
+            }
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "f64 body for an i32 annotation must be an error"
+        );
+    }
+
+    #[test]
+    fn parse_out_with_conditions_reports_output_valid_and_violated() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell width: f64 = 4.0;
+                    cell height: f64 = 3.0;
+                    cell max_area: f64 = 100.0;
+                    out area: f64 {
+                        method [width, height] { width * height }
+                        condition max_area [width, height, max_area] { width * height <= max_area }
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let output_id = *sheet.output_names.get("area").unwrap();
+        assert!(sheet.output_valid(output_id));
+        assert_eq!(sheet.violated_conditions(output_id).count(), 0);
+    }
+
+    #[test]
+    fn parse_out_condition_violation_is_reported_after_propagate() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell width: f64 = 40.0;
+                    cell height: f64 = 30.0;
+                    cell max_area: f64 = 100.0;
+                    out area: f64 {
+                        method [width, height] { width * height }
+                        condition max_area [width, height, max_area] { width * height <= max_area }
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let output_id = *sheet.output_names.get("area").unwrap();
+        assert!(!sheet.output_valid(output_id));
+        assert_eq!(sheet.violated_conditions(output_id).count(), 1);
+    }
+
+    #[test]
+    fn parse_condition_non_bool_body_is_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell width: f64 = 4.0;
+                out area: f64 {
+                    method [width] { width }
+                    condition bogus [width] { width }
+                }
+            }
+        "#,
+        );
+        assert!(result.is_err(), "an f64 condition body must be an error");
+    }
+
+    #[test]
+    fn parse_out_duplicate_condition_names_is_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell width: f64 = 4.0;
+                out area: f64 {
+                    method [width] { width }
+                    condition dup [width] { width <= 10.0 }
+                    condition dup [width] { width >= 0.0 }
+                }
+            }
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "two conditions sharing a name must be an error"
+        );
+    }
+
+    #[test]
+    fn parse_out_cell_referenced_elsewhere_is_terminal_cell_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell width: f64 = 4.0;
+                cell height: f64 = 3.0;
+                out area: f64 { method [width, height] { width * height } }
+                relationship { method [area] -> [width] { area } }
+            }
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "referencing an out cell as another relationship's input must be an error"
+        );
     }
 }
