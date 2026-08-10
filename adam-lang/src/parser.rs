@@ -1401,4 +1401,41 @@ mod tests {
             "referencing an out cell as another relationship's input must be an error"
         );
     }
+
+    #[test]
+    fn parse_out_with_no_annotation_and_unregistered_type_is_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell dummy: i32 = 0;
+                out x { method [dummy] { () } }
+            }
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "an out with no annotation whose writer body produces an unregistered type must be an error"
+        );
+    }
+
+    #[test]
+    fn parse_out_cell_referenced_in_conditional_is_terminal_cell_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell width: f64 = 4.0;
+                cell height: f64 = 3.0;
+                cell mode: i32 = 0;
+                out area: f64 { method [width, height] { width * height } }
+                conditional mode {
+                    0i32 => { relationship { method [area] -> [width] { area } } }
+                }
+            }
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "referencing an out cell as a conditional branch relationship's input must be an error"
+        );
+    }
 }

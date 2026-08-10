@@ -3,7 +3,7 @@
 //! for the identical problem — see `cel-parser/src/lex_lexer.rs`'s `test_span_preservation`), and
 //! attaches each to the nearest following node. Applied recursively to every sibling list in the
 //! tree — `Sheet.items`, a `RelationshipDecl`'s `methods`, a `ConditionalDecl`'s `branches` and
-//! `default`, and each `ConditionalBranch`'s `relationships` — not just the top level. Also
+//! `default`, each `ConditionalBranch`'s `relationships`, and an `OutDecl`'s `conditions` — not just the top level. Also
 //! recovers a comment preceding the `sheet` keyword itself (e.g. a file header) into
 //! `Sheet.leading_comment` — the one gap with no enclosing sibling list to attach via, so it's
 //! handled directly against the start of `source` rather than through [`attach_gaps`].
