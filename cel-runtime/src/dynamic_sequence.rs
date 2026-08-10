@@ -773,4 +773,40 @@ mod tests {
         let result = seq.try_to_tuple::<(i32, i32)>();
         assert!(result.is_err());
     }
+
+    #[test]
+    fn try_into_tuple_moves_fields_without_double_dropping_or_leaking() -> anyhow::Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &other.0)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let seq = DynamicSequence::from_tuple((DropCounter(count.clone()), 7i32));
+        let (extracted, n): (DropCounter, i32) = seq.try_into_tuple()?;
+        assert_eq!(n, 7);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "moving out must not drop the element"
+        );
+        drop(extracted);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "the moved-out value must still drop exactly once, on its own schedule"
+        );
+        Ok(())
+    }
 }
