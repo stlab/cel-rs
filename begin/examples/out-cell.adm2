@@ -1,0 +1,24 @@
+sheet diamond {
+    cell a = 0.0;
+    cell b = 0.0;
+    cell c = 0.0;
+    cell d = 0.0;
+
+    relationship {
+        method [a, b] -> [c] { a * b }
+        method [a, c] -> [b] { c / a }
+        method [b, c] -> [a] { c / b }
+    }
+
+    relationship {
+        method [b, c] -> [d] { b * c }
+        method [b, d] -> [c] { d / b }
+        method [c, d] -> [b] { d / c }
+    }
+
+    out result {
+        method [a, b] { a + b }
+
+        condition min_a [a, b] { a <= b }
+    }
+}
