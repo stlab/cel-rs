@@ -77,7 +77,7 @@ impl AdamAstParser {
     pub fn parse_str(&mut self, source: &str) -> Result<ast::Sheet> {
         use std::str::FromStr;
         let stream = proc_macro2::TokenStream::from_str(source)
-            .map_err(|e| cel_parser::ParseError::new(e.to_string(), e.span()))?;
+            .map_err(|e| cel_parser::ParseError::from_lex_error(source, e))?;
         let mut cursor =
             TokenCursor::new(cel_parser::lex_lexer::LexLexer::new(stream.into_iter()).peekable());
         let sheet = self.parse_sheet(&mut cursor)?;
