@@ -413,6 +413,74 @@ impl DynamicSequence {
     pub fn arity(&self) -> usize {
         self.shape.len()
     }
+
+    /// Returns whether `T`'s element `TypeId` sequence matches this sequence's actual elements
+    /// exactly (same arity, same type at each position, in order).
+    fn shape_matches<T: TupleSequence>(&self) -> bool
+    where
+        T::Output: SequenceList,
+    {
+        let mut expected = Vec::new();
+        let mut max_align = 1usize;
+        T::Output::append_shape(&mut expected, 0, &mut max_align);
+        self.shape.len() == expected.len()
+            && self
+                .shape
+                .iter()
+                .zip(&expected)
+                .all(|(a, b)| a.type_id == b.type_id)
+    }
+
+    /// Consumes this sequence and reconstructs it as the concrete tuple `T`.
+    ///
+    /// - Complexity: O(arity).
+    ///
+    /// # Errors
+    /// Returns `Err` if `T`'s element `TypeId` sequence doesn't match this sequence's actual
+    /// elements (different arity, or a different type at some position).
+    pub fn try_into_tuple<T: TupleSequence>(mut self) -> anyhow::Result<T>
+    where
+        T::Output: SequenceList,
+    {
+        anyhow::ensure!(
+            self.shape_matches::<T>(),
+            "DynamicSequence::try_into_tuple: shape mismatch"
+        );
+        let offsets: Vec<usize> = self.shape.iter().map(|e| e.offset).collect();
+        let list = unsafe {
+            self.buffer
+                .read_at(0, |base| T::Output::read_from(base, &offsets))
+        };
+        // Fields were just moved out of `self.buffer`'s bytes above; clearing `shape` makes
+        // `Drop`'s element loop a no-op so those fields aren't dropped a second time. `buffer`'s
+        // own backing allocation is still freed normally when `self` goes out of scope below.
+        self.shape.clear();
+        Ok(T::from_list(list))
+    }
+
+    /// Reconstructs the concrete tuple `T` by cloning this sequence's elements, leaving `self`
+    /// untouched.
+    ///
+    /// - Complexity: O(arity).
+    ///
+    /// # Errors
+    /// Returns `Err` if `T`'s element `TypeId` sequence doesn't match this sequence's actual
+    /// elements (different arity, or a different type at some position).
+    pub fn try_to_tuple<T: TupleSequence>(&self) -> anyhow::Result<T>
+    where
+        T::Output: SequenceList,
+    {
+        anyhow::ensure!(
+            self.shape_matches::<T>(),
+            "DynamicSequence::try_to_tuple: shape mismatch"
+        );
+        let offsets: Vec<usize> = self.shape.iter().map(|e| e.offset).collect();
+        let list = unsafe {
+            self.buffer
+                .read_at(0, |base| T::Output::clone_from(base, &offsets))
+        };
+        Ok(T::from_list(list))
+    }
 }
 
 impl Drop for DynamicSequence {
@@ -672,5 +740,37 @@ mod tests {
         assert_ne!(a, b);
         let c = DynamicSequence::from_tuple((1i32, 2i32));
         assert_eq!(a, c);
+    }
+
+    #[test]
+    fn try_into_tuple_round_trips_for_a_matching_shape() -> anyhow::Result<()> {
+        let seq = DynamicSequence::from_tuple((3i32, 4.5f64));
+        let result: (i32, f64) = seq.try_into_tuple()?;
+        assert_eq!(result, (3, 4.5));
+        Ok(())
+    }
+
+    #[test]
+    fn try_into_tuple_errs_on_shape_mismatch() {
+        let seq = DynamicSequence::from_tuple((3i32, 4i32));
+        let result = seq.try_into_tuple::<(i32, f64)>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_to_tuple_clones_without_consuming_the_sequence() -> anyhow::Result<()> {
+        let seq = DynamicSequence::from_tuple((1i32, "hello".to_string()));
+        let a: (i32, String) = seq.try_to_tuple()?;
+        let b: (i32, String) = seq.try_to_tuple()?;
+        assert_eq!(a, (1, "hello".to_string()));
+        assert_eq!(b, (1, "hello".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn try_to_tuple_errs_on_shape_mismatch() {
+        let seq = DynamicSequence::from_tuple((1i32,));
+        let result = seq.try_to_tuple::<(i32, i32)>();
+        assert!(result.is_err());
     }
 }
