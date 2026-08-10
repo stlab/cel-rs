@@ -4,14 +4,16 @@
 //! destroyed when the sheet is dropped.
 
 use std::any::{Any, TypeId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use slotmap::SlotMap;
 
 use crate::{
     cell::{CellData, CellId},
+    condition::{Condition, ConditionData, ConditionId},
     conditional::{Branch, ConditionalData, ConditionalId},
     error::Error,
+    output::{OutputData, OutputId},
     relationship::{Method, RelationshipData, RelationshipId},
 };
 
@@ -54,6 +56,18 @@ pub struct Sheet {
     /// Union of all RelationshipIds assigned to any conditional branch or default.
     /// Used to exclude them from the unconditional active set.
     pub(crate) conditional_relationships: HashSet<RelationshipId>,
+    /// Cells belonging to a registered output (see [`Sheet::add_output`]). Such a cell
+    /// can never be referenced as an input to a relationship, conditional, condition, or
+    /// another output, and can never be the target of `write`.
+    terminal_cells: HashSet<CellId>,
+    /// All outputs registered on this sheet.
+    outputs: SlotMap<OutputId, OutputData>,
+    /// All conditions registered on this sheet, across all outputs.
+    conditions: SlotMap<ConditionId, ConditionData>,
+    /// Conditions that evaluated `false` as of the last `propagate()` call, grouped by
+    /// output. Sparse: an output with no entry had all its conditions hold. Not
+    /// recomputed by `propagate_without_replan`.
+    last_violated: HashMap<OutputId, Vec<ConditionId>>,
 }
 
 impl Sheet {
@@ -69,6 +83,10 @@ impl Sheet {
             last_forced_relationships: None,
             conditionals: SlotMap::with_key(),
             conditional_relationships: HashSet::new(),
+            terminal_cells: HashSet::new(),
+            outputs: SlotMap::with_key(),
+            conditions: SlotMap::with_key(),
+            last_violated: HashMap::new(),
         }
     }
 
@@ -116,6 +134,8 @@ impl Sheet {
     /// - `Error::InvalidId` — a `CellId` in any method is not found in this sheet.
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
+    /// - `Error::TerminalCell` — a method input or output cell already belongs to
+    ///   an existing output.
     ///
     /// - Complexity: O(m² × c) where m is the total number of methods and c is the
     ///   maximum number of cells per method (due to duplicate output set comparison).
@@ -137,6 +157,9 @@ impl Sheet {
             }
 
             for (&cell_id, &declared) in method.inputs.iter().zip(method.input_types.iter()) {
+                if self.terminal_cells.contains(&cell_id) {
+                    return Err(Error::TerminalCell);
+                }
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                 if cell.type_id != declared {
                     return Err(Error::TypeMismatch {
@@ -147,6 +170,9 @@ impl Sheet {
             }
 
             for (&cell_id, &declared) in method.outputs.iter().zip(method.output_types.iter()) {
+                if self.terminal_cells.contains(&cell_id) {
+                    return Err(Error::TerminalCell);
+                }
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                 if cell.type_id != declared {
                     return Err(Error::TypeMismatch {
@@ -228,6 +254,7 @@ impl Sheet {
     ///   a referenced relationship does not exist; a branch relationship that shares a cell with
     ///   the match cell or any of its unconditional upstream contributors has more than one method;
     ///   a relationship already appears in another conditional branch; or a branch has no keys.
+    /// - `Error::TerminalCell` — the match cell already belongs to an existing output.
     ///
     /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R = relationships per branch.
     pub fn add_conditional<T: Any + PartialEq + 'static>(
@@ -237,6 +264,9 @@ impl Sheet {
         default: Vec<RelationshipId>,
     ) -> Result<ConditionalId, Error> {
         let cell_data = self.cells.get(cell).ok_or(Error::InvalidId)?;
+        if self.terminal_cells.contains(&cell) {
+            return Err(Error::TerminalCell);
+        }
         if cell_data.type_id != TypeId::of::<T>() {
             return Err(Error::InvalidConditional);
         }
@@ -335,6 +365,226 @@ impl Sheet {
         }))
     }
 
+    /// Returns `true` if `id` already has adjacency (a relationship referencing it, or
+    /// use as some conditional's match cell) — i.e. it cannot legally become an output's
+    /// terminal cell, since that would retroactively violate the terminal invariant for
+    /// whatever already references it.
+    fn cell_has_prior_use(&self, id: CellId) -> bool {
+        self.cells.get(id).is_some_and(|cell| !cell.adj.is_empty())
+            || self.conditionals.values().any(|c| c.cell == id)
+    }
+
+    /// Registers an output: a cell written by exactly one method, together with zero or
+    /// more named conditions checked after every `propagate()`.
+    ///
+    /// `writer` must have exactly one output cell — that cell becomes terminal: it can
+    /// never afterward be referenced as an input to a relationship, conditional,
+    /// condition, or another output, nor be the target of `write`. A condition's inputs
+    /// may be any cells in the sheet, including the output's own cell, but not a cell that
+    /// already belongs to a different output.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidOutput` — `writer` does not have exactly one output cell, a
+    ///   condition name is empty, or two conditions share a name.
+    /// - `Error::TerminalCell` — a condition input is already another output's cell, or
+    ///   the writer's output cell already has prior use (see [`Sheet::cell_has_prior_use`])
+    ///   and so cannot become terminal.
+    /// - `Error::InvalidId` — a cell referenced by `writer` or a condition is not in this
+    ///   sheet.
+    /// - `Error::TypeMismatch` — a condition input's declared type does not match the
+    ///   cell's registered type.
+    /// - Any error `add_relationship` can return, for `writer`'s own validation.
+    ///
+    /// - Complexity: O(k + m²×c) where k is the number of conditions (each validated
+    ///   in a single pass over its inputs), plus the cost of `add_relationship` for
+    ///   `writer` alone (m = 1 method, c = cells in that method).
+    pub fn add_output(
+        &mut self,
+        writer: Method,
+        conditions: Vec<(&str, Condition)>,
+    ) -> Result<OutputId, Error> {
+        if writer.outputs.len() != 1 {
+            return Err(Error::InvalidOutput);
+        }
+        let output_cell = writer.outputs[0];
+
+        let mut seen_names: HashSet<&str> = HashSet::new();
+        for &(name, _) in &conditions {
+            if name.is_empty() || !seen_names.insert(name) {
+                return Err(Error::InvalidOutput);
+            }
+        }
+
+        for (_, condition) in &conditions {
+            if condition.inputs.len() != condition.input_types.len() {
+                return Err(Error::InvalidOutput);
+            }
+            for (&cell_id, &declared) in condition.inputs.iter().zip(condition.input_types.iter()) {
+                if self.terminal_cells.contains(&cell_id) {
+                    return Err(Error::TerminalCell);
+                }
+                let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
+                if cell.type_id != declared {
+                    return Err(Error::TypeMismatch {
+                        expected: cell.type_id,
+                        found: declared,
+                    });
+                }
+            }
+        }
+
+        if self.cell_has_prior_use(output_cell) {
+            return Err(Error::TerminalCell);
+        }
+
+        self.add_relationship(vec![writer])?;
+        self.terminal_cells.insert(output_cell);
+
+        let output_id = self.outputs.insert(OutputData {
+            cell: output_cell,
+            conditions: Vec::new(),
+        });
+
+        let condition_ids: Vec<ConditionId> = conditions
+            .into_iter()
+            .map(|(name, condition)| {
+                self.conditions.insert(ConditionData {
+                    name: name.to_string(),
+                    output: output_id,
+                    inputs: condition.inputs,
+                    function: condition.function,
+                })
+            })
+            .collect();
+        self.outputs[output_id].conditions = condition_ids;
+
+        Ok(output_id)
+    }
+
+    /// Returns the terminal cell backing output `id`. Read its value with [`Sheet::read`].
+    ///
+    /// Returns `None` if `id` is not a live output in this sheet.
+    pub fn output_cell(&self, id: OutputId) -> Option<CellId> {
+        self.outputs.get(id).map(|o| o.cell)
+    }
+
+    /// Returns the conditions registered on output `id`, in declaration order.
+    ///
+    /// Returns `None` if `id` is not a live output in this sheet.
+    pub fn output_conditions(&self, id: OutputId) -> Option<&[ConditionId]> {
+        self.outputs.get(id).map(|o| o.conditions.as_slice())
+    }
+
+    /// Returns the name of condition `id`.
+    ///
+    /// Returns `None` if `id` is not a live condition in this sheet.
+    pub fn condition_name(&self, id: ConditionId) -> Option<&str> {
+        self.conditions.get(id).map(|c| c.name.as_str())
+    }
+
+    /// Returns the output that condition `id` belongs to.
+    ///
+    /// Returns `None` if `id` is not a live condition in this sheet.
+    pub fn condition_output(&self, id: ConditionId) -> Option<OutputId> {
+        self.conditions.get(id).map(|c| c.output)
+    }
+
+    /// Returns the cells condition `id` reads.
+    ///
+    /// Returns `None` if `id` is not a live condition in this sheet.
+    pub fn condition_inputs(&self, id: ConditionId) -> Option<&[CellId]> {
+        self.conditions.get(id).map(|c| c.inputs.as_slice())
+    }
+
+    /// Returns `true` if every condition on `id` held as of the last `propagate()` call.
+    ///
+    /// Returns `false` if no propagation has run yet. Also returns `true` for an `id`
+    /// that is not a live output in this sheet, since no condition can have failed
+    /// for an output that doesn't exist.
+    pub fn output_valid(&self, id: OutputId) -> bool {
+        if self.last_plan.is_none() {
+            return false;
+        }
+        !self.last_violated.contains_key(&id)
+    }
+
+    /// Iterates the conditions on `id` that evaluated to `false` as of the last
+    /// `propagate()` call.
+    ///
+    /// - Postcondition: empty if `id`'s conditions all held, `id` is not a live
+    ///   output in this sheet, or no propagation has run yet.
+    pub fn violated_conditions(&self, id: OutputId) -> impl Iterator<Item = ConditionId> + '_ {
+        self.last_violated.get(&id).into_iter().flatten().copied()
+    }
+
+    /// Returns the set of root source cells currently determining `id`'s value, as of the
+    /// last `propagate()` call.
+    ///
+    /// Walks backward from `id` through the last plan's selected methods. A
+    /// self-referencing input (present in both a method's inputs and its outputs) is
+    /// treated as one of its own roots, since it is read at its pre-execution value rather
+    /// than derived further.
+    ///
+    /// - Postcondition: returns `{id}` if no propagation has run yet, or if `id` is
+    ///   currently a source.
+    ///
+    /// - Complexity: O(N) where N is the number of cells reachable upstream of `id`.
+    pub fn contributing_cells(&self, id: CellId) -> HashSet<CellId> {
+        let mut result = HashSet::new();
+        let mut visited: HashSet<CellId> = HashSet::new();
+        let mut stack = vec![id];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            if self.is_source(current) {
+                result.insert(current);
+                continue;
+            }
+            let producing = self.last_plan.as_ref().and_then(|plan| {
+                plan.iter()
+                    .find(|&&(rel, idx)| {
+                        self.relationships[rel].methods[idx]
+                            .outputs
+                            .contains(&current)
+                    })
+                    .copied()
+            });
+            let Some((rel_id, method_idx)) = producing else {
+                result.insert(current);
+                continue;
+            };
+            let method = &self.relationships[rel_id].methods[method_idx];
+            for &input in &method.inputs {
+                if method.outputs.contains(&input) {
+                    result.insert(input);
+                } else {
+                    stack.push(input);
+                }
+            }
+        }
+        result
+    }
+
+    /// Returns the union of [`Sheet::contributing_cells`] over condition `id`'s own
+    /// declared inputs.
+    ///
+    /// Returns an empty set if `id` is not a live condition in this sheet.
+    ///
+    /// - Complexity: O(K·N) where K is the condition's input count and N is the size of
+    ///   each input's contributing set.
+    pub fn condition_contributing_cells(&self, id: ConditionId) -> HashSet<CellId> {
+        let Some(condition) = self.conditions.get(id) else {
+            return HashSet::new();
+        };
+        condition
+            .inputs
+            .iter()
+            .flat_map(|&input| self.contributing_cells(input))
+            .collect()
+    }
+
     /// Writes a value to a cell, incrementing the cell's write-recency strength.
     ///
     /// Each successful `write` increments a global monotonic counter and assigns
@@ -347,7 +597,11 @@ impl Sheet {
     ///
     /// - `Error::InvalidId` — `id` is not a cell in this sheet.
     /// - `Error::TypeMismatch` — `T` does not match the cell's registered `TypeId`.
+    /// - `Error::TerminalCell` — `id` already belongs to an existing output.
     pub fn write<T: Any + 'static>(&mut self, id: CellId, value: T) -> Result<(), Error> {
+        if self.terminal_cells.contains(&id) {
+            return Err(Error::TerminalCell);
+        }
         let cell = self.cells.get_mut(id).ok_or(Error::InvalidId)?;
         if cell.type_id != TypeId::of::<T>() {
             return Err(Error::TypeMismatch {
@@ -616,11 +870,16 @@ impl Sheet {
     /// reverted to its source value (e.g. its forcing conditional went inactive); it is
     /// marked changed even though no method wrote to it this round.
     ///
+    /// **Phase 6 — Condition evaluation:** every registered condition is evaluated
+    /// against current cell values, rebuilding `last_violated` from scratch, so
+    /// [`Sheet::output_valid`] and [`Sheet::violated_conditions`] reflect this round.
+    ///
     /// # Errors
     ///
     /// - `Error::Conflict` — no valid method assignment exists.
-    /// - `Error::MethodFailed` — a method's function returned an error, or a method
-    ///   produced the wrong number of outputs.
+    /// - `Error::MethodFailed` — a method's function returned an error, a method
+    ///   produced the wrong number of outputs, or a condition's function returned
+    ///   an error.
     /// - `Error::TypeMismatch` — a method output's runtime type does not match the
     ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
@@ -669,6 +928,24 @@ impl Sheet {
                 self.changed_cells.push(id);
             }
         }
+
+        // Phase 6: evaluate every registered condition against current cell values.
+        let mut last_violated: HashMap<OutputId, Vec<ConditionId>> = HashMap::new();
+        for (condition_id, condition) in self.conditions.iter() {
+            let inputs: Vec<&dyn Any> = condition
+                .inputs
+                .iter()
+                .map(|&id| self.cells[id].effective())
+                .collect();
+            let holds = (condition.function)(&inputs).map_err(Error::MethodFailed)?;
+            if !holds {
+                last_violated
+                    .entry(condition.output)
+                    .or_default()
+                    .push(condition_id);
+            }
+        }
+        self.last_violated = last_violated;
 
         self.last_forced = Some(plan.forced_outputs);
         self.last_forced_relationships = Some(plan.forced_relationships);
@@ -916,7 +1193,9 @@ impl Sheet {
     ///   since the last `propagate()`. Violation produces incorrect branch activation.
     ///
     /// `is_forced` and `forced_cells` continue to reflect the last full `propagate()`
-    /// call; this method does not recompute them.
+    /// call; this method does not recompute them. Likewise, `output_valid` and
+    /// `violated_conditions` continue to reflect the last full `propagate()` call; this
+    /// method does not re-evaluate output conditions.
     ///
     /// # Errors
     ///
@@ -1088,6 +1367,43 @@ mod tests {
         let a = sheet.add_cell(1_i32);
         let b = sheet.add_cell(2_i32);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn write_returns_terminal_cell_for_terminal_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        sheet.terminal_cells.insert(a);
+        assert!(matches!(sheet.write(a, 1_i32), Err(Error::TerminalCell)));
+    }
+
+    #[test]
+    fn add_relationship_returns_terminal_cell_for_terminal_input() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet.terminal_cells.insert(a);
+        let result = sheet.add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))]);
+        assert!(matches!(result, Err(Error::TerminalCell)));
+    }
+
+    #[test]
+    fn add_relationship_returns_terminal_cell_for_terminal_output() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet.terminal_cells.insert(b);
+        let result = sheet.add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))]);
+        assert!(matches!(result, Err(Error::TerminalCell)));
+    }
+
+    #[test]
+    fn add_conditional_returns_terminal_cell_for_terminal_match_cell() {
+        let mut sheet = Sheet::new();
+        let p = sheet.add_cell(0_i32);
+        sheet.terminal_cells.insert(p);
+        let result = sheet.add_conditional::<i32>(p, vec![], vec![]);
+        assert!(matches!(result, Err(Error::TerminalCell)));
     }
 
     #[test]
