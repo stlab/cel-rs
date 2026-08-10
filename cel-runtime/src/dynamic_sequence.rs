@@ -423,6 +423,51 @@ impl Drop for DynamicSequence {
     }
 }
 
+impl Clone for DynamicSequence {
+    fn clone(&self) -> Self {
+        let total_size = self.buffer.len();
+        let mut buffer = crate::raw_stack::RawStack::with_base_alignment(self.max_align);
+        unsafe {
+            buffer.reserve_and_write(self.max_align, total_size, |dst| {
+                for elem in &self.shape {
+                    self.buffer.read_at(elem.offset, |src| {
+                        (elem.clone)(src, dst.add(elem.offset));
+                    });
+                }
+            });
+        }
+        DynamicSequence {
+            buffer,
+            shape: self.shape.clone(),
+            max_align: self.max_align,
+        }
+    }
+}
+
+impl PartialEq for DynamicSequence {
+    fn eq(&self, other: &Self) -> bool {
+        self.shape.len() == other.shape.len()
+            && self
+                .shape
+                .iter()
+                .zip(&other.shape)
+                .all(|(a, b)| a.type_id == b.type_id)
+            && self.shape.iter().all(|elem| unsafe {
+                self.buffer.read_at(elem.offset, |a| {
+                    other.buffer.read_at(elem.offset, |b| (elem.eq)(a, b))
+                })
+            })
+    }
+}
+
+impl std::fmt::Debug for DynamicSequence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynamicSequence")
+            .field("arity", &self.shape.len())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,5 +624,53 @@ mod tests {
 
         assert_eq!(count.load(Ordering::SeqCst), 2);
         assert_eq!(*order.lock().unwrap(), vec![2, 1]); // reverse of declaration order
+    }
+
+    #[test]
+    fn clone_produces_an_independently_droppable_equal_copy() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &other.0)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let original = DynamicSequence::from_tuple((DropCounter(count.clone()), 7i32));
+        let cloned = original.clone();
+
+        assert_eq!(original, cloned);
+
+        drop(original);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        drop(cloned);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn partial_eq_is_false_for_different_arity_or_element_type() {
+        let a = DynamicSequence::from_tuple((1i32, 2i32));
+        let b = DynamicSequence::from_tuple((1i32,));
+        let c = DynamicSequence::from_tuple((1i32, 2.0f64));
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn partial_eq_is_false_for_different_values_of_the_same_shape() {
+        let a = DynamicSequence::from_tuple((1i32, 2i32));
+        let b = DynamicSequence::from_tuple((1i32, 3i32));
+        assert_ne!(a, b);
+        let c = DynamicSequence::from_tuple((1i32, 2i32));
+        assert_eq!(a, c);
     }
 }
