@@ -265,17 +265,20 @@ git commit -m "feat(adam-lang): add OutDecl/OutMethodDecl/ConditionDecl AST type
 
 ---
 
-### Task 2: AST parser (`ast_parser.rs`) + recovery keyword + grammar doc
+### Task 2: AST parser (`ast_parser.rs`) + recovery keyword + grammar doc + trivia
 
 **Files:**
 - Modify: `adam-lang/src/ast_parser.rs`
 - Modify: `adam-lang/src/token_cursor.rs`
 - Modify: `adam-lang/src/lib.rs`
+- Modify: `adam-lang/src/trivia.rs`
 
 **Interfaces:**
 - Consumes: `ast::OutDecl`/`OutMethodDecl`/`ConditionDecl`/`SheetItem::Out` (Task 1).
-- Produces: `AdamAstParser::parse_str` now accepts `out`/`condition` source and returns `SheetItem::Out` items.
-- Consumed by: Task 3 (`fmt.rs`), Task 4 (`typecheck.rs`), both operate on `AdamAstParser`'s output.
+- Produces: `AdamAstParser::parse_str` now accepts `out`/`condition` source and returns `SheetItem::Out` items. `attach_trivia` now recovers comments/blank-lines for an `out`'s `condition`s (parity with how it already handles a `relationship`'s `method`s and a `conditional`'s `branches`).
+- Consumed by: Task 3 (`fmt.rs`), Task 4 (`typecheck.rs`), both operate on `AdamAstParser`'s output — Task 3's formatter output depends on this task's `trivia.rs` change to reproduce comments/blank-lines around `condition`s correctly.
+
+**Note:** Task 1's implementer discovered that `adam-lang/src/trivia.rs`'s `attach_trivia` also exhaustively matches on `SheetItem` (missed when this plan was originally written) and added a placeholder no-op arm for `SheetItem::Out` to keep the crate compiling. This task replaces that placeholder with real trivia recovery — see Step 3b below.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -525,16 +528,87 @@ In `adam-lang/src/lib.rs`, extend the `# Grammar` doc comment:
 Run: `cargo test -p adam-lang parse_out_with_explicit_type_and_no_conditions parse_out_with_no_type_annotation parse_out_with_conditions_in_declaration_order parse_malformed_out_is_recorded_as_an_error_item`
 Expected: PASS (4 tests).
 
-- [ ] **Step 5: Run the full existing `adam-lang` test suite to check for regressions**
+- [ ] **Step 5: Write the failing trivia test**
+
+`adam-lang/src/trivia.rs`'s `attach_trivia` currently has a placeholder no-op arm for `SheetItem::Out` (added by Task 1 only to keep the crate compiling — see this task's Note above). Add to `adam-lang/src/trivia.rs`'s existing `#[cfg(test)] mod tests`:
+
+```rust
+#[test]
+fn attaches_a_comment_to_a_condition_inside_an_out_block() {
+    let source = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n        // second\n        condition c [width] { width <= 10.0 }\n    }\n}";
+    let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+    attach_trivia(source, &mut sheet);
+    let crate::ast::SheetItem::Out(out) = &sheet.items[0] else {
+        panic!("expected Out");
+    };
+    assert_eq!(out.conditions[0].leading_comment.as_deref(), Some("second"));
+}
+```
+
+- [ ] **Step 6: Run the test to verify it fails**
+
+Run: `cargo test -p adam-lang attaches_a_comment_to_a_condition_inside_an_out_block`
+Expected: FAIL — the placeholder `SheetItem::Out(_out) => { /* TODO */ }` arm in `attach_trivia` never visits `out.conditions`, so `leading_comment` stays `None`.
+
+- [ ] **Step 7: Add `attach_out` to `trivia.rs`**
+
+In `adam-lang/src/trivia.rs`, update the `use` list to bring in the two new AST types:
+
+```rust
+use crate::ast::{
+    ConditionDecl, ConditionalBranch, ConditionalDecl, ExprSpan, MethodDecl, OutDecl,
+    RelationshipDecl, Sheet,
+};
+```
+
+Add a `TriviaTarget` impl for `ConditionDecl` (placed after the existing `impl TriviaTarget for ConditionalBranch`):
+
+```rust
+impl TriviaTarget for ConditionDecl {
+    fn span(&self) -> ExprSpan {
+        self.span
+    }
+    fn set_leading_comment(&mut self, comment: String) {
+        self.leading_comment = Some(comment);
+    }
+    fn set_blank_line_before(&mut self, value: bool) {
+        self.blank_line_before = value;
+    }
+}
+```
+
+Replace the placeholder arm in `attach_trivia`'s match:
+
+```rust
+crate::ast::SheetItem::Out(out_decl) => attach_out(source, &line_starts, out_decl),
+```
+
+Add `attach_out` (placed after `attach_conditional`) — the writer method is always the out block's first item (nothing precedes it to attach a comment to, the same "first item in a list is never attached" limitation the module doc already documents for every other list), so only the `conditions` list needs a gap pass:
+
+```rust
+/// Recovers trivia for an out declaration's conditions. The writer method itself is always
+/// first in the block — nothing precedes it to attach a comment to, the same limitation
+/// documented in this module's doc comment for the first item of any sibling list.
+fn attach_out(source: &str, line_starts: &[usize], out_decl: &mut OutDecl) {
+    attach_gaps(source, line_starts, &mut out_decl.conditions);
+}
+```
+
+- [ ] **Step 8: Run the test to verify it passes**
+
+Run: `cargo test -p adam-lang attaches_a_comment_to_a_condition_inside_an_out_block`
+Expected: PASS.
+
+- [ ] **Step 9: Run the full existing `adam-lang` test suite to check for regressions**
 
 Run: `cargo test -p adam-lang`
-Expected: PASS, same pre-existing count plus the 4 new tests. In particular, every existing `recovery_*`/`parse_unknown_sheet_item_is_recorded_as_an_error_item` test in `ast_parser.rs` must still pass unchanged — adding `out`/`condition` as new possibilities doesn't change how any `cell`/`relationship`/`conditional`/error case is recognized.
+Expected: PASS, same pre-existing count plus the 4 `ast_parser.rs` tests from Step 4 and the 1 `trivia.rs` test from Step 8. In particular, every existing `recovery_*`/`parse_unknown_sheet_item_is_recorded_as_an_error_item` test in `ast_parser.rs`, and every existing `attach*`/`attaches_*` test in `trivia.rs`, must still pass unchanged — adding `out`/`condition` as new possibilities doesn't change how any `cell`/`relationship`/`conditional`/error case is recognized or how trivia is recovered for them.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 cargo fmt --all
-git add adam-lang/src/ast_parser.rs adam-lang/src/token_cursor.rs adam-lang/src/lib.rs
+git add adam-lang/src/ast_parser.rs adam-lang/src/token_cursor.rs adam-lang/src/lib.rs adam-lang/src/trivia.rs
 git commit -m "feat(adam-lang): parse out/condition declarations into the AST"
 ```
 
