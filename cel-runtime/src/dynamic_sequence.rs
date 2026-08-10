@@ -7,6 +7,7 @@
 //! `IntoTupleList` already produces.
 
 use crate::memory::align_index;
+use crate::tuple_list::IntoTupleList;
 use std::any::TypeId;
 use std::borrow::Cow;
 
@@ -172,6 +173,199 @@ impl<H: 'static + Clone + PartialEq, T: SequenceList> SequenceList for (H, T) {
     }
 }
 
+/// Bridges a concrete Rust tuple `T` to and from its [`IntoTupleList`] cons-list representation,
+/// so [`DynamicSequence`] can convert to/from `T` while all the actual byte-layout work is
+/// handled generically by [`SequenceList`].
+///
+/// Implemented for tuples of arity 1 through 12 — the same range `cel-runtime`'s `IntoList`
+/// supports — via a single-line reversal of [`IntoTupleList::into_tuple_list`]; no unsafe code
+/// appears in any of these impls. A nested tuple field needs no special handling: it's simply an
+/// ordinary `'static + Clone + PartialEq` element type to its enclosing tuple's own impl.
+pub trait TupleSequence: IntoTupleList + Sized
+where
+    Self::Output: SequenceList,
+{
+    /// Reconstructs `Self` from its cons-list representation — the reverse of
+    /// [`IntoTupleList::into_tuple_list`].
+    fn from_list(list: Self::Output) -> Self;
+}
+
+impl<A: 'static + Clone + PartialEq> TupleSequence for (A,) {
+    fn from_list(list: Self::Output) -> Self {
+        let (a, ()) = list;
+        (a,)
+    }
+}
+
+impl<A: 'static + Clone + PartialEq, B: 'static + Clone + PartialEq> TupleSequence for (A, B) {
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, ())) = list;
+        (a, b)
+    }
+}
+
+impl<A: 'static + Clone + PartialEq, B: 'static + Clone + PartialEq, C: 'static + Clone + PartialEq>
+    TupleSequence for (A, B, C)
+{
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, ()))) = list;
+        (a, b, c)
+    }
+}
+
+impl<
+    A: 'static + Clone + PartialEq,
+    B: 'static + Clone + PartialEq,
+    C: 'static + Clone + PartialEq,
+    D: 'static + Clone + PartialEq,
+> TupleSequence for (A, B, C, D)
+{
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, ())))) = list;
+        (a, b, c, d)
+    }
+}
+
+impl<
+    A: 'static + Clone + PartialEq,
+    B: 'static + Clone + PartialEq,
+    C: 'static + Clone + PartialEq,
+    D: 'static + Clone + PartialEq,
+    E: 'static + Clone + PartialEq,
+> TupleSequence for (A, B, C, D, E)
+{
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, ()))))) = list;
+        (a, b, c, d, e)
+    }
+}
+
+impl<
+    A: 'static + Clone + PartialEq,
+    B: 'static + Clone + PartialEq,
+    C: 'static + Clone + PartialEq,
+    D: 'static + Clone + PartialEq,
+    E: 'static + Clone + PartialEq,
+    F: 'static + Clone + PartialEq,
+> TupleSequence for (A, B, C, D, E, F)
+{
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, ())))))) = list;
+        (a, b, c, d, e, f)
+    }
+}
+
+impl<
+    A: 'static + Clone + PartialEq,
+    B: 'static + Clone + PartialEq,
+    C: 'static + Clone + PartialEq,
+    D: 'static + Clone + PartialEq,
+    E: 'static + Clone + PartialEq,
+    F: 'static + Clone + PartialEq,
+    G: 'static + Clone + PartialEq,
+> TupleSequence for (A, B, C, D, E, F, G)
+{
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, ()))))))) = list;
+        (a, b, c, d, e, f, g)
+    }
+}
+
+impl<
+    A: 'static + Clone + PartialEq,
+    B: 'static + Clone + PartialEq,
+    C: 'static + Clone + PartialEq,
+    D: 'static + Clone + PartialEq,
+    E: 'static + Clone + PartialEq,
+    F: 'static + Clone + PartialEq,
+    G: 'static + Clone + PartialEq,
+    H: 'static + Clone + PartialEq,
+> TupleSequence for (A, B, C, D, E, F, G, H)
+{
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, (h, ())))))))) = list;
+        (a, b, c, d, e, f, g, h)
+    }
+}
+
+impl<
+    A: 'static + Clone + PartialEq,
+    B: 'static + Clone + PartialEq,
+    C: 'static + Clone + PartialEq,
+    D: 'static + Clone + PartialEq,
+    E: 'static + Clone + PartialEq,
+    F: 'static + Clone + PartialEq,
+    G: 'static + Clone + PartialEq,
+    H: 'static + Clone + PartialEq,
+    I: 'static + Clone + PartialEq,
+> TupleSequence for (A, B, C, D, E, F, G, H, I)
+{
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, (h, (i, ()))))))))) = list;
+        (a, b, c, d, e, f, g, h, i)
+    }
+}
+
+impl<
+    A: 'static + Clone + PartialEq,
+    B: 'static + Clone + PartialEq,
+    C: 'static + Clone + PartialEq,
+    D: 'static + Clone + PartialEq,
+    E: 'static + Clone + PartialEq,
+    F: 'static + Clone + PartialEq,
+    G: 'static + Clone + PartialEq,
+    H: 'static + Clone + PartialEq,
+    I: 'static + Clone + PartialEq,
+    J: 'static + Clone + PartialEq,
+> TupleSequence for (A, B, C, D, E, F, G, H, I, J)
+{
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, (h, (i, (j, ())))))))))) = list;
+        (a, b, c, d, e, f, g, h, i, j)
+    }
+}
+
+impl<
+    A: 'static + Clone + PartialEq,
+    B: 'static + Clone + PartialEq,
+    C: 'static + Clone + PartialEq,
+    D: 'static + Clone + PartialEq,
+    E: 'static + Clone + PartialEq,
+    F: 'static + Clone + PartialEq,
+    G: 'static + Clone + PartialEq,
+    H: 'static + Clone + PartialEq,
+    I: 'static + Clone + PartialEq,
+    J: 'static + Clone + PartialEq,
+    K: 'static + Clone + PartialEq,
+> TupleSequence for (A, B, C, D, E, F, G, H, I, J, K)
+{
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, (h, (i, (j, (k, ()))))))))))) = list;
+        (a, b, c, d, e, f, g, h, i, j, k)
+    }
+}
+
+impl<
+    A: 'static + Clone + PartialEq,
+    B: 'static + Clone + PartialEq,
+    C: 'static + Clone + PartialEq,
+    D: 'static + Clone + PartialEq,
+    E: 'static + Clone + PartialEq,
+    F: 'static + Clone + PartialEq,
+    G: 'static + Clone + PartialEq,
+    H: 'static + Clone + PartialEq,
+    I: 'static + Clone + PartialEq,
+    J: 'static + Clone + PartialEq,
+    K: 'static + Clone + PartialEq,
+    L: 'static + Clone + PartialEq,
+> TupleSequence for (A, B, C, D, E, F, G, H, I, J, K, L)
+{
+    fn from_list(list: Self::Output) -> Self {
+        let (a, (b, (c, (d, (e, (f, (g, (h, (i, (j, (k, (l, ())))))))))))) = list;
+        (a, b, c, d, e, f, g, h, i, j, k, l)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +460,24 @@ mod tests {
         assert_eq!(out[1].offset, 4); // u8 at [0,1); u32 aligned up to 4
         assert_eq!(after_u32, 8);
         assert_eq!(max_align, 4);
+    }
+
+    #[test]
+    fn tuple_sequence_from_list_reverses_into_tuple_list_for_several_arities() {
+        assert_eq!(<(i32,)>::from_list((1i32, ())), (1,));
+        assert_eq!(<(i32, f64)>::from_list((1i32, (2.5f64, ()))), (1, 2.5));
+        assert_eq!(
+            <(i32, f64, bool)>::from_list((1i32, (2.5f64, (true, ())))),
+            (1, 2.5, true)
+        );
+        let full_arity_12 = (
+            1i32, 2i32, 3i32, 4i32, 5i32, 6i32, 7i32, 8i32, 9i32, 10i32, 11i32, 12i32,
+        );
+        assert_eq!(
+            <(i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32)>::from_list(
+                full_arity_12.into_tuple_list()
+            ),
+            full_arity_12
+        );
     }
 }
