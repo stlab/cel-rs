@@ -291,3 +291,12 @@ Derived from the contract/public interface only:
 - Surfacing *which* condition(s) failed (e.g. a tooltip listing violated
   condition names) — not requested; `invalid`/`warning` are boolean-only for
   now.
+- `warning` is computed independently of `disabled`/relevance (§2.2's
+  formula checks membership in the violation set, not in `relevant`), so a
+  cell that feeds a condition's inputs but not the output's own writer
+  method (e.g. a bound like `max_area` in the worked example) can be both
+  `disabled` (don't-care, since it's outside `output_relevant_cells`) and
+  `warning` at once. Accepted as-is rather than gating `warning` on
+  relevance: a don't-care field showing the softer warning treatment is a
+  reasonable signal that it's still implicated in a failing condition, even
+  though editing it currently has no effect on any out cell's value.
