@@ -1680,3 +1680,28 @@ fn condition_contributing_cells_returns_empty_for_invalid_id() {
         HashSet::new()
     );
 }
+
+#[test]
+fn outputs_empty_for_sheet_with_no_outputs() {
+    let sheet = Sheet::new();
+    assert_eq!(sheet.outputs().count(), 0);
+}
+
+#[test]
+fn outputs_iterates_every_live_output_id() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let out_a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let out_b = sheet.add_cell(0_i32);
+
+    let id_a = sheet
+        .add_output(Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)), vec![])
+        .unwrap();
+    let id_b = sheet
+        .add_output(Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)), vec![])
+        .unwrap();
+
+    let ids: HashSet<_> = sheet.outputs().collect();
+    assert_eq!(ids, HashSet::from([id_a, id_b]));
+}

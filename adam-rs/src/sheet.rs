@@ -1125,6 +1125,13 @@ impl Sheet {
         self.conditionals.keys()
     }
 
+    /// Iterates all live output IDs in the sheet.
+    ///
+    /// - Complexity: O(n) where n is the number of outputs.
+    pub fn outputs(&self) -> impl Iterator<Item = OutputId> + '_ {
+        self.outputs.keys()
+    }
+
     /// Returns the match cell for conditional `id`.
     ///
     /// Returns `None` if `id` is not a live conditional in this sheet.
