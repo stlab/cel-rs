@@ -1,19 +1,16 @@
-sheet diamond {
+// out cell with condition and "don't care" value.
+sheet out_cell {
     cell a = 0.0;
     cell b = 0.0;
     cell c = 0.0;
-    cell d = 0.0;
+    cell p = false;
 
-    relationship {
-        method [a, b] -> [c] { a * b }
-        method [a, c] -> [b] { c / a }
-        method [b, c] -> [a] { c / b }
-    }
-
-    relationship {
-        method [b, c] -> [d] { b * c }
-        method [b, d] -> [c] { d / b }
-        method [c, d] -> [b] { d / c }
+    conditional p {
+        true => {
+            relationship {
+                method [c] -> [b] { c }
+            }
+        }
     }
 
     out result {
