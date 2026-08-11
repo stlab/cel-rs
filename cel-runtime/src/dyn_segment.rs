@@ -102,6 +102,26 @@ pub fn raw_dropper_for<T: 'static>() -> RawDropper {
     |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) }
 }
 
+/// Computes each element's on-stack byte offset in place — the same convention [`make_tuple`]
+/// already uses: place at this element's own alignment, then pad up to the running max
+/// alignment seen so far (matching `CStackList`'s nested layout). Each element's `type_id`,
+/// `size`, and `align` must already be set; `offset` is overwritten. Returns
+/// `(total_size, max_align)`.
+///
+/// - Complexity: O(n).
+pub fn layout_associated(elements: &mut [AssociatedType]) -> (usize, usize) {
+    let mut offset = 0usize;
+    let mut max_align = 1usize;
+    for elem in elements.iter_mut() {
+        offset = align_index(elem.align, offset);
+        max_align = max_align.max(elem.align);
+        elem.offset = offset;
+        offset += elem.size;
+        offset = align_index(max_align, offset);
+    }
+    (offset, max_align)
+}
+
 /// Returns whether every element `TypeId` in `a` and `b` matches, in order —
 /// recursing into nested tuple elements' own `associated` shapes rather than
 /// stopping at their shared [`DynTuple`] marker `TypeId`.
@@ -2103,5 +2123,56 @@ mod tests {
         unsafe { dropper((&raw mut value).cast::<u8>(), &[]) };
         std::mem::forget(value);
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn layout_associated_matches_make_tuples_own_padding_convention() {
+        // Mirrors make_tuple's documented layout for (f64, i8, i8): each element at its own
+        // alignment, then padded up to the running max alignment seen so far — inserting extra
+        // padding between the two i8 elements once f64 raises the running max to 8.
+        let mut elements = vec![
+            AssociatedType {
+                type_id: TypeId::of::<f64>(),
+                type_name: Cow::Borrowed("f64"),
+                offset: 0,
+                size: size_of::<f64>(),
+                align: align_of::<f64>(),
+                dropper: raw_dropper_for::<f64>(),
+                associated: Vec::new(),
+            },
+            AssociatedType {
+                type_id: TypeId::of::<i8>(),
+                type_name: Cow::Borrowed("i8"),
+                offset: 0,
+                size: size_of::<i8>(),
+                align: align_of::<i8>(),
+                dropper: raw_dropper_for::<i8>(),
+                associated: Vec::new(),
+            },
+            AssociatedType {
+                type_id: TypeId::of::<i8>(),
+                type_name: Cow::Borrowed("i8"),
+                offset: 0,
+                size: size_of::<i8>(),
+                align: align_of::<i8>(),
+                dropper: raw_dropper_for::<i8>(),
+                associated: Vec::new(),
+            },
+        ];
+        let (total_size, align) = layout_associated(&mut elements);
+        assert_eq!(
+            elements.iter().map(|e| e.offset).collect::<Vec<_>>(),
+            vec![0, 8, 16]
+        );
+        assert_eq!(total_size, 24);
+        assert_eq!(align, 8);
+    }
+
+    #[test]
+    fn layout_associated_returns_zero_size_for_no_elements() {
+        let mut elements: Vec<AssociatedType> = Vec::new();
+        let (total_size, align) = layout_associated(&mut elements);
+        assert_eq!(total_size, 0);
+        assert_eq!(align, 1);
     }
 }
