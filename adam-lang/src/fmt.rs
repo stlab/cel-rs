@@ -175,6 +175,67 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     out.push_str(";\n");
 }
 
+/// Writes one `method [...] { ... }` writer declaration inside an `out` block — like
+/// `write_method`, but with no `-> [...]` half: an out cell's writer always writes exactly the
+/// enclosing declaration's cell, so naming it again would be redundant.
+fn write_out_method(out: &mut String, method: &ast::OutMethodDecl, depth: usize) {
+    write_trivia(
+        out,
+        method.blank_line_before,
+        method.leading_comment.as_deref(),
+        depth,
+    );
+    out.push_str(&indent(depth));
+    out.push_str("method ");
+    write_cell_list(out, &method.inputs);
+    out.push_str(" { ");
+    out.push_str(&cel_parser::format_expr(&method.body));
+    out.push_str(" }\n");
+}
+
+/// Writes one `condition name [...] { ... }` declaration.
+fn write_condition(out: &mut String, cond: &ast::ConditionDecl, depth: usize) {
+    write_trivia(
+        out,
+        cond.blank_line_before,
+        cond.leading_comment.as_deref(),
+        depth,
+    );
+    out.push_str(&indent(depth));
+    out.push_str("condition ");
+    out.push_str(&cond.name);
+    out.push(' ');
+    write_cell_list(out, &cond.inputs);
+    out.push_str(" { ");
+    out.push_str(&cel_parser::format_expr(&cond.body));
+    out.push_str(" }\n");
+}
+
+/// Writes one `out name[: type] { ... }` declaration: its writer method followed by its
+/// conditions, in declaration order.
+fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
+    write_trivia(
+        out,
+        decl.blank_line_before,
+        decl.leading_comment.as_deref(),
+        depth,
+    );
+    out.push_str(&indent(depth));
+    out.push_str("out ");
+    out.push_str(&decl.name);
+    if let Some((type_name, _)) = &decl.type_name {
+        out.push_str(": ");
+        out.push_str(type_name);
+    }
+    out.push_str(" {\n");
+    write_out_method(out, &decl.writer, depth + 1);
+    for cond in &decl.conditions {
+        write_condition(out, cond, depth + 1);
+    }
+    out.push_str(&indent(depth));
+    out.push_str("}\n");
+}
+
 /// Dispatches to the writer for one top-level sheet item.
 ///
 /// - Precondition: `item` is not `SheetItem::Error` — [`format_sheet`]'s own precondition
@@ -184,6 +245,7 @@ fn write_sheet_item(out: &mut String, item: &ast::SheetItem, depth: usize) {
         ast::SheetItem::Cell(cell) => write_cell(out, cell, depth),
         ast::SheetItem::Relationship(rel) => write_relationship(out, rel, depth),
         ast::SheetItem::Conditional(cond) => write_conditional(out, cond, depth),
+        ast::SheetItem::Out(out_decl) => write_out(out, out_decl, depth),
         ast::SheetItem::Error { .. } => {
             unreachable!("format_sheet is only called on a sheet with no recorded syntax errors")
         }
@@ -340,5 +402,26 @@ mod tests {
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_an_out_with_explicit_type_and_no_conditions() {
+        let source = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n    }\n}";
+        let expected = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_an_out_with_no_type_annotation() {
+        let source = "sheet s {\n    out area {\n        method [width] { width }\n    }\n}";
+        let expected = "sheet s {\n    out area {\n        method [width] { width }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_an_out_with_conditions_in_declaration_order() {
+        let source = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n        condition max_area [width, height, max_area] { width * height <= max_area }\n    }\n}";
+        let expected = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n        condition max_area [width, height, max_area] { width * height <= max_area }\n    }\n}\n";
+        assert_eq!(format(source), expected);
     }
 }
