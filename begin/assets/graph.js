@@ -284,7 +284,9 @@
                 var tKind = typeof d.target === 'object' ? d.target.kind : null;
                 return (sKind === 'Branch' || tKind === 'Branch') ? LINK_DISTANCE / 2 : LINK_DISTANCE;
             }))
-            .force('charge', d3.forceManyBody().strength(CHARGE_STRENGTH))
+            .force('charge', d3.forceManyBody().strength(function (d) {
+                return d.kind === 'Branch' ? 0 : CHARGE_STRENGTH;
+            }))
             .force('center', d3.forceCenter(width / 2, height / 2))
             // CHANGED: collision radius handles Conditional nodes.
             .force('collide', d3.forceCollide().radius(function (d) {
