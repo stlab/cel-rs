@@ -1,0 +1,10 @@
+/* Softer alternative to sp-textfield's built-in `invalid` state: marks a field that
+   currently contributes to a failing out-cell condition, without being itself invalid.
+   `:not([invalid])` guards against ever showing both states at once — an invalid field
+   always wins. The custom-property name below is a starting guess (Spectrum Web
+   Components expose textfield border theming through custom properties); confirm and
+   correct it against the rendered shadow DOM in Task 7 before relying on this rule. */
+sp-textfield.warning:not([invalid]) {
+    --spectrum-textfield-border-color: #e68619;
+    --spectrum-textfield-border-color-hover: #e68619;
+}
