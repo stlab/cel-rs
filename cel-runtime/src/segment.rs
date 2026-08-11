@@ -153,11 +153,12 @@ where
     pub fn op1r<R, F>(mut self, op: F) -> Segment<Args, CStackList<R, Stack::Tail>>
     where
         Stack: CStackListHeadPadded,
+        Stack::Tail: DropStack,
         F: Fn(Stack::Head) -> Result<R> + 'static,
         R: 'static,
     {
         self.segment.raw1(
-            move |stack, x| op(x).inspect_err(|_| Stack::drop_stack(stack)),
+            move |stack, x| op(x).inspect_err(|_| Stack::Tail::drop_stack(stack)),
             Stack::HEAD_PADDED,
         );
         self.into()
@@ -288,6 +289,47 @@ mod tests {
         let result = segment.call(());
         assert!(matches!(result, Err(e) if e.to_string() == "error"));
         assert_eq!(drop_count.load(Ordering::SeqCst), 1); // The DropCounter from op0 was dropped
+    }
+
+    #[test]
+    fn op1r_error_does_not_panic() {
+        let parse_and_double = Segment::<(&str,)>::new()
+            .op1r(|s: &str| s.parse::<u32>().map_err(anyhow::Error::from))
+            .op1(|n| n * 2);
+
+        let result = parse_and_double.call(("nope",));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn op1r_drops_remaining_stack_exactly_once_on_error() {
+        struct DropCounter(Arc<AtomicUsize>);
+
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        impl Clone for DropCounter {
+            fn clone(&self) -> Self {
+                DropCounter(self.0.clone())
+            }
+        }
+
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let tracker = DropCounter(drop_count.clone());
+
+        let segment = Segment::new()
+            .op0(move || tracker.clone())
+            .op0(|| "nope")
+            .op1r(|s: &str| s.parse::<u32>().map_err(anyhow::Error::from))
+            .op2(|_: DropCounter, _: u32| 42u32);
+
+        assert_eq!(drop_count.load(Ordering::SeqCst), 0); // Nothing dropped yet
+        let result = segment.call(());
+        assert!(result.is_err());
+        assert_eq!(drop_count.load(Ordering::SeqCst), 1); // The DropCounter was dropped exactly once
     }
 
     #[test]
