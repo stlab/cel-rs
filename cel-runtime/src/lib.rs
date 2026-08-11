@@ -36,6 +36,8 @@
 pub mod c_stack_list;
 /// Dynamic segment implementation with runtime type checking.
 pub mod dyn_segment;
+/// Owned, type-erased CEL tuple value that can outlive a `DynSegment` evaluation.
+pub mod dynamic_sequence;
 /// Traits for working with type lists and type information.
 pub mod list_traits;
 /// Memory management and alignment utilities for the runtime.
@@ -55,6 +57,7 @@ pub mod tuple_list;
 
 pub use c_stack_list::*;
 pub use dyn_segment::*;
+pub use dynamic_sequence::*;
 pub use list_traits::*;
 pub use memory::*;
 pub use raw_segment::*;
@@ -62,4 +65,4 @@ pub use raw_sequence::*;
 pub use raw_stack::*;
 pub use raw_vec::*;
 pub use segment::*;
-//pub use tuple_list::*;
+pub use tuple_list::*;

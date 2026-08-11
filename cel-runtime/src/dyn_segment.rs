@@ -1,4 +1,5 @@
 use crate::c_stack_list::{CNil, CStackList, IntoCStackList};
+use crate::dynamic_sequence::{SequenceList, TupleSequence};
 use crate::list_traits::{List, ListTypeIteratorAdvance, TypeIdIterator};
 use crate::memory::align_index;
 use crate::raw_segment::RawSegment;
@@ -876,6 +877,93 @@ impl DynSegment {
         Ok(results)
     }
 
+    /// Executes the segment once and reconstructs its tuple result directly as the concrete
+    /// tuple `T`, moving each element's bytes rather than splitting them into separate boxed
+    /// values (contrast with [`call_dyn_tuple`](Self::call_dyn_tuple)).
+    ///
+    /// # Errors
+    /// Returns `Err` if:
+    /// - The segment requires pre-loaded arguments (created with a non-unit `Args` type).
+    /// - The stack does not contain exactly one value after expression compilation.
+    /// - That value is not a tuple, or its element `TypeId` sequence doesn't match `T`'s.
+    /// - Any op returns an error during execution.
+    ///
+    /// - Complexity: O(n) in the number of ops, plus O(arity) to reconstruct `T`.
+    pub fn call_dyn_as_tuple<T: TupleSequence>(&mut self, inputs: &[&dyn Any]) -> anyhow::Result<T>
+    where
+        T::Output: SequenceList,
+    {
+        ensure!(
+            self.argument_ids.is_empty(),
+            "call_dyn_as_tuple: segment requires {} pre-loaded argument(s); \
+             use call_dyn_as_tuple only with push_arg-based segments",
+            self.argument_ids.len()
+        );
+        ensure!(
+            self.stack_ids.len() == 1,
+            "call_dyn_as_tuple: expected exactly 1 value on stack, got {}",
+            self.stack_ids.len()
+        );
+        let info = &self.stack_ids[0];
+        ensure!(
+            info.type_id == TypeId::of::<DynTuple>(),
+            "call_dyn_as_tuple: expected a tuple result, got {}",
+            info.type_name,
+        );
+
+        let mut expected = Vec::new();
+        let mut max_align = 1usize;
+        T::Output::append_shape(&mut expected, 0, &mut max_align);
+        ensure!(
+            info.associated.len() == expected.len()
+                && info
+                    .associated
+                    .iter()
+                    .zip(&expected)
+                    .all(|(a, b)| a.type_id == b.type_id),
+            "call_dyn_as_tuple: tuple shape does not match `{}`",
+            std::any::type_name::<T>(),
+        );
+
+        let tuple_size = info.size;
+        let tuple_padding = info.padding;
+        let associated = info.associated.clone();
+
+        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
+        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
+        let _guard = DynCallGuard;
+
+        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
+        // Safety: the checks above verified the segment builds exactly one tuple value whose
+        // shape matches T; call_dyn's own argument preconditions (no pre-loaded arguments) hold
+        // identically here.
+        unsafe {
+            self.segment.call0_stack(&mut stack)?;
+        }
+
+        let tuple_base = stack.len() - tuple_size;
+        // `associated`'s offsets describe the tuple's actual, already-correct on-stack layout
+        // (computed by `make_tuple`) — using them, not a freshly-recomputed layout, is what
+        // makes this sound regardless of any layout convention `SequenceList` uses internally.
+        let offsets: Vec<usize> = associated.iter().map(|a| a.offset).collect();
+        let list: T::Output =
+            unsafe { stack.read_at(tuple_base, |base| T::Output::read_from(base, &offsets)) };
+        let result = T::from_list(list);
+
+        // `read_from` already moved every element's bytes out into `result` (per its own safety
+        // contract: the caller must not separately drop those bytes afterward), so the tuple's
+        // vacated bytes are dead space now, not a live value. This `truncate_to` is defensive
+        // bookkeeping that mirrors `call_dyn_tuple`'s cleanup shape above, not a double-drop
+        // guard: `stack` is a local `RawStack`, which has no `Drop` impl of its own that runs
+        // element destructors, so letting it go out of scope untruncated was never going to
+        // double-drop anything either way.
+        unsafe {
+            stack.truncate_to(tuple_base, tuple_padding);
+        }
+
+        Ok(result)
+    }
+
     /// Pushes a unary operation that takes one argument of type T and returns a value of type R.
     ///
     /// Verifies that the top of the type stack matches the expected input type T
@@ -1557,6 +1645,100 @@ mod tests {
         assert!(
             msg.contains("op failed"),
             "error message should propagate op error: {msg}"
+        );
+    }
+
+    #[test]
+    fn call_dyn_as_tuple_reconstructs_the_tuple_result() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 10i32);
+        seg.op0(|| 2.5f64);
+        seg.make_tuple(2, ambient_start);
+
+        let result: (i32, f64) = seg.call_dyn_as_tuple(&[])?;
+        assert_eq!(result, (10, 2.5));
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_as_tuple_is_repeatable() -> Result<(), anyhow::Error> {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        seg.op0(|| 2i32);
+        seg.make_tuple(2, ambient_start);
+
+        let first: (i32, i32) = seg.call_dyn_as_tuple(&[])?;
+        let second: (i32, i32) = seg.call_dyn_as_tuple(&[])?;
+        assert_eq!(first, (1, 2));
+        assert_eq!(second, (1, 2));
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_as_tuple_errors_if_result_is_not_a_tuple() {
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 5i32);
+        let result = seg.call_dyn_as_tuple::<(i32,)>(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn call_dyn_as_tuple_errors_on_shape_mismatch() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        seg.op0(|| 2i32);
+        seg.make_tuple(2, ambient_start);
+
+        let result = seg.call_dyn_as_tuple::<(i32, f64)>(&[]);
+        assert!(result.is_err(), "(i32, i32) should not match (i32, f64)");
+    }
+
+    #[test]
+    fn call_dyn_as_tuple_moves_fields_without_double_dropping_or_leaking() {
+        // Regression test: read_from moves each element's bytes out of the tuple by
+        // std::ptr::read (per its own safety contract, the caller must not separately drop
+        // those bytes afterward). If call_dyn_as_tuple also ran the tuple's drop glue over the
+        // same bytes, any element with a real Drop impl would be dropped twice.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &other.0)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let tracker = DropCounter(drop_count.clone());
+
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(move || tracker.clone());
+        seg.op0(|| 7i32);
+        seg.make_tuple(2, ambient_start);
+
+        let (extracted, n): (DropCounter, i32) = seg.call_dyn_as_tuple(&[]).unwrap();
+        assert_eq!(n, 7);
+        assert_eq!(
+            drop_count.load(Ordering::SeqCst),
+            0,
+            "moving out must not drop the element"
+        );
+        drop(extracted);
+        assert_eq!(
+            drop_count.load(Ordering::SeqCst),
+            1,
+            "the moved-out value must still drop exactly once, on its own schedule"
         );
     }
 

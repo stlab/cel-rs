@@ -112,6 +112,40 @@ impl RawStack {
         aligned_index - len > 0
     }
 
+    /// Reserves aligned space for `size` bytes (using the same padding/marker
+    /// bookkeeping as [`push`](Self::push)) and calls `write` with a pointer
+    /// to that space instead of copying from a source buffer.
+    ///
+    /// - Precondition: `align` is a power of two.
+    /// - Postcondition: `write` is called exactly once, before this method
+    ///   returns, with a pointer to `size` freshly-reserved bytes.
+    ///
+    /// # Safety
+    /// `write` must fully initialize all `size` bytes at the pointer it's
+    /// given before returning.
+    pub unsafe fn reserve_and_write(
+        &mut self,
+        align: usize,
+        size: usize,
+        write: impl FnOnce(*mut u8),
+    ) -> bool {
+        debug_assert!(align.is_power_of_two());
+        let len = self.buffer.len();
+        let aligned_index = align_index(align, len);
+        let new_len = aligned_index + size;
+
+        self.buffer.reserve(new_len - len);
+        unsafe {
+            self.buffer.set_len(new_len);
+            if aligned_index - len > 0 {
+                self.buffer[len].write(1);
+                self.buffer[len + 1..aligned_index].fill(MaybeUninit::new(0));
+            }
+            write(self.buffer.as_mut_ptr().add(aligned_index).cast::<u8>());
+        }
+        aligned_index - len > 0
+    }
+
     /// Copies `size` bytes starting at absolute buffer offset `offset` into `dst`.
     ///
     /// `dst` is typed as `MaybeUninit<u8>` rather than `u8` because the bytes
@@ -393,6 +427,48 @@ mod tests {
             )
         };
         assert_eq!(padding_typed, padding_raw);
+    }
+
+    #[test]
+    fn reserve_and_write_matches_push_raw_padding_and_bytes() {
+        let mut stack_a = RawStack::with_base_alignment(align_of::<f64>());
+        let _ = stack_a.push(1u8);
+        let value = 2.5f64;
+        let padding_a = unsafe {
+            stack_a.push_raw(
+                align_of::<f64>(),
+                size_of::<f64>(),
+                (&value as *const f64).cast::<MaybeUninit<u8>>(),
+            )
+        };
+
+        let mut stack_b = RawStack::with_base_alignment(align_of::<f64>());
+        let _ = stack_b.push(1u8);
+        let padding_b = unsafe {
+            stack_b.reserve_and_write(align_of::<f64>(), size_of::<f64>(), |dst| {
+                std::ptr::write(dst.cast::<f64>(), 2.5f64);
+            })
+        };
+
+        assert_eq!(padding_a, padding_b);
+        let popped_a: f64 = unsafe { stack_a.pop(padding_a) };
+        let popped_b: f64 = unsafe { stack_b.pop(padding_b) };
+        assert_eq!(popped_a, popped_b);
+    }
+
+    #[test]
+    fn reserve_and_write_runs_write_exactly_once_with_correct_size() {
+        let mut stack = RawStack::with_base_alignment(align_of::<u32>());
+        let mut call_count = 0;
+        let padding = unsafe {
+            stack.reserve_and_write(align_of::<u32>(), size_of::<u32>(), |dst| {
+                call_count += 1;
+                std::ptr::write(dst.cast::<u32>(), 42);
+            })
+        };
+        assert_eq!(call_count, 1);
+        let result: u32 = unsafe { stack.pop(padding) };
+        assert_eq!(result, 42);
     }
 
     #[test]
