@@ -1,17 +1,19 @@
 //! A best-effort static type checker over [`crate::ast::Sheet`] trees, built on
 //! [`cel_parser::ty::check_expr`]. Checks each `cell`'s literal initializer against its `:
-//! type_name` annotation, and each `relationship`/`conditional` method's body against its declared
+//! type_name` annotation, each `relationship`/`conditional` method's body against its declared
 //! outputs (arity: does the body actually produce as many values as declared; and per-output
-//! type). An absent annotation, an annotation naming a type [`crate::TypeRegistry`] doesn't
-//! recognize, or an operator [`cel_parser::op_table::builtin_operand_types`] doesn't recognize all
-//! resolve to [`cel_parser::Ty::Any`] and are never flagged — matching adam-lang/CEL's extensible
-//! type system. Not a complete type system; see the design doc's "Type checking (v1)" section.
+//! type), and each `out`'s writer body against its optional `: type_name` annotation, with each
+//! `condition` body checked to produce `bool` type. An absent annotation, an annotation naming a
+//! type [`crate::TypeRegistry`] doesn't recognize, or an operator [`cel_parser::op_table::builtin_operand_types`]
+//! doesn't recognize all resolve to [`cel_parser::Ty::Any`] and are never flagged — matching
+//! adam-lang/CEL's extensible type system. Not a complete type system; see the design doc's
+//! "Type checking (v1)" section.
 
 use cel_parser::lex_lexer::Literal as LexLiteral;
 use cel_parser::{Expr, ParseError, Ty, ty::check_expr};
 
 use crate::TypeRegistry;
-use crate::ast::{CellDecl, MethodDecl, Sheet, SheetItem};
+use crate::ast::{CellDecl, MethodDecl, OutDecl, Sheet, SheetItem};
 
 /// Checks `sheet` against `registry`'s registered types, returning every type diagnostic found.
 /// Never fails — an unrecognized annotation, an unresolved identifier, or a custom operator
@@ -59,15 +61,19 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                     }
                 }
             }
+            SheetItem::Out(out_decl) => check_out(out_decl, &resolve, &mut diagnostics),
             SheetItem::Error { .. } => {} // already reported as a syntax error; nothing to type-check
         }
     }
     diagnostics
 }
 
-/// Maps every declared cell name to its `Ty` (from its `: type_name` annotation, resolved through
-/// `registry`), for use as the identifier resolver method bodies are checked against. A cell with
-/// no annotation, or one naming a type `registry` doesn't recognize, maps to `Ty::Any`.
+/// Maps every declared cell name — from a `cell` or an `out` — to its `Ty`, for use as the
+/// identifier resolver method/condition bodies are checked against. A `cell` with no
+/// annotation, or one naming a type `registry` doesn't recognize, maps to `Ty::Any`. An `out`
+/// with an annotation resolves the same way; one without is inferred from its writer body's
+/// checked type, using only `cell`-declared types as context (not other `out`s' inferred
+/// types — see this function's own note above).
 fn declared_cell_types(
     sheet: &Sheet,
     registry: &TypeRegistry,
@@ -84,6 +90,20 @@ fn declared_cell_types(
             map.insert(cell.name.clone(), ty);
         }
     }
+    let resolve_cells = |name: &str| -> Ty { map.get(name).copied().unwrap_or(Ty::Any) };
+    let mut out_types = std::collections::HashMap::new();
+    for item in &sheet.items {
+        if let SheetItem::Out(out_decl) = item {
+            let ty = out_decl
+                .type_name
+                .as_ref()
+                .and_then(|(name, _)| registry.get(name))
+                .map(|entry| Ty::from_type_id(entry.type_id))
+                .unwrap_or_else(|| check_expr(&out_decl.writer.body, &resolve_cells).0);
+            out_types.insert(out_decl.name.clone(), ty);
+        }
+    }
+    map.extend(out_types);
     map
 }
 
@@ -224,6 +244,46 @@ fn check_method(
                     ));
                 }
             }
+        }
+    }
+}
+
+/// Checks one `out`'s writer body against its optional `: type_name` annotation — mirroring
+/// `check_method`'s single-output branch, since an out's writer is structurally a `method`
+/// with one implicit output (the out cell itself) — and each of its conditions' bodies
+/// against `Ty::Bool`. Operator-level diagnostics from inside any body (via `check_expr`) are
+/// always included, regardless of whether a mismatch diagnostic is also added.
+fn check_out(out_decl: &OutDecl, resolve: &impl Fn(&str) -> Ty, diagnostics: &mut Vec<ParseError>) {
+    let (body_ty, body_diags) = check_expr(&out_decl.writer.body, resolve);
+    diagnostics.extend(body_diags);
+    if out_decl.type_name.is_some() {
+        let declared = resolve(&out_decl.name);
+        if !declared.unifies_with(&body_ty) {
+            diagnostics.push(ParseError::new_range(
+                format!(
+                    "out `{}` body produces `{}`, but is declared `{}`",
+                    out_decl.name,
+                    body_ty.name(),
+                    declared.name()
+                ),
+                out_decl.writer.body.span().start,
+                out_decl.writer.body.span().end,
+            ));
+        }
+    }
+    for condition in &out_decl.conditions {
+        let (cond_ty, cond_diags) = check_expr(&condition.body, resolve);
+        diagnostics.extend(cond_diags);
+        if !cond_ty.unifies_with(&Ty::Bool) {
+            diagnostics.push(ParseError::new_range(
+                format!(
+                    "condition `{}` produces `{}`, but conditions must be `bool`",
+                    condition.name,
+                    cond_ty.name()
+                ),
+                condition.body.span().start,
+                condition.body.span().end,
+            ));
         }
     }
 }
@@ -395,5 +455,63 @@ mod tests {
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn out_body_matching_its_annotation_has_no_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell width: f64; cell height: f64; \
+             out area: f64 { method [width, height] { width * height } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn out_body_mismatched_with_its_annotation_is_a_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell width: f64; cell height: f64; \
+             out area: i32 { method [width, height] { width * height } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn out_with_no_annotation_infers_its_type_and_has_no_diagnostic() {
+        // No `: type_name` to cross-check against — nothing to flag, and a later reference to
+        // `area`'s name (were one added) would resolve through the inferred f64, not Ty::Any.
+        let sheet = parse(
+            "sheet s { cell width: f64; cell height: f64; \
+             out area { method [width, height] { width * height } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn condition_with_bool_body_has_no_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell width: f64; cell max_width: f64; \
+             out area: f64 { \
+                 method [width] { width } \
+                 condition max_width [width, max_width] { width <= max_width } \
+             } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn condition_with_non_bool_body_is_a_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell width: f64; \
+             out area: f64 { \
+                 method [width] { width } \
+                 condition bogus [width] { width } \
+             } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
     }
 }
