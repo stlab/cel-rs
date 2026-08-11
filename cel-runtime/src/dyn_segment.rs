@@ -1,5 +1,8 @@
 use crate::c_stack_list::{CNil, CStackList, IntoCStackList};
-use crate::dynamic_sequence::{SequenceList, TupleSequence};
+use crate::dynamic_sequence::{
+    DynamicSequence, ElementCloner, ElementDropper, ElementEq, SequenceElement, SequenceList,
+    TupleSequence, element_cloner_for, element_dropper_for, element_eq_for,
+};
 use crate::list_traits::{List, ListTypeIteratorAdvance, TypeIdIterator};
 use crate::memory::align_index;
 use crate::raw_segment::RawSegment;
@@ -990,6 +993,78 @@ impl DynSegment {
         Ok(result)
     }
 
+    /// Executes the segment once and moves its tuple result into an owned `DynamicSequence`,
+    /// recursing into nested tuple elements as nested `DynamicSequence` leaves. `leaf` supplies
+    /// each non-tuple element's `Drop`/`Clone`/`PartialEq` function pointers by its runtime
+    /// `TypeId` (`AssociatedType` itself carries only a 2-argument tuple-recursing dropper, not
+    /// these three, and this method never calls that dropper — every leaf's bytes are moved, not
+    /// cloned, exactly like [`call_dyn_as_tuple`](Self::call_dyn_as_tuple)).
+    ///
+    /// # Errors
+    /// Returns `Err` if:
+    /// - The segment requires pre-loaded arguments (created with a non-unit `Args` type).
+    /// - The stack does not contain exactly one value after expression compilation.
+    /// - That value is not a tuple.
+    /// - `leaf` returns `None` for some non-tuple element's `TypeId`.
+    /// - Any op returns an error during execution.
+    ///
+    /// - Complexity: O(n) in the number of ops, plus O(total element count, including nested) to
+    ///   build the result.
+    pub fn call_dyn_as_dynamic_sequence(
+        &mut self,
+        inputs: &[&dyn Any],
+        leaf: &impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)>,
+    ) -> anyhow::Result<DynamicSequence> {
+        ensure!(
+            self.argument_ids.is_empty(),
+            "call_dyn_as_dynamic_sequence: segment requires {} pre-loaded argument(s); \
+             use call_dyn_as_dynamic_sequence only with push_arg-based segments",
+            self.argument_ids.len()
+        );
+        ensure!(
+            self.stack_ids.len() == 1,
+            "call_dyn_as_dynamic_sequence: expected exactly 1 value on stack, got {}",
+            self.stack_ids.len()
+        );
+        let info = &self.stack_ids[0];
+        ensure!(
+            info.type_id == TypeId::of::<DynTuple>(),
+            "call_dyn_as_dynamic_sequence: expected a tuple result, got {}",
+            info.type_name,
+        );
+
+        let tuple_size = info.size;
+        let tuple_padding = info.padding;
+        let associated = info.associated.clone();
+
+        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
+        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
+        let _guard = DynCallGuard;
+
+        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
+        // Safety: the checks above verified the segment builds exactly one tuple value;
+        // call_dyn's own argument preconditions (no pre-loaded arguments) hold identically here.
+        unsafe {
+            self.segment.call0_stack(&mut stack)?;
+        }
+
+        let tuple_base = stack.len() - tuple_size;
+        let result = unsafe {
+            stack.read_at(tuple_base, |base| {
+                build_dynamic_sequence(base, &associated, leaf)
+            })
+        }?;
+
+        // Every leaf at every nesting depth was moved (not cloned) into a fresh
+        // DynamicSequence above; the vacated bytes are dead space now, matching
+        // call_dyn_as_tuple's own cleanup below it.
+        unsafe {
+            stack.truncate_to(tuple_base, tuple_padding);
+        }
+
+        Ok(result)
+    }
+
     /// Pushes a unary operation that takes one argument of type T and returns a value of type R.
     ///
     /// Verifies that the top of the type stack matches the expected input type T
@@ -1287,6 +1362,244 @@ impl DynSegment {
         info.type_name = Cow::Borrowed(std::any::type_name::<DynTuple>());
         info.raw_dropper = drop_tuple;
         info.associated = associated;
+    }
+}
+
+/// Recursively converts a described tuple region at `base` into an owned `DynamicSequence`,
+/// moving each leaf's bytes and recursing into nested tuple elements as nested `DynamicSequence`
+/// values.
+///
+/// # Safety
+/// `base` must point to a live value laid out exactly as described by `associated`.
+unsafe fn build_dynamic_sequence(
+    base: *const u8,
+    associated: &[AssociatedType],
+    leaf: &(impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)> + ?Sized),
+) -> anyhow::Result<DynamicSequence> {
+    enum Built {
+        Leaf,
+        Tuple(DynamicSequence),
+    }
+
+    // Pass 1: recursively build nested values and resolve each leaf's descriptor, computing
+    // this level's own destination shape/offsets as we go. All fallible work happens here,
+    // before any bytes are written.
+    let mut shape = Vec::with_capacity(associated.len());
+    let mut built: Vec<Built> = Vec::with_capacity(associated.len());
+    let mut max_align = 1usize;
+    let mut offset = 0usize;
+    for elem in associated {
+        let is_tuple = elem.type_id == TypeId::of::<DynTuple>();
+        let (size, align, drop, clone, eq, value) = if is_tuple {
+            let nested =
+                unsafe { build_dynamic_sequence(base.add(elem.offset), &elem.associated, leaf)? };
+            (
+                size_of::<DynamicSequence>(),
+                align_of::<DynamicSequence>(),
+                element_dropper_for::<DynamicSequence>(),
+                element_cloner_for::<DynamicSequence>(),
+                element_eq_for::<DynamicSequence>(),
+                Built::Tuple(nested),
+            )
+        } else {
+            let (drop, clone, eq) = leaf(elem.type_id).ok_or_else(|| {
+                anyhow!(
+                    "call_dyn_as_dynamic_sequence: no Clone/PartialEq registered for element \
+                     type `{}`",
+                    elem.type_name
+                )
+            })?;
+            (elem.size, elem.align, drop, clone, eq, Built::Leaf)
+        };
+        let aligned = align_index(align, offset);
+        max_align = max_align.max(align);
+        shape.push(SequenceElement {
+            type_id: if is_tuple {
+                TypeId::of::<DynamicSequence>()
+            } else {
+                elem.type_id
+            },
+            type_name: if is_tuple {
+                Cow::Borrowed(std::any::type_name::<DynamicSequence>())
+            } else {
+                elem.type_name.clone()
+            },
+            offset: aligned,
+            size,
+            align,
+            drop,
+            clone,
+            eq,
+        });
+        built.push(value);
+        offset = aligned + size;
+    }
+    let total_size = align_index(max_align, offset);
+
+    // Pass 2: write bytes. Infallible -- everything fallible already happened in pass 1.
+    let mut buffer = RawStack::with_base_alignment(max_align);
+    unsafe {
+        buffer.reserve_and_write(max_align, total_size, |dst| {
+            for ((elem, src_elem), value) in shape.iter().zip(associated).zip(built) {
+                match value {
+                    Built::Tuple(nested) => {
+                        std::ptr::write(dst.add(elem.offset).cast::<DynamicSequence>(), nested);
+                    }
+                    Built::Leaf => {
+                        std::ptr::copy_nonoverlapping(
+                            base.add(src_elem.offset),
+                            dst.add(elem.offset),
+                            src_elem.size,
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    Ok(unsafe { DynamicSequence::from_raw_parts(buffer, shape, max_align) })
+}
+
+/// One N>1-output slot's extraction, for [`DynSegment::call_dyn_tuple_mixed`]: either a scalar
+/// leaf (the existing [`BoxExtractor`] path, identical to [`call_dyn_tuple`](DynSegment::call_dyn_tuple)),
+/// or a nested tuple, converted to a boxed `DynamicSequence` via the same recursive machinery
+/// [`call_dyn_as_dynamic_sequence`](DynSegment::call_dyn_as_dynamic_sequence) uses.
+#[allow(clippy::type_complexity)]
+pub enum DynExtractor {
+    /// A scalar element: `extractors[i].0` must match that element's runtime `TypeId`;
+    /// `extractors[i].1` reads and clones it (see [`BoxExtractor`]'s own safety contract).
+    Scalar(TypeId, BoxExtractor),
+    /// A nested-tuple element: the closure supplies each of *its own* leaves'
+    /// `Drop`/`Clone`/`PartialEq` function pointers by `TypeId`, exactly like
+    /// `call_dyn_as_dynamic_sequence`'s `leaf` parameter.
+    Tuple(Box<dyn Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)>>),
+}
+
+impl DynSegment {
+    /// Executes the segment once and splits its tuple result into one boxed value per element —
+    /// a scalar `Box<T>` for a `DynExtractor::Scalar` slot (identical to
+    /// [`call_dyn_tuple`](Self::call_dyn_tuple)'s own behavior for an all-scalar split), or a
+    /// boxed `DynamicSequence` for a `DynExtractor::Tuple` slot, built from just that one
+    /// element's own nested region (not the whole top-of-stack value).
+    ///
+    /// # Safety
+    /// Every `DynExtractor::Scalar`'s `BoxExtractor` must satisfy the same contract
+    /// [`call_dyn_tuple`](Self::call_dyn_tuple) requires: clone rather than move.
+    ///
+    /// # Errors
+    /// Returns `Err` if:
+    /// - The segment requires pre-loaded arguments.
+    /// - The stack does not contain exactly one value after expression compilation.
+    /// - That value is not a tuple, or its arity does not equal `extractors.len()`.
+    /// - Some element's runtime `TypeId` doesn't match its `DynExtractor::Scalar` type, or (for
+    ///   `DynExtractor::Tuple`) the element isn't itself a tuple, or one of *its* leaves has no
+    ///   registered descriptor.
+    /// - Any op returns an error during execution.
+    pub unsafe fn call_dyn_tuple_mixed(
+        &mut self,
+        inputs: &[&dyn Any],
+        extractors: &[DynExtractor],
+    ) -> anyhow::Result<Vec<Box<dyn Any>>> {
+        ensure!(
+            self.argument_ids.is_empty(),
+            "call_dyn_tuple_mixed: segment requires {} pre-loaded argument(s); \
+             use call_dyn_tuple_mixed only with push_arg-based segments",
+            self.argument_ids.len()
+        );
+        ensure!(
+            self.stack_ids.len() == 1,
+            "call_dyn_tuple_mixed: expected exactly 1 value on stack, got {}",
+            self.stack_ids.len()
+        );
+        let info = &self.stack_ids[0];
+        ensure!(
+            info.type_id == TypeId::of::<DynTuple>(),
+            "call_dyn_tuple_mixed: expected a tuple result, got {}",
+            info.type_name,
+        );
+        ensure!(
+            info.associated.len() == extractors.len(),
+            "call_dyn_tuple_mixed: tuple has {} element(s) but {} extractor(s) were supplied",
+            info.associated.len(),
+            extractors.len(),
+        );
+        for (i, (elem, extractor)) in info.associated.iter().zip(extractors).enumerate() {
+            if let DynExtractor::Scalar(expected_type_id, _) = extractor {
+                ensure!(
+                    elem.type_id == *expected_type_id,
+                    "call_dyn_tuple_mixed: element {i} type mismatch: expected type {:?}, got `{}`",
+                    expected_type_id,
+                    elem.type_name,
+                );
+            }
+        }
+
+        let tuple_size = info.size;
+        let tuple_padding = info.padding;
+        let associated = info.associated.clone();
+
+        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
+        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
+        let _guard = DynCallGuard;
+
+        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
+        // Safety: the checks above verified the segment builds exactly one tuple value with
+        // `extractors.len()` matching elements; call_dyn's own argument preconditions (no
+        // pre-loaded arguments) hold identically here.
+        unsafe {
+            self.segment.call0_stack(&mut stack)?;
+        }
+
+        let tuple_base = stack.len() - tuple_size;
+        let results: anyhow::Result<Vec<Box<dyn Any>>> = associated
+            .iter()
+            .zip(extractors)
+            .map(|(elem, extractor)| match extractor {
+                DynExtractor::Scalar(_, boxextractor) => {
+                    Ok(unsafe { stack.read_at(tuple_base + elem.offset, |ptr| boxextractor(ptr)) })
+                }
+                DynExtractor::Tuple(leaf) => {
+                    ensure!(
+                        elem.type_id == TypeId::of::<DynTuple>(),
+                        "call_dyn_tuple_mixed: expected a nested tuple, got `{}`",
+                        elem.type_name,
+                    );
+                    let nested = unsafe {
+                        stack.read_at(tuple_base + elem.offset, |base| {
+                            build_dynamic_sequence(base, &elem.associated, leaf.as_ref())
+                        })
+                    }?;
+                    Ok(Box::new(nested) as Box<dyn Any>)
+                }
+            })
+            .collect();
+        let results = results?;
+
+        // Every DynExtractor::Scalar element's bytes were only cloned above (BoxExtractor's own
+        // contract, matching call_dyn_tuple) -- those must still be dropped normally. Every
+        // DynExtractor::Tuple element's bytes were *moved* into the nested DynamicSequence above
+        // (build_dynamic_sequence's contract, matching call_dyn_as_dynamic_sequence) -- running
+        // that element's own dropper again would double-drop/use-after-move, so its dropper is
+        // replaced with a no-op for this cleanup pass only (mirroring how
+        // DynamicSequence::try_into_tuple clears its own `shape` to make its `Drop` a no-op after
+        // moving every element out).
+        let drop_associated: Vec<AssociatedType> = associated
+            .iter()
+            .zip(extractors)
+            .map(|(elem, extractor)| match extractor {
+                DynExtractor::Scalar(..) => elem.clone(),
+                DynExtractor::Tuple(_) => AssociatedType {
+                    dropper: |_ptr, _associated| {},
+                    ..elem.clone()
+                },
+            })
+            .collect();
+        unsafe {
+            stack.drop_at(tuple_base, |ptr| drop_tuple(ptr, &drop_associated));
+            stack.truncate_to(tuple_base, tuple_padding);
+        }
+
+        Ok(results)
     }
 }
 
@@ -1765,6 +2078,283 @@ mod tests {
             drop_count.load(Ordering::SeqCst),
             1,
             "the moved-out value must still drop exactly once, on its own schedule"
+        );
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_builds_a_flat_sequence() -> anyhow::Result<()> {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 10i32);
+        seg.op0(|| 2.5f64);
+        seg.make_tuple(2, ambient_start);
+
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            if type_id == TypeId::of::<i32>() {
+                Some((
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                ))
+            } else if type_id == TypeId::of::<f64>() {
+                Some((
+                    element_dropper_for::<f64>(),
+                    element_cloner_for::<f64>(),
+                    element_eq_for::<f64>(),
+                ))
+            } else {
+                None
+            }
+        };
+        let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf)?;
+        assert_eq!(seq.arity(), 2);
+        let (a, b): (i32, f64) = seq.try_to_tuple()?;
+        assert_eq!((a, b), (10, 2.5));
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_recurses_into_nested_tuples() -> anyhow::Result<()> {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        let inner_start = seg.current_stack_offset();
+        seg.op0(|| 2i32);
+        seg.op0(|| 3i32);
+        seg.make_tuple(2, inner_start);
+        seg.make_tuple(2, ambient_start);
+
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            (type_id == TypeId::of::<i32>()).then(|| {
+                (
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                )
+            })
+        };
+        let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf)?;
+        assert_eq!(seq.arity(), 2);
+        let (a, nested): (i32, DynamicSequence) = seq.try_to_tuple()?;
+        assert_eq!(a, 1);
+        assert_eq!(nested.arity(), 2);
+        let (b, c): (i32, i32) = nested.try_to_tuple()?;
+        assert_eq!((b, c), (2, 3));
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_errors_if_result_is_not_a_tuple() {
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 5i32);
+        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> { None };
+        let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("tuple"));
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_errors_on_unregistered_leaf_type() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        seg.op0(|| 2i32);
+        seg.make_tuple(2, ambient_start);
+        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> { None };
+        let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_drops_every_element_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &other.0)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        let a = DropCounter(count.clone());
+        seg.op0(move || a.clone());
+        seg.op0(|| 7i32);
+        seg.make_tuple(2, ambient_start);
+
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            if type_id == TypeId::of::<DropCounter>() {
+                Some((
+                    element_dropper_for::<DropCounter>(),
+                    element_cloner_for::<DropCounter>(),
+                    element_eq_for::<DropCounter>(),
+                ))
+            } else if type_id == TypeId::of::<i32>() {
+                Some((
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                ))
+            } else {
+                None
+            }
+        };
+        let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf).unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "moving out must not drop the element"
+        );
+        drop(seq);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "must still drop exactly once"
+        );
+    }
+
+    #[test]
+    fn call_dyn_tuple_mixed_splits_a_tuple_output_among_scalar_and_tuple_slots()
+    -> anyhow::Result<()> {
+        // (i32, (i32, i32)) split into 2 declared outputs: a scalar, and a nested tuple.
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        let inner_start = seg.current_stack_offset();
+        seg.op0(|| 2i32);
+        seg.op0(|| 3i32);
+        seg.make_tuple(2, inner_start);
+        seg.make_tuple(2, ambient_start);
+
+        fn extract_i32(ptr: *const u8) -> Box<dyn Any> {
+            Box::new(unsafe { *ptr.cast::<i32>() })
+        }
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            (type_id == TypeId::of::<i32>()).then(|| {
+                (
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                )
+            })
+        };
+        let extractors = [
+            DynExtractor::Scalar(TypeId::of::<i32>(), extract_i32 as BoxExtractor),
+            DynExtractor::Tuple(Box::new(leaf)),
+        ];
+        let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }?;
+        assert_eq!(results.len(), 2);
+        assert_eq!(*results[0].downcast_ref::<i32>().unwrap(), 1);
+        let nested = results[1].downcast_ref::<DynamicSequence>().unwrap();
+        assert_eq!(nested.arity(), 2);
+        let (b, c): (i32, i32) = nested.try_to_tuple()?;
+        assert_eq!((b, c), (2, 3));
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_tuple_mixed_matches_call_dyn_tuple_for_all_scalar_slots() -> anyhow::Result<()> {
+        // Regression: an all-scalar split must behave identically to today's call_dyn_tuple.
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 10u32);
+        seg.op0(|| 20u32);
+        seg.make_tuple(2, ambient_start);
+
+        fn extract_u32(ptr: *const u8) -> Box<dyn Any> {
+            Box::new(unsafe { *ptr.cast::<u32>() })
+        }
+        let extractors = [
+            DynExtractor::Scalar(TypeId::of::<u32>(), extract_u32 as BoxExtractor),
+            DynExtractor::Scalar(TypeId::of::<u32>(), extract_u32 as BoxExtractor),
+        ];
+        let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }?;
+        assert_eq!(*results[0].downcast_ref::<u32>().unwrap(), 10);
+        assert_eq!(*results[1].downcast_ref::<u32>().unwrap(), 20);
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_tuple_mixed_errors_on_arity_mismatch() {
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 5u32);
+        fn extract_u32(ptr: *const u8) -> Box<dyn Any> {
+            Box::new(unsafe { *ptr.cast::<u32>() })
+        }
+        let extractors = [DynExtractor::Scalar(
+            TypeId::of::<u32>(),
+            extract_u32 as BoxExtractor,
+        )];
+        let result = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn call_dyn_tuple_mixed_drops_a_moved_out_tuple_slot_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &other.0)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        let inner_start = seg.current_stack_offset();
+        let a = DropCounter(count.clone());
+        seg.op0(move || a.clone());
+        seg.op0(|| 7i32);
+        seg.make_tuple(2, inner_start);
+        seg.make_tuple(1, ambient_start);
+
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            if type_id == TypeId::of::<DropCounter>() {
+                Some((
+                    element_dropper_for::<DropCounter>(),
+                    element_cloner_for::<DropCounter>(),
+                    element_eq_for::<DropCounter>(),
+                ))
+            } else if type_id == TypeId::of::<i32>() {
+                Some((
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                ))
+            } else {
+                None
+            }
+        };
+        let extractors = [DynExtractor::Tuple(Box::new(leaf))];
+        let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }.unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "moving out must not drop the element"
+        );
+        drop(results);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "must still drop exactly once, not zero or twice"
         );
     }
 
