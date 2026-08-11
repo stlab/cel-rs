@@ -174,6 +174,8 @@ Derive tests from the **contract and public interface only** — do not read or 
 
 Precondition violations have unspecified behavior and should not be tested. Tests written against the implementation risk encoding bugs rather than verifying intent.
 
+Every component needs a contract and unit tests wherever one can be given, including UI/framework glue — "it's just glue code" is not by itself a reason to skip testing. When logic embedded in framework-coupled code (a Dioxus component, an event handler, a callback) amounts to more than a direct passthrough of an existing call — any branching, combining, or suppressing of multiple conditions — extract it into a small pure function with its own doc comment and contract-derived unit tests, and have the framework-coupled code call it. Reserve "no dedicated test" for code that is genuinely a trivial passthrough with no branching of its own (e.g. mapping one existing boolean straight onto one element attribute); anything with its own decision to make should have a contract, even if the surrounding component still can't be tested directly.
+
 ### Fallible ops
 
 Operations that can fail use `.op1r` / `.op2r` variants (returning `Result`) rather than `.op1` / `.op2`. Arithmetic on signed integers must use `checked_*` operations, not wrapping arithmetic.
