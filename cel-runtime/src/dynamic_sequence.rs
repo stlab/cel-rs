@@ -5,6 +5,41 @@
 //! trait, implemented for arities 1 through 12. All the actual byte-layout work is implemented
 //! exactly once, generically, by [`SequenceList`], over the cons-list `tuple_list.rs`'s
 //! `IntoTupleList` already produces.
+//!
+//! # Examples
+//!
+//! Build a sequence from a concrete tuple, then read it back — both by cloning
+//! ([`try_to_tuple`](DynamicSequence::try_to_tuple), leaving the sequence usable afterward) and
+//! by consuming ([`try_into_tuple`](DynamicSequence::try_into_tuple)):
+//!
+//! ```rust
+//! use cel_runtime::DynamicSequence;
+//!
+//! let seq = DynamicSequence::from_tuple((3i32, 4.5f64));
+//! assert_eq!(seq.arity(), 2);
+//!
+//! let cloned: (i32, f64) = seq.try_to_tuple().unwrap();
+//! assert_eq!(cloned, (3, 4.5));
+//!
+//! let moved: (i32, f64) = seq.try_into_tuple().unwrap();
+//! assert_eq!(moved, (3, 4.5));
+//! ```
+//!
+//! [`adapt_fn_1`](DynamicSequence::adapt_fn_1) wraps a closure written against a concrete tuple
+//! so the wrapped closure can be passed directly as the method function in
+//! `adam_rs::Method::from_fn_1_1::<DynamicSequence, R, _>` or the condition function in
+//! `adam_rs::Condition::from_fn_1::<DynamicSequence, _>` — wiring a `DynamicSequence`-typed
+//! `Sheet` cell straight into ordinary tuple-shaped Rust code. `cel-runtime` does not depend on
+//! `adam-rs`, so this example calls the wrapped closure directly instead of going through a real
+//! `Sheet`:
+//!
+//! ```rust
+//! use cel_runtime::DynamicSequence;
+//!
+//! let seq = DynamicSequence::from_tuple((3i32, 4.5f64));
+//! let wrapped = DynamicSequence::adapt_fn_1(|t: &(i32, f64)| Ok(t.0 as f64 + t.1));
+//! assert_eq!(wrapped(&seq).unwrap(), 7.5);
+//! ```
 
 use crate::memory::align_index;
 use crate::tuple_list::IntoTupleList;
@@ -375,7 +410,6 @@ impl<
 pub struct DynamicSequence {
     buffer: crate::raw_stack::RawStack,
     shape: Vec<SequenceElement>,
-    #[allow(dead_code)]
     max_align: usize,
 }
 
@@ -383,6 +417,15 @@ impl DynamicSequence {
     /// Builds a `DynamicSequence` from a concrete Rust tuple, consuming it.
     ///
     /// - Complexity: O(arity) time; exactly one heap allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_runtime::DynamicSequence;
+    ///
+    /// let seq = DynamicSequence::from_tuple((1i32, "hello".to_string()));
+    /// assert_eq!(seq.arity(), 2);
+    /// ```
     #[must_use]
     pub fn from_tuple<T: TupleSequence>(value: T) -> Self
     where
@@ -438,6 +481,16 @@ impl DynamicSequence {
     /// # Errors
     /// Returns `Err` if `T`'s element `TypeId` sequence doesn't match this sequence's actual
     /// elements (different arity, or a different type at some position).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_runtime::DynamicSequence;
+    ///
+    /// let seq = DynamicSequence::from_tuple((3i32, 4.5f64));
+    /// let result: (i32, f64) = seq.try_into_tuple().unwrap();
+    /// assert_eq!(result, (3, 4.5));
+    /// ```
     pub fn try_into_tuple<T: TupleSequence>(mut self) -> anyhow::Result<T>
     where
         T::Output: SequenceList,
@@ -466,6 +519,18 @@ impl DynamicSequence {
     /// # Errors
     /// Returns `Err` if `T`'s element `TypeId` sequence doesn't match this sequence's actual
     /// elements (different arity, or a different type at some position).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_runtime::DynamicSequence;
+    ///
+    /// let seq = DynamicSequence::from_tuple((1i32, "hello".to_string()));
+    /// let a: (i32, String) = seq.try_to_tuple().unwrap();
+    /// let b: (i32, String) = seq.try_to_tuple().unwrap(); // `seq` is still usable afterward.
+    /// assert_eq!(a, (1, "hello".to_string()));
+    /// assert_eq!(a, b);
+    /// ```
     pub fn try_to_tuple<T: TupleSequence>(&self) -> anyhow::Result<T>
     where
         T::Output: SequenceList,
@@ -493,6 +558,16 @@ impl DynamicSequence {
     /// # Errors
     /// The returned closure returns `Err` if `A`'s element `TypeId` sequence doesn't match the
     /// `DynamicSequence`'s actual elements.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_runtime::DynamicSequence;
+    ///
+    /// let seq = DynamicSequence::from_tuple((3i32, 4.5f64));
+    /// let wrapped = DynamicSequence::adapt_fn_1(|t: &(i32, f64)| Ok(t.0 as f64 + t.1));
+    /// assert_eq!(wrapped(&seq).unwrap(), 7.5);
+    /// ```
     pub fn adapt_fn_1<A, R, F>(f: F) -> impl Fn(&DynamicSequence) -> anyhow::Result<R>
     where
         A: TupleSequence,

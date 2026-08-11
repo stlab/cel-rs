@@ -951,10 +951,12 @@ impl DynSegment {
         let result = T::from_list(list);
 
         // `read_from` already moved every element's bytes out into `result` (per its own safety
-        // contract: the caller must not separately drop those bytes afterward). The tuple's
-        // vacated bytes are dead space now, not a live value — truncate the stack's tracked
-        // length without running any destructor over them, or every element with a real `Drop`
-        // impl would be dropped twice (once here, once when `result` itself drops).
+        // contract: the caller must not separately drop those bytes afterward), so the tuple's
+        // vacated bytes are dead space now, not a live value. This `truncate_to` is defensive
+        // bookkeeping that mirrors `call_dyn_tuple`'s cleanup shape above, not a double-drop
+        // guard: `stack` is a local `RawStack`, which has no `Drop` impl of its own that runs
+        // element destructors, so letting it go out of scope untruncated was never going to
+        // double-drop anything either way.
         unsafe {
             stack.truncate_to(tuple_base, tuple_padding);
         }

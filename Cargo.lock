@@ -492,6 +492,7 @@ dependencies = [
 name = "cel-runtime"
 version = "0.1.0"
 dependencies = [
+ "adam-rs",
  "anyhow",
  "typenum",
 ]
