@@ -608,7 +608,7 @@ impl Sheet {
     ///   condition).
     pub fn output_violation_cells(&self) -> HashSet<CellId> {
         self.outputs()
-            .flat_map(|id| self.violated_conditions(id).collect::<Vec<_>>())
+            .flat_map(|id| self.violated_conditions(id))
             .flat_map(|cid| self.condition_contributing_cells(cid))
             .collect()
     }
