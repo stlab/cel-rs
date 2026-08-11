@@ -631,9 +631,15 @@ impl DynamicSequence {
 
     /// Reads this sequence's element at `offset` via `read`, given a pointer to its start.
     ///
-    /// - Precondition: `offset` is one of `self.shape()`'s own recorded element offsets.
+    /// # Safety
+    /// `offset` must be one of `self.shape()`'s own recorded element offsets, or otherwise
+    /// a valid offset into `self.buffer` for a live, properly-aligned value.
     #[allow(dead_code)]
-    pub(crate) fn read_element_at<R>(&self, offset: usize, read: impl FnOnce(*const u8) -> R) -> R {
+    pub(crate) unsafe fn read_element_at<R>(
+        &self,
+        offset: usize,
+        read: impl FnOnce(*const u8) -> R,
+    ) -> R {
         unsafe { self.buffer.read_at(offset, read) }
     }
 }
