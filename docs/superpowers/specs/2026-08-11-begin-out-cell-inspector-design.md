@@ -111,10 +111,32 @@ In `begin/src/inspector.rs`, `Inspector` (the parent component, not each
 ```rust
 struct OutputStatus {
     has_outputs: bool,
-    relevant: HashSet<CellId>,        // Sheet::output_relevant_cells()
+    relevant: HashSet<CellId>,        // Sheet::output_relevant_cells(), plus every
+                                       // conditional's match cell (see below)
     warning: HashSet<CellId>,         // Sheet::output_violation_cells()
     invalid_outputs: HashSet<CellId>, // out cells whose output_valid() is false
 }
+```
+
+**Match-cell carve-out.** `Sheet::contributing_cells` (and so
+`output_relevant_cells`, which is built from it) only traces back through
+relationship *method* inputs — it never includes a conditional's own match
+cell, even when that conditional's currently-active branch is what's
+feeding an out cell (e.g. `p` in `begin/examples/out-cell.adm2` switches
+whether `c` feeds `b`, but `p` itself never appears in
+`contributing_cells`). This is a correct, already-tested characteristic of
+that `adam-rs` primitive, not a bug — but taken literally it would let the
+Inspector's "don't care" rule disable the very toggle that controls which
+branch is active. `begin` (not `adam-rs`) therefore unconditionally unions
+every conditional's match cell into `relevant`, regardless of which branch
+is currently active:
+
+```rust
+relevant: sheet
+    .output_relevant_cells()
+    .into_iter()
+    .chain(sheet.conditionals().filter_map(|id| sheet.conditional_match_cell(id)))
+    .collect(),
 ```
 
 `invalid_outputs` is a trivial filter (no new domain logic, so it stays in
