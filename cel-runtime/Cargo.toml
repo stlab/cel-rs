@@ -8,9 +8,6 @@ description = "A stack-based runtime for developing domain specific languages"
 anyhow = "1.0"
 typenum = "1.20.1"
 
-[dev-dependencies]
-adam-rs = { path = "../adam-rs" }
-
 [features]
 playground = []
 

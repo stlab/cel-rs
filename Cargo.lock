@@ -32,6 +32,7 @@ name = "adam-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cel-runtime",
  "slotmap",
 ]
 
@@ -492,7 +493,6 @@ dependencies = [
 name = "cel-runtime"
 version = "0.1.0"
 dependencies = [
- "adam-rs",
  "anyhow",
  "typenum",
 ]

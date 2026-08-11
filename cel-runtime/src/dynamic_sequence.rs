@@ -1,5 +1,5 @@
 //! `DynamicSequence`: an owned, type-erased CEL tuple value that persists beyond any single
-//! `DynSegment` evaluation, and can be stored directly as an `adam_rs::Sheet` cell's value.
+//! `DynSegment` evaluation.
 //!
 //! Converts type-safely to and from concrete, nestable Rust tuples via the [`TupleSequence`]
 //! trait, implemented for arities 1 through 12. All the actual byte-layout work is implemented
@@ -25,13 +25,9 @@
 //! assert_eq!(moved, (3, 4.5));
 //! ```
 //!
-//! [`adapt_fn_1`](DynamicSequence::adapt_fn_1) wraps a closure written against a concrete tuple
-//! so the wrapped closure can be passed directly as the method function in
-//! `adam_rs::Method::from_fn_1_1::<DynamicSequence, R, _>` or the condition function in
-//! `adam_rs::Condition::from_fn_1::<DynamicSequence, _>` — wiring a `DynamicSequence`-typed
-//! `Sheet` cell straight into ordinary tuple-shaped Rust code. `cel-runtime` does not depend on
-//! `adam-rs`, so this example calls the wrapped closure directly instead of going through a real
-//! `Sheet`:
+//! [`adapt_fn_1`](DynamicSequence::adapt_fn_1) adapts a closure written against a concrete tuple
+//! into a closure over `&DynamicSequence`, so ordinary tuple-shaped Rust code can be called
+//! directly with a type-erased sequence:
 //!
 //! ```rust
 //! use cel_runtime::DynamicSequence;
@@ -402,7 +398,7 @@ impl<
 }
 
 /// An owned, type-erased CEL tuple value that persists beyond any single `DynSegment`
-/// evaluation, suitable for storing directly as an `adam_rs::Sheet` cell's value.
+/// evaluation.
 ///
 /// Converts type-safely to and from concrete Rust tuples via [`TupleSequence`] — see
 /// [`from_tuple`](Self::from_tuple), [`try_into_tuple`](Self::try_into_tuple), and
@@ -547,9 +543,7 @@ impl DynamicSequence {
         Ok(T::from_list(list))
     }
 
-    /// Wraps a closure over a concrete tuple `A` so it can be passed directly as the `F` in
-    /// `adam_rs::Method::from_fn_1_1::<DynamicSequence, R, _>` or
-    /// `adam_rs::Condition::from_fn_1::<DynamicSequence, _>`.
+    /// Adapts a closure over a concrete tuple `A` into a closure over `&DynamicSequence`.
     ///
     /// Every call clones `A`'s fields out of the `&DynamicSequence` (via
     /// [`try_to_tuple`](Self::try_to_tuple)) into a temporary `A`, calls `f` with a reference to

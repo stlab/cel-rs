@@ -1,4 +1,5 @@
-//! Acceptance tests demonstrating DynamicSequence integration with adam-rs Sheet and Method.
+//! Acceptance tests demonstrating cel_runtime::DynamicSequence integration with adam-rs Sheet
+//! and Method.
 use adam_rs::{Method, Sheet};
 use cel_runtime::DynamicSequence;
 
