@@ -90,10 +90,16 @@ pub struct DynTuple;
 ///
 /// # Safety
 /// `ptr` must point to a live tuple value whose layout matches `associated`.
-unsafe fn drop_tuple(ptr: *mut u8, associated: &[AssociatedType]) {
+pub unsafe fn drop_tuple(ptr: *mut u8, associated: &[AssociatedType]) {
     for elem in associated.iter().rev() {
         unsafe { (elem.dropper)(ptr.add(elem.offset), &elem.associated) };
     }
+}
+
+/// Returns a [`RawDropper`] that drops a value of type `T` in place, ignoring the `associated`
+/// parameter (a non-tuple leaf value has no nested elements to recurse into).
+pub fn raw_dropper_for<T: 'static>() -> RawDropper {
+    |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) }
 }
 
 /// Returns whether every element `TypeId` in `a` and `b` matches, in order —
@@ -385,7 +391,7 @@ impl DynSegment {
             padding: padded,
             size: size_of::<T>(),
             align: align_of::<T>(),
-            raw_dropper: |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) },
+            raw_dropper: raw_dropper_for::<T>(),
             associated: Vec::new(),
         });
     }
@@ -2077,5 +2083,25 @@ mod tests {
         assert_eq!(*result.tail().head(), 0xBBu8);
         assert_eq!(*result.head(), 0xCCu8);
         Ok(())
+    }
+
+    #[test]
+    fn raw_dropper_for_ignores_associated_and_drops_the_correct_type_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut value = DropCounter(count.clone());
+        let dropper = raw_dropper_for::<DropCounter>();
+        unsafe { dropper((&raw mut value).cast::<u8>(), &[]) };
+        std::mem::forget(value);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }
