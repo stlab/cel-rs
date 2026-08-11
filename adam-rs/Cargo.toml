@@ -8,9 +8,6 @@ description = "Runtime library for property model constraint graphs"
 slotmap = "1.1"
 anyhow = "1.0"
 
-[dev-dependencies]
-cel-runtime = { path = "../cel-runtime" }
-
 [features]
 playground = []
 
