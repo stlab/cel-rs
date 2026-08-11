@@ -125,6 +125,34 @@ pub fn layout_associated(elements: &mut [AssociatedType]) -> (usize, usize) {
     (offset, max_align)
 }
 
+/// Recursively lays out `elements`, first fixing up every nested tuple element's own
+/// `size`/`align` fields (bottom-up, from its own recursively-laid-out `associated` shape),
+/// then delegating to [`layout_associated`] for this level's own (now-correct) offsets.
+///
+/// [`layout_associated`] itself is a flat, single-level computation: it trusts each element's
+/// `size`/`align` as already correct, which holds unconditionally for leaf elements but not for
+/// a nested tuple element built from a caller-declared shape — that element's real footprint is
+/// only known once its own `associated` has been laid out. Fixing it up first means an
+/// enclosing tuple's `total_size` always accounts for a nested tuple's true size, never a
+/// caller-supplied placeholder.
+///
+/// - Precondition: every leaf element's `type_id`/`size`/`align` is already set; a nested tuple
+///   element (`type_id == TypeId::of::<DynTuple>()`) only needs its own `associated` set
+///   correctly — its `size`/`align` are overwritten here, the same way `offset` is (recursively,
+///   at every nesting level).
+///
+/// - Complexity: O(n) in the total (nested) element count.
+fn layout_associated_recursive(elements: &mut [AssociatedType]) -> (usize, usize) {
+    for elem in elements.iter_mut() {
+        if elem.type_id == TypeId::of::<DynTuple>() {
+            let (size, align) = layout_associated_recursive(&mut elem.associated);
+            elem.size = size;
+            elem.align = align;
+        }
+    }
+    layout_associated(elements)
+}
+
 /// Returns whether every element `TypeId` in `a` and `b` matches, in order —
 /// recursing into nested tuple elements' own `associated` shapes rather than
 /// stopping at their shared [`DynTuple`] marker `TypeId`.
@@ -767,6 +795,141 @@ impl DynSegment {
         self.push_type::<T>();
     }
 
+    /// Emits an op that clones `inputs[index]` (downcast to `&DynamicSequence`) onto the stack
+    /// as a live, tagged `DynTuple`, so ordinary CEL tuple indexing/operators work on a
+    /// tuple-typed input cell exactly as they would on an inline tuple literal. `associated`
+    /// describes the expected (declared) element types, recursively — a nested tuple element's
+    /// own `associated` describes its inner shape the same way, and is expanded back into a
+    /// nested on-stack tuple region (the inverse of
+    /// [`call_dyn_as_dynamic_sequence`](Self::call_dyn_as_dynamic_sequence)'s "nested tuple →
+    /// nested `DynamicSequence`" conversion). Offsets in `associated` are ignored and overwritten
+    /// internally, recursively, via [`layout_associated`] — callers only need to supply each
+    /// element's `type_id`/`type_name`/`dropper` (or, for a nested tuple element, `type_id:
+    /// TypeId::of::<DynTuple>()` with its own recursively-built `associated`); `size`/`align` are
+    /// likewise overwritten for a nested tuple element (computed from its own inner shape), so
+    /// only leaf elements need real `size`/`align` values.
+    ///
+    /// - Precondition: every call to a `call_dyn`-family execution supplies an `inputs` slice
+    ///   where `inputs[index]` is a `DynamicSequence` whose own shape matches `associated`
+    ///   exactly (same arity and element `TypeId`s, recursively).
+    ///
+    /// - Complexity: O(total element count, including nested) to lay out the declared shape at
+    ///   parse time; the op itself is O(total element count, including nested) at execution time.
+    pub fn push_arg_as_dynamic_sequence_tuple(
+        &mut self,
+        index: usize,
+        mut associated: Vec<AssociatedType>,
+    ) {
+        // layout_associated (Task 2) is a flat, single-level computation: it trusts each
+        // element's `size`/`align` as already correct. A nested tuple element's *real* footprint
+        // is only known once its own `associated` has been laid out, so that must happen first,
+        // bottom-up, overwriting the nested element's `size`/`align` before this level's own
+        // offsets (and total size) are computed from them. Skipping this step would let a nested
+        // tuple's declared placeholder `size` (however small) survive into this level's
+        // `total_size`, under-reserving the stack space the write below actually needs for the
+        // nested region — a buffer overrun, not just a wrong offset.
+        let (total_size, tuple_align) = layout_associated_recursive(&mut associated);
+        // raw0_ (unlike raw0/push_op0) does not fold its own return-type alignment into the
+        // segment's `base_alignment`, and this op's write target has no return-type alignment to
+        // fold in anyway — the tuple's alignment is only known from `associated`. Without this,
+        // `base_alignment` could stay smaller than `tuple_align`, so the fresh `RawStack` a later
+        // `call_dyn` allocates would not actually be aligned as strictly as `tuple_align` requires
+        // (mirrors `join2`'s own explicit `update_base_alignment` call for the same reason).
+        self.segment.update_base_alignment(tuple_align);
+        let ambient_start = self.current_stack_offset();
+        let dest_base = align_index(tuple_align, ambient_start);
+
+        let write_shape = associated.clone();
+        self.segment.raw0_(move |stack| {
+            CALL_DYN_PTR.with(|ptr_cell| {
+                CALL_DYN_LEN.with(|len_cell| -> anyhow::Result<()> {
+                    let raw_ptr = ptr_cell.get() as *const &dyn Any;
+                    let len = len_cell.get();
+                    assert!(
+                        !raw_ptr.is_null(),
+                        "push_arg_as_dynamic_sequence_tuple invoked outside call_dyn"
+                    );
+                    debug_assert!(
+                        index < len,
+                        "push_arg_as_dynamic_sequence_tuple index {index} out of range {len}"
+                    );
+                    // Safety: raw_ptr is non-null (checked above) and valid for the duration of
+                    // the enclosing call_dyn call; DynCallGuard clears it on return.
+                    let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len) };
+                    let seq = slice[index]
+                        .downcast_ref::<DynamicSequence>()
+                        .expect("push_arg_as_dynamic_sequence_tuple: type mismatch at runtime");
+                    unsafe {
+                        stack.reserve_and_write(tuple_align, total_size, |dst| {
+                            write_dynamic_sequence_as_tuple(seq, &write_shape, dst);
+                        });
+                    }
+                    Ok(())
+                })
+            })
+        });
+
+        self.stack_ids.push(StackInfo {
+            type_id: TypeId::of::<DynTuple>(),
+            type_name: Cow::Borrowed(std::any::type_name::<DynTuple>()),
+            padding: dest_base != ambient_start,
+            size: total_size,
+            align: tuple_align,
+            raw_dropper: drop_tuple,
+            associated,
+        });
+    }
+}
+
+/// Writes `seq`'s elements into `dst`, at the offsets in `dest_shape` (already computed via
+/// [`layout_associated_recursive`]), cloning each leaf and recursively expanding each
+/// nested-tuple element into its own nested on-stack tuple region.
+///
+/// # Safety
+/// `dst` must be valid for writes covering every offset + size in `dest_shape`; `dest_shape`'s
+/// element count and per-element shape (leaf vs. nested tuple, recursively) must match `seq`'s
+/// own shape exactly.
+unsafe fn write_dynamic_sequence_as_tuple(
+    seq: &DynamicSequence,
+    dest_shape: &[AssociatedType],
+    dst: *mut u8,
+) {
+    for (dest_elem, src_elem) in dest_shape.iter().zip(seq.shape()) {
+        if dest_elem.type_id == TypeId::of::<DynTuple>() {
+            // Safety: `read_element_at`'s own contract requires `src_elem.offset` to be one of
+            // `seq`'s recorded element offsets (true by the zip above) and the callback not to
+            // retain the pointer past the call (true here — it's used only to build `nested`,
+            // itself a borrow, not retained beyond this statement). The nested `DynamicSequence`
+            // is *borrowed*, not moved, out of `seq`'s bytes — `write_dynamic_sequence_as_tuple`
+            // only ever clones through it, matching this function's own "clone, don't move"
+            // contract, so `seq` (and its nested value) remains fully live and droppable
+            // afterward. `dst.add(dest_elem.offset)` is in-bounds per this function's own safety
+            // precondition on `dst`/`dest_shape`, and `dest_elem.associated`/the nested `seq`'s
+            // own shape match per this function's precondition (recursively).
+            unsafe {
+                seq.read_element_at(src_elem.offset, |src| {
+                    let nested = &*src.cast::<DynamicSequence>();
+                    write_dynamic_sequence_as_tuple(
+                        nested,
+                        &dest_elem.associated,
+                        dst.add(dest_elem.offset),
+                    );
+                });
+            }
+        } else {
+            // Safety: same `read_element_at` contract as above; `src_elem.clone` clones (per
+            // `ElementCloner`'s own contract) rather than moving, so `seq`'s original bytes stay
+            // live; `dst.add(dest_elem.offset)` is in-bounds per this function's precondition.
+            unsafe {
+                seq.read_element_at(src_elem.offset, |src| {
+                    (src_elem.clone)(src, dst.add(dest_elem.offset));
+                });
+            }
+        }
+    }
+}
+
+impl DynSegment {
     /// Executes the segment with `inputs` as call arguments and returns the final result.
     ///
     /// Ops registered via [`push_arg`](Self::push_arg) read their values from `inputs`
@@ -2979,5 +3142,149 @@ mod tests {
         let (total_size, align) = layout_associated(&mut elements);
         assert_eq!(total_size, 0);
         assert_eq!(align, 1);
+    }
+
+    #[test]
+    fn push_arg_as_dynamic_sequence_tuple_supports_tuple_indexing() -> anyhow::Result<()> {
+        let seq = DynamicSequence::from_tuple((10i32, 2.5f64));
+        let mut seg = DynSegment::new::<()>();
+        let shape = vec![
+            AssociatedType {
+                type_id: TypeId::of::<i32>(),
+                type_name: Cow::Borrowed("i32"),
+                offset: 0,
+                size: size_of::<i32>(),
+                align: align_of::<i32>(),
+                dropper: raw_dropper_for::<i32>(),
+                associated: Vec::new(),
+            },
+            AssociatedType {
+                type_id: TypeId::of::<f64>(),
+                type_name: Cow::Borrowed("f64"),
+                offset: 0,
+                size: size_of::<f64>(),
+                align: align_of::<f64>(),
+                dropper: raw_dropper_for::<f64>(),
+                associated: Vec::new(),
+            },
+        ];
+        seg.push_arg_as_dynamic_sequence_tuple(0, shape);
+        assert_eq!(seg.peek_tuple_arity(), Some(2));
+        seg.tuple_index(1);
+        let result: f64 = seg.call_dyn(&[&seq as &dyn Any])?;
+        assert_eq!(result, 2.5);
+        Ok(())
+    }
+
+    #[test]
+    fn push_arg_as_dynamic_sequence_tuple_recurses_into_nested_tuples() -> anyhow::Result<()> {
+        // Build the same shape call_dyn_as_dynamic_sequence's nesting test produces: (i32, (i32,i32)).
+        let mut source = DynSegment::new::<()>();
+        let ambient_start = source.current_stack_offset();
+        source.op0(|| 1i32);
+        let inner_start = source.current_stack_offset();
+        source.op0(|| 2i32);
+        source.op0(|| 3i32);
+        source.make_tuple(2, inner_start);
+        source.make_tuple(2, ambient_start);
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            (type_id == TypeId::of::<i32>()).then(|| {
+                (
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                )
+            })
+        };
+        let seq = source.call_dyn_as_dynamic_sequence(&[], &leaf)?;
+
+        let inner_shape = vec![
+            AssociatedType {
+                type_id: TypeId::of::<i32>(),
+                type_name: Cow::Borrowed("i32"),
+                offset: 0,
+                size: size_of::<i32>(),
+                align: align_of::<i32>(),
+                dropper: raw_dropper_for::<i32>(),
+                associated: Vec::new(),
+            },
+            AssociatedType {
+                type_id: TypeId::of::<i32>(),
+                type_name: Cow::Borrowed("i32"),
+                offset: 0,
+                size: size_of::<i32>(),
+                align: align_of::<i32>(),
+                dropper: raw_dropper_for::<i32>(),
+                associated: Vec::new(),
+            },
+        ];
+        let outer_shape = vec![
+            AssociatedType {
+                type_id: TypeId::of::<i32>(),
+                type_name: Cow::Borrowed("i32"),
+                offset: 0,
+                size: size_of::<i32>(),
+                align: align_of::<i32>(),
+                dropper: raw_dropper_for::<i32>(),
+                associated: Vec::new(),
+            },
+            AssociatedType {
+                type_id: TypeId::of::<DynTuple>(),
+                type_name: Cow::Borrowed("tuple"),
+                offset: 0,
+                size: 0,
+                align: 1,
+                dropper: drop_tuple,
+                associated: inner_shape,
+            },
+        ];
+
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg_as_dynamic_sequence_tuple(0, outer_shape);
+        seg.tuple_index(1); // the nested (i32, i32)
+        seg.tuple_index(0); // its first element
+        let result: i32 = seg.call_dyn(&[&seq as &dyn Any])?;
+        assert_eq!(result, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn push_arg_as_dynamic_sequence_tuple_clones_leaving_the_input_usable() -> anyhow::Result<()> {
+        let seq = DynamicSequence::from_tuple((1i32, 2i32));
+        let shape = || {
+            vec![
+                AssociatedType {
+                    type_id: TypeId::of::<i32>(),
+                    type_name: Cow::Borrowed("i32"),
+                    offset: 0,
+                    size: size_of::<i32>(),
+                    align: align_of::<i32>(),
+                    dropper: raw_dropper_for::<i32>(),
+                    associated: Vec::new(),
+                },
+                AssociatedType {
+                    type_id: TypeId::of::<i32>(),
+                    type_name: Cow::Borrowed("i32"),
+                    offset: 0,
+                    size: size_of::<i32>(),
+                    align: align_of::<i32>(),
+                    dropper: raw_dropper_for::<i32>(),
+                    associated: Vec::new(),
+                },
+            ]
+        };
+
+        let mut seg_a = DynSegment::new::<()>();
+        seg_a.push_arg_as_dynamic_sequence_tuple(0, shape());
+        seg_a.tuple_index(0);
+        let a: i32 = seg_a.call_dyn(&[&seq as &dyn Any])?;
+
+        let mut seg_b = DynSegment::new::<()>();
+        seg_b.push_arg_as_dynamic_sequence_tuple(0, shape());
+        seg_b.tuple_index(1);
+        let b: i32 = seg_b.call_dyn(&[&seq as &dyn Any])?;
+
+        assert_eq!((a, b), (1, 2));
+        Ok(())
     }
 }
