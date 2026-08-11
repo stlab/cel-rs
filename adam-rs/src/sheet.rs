@@ -598,6 +598,21 @@ impl Sheet {
             .collect()
     }
 
+    /// Returns the union of `condition_contributing_cells` over every condition that
+    /// evaluated `false` as of the last `propagate()` call, across every output in the
+    /// sheet.
+    ///
+    /// - Postcondition: empty if the sheet has no outputs, or if every condition on
+    ///   every output currently holds.
+    /// - Complexity: O(sum of `condition_contributing_cells` cost over every violated
+    ///   condition).
+    pub fn output_violation_cells(&self) -> HashSet<CellId> {
+        self.outputs()
+            .flat_map(|id| self.violated_conditions(id).collect::<Vec<_>>())
+            .flat_map(|cid| self.condition_contributing_cells(cid))
+            .collect()
+    }
+
     /// Writes a value to a cell, incrementing the cell's write-recency strength.
     ///
     /// Each successful `write` increments a global monotonic counter and assigns
