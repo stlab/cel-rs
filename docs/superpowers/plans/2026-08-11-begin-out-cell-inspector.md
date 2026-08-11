@@ -536,9 +536,18 @@ EOF
 
 **Interfaces:**
 - Consumes: `Sheet::outputs()` (Task 1), `Sheet::output_relevant_cells()` (Task 2), `Sheet::output_violation_cells()` (Task 3), `Sheet::output_cell`/`Sheet::output_valid` (existing), `Sheet::conditionals()`/`Sheet::conditional_match_cell()` (existing), `SpTextfield { warning: bool, .. }` (Task 4).
-- Produces: `OutputStatus` (private to `inspector.rs`; no other file needs it). `CellRow` now computes `disabled`/`invalid`/`warning` instead of just `disabled = forced`/`invalid = has_error`.
+- Produces: `OutputStatus` and `CellFlags` (both private to `inspector.rs`; no other file needs them). `CellRow` now derives `disabled`/`invalid`/`warning` via the pure `cell_flags` function instead of just `disabled = forced`/`invalid = has_error`.
 
-This task has no dedicated Rust unit test — `CellRow`'s wiring is UI glue with no test infrastructure today, consistent with how `forced`/`disabled` landed (`docs/superpowers/plans/2026-07-09-begin-forced-cells-ui.md`, Task 2). Verified in Task 7's manual check.
+Per root `CLAUDE.md`'s "Unit tests" section: `cell_flags` (Step 3 below) is
+genuine branching/combining logic, not a passthrough, so it gets its own
+contract and unit tests even though it's called from framework-coupled
+Dioxus code. `compute_output_status` and `CellRow`'s wiring around it stay
+untested UI glue (as `forced`/`disabled` did in
+`docs/superpowers/plans/2026-07-09-begin-forced-cells-ui.md`, Task 2) —
+verified instead in Task 7's manual check — because they're straight
+plumbing: reading `Sheet`, constructing `OutputStatus`, and calling
+`cell_flags`, with no decision of their own left untested once `cell_flags`
+is covered.
 
 - [ ] **Step 1: Add `OutputStatus` and its constructor**
 
@@ -598,7 +607,136 @@ fn compute_output_status(sheet: &Sheet) -> OutputStatus {
 }
 ```
 
-- [ ] **Step 2: Compute `OutputStatus` once in `Inspector` and pass it to `CellRow`**
+- [ ] **Step 2: Write the failing tests for `cell_flags`**
+
+Add a `#[cfg(test)] mod tests` block at the end of `begin/src/inspector.rs`
+(this is a new block — the file has no tests today):
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(has_outputs: bool, relevant: &[CellId], warning: &[CellId], invalid_outputs: &[CellId]) -> OutputStatus {
+        OutputStatus {
+            has_outputs,
+            relevant: relevant.iter().copied().collect(),
+            warning: warning.iter().copied().collect(),
+            invalid_outputs: invalid_outputs.iter().copied().collect(),
+        }
+    }
+
+    fn dummy_cell() -> CellId {
+        let mut sheet = Sheet::new();
+        sheet.add_cell(0_i32)
+    }
+
+    #[test]
+    fn cell_flags_enabled_when_no_outputs_even_if_not_relevant() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, false, &status(false, &[], &[], &[]));
+        assert!(!flags.disabled);
+    }
+
+    #[test]
+    fn cell_flags_disabled_when_forced_regardless_of_outputs() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, true, false, &status(false, &[], &[], &[]));
+        assert!(flags.disabled);
+    }
+
+    #[test]
+    fn cell_flags_disabled_when_has_outputs_and_cell_not_relevant() {
+        // Both ids must come from the same Sheet: two fresh Sheets' first added cell
+        // return equal CellId values (slotmap's key generation is deterministic per
+        // map), which would make `id` and `other` indistinguishable below.
+        let mut sheet = Sheet::new();
+        let id = sheet.add_cell(0_i32);
+        let other = sheet.add_cell(0_i32);
+        let flags = cell_flags(id, false, false, &status(true, &[other], &[], &[]));
+        assert!(flags.disabled);
+    }
+
+    #[test]
+    fn cell_flags_enabled_when_has_outputs_and_cell_is_relevant() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, false, &status(true, &[id], &[], &[]));
+        assert!(!flags.disabled);
+    }
+
+    #[test]
+    fn cell_flags_invalid_when_has_error() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, true, &status(false, &[], &[], &[]));
+        assert!(flags.invalid);
+    }
+
+    #[test]
+    fn cell_flags_invalid_when_cell_is_an_invalid_output() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, false, &status(true, &[id], &[], &[id]));
+        assert!(flags.invalid);
+    }
+
+    #[test]
+    fn cell_flags_warning_when_in_warning_set_and_not_invalid() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, false, &status(true, &[id], &[id], &[]));
+        assert!(flags.warning);
+    }
+
+    #[test]
+    fn cell_flags_warning_suppressed_when_also_invalid() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, true, &status(true, &[id], &[id], &[]));
+        assert!(!flags.warning);
+        assert!(flags.invalid);
+    }
+}
+```
+
+- [ ] **Step 3: Run the tests to verify they fail**
+
+Run: `cargo test -p begin --no-default-features cell_flags_`
+Expected: compile error — `cannot find function \`cell_flags\` in this scope` (and `OutputStatus`'s fields aren't constructible yet if Step 1 hasn't landed the exact field names — it has, per Step 1 above, so this should be exactly one error: the missing `cell_flags` function).
+
+- [ ] **Step 4: Implement `CellFlags` and `cell_flags`**
+
+Add directly after `compute_output_status` (the function added in Step 1):
+
+```rust
+/// A cell's Inspector display flags, derived from its own forced/error state and the
+/// sheet-wide out-cell status.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CellFlags {
+    disabled: bool,
+    invalid: bool,
+    warning: bool,
+}
+
+/// Derives `id`'s Inspector display flags from its own `forced`/`has_error` state and the
+/// sheet-wide `status`.
+///
+/// - Postcondition: `warning` is `false` whenever `invalid` is `true` — a field never
+///   shows both states at once.
+fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) -> CellFlags {
+    let disabled = forced || (status.has_outputs && !status.relevant.contains(&id));
+    let invalid = has_error || status.invalid_outputs.contains(&id);
+    let warning = !invalid && status.warning.contains(&id);
+    CellFlags {
+        disabled,
+        invalid,
+        warning,
+    }
+}
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `cargo test -p begin --no-default-features cell_flags_`
+Expected: PASS (8 passed)
+
+- [ ] **Step 6: Compute `OutputStatus` once in `Inspector` and pass it to `CellRow`**
 
 Replace the `Inspector` component (current lines 16-34) with:
 
@@ -625,7 +763,7 @@ pub fn Inspector(
 }
 ```
 
-- [ ] **Step 3: Update `CellRow`'s signature and derive the three flags**
+- [ ] **Step 7: Update `CellRow`'s signature to call `cell_flags`**
 
 Replace the `CellRow` component's signature and the block between the existing `forced` memo (current lines 61-65) and the `field_id` line (current line 76) with:
 
@@ -662,14 +800,9 @@ fn CellRow(
     let mut is_focused = use_signal(|| false);
     let mut has_error = use_signal(|| false);
 
-    let disabled = use_memo(move || {
-        let status = output_status.read();
-        *forced.read() || (status.has_outputs && !status.relevant.contains(&id))
+    let flags = use_memo(move || {
+        cell_flags(id, *forced.read(), *has_error.read(), &output_status.read())
     });
-    let invalid = use_memo(move || {
-        *has_error.read() || output_status.read().invalid_outputs.contains(&id)
-    });
-    let warning = use_memo(move || !*invalid.read() && output_status.read().warning.contains(&id));
 
     // Sync input to the computed value whenever it changes, but not while the user
     // is actively editing — that would interrupt mid-value typing (e.g. "1." → "1").
@@ -683,7 +816,7 @@ fn CellRow(
     let field_id = format!("cell-{id:?}");
 ```
 
-- [ ] **Step 4: Wire the three flags into `SpTextfield`**
+- [ ] **Step 8: Wire the three flags into `SpTextfield`**
 
 Update the `SpTextfield` call (current lines 82-95) to:
 
@@ -691,28 +824,28 @@ Update the `SpTextfield` call (current lines 82-95) to:
             SpTextfield {
                 id: field_id,
                 value: input.read().clone(),
-                invalid: *invalid.read(),
-                warning: *warning.read(),
-                disabled: *disabled.read(),
+                invalid: flags.read().invalid,
+                warning: flags.read().warning,
+                disabled: flags.read().disabled,
                 // Dioxus's event serializer only reads event.target.value for
                 // HTMLInputElement — custom elements (sp-textfield) always give "".
                 // Use dioxus.send() in JS and eval.recv() to read the live value.
                 oninput: move |_: FormEvent| {
 ```
 
-(leave the rest of the `oninput`/`onfocus`/`onblur` block unchanged — `has_error.set(...)` inside it still drives `invalid` correctly, since `invalid`'s memo reads `*has_error.read()`.)
+(leave the rest of the `oninput`/`onfocus`/`onblur` block unchanged — `has_error.set(...)` inside it still drives `flags`/`invalid` correctly, since `flags`'s memo reads `*has_error.read()`.)
 
-- [ ] **Step 5: Build to verify it compiles**
+- [ ] **Step 9: Build to verify it compiles**
 
 Run: `cargo build -p begin --no-default-features`
 Expected: builds cleanly, zero warnings.
 
-- [ ] **Step 6: Run the begin test suite**
+- [ ] **Step 10: Run the begin test suite**
 
 Run: `cargo test -p begin --no-default-features`
-Expected: all existing tests pass (none reference `CellRow`'s internals directly).
+Expected: all tests pass, including the 8 new `cell_flags_*` tests from Step 5 and every existing test (none reference `CellRow`'s internals directly).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add begin/src/inspector.rs
@@ -722,12 +855,14 @@ feat(begin): disable don't-care fields and flag out-cell violations
 Inspector now computes one OutputStatus snapshot per render (cells
 relevant to any out cell, cells implicated in a failing condition,
 and which out cells are currently invalid) and shares it across every
-CellRow. A field is disabled once the sheet has an out cell and the
-field isn't currently relevant to any of them (conditional match
-cells are always exempted, since contributing_cells never traces
-through them); an out cell's own field turns invalid when one of its
-conditions fails; a contributing field gets the softer warning state
-when it feeds a currently-failing condition.
+CellRow. The pure, unit-tested cell_flags derives disabled/invalid/
+warning from a cell's own forced/error state plus that snapshot: a
+field is disabled once the sheet has an out cell and the field isn't
+currently relevant to any of them (conditional match cells are always
+exempted, since contributing_cells never traces through them); an out
+cell's own field turns invalid when one of its conditions fails; a
+contributing field gets the softer warning state when it feeds a
+currently-failing condition.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 EOF
