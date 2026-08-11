@@ -1033,6 +1033,18 @@ impl DynSegment {
             info.type_name,
         );
 
+        // Validate every leaf's registration BEFORE executing the segment -- a purely static
+        // check over `associated`/`leaf`, independent of the segment's runtime values -- so a
+        // failure here means nothing has been executed, built, or moved yet, and there is
+        // nothing to clean up. This also rules out the double-free that a post-execution
+        // Err-cleanup path can't safely avoid: a nested tuple element can finish building (and
+        // moving its own interior bytes into a fresh DynamicSequence) before a later *sibling*
+        // element fails, at which point the original bytes of that already-moved nested element
+        // are no longer solely owned by the on-stack tuple -- dropping them again from here
+        // would double-drop them. Validating first means `build_dynamic_sequence` below is
+        // guaranteed to succeed, so that scenario can never arise.
+        validate_associated_shape(&info.associated, leaf)?;
+
         let tuple_size = info.size;
         let tuple_padding = info.padding;
         let associated = info.associated.clone();
@@ -1053,28 +1065,16 @@ impl DynSegment {
             stack.read_at(tuple_base, |base| {
                 build_dynamic_sequence(base, &associated, leaf)
             })
-        };
-        match result {
-            Ok(seq) => {
-                // Every leaf at every nesting depth was moved (not cloned) into a fresh
-                // DynamicSequence above; the vacated bytes are dead space now, matching
-                // call_dyn_as_tuple's own cleanup.
-                unsafe {
-                    stack.truncate_to(tuple_base, tuple_padding);
-                }
-                Ok(seq)
-            }
-            Err(e) => {
-                // build_dynamic_sequence's pass 2 (the only step that moves bytes) never ran if
-                // it returned Err -- the original tuple is still fully live and must be dropped
-                // normally, not left to leak.
-                unsafe {
-                    stack.drop_at(tuple_base, |ptr| drop_tuple(ptr, &associated));
-                    stack.truncate_to(tuple_base, tuple_padding);
-                }
-                Err(e)
-            }
         }
+        .expect("validate_associated_shape already confirmed every leaf resolves");
+
+        // Every leaf at every nesting depth was moved (not cloned) into a fresh DynamicSequence
+        // above; the vacated bytes are dead space now, matching call_dyn_as_tuple's own cleanup.
+        unsafe {
+            stack.truncate_to(tuple_base, tuple_padding);
+        }
+
+        Ok(result)
     }
 
     /// Pushes a unary operation that takes one argument of type T and returns a value of type R.
@@ -1472,6 +1472,33 @@ unsafe fn build_dynamic_sequence(
     Ok(unsafe { DynamicSequence::from_raw_parts(buffer, shape, max_align) })
 }
 
+/// Recursively confirms every non-tuple element in `associated` has a leaf descriptor
+/// available from `leaf`, without moving or reading any bytes — a pure validation pass so a
+/// caller can call this *before* executing a segment, guaranteeing that
+/// `build_dynamic_sequence` (called afterward, on the same `associated`/`leaf`) cannot fail.
+///
+/// # Errors
+/// Returns `Err` naming the first element (at any nesting depth) whose `TypeId` `leaf` doesn't
+/// recognize.
+fn validate_associated_shape(
+    associated: &[AssociatedType],
+    leaf: &(impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)> + ?Sized),
+) -> anyhow::Result<()> {
+    for elem in associated {
+        if elem.type_id == TypeId::of::<DynTuple>() {
+            validate_associated_shape(&elem.associated, leaf)?;
+        } else {
+            leaf(elem.type_id).ok_or_else(|| {
+                anyhow!(
+                    "no Clone/PartialEq registered for element type `{}`",
+                    elem.type_name
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// One N>1-output slot's extraction, for [`DynSegment::call_dyn_tuple_mixed`]: either a scalar
 /// leaf (the existing [`BoxExtractor`] path, identical to [`call_dyn_tuple`](DynSegment::call_dyn_tuple)),
 /// or a nested tuple, converted to a boxed `DynamicSequence` via the same recursive machinery
@@ -1535,14 +1562,37 @@ impl DynSegment {
             info.associated.len(),
             extractors.len(),
         );
+        // Validate every element BEFORE executing the segment: a Scalar slot's type_id must
+        // match, and a Tuple slot must itself be a nested tuple whose own leaves (at every
+        // nesting depth) all resolve via its own `leaf` closure. This is a purely static check
+        // over `info.associated`/`extractors`, independent of the segment's runtime values, so a
+        // failure here means nothing has been executed, built, or moved yet, and there is
+        // nothing to clean up. It also rules out a double-free that a post-execution
+        // Err-cleanup path can't safely avoid: a Tuple slot's own nested build can partially
+        // succeed (moving some of its interior bytes into a fresh DynamicSequence) before a
+        // later *sibling* slot fails, at which point those already-moved bytes are no longer
+        // solely owned by the on-stack tuple -- dropping them again from here would double-drop
+        // them. Validating first means every `build_dynamic_sequence` call below is guaranteed
+        // to succeed, so that scenario can never arise.
         for (i, (elem, extractor)) in info.associated.iter().zip(extractors).enumerate() {
-            if let DynExtractor::Scalar(expected_type_id, _) = extractor {
-                ensure!(
-                    elem.type_id == *expected_type_id,
-                    "call_dyn_tuple_mixed: element {i} type mismatch: expected type {:?}, got `{}`",
-                    expected_type_id,
-                    elem.type_name,
-                );
+            match extractor {
+                DynExtractor::Scalar(expected_type_id, _) => {
+                    ensure!(
+                        elem.type_id == *expected_type_id,
+                        "call_dyn_tuple_mixed: element {i} type mismatch: expected type {:?}, \
+                         got `{}`",
+                        expected_type_id,
+                        elem.type_name,
+                    );
+                }
+                DynExtractor::Tuple(leaf) => {
+                    ensure!(
+                        elem.type_id == TypeId::of::<DynTuple>(),
+                        "call_dyn_tuple_mixed: element {i}: expected a nested tuple, got `{}`",
+                        elem.type_name,
+                    );
+                    validate_associated_shape(&elem.associated, leaf.as_ref())?;
+                }
             }
         }
 
@@ -1563,65 +1613,42 @@ impl DynSegment {
         }
 
         let tuple_base = stack.len() - tuple_size;
-
-        // Unlike a `.collect::<anyhow::Result<Vec<_>>>()`, this explicit loop tracks, per
-        // element, whether it was actually moved (`moved[i]`) -- needed because a failure
-        // partway through may leave some earlier `Tuple`-kind elements already moved into a
-        // nested `DynamicSequence` while the failing element (and everything after it) is still
-        // fully live, so the cleanup below can't assume a uniform "all Tuple slots were moved".
-        let mut results: Vec<Box<dyn Any>> = Vec::with_capacity(extractors.len());
-        let mut moved = vec![false; associated.len()];
-        let mut first_err: Option<anyhow::Error> = None;
-        for (i, (elem, extractor)) in associated.iter().zip(extractors).enumerate() {
-            match extractor {
-                DynExtractor::Scalar(_, boxextractor) => {
-                    results.push(unsafe {
-                        stack.read_at(tuple_base + elem.offset, |ptr| boxextractor(ptr))
-                    });
-                }
+        let results: Vec<Box<dyn Any>> = associated
+            .iter()
+            .zip(extractors)
+            .map(|(elem, extractor)| match extractor {
+                DynExtractor::Scalar(_, boxextractor) => unsafe {
+                    stack.read_at(tuple_base + elem.offset, |ptr| boxextractor(ptr))
+                },
                 DynExtractor::Tuple(leaf) => {
-                    if elem.type_id != TypeId::of::<DynTuple>() {
-                        first_err = Some(anyhow!(
-                            "call_dyn_tuple_mixed: expected a nested tuple, got `{}`",
-                            elem.type_name
-                        ));
-                        break;
-                    }
-                    let built = unsafe {
+                    let nested = unsafe {
                         stack.read_at(tuple_base + elem.offset, |base| {
                             build_dynamic_sequence(base, &elem.associated, leaf.as_ref())
                         })
-                    };
-                    match built {
-                        Ok(nested) => {
-                            moved[i] = true;
-                            results.push(Box::new(nested) as Box<dyn Any>);
-                        }
-                        Err(e) => {
-                            first_err = Some(e);
-                            break;
-                        }
                     }
+                    .expect("validated above: every leaf in this region is registered");
+                    Box::new(nested) as Box<dyn Any>
                 }
-            }
-        }
+            })
+            .collect();
 
-        // Scalar slots were only ever cloned (never moved), so they always need their real
-        // dropper. A Tuple slot needs a no-op dropper only if `moved[i]` is true -- an
-        // unprocessed or failed Tuple slot (past the break point above) is still fully live and
-        // must be dropped normally too, exactly like a Scalar slot.
+        // Every DynExtractor::Scalar element's bytes were only cloned above (BoxExtractor's own
+        // contract, matching call_dyn_tuple) -- those must still be dropped normally. Every
+        // DynExtractor::Tuple element's bytes were *moved* into the nested DynamicSequence above
+        // (build_dynamic_sequence's contract, matching call_dyn_as_dynamic_sequence) -- running
+        // that element's own dropper again would double-drop/use-after-move, so its dropper is
+        // replaced with a no-op for this cleanup pass only (mirroring how
+        // DynamicSequence::try_into_tuple clears its own `shape` to make its `Drop` a no-op after
+        // moving every element out).
         let drop_associated: Vec<AssociatedType> = associated
             .iter()
-            .enumerate()
-            .map(|(i, elem)| {
-                if moved[i] {
-                    AssociatedType {
-                        dropper: |_ptr, _associated| {},
-                        ..elem.clone()
-                    }
-                } else {
-                    elem.clone()
-                }
+            .zip(extractors)
+            .map(|(elem, extractor)| match extractor {
+                DynExtractor::Scalar(..) => elem.clone(),
+                DynExtractor::Tuple(_) => AssociatedType {
+                    dropper: |_ptr, _associated| {},
+                    ..elem.clone()
+                },
             })
             .collect();
         unsafe {
@@ -1629,9 +1656,6 @@ impl DynSegment {
             stack.truncate_to(tuple_base, tuple_padding);
         }
 
-        if let Some(e) = first_err {
-            return Err(e);
-        }
         Ok(results)
     }
 }
@@ -2256,12 +2280,12 @@ mod tests {
     }
 
     #[test]
-    fn call_dyn_as_dynamic_sequence_drops_earlier_elements_on_error() {
-        // Regression test for a leak: if `leaf` fails for some element (here, the second),
-        // build_dynamic_sequence's pass 2 (the only step that moves bytes) never runs, so the
-        // *entire* original tuple -- including the earlier DropCounter element that `leaf`
-        // already resolved successfully -- is still fully live on the stack and must be dropped
-        // normally on the error path, not left to leak.
+    fn call_dyn_as_dynamic_sequence_never_executes_when_a_leaf_is_unregistered() {
+        // Regression test: if `leaf` doesn't recognize some element's type, that must be caught
+        // by validation *before* the segment ever executes -- there is nothing on the stack to
+        // build, move, or clean up. The op closures' own captured state (here, the DropCounter
+        // `a`) is untouched by the failed call and drops normally, exactly once, whenever `seg`
+        // itself is later dropped -- not leaked (dropped zero times), and not double-dropped.
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2287,7 +2311,8 @@ mod tests {
         seg.make_tuple(2, ambient_start);
 
         // Only DropCounter's type is registered; i32 (the element after it) is not, so
-        // call_dyn_as_dynamic_sequence must fail.
+        // call_dyn_as_dynamic_sequence must fail during validation, before executing the
+        // segment at all.
         let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
             (type_id == TypeId::of::<DropCounter>()).then(|| {
                 (
@@ -2301,10 +2326,50 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             count.load(Ordering::SeqCst),
-            1,
-            "the earlier DropCounter element must still be dropped exactly once on error, \
-             not leaked"
+            0,
+            "the segment must never execute -- nothing was ever built or moved, so there is \
+             nothing to drop yet"
         );
+        drop(seg);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "the op closure's own captured DropCounter must still drop exactly once, normally, \
+             when `seg` itself is dropped"
+        );
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_errors_on_unregistered_sibling_after_nested_tuple() {
+        // Regression test for a double-free a prior (now-reverted) fix attempt introduced: a
+        // nested tuple element (element 0) whose own interior leaf *is* registered, followed by
+        // a sibling scalar element (element 1) whose leaf is *not* registered. A naive
+        // post-execution error-path cleanup could double-drop element 0's interior bytes, since
+        // its own nested build could already have completed (moving its bytes into a fresh
+        // DynamicSequence) before element 1's failure was discovered. Validating the whole shape
+        // recursively before ever executing the segment means this is caught up front, before
+        // anything is built -- so there is nothing to double-drop.
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        let inner_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        seg.make_tuple(1, inner_start);
+        seg.op0(|| 2.5f64);
+        seg.make_tuple(2, ambient_start);
+
+        // Only i32 (the nested tuple's own interior element) is registered; f64 (the outer
+        // sibling element) is not.
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            (type_id == TypeId::of::<i32>()).then(|| {
+                (
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                )
+            })
+        };
+        let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2444,12 +2509,13 @@ mod tests {
     }
 
     #[test]
-    fn call_dyn_tuple_mixed_drops_earlier_scalar_element_on_error() {
-        // Regression test for a leak: element 0 (a Scalar slot) is successfully cloned before
-        // element 1 (a Tuple slot whose own nested leaf lookup is unregistered) fails. Element
-        // 0's *original* on-stack bytes were never moved (BoxExtractor only clones, per its own
-        // contract) and must still be dropped normally by the fixed cleanup path, not left to
-        // leak just because a later element failed.
+    fn call_dyn_tuple_mixed_never_executes_when_a_tuple_slots_leaf_is_unregistered() {
+        // Regression test: element 0 is a Scalar slot; element 1 is a Tuple slot whose own
+        // nested leaf lookup is unregistered. That must be caught by validation *before* the
+        // segment executes -- not discovered partway through building results, where element 0
+        // might already have been cloned. The op closures' own captured state (here, the
+        // DropCounter `a`) is untouched by the failed call and drops normally, exactly once,
+        // whenever `seg` itself is later dropped -- not leaked, and not double-dropped.
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2480,8 +2546,8 @@ mod tests {
         seg.make_tuple(1, inner_start);
         seg.make_tuple(2, ambient_start);
 
-        // The nested tuple's own element type (i32) is never registered, so building it as a
-        // DynamicSequence must fail.
+        // The nested tuple's own element type (i32) is never registered, so validation must
+        // fail before the segment ever executes.
         let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> { None };
         let extractors = [
             DynExtractor::Scalar(
@@ -2492,17 +2558,18 @@ mod tests {
         ];
         let result = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) };
         assert!(result.is_err());
-        // Two drops are expected by the time the call has returned: the cloned box extracted
-        // for element 0 (owned by the function's own local `results`, dropped when the function
-        // returns) and element 0's original on-stack bytes (dropped by the fixed cleanup path).
-        // Under the old, buggy early-return path neither the cleanup call nor the truncate ever
-        // ran, so only the first of these two drops would have happened (count stuck at 1,
-        // leaking the original bytes).
         assert_eq!(
             count.load(Ordering::SeqCst),
-            2,
-            "the earlier Scalar element's original on-stack bytes must still be dropped on \
-             error, not leaked"
+            0,
+            "the segment must never execute -- element 0 was never cloned, so there is \
+             nothing to drop yet"
+        );
+        drop(seg);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "the op closure's own captured DropCounter must still drop exactly once, normally, \
+             when `seg` itself is dropped"
         );
     }
 
