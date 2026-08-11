@@ -889,11 +889,19 @@ impl DynSegment {
 /// `dst` must be valid for writes covering every offset + size in `dest_shape`; `dest_shape`'s
 /// element count and per-element shape (leaf vs. nested tuple, recursively) must match `seq`'s
 /// own shape exactly.
+///
+/// - Complexity: O(total element count, including nested).
 unsafe fn write_dynamic_sequence_as_tuple(
     seq: &DynamicSequence,
     dest_shape: &[AssociatedType],
     dst: *mut u8,
 ) {
+    debug_assert_eq!(
+        dest_shape.len(),
+        seq.shape().len(),
+        "write_dynamic_sequence_as_tuple: dest_shape and seq.shape() must have the same \
+         element count (precondition violated by caller)"
+    );
     for (dest_elem, src_elem) in dest_shape.iter().zip(seq.shape()) {
         if dest_elem.type_id == TypeId::of::<DynTuple>() {
             // Safety: `read_element_at`'s own contract requires `src_elem.offset` to be one of
@@ -1697,6 +1705,9 @@ impl DynSegment {
     ///   `DynExtractor::Tuple`) the element isn't itself a tuple, or one of *its* leaves has no
     ///   registered descriptor.
     /// - Any op returns an error during execution.
+    ///
+    /// - Complexity: O(n) in the number of ops, plus O(total element count, including nested) to
+    ///   build the result.
     pub unsafe fn call_dyn_tuple_mixed(
         &mut self,
         inputs: &[&dyn Any],

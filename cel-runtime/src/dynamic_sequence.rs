@@ -671,7 +671,6 @@ impl DynamicSequence {
     /// # Safety
     /// `buffer` must contain exactly the bytes described by `shape`, laid out at each element's
     /// own `offset`; `max_align` must be at least as large as every element's `align`.
-    #[allow(dead_code)]
     pub(crate) unsafe fn from_raw_parts(
         buffer: crate::raw_stack::RawStack,
         shape: Vec<SequenceElement>,
@@ -686,7 +685,6 @@ impl DynamicSequence {
 
     /// Returns this sequence's own element shape, for use by `dyn_segment`'s tuple-expansion
     /// machinery.
-    #[allow(dead_code)]
     pub(crate) fn shape(&self) -> &[SequenceElement] {
         &self.shape
     }
@@ -696,7 +694,6 @@ impl DynamicSequence {
     /// # Safety
     /// `offset` must be one of `self.shape()`'s own recorded element offsets, or otherwise
     /// a valid offset into `self.buffer` for a live, properly-aligned value.
-    #[allow(dead_code)]
     pub(crate) unsafe fn read_element_at<R>(
         &self,
         offset: usize,
