@@ -585,6 +585,19 @@ impl Sheet {
             .collect()
     }
 
+    /// Returns the union of `contributing_cells` over every live output's cell — the set
+    /// of cells currently determining at least one output's value, as of the last
+    /// `propagate()` call.
+    ///
+    /// - Postcondition: empty if the sheet has no outputs.
+    /// - Complexity: O(sum of `contributing_cells` cost over every output).
+    pub fn output_relevant_cells(&self) -> HashSet<CellId> {
+        self.outputs()
+            .filter_map(|id| self.output_cell(id))
+            .flat_map(|cell| self.contributing_cells(cell))
+            .collect()
+    }
+
     /// Writes a value to a cell, incrementing the cell's write-recency strength.
     ///
     /// Each successful `write` increments a global monotonic counter and assigns

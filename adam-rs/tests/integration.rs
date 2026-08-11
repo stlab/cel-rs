@@ -1705,3 +1705,78 @@ fn outputs_iterates_every_live_output_id() {
     let ids: HashSet<_> = sheet.outputs().collect();
     assert_eq!(ids, HashSet::from([id_a, id_b]));
 }
+
+#[test]
+fn output_relevant_cells_empty_when_sheet_has_no_outputs() {
+    let sheet = Sheet::new();
+    assert_eq!(sheet.output_relevant_cells(), HashSet::new());
+}
+
+#[test]
+fn output_relevant_cells_returns_output_cell_itself_before_propagate() {
+    let (sheet, output, ..) = sheet_with_area_output();
+    let area = sheet.output_cell(output).unwrap();
+    assert_eq!(sheet.output_relevant_cells(), HashSet::from([area]));
+}
+
+#[test]
+fn output_relevant_cells_returns_root_sources_after_propagate() {
+    let (mut sheet, _output, width, height, _max_area) = sheet_with_area_output();
+    sheet.write(width, 5_i32).unwrap();
+    sheet.write(height, 4_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(
+        sheet.output_relevant_cells(),
+        HashSet::from([width, height])
+    );
+}
+
+#[test]
+fn output_relevant_cells_unions_across_multiple_outputs() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(1_i32);
+    let b = sheet.add_cell(2_i32);
+    let out_a = sheet.add_cell(0_i32);
+    let out_b = sheet.add_cell(0_i32);
+    sheet
+        .add_output(Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)), vec![])
+        .unwrap();
+    sheet
+        .add_output(Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)), vec![])
+        .unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.output_relevant_cells(), HashSet::from([a, b]));
+}
+
+#[test]
+fn output_relevant_cells_updates_when_a_different_relationship_becomes_active() {
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(1_i32);
+    let b = sheet.add_cell(2_i32);
+    let c = sheet.add_cell(0_i32);
+    let rel0 = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .unwrap();
+    let rel1 = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet
+        .add_conditional(
+            p,
+            vec![(vec![0_i32], vec![rel0]), (vec![1_i32], vec![rel1])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_output(Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)), vec![])
+        .unwrap();
+
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.output_relevant_cells(), HashSet::from([a]));
+
+    sheet.write(p, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.output_relevant_cells(), HashSet::from([b]));
+}
