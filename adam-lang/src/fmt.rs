@@ -2,10 +2,12 @@
 //! opening braces on the same line, `leading_comment`/`blank_line_before` reproduced exactly as
 //! [`crate::trivia::attach_trivia`] recovered them (including a file-header-style comment
 //! preceding the `sheet` keyword itself, `Sheet.leading_comment`), and method bodies/cell
-//! initializers delegated to [`cel_parser::format_expr`] (bodies) or re-emitted via
-//! `Span::source_text()` directly (initializers/branch-match literals — see the design doc for
-//! why no `Literal` value is needed). Conditional branches omit the grammar's optional trailing
-//! `,`, matching `begin/assets/demo.adm2`'s existing style.
+//! initializers/condition bodies delegated to [`cel_parser::format_expr`] (a normalization
+//! improvement over span-based re-emit, which was only ever a stopgap for when there was no
+//! parsed `Expr` to format). Type annotations are re-emitted via `Span::source_text()` directly
+//! via `TypeExpr::span()`, and branch-match literals via `ConditionalBranch::literal_span` — see
+//! the design doc for why no `Literal` value is needed. Conditional branches omit the grammar's
+//! optional trailing `,`, matching `begin/assets/demo.adm2`'s existing style.
 //!
 //! Never called on a sheet with any recorded syntax errors — see `adam-lsp`'s
 //! `textDocument/formatting` handler, which refuses to format in that case.
@@ -152,8 +154,9 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     out.push_str("}\n");
 }
 
-/// Writes one `cell name[: type][ = initializer];` declaration, re-emitting the initializer via
-/// its span rather than the (unused) `Literal` value.
+/// Writes one `cell name[: type][ = initializer];` declaration, delegating its type annotation
+/// to [`source_text_or_empty`] via `TypeExpr::span()` and its initializer to
+/// [`cel_parser::format_expr`].
 fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     write_trivia(
         out,
@@ -164,13 +167,13 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     out.push_str(&indent(depth));
     out.push_str("cell ");
     out.push_str(&cell.name);
-    if let Some((type_name, _)) = &cell.type_name {
+    if let Some(type_expr) = &cell.type_name {
         out.push_str(": ");
-        out.push_str(type_name);
+        out.push_str(&source_text_or_empty(type_expr.span()));
     }
-    if let Some((_, span)) = &cell.initializer {
+    if let Some(expr) = &cell.initializer {
         out.push_str(" = ");
-        out.push_str(&source_text_or_empty(*span));
+        out.push_str(&cel_parser::format_expr(expr));
     }
     out.push_str(";\n");
 }
@@ -223,9 +226,9 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     out.push_str(&indent(depth));
     out.push_str("out ");
     out.push_str(&decl.name);
-    if let Some((type_name, _)) = &decl.type_name {
+    if let Some(type_expr) = &decl.type_name {
         out.push_str(": ");
-        out.push_str(type_name);
+        out.push_str(&source_text_or_empty(type_expr.span()));
     }
     out.push_str(" {\n");
     write_out_method(out, &decl.writer, depth + 1);
@@ -423,5 +426,37 @@ mod tests {
         let source = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n        condition max_area [width, height, max_area] { width * height <= max_area }\n    }\n}";
         let expected = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n        condition max_area [width, height, max_area] { width * height <= max_area }\n    }\n}\n";
         assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_cell_with_an_explicit_tuple_type() {
+        assert_eq!(
+            format("sheet s { cell a: (i32, f64) = (1, 2.5); }"),
+            "sheet s {\n    cell a: (i32, f64) = (1, 2.5);\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_cell_with_a_nested_tuple_type() {
+        assert_eq!(
+            format("sheet s { cell a: (i32, (f64, String)); }"),
+            "sheet s {\n    cell a: (i32, (f64, String));\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_an_out_with_an_explicit_tuple_type() {
+        assert_eq!(
+            format("sheet s { out a: (i32, i32) { method [x] { (x, x) } } }"),
+            "sheet s {\n    out a: (i32, i32) {\n        method [x] { (x, x) }\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn format_is_idempotent_through_a_reparse_with_a_tuple_cell() {
+        let source = "sheet s {\n    cell a: (i32, f64) = (1, 2.5);\n}";
+        let once = format(source);
+        let twice = format(&once);
+        assert_eq!(once, twice);
     }
 }
