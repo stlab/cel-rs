@@ -378,6 +378,14 @@ impl TypeRegistry {
         associated
     }
 
+    /// Builds one `AssociatedType` entry describing `shape`: a leaf's own registered layout for
+    /// `TypeShape::Named`, or a nested tuple's layout (computed recursively via
+    /// `cel_runtime::layout_associated` over its own children) for `TypeShape::Tuple`.
+    ///
+    /// - Precondition: every leaf `TypeId` reachable from `shape` is registered.
+    ///
+    /// - Postcondition: the returned entry's `offset` is always 0; the caller
+    ///   (`associated_prototype`) lays out sibling entries via `cel_runtime::layout_associated`.
     fn one_associated(&self, shape: &TypeShape) -> cel_runtime::AssociatedType {
         match shape {
             TypeShape::Named(type_id) => {
@@ -436,6 +444,12 @@ impl TypeRegistry {
         Ok(cel_runtime::DynamicSequence::from_dyn_elements(built))
     }
 
+    /// Builds one `(DynElementSpec, Box<dyn Any>)` pair for `shape`: a leaf's own registered
+    /// default value for `TypeShape::Named`, or — recursively, via `default_dynamic_sequence` —
+    /// a nested `DynamicSequence` built from its own children's defaults for `TypeShape::Tuple`.
+    ///
+    /// # Errors
+    /// Returns an error naming the specific leaf type that has no registered default.
     fn default_dyn_element(
         &self,
         shape: &TypeShape,
