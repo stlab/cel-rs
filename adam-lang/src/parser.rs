@@ -11,7 +11,7 @@ use indexmap::IndexMap;
 use adam_rs::{CellId, Condition, Method, OutputId, RelationshipId, Sheet};
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Literal, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
-use cel_runtime::{BoxExtractor, DynSegment};
+use cel_runtime::DynSegment;
 use proc_macro2::{Span, TokenStream};
 
 use crate::TypeRegistry;
@@ -376,38 +376,6 @@ impl AdamParser {
         }
     }
 
-    /// Builds an owned table of every leaf `TypeId` in `shape` paired with its
-    /// `Drop`/`Clone`/`PartialEq` descriptor, for a closure that must outlive this parser (e.g. a
-    /// tuple-typed `out` cell's writer `Method`, stored indefinitely in the live `Sheet`).
-    ///
-    /// - Precondition: every leaf `TypeId` in `shape` is registered (already resolved via
-    ///   `TypeRegistry::resolve`, which would have already errored otherwise).
-    ///
-    /// - Complexity: O(n) in the number of leaves in `shape`.
-    fn element_descriptors_for(
-        &self,
-        shape: &TypeShape,
-    ) -> Vec<(
-        TypeId,
-        cel_runtime::ElementDropper,
-        cel_runtime::ElementCloner,
-        cel_runtime::ElementEq,
-    )> {
-        match shape {
-            TypeShape::Named(type_id) => {
-                let (drop, clone, eq) = self
-                    .types
-                    .element_descriptor(*type_id)
-                    .expect("element_descriptors_for: type registered");
-                vec![(*type_id, drop, clone, eq)]
-            }
-            TypeShape::Tuple(elements) => elements
-                .iter()
-                .flat_map(|e| self.element_descriptors_for(e))
-                .collect(),
-        }
-    }
-
     /// `type_expr = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".`
     ///
     /// `()` is the empty tuple type (0 elements); `(T)` is grouping (same as bare `T`); `(T,)`
@@ -653,7 +621,7 @@ impl AdamParser {
                 CompiledOutputs::Single(call_fn)
             }
             TypeShape::Tuple(_) => {
-                CompiledOutputs::SingleTuple(self.element_descriptors_for(&out_shape))
+                CompiledOutputs::SingleTuple(self.types.element_descriptors_for(&out_shape))
             }
         };
         let writer = build_method(
@@ -765,12 +733,10 @@ impl AdamParser {
     /// Parses a `{ or_expression }` body with `inputs` cells available as a resolvable
     /// identifier scope, pushed for the duration of the parse and popped afterward regardless of
     /// success or failure of the body's own parse (mirrors the push/pop pairing already used by
-    /// `parse_method_body`'s single call site before this extraction).
-    ///
-    /// # Errors
-    /// Returns `Err` if any input cell is tuple-typed: wiring a `TypeShape::Tuple` input through
-    /// `cel_runtime::DynSegment::push_arg_as_dynamic_sequence_tuple` is `// TODO(Task 8)`, not
-    /// yet implemented here.
+    /// `parse_method_body`'s single call site before this extraction). A scalar-typed input cell
+    /// resolves to a plain `push_arg`; a tuple-typed input cell resolves to
+    /// `push_arg_as_dynamic_sequence_tuple`, so ordinary CEL tuple indexing (`pair.0`) works on it
+    /// exactly as on an inline tuple literal.
     ///
     /// - Complexity: O(k) to build the scope's dispatch table, where k = `inputs.len()`.
     fn parse_body_with_input_scope(
@@ -780,30 +746,24 @@ impl AdamParser {
     ) -> Result<DynSegment> {
         ctx.expect_open_brace()?;
 
-        let scope_data: Vec<(String, PushArgFn, usize)> = inputs
+        let scope_data: Vec<(String, InputPush, usize)> = inputs
             .iter()
             .enumerate()
             .map(|(idx, (name, _, shape))| {
-                let type_id = match shape {
-                    TypeShape::Named(type_id) => *type_id,
-                    TypeShape::Tuple(_) => {
-                        return Err(ParseError::new(
-                            format!(
-                                "cell `{name}`: tuple-typed cells cannot yet be used as \
-                                 method/out/condition inputs"
-                            ),
-                            Span::call_site(),
-                        ));
+                let push: InputPush = match shape {
+                    TypeShape::Named(type_id) => {
+                        let fn_ptr = self
+                            .types
+                            .entry_by_type_id(*type_id)
+                            .expect("input cell type registered")
+                            .push_arg_fn;
+                        InputPush::Scalar(fn_ptr)
                     }
+                    TypeShape::Tuple(_) => InputPush::Tuple(self.types.associated_prototype(shape)),
                 };
-                let fn_ptr = self
-                    .types
-                    .entry_by_type_id(type_id)
-                    .expect("input cell type registered")
-                    .push_arg_fn;
-                Ok((name.clone(), fn_ptr, idx))
+                (name.clone(), push, idx)
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
 
         self.cel
             .op_lookup_mut()
@@ -811,9 +771,14 @@ impl AdamParser {
                 if arity != 0 {
                     return Ok(false);
                 }
-                for (n, fn_ptr, idx) in &scope_data {
+                for (n, push, idx) in &scope_data {
                     if n == name {
-                        fn_ptr(segment, *idx);
+                        match push {
+                            InputPush::Scalar(fn_ptr) => fn_ptr(segment, *idx),
+                            InputPush::Tuple(associated) => {
+                                segment.push_arg_as_dynamic_sequence_tuple(*idx, associated.clone())
+                            }
+                        }
                         return Ok(true);
                     }
                 }
@@ -831,16 +796,15 @@ impl AdamParser {
     /// `method_body = "{" or_expression "}".`
     ///
     /// Returns the compiled body segment and how to split its result across `outputs`:
-    /// one output takes the segment's single result directly; more than one requires
-    /// the result to be a tuple of matching arity and element types, split via
-    /// `call_dyn_tuple`.
+    /// one output takes the segment's single result directly (scalar via `call_dyn`, tuple-typed
+    /// via `call_dyn_as_dynamic_sequence`, or the trivial empty-tuple case); more than one
+    /// requires the result to be a tuple of matching arity and element shapes, split element-wise
+    /// via `call_dyn_tuple_mixed`.
     ///
     /// # Errors
-    /// A tuple-typed `relationship`/`method` output (single or among several) is
-    /// `// TODO(Task 8)`: `CompiledOutputs::SingleTuple`/a `DynExtractor`-based tuple element are
-    /// Task 8's job (out-cell writers already support a `TypeShape::Tuple` result — see
-    /// `parse_out_decl` — since an out cell is always single-output). For now this is an
-    /// explicit `Err`, not a silent gap.
+    /// Returns `Err` if any output's declared shape doesn't structurally match the body's actual
+    /// result (scalar type mismatch, tuple arity mismatch, or tuple element shape mismatch, at
+    /// any nesting depth).
     fn parse_method_body(
         &mut self,
         ctx: &mut ParseContext,
@@ -851,39 +815,61 @@ impl AdamParser {
 
         let compiled = if outputs.len() == 1 {
             let (out_name, _, out_shape) = &outputs[0];
-            let out_type_id = match out_shape {
-                TypeShape::Named(type_id) => *type_id,
-                TypeShape::Tuple(_) => {
-                    return Err(ctx.err_at(format!(
-                        "output `{out_name}`: tuple-typed relationship/method outputs are not \
-                         yet supported"
-                    )));
+            match out_shape {
+                TypeShape::Named(out_type_id) => {
+                    // unchanged from before: scalar single-output path
+                    let actual_type_id = segment.peek_output_type_id().ok_or_else(|| {
+                        ctx.err_at(format!("output `{out_name}`: expression produced no value"))
+                    })?;
+                    if actual_type_id != *out_type_id {
+                        let expected = self.types.display_name(out_shape);
+                        let got = self
+                            .types
+                            .entry_by_type_id(actual_type_id)
+                            .map(|e| e.type_name.to_string())
+                            .unwrap_or_else(|| "?".to_string());
+                        return Err(ctx.err_at(format!(
+                            "output `{out_name}`: type mismatch: expected `{expected}`, got `{got}`"
+                        )));
+                    }
+                    let call_fn = self
+                        .types
+                        .entry_by_type_id(*out_type_id)
+                        .expect("registered")
+                        .call_dyn_fn;
+                    CompiledOutputs::Single(call_fn)
                 }
-            };
-            let actual_type_id = segment.peek_output_type_id().ok_or_else(|| {
-                ctx.err_at(format!("output `{out_name}`: expression produced no value"))
-            })?;
-            if actual_type_id != out_type_id {
-                let expected = self
-                    .types
-                    .entry_by_type_id(out_type_id)
-                    .map(|e| e.type_name)
-                    .unwrap_or("?");
-                let got = self
-                    .types
-                    .entry_by_type_id(actual_type_id)
-                    .map(|e| e.type_name)
-                    .unwrap_or("?");
-                return Err(ctx.err_at(format!(
-                    "output `{out_name}`: type mismatch: expected `{expected}`, got `{got}`"
-                )));
+                TypeShape::Tuple(elements) if elements.is_empty() => {
+                    // () is CEL's concrete unit type, a distinct leaf TypeId -- not DynTuple.
+                    let actual_type_id = segment.peek_output_type_id().ok_or_else(|| {
+                        ctx.err_at(format!("output `{out_name}`: expression produced no value"))
+                    })?;
+                    if actual_type_id != TypeId::of::<()>() {
+                        return Err(ctx.err_at(format!(
+                            "output `{out_name}`: type mismatch: expected `()`, got a non-`()` \
+                             value"
+                        )));
+                    }
+                    CompiledOutputs::EmptyTuple
+                }
+                TypeShape::Tuple(_) => {
+                    let stack_info = segment.peek_stack_infos(1).first();
+                    let matches = stack_info.is_some_and(|info| {
+                        tuple_shape_matches_associated(out_shape, &info.associated)
+                    });
+                    if !matches {
+                        let actual = stack_info
+                            .and_then(|info| self.shape_of_associated(&info.associated).ok())
+                            .map(|s| self.types.display_name(&s))
+                            .unwrap_or_else(|| "a non-matching value".to_string());
+                        return Err(ctx.err_at(format!(
+                            "output `{out_name}`: type mismatch: expected `{}`, got `{actual}`",
+                            self.types.display_name(out_shape)
+                        )));
+                    }
+                    CompiledOutputs::SingleTuple(self.types.element_descriptors_for(out_shape))
+                }
             }
-            let call_fn = self
-                .types
-                .entry_by_type_id(out_type_id)
-                .expect("output cell type registered")
-                .call_dyn_fn;
-            CompiledOutputs::Single(call_fn)
         } else {
             let arity = segment.peek_tuple_arity().unwrap_or(0);
             if arity != outputs.len() {
@@ -892,45 +878,32 @@ impl AdamParser {
                     outputs.len()
                 )));
             }
-            let element_type_ids: Vec<TypeId> = segment.peek_stack_infos(1)[0]
-                .associated
-                .iter()
-                .map(|a| a.type_id)
-                .collect();
-
+            let associated = segment.peek_stack_infos(1)[0].associated.clone();
             let mut extractors = Vec::with_capacity(outputs.len());
-            for (i, ((out_name, _, out_shape), actual_type_id)) in
-                outputs.iter().zip(&element_type_ids).enumerate()
+            for (i, ((out_name, _, out_shape), elem)) in outputs.iter().zip(&associated).enumerate()
             {
-                let out_type_id = match out_shape {
-                    TypeShape::Named(type_id) => *type_id,
-                    TypeShape::Tuple(_) => {
-                        return Err(ctx.err_at(format!(
-                            "output {i} `{out_name}`: a tuple-typed output among several is not \
-                             yet supported"
-                        )));
-                    }
-                };
-                if *actual_type_id != out_type_id {
-                    let expected = self
-                        .types
-                        .entry_by_type_id(out_type_id)
-                        .map(|e| e.type_name)
-                        .unwrap_or("?");
-                    let got = self
-                        .types
-                        .entry_by_type_id(*actual_type_id)
-                        .map(|e| e.type_name)
-                        .unwrap_or("?");
+                if !element_shape_matches(out_shape, elem) {
                     return Err(ctx.err_at(format!(
-                        "output {i} `{out_name}`: type mismatch: expected `{expected}`, got `{got}`"
+                        "output {i} `{out_name}`: type mismatch: expected `{}`, got `{}`",
+                        self.types.display_name(out_shape),
+                        elem.type_name
                     )));
                 }
-                let entry = self
-                    .types
-                    .entry_by_type_id(out_type_id)
-                    .expect("output cell type registered");
-                extractors.push((out_type_id, entry.extract_box_fn));
+                extractors.push(match out_shape {
+                    TypeShape::Named(type_id) => {
+                        let entry = self.types.entry_by_type_id(*type_id).expect("registered");
+                        cel_runtime::DynExtractor::Scalar(*type_id, entry.extract_box_fn)
+                    }
+                    TypeShape::Tuple(_) => {
+                        let table = self.types.element_descriptors_for(out_shape);
+                        cel_runtime::DynExtractor::Tuple(Box::new(move |type_id: TypeId| {
+                            table
+                                .iter()
+                                .find(|(tid, ..)| *tid == type_id)
+                                .map(|(_, d, c, e)| (*d, *c, *e))
+                        }))
+                    }
+                });
             }
             CompiledOutputs::Tuple(extractors)
         };
@@ -1025,14 +998,54 @@ fn parse_float_literal(entry: &TypeEntry, f: &syn::LitFloat) -> Option<Box<dyn A
     }
 }
 
+/// How one input cell's identifier scope entry pushes its value onto a method/out/condition
+/// body's segment: a scalar cell via a plain `push_arg`-family function pointer, or a
+/// tuple-typed cell via `cel_runtime::DynSegment::push_arg_as_dynamic_sequence_tuple` (given the
+/// declared shape's `AssociatedType` prototype, so ordinary CEL tuple indexing/operators work on
+/// it exactly as on an inline tuple literal).
+enum InputPush {
+    /// A scalar input cell's `push_arg` function pointer.
+    Scalar(PushArgFn),
+    /// A tuple-typed input cell's declared shape, as an `AssociatedType` prototype (cloned per
+    /// call, since `push_arg_as_dynamic_sequence_tuple` consumes its argument by value).
+    Tuple(Vec<cel_runtime::AssociatedType>),
+}
+
+/// Returns whether one live tuple element `a` structurally matches one declared leaf/tuple
+/// `shape` — the base case `tuple_shape_matches_associated` recurses into.
+fn element_shape_matches(shape: &TypeShape, a: &cel_runtime::AssociatedType) -> bool {
+    match shape {
+        TypeShape::Named(type_id) => a.type_id == *type_id,
+        TypeShape::Tuple(_) => {
+            a.type_id == TypeId::of::<cel_runtime::DynTuple>()
+                && tuple_shape_matches_associated(shape, &a.associated)
+        }
+    }
+}
+
+/// Returns whether a whole tuple's element list `associated` structurally matches
+/// `shape`'s own top-level element list (same arity, each pair checked via
+/// `element_shape_matches`) — `shape` must be `TypeShape::Tuple`.
+fn tuple_shape_matches_associated(
+    shape: &TypeShape,
+    associated: &[cel_runtime::AssociatedType],
+) -> bool {
+    let TypeShape::Tuple(elements) = shape else {
+        return false;
+    };
+    elements.len() == associated.len()
+        && elements
+            .iter()
+            .zip(associated)
+            .all(|(e, a)| element_shape_matches(e, a))
+}
+
 /// How to turn one compiled `or_expression`'s result into per-output values.
 enum CompiledOutputs {
     /// One output, scalar: the segment's single result, boxed via `call_dyn`.
     Single(CallDynFn),
     /// One output, tuple-typed: the segment's whole tuple result, moved into one
-    /// `DynamicSequence` via `call_dyn_as_dynamic_sequence`. Used today only by a tuple-typed
-    /// `out` cell's writer (`// TODO(Task 8)`: relationship/method tuple-typed outputs reuse
-    /// this same variant once wired up there too).
+    /// `DynamicSequence` via `call_dyn_as_dynamic_sequence`.
     SingleTuple(
         Vec<(
             TypeId,
@@ -1041,9 +1054,13 @@ enum CompiledOutputs {
             cel_runtime::ElementEq,
         )>,
     ),
-    /// N > 1 outputs: the segment's tuple result, split via `call_dyn_tuple`. Each
-    /// entry pairs an output's expected `TypeId` with the extractor that reads it.
-    Tuple(Vec<(TypeId, BoxExtractor)>),
+    /// The declared output is the empty tuple `()`: no CEL expression can produce a live
+    /// `DynTuple`-tagged 0-arity value (CEL's own `()` literal is the concrete Rust unit type,
+    /// a distinct leaf `TypeId`, not `DynTuple`) — so this is its own case, matched directly
+    /// against a `()`-typed body result and stored as a trivially-empty `DynamicSequence`.
+    EmptyTuple,
+    /// N > 1 outputs: the segment's tuple result, split element-wise via `call_dyn_tuple_mixed`.
+    Tuple(Vec<cel_runtime::DynExtractor>),
 }
 
 /// Builds a [`Method`] from parsed inputs, outputs, the compiled body segment, and how
@@ -1074,6 +1091,12 @@ fn build_method(
             let seg = &mut *segment.borrow_mut();
             match &compiled {
                 CompiledOutputs::Single(call_fn) => Ok(vec![call_fn(seg, inputs_any)?]),
+                CompiledOutputs::EmptyTuple => {
+                    Ok(vec![
+                        Box::new(cel_runtime::DynamicSequence::from_dyn_elements(Vec::new()))
+                            as Box<dyn Any>,
+                    ])
+                }
                 CompiledOutputs::SingleTuple(table) => {
                     let leaf = |type_id: TypeId| {
                         table
@@ -1085,10 +1108,11 @@ fn build_method(
                     Ok(vec![Box::new(seq) as Box<dyn Any>])
                 }
                 CompiledOutputs::Tuple(extractors) => {
-                    // Safety: every extractor here is `extract_box_impl::<T>` (via
-                    // `TypeEntry::extract_box_fn`), which clones rather than moves —
-                    // satisfying `call_dyn_tuple`'s contract.
-                    unsafe { seg.call_dyn_tuple(inputs_any, extractors) }
+                    // Safety: every DynExtractor::Scalar extractor here is extract_box_impl::<T>
+                    // (via TypeEntry::extract_box_fn), which clones rather than moves --
+                    // satisfying call_dyn_tuple_mixed's contract, exactly like the pre-tuple
+                    // call_dyn_tuple call site this replaces.
+                    unsafe { seg.call_dyn_tuple_mixed(inputs_any, extractors) }
                 }
             }
         };
@@ -1342,6 +1366,127 @@ mod tests {
             result.is_err(),
             "1-tuple body for a single declared output must be an error"
         );
+    }
+
+    #[test]
+    fn parse_method_single_tuple_typed_output() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell a: i32 = 3;
+                    cell b: i32 = 4;
+                    cell pair: (i32, i32);
+                    relationship { method [a, b] -> [pair] { (a, b) } }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (cell_id, _) = sheet.cell_names["pair"].clone();
+        let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
+        let (a, b): (i32, i32) = value.try_to_tuple().unwrap();
+        assert_eq!((a, b), (3, 4));
+    }
+
+    #[test]
+    fn parse_method_tuple_typed_output_among_several() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell a: i32 = 3;
+                    cell b: i32 = 4;
+                    cell pair: (i32, i32);
+                    cell extra: i32;
+                    relationship { method [a, b] -> [pair, extra] { ((a, b), a) } }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (pair_id, _) = sheet.cell_names["pair"].clone();
+        let (extra_id, _) = sheet.cell_names["extra"].clone();
+        let pair = sheet.read::<cel_runtime::DynamicSequence>(pair_id).unwrap();
+        let (a, b): (i32, i32) = pair.try_to_tuple().unwrap();
+        assert_eq!((a, b), (3, 4));
+        assert_eq!(*sheet.read::<i32>(extra_id).unwrap(), 3);
+    }
+
+    #[test]
+    fn parse_method_with_tuple_typed_input_supports_field_indexing() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell pair: (i32, i32) = (10, 20);
+                    cell sum: i32;
+                    relationship { method [pair] -> [sum] { pair.0 + pair.1 } }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (sum_id, _) = sheet.cell_names["sum"].clone();
+        assert_eq!(*sheet.read::<i32>(sum_id).unwrap(), 30);
+    }
+
+    #[test]
+    fn parse_method_tuple_output_shape_mismatch_is_an_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell a: i32 = 1;
+                cell b: f64 = 2.0;
+                cell pair: (i32, i32);
+                relationship { method [a, b] -> [pair] { (a, b) } }
+            }
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn existing_multi_output_scalar_methods_still_work_unchanged() {
+        // Regression: today's N-scalar-outputs mechanism must still behave identically after the
+        // CompiledOutputs refactor.
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell a: i32 = 3;
+                    cell b: i32 = 4;
+                    cell sum: i32;
+                    cell diff: i32;
+                    relationship { method [a, b] -> [sum, diff] { (a + b, a - b) } }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (sum_id, _) = sheet.cell_names["sum"].clone();
+        let (diff_id, _) = sheet.cell_names["diff"].clone();
+        assert_eq!(*sheet.read::<i32>(sum_id).unwrap(), 7);
+        assert_eq!(*sheet.read::<i32>(diff_id).unwrap(), -1);
+    }
+
+    #[test]
+    fn parse_method_single_empty_tuple_typed_output() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell x: i32 = 1;
+                    cell nothing: ();
+                    relationship { method [x] -> [nothing] { () } }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (cell_id, _) = sheet.cell_names["nothing"].clone();
+        let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
+        assert_eq!(value.arity(), 0);
     }
 
     #[test]

@@ -360,6 +360,38 @@ impl TypeRegistry {
             .map(|e| (e.element_drop, e.element_clone, e.element_eq))
     }
 
+    /// Builds an owned table of every leaf `TypeId` in `shape` paired with its
+    /// `Drop`/`Clone`/`PartialEq` descriptor, for a closure that must outlive this registry (e.g.
+    /// a `Method`'s stored output-extraction closure).
+    ///
+    /// - Precondition: every leaf `TypeId` in `shape` is registered (already resolved via
+    ///   `TypeRegistry::resolve`, which would have already errored otherwise).
+    ///
+    /// - Complexity: O(n) in the number of leaves in `shape`.
+    #[must_use]
+    pub fn element_descriptors_for(
+        &self,
+        shape: &TypeShape,
+    ) -> Vec<(
+        TypeId,
+        cel_runtime::ElementDropper,
+        cel_runtime::ElementCloner,
+        cel_runtime::ElementEq,
+    )> {
+        match shape {
+            TypeShape::Named(type_id) => {
+                let (drop, clone, eq) = self
+                    .element_descriptor(*type_id)
+                    .expect("element_descriptors_for: type registered");
+                vec![(*type_id, drop, clone, eq)]
+            }
+            TypeShape::Tuple(elements) => elements
+                .iter()
+                .flat_map(|e| self.element_descriptors_for(e))
+                .collect(),
+        }
+    }
+
     /// Builds the recursive `AssociatedType` "prototype" describing `shape`'s on-stack tuple
     /// layout, for `cel_runtime::DynSegment::push_arg_as_dynamic_sequence_tuple`.
     ///
