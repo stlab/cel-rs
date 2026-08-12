@@ -29,3 +29,18 @@ sp-textfield.warning:not([invalid]) {
 sp-textfield[invalid][disabled] {
     --spectrum-textfield-border-color-disabled: var(--spectrum-textfield-border-color-invalid-default) !important;
 }
+
+/* `<sp-sidenav>`'s own shadow stylesheet sets `:host { width: 240px; }` unconditionally
+   (confirmed via the verifying-begin-ui skill: `getComputedStyle` on a live `sp-sidenav`
+   reported `width: 240px` sourced from an adopted `:host` rule), regardless of its
+   container's actual width. ExamplesPicker's sidebar column is 260px wide with 12px of
+   padding on each side, a 236px content box — narrower than the sidenav's fixed 240px -
+   so the sidenav overflows it by a few pixels and a horizontal scrollbar appears even
+   when no item's label text is anywhere near wide enough to overflow on its own.
+   `!important` is required for the same reason as the sp-textfield rules above: the
+   shadow stylesheet's `:host` rule otherwise wins the cascade over this external rule
+   regardless of selector specificity or source order. */
+sp-sidenav {
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
