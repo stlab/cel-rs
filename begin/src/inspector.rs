@@ -121,7 +121,7 @@ fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
 pub fn Inspector(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
-    active_source: Signal<crate::demo_source::ActiveSource>,
+    active_source: Signal<crate::example_source::ActiveSource>,
 ) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
     let output_status = use_memo(move || compute_output_status(&sheet.read()));
@@ -143,7 +143,7 @@ fn CellRow(
     id: CellId,
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
-    active_source: Signal<crate::demo_source::ActiveSource>,
+    active_source: Signal<crate::example_source::ActiveSource>,
     output_status: Memo<OutputStatus>,
 ) -> Element {
     let label = use_memo(move || {
