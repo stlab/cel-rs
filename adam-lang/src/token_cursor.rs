@@ -14,23 +14,30 @@ type Result<T> = std::result::Result<T, ParseError>;
 /// `adam_rs::Sheet` mutation, or a syntax tree node).
 pub(crate) struct TokenCursor {
     tokens: Option<std::iter::Peekable<LexLexer>>,
-    /// Running brace/bracket nesting depth, incremented/decremented only by this cursor's own
-    /// `expect_open_brace`/`expect_close_brace`/`expect_open_bracket`/`expect_close_bracket`
-    /// (brace and bracket delimiters are tracked uniformly as one counter). Tokens consumed
-    /// directly by an embedded `cel_parser::Parser` while it temporarily owns the stream (see
-    /// `take_tokens`/`set_tokens`) never pass through these methods, so they don't affect this
-    /// counter — which is exactly what callers like [`skip_to_recovery_point`] need: a depth
-    /// that reflects only adam-lang-grammar nesting, not CEL sub-expression internals.
+    /// Running brace/bracket/paren nesting depth, incremented/decremented only by this cursor's
+    /// own `expect_open_brace`/`expect_close_brace`/`expect_open_bracket`/`expect_close_bracket`/
+    /// `expect_open_paren`/`expect_close_paren` (all three delimiter kinds are tracked uniformly
+    /// as one counter). Tokens consumed directly by an embedded `cel_parser::Parser` while it
+    /// temporarily owns the stream (see `take_tokens`/`set_tokens`) never pass through these
+    /// methods, so they don't affect this counter — which is exactly what callers like
+    /// [`skip_to_recovery_point`] need: a depth that reflects only adam-lang-grammar nesting, not
+    /// CEL sub-expression internals.
     ///
     /// This separation holds only as long as a failed CEL sub-expression doesn't leave a dangling,
-    /// unmatched delimiter of a kind CEL also reuses for its own internal grouping. It holds for
-    /// `Delimiter::Parenthesis` (CEL owns all parens; adam-lang's grammar never uses them), but not
-    /// for `Delimiter::Brace`: CEL's `if`/`else` expressions use braces for their branches, the
-    /// same delimiter kind adam-lang uses for `relationship`/`conditional`/method bodies. A CEL `if`
-    /// expression whose then-branch fails to parse (e.g. `if a { }`) can leave a stray `}` in the
-    /// stream that this counter — and [`skip_to_recovery_point`], which reads it — has no way to
-    /// distinguish from a real adam-lang-tracked brace. See [`skip_to_recovery_point`]'s doc comment
-    /// for the resulting scope boundary.
+    /// unmatched delimiter of a kind CEL also reuses for its own internal grouping. `type_expr`
+    /// (the one adam-lang-grammar-level production that uses parens) is the sole
+    /// adam-lang-grammar exception: those parens genuinely go through `expect_open_paren`/
+    /// `expect_close_paren`, exactly like brace/bracket, so a malformed `type_expr` unwinds
+    /// `depth` correctly. It does not hold for `Delimiter::Brace` or, now, `Delimiter::Parenthesis`
+    /// when the dangling delimiter comes from CEL's own internal grouping instead: CEL's `if`/
+    /// `else` expressions use braces for their branches, and CEL's tuple/group literals use
+    /// parens, the same delimiter kinds adam-lang uses for `relationship`/`conditional`/method
+    /// bodies and for `type_expr`, respectively. A CEL `if` expression whose then-branch fails to
+    /// parse (e.g. `if a { }`), or a CEL tuple/group literal that fails partway through (e.g.
+    /// `(+)`), can leave a stray `}`/`)` in the stream that this counter — and
+    /// [`skip_to_recovery_point`], which reads it — has no way to distinguish from a real
+    /// adam-lang-tracked brace/paren. See [`skip_to_recovery_point`]'s doc comment for the
+    /// resulting scope boundary.
     depth: i32,
     /// The span of the last token [`Self::advance`] actually consumed. Callers seed this to a
     /// known-good starting point via [`Self::set_last_span`] before dispatching to a production
@@ -65,12 +72,13 @@ impl TokenCursor {
         self.last_span = span;
     }
 
-    /// Returns the cursor's current brace/bracket nesting depth.
+    /// Returns the cursor's current brace/bracket/paren nesting depth.
     ///
     /// - Postcondition: reflects only delimiters consumed via this cursor's own
-    ///   `expect_open_brace`/`expect_close_brace`/`expect_open_bracket`/`expect_close_bracket`
-    ///   (and by [`skip_to_recovery_point`] internally); unaffected by tokens the embedded CEL
-    ///   sub-parser consumes directly while it owns the stream.
+    ///   `expect_open_brace`/`expect_close_brace`/`expect_open_bracket`/`expect_close_bracket`/
+    ///   `expect_open_paren`/`expect_close_paren` (and by [`skip_to_recovery_point`] internally);
+    ///   unaffected by tokens the embedded CEL sub-parser consumes directly while it owns the
+    ///   stream.
     pub(crate) fn depth(&self) -> i32 {
         self.depth
     }
@@ -271,6 +279,65 @@ impl TokenCursor {
         }
     }
 
+    /// Consumes `(`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the next token is not `(`.
+    ///
+    /// - Postcondition: on success, increments [`Self::depth`] by 1.
+    pub(crate) fn expect_open_paren(&mut self) -> Result<Span> {
+        let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Parenthesis,
+                span,
+            }) => (true, *span),
+            other => (false, other.map(|t| t.span()).unwrap_or(Span::call_site())),
+        };
+        if ok {
+            self.advance();
+            self.depth += 1;
+            Ok(span)
+        } else {
+            Err(ParseError::new("expected `(`", span))
+        }
+    }
+
+    /// Returns whether the next token is `)` (or the stream is exhausted).
+    pub(crate) fn at_close_paren(&mut self) -> bool {
+        matches!(
+            self.tokens.as_mut().and_then(|t| t.peek()),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            }) | None
+        )
+    }
+
+    /// Consumes `)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the next token is not `)`.
+    ///
+    /// - Postcondition: on success, decrements [`Self::depth`] by 1.
+    pub(crate) fn expect_close_paren(&mut self) -> Result<Span> {
+        let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                span,
+            }) => (true, *span),
+            other => (false, other.map(|t| t.span()).unwrap_or(Span::call_site())),
+        };
+        if ok {
+            self.advance();
+            self.depth -= 1;
+            Ok(span)
+        } else {
+            Err(ParseError::new("expected `)`", span))
+        }
+    }
+
     /// Consumes and returns a literal token.
     ///
     /// # Errors
@@ -316,29 +383,29 @@ impl TokenCursor {
     /// excess closing delimiters could otherwise dip `depth` below `target_depth` and never
     /// satisfy an exact-equality check.
     ///
-    /// Only `Delimiter::Brace` and `Delimiter::Bracket` affect [`Self::depth`] here, mirroring
-    /// `expect_open_brace`/`expect_close_brace`/`expect_open_bracket`/`expect_close_bracket`.
-    /// `Delimiter::Parenthesis` and `Delimiter::None` are treated as ordinary tokens (consumed,
-    /// no depth change): a CEL sub-expression that fails partway through — e.g. `(+)`, where
-    /// `is_tuple_or_group` consumes `(` but the error occurs before its matching `)` is ever
-    /// reached — can leave a stray, PM-untracked paren in the stream for this method to skip
-    /// past. Treating it as a brace/bracket-equivalent depth change would desync `depth` from
-    /// the real adam-lang nesting it's meant to track.
+    /// `Delimiter::Brace`, `Delimiter::Bracket`, and `Delimiter::Parenthesis` all affect
+    /// [`Self::depth`] here, mirroring `expect_open_brace`/`expect_close_brace`/
+    /// `expect_open_bracket`/`expect_close_bracket`/`expect_open_paren`/`expect_close_paren` —
+    /// `type_expr` is the one adam-lang-grammar production that uses parens, so a malformed
+    /// `type_expr`'s own unmatched `(`/`)` must unwind `depth` the same way a malformed
+    /// `relationship`/`conditional`/method body's brace or `cell_list`'s bracket does.
+    /// `Delimiter::None` is treated as an ordinary token (consumed, no depth change): it never
+    /// appears in adam-lang's own grammar, or in a way `cel_parser` leaves dangling.
     ///
-    /// **Known limitation (accepted scope boundary):** this kind-based approach only works
-    /// because adam-lang's own grammar never uses `Parenthesis`/`None` delimiters, so treating them
-    /// as depth-neutral can never be confused with a real adam-lang brace/bracket. It does *not*
-    /// extend to a CEL expression failure that leaves a dangling, unmatched `Brace` — e.g. a CEL
-    /// `if` expression whose then-branch fails to parse (`if a { }`): CEL's `if`/`else` grammar
-    /// reuses `Delimiter::Brace` for its own branches, the same kind adam-lang uses for
-    /// `relationship`/`conditional`/method bodies, so there is no way to distinguish "a stray
-    /// brace CEL left dangling" from "a real adam-lang-tracked brace" by delimiter kind alone. In
-    /// that case this method (and the recovery it drives) may stop one brace too early, mistaking
-    /// the stray brace for a real adam-lang-tracked one, aborting the whole parse with `Err` rather
-    /// than isolating just the one malformed item. Fixing this in general requires
-    /// `cel_parser`'s `Parser<C>` to report back exactly what it left unbalanced on a failed
-    /// parse — out of scope here; see the tracking issue for the general fix:
-    /// <https://github.com/stlab/cel-rs/issues/43>.
+    /// **Known limitation (accepted scope boundary):** because CEL's own grammar reuses these
+    /// same delimiter kinds for its internal grouping — `Delimiter::Brace` for `if`/`else`
+    /// branches, `Delimiter::Parenthesis` for tuple/group literals — a CEL sub-expression that
+    /// fails partway through (leaving a dangling, unmatched brace or paren behind) is
+    /// indistinguishable, by delimiter kind alone, from a real adam-lang-tracked brace or paren.
+    /// A CEL `if` expression whose then-branch fails to parse (`if a { }`) leaves a stray `}`
+    /// this way; a CEL tuple/group literal that fails partway through (`(+)`, where
+    /// `is_tuple_or_group` consumes `(` but the error occurs before its matching `)` is ever
+    /// reached) leaves a stray `)` the same way. In either case this method (and the recovery it
+    /// drives) may stop one delimiter too early, mistaking the stray one for a real
+    /// adam-lang-tracked one, aborting the whole parse with `Err` rather than isolating just the
+    /// one malformed item. Fixing this in general requires `cel_parser`'s `Parser<C>` to report
+    /// back exactly what it left unbalanced on a failed parse — out of scope here; see the
+    /// tracking issue for the general fix: <https://github.com/stlab/cel-rs/issues/43>.
     ///
     /// The keyword check matters when the malformed item has no `;` of its own — e.g.
     /// `cell bad unknown_syntax` immediately followed by a sibling `cell` declaration — so
@@ -375,11 +442,11 @@ impl TokenCursor {
             match self.peek_token() {
                 None => return last,
                 Some(Token::CloseDelim {
-                    delimiter: Delimiter::Brace | Delimiter::Bracket,
+                    delimiter: Delimiter::Brace | Delimiter::Bracket | Delimiter::Parenthesis,
                     ..
                 }) if at_or_below_target => return last,
                 Some(Token::CloseDelim {
-                    delimiter: Delimiter::Brace | Delimiter::Bracket,
+                    delimiter: Delimiter::Brace | Delimiter::Bracket | Delimiter::Parenthesis,
                     ..
                 }) => {
                     self.depth -= 1;
@@ -387,7 +454,7 @@ impl TokenCursor {
                     self.advance();
                 }
                 Some(Token::OpenDelim {
-                    delimiter: Delimiter::Brace | Delimiter::Bracket,
+                    delimiter: Delimiter::Brace | Delimiter::Bracket | Delimiter::Parenthesis,
                     ..
                 }) => {
                     self.depth += 1;
@@ -414,5 +481,49 @@ impl TokenCursor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn expect_open_paren_increments_depth() {
+        let stream = proc_macro2::TokenStream::from_str("( )").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        assert_eq!(cursor.depth(), 0);
+        cursor.expect_open_paren().unwrap();
+        assert_eq!(cursor.depth(), 1);
+    }
+
+    #[test]
+    fn expect_close_paren_decrements_depth() {
+        let stream = proc_macro2::TokenStream::from_str("( )").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        cursor.expect_open_paren().unwrap();
+        cursor.expect_close_paren().unwrap();
+        assert_eq!(cursor.depth(), 0);
+    }
+
+    #[test]
+    fn at_close_paren_is_true_at_a_close_paren() {
+        // `proc_macro2::TokenStream::from_str` tokenizes delimiters as a matched tree up front, so
+        // a source string with a truly unmatched `)` (with no corresponding `(` anywhere in the
+        // string) fails to tokenize at all rather than producing a lone `CloseDelim` token —
+        // exercise the true case of the postcondition against a balanced `( )` pair instead,
+        // advancing past the `(` first.
+        let stream = proc_macro2::TokenStream::from_str("( )").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        cursor.expect_open_paren().unwrap();
+        assert!(cursor.at_close_paren());
+    }
+
+    #[test]
+    fn at_close_paren_is_true_at_end_of_input() {
+        let stream = proc_macro2::TokenStream::from_str("").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        assert!(cursor.at_close_paren());
     }
 }
