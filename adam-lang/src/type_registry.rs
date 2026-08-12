@@ -23,6 +23,18 @@ use std::collections::HashMap;
 use adam_rs::{CellId, ConditionalId, RelationshipId, Sheet};
 use cel_runtime::{BoxExtractor, DynSegment};
 
+/// The identity of a declared adam-lang cell type. Every distinct tuple *shape* erases to the
+/// same Rust type (`cel_runtime::DynamicSequence`), so a flat `TypeId` alone can no longer
+/// identify a declared cell type once tuples exist — this recursive identity replaces it
+/// wherever a declared cell type is tracked.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum TypeShape {
+    /// A registered leaf type, by its Rust `TypeId`.
+    Named(TypeId),
+    /// A tuple type, recursively — an empty `Vec` for `()`.
+    Tuple(Vec<TypeShape>),
+}
+
 /// Registers a `push_arg<T>(index)` op on a segment.
 pub type PushArgFn = fn(&mut DynSegment, usize);
 
@@ -62,6 +74,21 @@ pub struct TypeEntry {
     pub default_fn: Option<fn() -> Box<dyn Any>>,
     /// Calls `Sheet::add_conditional::<T>` with type-erased branch keys.
     pub add_conditional_fn: AddConditionalFn,
+    /// Size in bytes of a value of this type.
+    pub size: usize,
+    /// Required alignment in bytes of a value of this type.
+    pub align: usize,
+    /// In-place dropper taking an unused `associated` parameter, for building an `AssociatedType`
+    /// "prototype" describing a tuple-typed cell's on-stack shape.
+    pub raw_dropper: cel_runtime::RawDropper,
+    /// In-place dropper for this type as a `DynamicSequence` tuple element.
+    pub element_drop: cel_runtime::ElementDropper,
+    /// In-place cloner for this type as a `DynamicSequence` tuple element.
+    pub element_clone: cel_runtime::ElementCloner,
+    /// Equality comparator for this type as a `DynamicSequence` tuple element.
+    pub element_eq: cel_runtime::ElementEq,
+    /// Moves a boxed value of this type into a `DynamicSequence` being built from boxed defaults.
+    pub element_write: unsafe fn(Box<dyn Any>, *mut u8),
 }
 
 /// Maps DSL type names to Rust types for adam-lang cell declarations.
@@ -185,6 +212,13 @@ impl TypeRegistry {
                 extract_box_fn: extract_box_impl::<T>,
                 default_fn: Some(|| Box::new(T::default()) as Box<dyn Any>),
                 add_conditional_fn: add_conditional_impl::<T>,
+                size: std::mem::size_of::<T>(),
+                align: std::mem::align_of::<T>(),
+                raw_dropper: cel_runtime::raw_dropper_for::<T>(),
+                element_drop: cel_runtime::element_dropper_for::<T>(),
+                element_clone: cel_runtime::element_cloner_for::<T>(),
+                element_eq: cel_runtime::element_eq_for::<T>(),
+                element_write: cel_runtime::element_writer_for::<T>(),
             },
         );
         self.by_type_id.insert(type_id, name.to_owned());
@@ -223,6 +257,13 @@ impl TypeRegistry {
                 extract_box_fn: extract_box_impl::<T>,
                 default_fn: None,
                 add_conditional_fn: add_conditional_impl::<T>,
+                size: std::mem::size_of::<T>(),
+                align: std::mem::align_of::<T>(),
+                raw_dropper: cel_runtime::raw_dropper_for::<T>(),
+                element_drop: cel_runtime::element_dropper_for::<T>(),
+                element_clone: cel_runtime::element_cloner_for::<T>(),
+                element_eq: cel_runtime::element_eq_for::<T>(),
+                element_write: cel_runtime::element_writer_for::<T>(),
             },
         );
         self.by_type_id.insert(type_id, name.to_owned());
@@ -263,6 +304,46 @@ impl TypeRegistry {
         let name = self.by_type_id.get(&type_id)?;
         self.by_name.get(name)
     }
+
+    /// Resolves a parsed `type_expr` against this registry, recursively.
+    ///
+    /// # Errors
+    /// Returns the unknown type name and its span if some leaf name isn't registered.
+    pub fn resolve(
+        &self,
+        expr: &crate::ast::TypeExpr,
+    ) -> std::result::Result<TypeShape, (String, proc_macro2::Span)> {
+        match expr {
+            crate::ast::TypeExpr::Named(name, span) => {
+                let entry = self
+                    .get(name)
+                    .ok_or_else(|| (format!("unknown type `{name}`"), span.start))?;
+                Ok(TypeShape::Named(entry.type_id))
+            }
+            crate::ast::TypeExpr::Tuple(elements, _) => {
+                let shapes = elements
+                    .iter()
+                    .map(|e| self.resolve(e))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Ok(TypeShape::Tuple(shapes))
+            }
+        }
+    }
+
+    /// Formats `shape` recursively, e.g. `"(i32, (f64, String))"`, for error messages.
+    #[must_use]
+    pub fn display_name(&self, shape: &TypeShape) -> String {
+        match shape {
+            TypeShape::Named(type_id) => self
+                .entry_by_type_id(*type_id)
+                .map(|e| e.type_name.to_string())
+                .unwrap_or_else(|| "?".to_string()),
+            TypeShape::Tuple(elements) => {
+                let parts: Vec<String> = elements.iter().map(|e| self.display_name(e)).collect();
+                format!("({})", parts.join(", "))
+            }
+        }
+    }
 }
 
 impl Default for TypeRegistry {
@@ -275,7 +356,15 @@ impl Default for TypeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proc_macro2::Span;
     use std::any::TypeId;
+
+    fn point(span: Span) -> crate::ast::ExprSpan {
+        crate::ast::ExprSpan {
+            start: span,
+            end: span,
+        }
+    }
 
     #[test]
     fn new_registers_builtin_i32() {
@@ -451,5 +540,83 @@ mod tests {
             "stale TypeA mapping should have been removed"
         );
         assert!(reg.entry_by_type_id(TypeId::of::<TypeB>()).is_some());
+    }
+
+    #[test]
+    fn new_registers_i32_with_the_new_descriptor_fields() {
+        let reg = TypeRegistry::new();
+        let entry = reg.get("i32").unwrap();
+        assert_eq!(entry.size, std::mem::size_of::<i32>());
+        assert_eq!(entry.align, std::mem::align_of::<i32>());
+        let mut a = 7i32;
+        let mut b = 0i32;
+        unsafe {
+            (entry.element_clone)((&raw mut a).cast::<u8>(), (&raw mut b).cast::<u8>());
+        }
+        assert_eq!(b, 7);
+        assert!(unsafe {
+            (entry.element_eq)((&raw const a).cast::<u8>(), (&raw const b).cast::<u8>())
+        });
+    }
+
+    #[test]
+    fn resolve_named_type_expr_returns_the_matching_type_shape() {
+        let reg = TypeRegistry::new();
+        let expr = crate::ast::TypeExpr::Named("i32".to_string(), point(Span::call_site()));
+        let shape = reg.resolve(&expr).unwrap();
+        assert_eq!(shape, TypeShape::Named(TypeId::of::<i32>()));
+    }
+
+    #[test]
+    fn resolve_unknown_named_type_expr_is_an_error() {
+        let reg = TypeRegistry::new();
+        let expr = crate::ast::TypeExpr::Named("bogus".to_string(), point(Span::call_site()));
+        assert!(reg.resolve(&expr).is_err());
+    }
+
+    #[test]
+    fn resolve_tuple_type_expr_returns_a_nested_type_shape() {
+        let reg = TypeRegistry::new();
+        let span = point(Span::call_site());
+        let expr = crate::ast::TypeExpr::Tuple(
+            vec![
+                crate::ast::TypeExpr::Named("i32".to_string(), span),
+                crate::ast::TypeExpr::Tuple(
+                    vec![
+                        crate::ast::TypeExpr::Named("f64".to_string(), span),
+                        crate::ast::TypeExpr::Named("String".to_string(), span),
+                    ],
+                    span,
+                ),
+            ],
+            span,
+        );
+        let shape = reg.resolve(&expr).unwrap();
+        assert_eq!(
+            shape,
+            TypeShape::Tuple(vec![
+                TypeShape::Named(TypeId::of::<i32>()),
+                TypeShape::Tuple(vec![
+                    TypeShape::Named(TypeId::of::<f64>()),
+                    TypeShape::Named(TypeId::of::<String>()),
+                ]),
+            ])
+        );
+    }
+
+    #[test]
+    fn display_name_formats_a_nested_tuple_shape() {
+        let reg = TypeRegistry::new();
+        let shape = TypeShape::Tuple(vec![
+            TypeShape::Named(TypeId::of::<i32>()),
+            TypeShape::Tuple(vec![
+                TypeShape::Named(TypeId::of::<f64>()),
+                TypeShape::Named(TypeId::of::<String>()),
+            ]),
+        ]);
+        assert_eq!(
+            reg.display_name(&shape),
+            "(i32, (f64, alloc::string::String))"
+        );
     }
 }
