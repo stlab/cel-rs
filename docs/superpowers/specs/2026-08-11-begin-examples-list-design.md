@@ -157,3 +157,14 @@ New wrapper components, following the existing `SpActionGroup`/`SpActionButton` 
   scrolls with more items than fit, selecting an item switches the graph, and (desktop)
   adding a new `.adm2` file to `begin/examples/` while the app is running makes it appear in
   the list without a restart.
+
+## Follow-ups
+
+- Discovered during the Task 3 end-to-end verification (2026-08-11): a single on-disk write to
+  the active example's file (via a normal editor save) can cause `notify`'s Windows watcher to
+  deliver multiple change events for that one write — observed 5–7 `spawn_examples_watch`
+  callback firings (each logged as a separate `loading begin/examples/<name>.adm2` line) for
+  one edit. Each firing independently re-reads the file and rebuilds the sheet, so the
+  behavior is correct and user-visibly harmless (idempotent, same end state), just redundant
+  work. Not a blocker; a cheap future improvement would be to debounce/coalesce watcher events
+  within a short window (e.g. a few hundred ms) before triggering a reload.
