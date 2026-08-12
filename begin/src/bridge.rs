@@ -22,7 +22,9 @@ pub struct CellMeta {
     pub label: String,
     /// Returns the current cell value as a display string.
     pub display: Box<dyn Fn(&Sheet) -> String>,
-    /// Parses `s` and writes the result to the cell; returns `Err` on parse failure or type mismatch.
+    /// Parses `s` and writes the result to the cell; returns `Err` on parse failure or type
+    /// mismatch. May also always return `Err` for a cell type with no write support yet (e.g.
+    /// tuples — see [`Labels::add_tuple_cell`]).
     pub write_str: WriteStrFn,
 }
 
@@ -68,6 +70,35 @@ impl Labels {
             },
         );
     }
+
+    /// Registers display-only metadata for a tuple-typed cell of any shape.
+    ///
+    /// `write_str` always returns `Err` — no tuple-literal parser exists yet (tracked as a
+    /// follow-up: see the "Support editing tuple-typed cells in `begin`" GitHub issue). The
+    /// field still participates fully in the Inspector's existing invalid/warning/disabled
+    /// machinery, since that's entirely keyed on `CellId`, not on any per-type behavior.
+    ///
+    /// - Precondition: `id` is a live cell in the sheet this `Labels` will be used with, holding
+    ///   a `cel_runtime::DynamicSequence`.
+    pub fn add_tuple_cell(&mut self, id: CellId, label: &str) {
+        self.cells.insert(
+            id,
+            CellMeta {
+                label: label.to_owned(),
+                display: Box::new(move |sheet| {
+                    sheet
+                        .read::<cel_runtime::DynamicSequence>(id)
+                        .map(|v| format!("{v:?}"))
+                        .unwrap_or_else(|_| "?".to_owned())
+                }),
+                write_str: Box::new(|_sheet, _s| {
+                    Err(Error::MethodFailed(anyhow::anyhow!(
+                        "editing tuple-typed cells is not yet supported"
+                    )))
+                }),
+            },
+        );
+    }
 }
 
 impl Default for Labels {
@@ -106,10 +137,10 @@ pub fn format_rounded(v: f64) -> String {
 /// Builds a [`Labels`] from an adam-lang-style declaration-ordered cell name map.
 ///
 /// Matches each scalar cell's `TypeId` against the built-in primitive types
-/// `adam_lang::TypeRegistry::new()` registers. Cells whose `TypeId` is not one
-/// of these — and any tuple-typed cell (`TypeShape::Tuple`), not yet
-/// supported in the sidebar — are silently skipped, so they simply won't
-/// appear in the sidebar.
+/// `adam_lang::TypeRegistry::new()` registers. A tuple-typed cell
+/// (`TypeShape::Tuple`) appears with a Debug-formatted, display-only entry via
+/// [`Labels::add_tuple_cell`]. Cells whose `TypeId` is none of the built-in
+/// primitives are silently skipped, so they simply won't appear in the sidebar.
 ///
 /// - Complexity: O(n) in the number of cells.
 pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeShape)>) -> Labels {
@@ -118,7 +149,10 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeShape)>
         let id = *id;
         let type_id = match shape {
             TypeShape::Named(type_id) => *type_id,
-            TypeShape::Tuple(_) => continue,
+            TypeShape::Tuple(_) => {
+                labels.add_tuple_cell(id, name);
+                continue;
+            }
         };
         macro_rules! try_ty {
             ($T:ty) => {
@@ -581,6 +615,31 @@ mod tests {
     }
 
     #[test]
+    fn labels_from_cell_names_includes_tuple_typed_cells() {
+        use std::any::TypeId;
+
+        let mut sheet = Sheet::new();
+        let pair = sheet.add_cell(cel_runtime::DynamicSequence::from_tuple((3i32, 4.5f64)));
+
+        let mut cell_names = IndexMap::new();
+        cell_names.insert(
+            "pair".to_string(),
+            (
+                pair,
+                TypeShape::Tuple(vec![
+                    TypeShape::Named(TypeId::of::<i32>()),
+                    TypeShape::Named(TypeId::of::<f64>()),
+                ]),
+            ),
+        );
+
+        let labels = labels_from_cell_names(&cell_names);
+
+        assert_eq!(labels.cells.len(), 1);
+        assert_eq!((labels.cells[&pair].display)(&sheet), "(3, 4.5)");
+    }
+
+    #[test]
     fn labels_from_cell_names_preserves_declaration_order() {
         use std::any::TypeId;
 
@@ -990,6 +1049,33 @@ mod tests {
             .unwrap();
         let display = &labels.cells[&a_id].display;
         assert_eq!(display(&sheet), "2");
+    }
+
+    #[test]
+    fn add_tuple_cell_display_returns_rust_debug_formatted_string() {
+        let mut sheet = Sheet::new();
+        let cell_id = sheet.add_cell(cel_runtime::DynamicSequence::from_tuple((3i32, 4.5f64)));
+        let mut labels = Labels::new();
+        labels.add_tuple_cell(cell_id, "pair");
+        let meta = labels.cells.get(&cell_id).unwrap();
+        assert_eq!((meta.display)(&sheet), "(3, 4.5)");
+    }
+
+    #[test]
+    fn add_tuple_cell_write_str_always_errs_without_mutating_the_sheet() {
+        let mut sheet = Sheet::new();
+        let cell_id = sheet.add_cell(cel_runtime::DynamicSequence::from_tuple((3i32, 4.5f64)));
+        let mut labels = Labels::new();
+        labels.add_tuple_cell(cell_id, "pair");
+        let meta = labels.cells.get(&cell_id).unwrap();
+        let before = sheet
+            .read::<cel_runtime::DynamicSequence>(cell_id)
+            .unwrap()
+            .clone();
+        let result = (meta.write_str)(&mut sheet, "(1, 2.0)");
+        assert!(result.is_err());
+        let after = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
+        assert_eq!(&before, after);
     }
 
     #[test]
