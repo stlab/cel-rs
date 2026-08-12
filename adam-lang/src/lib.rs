@@ -9,14 +9,14 @@
 //! sheet              = "sheet" identifier "{" { sheet_item } "}".
 //! sheet_item         = cell_decl | relationship_decl | conditional_decl | out_decl.
 //! cell_decl          = "cell" identifier cell_type_init ";".
-//! cell_type_init     = (":" type_name [ "=" literal ]) | ("=" literal).
-//! type_name          = identifier.
+//! cell_type_init     = (":" type_expr [ "=" or_expression ]) | ("=" or_expression).
+//! type_expr          = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 //! relationship_decl  = "relationship" [ identifier ] "{" { method_decl } "}".
 //! conditional_decl   = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".
-//! conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].
+//! conditional_branch = or_expression "=>" "{" { relationship_decl } "}" [ "," ].
 //! default_branch     = "_"   "=>" "{" { relationship_decl } "}" [ "," ].
 //! method_decl        = "method" cell_list "->" cell_list method_body.
-//! out_decl           = "out" identifier [ ":" type_name ] "{" out_method { condition_decl } "}".
+//! out_decl           = "out" identifier [ ":" type_expr ] "{" out_method { condition_decl } "}".
 //! out_method         = "method" cell_list method_body.
 //! condition_decl     = "condition" identifier cell_list "{" or_expression "}".
 //! cell_list          = "[" identifier { "," identifier } "]".
