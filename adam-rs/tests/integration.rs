@@ -1680,3 +1680,183 @@ fn condition_contributing_cells_returns_empty_for_invalid_id() {
         HashSet::new()
     );
 }
+
+#[test]
+fn outputs_empty_for_sheet_with_no_outputs() {
+    let sheet = Sheet::new();
+    assert_eq!(sheet.outputs().count(), 0);
+}
+
+#[test]
+fn outputs_iterates_every_live_output_id() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let out_a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let out_b = sheet.add_cell(0_i32);
+
+    let id_a = sheet
+        .add_output(Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)), vec![])
+        .unwrap();
+    let id_b = sheet
+        .add_output(Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)), vec![])
+        .unwrap();
+
+    let ids: HashSet<_> = sheet.outputs().collect();
+    assert_eq!(ids, HashSet::from([id_a, id_b]));
+}
+
+#[test]
+fn output_relevant_cells_empty_when_sheet_has_no_outputs() {
+    let sheet = Sheet::new();
+    assert_eq!(sheet.output_relevant_cells(), HashSet::new());
+}
+
+#[test]
+fn output_relevant_cells_returns_output_cell_itself_before_propagate() {
+    let (sheet, output, ..) = sheet_with_area_output();
+    let area = sheet.output_cell(output).unwrap();
+    assert_eq!(sheet.output_relevant_cells(), HashSet::from([area]));
+}
+
+#[test]
+fn output_relevant_cells_returns_root_sources_after_propagate() {
+    let (mut sheet, _output, width, height, _max_area) = sheet_with_area_output();
+    sheet.write(width, 5_i32).unwrap();
+    sheet.write(height, 4_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(
+        sheet.output_relevant_cells(),
+        HashSet::from([width, height])
+    );
+}
+
+#[test]
+fn output_relevant_cells_unions_across_multiple_outputs() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(1_i32);
+    let b = sheet.add_cell(2_i32);
+    let out_a = sheet.add_cell(0_i32);
+    let out_b = sheet.add_cell(0_i32);
+    sheet
+        .add_output(Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)), vec![])
+        .unwrap();
+    sheet
+        .add_output(Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)), vec![])
+        .unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.output_relevant_cells(), HashSet::from([a, b]));
+}
+
+#[test]
+fn output_relevant_cells_updates_when_a_different_relationship_becomes_active() {
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(1_i32);
+    let b = sheet.add_cell(2_i32);
+    let c = sheet.add_cell(0_i32);
+    let rel0 = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .unwrap();
+    let rel1 = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet
+        .add_conditional(
+            p,
+            vec![(vec![0_i32], vec![rel0]), (vec![1_i32], vec![rel1])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_output(Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)), vec![])
+        .unwrap();
+
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.output_relevant_cells(), HashSet::from([a]));
+
+    sheet.write(p, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.output_relevant_cells(), HashSet::from([b]));
+}
+
+#[test]
+fn output_violation_cells_empty_when_sheet_has_no_outputs() {
+    let sheet = Sheet::new();
+    assert_eq!(sheet.output_violation_cells(), HashSet::new());
+}
+
+#[test]
+fn output_violation_cells_empty_when_all_conditions_hold() {
+    let (mut sheet, _output, width, height, _max_area) = sheet_with_area_output();
+    sheet.write(width, 5_i32).unwrap();
+    sheet.write(height, 4_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.output_violation_cells(), HashSet::new());
+}
+
+#[test]
+fn output_violation_cells_returns_contributing_cells_for_the_failing_condition() {
+    let (mut sheet, output, width, height, max_area) = sheet_with_area_output();
+    sheet.write(width, 50_i32).unwrap();
+    sheet.write(height, 40_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(!sheet.output_valid(output));
+    assert_eq!(
+        sheet.output_violation_cells(),
+        HashSet::from([width, height, max_area])
+    );
+}
+
+#[test]
+fn output_violation_cells_unions_across_multiple_violated_conditions() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let max_a = sheet.add_cell(5_i32);
+    let out_a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let max_b = sheet.add_cell(5_i32);
+    let out_b = sheet.add_cell(0_i32);
+
+    sheet
+        .add_output(
+            Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)),
+            vec![(
+                "max_a",
+                Condition::from_fn_2([a, max_a], |v: &i32, max: &i32| Ok(v <= max)),
+            )],
+        )
+        .unwrap();
+    sheet
+        .add_output(
+            Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)),
+            vec![(
+                "max_b",
+                Condition::from_fn_2([b, max_b], |v: &i32, max: &i32| Ok(v <= max)),
+            )],
+        )
+        .unwrap();
+
+    sheet.write(a, 50_i32).unwrap();
+    sheet.write(b, 50_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    assert_eq!(
+        sheet.output_violation_cells(),
+        HashSet::from([a, max_a, b, max_b])
+    );
+}
+
+#[test]
+fn output_violation_cells_updates_across_propagate_calls() {
+    let (mut sheet, _output, width, height, _max_area) = sheet_with_area_output();
+    sheet.write(width, 50_i32).unwrap();
+    sheet.write(height, 40_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert!(!sheet.output_violation_cells().is_empty());
+
+    sheet.write(height, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.output_violation_cells(), HashSet::new());
+}

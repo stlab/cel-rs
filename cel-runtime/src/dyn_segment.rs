@@ -1,5 +1,8 @@
 use crate::c_stack_list::{CNil, CStackList, IntoCStackList};
-use crate::dynamic_sequence::{SequenceList, TupleSequence};
+use crate::dynamic_sequence::{
+    DynamicSequence, ElementCloner, ElementDropper, ElementEq, SequenceElement, SequenceList,
+    TupleSequence, element_cloner_for, element_dropper_for, element_eq_for,
+};
 use crate::list_traits::{List, ListTypeIteratorAdvance, TypeIdIterator};
 use crate::memory::align_index;
 use crate::raw_segment::RawSegment;
@@ -90,10 +93,64 @@ pub struct DynTuple;
 ///
 /// # Safety
 /// `ptr` must point to a live tuple value whose layout matches `associated`.
-unsafe fn drop_tuple(ptr: *mut u8, associated: &[AssociatedType]) {
+pub unsafe fn drop_tuple(ptr: *mut u8, associated: &[AssociatedType]) {
     for elem in associated.iter().rev() {
         unsafe { (elem.dropper)(ptr.add(elem.offset), &elem.associated) };
     }
+}
+
+/// Returns a [`RawDropper`] that drops a value of type `T` in place, ignoring the `associated`
+/// parameter (a non-tuple leaf value has no nested elements to recurse into).
+pub fn raw_dropper_for<T: 'static>() -> RawDropper {
+    |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) }
+}
+
+/// Computes each element's on-stack byte offset in place — the same convention [`make_tuple`]
+/// already uses: place at this element's own alignment, then pad up to the running max
+/// alignment seen so far (matching `CStackList`'s nested layout). Each element's `type_id`,
+/// `size`, and `align` must already be set; `offset` is overwritten. Returns
+/// `(total_size, max_align)`.
+///
+/// - Complexity: O(n).
+pub fn layout_associated(elements: &mut [AssociatedType]) -> (usize, usize) {
+    let mut offset = 0usize;
+    let mut max_align = 1usize;
+    for elem in elements.iter_mut() {
+        offset = align_index(elem.align, offset);
+        max_align = max_align.max(elem.align);
+        elem.offset = offset;
+        offset += elem.size;
+        offset = align_index(max_align, offset);
+    }
+    (offset, max_align)
+}
+
+/// Recursively lays out `elements`, first fixing up every nested tuple element's own
+/// `size`/`align` fields (bottom-up, from its own recursively-laid-out `associated` shape),
+/// then delegating to [`layout_associated`] for this level's own (now-correct) offsets.
+///
+/// [`layout_associated`] itself is a flat, single-level computation: it trusts each element's
+/// `size`/`align` as already correct, which holds unconditionally for leaf elements but not for
+/// a nested tuple element built from a caller-declared shape — that element's real footprint is
+/// only known once its own `associated` has been laid out. Fixing it up first means an
+/// enclosing tuple's `total_size` always accounts for a nested tuple's true size, never a
+/// caller-supplied placeholder.
+///
+/// - Precondition: every leaf element's `type_id`/`size`/`align` is already set; a nested tuple
+///   element (`type_id == TypeId::of::<DynTuple>()`) only needs its own `associated` set
+///   correctly — its `size`/`align` are overwritten here, the same way `offset` is (recursively,
+///   at every nesting level).
+///
+/// - Complexity: O(n) in the total (nested) element count.
+fn layout_associated_recursive(elements: &mut [AssociatedType]) -> (usize, usize) {
+    for elem in elements.iter_mut() {
+        if elem.type_id == TypeId::of::<DynTuple>() {
+            let (size, align) = layout_associated_recursive(&mut elem.associated);
+            elem.size = size;
+            elem.align = align;
+        }
+    }
+    layout_associated(elements)
 }
 
 /// Returns whether every element `TypeId` in `a` and `b` matches, in order —
@@ -385,7 +442,7 @@ impl DynSegment {
             padding: padded,
             size: size_of::<T>(),
             align: align_of::<T>(),
-            raw_dropper: |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) },
+            raw_dropper: raw_dropper_for::<T>(),
             associated: Vec::new(),
         });
     }
@@ -738,6 +795,149 @@ impl DynSegment {
         self.push_type::<T>();
     }
 
+    /// Emits an op that clones `inputs[index]` (downcast to `&DynamicSequence`) onto the stack
+    /// as a live, tagged `DynTuple`, so ordinary CEL tuple indexing/operators work on a
+    /// tuple-typed input cell exactly as they would on an inline tuple literal. `associated`
+    /// describes the expected (declared) element types, recursively — a nested tuple element's
+    /// own `associated` describes its inner shape the same way, and is expanded back into a
+    /// nested on-stack tuple region (the inverse of
+    /// [`call_dyn_as_dynamic_sequence`](Self::call_dyn_as_dynamic_sequence)'s "nested tuple →
+    /// nested `DynamicSequence`" conversion). Offsets in `associated` are ignored and overwritten
+    /// internally, recursively, via [`layout_associated`] — callers only need to supply each
+    /// element's `type_id`/`type_name`/`dropper` (or, for a nested tuple element, `type_id:
+    /// TypeId::of::<DynTuple>()` with its own recursively-built `associated`); `size`/`align` are
+    /// likewise overwritten for a nested tuple element (computed from its own inner shape), so
+    /// only leaf elements need real `size`/`align` values.
+    ///
+    /// - Precondition: every call to a `call_dyn`-family execution supplies an `inputs` slice
+    ///   where `inputs[index]` is a `DynamicSequence` whose own shape matches `associated`
+    ///   exactly (same arity and element `TypeId`s, recursively).
+    ///
+    /// - Complexity: O(total element count, including nested) to lay out the declared shape at
+    ///   parse time; the op itself is O(total element count, including nested) at execution time.
+    pub fn push_arg_as_dynamic_sequence_tuple(
+        &mut self,
+        index: usize,
+        mut associated: Vec<AssociatedType>,
+    ) {
+        // layout_associated (Task 2) is a flat, single-level computation: it trusts each
+        // element's `size`/`align` as already correct. A nested tuple element's *real* footprint
+        // is only known once its own `associated` has been laid out, so that must happen first,
+        // bottom-up, overwriting the nested element's `size`/`align` before this level's own
+        // offsets (and total size) are computed from them. Skipping this step would let a nested
+        // tuple's declared placeholder `size` (however small) survive into this level's
+        // `total_size`, under-reserving the stack space the write below actually needs for the
+        // nested region — a buffer overrun, not just a wrong offset.
+        let (total_size, tuple_align) = layout_associated_recursive(&mut associated);
+        // raw0_ (unlike raw0/push_op0) does not fold its own return-type alignment into the
+        // segment's `base_alignment`, and this op's write target has no return-type alignment to
+        // fold in anyway — the tuple's alignment is only known from `associated`. Without this,
+        // `base_alignment` could stay smaller than `tuple_align`, so the fresh `RawStack` a later
+        // `call_dyn` allocates would not actually be aligned as strictly as `tuple_align` requires
+        // (mirrors `join2`'s own explicit `update_base_alignment` call for the same reason).
+        self.segment.update_base_alignment(tuple_align);
+        let ambient_start = self.current_stack_offset();
+        let dest_base = align_index(tuple_align, ambient_start);
+
+        let write_shape = associated.clone();
+        self.segment.raw0_(move |stack| {
+            CALL_DYN_PTR.with(|ptr_cell| {
+                CALL_DYN_LEN.with(|len_cell| -> anyhow::Result<()> {
+                    let raw_ptr = ptr_cell.get() as *const &dyn Any;
+                    let len = len_cell.get();
+                    assert!(
+                        !raw_ptr.is_null(),
+                        "push_arg_as_dynamic_sequence_tuple invoked outside call_dyn"
+                    );
+                    debug_assert!(
+                        index < len,
+                        "push_arg_as_dynamic_sequence_tuple index {index} out of range {len}"
+                    );
+                    // Safety: raw_ptr is non-null (checked above) and valid for the duration of
+                    // the enclosing call_dyn call; DynCallGuard clears it on return.
+                    let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len) };
+                    let seq = slice[index]
+                        .downcast_ref::<DynamicSequence>()
+                        .expect("push_arg_as_dynamic_sequence_tuple: type mismatch at runtime");
+                    unsafe {
+                        stack.reserve_and_write(tuple_align, total_size, |dst| {
+                            write_dynamic_sequence_as_tuple(seq, &write_shape, dst);
+                        });
+                    }
+                    Ok(())
+                })
+            })
+        });
+
+        self.stack_ids.push(StackInfo {
+            type_id: TypeId::of::<DynTuple>(),
+            type_name: Cow::Borrowed(std::any::type_name::<DynTuple>()),
+            padding: dest_base != ambient_start,
+            size: total_size,
+            align: tuple_align,
+            raw_dropper: drop_tuple,
+            associated,
+        });
+    }
+}
+
+/// Writes `seq`'s elements into `dst`, at the offsets in `dest_shape` (already computed via
+/// [`layout_associated_recursive`]), cloning each leaf and recursively expanding each
+/// nested-tuple element into its own nested on-stack tuple region.
+///
+/// # Safety
+/// `dst` must be valid for writes covering every offset + size in `dest_shape`; `dest_shape`'s
+/// element count and per-element shape (leaf vs. nested tuple, recursively) must match `seq`'s
+/// own shape exactly.
+///
+/// - Complexity: O(total element count, including nested).
+unsafe fn write_dynamic_sequence_as_tuple(
+    seq: &DynamicSequence,
+    dest_shape: &[AssociatedType],
+    dst: *mut u8,
+) {
+    debug_assert_eq!(
+        dest_shape.len(),
+        seq.shape().len(),
+        "write_dynamic_sequence_as_tuple: dest_shape and seq.shape() must have the same \
+         element count (precondition violated by caller)"
+    );
+    for (dest_elem, src_elem) in dest_shape.iter().zip(seq.shape()) {
+        if dest_elem.type_id == TypeId::of::<DynTuple>() {
+            // Safety: `read_element_at`'s own contract requires `src_elem.offset` to be one of
+            // `seq`'s recorded element offsets (true by the zip above) and the callback not to
+            // retain the pointer past the call (true here — it's used only to build `nested`,
+            // itself a borrow, not retained beyond this statement). The nested `DynamicSequence`
+            // is *borrowed*, not moved, out of `seq`'s bytes — `write_dynamic_sequence_as_tuple`
+            // only ever clones through it, matching this function's own "clone, don't move"
+            // contract, so `seq` (and its nested value) remains fully live and droppable
+            // afterward. `dst.add(dest_elem.offset)` is in-bounds per this function's own safety
+            // precondition on `dst`/`dest_shape`, and `dest_elem.associated`/the nested `seq`'s
+            // own shape match per this function's precondition (recursively).
+            unsafe {
+                seq.read_element_at(src_elem.offset, |src| {
+                    let nested = &*src.cast::<DynamicSequence>();
+                    write_dynamic_sequence_as_tuple(
+                        nested,
+                        &dest_elem.associated,
+                        dst.add(dest_elem.offset),
+                    );
+                });
+            }
+        } else {
+            // Safety: same `read_element_at` contract as above; `src_elem.clone` clones (per
+            // `ElementCloner`'s own contract) rather than moving, so `seq`'s original bytes stay
+            // live; `dst.add(dest_elem.offset)` is in-bounds per this function's precondition.
+            unsafe {
+                seq.read_element_at(src_elem.offset, |src| {
+                    (src_elem.clone)(src, dst.add(dest_elem.offset));
+                });
+            }
+        }
+    }
+}
+
+impl DynSegment {
     /// Executes the segment with `inputs` as call arguments and returns the final result.
     ///
     /// Ops registered via [`push_arg`](Self::push_arg) read their values from `inputs`
@@ -957,6 +1157,90 @@ impl DynSegment {
         // guard: `stack` is a local `RawStack`, which has no `Drop` impl of its own that runs
         // element destructors, so letting it go out of scope untruncated was never going to
         // double-drop anything either way.
+        unsafe {
+            stack.truncate_to(tuple_base, tuple_padding);
+        }
+
+        Ok(result)
+    }
+
+    /// Executes the segment once and moves its tuple result into an owned `DynamicSequence`,
+    /// recursing into nested tuple elements as nested `DynamicSequence` leaves. `leaf` supplies
+    /// each non-tuple element's `Drop`/`Clone`/`PartialEq` function pointers by its runtime
+    /// `TypeId` (`AssociatedType` itself carries only a 2-argument tuple-recursing dropper, not
+    /// these three, and this method never calls that dropper — every leaf's bytes are moved, not
+    /// cloned, exactly like [`call_dyn_as_tuple`](Self::call_dyn_as_tuple)).
+    ///
+    /// # Errors
+    /// Returns `Err` if:
+    /// - The segment requires pre-loaded arguments (created with a non-unit `Args` type).
+    /// - The stack does not contain exactly one value after expression compilation.
+    /// - That value is not a tuple.
+    /// - `leaf` returns `None` for some non-tuple element's `TypeId`.
+    /// - Any op returns an error during execution.
+    ///
+    /// - Complexity: O(n) in the number of ops, plus O(total element count, including nested) to
+    ///   build the result.
+    pub fn call_dyn_as_dynamic_sequence(
+        &mut self,
+        inputs: &[&dyn Any],
+        leaf: &impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)>,
+    ) -> anyhow::Result<DynamicSequence> {
+        ensure!(
+            self.argument_ids.is_empty(),
+            "call_dyn_as_dynamic_sequence: segment requires {} pre-loaded argument(s); \
+             use call_dyn_as_dynamic_sequence only with push_arg-based segments",
+            self.argument_ids.len()
+        );
+        ensure!(
+            self.stack_ids.len() == 1,
+            "call_dyn_as_dynamic_sequence: expected exactly 1 value on stack, got {}",
+            self.stack_ids.len()
+        );
+        let info = &self.stack_ids[0];
+        ensure!(
+            info.type_id == TypeId::of::<DynTuple>(),
+            "call_dyn_as_dynamic_sequence: expected a tuple result, got {}",
+            info.type_name,
+        );
+
+        // Validate every leaf's registration BEFORE executing the segment -- a purely static
+        // check over `associated`/`leaf`, independent of the segment's runtime values -- so a
+        // failure here means nothing has been executed, built, or moved yet, and there is
+        // nothing to clean up. This also rules out the double-free that a post-execution
+        // Err-cleanup path can't safely avoid: a nested tuple element can finish building (and
+        // moving its own interior bytes into a fresh DynamicSequence) before a later *sibling*
+        // element fails, at which point the original bytes of that already-moved nested element
+        // are no longer solely owned by the on-stack tuple -- dropping them again from here
+        // would double-drop them. Validating first means `build_dynamic_sequence` below is
+        // guaranteed to succeed, so that scenario can never arise.
+        validate_associated_shape(&info.associated, leaf)?;
+
+        let tuple_size = info.size;
+        let tuple_padding = info.padding;
+        let associated = info.associated.clone();
+
+        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
+        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
+        let _guard = DynCallGuard;
+
+        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
+        // Safety: the checks above verified the segment builds exactly one tuple value;
+        // call_dyn's own argument preconditions (no pre-loaded arguments) hold identically here.
+        unsafe {
+            self.segment.call0_stack(&mut stack)?;
+        }
+
+        let tuple_base = stack.len() - tuple_size;
+        let result = unsafe {
+            stack.read_at(tuple_base, |base| {
+                build_dynamic_sequence(base, &associated, leaf)
+            })
+        }
+        .expect("validate_associated_shape already confirmed every leaf resolves");
+
+        // Every leaf at every nesting depth was moved (not cloned) into a fresh DynamicSequence
+        // above; the vacated bytes are dead space now, matching call_dyn_as_tuple's own cleanup.
         unsafe {
             stack.truncate_to(tuple_base, tuple_padding);
         }
@@ -1261,6 +1545,292 @@ impl DynSegment {
         info.type_name = Cow::Borrowed(std::any::type_name::<DynTuple>());
         info.raw_dropper = drop_tuple;
         info.associated = associated;
+    }
+}
+
+/// Recursively converts a described tuple region at `base` into an owned `DynamicSequence`,
+/// moving each leaf's bytes and recursing into nested tuple elements as nested `DynamicSequence`
+/// values.
+///
+/// # Safety
+/// `base` must point to a live value laid out exactly as described by `associated`.
+unsafe fn build_dynamic_sequence(
+    base: *const u8,
+    associated: &[AssociatedType],
+    leaf: &(impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)> + ?Sized),
+) -> anyhow::Result<DynamicSequence> {
+    enum Built {
+        Leaf,
+        Tuple(DynamicSequence),
+    }
+
+    // Pass 1: recursively build nested values and resolve each leaf's descriptor, computing
+    // this level's own destination shape/offsets as we go. All fallible work happens here,
+    // before any bytes are written.
+    let mut shape = Vec::with_capacity(associated.len());
+    let mut built: Vec<Built> = Vec::with_capacity(associated.len());
+    let mut max_align = 1usize;
+    let mut offset = 0usize;
+    for elem in associated {
+        let is_tuple = elem.type_id == TypeId::of::<DynTuple>();
+        let (size, align, drop, clone, eq, value) = if is_tuple {
+            let nested =
+                unsafe { build_dynamic_sequence(base.add(elem.offset), &elem.associated, leaf)? };
+            (
+                size_of::<DynamicSequence>(),
+                align_of::<DynamicSequence>(),
+                element_dropper_for::<DynamicSequence>(),
+                element_cloner_for::<DynamicSequence>(),
+                element_eq_for::<DynamicSequence>(),
+                Built::Tuple(nested),
+            )
+        } else {
+            let (drop, clone, eq) = leaf(elem.type_id).ok_or_else(|| {
+                anyhow!(
+                    "call_dyn_as_dynamic_sequence: no Clone/PartialEq registered for element \
+                     type `{}`",
+                    elem.type_name
+                )
+            })?;
+            (elem.size, elem.align, drop, clone, eq, Built::Leaf)
+        };
+        let aligned = align_index(align, offset);
+        max_align = max_align.max(align);
+        shape.push(SequenceElement {
+            type_id: if is_tuple {
+                TypeId::of::<DynamicSequence>()
+            } else {
+                elem.type_id
+            },
+            type_name: if is_tuple {
+                Cow::Borrowed(std::any::type_name::<DynamicSequence>())
+            } else {
+                elem.type_name.clone()
+            },
+            offset: aligned,
+            size,
+            align,
+            drop,
+            clone,
+            eq,
+        });
+        built.push(value);
+        offset = aligned + size;
+    }
+    let total_size = align_index(max_align, offset);
+
+    // Pass 2: write bytes. Infallible -- everything fallible already happened in pass 1.
+    let mut buffer = RawStack::with_base_alignment(max_align);
+    unsafe {
+        buffer.reserve_and_write(max_align, total_size, |dst| {
+            for ((elem, src_elem), value) in shape.iter().zip(associated).zip(built) {
+                match value {
+                    Built::Tuple(nested) => {
+                        std::ptr::write(dst.add(elem.offset).cast::<DynamicSequence>(), nested);
+                    }
+                    Built::Leaf => {
+                        std::ptr::copy_nonoverlapping(
+                            base.add(src_elem.offset),
+                            dst.add(elem.offset),
+                            src_elem.size,
+                        );
+                    }
+                }
+            }
+        });
+    }
+
+    Ok(unsafe { DynamicSequence::from_raw_parts(buffer, shape, max_align) })
+}
+
+/// Recursively confirms every non-tuple element in `associated` has a leaf descriptor
+/// available from `leaf`, without moving or reading any bytes — a pure validation pass so a
+/// caller can call this *before* executing a segment, guaranteeing that
+/// `build_dynamic_sequence` (called afterward, on the same `associated`/`leaf`) cannot fail.
+///
+/// # Errors
+/// Returns `Err` naming the first element (at any nesting depth) whose `TypeId` `leaf` doesn't
+/// recognize.
+fn validate_associated_shape(
+    associated: &[AssociatedType],
+    leaf: &(impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)> + ?Sized),
+) -> anyhow::Result<()> {
+    for elem in associated {
+        if elem.type_id == TypeId::of::<DynTuple>() {
+            validate_associated_shape(&elem.associated, leaf)?;
+        } else {
+            leaf(elem.type_id).ok_or_else(|| {
+                anyhow!(
+                    "no Clone/PartialEq registered for element type `{}`",
+                    elem.type_name
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// One N>1-output slot's extraction, for [`DynSegment::call_dyn_tuple_mixed`]: either a scalar
+/// leaf (the existing [`BoxExtractor`] path, identical to [`call_dyn_tuple`](DynSegment::call_dyn_tuple)),
+/// or a nested tuple, converted to a boxed `DynamicSequence` via the same recursive machinery
+/// [`call_dyn_as_dynamic_sequence`](DynSegment::call_dyn_as_dynamic_sequence) uses.
+#[allow(clippy::type_complexity)]
+pub enum DynExtractor {
+    /// A scalar element: `extractors[i].0` must match that element's runtime `TypeId`;
+    /// `extractors[i].1` reads and clones it (see [`BoxExtractor`]'s own safety contract).
+    Scalar(TypeId, BoxExtractor),
+    /// A nested-tuple element: the closure supplies each of *its own* leaves'
+    /// `Drop`/`Clone`/`PartialEq` function pointers by `TypeId`, exactly like
+    /// `call_dyn_as_dynamic_sequence`'s `leaf` parameter.
+    Tuple(Box<dyn Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)>>),
+}
+
+impl DynSegment {
+    /// Executes the segment once and splits its tuple result into one boxed value per element —
+    /// a scalar `Box<T>` for a `DynExtractor::Scalar` slot (identical to
+    /// [`call_dyn_tuple`](Self::call_dyn_tuple)'s own behavior for an all-scalar split), or a
+    /// boxed `DynamicSequence` for a `DynExtractor::Tuple` slot, built from just that one
+    /// element's own nested region (not the whole top-of-stack value).
+    ///
+    /// # Safety
+    /// Every `DynExtractor::Scalar`'s `BoxExtractor` must satisfy the same contract
+    /// [`call_dyn_tuple`](Self::call_dyn_tuple) requires: clone rather than move.
+    ///
+    /// # Errors
+    /// Returns `Err` if:
+    /// - The segment requires pre-loaded arguments.
+    /// - The stack does not contain exactly one value after expression compilation.
+    /// - That value is not a tuple, or its arity does not equal `extractors.len()`.
+    /// - Some element's runtime `TypeId` doesn't match its `DynExtractor::Scalar` type, or (for
+    ///   `DynExtractor::Tuple`) the element isn't itself a tuple, or one of *its* leaves has no
+    ///   registered descriptor.
+    /// - Any op returns an error during execution.
+    ///
+    /// - Complexity: O(n) in the number of ops, plus O(total element count, including nested) to
+    ///   build the result.
+    pub unsafe fn call_dyn_tuple_mixed(
+        &mut self,
+        inputs: &[&dyn Any],
+        extractors: &[DynExtractor],
+    ) -> anyhow::Result<Vec<Box<dyn Any>>> {
+        ensure!(
+            self.argument_ids.is_empty(),
+            "call_dyn_tuple_mixed: segment requires {} pre-loaded argument(s); \
+             use call_dyn_tuple_mixed only with push_arg-based segments",
+            self.argument_ids.len()
+        );
+        ensure!(
+            self.stack_ids.len() == 1,
+            "call_dyn_tuple_mixed: expected exactly 1 value on stack, got {}",
+            self.stack_ids.len()
+        );
+        let info = &self.stack_ids[0];
+        ensure!(
+            info.type_id == TypeId::of::<DynTuple>(),
+            "call_dyn_tuple_mixed: expected a tuple result, got {}",
+            info.type_name,
+        );
+        ensure!(
+            info.associated.len() == extractors.len(),
+            "call_dyn_tuple_mixed: tuple has {} element(s) but {} extractor(s) were supplied",
+            info.associated.len(),
+            extractors.len(),
+        );
+        // Validate every element BEFORE executing the segment: a Scalar slot's type_id must
+        // match, and a Tuple slot must itself be a nested tuple whose own leaves (at every
+        // nesting depth) all resolve via its own `leaf` closure. This is a purely static check
+        // over `info.associated`/`extractors`, independent of the segment's runtime values, so a
+        // failure here means nothing has been executed, built, or moved yet, and there is
+        // nothing to clean up. It also rules out a double-free that a post-execution
+        // Err-cleanup path can't safely avoid: a Tuple slot's own nested build can partially
+        // succeed (moving some of its interior bytes into a fresh DynamicSequence) before a
+        // later *sibling* slot fails, at which point those already-moved bytes are no longer
+        // solely owned by the on-stack tuple -- dropping them again from here would double-drop
+        // them. Validating first means every `build_dynamic_sequence` call below is guaranteed
+        // to succeed, so that scenario can never arise.
+        for (i, (elem, extractor)) in info.associated.iter().zip(extractors).enumerate() {
+            match extractor {
+                DynExtractor::Scalar(expected_type_id, _) => {
+                    ensure!(
+                        elem.type_id == *expected_type_id,
+                        "call_dyn_tuple_mixed: element {i} type mismatch: expected type {:?}, \
+                         got `{}`",
+                        expected_type_id,
+                        elem.type_name,
+                    );
+                }
+                DynExtractor::Tuple(leaf) => {
+                    ensure!(
+                        elem.type_id == TypeId::of::<DynTuple>(),
+                        "call_dyn_tuple_mixed: element {i}: expected a nested tuple, got `{}`",
+                        elem.type_name,
+                    );
+                    validate_associated_shape(&elem.associated, leaf.as_ref())?;
+                }
+            }
+        }
+
+        let tuple_size = info.size;
+        let tuple_padding = info.padding;
+        let associated = info.associated.clone();
+
+        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
+        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
+        let _guard = DynCallGuard;
+
+        let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
+        // Safety: the checks above verified the segment builds exactly one tuple value with
+        // `extractors.len()` matching elements; call_dyn's own argument preconditions (no
+        // pre-loaded arguments) hold identically here.
+        unsafe {
+            self.segment.call0_stack(&mut stack)?;
+        }
+
+        let tuple_base = stack.len() - tuple_size;
+        let results: Vec<Box<dyn Any>> = associated
+            .iter()
+            .zip(extractors)
+            .map(|(elem, extractor)| match extractor {
+                DynExtractor::Scalar(_, boxextractor) => unsafe {
+                    stack.read_at(tuple_base + elem.offset, |ptr| boxextractor(ptr))
+                },
+                DynExtractor::Tuple(leaf) => {
+                    let nested = unsafe {
+                        stack.read_at(tuple_base + elem.offset, |base| {
+                            build_dynamic_sequence(base, &elem.associated, leaf.as_ref())
+                        })
+                    }
+                    .expect("validated above: every leaf in this region is registered");
+                    Box::new(nested) as Box<dyn Any>
+                }
+            })
+            .collect();
+
+        // Every DynExtractor::Scalar element's bytes were only cloned above (BoxExtractor's own
+        // contract, matching call_dyn_tuple) -- those must still be dropped normally. Every
+        // DynExtractor::Tuple element's bytes were *moved* into the nested DynamicSequence above
+        // (build_dynamic_sequence's contract, matching call_dyn_as_dynamic_sequence) -- running
+        // that element's own dropper again would double-drop/use-after-move, so its dropper is
+        // replaced with a no-op for this cleanup pass only (mirroring how
+        // DynamicSequence::try_into_tuple clears its own `shape` to make its `Drop` a no-op after
+        // moving every element out).
+        let drop_associated: Vec<AssociatedType> = associated
+            .iter()
+            .zip(extractors)
+            .map(|(elem, extractor)| match extractor {
+                DynExtractor::Scalar(..) => elem.clone(),
+                DynExtractor::Tuple(_) => AssociatedType {
+                    dropper: |_ptr, _associated| {},
+                    ..elem.clone()
+                },
+            })
+            .collect();
+        unsafe {
+            stack.drop_at(tuple_base, |ptr| drop_tuple(ptr, &drop_associated));
+            stack.truncate_to(tuple_base, tuple_padding);
+        }
+
+        Ok(results)
     }
 }
 
@@ -1743,6 +2313,441 @@ mod tests {
     }
 
     #[test]
+    fn call_dyn_as_dynamic_sequence_builds_a_flat_sequence() -> anyhow::Result<()> {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 10i32);
+        seg.op0(|| 2.5f64);
+        seg.make_tuple(2, ambient_start);
+
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            if type_id == TypeId::of::<i32>() {
+                Some((
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                ))
+            } else if type_id == TypeId::of::<f64>() {
+                Some((
+                    element_dropper_for::<f64>(),
+                    element_cloner_for::<f64>(),
+                    element_eq_for::<f64>(),
+                ))
+            } else {
+                None
+            }
+        };
+        let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf)?;
+        assert_eq!(seq.arity(), 2);
+        let (a, b): (i32, f64) = seq.try_to_tuple()?;
+        assert_eq!((a, b), (10, 2.5));
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_recurses_into_nested_tuples() -> anyhow::Result<()> {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        let inner_start = seg.current_stack_offset();
+        seg.op0(|| 2i32);
+        seg.op0(|| 3i32);
+        seg.make_tuple(2, inner_start);
+        seg.make_tuple(2, ambient_start);
+
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            (type_id == TypeId::of::<i32>()).then(|| {
+                (
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                )
+            })
+        };
+        let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf)?;
+        assert_eq!(seq.arity(), 2);
+        let (a, nested): (i32, DynamicSequence) = seq.try_to_tuple()?;
+        assert_eq!(a, 1);
+        assert_eq!(nested.arity(), 2);
+        let (b, c): (i32, i32) = nested.try_to_tuple()?;
+        assert_eq!((b, c), (2, 3));
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_errors_if_result_is_not_a_tuple() {
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 5i32);
+        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> { None };
+        let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("tuple"));
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_errors_on_unregistered_leaf_type() {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        seg.op0(|| 2i32);
+        seg.make_tuple(2, ambient_start);
+        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> { None };
+        let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_drops_every_element_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &other.0)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        let a = DropCounter(count.clone());
+        seg.op0(move || a.clone());
+        seg.op0(|| 7i32);
+        seg.make_tuple(2, ambient_start);
+
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            if type_id == TypeId::of::<DropCounter>() {
+                Some((
+                    element_dropper_for::<DropCounter>(),
+                    element_cloner_for::<DropCounter>(),
+                    element_eq_for::<DropCounter>(),
+                ))
+            } else if type_id == TypeId::of::<i32>() {
+                Some((
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                ))
+            } else {
+                None
+            }
+        };
+        let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf).unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "moving out must not drop the element"
+        );
+        drop(seq);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "must still drop exactly once"
+        );
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_never_executes_when_a_leaf_is_unregistered() {
+        // Regression test: if `leaf` doesn't recognize some element's type, that must be caught
+        // by validation *before* the segment ever executes -- there is nothing on the stack to
+        // build, move, or clean up. The op closures' own captured state (here, the DropCounter
+        // `a`) is untouched by the failed call and drops normally, exactly once, whenever `seg`
+        // itself is later dropped -- not leaked (dropped zero times), and not double-dropped.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &other.0)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        let a = DropCounter(count.clone());
+        seg.op0(move || a.clone());
+        seg.op0(|| 7i32);
+        seg.make_tuple(2, ambient_start);
+
+        // Only DropCounter's type is registered; i32 (the element after it) is not, so
+        // call_dyn_as_dynamic_sequence must fail during validation, before executing the
+        // segment at all.
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            (type_id == TypeId::of::<DropCounter>()).then(|| {
+                (
+                    element_dropper_for::<DropCounter>(),
+                    element_cloner_for::<DropCounter>(),
+                    element_eq_for::<DropCounter>(),
+                )
+            })
+        };
+        let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
+        assert!(result.is_err());
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "the segment must never execute -- nothing was ever built or moved, so there is \
+             nothing to drop yet"
+        );
+        drop(seg);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "the op closure's own captured DropCounter must still drop exactly once, normally, \
+             when `seg` itself is dropped"
+        );
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_errors_on_unregistered_sibling_after_nested_tuple() {
+        // Regression test for a double-free a prior (now-reverted) fix attempt introduced: a
+        // nested tuple element (element 0) whose own interior leaf *is* registered, followed by
+        // a sibling scalar element (element 1) whose leaf is *not* registered. A naive
+        // post-execution error-path cleanup could double-drop element 0's interior bytes, since
+        // its own nested build could already have completed (moving its bytes into a fresh
+        // DynamicSequence) before element 1's failure was discovered. Validating the whole shape
+        // recursively before ever executing the segment means this is caught up front, before
+        // anything is built -- so there is nothing to double-drop.
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        let inner_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        seg.make_tuple(1, inner_start);
+        seg.op0(|| 2.5f64);
+        seg.make_tuple(2, ambient_start);
+
+        // Only i32 (the nested tuple's own interior element) is registered; f64 (the outer
+        // sibling element) is not.
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            (type_id == TypeId::of::<i32>()).then(|| {
+                (
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                )
+            })
+        };
+        let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn call_dyn_tuple_mixed_splits_a_tuple_output_among_scalar_and_tuple_slots()
+    -> anyhow::Result<()> {
+        // (i32, (i32, i32)) split into 2 declared outputs: a scalar, and a nested tuple.
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        let inner_start = seg.current_stack_offset();
+        seg.op0(|| 2i32);
+        seg.op0(|| 3i32);
+        seg.make_tuple(2, inner_start);
+        seg.make_tuple(2, ambient_start);
+
+        fn extract_i32(ptr: *const u8) -> Box<dyn Any> {
+            Box::new(unsafe { *ptr.cast::<i32>() })
+        }
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            (type_id == TypeId::of::<i32>()).then(|| {
+                (
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                )
+            })
+        };
+        let extractors = [
+            DynExtractor::Scalar(TypeId::of::<i32>(), extract_i32 as BoxExtractor),
+            DynExtractor::Tuple(Box::new(leaf)),
+        ];
+        let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }?;
+        assert_eq!(results.len(), 2);
+        assert_eq!(*results[0].downcast_ref::<i32>().unwrap(), 1);
+        let nested = results[1].downcast_ref::<DynamicSequence>().unwrap();
+        assert_eq!(nested.arity(), 2);
+        let (b, c): (i32, i32) = nested.try_to_tuple()?;
+        assert_eq!((b, c), (2, 3));
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_tuple_mixed_matches_call_dyn_tuple_for_all_scalar_slots() -> anyhow::Result<()> {
+        // Regression: an all-scalar split must behave identically to today's call_dyn_tuple.
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 10u32);
+        seg.op0(|| 20u32);
+        seg.make_tuple(2, ambient_start);
+
+        fn extract_u32(ptr: *const u8) -> Box<dyn Any> {
+            Box::new(unsafe { *ptr.cast::<u32>() })
+        }
+        let extractors = [
+            DynExtractor::Scalar(TypeId::of::<u32>(), extract_u32 as BoxExtractor),
+            DynExtractor::Scalar(TypeId::of::<u32>(), extract_u32 as BoxExtractor),
+        ];
+        let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }?;
+        assert_eq!(*results[0].downcast_ref::<u32>().unwrap(), 10);
+        assert_eq!(*results[1].downcast_ref::<u32>().unwrap(), 20);
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_tuple_mixed_errors_on_arity_mismatch() {
+        let mut seg = DynSegment::new::<()>();
+        seg.op0(|| 5u32);
+        fn extract_u32(ptr: *const u8) -> Box<dyn Any> {
+            Box::new(unsafe { *ptr.cast::<u32>() })
+        }
+        let extractors = [DynExtractor::Scalar(
+            TypeId::of::<u32>(),
+            extract_u32 as BoxExtractor,
+        )];
+        let result = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) };
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn call_dyn_tuple_mixed_drops_a_moved_out_tuple_slot_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &other.0)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        let inner_start = seg.current_stack_offset();
+        let a = DropCounter(count.clone());
+        seg.op0(move || a.clone());
+        seg.op0(|| 7i32);
+        seg.make_tuple(2, inner_start);
+        seg.make_tuple(1, ambient_start);
+
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            if type_id == TypeId::of::<DropCounter>() {
+                Some((
+                    element_dropper_for::<DropCounter>(),
+                    element_cloner_for::<DropCounter>(),
+                    element_eq_for::<DropCounter>(),
+                ))
+            } else if type_id == TypeId::of::<i32>() {
+                Some((
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                ))
+            } else {
+                None
+            }
+        };
+        let extractors = [DynExtractor::Tuple(Box::new(leaf))];
+        let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }.unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "moving out must not drop the element"
+        );
+        drop(results);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "must still drop exactly once, not zero or twice"
+        );
+    }
+
+    #[test]
+    fn call_dyn_tuple_mixed_never_executes_when_a_tuple_slots_leaf_is_unregistered() {
+        // Regression test: element 0 is a Scalar slot; element 1 is a Tuple slot whose own
+        // nested leaf lookup is unregistered. That must be caught by validation *before* the
+        // segment executes -- not discovered partway through building results, where element 0
+        // might already have been cloned. The op closures' own captured state (here, the
+        // DropCounter `a`) is untouched by the failed call and drops normally, exactly once,
+        // whenever `seg` itself is later dropped -- not leaked, and not double-dropped.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &other.0)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn extract_drop_counter(ptr: *const u8) -> Box<dyn Any> {
+            Box::new(unsafe { (*ptr.cast::<DropCounter>()).clone() })
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        let a = DropCounter(count.clone());
+        seg.op0(move || a.clone());
+        let inner_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        seg.make_tuple(1, inner_start);
+        seg.make_tuple(2, ambient_start);
+
+        // The nested tuple's own element type (i32) is never registered, so validation must
+        // fail before the segment ever executes.
+        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> { None };
+        let extractors = [
+            DynExtractor::Scalar(
+                TypeId::of::<DropCounter>(),
+                extract_drop_counter as BoxExtractor,
+            ),
+            DynExtractor::Tuple(Box::new(leaf)),
+        ];
+        let result = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) };
+        assert!(result.is_err());
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "the segment must never execute -- element 0 was never cloned, so there is \
+             nothing to drop yet"
+        );
+        drop(seg);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "the op closure's own captured DropCounter must still drop exactly once, normally, \
+             when `seg` itself is dropped"
+        );
+    }
+
+    #[test]
     fn stack_info_records_size_and_align() {
         let mut seg = DynSegment::new::<()>();
         seg.op0(|| 7u32);
@@ -2076,6 +3081,221 @@ mod tests {
         assert_eq!(*result.tail().tail().head(), 0xAAu32);
         assert_eq!(*result.tail().head(), 0xBBu8);
         assert_eq!(*result.head(), 0xCCu8);
+        Ok(())
+    }
+
+    #[test]
+    fn raw_dropper_for_ignores_associated_and_drops_the_correct_type_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut value = DropCounter(count.clone());
+        let dropper = raw_dropper_for::<DropCounter>();
+        unsafe { dropper((&raw mut value).cast::<u8>(), &[]) };
+        std::mem::forget(value);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn layout_associated_matches_make_tuples_own_padding_convention() {
+        // Mirrors make_tuple's documented layout for (f64, i8, i8): each element at its own
+        // alignment, then padded up to the running max alignment seen so far — inserting extra
+        // padding between the two i8 elements once f64 raises the running max to 8.
+        let mut elements = vec![
+            AssociatedType {
+                type_id: TypeId::of::<f64>(),
+                type_name: Cow::Borrowed("f64"),
+                offset: 0,
+                size: size_of::<f64>(),
+                align: align_of::<f64>(),
+                dropper: raw_dropper_for::<f64>(),
+                associated: Vec::new(),
+            },
+            AssociatedType {
+                type_id: TypeId::of::<i8>(),
+                type_name: Cow::Borrowed("i8"),
+                offset: 0,
+                size: size_of::<i8>(),
+                align: align_of::<i8>(),
+                dropper: raw_dropper_for::<i8>(),
+                associated: Vec::new(),
+            },
+            AssociatedType {
+                type_id: TypeId::of::<i8>(),
+                type_name: Cow::Borrowed("i8"),
+                offset: 0,
+                size: size_of::<i8>(),
+                align: align_of::<i8>(),
+                dropper: raw_dropper_for::<i8>(),
+                associated: Vec::new(),
+            },
+        ];
+        let (total_size, align) = layout_associated(&mut elements);
+        assert_eq!(
+            elements.iter().map(|e| e.offset).collect::<Vec<_>>(),
+            vec![0, 8, 16]
+        );
+        assert_eq!(total_size, 24);
+        assert_eq!(align, 8);
+    }
+
+    #[test]
+    fn layout_associated_returns_zero_size_for_no_elements() {
+        let mut elements: Vec<AssociatedType> = Vec::new();
+        let (total_size, align) = layout_associated(&mut elements);
+        assert_eq!(total_size, 0);
+        assert_eq!(align, 1);
+    }
+
+    #[test]
+    fn push_arg_as_dynamic_sequence_tuple_supports_tuple_indexing() -> anyhow::Result<()> {
+        let seq = DynamicSequence::from_tuple((10i32, 2.5f64));
+        let mut seg = DynSegment::new::<()>();
+        let shape = vec![
+            AssociatedType {
+                type_id: TypeId::of::<i32>(),
+                type_name: Cow::Borrowed("i32"),
+                offset: 0,
+                size: size_of::<i32>(),
+                align: align_of::<i32>(),
+                dropper: raw_dropper_for::<i32>(),
+                associated: Vec::new(),
+            },
+            AssociatedType {
+                type_id: TypeId::of::<f64>(),
+                type_name: Cow::Borrowed("f64"),
+                offset: 0,
+                size: size_of::<f64>(),
+                align: align_of::<f64>(),
+                dropper: raw_dropper_for::<f64>(),
+                associated: Vec::new(),
+            },
+        ];
+        seg.push_arg_as_dynamic_sequence_tuple(0, shape);
+        assert_eq!(seg.peek_tuple_arity(), Some(2));
+        seg.tuple_index(1);
+        let result: f64 = seg.call_dyn(&[&seq as &dyn Any])?;
+        assert_eq!(result, 2.5);
+        Ok(())
+    }
+
+    #[test]
+    fn push_arg_as_dynamic_sequence_tuple_recurses_into_nested_tuples() -> anyhow::Result<()> {
+        // Build the same shape call_dyn_as_dynamic_sequence's nesting test produces: (i32, (i32,i32)).
+        let mut source = DynSegment::new::<()>();
+        let ambient_start = source.current_stack_offset();
+        source.op0(|| 1i32);
+        let inner_start = source.current_stack_offset();
+        source.op0(|| 2i32);
+        source.op0(|| 3i32);
+        source.make_tuple(2, inner_start);
+        source.make_tuple(2, ambient_start);
+        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
+            (type_id == TypeId::of::<i32>()).then(|| {
+                (
+                    element_dropper_for::<i32>(),
+                    element_cloner_for::<i32>(),
+                    element_eq_for::<i32>(),
+                )
+            })
+        };
+        let seq = source.call_dyn_as_dynamic_sequence(&[], &leaf)?;
+
+        let inner_shape = vec![
+            AssociatedType {
+                type_id: TypeId::of::<i32>(),
+                type_name: Cow::Borrowed("i32"),
+                offset: 0,
+                size: size_of::<i32>(),
+                align: align_of::<i32>(),
+                dropper: raw_dropper_for::<i32>(),
+                associated: Vec::new(),
+            },
+            AssociatedType {
+                type_id: TypeId::of::<i32>(),
+                type_name: Cow::Borrowed("i32"),
+                offset: 0,
+                size: size_of::<i32>(),
+                align: align_of::<i32>(),
+                dropper: raw_dropper_for::<i32>(),
+                associated: Vec::new(),
+            },
+        ];
+        let outer_shape = vec![
+            AssociatedType {
+                type_id: TypeId::of::<i32>(),
+                type_name: Cow::Borrowed("i32"),
+                offset: 0,
+                size: size_of::<i32>(),
+                align: align_of::<i32>(),
+                dropper: raw_dropper_for::<i32>(),
+                associated: Vec::new(),
+            },
+            AssociatedType {
+                type_id: TypeId::of::<DynTuple>(),
+                type_name: Cow::Borrowed("tuple"),
+                offset: 0,
+                size: 0,
+                align: 1,
+                dropper: drop_tuple,
+                associated: inner_shape,
+            },
+        ];
+
+        let mut seg = DynSegment::new::<()>();
+        seg.push_arg_as_dynamic_sequence_tuple(0, outer_shape);
+        seg.tuple_index(1); // the nested (i32, i32)
+        seg.tuple_index(0); // its first element
+        let result: i32 = seg.call_dyn(&[&seq as &dyn Any])?;
+        assert_eq!(result, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn push_arg_as_dynamic_sequence_tuple_clones_leaving_the_input_usable() -> anyhow::Result<()> {
+        let seq = DynamicSequence::from_tuple((1i32, 2i32));
+        let shape = || {
+            vec![
+                AssociatedType {
+                    type_id: TypeId::of::<i32>(),
+                    type_name: Cow::Borrowed("i32"),
+                    offset: 0,
+                    size: size_of::<i32>(),
+                    align: align_of::<i32>(),
+                    dropper: raw_dropper_for::<i32>(),
+                    associated: Vec::new(),
+                },
+                AssociatedType {
+                    type_id: TypeId::of::<i32>(),
+                    type_name: Cow::Borrowed("i32"),
+                    offset: 0,
+                    size: size_of::<i32>(),
+                    align: align_of::<i32>(),
+                    dropper: raw_dropper_for::<i32>(),
+                    associated: Vec::new(),
+                },
+            ]
+        };
+
+        let mut seg_a = DynSegment::new::<()>();
+        seg_a.push_arg_as_dynamic_sequence_tuple(0, shape());
+        seg_a.tuple_index(0);
+        let a: i32 = seg_a.call_dyn(&[&seq as &dyn Any])?;
+
+        let mut seg_b = DynSegment::new::<()>();
+        seg_b.push_arg_as_dynamic_sequence_tuple(0, shape());
+        seg_b.tuple_index(1);
+        let b: i32 = seg_b.call_dyn(&[&seq as &dyn Any])?;
+
+        assert_eq!((a, b), (1, 2));
         Ok(())
     }
 }

@@ -1,6 +1,8 @@
 // window.beginOpenFile: bridges Rust (via document::eval + dioxus.send) to
 // the browser's File System Access API, with a plain <input type="file">
-// fallback for browsers that don't support it (Firefox, Safari).
+// fallback for browsers that don't support it (Firefox, Safari) *and* for
+// browsers/embedders that expose it but then refuse to honor it (see
+// `_openViaInput`'s doc comment).
 //
 // open()/refresh() resolve to one of three shapes, matching Rust's
 // `Option<OpenResult>`:
@@ -30,7 +32,15 @@ window.beginOpenFile = {
             ],
           });
         } catch (e) {
-          return null; // user cancelled the picker — leave any existing handle alone
+          // AbortError is the spec-defined name for a real user cancellation —
+          // leave any existing handle alone and resolve to the silent no-op.
+          // Anything else (observed: a `NotAllowedError` from some embedders —
+          // see `_openViaInput`) means the picker itself couldn't run here at
+          // all, so fall back rather than silently discarding a genuine error.
+          if (e && e.name === "AbortError") {
+            return null;
+          }
+          return this._openViaInput();
         }
         // A failure past this point is a genuine read failure, not a
         // cancellation, so it gets its own try/catch resolving `{ error }`
@@ -57,12 +67,32 @@ window.beginOpenFile = {
           this.handles[id] = handle;
           return { id, name: handle.name, text };
         } catch (e) {
+          // Some embedders expose `showOpenFilePicker` and let it resolve with
+          // a real handle, but then refuse `getFile()` itself with a
+          // `NotAllowedError` ("The request is not allowed by the user agent
+          // or the platform in the current context") — observed in VS Code's
+          // built-in Simple Browser, which hosts external pages in a nested
+          // (non-outermost) browsing context that the File System Access
+          // spec deliberately excludes from real filesystem access. Retry via
+          // the universally-supported `<input type="file">` path instead of
+          // surfacing this as a hard failure.
+          if (e && e.name === "NotAllowedError") {
+            return this._openViaInput();
+          }
           return { error: String((e && e.message) || e) };
         }
       })();
     }
 
-    // Fallback: one-shot <input type="file">, no handle survives to refresh from.
+    return this._openViaInput();
+  },
+
+  // Fallback: one-shot <input type="file">, no handle survives to refresh
+  // from. Used both when `showOpenFilePicker` doesn't exist at all, and when
+  // it exists but the embedding context refuses to actually honor it (see
+  // callers above) — `<input type="file">` has no equivalent "outermost
+  // browsing context" restriction.
+  _openViaInput() {
     return new Promise((resolve) => {
       const input = document.createElement("input");
       input.type = "file";

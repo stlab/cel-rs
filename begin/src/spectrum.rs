@@ -34,13 +34,17 @@ pub fn SpTheme(color: String, scale: String, system: String, children: Element) 
 ///
 /// Maps to `<sp-textfield>`. Fires standard DOM `input`, `focus`, and `blur`
 /// events. Setting `invalid` to `true` renders the SWC error state (red ring
-/// and `aria-invalid`). Setting `disabled` to `true` renders the SWC disabled
-/// state and blocks focus/input at the DOM level.
+/// and `aria-invalid`). Setting `warning` to `true` (and `invalid` to `false`)
+/// renders a softer amber treatment via the `warning` CSS class, styled in
+/// `begin/assets/inspector.css` — not a native SWC state. Setting `disabled`
+/// to `true` renders the SWC disabled state and blocks focus/input at the DOM
+/// level.
 #[component]
 pub fn SpTextfield(
     id: String,
     value: String,
     invalid: bool,
+    warning: bool,
     disabled: bool,
     oninput: EventHandler<FormEvent>,
     onfocus: EventHandler<FocusEvent>,
@@ -53,6 +57,7 @@ pub fn SpTextfield(
             // Boolean attribute: omit entirely when false; presence = invalid.
             "invalid": if invalid { "true" },
             "disabled": if disabled { "true" },
+            class: if warning { "warning" },
             oninput: move |e| oninput.call(e),
             onfocus: move |e| onfocus.call(e),
             onblur: move |e| onblur.call(e),

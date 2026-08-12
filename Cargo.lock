@@ -322,6 +322,8 @@ dependencies = [
  "serde",
  "serde_json",
  "slotmap",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

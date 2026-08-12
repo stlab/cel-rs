@@ -85,6 +85,62 @@ pub struct SequenceElement {
     pub eq: ElementEq,
 }
 
+/// One element to be moved into a `DynamicSequence` being built from already-boxed values (used
+/// when no CEL expression exists to evaluate — e.g. a tuple-typed cell's default value).
+pub struct DynElementSpec {
+    /// Runtime type id for this element.
+    pub type_id: TypeId,
+    /// Human-readable name for error reporting.
+    pub type_name: Cow<'static, str>,
+    /// Size in bytes of this element's value.
+    pub size: usize,
+    /// Required alignment in bytes of this element's value.
+    pub align: usize,
+    /// In-place dropper for this element.
+    pub drop: ElementDropper,
+    /// In-place cloner for this element.
+    pub clone: ElementCloner,
+    /// Equality comparator for this element.
+    pub eq: ElementEq,
+    /// Moves the boxed value's bytes to a destination pointer, consuming the box without
+    /// dropping its contents.
+    ///
+    /// # Safety
+    /// The destination must be valid for writes of `size` bytes at `align`; the boxed value's
+    /// runtime type must match the type this `write` was generated for.
+    pub write: unsafe fn(Box<dyn std::any::Any>, *mut u8),
+}
+
+/// Returns an [`ElementDropper`] that drops a value of type `T` in place.
+pub fn element_dropper_for<T: 'static>() -> ElementDropper {
+    |ptr| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) }
+}
+
+/// Returns an [`ElementCloner`] that clones a value of type `T` in place.
+pub fn element_cloner_for<T: 'static + Clone>() -> ElementCloner {
+    |src, dst| unsafe { std::ptr::write(dst.cast::<T>(), (*src.cast::<T>()).clone()) }
+}
+
+/// Returns an [`ElementEq`] that compares two values of type `T` for equality.
+pub fn element_eq_for<T: 'static + PartialEq>() -> ElementEq {
+    |a, b| unsafe { *a.cast::<T>() == *b.cast::<T>() }
+}
+
+/// Returns a function that moves a boxed `T`'s bytes to `dst`, consuming the box without
+/// running `T`'s destructor (ownership transfers to `dst`).
+///
+/// # Safety
+/// The returned function's `dst` must be valid for writes of `size_of::<T>()` bytes at
+/// `align_of::<T>()`; its `Box<dyn Any>` argument's runtime type must be `T`.
+pub fn element_writer_for<T: 'static>() -> unsafe fn(Box<dyn std::any::Any>, *mut u8) {
+    |boxed, dst| unsafe {
+        let value = *boxed
+            .downcast::<T>()
+            .expect("element_writer_for: type mismatch");
+        std::ptr::write(dst.cast::<T>(), value);
+    }
+}
+
 /// Computes the next aligned offset for a `'static + Clone + PartialEq` field of type `T`,
 /// appends its [`SequenceElement`] to `out`, folds `T`'s alignment into `*max_align`, and returns
 /// the byte position immediately after this element.
@@ -106,9 +162,9 @@ fn push_element<T: 'static + Clone + PartialEq>(
         offset: aligned_offset,
         size: size_of::<T>(),
         align,
-        drop: |ptr| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) },
-        clone: |src, dst| unsafe { std::ptr::write(dst.cast::<T>(), (*src.cast::<T>()).clone()) },
-        eq: |a, b| unsafe { *a.cast::<T>() == *b.cast::<T>() },
+        drop: element_dropper_for::<T>(),
+        clone: element_cloner_for::<T>(),
+        eq: element_eq_for::<T>(),
     });
     aligned_offset + size_of::<T>()
 }
@@ -453,6 +509,42 @@ impl DynamicSequence {
         self.shape.len()
     }
 
+    /// Builds a sequence by moving each boxed value into a fresh buffer, per its own descriptor.
+    ///
+    /// - Complexity: O(n) time; one heap allocation for the sequence's own buffer.
+    #[must_use]
+    pub fn from_dyn_elements(elements: Vec<(DynElementSpec, Box<dyn std::any::Any>)>) -> Self {
+        let mut shape = Vec::with_capacity(elements.len());
+        let mut max_align = 1usize;
+        let mut offset = 0usize;
+        for (spec, _) in &elements {
+            let aligned = align_index(spec.align, offset);
+            max_align = max_align.max(spec.align);
+            shape.push(SequenceElement {
+                type_id: spec.type_id,
+                type_name: spec.type_name.clone(),
+                offset: aligned,
+                size: spec.size,
+                align: spec.align,
+                drop: spec.drop,
+                clone: spec.clone,
+                eq: spec.eq,
+            });
+            offset = aligned + spec.size;
+        }
+        let total_size = align_index(max_align, offset);
+
+        let mut buffer = crate::raw_stack::RawStack::with_base_alignment(max_align);
+        unsafe {
+            buffer.reserve_and_write(max_align, total_size, |dst| {
+                for ((spec, value), elem) in elements.into_iter().zip(&shape) {
+                    (spec.write)(value, dst.add(elem.offset));
+                }
+            });
+        }
+        unsafe { DynamicSequence::from_raw_parts(buffer, shape, max_align) }
+    }
+
     /// Returns whether `T`'s element `TypeId` sequence matches this sequence's actual elements
     /// exactly (same arity, same type at each position, in order).
     fn shape_matches<T: TupleSequence>(&self) -> bool
@@ -572,6 +664,42 @@ impl DynamicSequence {
             let a: A = seq.try_to_tuple()?;
             f(&a)
         }
+    }
+
+    /// Assembles a `DynamicSequence` directly from an already-populated buffer and shape.
+    ///
+    /// # Safety
+    /// `buffer` must contain exactly the bytes described by `shape`, laid out at each element's
+    /// own `offset`; `max_align` must be at least as large as every element's `align`.
+    pub(crate) unsafe fn from_raw_parts(
+        buffer: crate::raw_stack::RawStack,
+        shape: Vec<SequenceElement>,
+        max_align: usize,
+    ) -> Self {
+        DynamicSequence {
+            buffer,
+            shape,
+            max_align,
+        }
+    }
+
+    /// Returns this sequence's own element shape, for use by `dyn_segment`'s tuple-expansion
+    /// machinery.
+    pub(crate) fn shape(&self) -> &[SequenceElement] {
+        &self.shape
+    }
+
+    /// Reads this sequence's element at `offset` via `read`, given a pointer to its start.
+    ///
+    /// # Safety
+    /// `offset` must be one of `self.shape()`'s own recorded element offsets, or otherwise
+    /// a valid offset into `self.buffer` for a live, properly-aligned value.
+    pub(crate) unsafe fn read_element_at<R>(
+        &self,
+        offset: usize,
+        read: impl FnOnce(*const u8) -> R,
+    ) -> R {
+        unsafe { self.buffer.read_at(offset, read) }
     }
 }
 
@@ -915,5 +1043,136 @@ mod tests {
         let seq = DynamicSequence::from_tuple((3i32, 4i32));
         let wrapped = DynamicSequence::adapt_fn_1(|t: &(i32, f64)| Ok(t.0 as f64 + t.1));
         assert!(wrapped(&seq).is_err());
+    }
+
+    #[test]
+    fn element_dropper_for_drops_the_correct_type_exactly_once() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut value = DropCounter(count.clone());
+        let dropper = element_dropper_for::<DropCounter>();
+        unsafe { dropper((&raw mut value).cast::<u8>()) };
+        std::mem::forget(value);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn element_cloner_for_clones_the_correct_type() {
+        let cloner = element_cloner_for::<i32>();
+        let src = 7i32;
+        let mut dst = 0i32;
+        unsafe { cloner((&raw const src).cast::<u8>(), (&raw mut dst).cast::<u8>()) };
+        assert_eq!(dst, 7);
+    }
+
+    #[test]
+    fn element_eq_for_compares_the_correct_type() {
+        let eq = element_eq_for::<i32>();
+        let (a, b, c) = (5i32, 5i32, 6i32);
+        assert!(unsafe { eq((&raw const a).cast::<u8>(), (&raw const b).cast::<u8>()) });
+        assert!(!unsafe { eq((&raw const a).cast::<u8>(), (&raw const c).cast::<u8>()) });
+    }
+
+    #[test]
+    fn element_writer_for_moves_a_boxed_value_without_dropping_it() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let boxed: Box<dyn std::any::Any> = Box::new(DropCounter(count.clone()));
+        let writer = element_writer_for::<DropCounter>();
+        let mut dst = std::mem::MaybeUninit::<DropCounter>::uninit();
+        unsafe { writer(boxed, dst.as_mut_ptr().cast::<u8>()) };
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "the box's move must not run Drop"
+        );
+        unsafe { dst.assume_init_drop() };
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn from_dyn_elements_builds_a_matching_sequence() {
+        let spec_i32 = DynElementSpec {
+            type_id: TypeId::of::<i32>(),
+            type_name: Cow::Borrowed("i32"),
+            size: size_of::<i32>(),
+            align: align_of::<i32>(),
+            drop: element_dropper_for::<i32>(),
+            clone: element_cloner_for::<i32>(),
+            eq: element_eq_for::<i32>(),
+            write: element_writer_for::<i32>(),
+        };
+        let spec_f64 = DynElementSpec {
+            type_id: TypeId::of::<f64>(),
+            type_name: Cow::Borrowed("f64"),
+            size: size_of::<f64>(),
+            align: align_of::<f64>(),
+            drop: element_dropper_for::<f64>(),
+            clone: element_cloner_for::<f64>(),
+            eq: element_eq_for::<f64>(),
+            write: element_writer_for::<f64>(),
+        };
+        let seq = DynamicSequence::from_dyn_elements(vec![
+            (spec_i32, Box::new(3i32) as Box<dyn std::any::Any>),
+            (spec_f64, Box::new(4.5f64) as Box<dyn std::any::Any>),
+        ]);
+        assert_eq!(seq.arity(), 2);
+        let (a, b): (i32, f64) = seq.try_to_tuple().unwrap();
+        assert_eq!((a, b), (3, 4.5));
+    }
+
+    #[test]
+    fn from_dyn_elements_moves_boxed_values_without_double_dropping() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct DropCounter(Arc<AtomicUsize>);
+        impl PartialEq for DropCounter {
+            fn eq(&self, other: &Self) -> bool {
+                Arc::ptr_eq(&self.0, &other.0)
+            }
+        }
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let spec = DynElementSpec {
+            type_id: TypeId::of::<DropCounter>(),
+            type_name: Cow::Borrowed("DropCounter"),
+            size: size_of::<DropCounter>(),
+            align: align_of::<DropCounter>(),
+            drop: element_dropper_for::<DropCounter>(),
+            clone: element_cloner_for::<DropCounter>(),
+            eq: element_eq_for::<DropCounter>(),
+            write: element_writer_for::<DropCounter>(),
+        };
+        let boxed: Box<dyn std::any::Any> = Box::new(DropCounter(count.clone()));
+        let seq = DynamicSequence::from_dyn_elements(vec![(spec, boxed)]);
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        drop(seq);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 }

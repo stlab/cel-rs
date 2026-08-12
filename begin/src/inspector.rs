@@ -6,6 +6,110 @@ use dioxus::prelude::*;
 use crate::bridge::{Labels, format_adam_error};
 use crate::spectrum::{SpDivider, SpFieldLabel, SpHeading, SpTextfield};
 
+use std::collections::HashSet;
+
+/// Aggregate out-cell status for the whole sheet, computed once per render and shared by
+/// every `CellRow` so `Sheet::output_relevant_cells`/`output_violation_cells` run once
+/// instead of once per row.
+#[derive(Clone, PartialEq)]
+struct OutputStatus {
+    /// `true` if the sheet has at least one output.
+    has_outputs: bool,
+    /// `Sheet::output_relevant_cells()`, plus every conditional's match cell.
+    ///
+    /// `Sheet::contributing_cells` never traces back through a conditional's match
+    /// cell (it only follows relationship method inputs), so without this addition a
+    /// conditional's own switch could be marked "don't care" and disabled once the
+    /// sheet has any output — blocking the toggle that controls which branch is
+    /// active. Match cells are therefore always treated as relevant, independent of
+    /// which branch is currently active.
+    relevant: HashSet<CellId>,
+    /// Union of `Sheet::output_violation_cells()`.
+    warning: HashSet<CellId>,
+    /// Cells backing an output whose `Sheet::output_valid` is currently `false`.
+    invalid_outputs: HashSet<CellId>,
+}
+
+/// Computes `sheet`'s current out-cell status for the Inspector.
+///
+/// - Complexity: O(`Sheet::output_relevant_cells` + `Sheet::output_violation_cells` +
+///   the number of conditionals in the sheet).
+fn compute_output_status(sheet: &Sheet) -> OutputStatus {
+    let outputs: Vec<_> = sheet.outputs().collect();
+    let relevant = sheet
+        .output_relevant_cells()
+        .into_iter()
+        .chain(
+            sheet
+                .conditionals()
+                .filter_map(|id| sheet.conditional_match_cell(id)),
+        )
+        .collect();
+    let invalid_outputs = outputs
+        .iter()
+        .filter(|&&id| !sheet.output_valid(id))
+        .filter_map(|&id| sheet.output_cell(id))
+        .collect();
+    OutputStatus {
+        has_outputs: !outputs.is_empty(),
+        relevant,
+        warning: sheet.output_violation_cells(),
+        invalid_outputs,
+    }
+}
+
+/// A cell's Inspector display flags, derived from its own forced/error state and the
+/// sheet-wide out-cell status.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CellFlags {
+    disabled: bool,
+    invalid: bool,
+    warning: bool,
+}
+
+/// Derives `id`'s Inspector display flags from its own `forced`/`has_error` state and the
+/// sheet-wide `status`.
+///
+/// - Postcondition: `warning` is `false` whenever `invalid` is `true` — a field never
+///   shows both states at once.
+fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) -> CellFlags {
+    let disabled = forced || (status.has_outputs && !status.relevant.contains(&id));
+    let invalid = has_error || status.invalid_outputs.contains(&id);
+    let warning = !invalid && status.warning.contains(&id);
+    CellFlags {
+        disabled,
+        invalid,
+        warning,
+    }
+}
+
+/// Returns `true` if writing `id` can invalidate more than just the cached plan's
+/// execution order, so a full `Sheet::propagate()` is required instead of the cheaper
+/// `Sheet::propagate_without_replan()`.
+///
+/// This holds for a conditional's match cell (writing it can switch the active branch,
+/// which `propagate_without_replan` never re-evaluates) and for any cell that feeds an
+/// output condition's inputs (`propagate_without_replan` does not re-evaluate output
+/// conditions at all, per its own documented contract — so `output_valid`/
+/// `output_violation_cells` would otherwise go stale after such a write).
+///
+/// - Complexity: O(number of conditionals + number of output conditions in the sheet).
+fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
+    let is_match_cell = sheet
+        .conditionals()
+        .any(|cid| sheet.conditional_match_cell(cid) == Some(id));
+    let feeds_condition = sheet.outputs().any(|oid| {
+        sheet.output_conditions(oid).is_some_and(|conditions| {
+            conditions.iter().any(|&cid| {
+                sheet
+                    .condition_inputs(cid)
+                    .is_some_and(|inputs| inputs.contains(&id))
+            })
+        })
+    });
+    is_match_cell || feeds_condition
+}
+
 /// Sidebar panel showing all cells with labels, current values, and text inputs for writing.
 ///
 /// Editing an input field immediately writes the parsed value to the sheet and propagates
@@ -20,6 +124,7 @@ pub fn Inspector(
     active_source: Signal<crate::example_source::ActiveSource>,
 ) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
+    let output_status = use_memo(move || compute_output_status(&sheet.read()));
 
     rsx! {
         div {
@@ -27,7 +132,7 @@ pub fn Inspector(
             SpHeading { "Cells" }
             SpDivider {}
             for id in ids {
-                CellRow { key: "{id:?}", id, sheet, labels, active_source }
+                CellRow { key: "{id:?}", id, sheet, labels, active_source, output_status }
             }
         }
     }
@@ -39,6 +144,7 @@ fn CellRow(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
     active_source: Signal<crate::example_source::ActiveSource>,
+    output_status: Memo<OutputStatus>,
 ) -> Element {
     let label = use_memo(move || {
         labels
@@ -64,6 +170,9 @@ fn CellRow(
     let mut is_focused = use_signal(|| false);
     let mut has_error = use_signal(|| false);
 
+    let flags =
+        use_memo(move || cell_flags(id, *forced.read(), *has_error.read(), &output_status.read()));
+
     // Sync input to the computed value whenever it changes, but not while the user
     // is actively editing — that would interrupt mid-value typing (e.g. "1." → "1").
     use_effect(move || {
@@ -82,8 +191,9 @@ fn CellRow(
             SpTextfield {
                 id: field_id,
                 value: input.read().clone(),
-                invalid: *has_error.read(),
-                disabled: *forced.read(),
+                invalid: flags.read().invalid,
+                warning: flags.read().warning,
+                disabled: flags.read().disabled,
                 // Dioxus's event serializer only reads event.target.value for
                 // HTMLInputElement — custom elements (sp-textfield) always give "".
                 // Use dioxus.send() in JS and eval.recv() to read the live value.
@@ -107,13 +217,8 @@ fn CellRow(
                         drop(labels_r);
                         let propagate_result = match write_result {
                             Ok(()) => {
-                                // A conditional match cell changes the active constraint set
-                                // when written, which invalidates the plan even if the cell
-                                // is a source — so we must always replan for match cells.
-                                let is_match_cell = sheet_w
-                                    .conditionals()
-                                    .any(|cid| sheet_w.conditional_match_cell(cid) == Some(id));
-                                if sheet_w.is_source(id) && !is_match_cell {
+                                if sheet_w.is_source(id) && !cell_needs_full_propagate(&sheet_w, id)
+                                {
                                     sheet_w.propagate_without_replan()
                                 } else {
                                     sheet_w.propagate()
@@ -128,7 +233,11 @@ fn CellRow(
                             Err(e) => {
                                 has_error.set(true);
                                 let active = active_source.read();
-                                eprintln!("{}", format_adam_error(&e, &active.text, &active.file_name()));
+                                crate::diagnostics::report_error(&format_adam_error(
+                                    &e,
+                                    &active.text,
+                                    &active.file_name(),
+                                ));
                             }
                         }
                     });
@@ -141,5 +250,160 @@ fn CellRow(
             }
         }
         SpDivider {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(
+        has_outputs: bool,
+        relevant: &[CellId],
+        warning: &[CellId],
+        invalid_outputs: &[CellId],
+    ) -> OutputStatus {
+        OutputStatus {
+            has_outputs,
+            relevant: relevant.iter().copied().collect(),
+            warning: warning.iter().copied().collect(),
+            invalid_outputs: invalid_outputs.iter().copied().collect(),
+        }
+    }
+
+    fn dummy_cell() -> CellId {
+        let mut sheet = Sheet::new();
+        sheet.add_cell(0_i32)
+    }
+
+    #[test]
+    fn cell_flags_enabled_when_no_outputs_even_if_not_relevant() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, false, &status(false, &[], &[], &[]));
+        assert!(!flags.disabled);
+    }
+
+    #[test]
+    fn cell_flags_disabled_when_forced_regardless_of_outputs() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, true, false, &status(false, &[], &[], &[]));
+        assert!(flags.disabled);
+    }
+
+    #[test]
+    fn cell_flags_disabled_when_has_outputs_and_cell_not_relevant() {
+        // Both ids must come from the same Sheet: two fresh Sheets' first added cell
+        // return equal CellId values (slotmap's key generation is deterministic per
+        // map), which would make `id` and `other` indistinguishable below.
+        let mut sheet = Sheet::new();
+        let id = sheet.add_cell(0_i32);
+        let other = sheet.add_cell(0_i32);
+        let flags = cell_flags(id, false, false, &status(true, &[other], &[], &[]));
+        assert!(flags.disabled);
+    }
+
+    #[test]
+    fn cell_flags_enabled_when_has_outputs_and_cell_is_relevant() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, false, &status(true, &[id], &[], &[]));
+        assert!(!flags.disabled);
+    }
+
+    #[test]
+    fn cell_flags_invalid_when_has_error() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, true, &status(false, &[], &[], &[]));
+        assert!(flags.invalid);
+    }
+
+    #[test]
+    fn cell_flags_invalid_when_cell_is_an_invalid_output() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, false, &status(true, &[id], &[], &[id]));
+        assert!(flags.invalid);
+    }
+
+    #[test]
+    fn cell_flags_warning_when_in_warning_set_and_not_invalid() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, false, &status(true, &[id], &[id], &[]));
+        assert!(flags.warning);
+    }
+
+    #[test]
+    fn cell_flags_warning_suppressed_when_also_invalid() {
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, true, &status(true, &[id], &[id], &[]));
+        assert!(!flags.warning);
+        assert!(flags.invalid);
+    }
+
+    #[test]
+    fn cell_needs_full_propagate_false_when_sheet_has_no_conditionals_or_outputs() {
+        let id = dummy_cell();
+        let sheet = Sheet::new();
+        assert!(!cell_needs_full_propagate(&sheet, id));
+    }
+
+    #[test]
+    fn cell_needs_full_propagate_true_for_conditional_match_cell() {
+        use adam_rs::Method;
+
+        let mut sheet = Sheet::new();
+        let p = sheet.add_cell(0_i32);
+        let a = sheet.add_cell(0.0_f64);
+        let b = sheet.add_cell(0.0_f64);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &f64| Ok(*v))])
+            .unwrap();
+        sheet
+            .add_conditional(p, vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+
+        assert!(cell_needs_full_propagate(&sheet, p));
+    }
+
+    #[test]
+    fn cell_needs_full_propagate_true_for_cell_feeding_an_output_condition() {
+        use adam_rs::{Condition, Method};
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let result = sheet.add_cell(0_i32);
+        sheet
+            .add_output(
+                Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
+                vec![(
+                    "min_a",
+                    Condition::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
+                )],
+            )
+            .unwrap();
+
+        assert!(cell_needs_full_propagate(&sheet, a));
+        assert!(cell_needs_full_propagate(&sheet, b));
+    }
+
+    #[test]
+    fn cell_needs_full_propagate_false_for_cell_not_a_match_cell_or_condition_input() {
+        use adam_rs::{Condition, Method};
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let result = sheet.add_cell(0_i32);
+        let unrelated = sheet.add_cell(0_i32);
+        sheet
+            .add_output(
+                Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
+                vec![(
+                    "min_a",
+                    Condition::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
+                )],
+            )
+            .unwrap();
+
+        assert!(!cell_needs_full_propagate(&sheet, unrelated));
     }
 }
