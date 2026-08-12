@@ -83,6 +83,33 @@ fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) 
     }
 }
 
+/// Returns `true` if writing `id` can invalidate more than just the cached plan's
+/// execution order, so a full `Sheet::propagate()` is required instead of the cheaper
+/// `Sheet::propagate_without_replan()`.
+///
+/// This holds for a conditional's match cell (writing it can switch the active branch,
+/// which `propagate_without_replan` never re-evaluates) and for any cell that feeds an
+/// output condition's inputs (`propagate_without_replan` does not re-evaluate output
+/// conditions at all, per its own documented contract — so `output_valid`/
+/// `output_violation_cells` would otherwise go stale after such a write).
+///
+/// - Complexity: O(number of conditionals + number of output conditions in the sheet).
+fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
+    let is_match_cell = sheet
+        .conditionals()
+        .any(|cid| sheet.conditional_match_cell(cid) == Some(id));
+    let feeds_condition = sheet.outputs().any(|oid| {
+        sheet.output_conditions(oid).is_some_and(|conditions| {
+            conditions.iter().any(|&cid| {
+                sheet
+                    .condition_inputs(cid)
+                    .is_some_and(|inputs| inputs.contains(&id))
+            })
+        })
+    });
+    is_match_cell || feeds_condition
+}
+
 /// Sidebar panel showing all cells with labels, current values, and text inputs for writing.
 ///
 /// Editing an input field immediately writes the parsed value to the sheet and propagates
@@ -190,13 +217,8 @@ fn CellRow(
                         drop(labels_r);
                         let propagate_result = match write_result {
                             Ok(()) => {
-                                // A conditional match cell changes the active constraint set
-                                // when written, which invalidates the plan even if the cell
-                                // is a source — so we must always replan for match cells.
-                                let is_match_cell = sheet_w
-                                    .conditionals()
-                                    .any(|cid| sheet_w.conditional_match_cell(cid) == Some(id));
-                                if sheet_w.is_source(id) && !is_match_cell {
+                                if sheet_w.is_source(id) && !cell_needs_full_propagate(&sheet_w, id)
+                                {
                                     sheet_w.propagate_without_replan()
                                 } else {
                                     sheet_w.propagate()
@@ -211,7 +233,11 @@ fn CellRow(
                             Err(e) => {
                                 has_error.set(true);
                                 let active = active_source.read();
-                                eprintln!("{}", format_adam_error(&e, &active.text, &active.file_name()));
+                                crate::diagnostics::report_error(&format_adam_error(
+                                    &e,
+                                    &active.text,
+                                    &active.file_name(),
+                                ));
                             }
                         }
                     });
@@ -310,5 +336,74 @@ mod tests {
         let flags = cell_flags(id, false, true, &status(true, &[id], &[id], &[]));
         assert!(!flags.warning);
         assert!(flags.invalid);
+    }
+
+    #[test]
+    fn cell_needs_full_propagate_false_when_sheet_has_no_conditionals_or_outputs() {
+        let id = dummy_cell();
+        let sheet = Sheet::new();
+        assert!(!cell_needs_full_propagate(&sheet, id));
+    }
+
+    #[test]
+    fn cell_needs_full_propagate_true_for_conditional_match_cell() {
+        use adam_rs::Method;
+
+        let mut sheet = Sheet::new();
+        let p = sheet.add_cell(0_i32);
+        let a = sheet.add_cell(0.0_f64);
+        let b = sheet.add_cell(0.0_f64);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &f64| Ok(*v))])
+            .unwrap();
+        sheet
+            .add_conditional(p, vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+
+        assert!(cell_needs_full_propagate(&sheet, p));
+    }
+
+    #[test]
+    fn cell_needs_full_propagate_true_for_cell_feeding_an_output_condition() {
+        use adam_rs::{Condition, Method};
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let result = sheet.add_cell(0_i32);
+        sheet
+            .add_output(
+                Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
+                vec![(
+                    "min_a",
+                    Condition::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
+                )],
+            )
+            .unwrap();
+
+        assert!(cell_needs_full_propagate(&sheet, a));
+        assert!(cell_needs_full_propagate(&sheet, b));
+    }
+
+    #[test]
+    fn cell_needs_full_propagate_false_for_cell_not_a_match_cell_or_condition_input() {
+        use adam_rs::{Condition, Method};
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let result = sheet.add_cell(0_i32);
+        let unrelated = sheet.add_cell(0_i32);
+        sheet
+            .add_output(
+                Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
+                vec![(
+                    "min_a",
+                    Condition::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
+                )],
+            )
+            .unwrap();
+
+        assert!(!cell_needs_full_propagate(&sheet, unrelated));
     }
 }
