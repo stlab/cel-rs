@@ -135,6 +135,56 @@ pub fn SpActionButton(
     }
 }
 
+/// A scrollable, selectable vertical list of items — used as the examples
+/// picker sidebar.
+///
+/// Maps to `<sp-sidenav>`. `value` must equal the `value` of whichever child
+/// `SpSideNavItem` should render selected. This is load-bearing, not
+/// cosmetic: `<sp-sidenav-item>` derives its own selected state by comparing
+/// its `value` against its parent's once per connect (SWC's
+/// `SidenavItem.startTrackingSelection`), silently clearing any `selected`
+/// attribute set directly on an item whose `value` doesn't match — confirmed
+/// by inspecting the bundled `assets/swc.js` source and the rendered DOM
+/// (see `docs/superpowers/2026-08-11-begin-examples-list/task-2-report.md`).
+#[component]
+pub fn SpSideNav(value: String, children: Element) -> Element {
+    rsx! {
+        sp-sidenav {
+            "value": "{value}",
+            {children}
+        }
+    }
+}
+
+/// A single item within an `SpSideNav`.
+///
+/// Maps to `<sp-sidenav-item>`. `label` sets the item's visible text (via the
+/// element's `label` attribute, not slotted content). `value` must be unique
+/// among sibling items; pass the parent `SpSideNav`'s `value` here exactly
+/// when this item should render selected — see `SpSideNav`'s doc comment for
+/// why a matching `value` (not just `selected`) is required. `selected`
+/// renders it in its highlighted/active state (e.g. to mark the current
+/// choice in a list used as a picker); pass the same condition used to
+/// decide `SpSideNav`'s `value`, so the attribute is already correct on the
+/// very first render rather than only after a later selection change.
+#[component]
+pub fn SpSideNavItem(
+    label: String,
+    value: String,
+    onclick: EventHandler<MouseEvent>,
+    #[props(default)] selected: bool,
+) -> Element {
+    rsx! {
+        sp-sidenav-item {
+            "label": "{label}",
+            "value": "{value}",
+            onclick: move |e| onclick.call(e),
+            // Boolean attribute: omit entirely when false; presence = selected.
+            "selected": if selected { "true" },
+        }
+    }
+}
+
 /// Zoom-in glyph, used as `SpActionButton` icon content.
 ///
 /// Maps to `<sp-icon-zoom-in>`, assigned to the button's `icon` slot so

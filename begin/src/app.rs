@@ -9,7 +9,9 @@ use crate::example_source::{
 };
 use crate::graph_view::GraphView;
 use crate::inspector::Inspector;
-use crate::spectrum::{SpActionButton, SpActionGroup, SpTheme};
+use crate::spectrum::{
+    SpActionButton, SpActionGroup, SpDivider, SpHeading, SpSideNav, SpSideNavItem, SpTheme,
+};
 
 /// Root component: Spectrum theme wrapper with an examples picker, the graph, and
 /// the Inspector filling the viewport. `begin` ships with several example
@@ -227,10 +229,10 @@ pub fn App() -> Element {
             system: "spectrum-two".to_string(),
             div {
                 style: "position: fixed; inset: 0; display: flex; flex-direction: column; overflow: hidden;",
-                ExamplesPicker { sheet, labels, active_source, example_names, on_select: on_example_selected }
                 {open_file_controls}
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
+                    ExamplesPicker { sheet, labels, active_source, example_names, on_select: on_example_selected }
                     GraphView { data: graph_data, source_id }
                     Inspector { sheet, labels, active_source }
                 }
@@ -516,11 +518,13 @@ fn OpenFileControls(
     }
 }
 
-/// Picker row listing every example from `example_names`; clicking one
+/// Sidebar panel listing every example from `example_names`; clicking one
 /// loads it into `sheet`/`labels`/`active_source`, highlighting whichever
 /// name matches `active_source`'s current value, then calls `on_select` —
 /// on desktop, `App` uses this to clear any watcher left over from a
-/// previously opened file (see `App`'s `on_example_selected`).
+/// previously opened file (see `App`'s `on_example_selected`). Scrolls
+/// internally once the list outgrows the panel's height, so the list can
+/// grow arbitrarily without crowding the rest of the window.
 #[component]
 fn ExamplesPicker(
     sheet: Signal<Sheet>,
@@ -531,15 +535,27 @@ fn ExamplesPicker(
 ) -> Element {
     let is_example_active = matches!(active_source.read().origin, SourceOrigin::Example);
     let current = active_source.read().name.clone();
+    // Empty string never matches a real example name, so when an opened file
+    // (rather than an example) is active, this deliberately leaves every
+    // `SpSideNavItem` unselected instead of matching one by coincidence.
+    let sidenav_value = if is_example_active {
+        current.clone()
+    } else {
+        String::new()
+    };
 
     rsx! {
         div {
-            style: "padding: 8px 12px; border-bottom: 1px solid #ccc; flex: none;",
-            SpActionGroup {
-                compact: true,
+            style: "width: 260px; min-width: 260px; height: 100%; overflow-y: auto; padding: 12px; box-sizing: border-box; border-right: 1px solid #ccc;",
+            SpHeading { "Examples" }
+            SpDivider {}
+            SpSideNav {
+                value: sidenav_value,
                 for name in example_names.read().iter().cloned() {
-                    SpActionButton {
+                    SpSideNavItem {
                         key: "{name}",
+                        label: name.clone(),
+                        value: name.clone(),
                         selected: is_example_active && name == current,
                         onclick: {
                             let mut sheet = sheet;
@@ -554,7 +570,6 @@ fn ExamplesPicker(
                                 on_select.call(());
                             }
                         },
-                        "{name}"
                     }
                 }
             }
