@@ -144,8 +144,7 @@ pub fn SpActionButton(
 /// its `value` against its parent's once per connect (SWC's
 /// `SidenavItem.startTrackingSelection`), silently clearing any `selected`
 /// attribute set directly on an item whose `value` doesn't match — confirmed
-/// by inspecting the bundled `assets/swc.js` source and the rendered DOM
-/// (see `docs/superpowers/2026-08-11-begin-examples-list/task-2-report.md`).
+/// by inspecting the bundled `assets/swc.js` source and the rendered DOM.
 #[component]
 pub fn SpSideNav(value: String, children: Element) -> Element {
     rsx! {
