@@ -71,7 +71,7 @@ pub type ElementEq = unsafe fn(*const u8, *const u8) -> bool;
 pub type ElementDebug = unsafe fn(*const u8, &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
 
 /// Describes one element of a [`DynamicSequence`]: its type identity, byte layout, and
-/// in-place drop/clone/equality functions.
+/// in-place drop/clone/equality/debug-formatting functions.
 #[derive(Clone)]
 pub struct SequenceElement {
     /// Runtime type id for this element.
@@ -157,7 +157,7 @@ pub fn element_writer_for<T: 'static>() -> unsafe fn(Box<dyn std::any::Any>, *mu
     }
 }
 
-/// Computes the next aligned offset for a `'static + Clone + PartialEq` field of type `T`,
+/// Computes the next aligned offset for a `'static + Clone + PartialEq + std::fmt::Debug` field of type `T`,
 /// appends its [`SequenceElement`] to `out`, folds `T`'s alignment into `*max_align`, and returns
 /// the byte position immediately after this element.
 ///
