@@ -239,7 +239,7 @@ fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
         Ok(source) => {
             let outcome = build_sheet(&source, &format!("begin/assets/{name}.adm2"));
             if let Some(err) = &outcome.error {
-                eprintln!("{err}");
+                crate::diagnostics::report_error(err);
             }
             let active_source = ActiveSource {
                 name: name.to_string(),
@@ -252,7 +252,7 @@ fn load_demo(name: &str) -> (Sheet, Labels, ActiveSource) {
             }
         }
         Err(err) => {
-            eprintln!("{err}");
+            crate::diagnostics::report_error(&err);
             (
                 Sheet::new(),
                 Labels::new(),
@@ -397,7 +397,7 @@ fn load_from_payload(
 ) -> (Option<(Sheet, Labels)>, ActiveSource) {
     let outcome = build_sheet(&payload.text, &payload.name);
     if let Some(err) = &outcome.error {
-        eprintln!("{err}");
+        crate::diagnostics::report_error(err);
     }
     let active_source = ActiveSource {
         name: payload.name.clone(),
@@ -435,14 +435,18 @@ fn OpenFileControls(
                             let mut eval = document::eval(crate::open_file::OPEN_SCRIPT);
                             let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
                             let Ok(result) = result else {
-                                eprintln!("failed to open file: eval channel error: {result:?}");
+                                crate::diagnostics::report_error(&format!(
+                                    "failed to open file: eval channel error: {result:?}"
+                                ));
                                 return;
                             };
                             let Some(result) = result else { return }; // cancelled — silent no-op
                             let payload = match result {
                                 crate::open_file::OpenResult::Payload(payload) => payload,
                                 crate::open_file::OpenResult::Failed { error } => {
-                                    eprintln!("failed to open file: {error}");
+                                    crate::diagnostics::report_error(&format!(
+                                        "failed to open file: {error}"
+                                    ));
                                     return;
                                 }
                             };
@@ -468,14 +472,18 @@ fn OpenFileControls(
                                 let mut eval = document::eval(&script);
                                 let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
                                 let Ok(result) = result else {
-                                    eprintln!("failed to refresh file: eval channel error: {result:?}");
+                                    crate::diagnostics::report_error(&format!(
+                                        "failed to refresh file: eval channel error: {result:?}"
+                                    ));
                                     return;
                                 };
                                 let Some(result) = result else { return }; // stale/unknown id — silent no-op
                                 let payload = match result {
                                     crate::open_file::OpenResult::Payload(payload) => payload,
                                     crate::open_file::OpenResult::Failed { error } => {
-                                        eprintln!("failed to refresh file: {error}");
+                                        crate::diagnostics::report_error(&format!(
+                                            "failed to refresh file: {error}"
+                                        ));
                                         return;
                                     }
                                 };

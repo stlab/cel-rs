@@ -2,6 +2,7 @@
 mod app;
 mod bridge;
 mod demo_source;
+mod diagnostics;
 mod graph_view;
 mod inspector;
 mod open_file;
