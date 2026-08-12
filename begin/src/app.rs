@@ -47,7 +47,18 @@ pub fn App() -> Element {
     let sheet = use_signal(|| initial_sheet);
     let labels = use_signal(|| initial_labels);
     let active_source = use_signal(|| initial_active_source);
-    let example_names = use_signal(|| available_examples());
+    let example_names = use_signal(available_examples);
+
+    // Holds the `notify` watcher on `begin/examples/` established in the
+    // `reload_tx` hook below. Unlike `watcher_slot` (the opened-file watcher,
+    // which changes targets as the user opens different files), this watch
+    // target never changes for the life of the app — the slot exists purely
+    // to keep the `RecommendedWatcher` alive for as long as `App` is mounted;
+    // dropping it (e.g. if it were a temporary instead) would immediately
+    // stop the OS-level watch, exactly as `spawn_examples_watch`'s own doc
+    // comment warns.
+    #[cfg(feature = "desktop")]
+    let examples_watcher_slot: Signal<Option<notify::RecommendedWatcher>> = use_signal(|| None);
 
     // The reload channel is shared by two producers: a filesystem watch on
     // `begin/examples/` for the currently selected example (below), and, on desktop,
@@ -67,15 +78,17 @@ pub fn App() -> Element {
         let mut labels = labels;
         let mut active_source = active_source;
         let mut example_names = example_names;
+        let mut examples_watcher_slot = examples_watcher_slot;
         use_hook(move || {
             let (tx, mut rx) = futures_channel::mpsc::unbounded::<()>();
-            if let Err(err) = crate::example_source::spawn_examples_watch({
+            match crate::example_source::spawn_examples_watch({
                 let tx = tx.clone();
                 move || {
                     let _ = tx.unbounded_send(());
                 }
             }) {
-                eprintln!("failed to watch begin/examples/: {err}");
+                Ok(watcher) => examples_watcher_slot.set(Some(watcher)),
+                Err(err) => eprintln!("failed to watch begin/examples/: {err}"),
             }
             spawn(async move {
                 use futures_util::StreamExt;
