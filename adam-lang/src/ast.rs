@@ -119,6 +119,7 @@ impl TypeExpr {
         }
     }
 }
+
 /// `cell_decl = "cell" identifier cell_type_init ";".`
 ///
 /// `type_name`/`initializer` are unresolved — no `TypeRegistry` lookup, no literal validation.
@@ -134,6 +135,8 @@ pub struct CellDecl {
     /// The `: type_expr` annotation, if present.
     pub type_name: Option<TypeExpr>,
     /// The `= or_expression` initializer, if present. Unresolved and unevaluated here — see
+    /// `crate::parser::AdamParser` for the compile-to-`Sheet` phase, which parses this with no
+    /// cell scope pushed and evaluates it eagerly, once, at parse time.
     pub initializer: Option<cel_parser::Expr>,
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
@@ -160,9 +163,9 @@ pub struct RelationshipDecl {
     pub span: ExprSpan,
 }
 
-/// `out_decl = "out" identifier [ ":" type_name ] "{" out_method { condition_decl } "}".`
+/// `out_decl = "out" identifier [ ":" type_expr ] "{" out_method { condition_decl } "}".`
 ///
-/// `type_name` is unresolved here (no `TypeRegistry` lookup), matching `CellDecl`. When
+/// `type_expr` is unresolved here (no `TypeRegistry` lookup), matching `CellDecl`. When
 /// absent, the cell's type is inferred from `writer.body`'s result type by the compile phase
 /// (`crate::parser::AdamParser`) — never here.
 #[derive(Debug, Clone)]
@@ -171,7 +174,7 @@ pub struct OutDecl {
     pub name: String,
     /// The name token's span.
     pub name_span: ExprSpan,
-    /// The `: type_name` annotation, if present.
+    /// The `: type_expr` annotation, if present.
     pub type_name: Option<TypeExpr>,
     /// The single writer method that computes this cell's value.
     pub writer: OutMethodDecl,
