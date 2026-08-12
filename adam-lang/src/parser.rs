@@ -921,7 +921,7 @@ impl AdamParser {
                             table
                                 .iter()
                                 .find(|(tid, ..)| *tid == type_id)
-                                .map(|(_, d, c, e)| (*d, *c, *e))
+                                .map(|(_, d, c, e, dbg)| (*d, *c, *e, *dbg))
                         }))
                     }
                 });
@@ -1001,6 +1001,7 @@ enum CompiledOutputs {
             cel_runtime::ElementDropper,
             cel_runtime::ElementCloner,
             cel_runtime::ElementEq,
+            cel_runtime::ElementDebug,
         )>,
     ),
     /// The declared output is the empty tuple `()`: no CEL expression can produce a live
@@ -1051,7 +1052,7 @@ fn build_method(
                         table
                             .iter()
                             .find(|(tid, ..)| *tid == type_id)
-                            .map(|(_, d, c, e)| (*d, *c, *e))
+                            .map(|(_, d, c, e, dbg)| (*d, *c, *e, *dbg))
                     };
                     let seq = seg.call_dyn_as_dynamic_sequence(inputs_any, &leaf)?;
                     Ok(vec![Box::new(seq) as Box<dyn Any>])
@@ -1138,7 +1139,7 @@ mod tests {
 
     #[test]
     fn parse_cell_missing_default_is_error() {
-        #[derive(PartialEq, Clone)]
+        #[derive(PartialEq, Clone, Debug)]
         struct NoDef(i32);
         let mut reg = TypeRegistry::new();
         reg.register_no_default::<NoDef>("NoDef");
@@ -1650,6 +1651,25 @@ mod tests {
         let output_id = *sheet.output_names.get("area").expect("area registered");
         let cell_id = sheet.output_cell(output_id).expect("output has a cell");
         assert_eq!(*sheet.read::<f64>(cell_id).unwrap(), 12.0);
+    }
+
+    #[test]
+    fn parse_out_with_tuple_type_value_debug_formats_correctly() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell x: i32 = 3;
+                    out pair: (i32, i32) { method [x] { (x, x) } }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let output_id = *sheet.output_names.get("pair").unwrap();
+        let cell_id = sheet.output_cell(output_id).unwrap();
+        let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
+        assert_eq!(format!("{value:?}"), "(3, 3)");
     }
 
     #[test]
