@@ -585,6 +585,34 @@ impl Sheet {
             .collect()
     }
 
+    /// Returns the union of `contributing_cells` over every live output's cell — the set
+    /// of cells currently determining at least one output's value, as of the last
+    /// `propagate()` call.
+    ///
+    /// - Postcondition: empty if the sheet has no outputs.
+    /// - Complexity: O(sum of `contributing_cells` cost over every output).
+    pub fn output_relevant_cells(&self) -> HashSet<CellId> {
+        self.outputs()
+            .filter_map(|id| self.output_cell(id))
+            .flat_map(|cell| self.contributing_cells(cell))
+            .collect()
+    }
+
+    /// Returns the union of `condition_contributing_cells` over every condition that
+    /// evaluated `false` as of the last `propagate()` call, across every output in the
+    /// sheet.
+    ///
+    /// - Postcondition: empty if the sheet has no outputs, or if every condition on
+    ///   every output currently holds.
+    /// - Complexity: O(sum of `condition_contributing_cells` cost over every violated
+    ///   condition).
+    pub fn output_violation_cells(&self) -> HashSet<CellId> {
+        self.outputs()
+            .flat_map(|id| self.violated_conditions(id))
+            .flat_map(|cid| self.condition_contributing_cells(cid))
+            .collect()
+    }
+
     /// Writes a value to a cell, incrementing the cell's write-recency strength.
     ///
     /// Each successful `write` increments a global monotonic counter and assigns
@@ -1123,6 +1151,13 @@ impl Sheet {
     /// - Complexity: O(n) where n is the number of conditionals.
     pub fn conditionals(&self) -> impl Iterator<Item = ConditionalId> + '_ {
         self.conditionals.keys()
+    }
+
+    /// Iterates all live output IDs in the sheet.
+    ///
+    /// - Complexity: O(n) where n is the number of outputs.
+    pub fn outputs(&self) -> impl Iterator<Item = OutputId> + '_ {
+        self.outputs.keys()
     }
 
     /// Returns the match cell for conditional `id`.
