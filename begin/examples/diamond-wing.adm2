@@ -1,9 +1,9 @@
-sheet diamond {
+sheet diamond_wing {
     cell a = 0.0;
     cell b = 0.0;
     cell c = 0.0;
-    cell d = 0.0;
-    cell e = 0.0;
+    cell d = 2.0;
+    cell e = 3.0;
 
     relationship {
         method [b] -> [e] { b }

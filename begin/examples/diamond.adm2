@@ -1,8 +1,8 @@
 sheet diamond {
     cell a = 0.0;
     cell b = 0.0;
-    cell c = 0.0;
-    cell d = 0.0;
+    cell c = 2.0;
+    cell d = 3.0;
 
     relationship {
         method [a, b] -> [c] { a * b }
