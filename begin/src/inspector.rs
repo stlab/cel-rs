@@ -17,7 +17,7 @@ use crate::spectrum::{SpDivider, SpFieldLabel, SpHeading, SpTextfield};
 pub fn Inspector(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
-    active_source: Signal<crate::demo_source::ActiveSource>,
+    active_source: Signal<crate::example_source::ActiveSource>,
 ) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
 
@@ -38,7 +38,7 @@ fn CellRow(
     id: CellId,
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
-    active_source: Signal<crate::demo_source::ActiveSource>,
+    active_source: Signal<crate::example_source::ActiveSource>,
 ) -> Element {
     let label = use_memo(move || {
         labels

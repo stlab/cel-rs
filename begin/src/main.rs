@@ -1,7 +1,7 @@
 //! Entry point for the `begin` property model development environment.
 mod app;
 mod bridge;
-mod demo_source;
+mod example_source;
 mod graph_view;
 mod inspector;
 mod open_file;

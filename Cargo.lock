@@ -314,7 +314,6 @@ dependencies = [
  "anyhow",
  "cel-parser",
  "dioxus",
- "dioxus-devtools",
  "futures-channel",
  "futures-util",
  "indexmap",
