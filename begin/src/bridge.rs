@@ -4,6 +4,7 @@
 //! with stable [`CellId`] and [`RelationshipId`] keys. [`to_graph_data`] serializes a
 //! [`Sheet`] and its [`Labels`] into a [`GraphData`] value ready for JSON encoding.
 
+use adam_lang::type_registry::TypeShape;
 use adam_rs::{CellId, ConditionalId, Error, RelationshipId, Sheet};
 use annotate_snippets::Renderer;
 use cel_parser::FormatRustcStyle;
@@ -104,14 +105,21 @@ pub fn format_rounded(v: f64) -> String {
 
 /// Builds a [`Labels`] from an adam-lang-style declaration-ordered cell name map.
 ///
-/// Matches each `TypeId` against the built-in primitive types
+/// Matches each scalar cell's `TypeId` against the built-in primitive types
 /// `adam_lang::TypeRegistry::new()` registers. Cells whose `TypeId` is not one
-/// of these are silently skipped — they simply won't appear in the sidebar.
+/// of these — and any tuple-typed cell (`TypeShape::Tuple`), not yet
+/// supported in the sidebar — are silently skipped, so they simply won't
+/// appear in the sidebar.
 ///
 /// - Complexity: O(n) in the number of cells.
-pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeId)>) -> Labels {
+pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeShape)>) -> Labels {
     let mut labels = Labels::new();
-    for (name, &(id, type_id)) in cell_names {
+    for (name, (id, shape)) in cell_names {
+        let id = *id;
+        let type_id = match shape {
+            TypeShape::Named(type_id) => *type_id,
+            TypeShape::Tuple(_) => continue,
+        };
         macro_rules! try_ty {
             ($T:ty) => {
                 if type_id == TypeId::of::<$T>() {
@@ -537,7 +545,7 @@ mod tests {
         let a = sheet.add_cell(86.666666666667_f64);
 
         let mut cell_names = IndexMap::new();
-        cell_names.insert("a".to_string(), (a, TypeId::of::<f64>()));
+        cell_names.insert("a".to_string(), (a, TypeShape::Named(TypeId::of::<f64>())));
 
         let labels = labels_from_cell_names(&cell_names);
 
@@ -555,10 +563,13 @@ mod tests {
         let d = sheet.add_cell("hi".to_string());
 
         let mut cell_names = IndexMap::new();
-        cell_names.insert("a".to_string(), (a, TypeId::of::<f64>()));
-        cell_names.insert("b".to_string(), (b, TypeId::of::<i32>()));
-        cell_names.insert("c".to_string(), (c, TypeId::of::<bool>()));
-        cell_names.insert("d".to_string(), (d, TypeId::of::<String>()));
+        cell_names.insert("a".to_string(), (a, TypeShape::Named(TypeId::of::<f64>())));
+        cell_names.insert("b".to_string(), (b, TypeShape::Named(TypeId::of::<i32>())));
+        cell_names.insert("c".to_string(), (c, TypeShape::Named(TypeId::of::<bool>())));
+        cell_names.insert(
+            "d".to_string(),
+            (d, TypeShape::Named(TypeId::of::<String>())),
+        );
 
         let labels = labels_from_cell_names(&cell_names);
 
@@ -578,8 +589,8 @@ mod tests {
         let a = sheet.add_cell(2_i32);
 
         let mut cell_names = IndexMap::new();
-        cell_names.insert("z".to_string(), (z, TypeId::of::<i32>()));
-        cell_names.insert("a".to_string(), (a, TypeId::of::<i32>()));
+        cell_names.insert("z".to_string(), (z, TypeShape::Named(TypeId::of::<i32>())));
+        cell_names.insert("a".to_string(), (a, TypeShape::Named(TypeId::of::<i32>())));
 
         let labels = labels_from_cell_names(&cell_names);
         let ids: Vec<_> = labels.cells.keys().copied().collect();
