@@ -1185,7 +1185,7 @@ impl DynSegment {
     pub fn call_dyn_as_dynamic_sequence(
         &mut self,
         inputs: &[&dyn Any],
-        leaf: &impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)>,
+        leaf: &impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)>,
     ) -> anyhow::Result<DynamicSequence> {
         ensure!(
             self.argument_ids.is_empty(),
@@ -1549,15 +1549,6 @@ impl DynSegment {
     }
 }
 
-/// Placeholder [`ElementDebug`] for leaf elements resolved via `build_dynamic_sequence`'s `leaf`
-/// callback, which does not yet supply a per-type debug formatter.
-///
-/// TODO(tuple-value-display Task 2): replace with a real per-type formatter once `leaf` is
-/// extended to also resolve an [`ElementDebug`] alongside its drop/clone/eq triple.
-unsafe fn debug_unavailable(_ptr: *const u8, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.write_str("<value>")
-}
-
 /// Recursively converts a described tuple region at `base` into an owned `DynamicSequence`,
 /// moving each leaf's bytes and recursing into nested tuple elements as nested `DynamicSequence`
 /// values.
@@ -1567,7 +1558,9 @@ unsafe fn debug_unavailable(_ptr: *const u8, f: &mut std::fmt::Formatter<'_>) ->
 unsafe fn build_dynamic_sequence(
     base: *const u8,
     associated: &[AssociatedType],
-    leaf: &(impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)> + ?Sized),
+    leaf: &(
+         impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> + ?Sized
+     ),
 ) -> anyhow::Result<DynamicSequence> {
     enum Built {
         Leaf,
@@ -1596,22 +1589,14 @@ unsafe fn build_dynamic_sequence(
                 Built::Tuple(nested),
             )
         } else {
-            let (drop, clone, eq) = leaf(elem.type_id).ok_or_else(|| {
+            let (drop, clone, eq, debug) = leaf(elem.type_id).ok_or_else(|| {
                 anyhow!(
                     "call_dyn_as_dynamic_sequence: no Clone/PartialEq registered for element \
                      type `{}`",
                     elem.type_name
                 )
             })?;
-            (
-                elem.size,
-                elem.align,
-                drop,
-                clone,
-                eq,
-                debug_unavailable as ElementDebug,
-                Built::Leaf,
-            )
+            (elem.size, elem.align, drop, clone, eq, debug, Built::Leaf)
         };
         let aligned = align_index(align, offset);
         max_align = max_align.max(align);
@@ -1673,7 +1658,9 @@ unsafe fn build_dynamic_sequence(
 /// recognize.
 fn validate_associated_shape(
     associated: &[AssociatedType],
-    leaf: &(impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)> + ?Sized),
+    leaf: &(
+         impl Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> + ?Sized
+     ),
 ) -> anyhow::Result<()> {
     for elem in associated {
         if elem.type_id == TypeId::of::<DynTuple>() {
@@ -1700,9 +1687,9 @@ pub enum DynExtractor {
     /// `extractors[i].1` reads and clones it (see [`BoxExtractor`]'s own safety contract).
     Scalar(TypeId, BoxExtractor),
     /// A nested-tuple element: the closure supplies each of *its own* leaves'
-    /// `Drop`/`Clone`/`PartialEq` function pointers by `TypeId`, exactly like
+    /// `Drop`/`Clone`/`PartialEq`/`Debug` function pointers by `TypeId`, exactly like
     /// `call_dyn_as_dynamic_sequence`'s `leaf` parameter.
-    Tuple(Box<dyn Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq)>>),
+    Tuple(Box<dyn Fn(TypeId) -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)>>),
 }
 
 impl DynSegment {
@@ -2340,27 +2327,63 @@ mod tests {
         seg.op0(|| 2.5f64);
         seg.make_tuple(2, ambient_start);
 
-        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
-            if type_id == TypeId::of::<i32>() {
-                Some((
-                    element_dropper_for::<i32>(),
-                    element_cloner_for::<i32>(),
-                    element_eq_for::<i32>(),
-                ))
-            } else if type_id == TypeId::of::<f64>() {
-                Some((
-                    element_dropper_for::<f64>(),
-                    element_cloner_for::<f64>(),
-                    element_eq_for::<f64>(),
-                ))
-            } else {
-                None
-            }
-        };
+        let leaf =
+            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+                if type_id == TypeId::of::<i32>() {
+                    Some((
+                        element_dropper_for::<i32>(),
+                        element_cloner_for::<i32>(),
+                        element_eq_for::<i32>(),
+                        element_debug_for::<i32>(),
+                    ))
+                } else if type_id == TypeId::of::<f64>() {
+                    Some((
+                        element_dropper_for::<f64>(),
+                        element_cloner_for::<f64>(),
+                        element_eq_for::<f64>(),
+                        element_debug_for::<f64>(),
+                    ))
+                } else {
+                    None
+                }
+            };
         let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf)?;
         assert_eq!(seq.arity(), 2);
         let (a, b): (i32, f64) = seq.try_to_tuple()?;
         assert_eq!((a, b), (10, 2.5));
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_as_dynamic_sequence_result_debug_formats_correctly() -> anyhow::Result<()> {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 10i32);
+        seg.op0(|| 2.5f64);
+        seg.make_tuple(2, ambient_start);
+
+        let leaf =
+            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+                if type_id == TypeId::of::<i32>() {
+                    Some((
+                        element_dropper_for::<i32>(),
+                        element_cloner_for::<i32>(),
+                        element_eq_for::<i32>(),
+                        element_debug_for::<i32>(),
+                    ))
+                } else if type_id == TypeId::of::<f64>() {
+                    Some((
+                        element_dropper_for::<f64>(),
+                        element_cloner_for::<f64>(),
+                        element_eq_for::<f64>(),
+                        element_debug_for::<f64>(),
+                    ))
+                } else {
+                    None
+                }
+            };
+        let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf)?;
+        assert_eq!(format!("{seq:?}"), "(10, 2.5)");
         Ok(())
     }
 
@@ -2375,15 +2398,17 @@ mod tests {
         seg.make_tuple(2, inner_start);
         seg.make_tuple(2, ambient_start);
 
-        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
-            (type_id == TypeId::of::<i32>()).then(|| {
-                (
-                    element_dropper_for::<i32>(),
-                    element_cloner_for::<i32>(),
-                    element_eq_for::<i32>(),
-                )
-            })
-        };
+        let leaf =
+            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+                (type_id == TypeId::of::<i32>()).then(|| {
+                    (
+                        element_dropper_for::<i32>(),
+                        element_cloner_for::<i32>(),
+                        element_eq_for::<i32>(),
+                        element_debug_for::<i32>(),
+                    )
+                })
+            };
         let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf)?;
         assert_eq!(seq.arity(), 2);
         let (a, nested): (i32, DynamicSequence) = seq.try_to_tuple()?;
@@ -2398,7 +2423,9 @@ mod tests {
     fn call_dyn_as_dynamic_sequence_errors_if_result_is_not_a_tuple() {
         let mut seg = DynSegment::new::<()>();
         seg.op0(|| 5i32);
-        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> { None };
+        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+            None
+        };
         let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("tuple"));
@@ -2411,7 +2438,9 @@ mod tests {
         seg.op0(|| 1i32);
         seg.op0(|| 2i32);
         seg.make_tuple(2, ambient_start);
-        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> { None };
+        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+            None
+        };
         let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
         assert!(result.is_err());
     }
@@ -2421,7 +2450,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         struct DropCounter(Arc<AtomicUsize>);
         impl PartialEq for DropCounter {
             fn eq(&self, other: &Self) -> bool {
@@ -2442,23 +2471,26 @@ mod tests {
         seg.op0(|| 7i32);
         seg.make_tuple(2, ambient_start);
 
-        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
-            if type_id == TypeId::of::<DropCounter>() {
-                Some((
-                    element_dropper_for::<DropCounter>(),
-                    element_cloner_for::<DropCounter>(),
-                    element_eq_for::<DropCounter>(),
-                ))
-            } else if type_id == TypeId::of::<i32>() {
-                Some((
-                    element_dropper_for::<i32>(),
-                    element_cloner_for::<i32>(),
-                    element_eq_for::<i32>(),
-                ))
-            } else {
-                None
-            }
-        };
+        let leaf =
+            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+                if type_id == TypeId::of::<DropCounter>() {
+                    Some((
+                        element_dropper_for::<DropCounter>(),
+                        element_cloner_for::<DropCounter>(),
+                        element_eq_for::<DropCounter>(),
+                        element_debug_for::<DropCounter>(),
+                    ))
+                } else if type_id == TypeId::of::<i32>() {
+                    Some((
+                        element_dropper_for::<i32>(),
+                        element_cloner_for::<i32>(),
+                        element_eq_for::<i32>(),
+                        element_debug_for::<i32>(),
+                    ))
+                } else {
+                    None
+                }
+            };
         let seq = seg.call_dyn_as_dynamic_sequence(&[], &leaf).unwrap();
         assert_eq!(
             count.load(Ordering::SeqCst),
@@ -2483,7 +2515,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         struct DropCounter(Arc<AtomicUsize>);
         impl PartialEq for DropCounter {
             fn eq(&self, other: &Self) -> bool {
@@ -2507,15 +2539,17 @@ mod tests {
         // Only DropCounter's type is registered; i32 (the element after it) is not, so
         // call_dyn_as_dynamic_sequence must fail during validation, before executing the
         // segment at all.
-        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
-            (type_id == TypeId::of::<DropCounter>()).then(|| {
-                (
-                    element_dropper_for::<DropCounter>(),
-                    element_cloner_for::<DropCounter>(),
-                    element_eq_for::<DropCounter>(),
-                )
-            })
-        };
+        let leaf =
+            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+                (type_id == TypeId::of::<DropCounter>()).then(|| {
+                    (
+                        element_dropper_for::<DropCounter>(),
+                        element_cloner_for::<DropCounter>(),
+                        element_eq_for::<DropCounter>(),
+                        element_debug_for::<DropCounter>(),
+                    )
+                })
+            };
         let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
         assert!(result.is_err());
         assert_eq!(
@@ -2553,15 +2587,17 @@ mod tests {
 
         // Only i32 (the nested tuple's own interior element) is registered; f64 (the outer
         // sibling element) is not.
-        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
-            (type_id == TypeId::of::<i32>()).then(|| {
-                (
-                    element_dropper_for::<i32>(),
-                    element_cloner_for::<i32>(),
-                    element_eq_for::<i32>(),
-                )
-            })
-        };
+        let leaf =
+            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+                (type_id == TypeId::of::<i32>()).then(|| {
+                    (
+                        element_dropper_for::<i32>(),
+                        element_cloner_for::<i32>(),
+                        element_eq_for::<i32>(),
+                        element_debug_for::<i32>(),
+                    )
+                })
+            };
         let result = seg.call_dyn_as_dynamic_sequence(&[], &leaf);
         assert!(result.is_err());
     }
@@ -2582,15 +2618,17 @@ mod tests {
         fn extract_i32(ptr: *const u8) -> Box<dyn Any> {
             Box::new(unsafe { *ptr.cast::<i32>() })
         }
-        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
-            (type_id == TypeId::of::<i32>()).then(|| {
-                (
-                    element_dropper_for::<i32>(),
-                    element_cloner_for::<i32>(),
-                    element_eq_for::<i32>(),
-                )
-            })
-        };
+        let leaf =
+            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+                (type_id == TypeId::of::<i32>()).then(|| {
+                    (
+                        element_dropper_for::<i32>(),
+                        element_cloner_for::<i32>(),
+                        element_eq_for::<i32>(),
+                        element_debug_for::<i32>(),
+                    )
+                })
+            };
         let extractors = [
             DynExtractor::Scalar(TypeId::of::<i32>(), extract_i32 as BoxExtractor),
             DynExtractor::Tuple(Box::new(leaf)),
@@ -2602,6 +2640,43 @@ mod tests {
         assert_eq!(nested.arity(), 2);
         let (b, c): (i32, i32) = nested.try_to_tuple()?;
         assert_eq!((b, c), (2, 3));
+        Ok(())
+    }
+
+    #[test]
+    fn call_dyn_tuple_mixed_tuple_slot_result_debug_formats_correctly() -> anyhow::Result<()> {
+        let mut seg = DynSegment::new::<()>();
+        let ambient_start = seg.current_stack_offset();
+        seg.op0(|| 1i32);
+        let inner_start = seg.current_stack_offset();
+        seg.op0(|| 2i32);
+        seg.op0(|| 3i32);
+        seg.make_tuple(2, inner_start);
+        seg.make_tuple(2, ambient_start);
+
+        let leaf =
+            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+                (type_id == TypeId::of::<i32>()).then(|| {
+                    (
+                        element_dropper_for::<i32>(),
+                        element_cloner_for::<i32>(),
+                        element_eq_for::<i32>(),
+                        element_debug_for::<i32>(),
+                    )
+                })
+            };
+        fn extract_i32(ptr: *const u8) -> Box<dyn Any> {
+            Box::new(unsafe { *ptr.cast::<i32>() })
+        }
+        let extractors = [
+            DynExtractor::Scalar(TypeId::of::<i32>(), extract_i32 as BoxExtractor),
+            DynExtractor::Tuple(Box::new(leaf)),
+        ];
+        let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }?;
+        let nested = results[1]
+            .downcast_ref::<DynamicSequence>()
+            .expect("slot 1 is a DynamicSequence");
+        assert_eq!(format!("{nested:?}"), "(2, 3)");
         Ok(())
     }
 
@@ -2647,7 +2722,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         struct DropCounter(Arc<AtomicUsize>);
         impl PartialEq for DropCounter {
             fn eq(&self, other: &Self) -> bool {
@@ -2670,23 +2745,26 @@ mod tests {
         seg.make_tuple(2, inner_start);
         seg.make_tuple(1, ambient_start);
 
-        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
-            if type_id == TypeId::of::<DropCounter>() {
-                Some((
-                    element_dropper_for::<DropCounter>(),
-                    element_cloner_for::<DropCounter>(),
-                    element_eq_for::<DropCounter>(),
-                ))
-            } else if type_id == TypeId::of::<i32>() {
-                Some((
-                    element_dropper_for::<i32>(),
-                    element_cloner_for::<i32>(),
-                    element_eq_for::<i32>(),
-                ))
-            } else {
-                None
-            }
-        };
+        let leaf =
+            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+                if type_id == TypeId::of::<DropCounter>() {
+                    Some((
+                        element_dropper_for::<DropCounter>(),
+                        element_cloner_for::<DropCounter>(),
+                        element_eq_for::<DropCounter>(),
+                        element_debug_for::<DropCounter>(),
+                    ))
+                } else if type_id == TypeId::of::<i32>() {
+                    Some((
+                        element_dropper_for::<i32>(),
+                        element_cloner_for::<i32>(),
+                        element_eq_for::<i32>(),
+                        element_debug_for::<i32>(),
+                    ))
+                } else {
+                    None
+                }
+            };
         let extractors = [DynExtractor::Tuple(Box::new(leaf))];
         let results = unsafe { seg.call_dyn_tuple_mixed(&[], &extractors) }.unwrap();
         assert_eq!(
@@ -2742,7 +2820,9 @@ mod tests {
 
         // The nested tuple's own element type (i32) is never registered, so validation must
         // fail before the segment ever executes.
-        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> { None };
+        let leaf = |_: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+            None
+        };
         let extractors = [
             DynExtractor::Scalar(
                 TypeId::of::<DropCounter>(),
@@ -3218,15 +3298,17 @@ mod tests {
         source.op0(|| 3i32);
         source.make_tuple(2, inner_start);
         source.make_tuple(2, ambient_start);
-        let leaf = |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq)> {
-            (type_id == TypeId::of::<i32>()).then(|| {
-                (
-                    element_dropper_for::<i32>(),
-                    element_cloner_for::<i32>(),
-                    element_eq_for::<i32>(),
-                )
-            })
-        };
+        let leaf =
+            |type_id: TypeId| -> Option<(ElementDropper, ElementCloner, ElementEq, ElementDebug)> {
+                (type_id == TypeId::of::<i32>()).then(|| {
+                    (
+                        element_dropper_for::<i32>(),
+                        element_cloner_for::<i32>(),
+                        element_eq_for::<i32>(),
+                        element_debug_for::<i32>(),
+                    )
+                })
+            };
         let seq = source.call_dyn_as_dynamic_sequence(&[], &leaf)?;
 
         let inner_shape = vec![
