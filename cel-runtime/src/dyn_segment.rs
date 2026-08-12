@@ -1,7 +1,8 @@
 use crate::c_stack_list::{CNil, CStackList, IntoCStackList};
 use crate::dynamic_sequence::{
-    DynamicSequence, ElementCloner, ElementDropper, ElementEq, SequenceElement, SequenceList,
-    TupleSequence, element_cloner_for, element_dropper_for, element_eq_for,
+    DynamicSequence, ElementCloner, ElementDebug, ElementDropper, ElementEq, SequenceElement,
+    SequenceList, TupleSequence, element_cloner_for, element_debug_for, element_dropper_for,
+    element_eq_for,
 };
 use crate::list_traits::{List, ListTypeIteratorAdvance, TypeIdIterator};
 use crate::memory::align_index;
@@ -1548,6 +1549,15 @@ impl DynSegment {
     }
 }
 
+/// Placeholder [`ElementDebug`] for leaf elements resolved via `build_dynamic_sequence`'s `leaf`
+/// callback, which does not yet supply a per-type debug formatter.
+///
+/// TODO(tuple-value-display Task 2): replace with a real per-type formatter once `leaf` is
+/// extended to also resolve an [`ElementDebug`] alongside its drop/clone/eq triple.
+unsafe fn debug_unavailable(_ptr: *const u8, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("<value>")
+}
+
 /// Recursively converts a described tuple region at `base` into an owned `DynamicSequence`,
 /// moving each leaf's bytes and recursing into nested tuple elements as nested `DynamicSequence`
 /// values.
@@ -1573,7 +1583,7 @@ unsafe fn build_dynamic_sequence(
     let mut offset = 0usize;
     for elem in associated {
         let is_tuple = elem.type_id == TypeId::of::<DynTuple>();
-        let (size, align, drop, clone, eq, value) = if is_tuple {
+        let (size, align, drop, clone, eq, debug, value) = if is_tuple {
             let nested =
                 unsafe { build_dynamic_sequence(base.add(elem.offset), &elem.associated, leaf)? };
             (
@@ -1582,6 +1592,7 @@ unsafe fn build_dynamic_sequence(
                 element_dropper_for::<DynamicSequence>(),
                 element_cloner_for::<DynamicSequence>(),
                 element_eq_for::<DynamicSequence>(),
+                element_debug_for::<DynamicSequence>(),
                 Built::Tuple(nested),
             )
         } else {
@@ -1592,7 +1603,15 @@ unsafe fn build_dynamic_sequence(
                     elem.type_name
                 )
             })?;
-            (elem.size, elem.align, drop, clone, eq, Built::Leaf)
+            (
+                elem.size,
+                elem.align,
+                drop,
+                clone,
+                eq,
+                debug_unavailable as ElementDebug,
+                Built::Leaf,
+            )
         };
         let aligned = align_index(align, offset);
         max_align = max_align.max(align);
@@ -1613,6 +1632,7 @@ unsafe fn build_dynamic_sequence(
             drop,
             clone,
             eq,
+            debug,
         });
         built.push(value);
         offset = aligned + size;
@@ -2275,7 +2295,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         struct DropCounter(Arc<AtomicUsize>);
         impl PartialEq for DropCounter {
             fn eq(&self, other: &Self) -> bool {
