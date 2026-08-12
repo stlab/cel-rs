@@ -168,3 +168,15 @@ New wrapper components, following the existing `SpActionGroup`/`SpActionButton` 
   behavior is correct and user-visibly harmless (idempotent, same end state), just redundant
   work. Not a blocker; a cheap future improvement would be to debounce/coalesce watcher events
   within a short window (e.g. a few hundred ms) before triggering a reload.
+- Also discovered during Task 3 (2026-08-11), then resolved during its own fix round: launching
+  `begin` via plain `cargo run -p begin` produces a desktop window whose Spectrum web
+  components (`sp-sidenav-item`, `sp-textfield`, etc.) don't visually render — they're present
+  correctly in the DOM (verified via CDP) but show no rendered text/styling, apparently because
+  `cargo run` skips whatever asset/bundling step registers those custom elements. This is
+  **specific to `cargo run`, not a project-wide or environment-wide limitation**: launching the
+  same build via `dx serve --platform desktop` instead renders the sidebar and graph correctly
+  (confirmed with real screenshots showing `diamond-copy` appearing/disappearing in the sidebar
+  and a cell value updating live to `inf`/`5` after an on-disk edit). No follow-up action
+  needed here beyond noting it for future manual-verification sessions: prefer `dx serve
+  --platform desktop` over `cargo run -p begin` when visual confirmation of `begin`'s UI is
+  needed.
