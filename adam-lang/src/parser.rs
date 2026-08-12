@@ -9,13 +9,13 @@ use std::str::FromStr;
 use indexmap::IndexMap;
 
 use adam_rs::{CellId, Condition, Method, OutputId, RelationshipId, Sheet};
-use cel_parser::lex_lexer::{HasSpan, LexLexer, Literal, Token};
+use cel_parser::lex_lexer::{HasSpan, LexLexer, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
 use cel_runtime::DynSegment;
 use proc_macro2::{Span, TokenStream};
 
 use crate::TypeRegistry;
-use crate::type_registry::{AddConditionalFn, CallDynFn, PushArgFn, TypeEntry, TypeShape};
+use crate::type_registry::{AddConditionalFn, CallDynFn, PushArgFn, TypeShape};
 
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, ParseError>;
@@ -466,26 +466,6 @@ impl AdamParser {
             ctx.cell_names.get(&match_name).cloned().ok_or_else(|| {
                 ParseError::new(format!("undeclared cell `{match_name}`"), match_span)
             })?;
-        // TODO(Task 9): a tuple-typed match cell isn't supported yet — Task 9 decides whether
-        // and how a conditional can match on a tuple shape. For now this is an explicit error
-        // rather than a silent gap.
-        let match_type_id = match match_shape {
-            TypeShape::Named(type_id) => type_id,
-            TypeShape::Tuple(_) => {
-                return Err(ParseError::new(
-                    format!(
-                        "conditional `{match_name}`: tuple-typed match cells are not yet \
-                         supported"
-                    ),
-                    match_span,
-                ));
-            }
-        };
-        let add_cond_fn: AddConditionalFn = self
-            .types
-            .entry_by_type_id(match_type_id)
-            .ok_or_else(|| ParseError::new("match cell type not in TypeRegistry", match_span))?
-            .add_conditional_fn;
         ctx.expect_open_brace()?;
 
         let mut branches: Vec<(Box<dyn Any>, Vec<RelationshipId>)> = Vec::new();
@@ -504,13 +484,22 @@ impl AdamParser {
                 break; // default branch is always last
             }
 
-            // Named branch: `literal => { ... }`
-            let (lit, lit_span) = ctx.consume_literal()?;
-            let entry = self
-                .types
-                .entry_by_type_id(match_type_id)
-                .ok_or_else(|| ParseError::new("match cell type not in TypeRegistry", lit_span))?;
-            let branch_val = parse_literal_as(entry, &lit, lit_span)?;
+            // Named branch: `or_expression "=>" "{" ... "}"` — an or_expression covers both a
+            // bare literal (`0i32 =>`) and a tuple value (`(0, 0) =>`) via the same grammar cell
+            // initializers already use.
+            let branch_span = ctx.peek_span();
+            let segment = self.parse_cel_or_expression(ctx)?;
+            let (branch_shape, branch_val) = self.eval_segment_boxed(segment)?;
+            if branch_shape != match_shape {
+                return Err(ParseError::new(
+                    format!(
+                        "conditional branch: type mismatch: expected `{}`, got `{}`",
+                        self.types.display_name(&match_shape),
+                        self.types.display_name(&branch_shape)
+                    ),
+                    branch_span,
+                ));
+            }
             ctx.expect_punct("=>")?;
             ctx.expect_open_brace()?;
             let rel_ids = self.parse_branch_relationships(ctx)?;
@@ -520,8 +509,40 @@ impl AdamParser {
         }
         ctx.expect_close_brace()?;
 
-        add_cond_fn(&mut ctx.sheet, match_cell_id, branches, default_rel_ids)
-            .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
+        match &match_shape {
+            TypeShape::Named(type_id) => {
+                let add_cond_fn: AddConditionalFn = self
+                    .types
+                    .entry_by_type_id(*type_id)
+                    .ok_or_else(|| {
+                        ParseError::new("match cell type not in TypeRegistry", match_span)
+                    })?
+                    .add_conditional_fn;
+                add_cond_fn(&mut ctx.sheet, match_cell_id, branches, default_rel_ids)
+                    .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
+            }
+            TypeShape::Tuple(_) => {
+                let typed_branches: Vec<(Vec<cel_runtime::DynamicSequence>, Vec<RelationshipId>)> =
+                    branches
+                        .into_iter()
+                        .map(|(val, rel_ids)| {
+                            let seq = *val.downcast::<cel_runtime::DynamicSequence>().expect(
+                                "eval_segment_boxed: a Tuple shape always boxes a \
+                                     DynamicSequence",
+                            );
+                            (vec![seq], rel_ids)
+                        })
+                        .collect();
+                ctx.sheet
+                    .add_conditional::<cel_runtime::DynamicSequence>(
+                        match_cell_id,
+                        typed_branches,
+                        default_rel_ids,
+                    )
+                    .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
+            }
+        }
+
         Ok(())
     }
 
@@ -925,78 +946,6 @@ impl AdamParser {
 // ---------------------------------------------------------------------------
 // Free functions
 // ---------------------------------------------------------------------------
-
-/// Parses `lit` as the type described by `entry`.
-///
-/// # Errors
-///
-/// Returns `Err` if the literal kind does not match the expected type.
-fn parse_literal_as(entry: &TypeEntry, lit: &Literal, span: Span) -> Result<Box<dyn Any>> {
-    use syn::Lit;
-    let val = match lit {
-        Lit::Int(i) => parse_int_literal(entry, i),
-        Lit::Float(f) => parse_float_literal(entry, f),
-        Lit::Bool(b) if entry.type_id == TypeId::of::<bool>() => {
-            Some(Box::new(b.value) as Box<dyn Any>)
-        }
-        Lit::Str(s) if entry.type_id == TypeId::of::<String>() => {
-            Some(Box::new(s.value()) as Box<dyn Any>)
-        }
-        _ => None,
-    };
-    val.ok_or_else(|| {
-        ParseError::new(
-            format!("literal cannot be used as type `{}`", entry.type_name),
-            span,
-        )
-    })
-}
-
-macro_rules! try_parse_int {
-    ($i:expr, $T:ty) => {
-        $i.base10_parse::<$T>()
-            .ok()
-            .map(|v| Box::new(v) as Box<dyn Any>)
-    };
-}
-
-macro_rules! try_parse_float {
-    ($f:expr, $T:ty) => {
-        $f.base10_parse::<$T>()
-            .ok()
-            .map(|v| Box::new(v) as Box<dyn Any>)
-    };
-}
-
-/// Parses `i` as the integer or float type described by `entry`, returning `None` on mismatch.
-fn parse_int_literal(entry: &TypeEntry, i: &syn::LitInt) -> Option<Box<dyn Any>> {
-    match entry.type_id {
-        t if t == TypeId::of::<i8>() => try_parse_int!(i, i8),
-        t if t == TypeId::of::<i16>() => try_parse_int!(i, i16),
-        t if t == TypeId::of::<i32>() => try_parse_int!(i, i32),
-        t if t == TypeId::of::<i64>() => try_parse_int!(i, i64),
-        t if t == TypeId::of::<i128>() => try_parse_int!(i, i128),
-        t if t == TypeId::of::<isize>() => try_parse_int!(i, isize),
-        t if t == TypeId::of::<u8>() => try_parse_int!(i, u8),
-        t if t == TypeId::of::<u16>() => try_parse_int!(i, u16),
-        t if t == TypeId::of::<u32>() => try_parse_int!(i, u32),
-        t if t == TypeId::of::<u64>() => try_parse_int!(i, u64),
-        t if t == TypeId::of::<u128>() => try_parse_int!(i, u128),
-        t if t == TypeId::of::<usize>() => try_parse_int!(i, usize),
-        t if t == TypeId::of::<f64>() => try_parse_float!(i, f64),
-        t if t == TypeId::of::<f32>() => try_parse_float!(i, f32),
-        _ => None,
-    }
-}
-
-/// Parses `f` as the float type described by `entry`, returning `None` on mismatch.
-fn parse_float_literal(entry: &TypeEntry, f: &syn::LitFloat) -> Option<Box<dyn Any>> {
-    match entry.type_id {
-        t if t == TypeId::of::<f64>() => try_parse_float!(f, f64),
-        t if t == TypeId::of::<f32>() => try_parse_float!(f, f32),
-        _ => None,
-    }
-}
 
 /// How one input cell's identifier scope entry pushes its value onto a method/out/condition
 /// body's segment: a scalar cell via a plain `push_arg`-family function pointer, or a
@@ -1589,6 +1538,28 @@ mod tests {
             result.is_err(),
             "float literal for i32 match cell must be an error"
         );
+    }
+
+    #[test]
+    fn parse_conditional_with_tuple_typed_match_cell() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell mode: (i32, i32) = (0, 0);
+                    cell x: f64 = 1.0;
+                    cell y: f64;
+                    conditional mode {
+                        (0, 0) => { relationship { method [x] -> [y] { x } } },
+                        _ => { relationship { method [x] -> [y] { x * 2.0 } } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (y_id, _) = sheet.cell_names["y"].clone();
+        assert_eq!(*sheet.read::<f64>(y_id).unwrap(), 1.0);
     }
 
     #[test]
