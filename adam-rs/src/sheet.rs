@@ -518,18 +518,37 @@ impl Sheet {
         self.last_violated.get(&id).into_iter().flatten().copied()
     }
 
-    /// Returns the set of root source cells currently determining `id`'s value, as of the
-    /// last `propagate()` call.
+    /// Returns the set of root cells that could determine `id`'s value for *some* choice of
+    /// cell strengths, as of the last `propagate()` call.
     ///
-    /// Walks backward from `id` through the last plan's selected methods. A
-    /// self-referencing input (present in both a method's inputs and its outputs) is
-    /// treated as one of its own roots, since it is read at its pre-execution value rather
-    /// than derived further.
+    /// A cell is a root candidate for `current` whenever some *active* relationship
+    /// adjacent to `current` has a method producing it — not just the one method the
+    /// current strengths happen to have selected: a different strength ordering could pick
+    /// a different method of that same relationship, making any of its other cells the
+    /// source instead. So every method (of every active relationship touching `current`)
+    /// with `current` among its outputs contributes its inputs to the walk, not only the
+    /// currently-selected one. [`Sheet::is_forced`] already answers "could `current` itself
+    /// be left as a free source under some strength" precisely, so `current` is added
+    /// directly whenever it is not forced. A self-referencing input (present in both a
+    /// method's inputs and its outputs) is treated as one of its own roots directly, since
+    /// it is read at its pre-execution value rather than derived further.
     ///
-    /// - Postcondition: returns `{id}` if no propagation has run yet, or if `id` is
-    ///   currently a source.
+    /// Every visited cell is also checked against every conditional in the sheet: if any of
+    /// that conditional's branches (or its default) has a method whose outputs include the
+    /// visited cell, the conditional's match cell is added as a contributor too, and is
+    /// itself traced recursively. This covers both an active producer that happens to
+    /// belong to a conditional branch, and a cell with *no* active producer specifically
+    /// because the branch that would define it isn't the one currently selected (that
+    /// absence is itself a fact controlled by the match cell, not an indication that the
+    /// match cell is irrelevant).
     ///
-    /// - Complexity: O(N) where N is the number of cells reachable upstream of `id`.
+    /// - Postcondition: returns `{id}` if no propagation has run yet, or if `id` is not
+    ///   forced and no active or conditional relationship could produce it.
+    ///
+    /// - Complexity: O(N · (R·M + B)) where N is the number of cells reachable from `id`
+    ///   (including conditional match cells), R is the number of relationships adjacent to
+    ///   a visited cell, M is the maximum number of methods per relationship, and B is the
+    ///   total number of branch/default relationships across all conditionals.
     pub fn contributing_cells(&self, id: CellId) -> HashSet<CellId> {
         let mut result = HashSet::new();
         let mut visited: HashSet<CellId> = HashSet::new();
@@ -538,33 +557,70 @@ impl Sheet {
             if !visited.insert(current) {
                 continue;
             }
-            if self.is_source(current) {
-                result.insert(current);
-                continue;
+
+            for match_cell in self.conditionals_potentially_producing(current) {
+                stack.push(match_cell);
             }
-            let producing = self.last_plan.as_ref().and_then(|plan| {
-                plan.iter()
-                    .find(|&&(rel, idx)| {
-                        self.relationships[rel].methods[idx]
-                            .outputs
-                            .contains(&current)
-                    })
-                    .copied()
-            });
-            let Some((rel_id, method_idx)) = producing else {
+
+            if !self.is_forced(current) {
                 result.insert(current);
+            }
+
+            let Some(adj) = self.cells.get(current).map(|c| c.adj.clone()) else {
                 continue;
             };
-            let method = &self.relationships[rel_id].methods[method_idx];
-            for &input in &method.inputs {
-                if method.outputs.contains(&input) {
-                    result.insert(input);
-                } else {
-                    stack.push(input);
+            for rel_id in adj {
+                if !self.is_relationship_active(rel_id) {
+                    continue;
+                }
+                for method in &self.relationships[rel_id].methods {
+                    if !method.outputs.contains(&current) {
+                        continue;
+                    }
+                    for &input in &method.inputs {
+                        if method.outputs.contains(&input) {
+                            result.insert(input);
+                        } else {
+                            stack.push(input);
+                        }
+                    }
                 }
             }
         }
         result
+    }
+
+    /// Returns `true` if `rel_id` was part of the active relationship set for the last
+    /// `propagate()` call — an unconditional relationship is always active; a conditional
+    /// branch/default relationship is active only while its conditional currently selects
+    /// it.
+    ///
+    /// Returns `false` if no propagation has run yet.
+    fn is_relationship_active(&self, rel_id: RelationshipId) -> bool {
+        self.last_plan
+            .as_ref()
+            .is_some_and(|plan| plan.iter().any(|&(r, _)| r == rel_id))
+    }
+
+    /// Returns the match cell of every conditional with at least one branch (or default)
+    /// relationship that touches `cell` (as an input or output of any of its methods) —
+    /// every conditional whose branch choice currently determines, or could determine,
+    /// `cell`'s value or whether it has an active producer at all.
+    ///
+    /// - Complexity: O(B) where B is the total number of branch/default relationships
+    ///   across all conditionals.
+    fn conditionals_potentially_producing(&self, cell: CellId) -> Vec<CellId> {
+        self.conditionals
+            .values()
+            .filter(|cond| {
+                cond.branches
+                    .iter()
+                    .flat_map(|branch| branch.relationships.iter())
+                    .chain(cond.default.iter())
+                    .any(|&rel_id| self.relationships[rel_id].adj.contains(&cell))
+            })
+            .map(|cond| cond.cell)
+            .collect()
     }
 
     /// Returns the union of [`Sheet::contributing_cells`] over condition `id`'s own

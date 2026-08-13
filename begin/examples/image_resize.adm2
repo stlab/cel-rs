@@ -1,66 +1,254 @@
+/*
+    Copyright 2013 Adobe
+    Distributed under the Boost Software License, Version 1.0.
+    (See accompanying file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+
+    Ported from ASL's classic `image_size` Adam sheet. adam-lang has no separate
+    input/constant/interface/output/invariant sections, no `unlink`, and no `when (expr)
+    relate {}` guard on an arbitrary boolean expression — only `conditional match_cell {
+    literal => {...} }`, dispatching on one cell's own value. The translation below:
+      - ASL `constant`/one-directional `<==` rules -> a `relationship` with a single method
+        (the planner always derives that cell; there is no alternative method to pick).
+      - ASL `when (cond) relate {}` -> `conditional cond { true => {...} false => {...} }`.
+      - ASL `when (a && b) relate {}` -> a derived helper bool cell for `a && b`
+        (`resample_and_constrain`), then `conditional` on that helper.
+      - ASL `unlink x : init <== cond ? x : fallback;` -> `conditional cond`'s "false" branch
+        forces `x` back to `fallback`; its "true" branch leaves `x` untouched (a free,
+        directly writable cell), matching the checkbox-like behavior `unlink` describes.
+      - ASL's `@bicubic`/`@draft`/etc. symbolic tags -> `String` literals (adam-lang has no
+        atom/enum literal).
+    The `result` output is approximated as a single tuple `(command, width, height,
+    resolution, scale_styles, resample_method)`, command first — adam-lang has no
+    tagged-union/struct output type, only tuples. Unlike ASL, the pixel/scale_styles/
+    resample_method fields are present (and treated as relevant) even in the
+    `set_resolution` case, where ASL would omit them entirely.
+*/
 sheet image_resize {
-    // Reference pixel dimensions of the original source image. These are
-    // never an output of any relationship below, so they stay fixed.
-    // Pixel counts are integers - there's no such thing as a fractional
-    // pixel - so this and width_px/height_px below are i32, not f64.
-    cell orig_width: i32 = 1024;
-    cell orig_height: i32 = 768;
+    // --- input ---
+    cell original_width: i32 = 1600;
+    cell original_height: i32 = 1200;
+    cell original_resolution: f64 = 300.0;
 
-    // Cells intended to be *derived* now (declared early = lower initial
-    // strength): pixel dimensions and zoom percent follow from the physical
-    // size and resolution below.
-    cell width_px: i32 = 1024;
-    cell height_px: i32 = 768;
-    cell percent: f64;
+    // --- constant (derived once from input; never a source) ---
+    cell original_doc_width: f64;
+    cell original_doc_height: f64;
 
-    // "Constrain Proportions": 1 = locked, 0 = unlocked.
-    cell constrain_proportions: i32 = 1;
+    // --- interface ---
+    cell resample: bool = true;
+    cell constrain: bool = true;
+    // Helper for ASL's `when (constrain && resample)` / `unlink scale_styles`'s compound
+    // guard: adam-lang's `conditional` can only dispatch on one cell's own value.
+    cell resample_and_constrain: bool = true;
+    cell scale_styles: bool = true;
 
-    // Cells intended to stay *sources* by default now (declared last =
-    // higher initial strength): physical size in inches and resolution.
-    // Changing dpi therefore recomputes width_px/height_px, holding these
-    // fixed, instead of the other way around.
-    cell width_in: f64 = 3.4133333333333336;
-    cell height_in: f64 = 2.56;
-    cell dpi: f64 = 300.0;
+    cell resample_method: String = "bicubic";
 
-    // width_px, width_in, and dpi are a three-way constraint: fix any two,
-    // the third follows. width_px is i32 while width_in/dpi are f64, so
-    // every method crossing that boundary explicitly casts: `as f64`
-    // widens i32->f64 exactly; `round(...) as i32` narrows f64->i32 to the
-    // nearest whole pixel, erroring rather than silently truncating if it
-    // doesn't fit in i32.
+    cell dim_width_pixels: i32 = 1600;
+    cell dim_width_percent: f64 = 100.0;
+
+    cell dim_height_pixels: i32 = 1200;
+    cell dim_height_percent: f64 = 100.0;
+
+    cell doc_width_inches: f64 = 5.333333333333333;
+    cell doc_width_percent: f64 = 100.0;
+
+    // Resolution is declared before the height/inches cells below, mirroring the ASL
+    // source's own comment: "Resolution must be initialized before width and height
+    // inches to allow proportions to be constrained." adam-rs assigns each cell's initial
+    // solver priority from declaration order, so this ordering is preserved best-effort;
+    // the two solvers don't guarantee identical tie-breaking.
+    cell doc_resolution: f64 = 300.0;
+
+    cell doc_height_inches: f64 = 4.0;
+    cell doc_height_percent: f64 = 100.0;
+
+    cell auto_quality: String = "draft";
+
+    // ASL leaves this uninitialized ("initialized from doc_resolution"), relying on
+    // its solver to seed it from doc_resolution's *current* value before first use.
+    // adam-lang cell initializers are literals only, and the planner's strength-based
+    // release order can pick screen_lpi itself as the free source rather than deriving
+    // it from doc_resolution — so unlike the sheet's other derived cells, leaving this
+    // at a default 0.0 does NOT get corrected by the first propagate(); it must already
+    // be consistent with doc_resolution's own default (300.0) at the default "draft"
+    // quality (factor 1): 300.0 / 1 = 300.0.
+    cell screen_lpi: f64 = 300.0;
+
+    // --- logic ---
+
     relationship {
-        method [width_px, dpi] -> [width_in] { width_px as f64 / dpi }
-        method [width_in, dpi] -> [width_px] { round(width_in * dpi) as i32 }
-        method [width_px, width_in] -> [dpi] { width_px as f64 / width_in }
+        method [original_width, original_resolution] -> [original_doc_width] {
+            original_width as f64 / original_resolution
+        }
+    }
+    relationship {
+        method [original_height, original_resolution] -> [original_doc_height] {
+            original_height as f64 / original_resolution
+        }
     }
 
-    // Same triangle for height, sharing the same dpi cell as the width
-    // triangle above.
     relationship {
-        method [height_px, dpi] -> [height_in] { height_px as f64 / dpi }
-        method [height_in, dpi] -> [height_px] { round(height_in * dpi) as i32 }
-        method [height_px, height_in] -> [dpi] { height_px as f64 / height_in }
+        method [resample, constrain] -> [resample_and_constrain] { resample && constrain }
     }
 
-    // percent is just width_px expressed relative to the original width.
+    // Unconditional: doc_width_inches <-> doc_width_percent, pinned to original_doc_width.
     relationship {
-        method [width_px, orig_width] -> [percent] { width_px as f64 / orig_width as f64 * 100.0 }
-        method [percent, orig_width] -> [width_px] { round(orig_width as f64 * percent / 100.0) as i32 }
+        method [doc_width_percent, original_doc_width] -> [doc_width_inches] {
+            doc_width_percent * original_doc_width / 100.0
+        }
+        method [doc_width_inches, original_doc_width] -> [doc_width_percent] {
+            doc_width_inches * 100.0 / original_doc_width
+        }
     }
 
-    // Aspect-ratio lock, expressed on the *inch* cells instead of the pixel
-    // cells: width_in/height_in are the sources that dpi divides into, so
-    // the lock has to constrain them directly - constraining width_px/
-    // height_px instead would double-claim cells the two triangles above
-    // already derive, which the planner would reject as a conflict.
-    conditional constrain_proportions {
-        1i32 => {
+    // Unconditional: doc_height_inches <-> doc_height_percent, pinned to original_doc_height.
+    relationship {
+        method [doc_height_percent, original_doc_height] -> [doc_height_inches] {
+            doc_height_percent * original_doc_height / 100.0
+        }
+        method [doc_height_inches, original_doc_height] -> [doc_height_percent] {
+            doc_height_inches * 100.0 / original_doc_height
+        }
+    }
+
+
+    relationship {
+        method [doc_resolution, auto_quality] -> [screen_lpi] { doc_resolution / if auto_quality == "draft" { 1.0 } else if auto_quality == "good" { 1.5 } else { 2.0 } }
+        method [screen_lpi, auto_quality] -> [doc_resolution] { screen_lpi * if auto_quality == "draft" { 1.0 } else if auto_quality == "good" { 1.5 } else { 2.0 } }
+    }
+
+
+    conditional resample {
+        true => {
             relationship {
-                method [width_in, orig_width, orig_height] -> [height_in] { width_in * orig_height as f64 / orig_width as f64 }
-                method [height_in, orig_width, orig_height] -> [width_in] { height_in * orig_width as f64 / orig_height as f64 }
+                method [dim_width_percent, original_width] -> [dim_width_pixels] {
+                    round(dim_width_percent * original_width as f64 / 100.0) as i32
+                }
+                method [dim_width_pixels, original_width] -> [dim_width_percent] {
+                    dim_width_pixels as f64 * 100.0 / original_width as f64
+                }
+            }
+            relationship {
+                method [dim_height_percent, original_height] -> [dim_height_pixels] {
+                    round(dim_height_percent * original_height as f64 / 100.0) as i32
+                }
+                method [dim_height_pixels, original_height] -> [dim_height_percent] {
+                    dim_height_pixels as f64 * 100.0 / original_height as f64
+                }
+            }
+            relationship {
+                method [dim_width_pixels, doc_resolution] -> [doc_width_inches] {
+                    dim_width_pixels as f64 / doc_resolution
+                }
+                method [doc_width_inches, doc_resolution] -> [dim_width_pixels] {
+                    round(doc_width_inches * doc_resolution) as i32
+                }
+                method [dim_width_pixels, doc_width_inches] -> [doc_resolution] {
+                    dim_width_pixels as f64 / doc_width_inches
+                }
+            }
+            relationship {
+                method [dim_height_pixels, doc_resolution] -> [doc_height_inches] {
+                    dim_height_pixels as f64 / doc_resolution
+                }
+                method [doc_height_inches, doc_resolution] -> [dim_height_pixels] {
+                    round(doc_height_inches * doc_resolution) as i32
+                }
+                method [dim_height_pixels, doc_height_inches] -> [doc_resolution] {
+                    dim_height_pixels as f64 / doc_height_inches
+                }
             }
         }
+        false => {
+            // unlink constrain: true <== resample ? constrain : true;
+            relationship {
+                method [resample] -> [constrain] { true }
+            }
+            // dim_width_pixels/percent snap back to the un-resampled defaults.
+            relationship {
+                method [original_width] -> [dim_width_pixels, dim_width_percent] {
+                    (original_width, 100.0)
+                }
+            }
+            relationship {
+                method [original_height] -> [dim_height_pixels, dim_height_percent] {
+                    (original_height, 100.0)
+                }
+            }
+            relationship {
+                method [doc_width_inches, original_width] -> [doc_resolution] {
+                    original_width as f64 / doc_width_inches
+                }
+                method [doc_resolution, original_width] -> [doc_width_inches] {
+                    original_width as f64 / doc_resolution
+                }
+            }
+            relationship {
+                method [doc_height_inches, original_height] -> [doc_resolution] {
+                    original_height as f64 / doc_height_inches
+                }
+                method [doc_resolution, original_height] -> [doc_height_inches] {
+                    original_height as f64 / doc_resolution
+                }
+            }
+        }
+    }
+
+    conditional resample_and_constrain {
+        true => {
+            // when (constrain && resample) relate: lock width/height percent together.
+            relationship {
+                method [dim_width_percent] -> [dim_height_percent] { dim_width_percent }
+                method [dim_height_percent] -> [dim_width_percent] { dim_height_percent }
+            }
+        }
+        false => {
+            // unlink scale_styles: true <== resample && constrain ? scale_styles : false;
+            relationship {
+                method [resample_and_constrain] -> [scale_styles] { false }
+            }
+        }
+    }
+
+    // --- output / invariant ---
+
+    out byte_count: i64 {
+        method [dim_width_pixels, dim_height_pixels] {
+            dim_width_pixels as i64 * dim_height_pixels as i64 * 32i64
+        }
+    }
+
+    out result: (String, i32, i32, f64, bool, String) {
+        method [
+            resample,
+            dim_width_pixels,
+            dim_height_pixels,
+            doc_resolution,
+            scale_styles,
+            resample_method
+        ] {
+            if resample {
+                (
+                    "resize_image",
+                    dim_width_pixels,
+                    dim_height_pixels,
+                    doc_resolution,
+                    scale_styles,
+                    resample_method
+                )
+            } else {
+                (
+                    "set_resolution",
+                    0,
+                    0,
+                    doc_resolution,
+                    false,
+                    ""
+                )
+            }
+        }
+
+        condition width_max [dim_width_pixels] { dim_width_pixels <= 300000 }
+        condition height_max [dim_height_pixels] { dim_height_pixels <= 300000 }
     }
 }
