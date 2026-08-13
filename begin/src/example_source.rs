@@ -321,6 +321,58 @@ mod tests {
     }
 
     #[test]
+    fn image_resize_constrain_is_relevant_despite_only_feeding_a_conditional_helper_cell() {
+        // Regression test: `constrain` only ever feeds `resample_and_constrain` (a derived
+        // helper cell used as a conditional match cell) — it is never itself a relationship
+        // output or a match cell. `Sheet::contributing_cells` must still trace through the
+        // match cell to find it, or it wrongly shows as an irrelevant/disabled field even
+        // though editing it changes which branch is active.
+        use adam_lang::AdamParser;
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/image_resize.adm2"),
+        )
+        .unwrap();
+        let mut parser = AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new());
+        let mut parsed = parser.parse_str(&source).unwrap();
+        parsed.propagate().unwrap();
+        let (constrain_id, _) = *parsed.cell_names.get("constrain").unwrap();
+        assert!(parsed.output_relevant_cells().contains(&constrain_id));
+    }
+
+    #[test]
+    fn image_resize_relevance_does_not_depend_on_which_cell_currently_holds_strength() {
+        // Regression test: `dim_width_pixels`/`dim_width_percent`/`doc_width_inches`/
+        // `doc_resolution` form a strength-ambiguous diamond (any two determine the rest).
+        // In the default state, `dim_width_pixels` and `doc_resolution` happen to be the
+        // strength-chosen sources — but every cell in the diamond, plus every cell feeding
+        // a conditional match cell (`resample`, `constrain`, `auto_quality`), must show as
+        // relevant regardless of which specific cells the *current* strengths picked.
+        use adam_lang::AdamParser;
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/image_resize.adm2"),
+        )
+        .unwrap();
+        let mut parser = AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new());
+        let mut parsed = parser.parse_str(&source).unwrap();
+        parsed.propagate().unwrap();
+        let relevant = parsed.output_relevant_cells();
+        for name in [
+            "dim_width_pixels",
+            "dim_width_percent",
+            "doc_width_inches",
+            "doc_resolution",
+            "original_width",
+            "resample",
+            "constrain",
+            "auto_quality",
+            "screen_lpi",
+        ] {
+            let (id, _) = *parsed.cell_names.get(name).unwrap();
+            assert!(relevant.contains(&id), "{name} should be relevant");
+        }
+    }
+
+    #[test]
     #[cfg(feature = "desktop")]
     fn load_example_source_rejects_name_containing_parent_dir_reference() {
         // Resolves (via `..`) to the same real file as "toy_example", but must

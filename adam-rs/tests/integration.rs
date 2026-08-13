@@ -1633,7 +1633,7 @@ fn contributing_cells_includes_self_and_other_inputs_for_self_referencing_cell()
 }
 
 #[test]
-fn contributing_cells_scoped_to_active_conditional_branch() {
+fn contributing_cells_follows_active_conditional_branch_and_includes_match_cell() {
     let mut sheet = Sheet::new();
     let p = sheet.add_cell(0_i32);
     let a = sheet.add_cell(1_i32);
@@ -1652,13 +1652,81 @@ fn contributing_cells_scoped_to_active_conditional_branch() {
         )
         .unwrap();
 
+    // Which cell is derived from which still follows only the active branch's data edge,
+    // but the match cell (which chose that branch) must also be reported as a contributor —
+    // writing p can flip which of a/b is the source.
     sheet.write(p, 0_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(sheet.contributing_cells(b), HashSet::from([a]));
+    assert_eq!(sheet.contributing_cells(b), HashSet::from([a, p]));
 
     sheet.write(p, 1_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(sheet.contributing_cells(a), HashSet::from([b]));
+    assert_eq!(sheet.contributing_cells(a), HashSet::from([b, p]));
+}
+
+#[test]
+fn contributing_cells_includes_every_direction_of_an_unforced_multi_method_relationship() {
+    // a * b = c -- three methods, one per direction (same shape as
+    // strength_drives_method_selection). With a, b currently sources and c derived,
+    // nothing here is forced: for a different strength ordering, any single cell could be
+    // the one left as the free source, with the other two determining it. Tracing from
+    // any one of them must therefore report the other two as contributors too -- not just
+    // whichever pair the *current* strengths happen to have picked.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(2.0_f64);
+    let b = sheet.add_cell(3.0_f64);
+    let c = sheet.add_cell(0.0_f64);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| Ok(x * y)),
+            Method::from_fn_2_1([b, c], a, |x: &f64, y: &f64| Ok(y / x)),
+            Method::from_fn_2_1([a, c], b, |x: &f64, y: &f64| Ok(y / x)),
+        ])
+        .unwrap();
+    sheet.write(a, 2.0_f64).unwrap();
+    sheet.write(b, 3.0_f64).unwrap();
+    sheet.propagate().unwrap();
+    assert!((*sheet.read::<f64>(c).unwrap() - 6.0).abs() < 1e-10);
+
+    assert!(!sheet.is_forced(a));
+    assert!(!sheet.is_forced(b));
+    assert!(!sheet.is_forced(c));
+    assert_eq!(sheet.contributing_cells(a), HashSet::from([a, b, c]));
+    assert_eq!(sheet.contributing_cells(b), HashSet::from([a, b, c]));
+    assert_eq!(sheet.contributing_cells(c), HashSet::from([a, b, c]));
+}
+
+#[test]
+fn contributing_cells_includes_transitive_contributors_of_a_conditional_match_cell() {
+    // p is itself derived (not a plain source) from x and y; a conditional branch only
+    // defined for p == 1 writes target. With p == 3 (no branch match, no default), target
+    // has no active producer at all -- but that absence is controlled by p, so p's own root
+    // contributors x, y must show up as target's contributors too (p itself is an
+    // intermediate derived cell, not a root, so it is correctly omitted -- same as any other
+    // derived cell in the walk).
+    let mut sheet = Sheet::new();
+    let x = sheet.add_cell(1_i32);
+    let y = sheet.add_cell(2_i32);
+    let p = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_2_1([x, y], p, |a: &i32, b: &i32| {
+            Ok(a + b)
+        })])
+        .unwrap();
+
+    let target = sheet.add_cell(0_i32);
+    let rel_branch_one = sheet
+        .add_relationship(vec![Method::from_fn_1_1(p, target, |v: &i32| Ok(*v))])
+        .unwrap();
+    sheet
+        .add_conditional(p, vec![(vec![1_i32], vec![rel_branch_one])], vec![])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(p).unwrap(), 3);
+
+    let contrib = sheet.contributing_cells(target);
+    assert_eq!(contrib, HashSet::from([target, x, y]));
 }
 
 #[test]
@@ -1774,11 +1842,11 @@ fn output_relevant_cells_updates_when_a_different_relationship_becomes_active() 
 
     sheet.write(p, 0_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(sheet.output_relevant_cells(), HashSet::from([a]));
+    assert_eq!(sheet.output_relevant_cells(), HashSet::from([a, p]));
 
     sheet.write(p, 1_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(sheet.output_relevant_cells(), HashSet::from([b]));
+    assert_eq!(sheet.output_relevant_cells(), HashSet::from([b, p]));
 }
 
 #[test]
