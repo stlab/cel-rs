@@ -111,27 +111,12 @@ sheet image_resize {
         }
     }
 
-    // screen_lpi <-> doc_resolution, scaled by auto_quality (draft=1, good=1.5, best=2).
-    conditional auto_quality {
-        "draft" => {
-            relationship {
-                method [doc_resolution] -> [screen_lpi] { doc_resolution }
-                method [screen_lpi] -> [doc_resolution] { screen_lpi }
-            }
-        }
-        "good" => {
-            relationship {
-                method [doc_resolution] -> [screen_lpi] { doc_resolution / 1.5 }
-                method [screen_lpi] -> [doc_resolution] { screen_lpi * 1.5 }
-            }
-        }
-        _ => {
-            relationship {
-                method [doc_resolution] -> [screen_lpi] { doc_resolution / 2.0 }
-                method [screen_lpi] -> [doc_resolution] { screen_lpi * 2.0 }
-            }
-        }
+
+    relationship {
+        method [doc_resolution, auto_quality] -> [screen_lpi] { doc_resolution / if auto_quality == "draft" { 1.0 } else if auto_quality == "good" { 1.5 } else { 2.0 } }
+        method [screen_lpi, auto_quality] -> [doc_resolution] { screen_lpi * if auto_quality == "draft" { 1.0 } else if auto_quality == "good" { 1.5 } else { 2.0 } }
     }
+
 
     conditional resample {
         true => {
@@ -231,9 +216,6 @@ sheet image_resize {
         method [dim_width_pixels, dim_height_pixels] {
             dim_width_pixels as i64 * dim_height_pixels as i64 * 32i64
         }
-
-        condition width_max [dim_width_pixels] { dim_width_pixels <= 300000 }
-        condition height_max [dim_height_pixels] { dim_height_pixels <= 300000 }
     }
 
     out result: (String, i32, i32, f64, bool, String) {
@@ -265,5 +247,8 @@ sheet image_resize {
                 )
             }
         }
+
+        condition width_max [dim_width_pixels] { dim_width_pixels <= 300000 }
+        condition height_max [dim_height_pixels] { dim_height_pixels <= 300000 }
     }
 }
