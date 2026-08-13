@@ -142,6 +142,14 @@ groups; the only `cel-parser` client so far.
 (implemented, in progress), and developing Dioxus applications that use property models
 (not yet implemented).
 
+**Target platforms:** desktop, web, and mobile are all intended shipping targets, not just
+desktop with web/mobile as dev-only conveniences. Desktop is furthest along today, so it's
+where most of the developer-experience work (live-reload, file watching, diagnostics) lands
+first — that work should be expected to extend to web and mobile over time rather than stay
+desktop-only. See issue #96 for one concrete gap this creates: the web/test build embeds
+`examples/*.adm2` at compile time (`include_str!`), so editing an example's content forces a
+full rebuild, unlike desktop's live-reload-off-disk.
+
 **Current state:** desktop-first Dioxus app rendering the adam-rs graph (D3
 force-directed layout) with an Inspector sidebar for reading/writing cells. A live-editable
 adam-lang source panel (`SourcePanel`) with rustc-style error diagnostics has just landed.
