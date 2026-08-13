@@ -2,7 +2,7 @@
 //! `DynSegment` evaluation.
 //!
 //! Converts type-safely to and from concrete, nestable Rust tuples via the [`TupleSequence`]
-//! trait, implemented for arities 1 through 12. All the actual byte-layout work is implemented
+//! trait, implemented for arities 0 through 12. All the actual byte-layout work is implemented
 //! exactly once, generically, by [`SequenceList`], over the cons-list `tuple_list.rs`'s
 //! `IntoTupleList` already produces.
 //!
@@ -63,8 +63,15 @@ pub type ElementCloner = unsafe fn(*const u8, *mut u8);
 /// comparator was generated for.
 pub type ElementEq = unsafe fn(*const u8, *const u8) -> bool;
 
+/// Debug-formats a value in place, given a pointer to its bytes.
+///
+/// # Safety
+/// `ptr` must point to a valid, live, properly aligned value of the type this formatter was
+/// generated for.
+pub type ElementDebug = unsafe fn(*const u8, &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
+
 /// Describes one element of a [`DynamicSequence`]: its type identity, byte layout, and
-/// in-place drop/clone/equality functions.
+/// in-place drop/clone/equality/debug-formatting functions.
 #[derive(Clone)]
 pub struct SequenceElement {
     /// Runtime type id for this element.
@@ -83,6 +90,8 @@ pub struct SequenceElement {
     pub clone: ElementCloner,
     /// Equality comparator for this element.
     pub eq: ElementEq,
+    /// Debug-formatter for this element, callable at its own start address.
+    pub debug: ElementDebug,
 }
 
 /// One element to be moved into a `DynamicSequence` being built from already-boxed values (used
@@ -102,6 +111,8 @@ pub struct DynElementSpec {
     pub clone: ElementCloner,
     /// Equality comparator for this element.
     pub eq: ElementEq,
+    /// Debug-formatter for this element.
+    pub debug: ElementDebug,
     /// Moves the boxed value's bytes to a destination pointer, consuming the box without
     /// dropping its contents.
     ///
@@ -126,6 +137,11 @@ pub fn element_eq_for<T: 'static + PartialEq>() -> ElementEq {
     |a, b| unsafe { *a.cast::<T>() == *b.cast::<T>() }
 }
 
+/// Returns an [`ElementDebug`] that debug-formats a value of type `T` in place.
+pub fn element_debug_for<T: 'static + std::fmt::Debug>() -> ElementDebug {
+    |ptr, f| unsafe { std::fmt::Debug::fmt(&*ptr.cast::<T>(), f) }
+}
+
 /// Returns a function that moves a boxed `T`'s bytes to `dst`, consuming the box without
 /// running `T`'s destructor (ownership transfers to `dst`).
 ///
@@ -141,12 +157,12 @@ pub fn element_writer_for<T: 'static>() -> unsafe fn(Box<dyn std::any::Any>, *mu
     }
 }
 
-/// Computes the next aligned offset for a `'static + Clone + PartialEq` field of type `T`,
+/// Computes the next aligned offset for a `'static + Clone + PartialEq + std::fmt::Debug` field of type `T`,
 /// appends its [`SequenceElement`] to `out`, folds `T`'s alignment into `*max_align`, and returns
 /// the byte position immediately after this element.
 ///
 /// - Complexity: O(1).
-fn push_element<T: 'static + Clone + PartialEq>(
+fn push_element<T: 'static + Clone + PartialEq + std::fmt::Debug>(
     out: &mut Vec<SequenceElement>,
     offset: usize,
     max_align: &mut usize,
@@ -165,6 +181,7 @@ fn push_element<T: 'static + Clone + PartialEq>(
         drop: element_dropper_for::<T>(),
         clone: element_cloner_for::<T>(),
         eq: element_eq_for::<T>(),
+        debug: element_debug_for::<T>(),
     });
     aligned_offset + size_of::<T>()
 }
@@ -230,7 +247,7 @@ impl SequenceList for () {
     unsafe fn clone_from(_src: *const u8, _offsets: &[usize]) -> Self {}
 }
 
-impl<H: 'static + Clone + PartialEq, T: SequenceList> SequenceList for (H, T) {
+impl<H: 'static + Clone + PartialEq + std::fmt::Debug, T: SequenceList> SequenceList for (H, T) {
     fn append_shape(out: &mut Vec<SequenceElement>, offset: usize, max_align: &mut usize) -> usize {
         let offset = push_element::<H>(out, offset, max_align);
         T::append_shape(out, offset, max_align)
@@ -264,10 +281,11 @@ impl<H: 'static + Clone + PartialEq, T: SequenceList> SequenceList for (H, T) {
 /// so [`DynamicSequence`] can convert to/from `T` while all the actual byte-layout work is
 /// handled generically by [`SequenceList`].
 ///
-/// Implemented for tuples of arity 1 through 12 — the same range `cel-runtime`'s `IntoList`
-/// supports — via a single-line reversal of [`IntoTupleList::into_tuple_list`]; no unsafe code
-/// appears in any of these impls. A nested tuple field needs no special handling: it's simply an
-/// ordinary `'static + Clone + PartialEq` element type to its enclosing tuple's own impl.
+/// Implemented for the empty tuple `()` (the identity case) and for tuples of arity 1 through 12
+/// — the same range `cel-runtime`'s `IntoList` supports — via a single-line reversal of
+/// [`IntoTupleList::into_tuple_list`]; no unsafe code appears in any of these impls. A nested
+/// tuple field needs no special handling: it's simply an ordinary
+/// `'static + Clone + PartialEq + Debug` element type to its enclosing tuple's own impl.
 pub trait TupleSequence: IntoTupleList + Sized
 where
     Self::Output: SequenceList,
@@ -277,22 +295,35 @@ where
     fn from_list(list: Self::Output) -> Self;
 }
 
-impl<A: 'static + Clone + PartialEq> TupleSequence for (A,) {
+impl TupleSequence for () {
+    fn from_list(list: Self::Output) -> Self {
+        list
+    }
+}
+
+impl<A: 'static + Clone + PartialEq + std::fmt::Debug> TupleSequence for (A,) {
     fn from_list(list: Self::Output) -> Self {
         let (a, ()) = list;
         (a,)
     }
 }
 
-impl<A: 'static + Clone + PartialEq, B: 'static + Clone + PartialEq> TupleSequence for (A, B) {
+impl<
+    A: 'static + Clone + PartialEq + std::fmt::Debug,
+    B: 'static + Clone + PartialEq + std::fmt::Debug,
+> TupleSequence for (A, B)
+{
     fn from_list(list: Self::Output) -> Self {
         let (a, (b, ())) = list;
         (a, b)
     }
 }
 
-impl<A: 'static + Clone + PartialEq, B: 'static + Clone + PartialEq, C: 'static + Clone + PartialEq>
-    TupleSequence for (A, B, C)
+impl<
+    A: 'static + Clone + PartialEq + std::fmt::Debug,
+    B: 'static + Clone + PartialEq + std::fmt::Debug,
+    C: 'static + Clone + PartialEq + std::fmt::Debug,
+> TupleSequence for (A, B, C)
 {
     fn from_list(list: Self::Output) -> Self {
         let (a, (b, (c, ()))) = list;
@@ -301,10 +332,10 @@ impl<A: 'static + Clone + PartialEq, B: 'static + Clone + PartialEq, C: 'static 
 }
 
 impl<
-    A: 'static + Clone + PartialEq,
-    B: 'static + Clone + PartialEq,
-    C: 'static + Clone + PartialEq,
-    D: 'static + Clone + PartialEq,
+    A: 'static + Clone + PartialEq + std::fmt::Debug,
+    B: 'static + Clone + PartialEq + std::fmt::Debug,
+    C: 'static + Clone + PartialEq + std::fmt::Debug,
+    D: 'static + Clone + PartialEq + std::fmt::Debug,
 > TupleSequence for (A, B, C, D)
 {
     fn from_list(list: Self::Output) -> Self {
@@ -314,11 +345,11 @@ impl<
 }
 
 impl<
-    A: 'static + Clone + PartialEq,
-    B: 'static + Clone + PartialEq,
-    C: 'static + Clone + PartialEq,
-    D: 'static + Clone + PartialEq,
-    E: 'static + Clone + PartialEq,
+    A: 'static + Clone + PartialEq + std::fmt::Debug,
+    B: 'static + Clone + PartialEq + std::fmt::Debug,
+    C: 'static + Clone + PartialEq + std::fmt::Debug,
+    D: 'static + Clone + PartialEq + std::fmt::Debug,
+    E: 'static + Clone + PartialEq + std::fmt::Debug,
 > TupleSequence for (A, B, C, D, E)
 {
     fn from_list(list: Self::Output) -> Self {
@@ -328,12 +359,12 @@ impl<
 }
 
 impl<
-    A: 'static + Clone + PartialEq,
-    B: 'static + Clone + PartialEq,
-    C: 'static + Clone + PartialEq,
-    D: 'static + Clone + PartialEq,
-    E: 'static + Clone + PartialEq,
-    F: 'static + Clone + PartialEq,
+    A: 'static + Clone + PartialEq + std::fmt::Debug,
+    B: 'static + Clone + PartialEq + std::fmt::Debug,
+    C: 'static + Clone + PartialEq + std::fmt::Debug,
+    D: 'static + Clone + PartialEq + std::fmt::Debug,
+    E: 'static + Clone + PartialEq + std::fmt::Debug,
+    F: 'static + Clone + PartialEq + std::fmt::Debug,
 > TupleSequence for (A, B, C, D, E, F)
 {
     fn from_list(list: Self::Output) -> Self {
@@ -343,13 +374,13 @@ impl<
 }
 
 impl<
-    A: 'static + Clone + PartialEq,
-    B: 'static + Clone + PartialEq,
-    C: 'static + Clone + PartialEq,
-    D: 'static + Clone + PartialEq,
-    E: 'static + Clone + PartialEq,
-    F: 'static + Clone + PartialEq,
-    G: 'static + Clone + PartialEq,
+    A: 'static + Clone + PartialEq + std::fmt::Debug,
+    B: 'static + Clone + PartialEq + std::fmt::Debug,
+    C: 'static + Clone + PartialEq + std::fmt::Debug,
+    D: 'static + Clone + PartialEq + std::fmt::Debug,
+    E: 'static + Clone + PartialEq + std::fmt::Debug,
+    F: 'static + Clone + PartialEq + std::fmt::Debug,
+    G: 'static + Clone + PartialEq + std::fmt::Debug,
 > TupleSequence for (A, B, C, D, E, F, G)
 {
     fn from_list(list: Self::Output) -> Self {
@@ -359,14 +390,14 @@ impl<
 }
 
 impl<
-    A: 'static + Clone + PartialEq,
-    B: 'static + Clone + PartialEq,
-    C: 'static + Clone + PartialEq,
-    D: 'static + Clone + PartialEq,
-    E: 'static + Clone + PartialEq,
-    F: 'static + Clone + PartialEq,
-    G: 'static + Clone + PartialEq,
-    H: 'static + Clone + PartialEq,
+    A: 'static + Clone + PartialEq + std::fmt::Debug,
+    B: 'static + Clone + PartialEq + std::fmt::Debug,
+    C: 'static + Clone + PartialEq + std::fmt::Debug,
+    D: 'static + Clone + PartialEq + std::fmt::Debug,
+    E: 'static + Clone + PartialEq + std::fmt::Debug,
+    F: 'static + Clone + PartialEq + std::fmt::Debug,
+    G: 'static + Clone + PartialEq + std::fmt::Debug,
+    H: 'static + Clone + PartialEq + std::fmt::Debug,
 > TupleSequence for (A, B, C, D, E, F, G, H)
 {
     fn from_list(list: Self::Output) -> Self {
@@ -376,15 +407,15 @@ impl<
 }
 
 impl<
-    A: 'static + Clone + PartialEq,
-    B: 'static + Clone + PartialEq,
-    C: 'static + Clone + PartialEq,
-    D: 'static + Clone + PartialEq,
-    E: 'static + Clone + PartialEq,
-    F: 'static + Clone + PartialEq,
-    G: 'static + Clone + PartialEq,
-    H: 'static + Clone + PartialEq,
-    I: 'static + Clone + PartialEq,
+    A: 'static + Clone + PartialEq + std::fmt::Debug,
+    B: 'static + Clone + PartialEq + std::fmt::Debug,
+    C: 'static + Clone + PartialEq + std::fmt::Debug,
+    D: 'static + Clone + PartialEq + std::fmt::Debug,
+    E: 'static + Clone + PartialEq + std::fmt::Debug,
+    F: 'static + Clone + PartialEq + std::fmt::Debug,
+    G: 'static + Clone + PartialEq + std::fmt::Debug,
+    H: 'static + Clone + PartialEq + std::fmt::Debug,
+    I: 'static + Clone + PartialEq + std::fmt::Debug,
 > TupleSequence for (A, B, C, D, E, F, G, H, I)
 {
     fn from_list(list: Self::Output) -> Self {
@@ -394,16 +425,16 @@ impl<
 }
 
 impl<
-    A: 'static + Clone + PartialEq,
-    B: 'static + Clone + PartialEq,
-    C: 'static + Clone + PartialEq,
-    D: 'static + Clone + PartialEq,
-    E: 'static + Clone + PartialEq,
-    F: 'static + Clone + PartialEq,
-    G: 'static + Clone + PartialEq,
-    H: 'static + Clone + PartialEq,
-    I: 'static + Clone + PartialEq,
-    J: 'static + Clone + PartialEq,
+    A: 'static + Clone + PartialEq + std::fmt::Debug,
+    B: 'static + Clone + PartialEq + std::fmt::Debug,
+    C: 'static + Clone + PartialEq + std::fmt::Debug,
+    D: 'static + Clone + PartialEq + std::fmt::Debug,
+    E: 'static + Clone + PartialEq + std::fmt::Debug,
+    F: 'static + Clone + PartialEq + std::fmt::Debug,
+    G: 'static + Clone + PartialEq + std::fmt::Debug,
+    H: 'static + Clone + PartialEq + std::fmt::Debug,
+    I: 'static + Clone + PartialEq + std::fmt::Debug,
+    J: 'static + Clone + PartialEq + std::fmt::Debug,
 > TupleSequence for (A, B, C, D, E, F, G, H, I, J)
 {
     fn from_list(list: Self::Output) -> Self {
@@ -413,17 +444,17 @@ impl<
 }
 
 impl<
-    A: 'static + Clone + PartialEq,
-    B: 'static + Clone + PartialEq,
-    C: 'static + Clone + PartialEq,
-    D: 'static + Clone + PartialEq,
-    E: 'static + Clone + PartialEq,
-    F: 'static + Clone + PartialEq,
-    G: 'static + Clone + PartialEq,
-    H: 'static + Clone + PartialEq,
-    I: 'static + Clone + PartialEq,
-    J: 'static + Clone + PartialEq,
-    K: 'static + Clone + PartialEq,
+    A: 'static + Clone + PartialEq + std::fmt::Debug,
+    B: 'static + Clone + PartialEq + std::fmt::Debug,
+    C: 'static + Clone + PartialEq + std::fmt::Debug,
+    D: 'static + Clone + PartialEq + std::fmt::Debug,
+    E: 'static + Clone + PartialEq + std::fmt::Debug,
+    F: 'static + Clone + PartialEq + std::fmt::Debug,
+    G: 'static + Clone + PartialEq + std::fmt::Debug,
+    H: 'static + Clone + PartialEq + std::fmt::Debug,
+    I: 'static + Clone + PartialEq + std::fmt::Debug,
+    J: 'static + Clone + PartialEq + std::fmt::Debug,
+    K: 'static + Clone + PartialEq + std::fmt::Debug,
 > TupleSequence for (A, B, C, D, E, F, G, H, I, J, K)
 {
     fn from_list(list: Self::Output) -> Self {
@@ -433,18 +464,18 @@ impl<
 }
 
 impl<
-    A: 'static + Clone + PartialEq,
-    B: 'static + Clone + PartialEq,
-    C: 'static + Clone + PartialEq,
-    D: 'static + Clone + PartialEq,
-    E: 'static + Clone + PartialEq,
-    F: 'static + Clone + PartialEq,
-    G: 'static + Clone + PartialEq,
-    H: 'static + Clone + PartialEq,
-    I: 'static + Clone + PartialEq,
-    J: 'static + Clone + PartialEq,
-    K: 'static + Clone + PartialEq,
-    L: 'static + Clone + PartialEq,
+    A: 'static + Clone + PartialEq + std::fmt::Debug,
+    B: 'static + Clone + PartialEq + std::fmt::Debug,
+    C: 'static + Clone + PartialEq + std::fmt::Debug,
+    D: 'static + Clone + PartialEq + std::fmt::Debug,
+    E: 'static + Clone + PartialEq + std::fmt::Debug,
+    F: 'static + Clone + PartialEq + std::fmt::Debug,
+    G: 'static + Clone + PartialEq + std::fmt::Debug,
+    H: 'static + Clone + PartialEq + std::fmt::Debug,
+    I: 'static + Clone + PartialEq + std::fmt::Debug,
+    J: 'static + Clone + PartialEq + std::fmt::Debug,
+    K: 'static + Clone + PartialEq + std::fmt::Debug,
+    L: 'static + Clone + PartialEq + std::fmt::Debug,
 > TupleSequence for (A, B, C, D, E, F, G, H, I, J, K, L)
 {
     fn from_list(list: Self::Output) -> Self {
@@ -529,6 +560,7 @@ impl DynamicSequence {
                 drop: spec.drop,
                 clone: spec.clone,
                 eq: spec.eq,
+                debug: spec.debug,
             });
             offset = aligned + spec.size;
         }
@@ -748,11 +780,30 @@ impl PartialEq for DynamicSequence {
     }
 }
 
+/// Formats this sequence exactly like Rust's own anonymous-tuple `Debug`: `()` for arity 0,
+/// `(a,)` for arity 1 (the trailing comma disambiguates a real 1-tuple from mere grouping,
+/// matching `format!("{:?}", (3,))`), `(a, b, ...)` otherwise. A nested tuple element (itself a
+/// `DynamicSequence` value) recurses through this same impl.
+///
+/// Not implementable via `f.debug_tuple()`: that builder is for tuple *structs*, which never
+/// need the arity-1 trailing comma (`Foo(3)` is never ambiguous), so it does not reproduce real
+/// anonymous-tuple formatting.
 impl std::fmt::Debug for DynamicSequence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DynamicSequence")
-            .field("arity", &self.shape.len())
-            .finish()
+        f.write_str("(")?;
+        for (i, elem) in self.shape.iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            unsafe {
+                self.buffer
+                    .read_at(elem.offset, |ptr| (elem.debug)(ptr, f))?;
+            }
+        }
+        if self.shape.len() == 1 {
+            f.write_str(",")?;
+        }
+        f.write_str(")")
     }
 }
 
@@ -882,6 +933,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
+        #[derive(Debug)]
         struct DropCounter(Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<u8>>>, u8);
         impl Clone for DropCounter {
             fn clone(&self) -> Self {
@@ -919,7 +971,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         struct DropCounter(Arc<AtomicUsize>);
         impl PartialEq for DropCounter {
             fn eq(&self, other: &Self) -> bool {
@@ -999,7 +1051,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         struct DropCounter(Arc<AtomicUsize>);
         impl PartialEq for DropCounter {
             fn eq(&self, other: &Self) -> bool {
@@ -1110,6 +1162,70 @@ mod tests {
     }
 
     #[test]
+    fn element_debug_for_formats_the_correct_type() {
+        struct Wrapper(*const u8, ElementDebug);
+        impl std::fmt::Debug for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                unsafe { (self.1)(self.0, f) }
+            }
+        }
+        let value = 7i32;
+        let debug = element_debug_for::<i32>();
+        let wrapper = Wrapper((&raw const value).cast::<u8>(), debug);
+        assert_eq!(format!("{wrapper:?}"), "7");
+    }
+
+    #[test]
+    fn debug_formats_the_empty_tuple() {
+        let seq = DynamicSequence::from_tuple(());
+        assert_eq!(format!("{seq:?}"), "()");
+    }
+
+    #[test]
+    fn debug_formats_a_1_tuple_with_a_trailing_comma() {
+        let seq = DynamicSequence::from_tuple((3i32,));
+        assert_eq!(format!("{seq:?}"), "(3,)");
+    }
+
+    #[test]
+    fn debug_formats_an_n_tuple_without_a_trailing_comma() {
+        let seq = DynamicSequence::from_tuple((3i32, 4.5f64));
+        assert_eq!(format!("{seq:?}"), "(3, 4.5)");
+    }
+
+    #[test]
+    fn debug_quotes_a_string_element_like_rust_debug_does() {
+        let seq = DynamicSequence::from_tuple((1i32, "hello".to_string()));
+        assert_eq!(format!("{seq:?}"), "(1, \"hello\")");
+    }
+
+    #[test]
+    fn debug_recurses_into_a_nested_tuple() {
+        let seq = DynamicSequence::from_tuple((1i32, (2.5f64, "x".to_string())));
+        assert_eq!(format!("{seq:?}"), "(1, (2.5, \"x\"))");
+    }
+
+    #[test]
+    fn debug_formats_a_sequence_built_via_from_dyn_elements() {
+        let spec_i32 = DynElementSpec {
+            type_id: TypeId::of::<i32>(),
+            type_name: Cow::Borrowed("i32"),
+            size: size_of::<i32>(),
+            align: align_of::<i32>(),
+            drop: element_dropper_for::<i32>(),
+            clone: element_cloner_for::<i32>(),
+            eq: element_eq_for::<i32>(),
+            debug: element_debug_for::<i32>(),
+            write: element_writer_for::<i32>(),
+        };
+        let seq = DynamicSequence::from_dyn_elements(vec![(
+            spec_i32,
+            Box::new(3i32) as Box<dyn std::any::Any>,
+        )]);
+        assert_eq!(format!("{seq:?}"), "(3,)");
+    }
+
+    #[test]
     fn from_dyn_elements_builds_a_matching_sequence() {
         let spec_i32 = DynElementSpec {
             type_id: TypeId::of::<i32>(),
@@ -1119,6 +1235,7 @@ mod tests {
             drop: element_dropper_for::<i32>(),
             clone: element_cloner_for::<i32>(),
             eq: element_eq_for::<i32>(),
+            debug: element_debug_for::<i32>(),
             write: element_writer_for::<i32>(),
         };
         let spec_f64 = DynElementSpec {
@@ -1129,6 +1246,7 @@ mod tests {
             drop: element_dropper_for::<f64>(),
             clone: element_cloner_for::<f64>(),
             eq: element_eq_for::<f64>(),
+            debug: element_debug_for::<f64>(),
             write: element_writer_for::<f64>(),
         };
         let seq = DynamicSequence::from_dyn_elements(vec![
@@ -1145,7 +1263,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        #[derive(Clone)]
+        #[derive(Clone, Debug)]
         struct DropCounter(Arc<AtomicUsize>);
         impl PartialEq for DropCounter {
             fn eq(&self, other: &Self) -> bool {
@@ -1167,6 +1285,7 @@ mod tests {
             drop: element_dropper_for::<DropCounter>(),
             clone: element_cloner_for::<DropCounter>(),
             eq: element_eq_for::<DropCounter>(),
+            debug: element_debug_for::<DropCounter>(),
             write: element_writer_for::<DropCounter>(),
         };
         let boxed: Box<dyn std::any::Any> = Box::new(DropCounter(count.clone()));

@@ -313,6 +313,7 @@ dependencies = [
  "annotate-snippets",
  "anyhow",
  "cel-parser",
+ "cel-runtime",
  "dioxus",
  "futures-channel",
  "futures-util",

@@ -98,6 +98,28 @@ impl SheetItem {
     }
 }
 
+/// `type_expr = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".`
+///
+/// `()` is the empty tuple type (0 elements); `(T)` is grouping (same as bare `T` — types have
+/// no precedence to disambiguate, but staying symmetric with `cel_parser`'s expression grammar
+/// costs nothing); `(T,)` is a 1-element tuple; `(T, U, ...)` is n-element, no trailing comma.
+#[derive(Debug, Clone)]
+pub enum TypeExpr {
+    /// A single type name, resolved later against a `TypeRegistry`.
+    Named(String, ExprSpan),
+    /// A tuple type, recursively — `Vec::new()` for `()`.
+    Tuple(Vec<TypeExpr>, ExprSpan),
+}
+
+impl TypeExpr {
+    /// Returns this type expression's source span.
+    pub fn span(&self) -> ExprSpan {
+        match self {
+            TypeExpr::Named(_, span) | TypeExpr::Tuple(_, span) => *span,
+        }
+    }
+}
+
 /// `cell_decl = "cell" identifier cell_type_init ";".`
 ///
 /// `type_name`/`initializer` are unresolved — no `TypeRegistry` lookup, no literal validation.
@@ -110,10 +132,12 @@ pub struct CellDecl {
     pub name: String,
     /// The name token's span.
     pub name_span: ExprSpan,
-    /// The `: type_name` annotation, if present.
-    pub type_name: Option<(String, ExprSpan)>,
-    /// The `= literal` initializer, if present.
-    pub initializer: Option<(Literal, ExprSpan)>,
+    /// The `: type_expr` annotation, if present.
+    pub type_name: Option<TypeExpr>,
+    /// The `= or_expression` initializer, if present. Unresolved and unevaluated here — see
+    /// `crate::parser::AdamParser` for the compile-to-`Sheet` phase, which parses this with no
+    /// cell scope pushed and evaluates it eagerly, once, at parse time.
+    pub initializer: Option<cel_parser::Expr>,
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<String>,
@@ -139,9 +163,9 @@ pub struct RelationshipDecl {
     pub span: ExprSpan,
 }
 
-/// `out_decl = "out" identifier [ ":" type_name ] "{" out_method { condition_decl } "}".`
+/// `out_decl = "out" identifier [ ":" type_expr ] "{" out_method { condition_decl } "}".`
 ///
-/// `type_name` is unresolved here (no `TypeRegistry` lookup), matching `CellDecl`. When
+/// `type_expr` is unresolved here (no `TypeRegistry` lookup), matching `CellDecl`. When
 /// absent, the cell's type is inferred from `writer.body`'s result type by the compile phase
 /// (`crate::parser::AdamParser`) — never here.
 #[derive(Debug, Clone)]
@@ -150,8 +174,8 @@ pub struct OutDecl {
     pub name: String,
     /// The name token's span.
     pub name_span: ExprSpan,
-    /// The `: type_name` annotation, if present.
-    pub type_name: Option<(String, ExprSpan)>,
+    /// The `: type_expr` annotation, if present.
+    pub type_name: Option<TypeExpr>,
     /// The single writer method that computes this cell's value.
     pub writer: OutMethodDecl,
     /// This output's conditions, in declaration order.
@@ -448,5 +472,64 @@ mod tests {
             SheetItem::Out(o) => assert_eq!(o.leading_comment.as_deref(), Some("hi")),
             other => panic!("expected Out, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn type_expr_named_span_is_its_own_span() {
+        let span = point(Span::call_site());
+        let expr = TypeExpr::Named("i32".to_string(), span);
+        assert_eq!(format!("{:?}", expr.span()), format!("{span:?}"));
+    }
+
+    #[test]
+    fn type_expr_tuple_span_is_the_whole_parenthesized_span() {
+        let span = point(Span::call_site());
+        let expr = TypeExpr::Tuple(Vec::new(), span);
+        assert_eq!(format!("{:?}", expr.span()), format!("{span:?}"));
+    }
+
+    #[test]
+    fn cell_decl_type_name_holds_a_nested_tuple_type_expr() {
+        let span = point(Span::call_site());
+        let cell = CellDecl {
+            name: "a".to_string(),
+            name_span: span,
+            type_name: Some(TypeExpr::Tuple(
+                vec![
+                    TypeExpr::Named("i32".to_string(), span),
+                    TypeExpr::Named("f64".to_string(), span),
+                ],
+                span,
+            )),
+            initializer: None,
+            leading_comment: None,
+            blank_line_before: false,
+            span,
+        };
+        match cell.type_name {
+            Some(TypeExpr::Tuple(elements, _)) => assert_eq!(elements.len(), 2),
+            other => panic!("expected Tuple, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cell_decl_initializer_holds_a_parsed_expr() {
+        let span = point(Span::call_site());
+        let cell = CellDecl {
+            name: "a".to_string(),
+            name_span: span,
+            type_name: None,
+            initializer: Some(cel_parser::Expr::Ident {
+                name: "x".to_string(),
+                span,
+            }),
+            leading_comment: None,
+            blank_line_before: false,
+            span,
+        };
+        assert!(matches!(
+            cell.initializer,
+            Some(cel_parser::Expr::Ident { .. })
+        ));
     }
 }

@@ -41,7 +41,20 @@ tuple-typed output now uses.
   invocations from the root `CLAUDE.md` before the final commit of the whole plan (Task 10).
 - Every existing test in `adam-lang/src/{ast,ast_parser,parser,typecheck,fmt}.rs` must keep
   passing unchanged throughout — every task here is additive/generalizing, not behavior-changing
-  for non-tuple cells.
+  for non-tuple cells. **Narrow, accepted exception (Task 2):** giving `Delimiter::Parenthesis` the
+  same depth-tracking treatment `Delimiter::Brace`/`Delimiter::Bracket` already have in
+  `skip_to_recovery_point` — required so a malformed `type_expr`'s own dangling paren unwinds
+  `TokenCursor::depth` correctly — extends the pre-existing, tracked known limitation around
+  `Delimiter::Brace` (a stray delimiter left dangling by a failed embedded CEL sub-expression being
+  mistaken for an adam-lang-tracked one; see
+  `recovery_known_limitation_if_expr_dangling_brace_aborts_whole_parse` and
+  <https://github.com/stlab/cel-rs/issues/43>) to parens as well. This flips one pre-existing,
+  non-tuple test — a malformed CEL expression like `(+)` inside a method body no longer recovers
+  cleanly and instead aborts the whole parse — from "recovers" to the same documented "known
+  limitation, tracked issue #43" bucket its brace-based sibling was already in. This is the one
+  deliberate, reviewed exception to "every existing test passes unchanged"; the old regression test
+  was converted to a known-limitation test (`recovery_known_limitation_cel_dangling_paren_aborts_whole_parse`)
+  rather than silently dropped.
 
 ---
 

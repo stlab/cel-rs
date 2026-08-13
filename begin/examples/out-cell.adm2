@@ -14,7 +14,7 @@ sheet out_cell {
     }
 
     out result {
-        method [a, b] { a + b }
+        method [a, b] { (a, b) }
 
         condition min_a [a, b] { a <= b }
     }
