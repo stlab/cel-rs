@@ -438,7 +438,7 @@ impl Sheet {
     /// - `Error::InvalidOutput` — `writer` does not have exactly one output cell, a
     ///   condition name is empty, or two conditions share a name.
     /// - `Error::TerminalCell` — a condition input is already another output's cell, or
-    ///   the writer's output cell already has prior use (see [`Sheet::cell_has_prior_use`])
+    ///   the writer's output cell already has prior use (see `cell_has_prior_use`)
     ///   and so cannot become terminal.
     /// - `Error::InvalidId` — a cell referenced by `writer` or a condition is not in this
     ///   sheet.

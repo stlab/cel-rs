@@ -106,8 +106,8 @@ pub fn raw_dropper_for<T: 'static>() -> RawDropper {
     |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) }
 }
 
-/// Computes each element's on-stack byte offset in place — the same convention [`make_tuple`]
-/// already uses: place at this element's own alignment, then pad up to the running max
+/// Computes each element's on-stack byte offset in place — the same convention
+/// [`DynSegment::make_tuple`] already uses: place at this element's own alignment, then pad up to the running max
 /// alignment seen so far (matching `CStackList`'s nested layout). Each element's `type_id`,
 /// `size`, and `align` must already be set; `offset` is overwritten. Returns
 /// `(total_size, max_align)`.
@@ -771,7 +771,7 @@ impl DynSegment {
     /// At execution time the op reads `inputs[index]` from the slice supplied to
     /// [`call_dyn`](Self::call_dyn) and clones the value onto the stack.
     ///
-    /// - Precondition: Every call to [`call_dyn`] must supply an `inputs` slice where
+    /// - Precondition: Every call to [`call_dyn`](Self::call_dyn) must supply an `inputs` slice where
     ///   `inputs[index]` is a value of type `T`.
     ///
     /// - Complexity: O(1).

@@ -51,7 +51,7 @@ impl AdamAstParser {
     /// A syntax error inside one `cell`/`relationship`/`conditional` item is recorded in
     /// `Sheet.errors` and replaced by a `SheetItem::Error` placeholder covering the skipped
     /// tokens; parsing resumes at the next sheet item instead of aborting (see
-    /// [`TokenCursor::skip_to_recovery_point`]). This recovery is declaration-level only: a
+    /// `TokenCursor::skip_to_recovery_point`). This recovery is declaration-level only: a
     /// malformed `method_decl` inside a `relationship`/`conditional` block causes the whole
     /// enclosing item to become one `SheetItem::Error`.
     ///
@@ -66,7 +66,7 @@ impl AdamAstParser {
     /// tuple/group literal's parens, the same `Delimiter::Parenthesis` kind `type_expr` uses
     /// (`(+)` is one such case). In that narrower case recovery may abort the entire parse
     /// (returning `Err`) rather than isolating the one malformed item; see
-    /// [`TokenCursor::skip_to_recovery_point`]'s doc comment for why a kind-based fix can't close
+    /// `TokenCursor::skip_to_recovery_point`'s doc comment for why a kind-based fix can't close
     /// this in general, and the tracking issue for the general fix.
     ///
     /// # Errors

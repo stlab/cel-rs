@@ -1,4 +1,4 @@
-//! A span-carrying CEL expression AST, built by [`AstContext`](crate::ast::AstContext) as an
+//! A span-carrying CEL expression AST, built by [`AstContext`] as an
 //! alternative to [`DynSegmentContext`](crate::parser_context::DynSegmentContext)'s direct
 //! execution. Consumed as-is by adam-lang (method bodies/initializers), the language server, the
 //! formatter, and the future macro-compilation backend. Carries no resolved types or operator
@@ -102,7 +102,7 @@ pub enum LogicalOp {
 
 /// A parsed CEL expression with source spans on every node.
 ///
-/// Built by [`AstContext`](crate::ast::AstContext); consumed as-is by adam-lang (method
+/// Built by [`AstContext`]; consumed as-is by adam-lang (method
 /// bodies/initializers), the language server (hover/goto), the formatter, and the future
 /// macro-compilation backend. Carries no resolved types or operator overloads — resolution is
 /// deferred to a later, separate type-checking phase.
