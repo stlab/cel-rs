@@ -82,7 +82,7 @@ pub mod sheet;
 
 pub use cell::CellId;
 pub use condition::{Condition, ConditionId};
-pub use conditional::ConditionalId;
+pub use conditional::{ConditionalId, MatchExpr};
 pub use error::Error;
 pub use output::OutputId;
 pub use relationship::{Method, RelationshipId};
