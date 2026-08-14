@@ -9,7 +9,7 @@
 //! adam-lang/CEL's extensible type system. Not a complete type system; see the design doc's
 //! "Type checking (v1)" section.
 
-use cel_parser::{Expr, Literal, ParseError, Ty, ty::check_expr};
+use cel_parser::{Expr, ExprSpan, Literal, ParseError, Ty, ty::check_expr};
 
 use crate::TypeRegistry;
 use crate::ast::{CellDecl, MethodDecl, OutDecl, Sheet, SheetItem};
@@ -197,11 +197,15 @@ fn literal_matches_declared_ty(lit: &Literal, declared: Ty) -> bool {
 /// must be a non-tuple `Expr` whose checked `Ty` unifies with that leaf (mirroring
 /// `literal_matches_declared_ty`'s spirit, generalized past bare literals now that initializers
 /// are full `or_expression`s); a `TypeShape::Tuple` must be an `Expr::Tuple` of matching arity,
-/// checked element-wise. `TypeShape::Named(TypeId)` with no registered entry (an unrecognized
+/// checked element-wise, or an `Expr::If` whose `then_branch` (and `else_branch`, if present —
+/// itself possibly another `Expr::If`, covering `else if` chains) each recursively match the same
+/// `shape`, since every branch that can be taken must produce a value of that shape. An `if` with
+/// no `else` is checked only against `then_branch`, matching `check_expr`'s existing leniency
+/// toward a missing else. `TypeShape::Named(TypeId)` with no registered entry (an unrecognized
 /// custom type) always matches — not statically checked, mirroring `Ty::Any`'s existing
 /// leniency.
 ///
-/// - Complexity: O(n) in the number of (nested) tuple elements.
+/// - Complexity: O(n) in the number of (nested) tuple elements and `if`/`else if` branches.
 fn expr_matches_shape(
     expr: &Expr,
     shape: &TypeShape,
@@ -226,6 +230,22 @@ fn expr_matches_shape(
             }
             for (element, element_shape) in elements.iter().zip(expected) {
                 expr_matches_shape(element, element_shape, registry, resolve, diagnostics);
+            }
+        }
+        (
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            },
+            TypeShape::Tuple(_),
+        ) => {
+            let (_, cond_diags) = check_expr(cond, resolve);
+            diagnostics.extend(cond_diags);
+            expr_matches_shape(then_branch, shape, registry, resolve, diagnostics);
+            if let Some(else_branch) = else_branch {
+                expr_matches_shape(else_branch, shape, registry, resolve, diagnostics);
             }
         }
         (_, TypeShape::Tuple(_)) => {
@@ -313,12 +333,74 @@ fn check_cell_initializer(
     }
 }
 
+/// Checks `body`'s multi-output shape against `outputs`, recursively: an `Expr::Tuple` of matching
+/// arity is checked element-wise, each element against its corresponding output cell's declared
+/// type; an `Expr::If` recurses into `then_branch` (and `else_branch`, if present — itself possibly
+/// another `Expr::If`, covering `else if` chains) against the same `outputs`, since every branch
+/// that can be taken must produce a value of that shape (mirroring [`expr_matches_shape`]'s
+/// `Expr::If` handling); any other expression is a diagnostic. An `if` with no `else` is checked
+/// only against `then_branch`, matching `check_expr`'s existing leniency toward a missing else.
+///
+/// - Complexity: O(n) in the number of declared outputs, times the number of (nested) `if`/`else
+///   if` branches.
+fn check_tuple_output_body(
+    body: &Expr,
+    outputs: &[(String, ExprSpan)],
+    resolve: &impl Fn(&str) -> Ty,
+    diagnostics: &mut Vec<ParseError>,
+) {
+    match body {
+        Expr::Tuple { elements, .. } if elements.len() == outputs.len() => {
+            for (element, (name, _)) in elements.iter().zip(outputs) {
+                let (element_ty, element_diags) = check_expr(element, resolve);
+                diagnostics.extend(element_diags);
+                let declared = resolve(name);
+                if !declared.unifies_with(&element_ty) {
+                    diagnostics.push(ParseError::new_range(
+                        format!(
+                            "method output `{name}` produces `{}`, but is declared `{}`",
+                            element_ty.name(),
+                            declared.name()
+                        ),
+                        element.span().start,
+                        element.span().end,
+                    ));
+                }
+            }
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let (_, cond_diags) = check_expr(cond, resolve);
+            diagnostics.extend(cond_diags);
+            check_tuple_output_body(then_branch, outputs, resolve, diagnostics);
+            if let Some(else_branch) = else_branch {
+                check_tuple_output_body(else_branch, outputs, resolve, diagnostics);
+            }
+        }
+        other => {
+            let (_, body_diags) = check_expr(other, resolve);
+            diagnostics.extend(body_diags);
+            let n = outputs.len();
+            diagnostics.push(ParseError::new_range(
+                format!("method declares {n} outputs but its body is not a {n}-tuple"),
+                other.span().start,
+                other.span().end,
+            ));
+        }
+    }
+}
+
 /// Checks one `method`'s body against its declared outputs: for a single output, the body's
 /// inferred type must unify with that output cell's declared type (or, when that output's
 /// declared type is itself a tuple — per `shapes` — the body is checked recursively via
-/// [`expr_matches_shape`] instead); for `n > 1` outputs, the body must be an `n`-element tuple,
-/// checked element-wise against each output cell. Operator-level diagnostics from inside the body
-/// (via [`check_expr`]) are always included exactly once, regardless of which branch below runs.
+/// [`expr_matches_shape`] instead); for `n > 1` outputs, the body is checked recursively via
+/// [`check_tuple_output_body`] against each output cell. Operator-level diagnostics from inside
+/// the body (via [`check_expr`]) are always included exactly once, regardless of which branch
+/// below runs.
 fn check_method(
     method: &MethodDecl,
     registry: &TypeRegistry,
@@ -361,36 +443,7 @@ fn check_method(
             }
         }
         outputs => {
-            let n = outputs.len();
-            match &method.body {
-                Expr::Tuple { elements, .. } if elements.len() == n => {
-                    for (element, (name, _)) in elements.iter().zip(outputs) {
-                        let (element_ty, element_diags) = check_expr(element, resolve);
-                        diagnostics.extend(element_diags);
-                        let declared = resolve(name);
-                        if !declared.unifies_with(&element_ty) {
-                            diagnostics.push(ParseError::new_range(
-                                format!(
-                                    "method output `{name}` produces `{}`, but is declared `{}`",
-                                    element_ty.name(),
-                                    declared.name()
-                                ),
-                                element.span().start,
-                                element.span().end,
-                            ));
-                        }
-                    }
-                }
-                other => {
-                    let (_, body_diags) = check_expr(other, resolve);
-                    diagnostics.extend(body_diags);
-                    diagnostics.push(ParseError::new_range(
-                        format!("method declares {n} outputs but its body is not a {n}-tuple"),
-                        other.span().start,
-                        other.span().end,
-                    ));
-                }
-            }
+            check_tuple_output_body(&method.body, outputs, resolve, diagnostics);
         }
     }
 }
@@ -716,6 +769,86 @@ mod tests {
         let sheet = parse(
             "sheet s { cell a: i32; cell b: f64; cell pair: (i32, i32); \
              relationship { method [a, b] -> [pair] { (a, b) } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn method_single_tuple_typed_output_if_else_body_matching_both_branches_has_no_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell cond: bool; cell a: i32; cell b: i32; cell pair: (i32, i32); \
+             relationship { method [cond, a, b] -> [pair] { \
+                 if cond { (a, b) } else { (b, a) } \
+             } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn method_single_tuple_typed_output_if_without_else_matching_then_branch_has_no_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell cond: bool; cell a: i32; cell b: i32; cell pair: (i32, i32); \
+             relationship { method [cond, a, b] -> [pair] { \
+                 if cond { (a, b) } \
+             } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn method_single_tuple_typed_output_if_else_if_chain_matching_all_branches_has_no_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell mode: i32; cell a: i32; cell b: i32; cell pair: (i32, i32); \
+             relationship { method [mode, a, b] -> [pair] { \
+                 if mode == 0 { (a, b) } else if mode == 1 { (b, a) } else { (0, 0) } \
+             } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn method_single_tuple_typed_output_if_else_body_element_mismatch_in_each_branch_is_two_diagnostics()
+     {
+        // Both branches use the same mismatched `c`, so a correctly recursing checker reports one
+        // diagnostic per branch (2 total). The old catch-all — which never recursed into an
+        // `Expr::If` at all — could only ever report exactly 1 diagnostic for the whole node
+        // regardless of how many branches were wrong, so `diags.len() == 2` distinguishes the fix
+        // from the bug (unlike asserting `== 1`, which both the buggy and fixed behavior satisfy
+        // when only one branch mismatches).
+        let sheet = parse(
+            "sheet s { cell cond: bool; cell a: i32; cell c: f64; cell pair: (i32, i32); \
+             relationship { method [cond, a, c] -> [pair] { \
+                 if cond { (a, c) } else { (a, c) } \
+             } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 2);
+    }
+
+    #[test]
+    fn method_multi_output_if_else_body_matching_both_branches_has_no_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell cond: bool; cell a: i32; cell b: i32; cell sum: i32; cell diff: i32; \
+             relationship { method [cond, a, b] -> [sum, diff] { \
+                 if cond { (a + b, a - b) } else { (a - b, a + b) } \
+             } } }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn method_multi_output_if_else_body_element_mismatch_in_a_branch_is_a_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell cond: bool; cell a: i32; cell b: i32; cell c: f64; \
+             cell sum: i32; cell diff: i32; \
+             relationship { method [cond, a, b, c] -> [sum, diff] { \
+                 if cond { (a, b) } else { (a, c) } \
+             } } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
