@@ -11,7 +11,7 @@ use slotmap::SlotMap;
 use crate::{
     cell::{CellData, CellId},
     condition::{Condition, ConditionData, ConditionId},
-    conditional::{Branch, ConditionalData, ConditionalId},
+    conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::Error,
     output::{OutputData, OutputId},
     relationship::{Method, RelationshipData, RelationshipId},
@@ -68,6 +68,22 @@ pub struct Sheet {
     /// output. Sparse: an output with no entry had all its conditions hold. Not
     /// recomputed by `propagate_without_replan`.
     last_violated: HashMap<OutputId, Vec<ConditionId>>,
+}
+
+/// A conditional's evaluated match value: borrowed (existing cell, no allocation) or owned
+/// (freshly computed by a [`MatchExpr`] function).
+enum MatchValue<'a> {
+    Ref(&'a dyn Any),
+    Owned(Box<dyn Any>),
+}
+
+impl MatchValue<'_> {
+    fn as_dyn(&self) -> &dyn Any {
+        match self {
+            MatchValue::Ref(r) => *r,
+            MatchValue::Owned(b) => b.as_ref(),
+        }
+    }
 }
 
 impl Sheet {
@@ -236,40 +252,67 @@ impl Sheet {
         Ok(rel_id)
     }
 
-    /// Registers a conditional that activates relationships based on the value of `cell`.
+    /// Registers a conditional that activates relationships based on the value of a match
+    /// subject: either a single existing cell, or a [`MatchExpr`] computed from multiple
+    /// input cells.
     ///
-    /// Each element of `branches` is `(keys, relationships)`: when the match cell's value
-    /// equals any key in `keys`, the branch's `relationships` are added to the active set
-    /// for `propagate`. Branches are evaluated in definition order; first match wins.
+    /// Each element of `branches` is `(keys, relationships)`: when the match subject's
+    /// value equals any key in `keys`, the branch's `relationships` are added to the active
+    /// set for `propagate`. Branches are evaluated in definition order; first match wins.
     /// `default` holds relationships activated when no branch matches; pass an empty `Vec`
     /// for no default.
     ///
-    /// The match cell's value is compared using the equality function captured at
-    /// `add_cell` time.
-    ///
     /// # Errors
     ///
-    /// - `Error::InvalidId` — `cell` is not in this sheet.
-    /// - `Error::InvalidConditional` — a branch key's `TypeId` does not match `cell`'s;
-    ///   a referenced relationship does not exist; a branch relationship that shares a cell with
-    ///   the match cell or any of its unconditional upstream contributors has more than one method;
-    ///   a relationship already appears in another conditional branch; or a branch has no keys.
-    /// - `Error::TerminalCell` — the match cell already belongs to an existing output.
+    /// - `Error::InvalidId` — the match subject references a cell not in this sheet.
+    /// - `Error::TerminalCell` — the match subject references a cell that already belongs
+    ///   to an existing output.
+    /// - `Error::TypeMismatch` — (expression match subject only) an input cell's registered
+    ///   type doesn't match the expression's declared type for that input.
+    /// - `Error::InvalidConditional` — the match subject's output type does not match `T`;
+    ///   a branch relationship shares a cell with the match subject or any of its
+    ///   unconditional upstream contributors and has more than one method; a referenced
+    ///   relationship does not exist; a relationship already appears in another
+    ///   conditional branch; or a branch has no keys.
     ///
-    /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R = relationships per branch.
+    /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R =
+    ///   relationships per branch.
     pub fn add_conditional<T: Any + PartialEq + 'static>(
         &mut self,
-        cell: CellId,
+        source: MatchExpr,
         branches: Vec<(Vec<T>, Vec<RelationshipId>)>,
         default: Vec<RelationshipId>,
     ) -> Result<ConditionalId, Error> {
-        let cell_data = self.cells.get(cell).ok_or(Error::InvalidId)?;
-        if self.terminal_cells.contains(&cell) {
-            return Err(Error::TerminalCell);
-        }
-        if cell_data.type_id != TypeId::of::<T>() {
-            return Err(Error::InvalidConditional);
-        }
+        let match_cells: Vec<CellId> = match &source.0 {
+            MatchSource::Cell(cell) => {
+                let cell_data = self.cells.get(*cell).ok_or(Error::InvalidId)?;
+                if self.terminal_cells.contains(cell) {
+                    return Err(Error::TerminalCell);
+                }
+                if cell_data.type_id != TypeId::of::<T>() {
+                    return Err(Error::InvalidConditional);
+                }
+                vec![*cell]
+            }
+            MatchSource::Expr(expr) => {
+                if expr.output_type != TypeId::of::<T>() {
+                    return Err(Error::InvalidConditional);
+                }
+                for (&cell_id, &declared) in expr.inputs.iter().zip(expr.input_types.iter()) {
+                    if self.terminal_cells.contains(&cell_id) {
+                        return Err(Error::TerminalCell);
+                    }
+                    let cell_data = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
+                    if cell_data.type_id != declared {
+                        return Err(Error::TypeMismatch {
+                            expected: cell_data.type_id,
+                            found: declared,
+                        });
+                    }
+                }
+                expr.inputs.clone()
+            }
+        };
 
         // Collect and validate all relationship IDs (branches + default).
         let all_rels: Vec<RelationshipId> = branches
@@ -279,16 +322,20 @@ impl Sheet {
             .collect();
         let all_rels_set: HashSet<RelationshipId> = all_rels.iter().copied().collect();
 
-        // Compute the set of cells that contribute to the match cell: BFS upstream through
-        // unconditional relationships (excluding already-committed conditional relationships
-        // and the relationships currently being added). A branch relationship with multiple
-        // methods is invalid if any of its adjacent cells is in this contributing set, because
-        // the branch could then flip method selection in the match cell's upstream subgraph.
+        // Compute the set of cells that contribute to the match subject: BFS upstream
+        // through unconditional relationships (excluding already-committed conditional
+        // relationships and the relationships currently being added), seeded from *every*
+        // match cell. A branch relationship with multiple methods is invalid if any of its
+        // adjacent cells is in this contributing set, because the branch could then flip
+        // method selection in the match subject's upstream subgraph.
         let contributing_cells: HashSet<CellId> = {
             let mut cells: HashSet<CellId> = HashSet::new();
             let mut queue: std::collections::VecDeque<CellId> = std::collections::VecDeque::new();
-            cells.insert(cell);
-            queue.push_back(cell);
+            for &cell in &match_cells {
+                if cells.insert(cell) {
+                    queue.push_back(cell);
+                }
+            }
             while let Some(c) = queue.pop_front() {
                 if let Some(cell_data) = self.cells.get(c) {
                     for &rel_id in &cell_data.adj {
@@ -359,7 +406,7 @@ impl Sheet {
         }
 
         Ok(self.conditionals.insert(ConditionalData {
-            cell,
+            source: source.0,
             branches: typed_branches,
             default,
         }))
@@ -371,7 +418,10 @@ impl Sheet {
     /// whatever already references it.
     fn cell_has_prior_use(&self, id: CellId) -> bool {
         self.cells.get(id).is_some_and(|cell| !cell.adj.is_empty())
-            || self.conditionals.values().any(|c| c.cell == id)
+            || self
+                .conditionals
+                .values()
+                .any(|c| c.match_cells().contains(&id))
     }
 
     /// Registers an output: a cell written by exactly one method, together with zero or
@@ -602,7 +652,7 @@ impl Sheet {
             .is_some_and(|plan| plan.iter().any(|&(r, _)| r == rel_id))
     }
 
-    /// Returns the match cell of every conditional with at least one branch (or default)
+    /// Returns the match cells of every conditional with at least one branch (or default)
     /// relationship that touches `cell` (as an input or output of any of its methods) —
     /// every conditional whose branch choice currently determines, or could determine,
     /// `cell`'s value or whether it has an active producer at all.
@@ -619,7 +669,7 @@ impl Sheet {
                     .chain(cond.default.iter())
                     .any(|&rel_id| self.relationships[rel_id].adj.contains(&cell))
             })
-            .map(|cond| cond.cell)
+            .flat_map(|cond| cond.match_cells().iter().copied())
             .collect()
     }
 
@@ -857,16 +907,54 @@ impl Sheet {
         result
     }
 
+    /// Evaluates conditional `cond`'s current match value: borrows the cell directly for a
+    /// plain match subject (no allocation), or calls the expression's function once for a
+    /// computed match subject.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::MethodFailed` — the match subject is a [`MatchExpr`] whose function
+    ///   returned an error.
+    fn evaluate_match_source(&self, cond: &ConditionalData) -> Result<MatchValue<'_>, Error> {
+        match &cond.source {
+            MatchSource::Cell(id) => Ok(MatchValue::Ref(self.cells[*id].effective())),
+            MatchSource::Expr(expr) => {
+                let args: Vec<&dyn Any> = expr
+                    .inputs
+                    .iter()
+                    .map(|&id| self.cells[id].effective())
+                    .collect();
+                let value = (expr.function)(&args).map_err(Error::MethodFailed)?;
+                Ok(MatchValue::Owned(value))
+            }
+        }
+    }
+
+    /// Returns the equality function used to compare `cond`'s match value against branch
+    /// keys: the match cell's own `eq_fn` for a plain match subject, or the expression's
+    /// captured `eq_fn` for a computed one.
+    fn match_eq_fn(&self, cond: &ConditionalData) -> fn(&dyn Any, &dyn Any) -> bool {
+        match &cond.source {
+            MatchSource::Cell(id) => self.cells[*id].eq_fn,
+            MatchSource::Expr(expr) => expr.eq_fn,
+        }
+    }
+
     /// Builds the active relationship set for the general planning pass.
     ///
     /// Starts with all unconditional relationships (those not in
     /// `self.conditional_relationships`), then evaluates each conditional: the first
-    /// branch whose keys contain the match cell's current value is selected, and its
+    /// branch whose keys contain the match subject's current value is selected, and its
     /// relationships are added. If no branch matches, the default relationships are added.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::MethodFailed` — an expression-sourced conditional's function returned an
+    ///   error.
     ///
     /// - Complexity: O(R + C·B·K) where R = total relationships, C = conditionals,
     ///   B = branches per conditional, K = keys per branch.
-    fn build_active_set(&self) -> HashSet<RelationshipId> {
+    fn build_active_set(&self) -> Result<HashSet<RelationshipId>, Error> {
         let mut active: HashSet<RelationshipId> = self
             .relationships
             .keys()
@@ -874,13 +962,13 @@ impl Sheet {
             .collect();
 
         for (_, cond) in &self.conditionals {
-            let cell = &self.cells[cond.cell];
-            let eq_fn = cell.eq_fn;
-            let value = cell.effective();
+            let value = self.evaluate_match_source(cond)?;
+            let value_ref = value.as_dyn();
+            let eq_fn = self.match_eq_fn(cond);
 
             let mut matched = false;
             for branch in &cond.branches {
-                if branch.keys.iter().any(|key| eq_fn(value, key.as_ref())) {
+                if branch.keys.iter().any(|key| eq_fn(value_ref, key.as_ref())) {
                     for &rel_id in &branch.relationships {
                         active.insert(rel_id);
                     }
@@ -895,7 +983,7 @@ impl Sheet {
             }
         }
 
-        active
+        Ok(active)
     }
 
     /// Assigns derived-cell strengths after a planning pass.
@@ -983,7 +1071,11 @@ impl Sheet {
 
         // Phase 1: pre-plan for derived match cells.
         if !self.conditionals.is_empty() {
-            let match_cells: Vec<CellId> = self.conditionals.values().map(|c| c.cell).collect();
+            let match_cells: Vec<CellId> = self
+                .conditionals
+                .values()
+                .flat_map(|c| c.match_cells().iter().copied())
+                .collect();
             let pre_active = self.match_cell_subgraph(&match_cells);
             if !pre_active.is_empty() {
                 let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
@@ -992,7 +1084,7 @@ impl Sheet {
         }
 
         // Phase 2: evaluate conditionals and build the active relationship set.
-        let active = self.build_active_set();
+        let active = self.build_active_set()?;
 
         // Phase 3: general plan on the active set.
         let plan = crate::planner::plan(&self.cells, &self.relationships, &active)?;
@@ -1216,11 +1308,12 @@ impl Sheet {
         self.outputs.keys()
     }
 
-    /// Returns the match cell for conditional `id`.
+    /// Returns the match cells for conditional `id`: a single cell for a plain match
+    /// subject, or every input of a [`MatchExpr`] match subject.
     ///
     /// Returns `None` if `id` is not a live conditional in this sheet.
-    pub fn conditional_match_cell(&self, id: ConditionalId) -> Option<CellId> {
-        self.conditionals.get(id).map(|c| c.cell)
+    pub fn conditional_match_cells(&self, id: ConditionalId) -> Option<&[CellId]> {
+        self.conditionals.get(id).map(|c| c.match_cells())
     }
 
     /// Returns the number of named branches in conditional `id`.
@@ -1258,21 +1351,30 @@ impl Sheet {
 
     /// Returns the index of the currently matching branch for conditional `id`.
     ///
-    /// Evaluates branch keys against the match cell's current value in definition order;
-    /// returns the index of the first matching branch. Returns `None` if no branch key
-    /// matches (the default branch is active) or if `id` is not a live conditional.
+    /// Evaluates branch keys against the match subject's current value in definition
+    /// order; returns the index of the first matching branch. Returns `Ok(None)` if no
+    /// branch key matches (the default branch is active) or if `id` is not a live
+    /// conditional.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::MethodFailed` — `id` is a live, expression-sourced conditional whose
+    ///   function returned an error.
     ///
     /// - Complexity: O(B·K) where B = branches, K = keys per branch.
-    pub fn conditional_active_branch(&self, id: ConditionalId) -> Option<usize> {
-        let cond = self.conditionals.get(id)?;
-        let cell = &self.cells[cond.cell];
-        let eq_fn = cell.eq_fn;
-        let value = cell.effective();
-        cond.branches
+    pub fn conditional_active_branch(&self, id: ConditionalId) -> Result<Option<usize>, Error> {
+        let Some(cond) = self.conditionals.get(id) else {
+            return Ok(None);
+        };
+        let value = self.evaluate_match_source(cond)?;
+        let value_ref = value.as_dyn();
+        let eq_fn = self.match_eq_fn(cond);
+        Ok(cond
+            .branches
             .iter()
             .enumerate()
-            .find(|(_, branch)| branch.keys.iter().any(|key| eq_fn(value, key.as_ref())))
-            .map(|(i, _)| i)
+            .find(|(_, branch)| branch.keys.iter().any(|key| eq_fn(value_ref, key.as_ref())))
+            .map(|(i, _)| i))
     }
 
     /// Re-executes the cached plan without invoking the planner.
@@ -1319,13 +1421,19 @@ impl Default for Sheet {
 
 #[cfg(test)]
 mod tests {
-    use crate::{ConditionalId, Error, Method, Sheet, cell::CellId, relationship::RelationshipId};
+    use crate::{
+        ConditionalId, Error, MatchExpr, Method, Sheet, cell::CellId, relationship::RelationshipId,
+    };
     use std::any::TypeId;
 
     #[test]
     fn add_conditional_returns_error_for_invalid_cell() {
         let mut sheet = Sheet::new();
-        let result = sheet.add_conditional(CellId::default(), vec![(vec![0_i32], vec![])], vec![]);
+        let result = sheet.add_conditional(
+            MatchExpr::cell(CellId::default()),
+            vec![(vec![0_i32], vec![])],
+            vec![],
+        );
         assert!(matches!(result, Err(Error::InvalidId)));
     }
 
@@ -1334,7 +1442,8 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         // Branch keys are f64 but cell holds i32.
-        let result = sheet.add_conditional(a, vec![(vec![0.0_f64], vec![])], vec![]);
+        let result =
+            sheet.add_conditional(MatchExpr::cell(a), vec![(vec![0.0_f64], vec![])], vec![]);
         assert!(matches!(result, Err(Error::InvalidConditional)));
     }
 
@@ -1343,7 +1452,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let result = sheet.add_conditional(
-            a,
+            MatchExpr::cell(a),
             vec![(vec![0_i32], vec![RelationshipId::default()])],
             vec![],
         );
@@ -1363,7 +1472,8 @@ mod tests {
                 Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
             ])
             .unwrap();
-        let result = sheet.add_conditional(a, vec![(vec![0_i32], vec![rel])], vec![]);
+        let result =
+            sheet.add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![]);
         assert!(matches!(result, Err(Error::InvalidConditional)));
     }
 
@@ -1384,8 +1494,91 @@ mod tests {
                 Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
             ])
             .unwrap();
-        let result = sheet.add_conditional(p, vec![(vec![0_i32], vec![rel])], vec![]);
+        let result =
+            sheet.add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![]);
         assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_error_when_branch_rel_involves_cell_upstream_of_either_expr_input() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let p = sheet.add_cell(0_i32);
+        let q = sheet.add_cell(0_i32);
+        // Unconditional: a → q  (a contributes to expr input q).
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, q, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Branch relationship has two methods and involves `a`, which feeds q, one of the
+        // match expression's two inputs (p, q).
+        let rel = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+                Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
+            ])
+            .unwrap();
+        let expr = MatchExpr::from_fn_2([p, q], |x: &i32, y: &i32| Ok(*x + *y));
+        let result = sheet.add_conditional(expr, vec![(vec![0_i32], vec![rel])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_activates_branch_from_two_cell_expression() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(false);
+        let b = sheet.add_cell(false);
+        let x = sheet.add_cell(0_i32);
+        let y = sheet.add_cell(0_i32);
+        let rel_true = sheet
+            .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v))])
+            .unwrap();
+        let expr = MatchExpr::from_fn_2([a, b], |p: &bool, q: &bool| Ok(*p && *q));
+        let cid = sheet
+            .add_conditional(expr, vec![(vec![true], vec![rel_true])], vec![])
+            .unwrap();
+
+        sheet.write(a, true).unwrap();
+        sheet.write(b, false).unwrap();
+        assert_eq!(sheet.conditional_active_branch(cid).unwrap(), None);
+
+        sheet.write(b, true).unwrap();
+        assert_eq!(sheet.conditional_active_branch(cid).unwrap(), Some(0));
+        assert_eq!(sheet.conditional_match_cells(cid).unwrap(), &[a, b]);
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_conditional_for_expr_output_type_mismatch() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        // Expression computes an i32, but branch keys below are f64.
+        let expr = MatchExpr::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x + y));
+        let result = sheet.add_conditional::<f64>(expr, vec![(vec![0.0], vec![])], vec![]);
+        assert!(matches!(result, Err(Error::InvalidConditional)));
+    }
+
+    #[test]
+    fn add_conditional_returns_invalid_id_for_bad_expr_input_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let expr = MatchExpr::from_fn_2([a, CellId::default()], |x: &i32, y: &i32| Ok(x + y));
+        let result = sheet.add_conditional::<i32>(expr, vec![], vec![]);
+        assert!(matches!(result, Err(Error::InvalidId)));
+    }
+
+    #[test]
+    fn propagate_surfaces_method_failed_from_a_failing_match_expression() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let expr = MatchExpr::from_fn_1(a, |_x: &i32| -> Result<i32, anyhow::Error> {
+            Err(anyhow::anyhow!("boom"))
+        });
+        sheet
+            .add_conditional::<i32>(expr, vec![(vec![0], vec![])], vec![])
+            .unwrap();
+        let result = sheet.propagate();
+        assert!(matches!(result, Err(Error::MethodFailed(_))));
     }
 
     #[test]
@@ -1403,7 +1596,11 @@ mod tests {
                 Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
             ])
             .unwrap();
-        let result = sheet.add_conditional(mode, vec![(vec![0_i32], vec![rel])], vec![]);
+        let result = sheet.add_conditional(
+            MatchExpr::cell(mode),
+            vec![(vec![0_i32], vec![rel])],
+            vec![],
+        );
         assert!(result.is_ok());
     }
 
@@ -1416,7 +1613,8 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
             .unwrap();
         // Empty key list is invalid.
-        let result = sheet.add_conditional::<i32>(a, vec![(vec![], vec![rel])], vec![]);
+        let result =
+            sheet.add_conditional::<i32>(MatchExpr::cell(a), vec![(vec![], vec![rel])], vec![]);
         assert!(matches!(result, Err(Error::InvalidConditional)));
     }
 
@@ -1430,10 +1628,11 @@ mod tests {
             .unwrap();
         // Add rel to the first conditional.
         sheet
-            .add_conditional(a, vec![(vec![0_i32], vec![rel])], vec![])
+            .add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![])
             .unwrap();
         // Try to add the same rel to a second conditional.
-        let result = sheet.add_conditional(a, vec![(vec![1_i32], vec![rel])], vec![]);
+        let result =
+            sheet.add_conditional(MatchExpr::cell(a), vec![(vec![1_i32], vec![rel])], vec![]);
         assert!(matches!(result, Err(Error::InvalidConditional)));
     }
 
@@ -1446,7 +1645,7 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
             .unwrap();
         let cid = sheet
-            .add_conditional(a, vec![(vec![0_i32], vec![rel])], vec![])
+            .add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![])
             .unwrap();
         // ConditionalId must be a live key.
         let _ = cid; // just check it compiles and succeeds
@@ -1493,7 +1692,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let p = sheet.add_cell(0_i32);
         sheet.terminal_cells.insert(p);
-        let result = sheet.add_conditional::<i32>(p, vec![], vec![]);
+        let result = sheet.add_conditional::<i32>(MatchExpr::cell(p), vec![], vec![]);
         assert!(matches!(result, Err(Error::TerminalCell)));
     }
 
@@ -2034,7 +2233,11 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
             .unwrap();
         sheet
-            .add_conditional(mode, vec![(vec![1_i32], vec![rel_on])], vec![])
+            .add_conditional(
+                MatchExpr::cell(mode),
+                vec![(vec![1_i32], vec![rel_on])],
+                vec![],
+            )
             .unwrap();
 
         // Full propagation with mode=1 (conditional active).
@@ -2110,7 +2313,7 @@ mod tests {
 
         let cid = sheet
             .add_conditional(
-                p,
+                MatchExpr::cell(p),
                 vec![(vec![0_i32], vec![rel0]), (vec![1_i32], vec![rel1])],
                 vec![],
             )
@@ -2129,7 +2332,7 @@ mod tests {
             .unwrap();
 
         let cid = sheet
-            .add_conditional::<i32>(p, vec![], vec![rel_default])
+            .add_conditional::<i32>(MatchExpr::cell(p), vec![], vec![rel_default])
             .unwrap();
         (sheet, cid, rel_default)
     }
@@ -2147,17 +2350,22 @@ mod tests {
     }
 
     #[test]
-    fn conditional_match_cell_returns_correct_cell() {
+    fn conditional_match_cells_returns_correct_cell() {
         let mut sheet = Sheet::new();
         let p = sheet.add_cell(0_i32);
-        let cid = sheet.add_conditional::<i32>(p, vec![], vec![]).unwrap();
-        assert_eq!(sheet.conditional_match_cell(cid), Some(p));
+        let cid = sheet
+            .add_conditional::<i32>(MatchExpr::cell(p), vec![], vec![])
+            .unwrap();
+        assert_eq!(sheet.conditional_match_cells(cid), Some([p].as_slice()));
     }
 
     #[test]
-    fn conditional_match_cell_returns_none_for_invalid_id() {
+    fn conditional_match_cells_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
-        assert_eq!(sheet.conditional_match_cell(ConditionalId::default()), None);
+        assert_eq!(
+            sheet.conditional_match_cells(ConditionalId::default()),
+            None
+        );
     }
 
     #[test]
@@ -2227,26 +2435,28 @@ mod tests {
     #[test]
     fn conditional_active_branch_returns_matching_branch_index() {
         let (mut sheet, cid) = sheet_with_two_branch_conditional();
-        let p = sheet.conditional_match_cell(cid).unwrap();
+        let p = sheet.conditional_match_cells(cid).unwrap()[0];
         sheet.write(p, 0_i32).unwrap();
-        assert_eq!(sheet.conditional_active_branch(cid), Some(0));
+        assert_eq!(sheet.conditional_active_branch(cid).unwrap(), Some(0));
         sheet.write(p, 1_i32).unwrap();
-        assert_eq!(sheet.conditional_active_branch(cid), Some(1));
+        assert_eq!(sheet.conditional_active_branch(cid).unwrap(), Some(1));
     }
 
     #[test]
     fn conditional_active_branch_returns_none_when_no_branch_matches() {
         let (mut sheet, cid) = sheet_with_two_branch_conditional();
-        let p = sheet.conditional_match_cell(cid).unwrap();
+        let p = sheet.conditional_match_cells(cid).unwrap()[0];
         sheet.write(p, 99_i32).unwrap();
-        assert_eq!(sheet.conditional_active_branch(cid), None);
+        assert_eq!(sheet.conditional_active_branch(cid).unwrap(), None);
     }
 
     #[test]
     fn conditional_active_branch_returns_none_for_invalid_id() {
         let sheet = Sheet::new();
         assert_eq!(
-            sheet.conditional_active_branch(ConditionalId::default()),
+            sheet
+                .conditional_active_branch(ConditionalId::default())
+                .unwrap(),
             None
         );
     }

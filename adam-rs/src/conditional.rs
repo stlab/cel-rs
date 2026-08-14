@@ -28,10 +28,8 @@ type MatchExprFn = Box<dyn Fn(&[&dyn Any]) -> Result<Box<dyn Any>, anyhow::Error
 /// Constructed via [`MatchExpr::cell`] for the common single-cell case, or
 /// [`MatchExpr::new`]/[`MatchExpr::from_fn_1`]/[`MatchExpr::from_fn_2`] to compute the
 /// match value from multiple cells (analogous to [`crate::relationship::Method`]).
-#[allow(dead_code)] // Temporary: expected to be removed once Task 2 wires these types into Sheet/ConditionalData
 pub struct MatchExpr(pub(crate) MatchSource);
 
-#[allow(dead_code)] // Temporary: expected to be removed once Task 2 wires these types into Sheet/ConditionalData
 pub(crate) enum MatchSource {
     /// The match value is `cell`'s current effective value, read directly with no
     /// allocation and no extra trait bounds.
@@ -40,7 +38,6 @@ pub(crate) enum MatchSource {
     Expr(MatchExprData),
 }
 
-#[allow(dead_code)] // Temporary: expected to be removed once Task 2 wires these types into Sheet/ConditionalData
 pub(crate) struct MatchExprData {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) input_types: Vec<TypeId>,
@@ -145,9 +142,9 @@ impl MatchExpr {
 }
 
 /// One arm of a [`ConditionalData`]: a set of key values and the relationships
-/// to activate when the match cell equals any key.
+/// to activate when the match value equals any key.
 pub(crate) struct Branch {
-    /// Type-erased key values; each `TypeId` matches the match cell's registered type.
+    /// Type-erased key values; each `TypeId` matches the match subject's output type.
     pub(crate) keys: Vec<Box<dyn Any>>,
     /// Relationships activated when any key matches.
     pub(crate) relationships: Vec<RelationshipId>,
@@ -155,12 +152,23 @@ pub(crate) struct Branch {
 
 /// Internal storage for a conditional.
 pub(crate) struct ConditionalData {
-    /// The cell whose value is tested.
-    pub(crate) cell: CellId,
+    /// The match subject whose value is tested.
+    pub(crate) source: MatchSource,
     /// Branches evaluated in definition order; first match wins.
     pub(crate) branches: Vec<Branch>,
     /// Relationships activated when no branch matches. Empty means no default.
     pub(crate) default: Vec<RelationshipId>,
+}
+
+impl ConditionalData {
+    /// Returns the cells that determine this conditional's match value: a single cell for
+    /// [`MatchSource::Cell`], or every input of the expression for [`MatchSource::Expr`].
+    pub(crate) fn match_cells(&self) -> &[CellId] {
+        match &self.source {
+            MatchSource::Cell(id) => std::slice::from_ref(id),
+            MatchSource::Expr(expr) => &expr.inputs,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +239,37 @@ mod tests {
             }
             MatchSource::Cell(_) => panic!("expected Expr variant"),
         }
+    }
+
+    #[test]
+    fn match_cells_returns_single_cell_for_cell_variant() {
+        use slotmap::SlotMap;
+        let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
+        let cell = map.insert(());
+        let data = ConditionalData {
+            source: MatchSource::Cell(cell),
+            branches: Vec::new(),
+            default: Vec::new(),
+        };
+        assert_eq!(data.match_cells(), &[cell]);
+    }
+
+    #[test]
+    fn match_cells_returns_all_inputs_for_expr_variant() {
+        use slotmap::SlotMap;
+        let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
+        let a = map.insert(());
+        let b = map.insert(());
+        let expr = MatchExpr::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x + y));
+        let MatchSource::Expr(data) = expr.0 else {
+            panic!("expected Expr variant")
+        };
+        let cond = ConditionalData {
+            source: MatchSource::Expr(data),
+            branches: Vec::new(),
+            default: Vec::new(),
+        };
+        assert_eq!(cond.match_cells(), &[a, b]);
     }
 
     #[test]
