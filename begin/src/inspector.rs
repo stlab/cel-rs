@@ -42,7 +42,9 @@ fn compute_output_status(sheet: &Sheet) -> OutputStatus {
         .chain(
             sheet
                 .conditionals()
-                .filter_map(|id| sheet.conditional_match_cell(id)),
+                .filter_map(|id| sheet.conditional_match_cells(id))
+                .flatten()
+                .copied(),
         )
         .collect();
     let invalid_outputs = outputs
@@ -95,9 +97,11 @@ fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) 
 ///
 /// - Complexity: O(number of conditionals + number of output conditions in the sheet).
 fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
-    let is_match_cell = sheet
-        .conditionals()
-        .any(|cid| sheet.conditional_match_cell(cid) == Some(id));
+    let is_match_cell = sheet.conditionals().any(|cid| {
+        sheet
+            .conditional_match_cells(cid)
+            .is_some_and(|c| c.contains(&id))
+    });
     let feeds_condition = sheet.outputs().any(|oid| {
         sheet.output_conditions(oid).is_some_and(|conditions| {
             conditions.iter().any(|&cid| {
@@ -347,7 +351,7 @@ mod tests {
 
     #[test]
     fn cell_needs_full_propagate_true_for_conditional_match_cell() {
-        use adam_rs::Method;
+        use adam_rs::{MatchExpr, Method};
 
         let mut sheet = Sheet::new();
         let p = sheet.add_cell(0_i32);
@@ -357,7 +361,7 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &f64| Ok(*v))])
             .unwrap();
         sheet
-            .add_conditional(p, vec![(vec![0_i32], vec![rel])], vec![])
+            .add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![])
             .unwrap();
 
         assert!(cell_needs_full_propagate(&sheet, p));
