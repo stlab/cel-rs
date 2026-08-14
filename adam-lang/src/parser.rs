@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use indexmap::IndexMap;
 
-use adam_rs::{CellId, Condition, Method, OutputId, RelationshipId, Sheet};
+use adam_rs::{CellId, Condition, MatchExpr, Method, OutputId, RelationshipId, Sheet};
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
 use cel_runtime::DynSegment;
@@ -535,7 +535,7 @@ impl AdamParser {
                         .collect();
                 ctx.sheet
                     .add_conditional::<cel_runtime::DynamicSequence>(
-                        match_cell_id,
+                        MatchExpr::cell(match_cell_id),
                         typed_branches,
                         default_rel_ids,
                     )

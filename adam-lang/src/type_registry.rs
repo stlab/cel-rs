@@ -20,7 +20,7 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
-use adam_rs::{CellId, ConditionalId, RelationshipId, Sheet};
+use adam_rs::{CellId, ConditionalId, MatchExpr, RelationshipId, Sheet};
 use cel_runtime::{BoxExtractor, DynSegment};
 
 /// The identity of a declared adam-lang cell type. Every distinct tuple *shape* erases to the
@@ -131,7 +131,7 @@ fn add_conditional_impl<T: Any + PartialEq + 'static>(
             (vec![v], rel_ids)
         })
         .collect();
-    sheet.add_conditional::<T>(cell, typed_branches, default)
+    sheet.add_conditional::<T>(MatchExpr::cell(cell), typed_branches, default)
 }
 
 fn add_cell_impl<T: Any + PartialEq + 'static>(sheet: &mut Sheet, value: Box<dyn Any>) -> CellId {
