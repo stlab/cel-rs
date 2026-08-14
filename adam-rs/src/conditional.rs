@@ -16,16 +16,22 @@ new_key_type! {
     pub struct ConditionalId;
 }
 
+/// Type-erased function stored inside a [`MatchExprData`].
+///
+/// Takes a slice of type-erased input references and returns a type-erased boxed
+/// result value, or an error.
+type MatchExprFn = Box<dyn Fn(&[&dyn Any]) -> Result<Box<dyn Any>, anyhow::Error>>;
+
 /// A conditional's match subject: an existing cell, or a method-like expression computed
 /// from a set of input cells.
 ///
 /// Constructed via [`MatchExpr::cell`] for the common single-cell case, or
 /// [`MatchExpr::new`]/[`MatchExpr::from_fn_1`]/[`MatchExpr::from_fn_2`] to compute the
 /// match value from multiple cells (analogous to [`crate::relationship::Method`]).
-#[allow(dead_code)]
+#[allow(dead_code)] // Temporary: expected to be removed once Task 2 wires these types into Sheet/ConditionalData
 pub struct MatchExpr(pub(crate) MatchSource);
 
-#[allow(dead_code)]
+#[allow(dead_code)] // Temporary: expected to be removed once Task 2 wires these types into Sheet/ConditionalData
 pub(crate) enum MatchSource {
     /// The match value is `cell`'s current effective value, read directly with no
     /// allocation and no extra trait bounds.
@@ -34,14 +40,13 @@ pub(crate) enum MatchSource {
     Expr(MatchExprData),
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // Temporary: expected to be removed once Task 2 wires these types into Sheet/ConditionalData
 pub(crate) struct MatchExprData {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) input_types: Vec<TypeId>,
     pub(crate) output_type: TypeId,
     pub(crate) eq_fn: fn(&dyn Any, &dyn Any) -> bool,
-    #[allow(clippy::type_complexity)]
-    pub(crate) function: Box<dyn Fn(&[&dyn Any]) -> Result<Box<dyn Any>, anyhow::Error>>,
+    pub(crate) function: MatchExprFn,
 }
 
 impl MatchExpr {
