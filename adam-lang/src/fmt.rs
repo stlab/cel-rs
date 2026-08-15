@@ -129,8 +129,8 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
     write_branch_relationships(out, &branch.relationships, depth);
 }
 
-/// Writes one `conditional match_name { ... }` declaration: its named branches in declaration
-/// order, followed by its optional `_ => { ... }` default arm.
+/// Writes one `conditional <expr> { ... }` declaration: its branches in declaration
+/// order (dispatching on the match-subject expression), followed by its optional `_ => { ... }` default arm.
 fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize) {
     write_trivia(
         out,

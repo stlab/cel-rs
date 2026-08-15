@@ -4,12 +4,11 @@
     (See accompanying file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
 
     Ported from ASL's classic `image_size` Adam sheet. adam-lang has no separate
-    input/constant/interface/output/invariant sections, no `unlink`, and no `when (expr)
-    relate {}` guard on an arbitrary boolean expression — only `conditional match_cell {
-    literal => {...} }`, dispatching on one cell's own value. The translation below:
+    input/constant/interface/output/invariant sections and no `unlink`. The translation below:
       - ASL `constant`/one-directional `<==` rules -> a `relationship` with a single method
         (the planner always derives that cell; there is no alternative method to pick).
-      - ASL `when (cond) relate {}` -> `conditional cond { true => {...} false => {...} }`.
+      - ASL `when (cond) relate {}` (arbitrary boolean expressions) -> `conditional <expr> {
+        true => {...} false => {...} }`.
       - ASL `unlink x : init <== cond ? x : fallback;` -> `conditional cond`'s "false" branch
         forces `x` back to `fallback`; its "true" branch leaves `x` untouched (a free,
         directly writable cell), matching the checkbox-like behavior `unlink` describes.
