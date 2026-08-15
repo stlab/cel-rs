@@ -321,12 +321,12 @@ mod tests {
     }
 
     #[test]
-    fn image_resize_constrain_is_relevant_despite_only_feeding_a_conditional_helper_cell() {
-        // Regression test: `constrain` only ever feeds `resample_and_constrain` (a derived
-        // helper cell used as a conditional match cell) — it is never itself a relationship
-        // output or a match cell. `Sheet::contributing_cells` must still trace through the
-        // match cell to find it, or it wrongly shows as an irrelevant/disabled field even
-        // though editing it changes which branch is active.
+    fn image_resize_constrain_is_relevant_despite_only_being_a_conditional_expression_input() {
+        // Regression test: `constrain` is never itself a relationship output or a plain
+        // match cell — it's one of two inputs to `conditional resample && constrain`'s match
+        // expression. `Sheet::contributing_cells` must still trace through every expression
+        // input to find it, or it wrongly shows as an irrelevant/disabled field even though
+        // editing it changes which branch is active.
         use adam_lang::AdamParser;
         let source = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/image_resize.adm2"),
@@ -344,8 +344,9 @@ mod tests {
         // Regression test: `dim_width_pixels`/`dim_width_percent`/`doc_width_inches`/
         // `doc_resolution` form a strength-ambiguous diamond (any two determine the rest).
         // In the default state, `dim_width_pixels` and `doc_resolution` happen to be the
-        // strength-chosen sources — but every cell in the diamond, plus every cell feeding
-        // a conditional match cell (`resample`, `constrain`, `auto_quality`), must show as
+        // strength-chosen sources — but every cell in the diamond, plus every cell feeding a
+        // conditional match subject (`resample` and `constrain` are both inputs to one
+        // conditional's match expression; `auto_quality` is a plain match cell), must show as
         // relevant regardless of which specific cells the *current* strengths picked.
         use adam_lang::AdamParser;
         let source = std::fs::read_to_string(

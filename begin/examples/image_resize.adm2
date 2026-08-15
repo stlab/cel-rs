@@ -10,8 +10,6 @@
       - ASL `constant`/one-directional `<==` rules -> a `relationship` with a single method
         (the planner always derives that cell; there is no alternative method to pick).
       - ASL `when (cond) relate {}` -> `conditional cond { true => {...} false => {...} }`.
-      - ASL `when (a && b) relate {}` -> a derived helper bool cell for `a && b`
-        (`resample_and_constrain`), then `conditional` on that helper.
       - ASL `unlink x : init <== cond ? x : fallback;` -> `conditional cond`'s "false" branch
         forces `x` back to `fallback`; its "true" branch leaves `x` untouched (a free,
         directly writable cell), matching the checkbox-like behavior `unlink` describes.
@@ -36,9 +34,6 @@ sheet image_resize {
     // --- interface ---
     cell resample: bool = true;
     cell constrain: bool = true;
-    // Helper for ASL's `when (constrain && resample)` / `unlink scale_styles`'s compound
-    // guard: adam-lang's `conditional` can only dispatch on one cell's own value.
-    cell resample_and_constrain: bool = true;
     cell scale_styles: bool = true;
 
     cell resample_method: String = "bicubic";
@@ -85,10 +80,6 @@ sheet image_resize {
         method [original_height, original_resolution] -> [original_doc_height] {
             original_height as f64 / original_resolution
         }
-    }
-
-    relationship {
-        method [resample, constrain] -> [resample_and_constrain] { resample && constrain }
     }
 
     // Unconditional: doc_width_inches <-> doc_width_percent, pinned to original_doc_width.
@@ -194,7 +185,7 @@ sheet image_resize {
         }
     }
 
-    conditional resample_and_constrain {
+    conditional resample && constrain {
         true => {
             // when (constrain && resample) relate: lock width/height percent together.
             relationship {
@@ -204,8 +195,10 @@ sheet image_resize {
         }
         false => {
             // unlink scale_styles: true <== resample && constrain ? scale_styles : false;
+            // adam-lang's `method` requires at least one input cell, so this ignores the
+            // same `resample`/`constrain` guard the conditional itself already dispatches on.
             relationship {
-                method [resample_and_constrain] -> [scale_styles] { false }
+                method [resample, constrain] -> [scale_styles] { false }
             }
         }
     }
