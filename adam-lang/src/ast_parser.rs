@@ -286,12 +286,12 @@ impl AdamAstParser {
         })
     }
 
-    /// `conditional_decl = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".`
+    /// `conditional_decl = "conditional" or_expression "{" { conditional_branch } [ default_branch ] "}".`
     fn parse_conditional_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::ConditionalDecl> {
         use cel_parser::lex_lexer::Token;
         let decl_start = cursor.peek_span();
         cursor.is_keyword("conditional");
-        let (match_name, match_span) = cursor.consume_ident()?;
+        let match_expr = self.parse_cel_or_expression(cursor)?;
         cursor.expect_open_brace()?;
         let mut branches = Vec::new();
         let mut default = None;
@@ -326,8 +326,7 @@ impl AdamAstParser {
         }
         let close_span = cursor.expect_close_brace()?;
         Ok(ast::ConditionalDecl {
-            match_name,
-            match_name_span: point(match_span),
+            match_expr,
             branches,
             default,
             leading_comment: None,
@@ -599,9 +598,34 @@ mod tests {
         let ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
             panic!("expected Conditional");
         };
-        assert_eq!(cond.match_name, "mode");
+        assert!(matches!(&cond.match_expr, Expr::Ident { name, .. } if name == "mode"));
         assert_eq!(cond.branches.len(), 1);
         assert!(cond.default.is_some());
+    }
+
+    #[test]
+    fn parse_conditional_records_an_expression_match_subject() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional a && b {
+                        _ => { relationship { method [width] -> [height] { width } } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        let ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        assert!(matches!(
+            &cond.match_expr,
+            Expr::Logical {
+                op: cel_parser::LogicalOp::And,
+                ..
+            }
+        ));
     }
 
     #[test]
