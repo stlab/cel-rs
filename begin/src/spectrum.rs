@@ -140,6 +140,25 @@ pub fn SpActionButton(
     }
 }
 
+/// A labeled on/off toggle.
+///
+/// Maps to `<sp-switch>`; slotted `children` render as its label. `checked`
+/// renders its current state; `onclick` fires on every toggle press,
+/// mirroring `SpActionButton`'s `selected`/`onclick` pattern (the caller owns
+/// the boolean state and re-renders `checked` from it) rather than reading
+/// the new state back off a native `change` event.
+#[component]
+pub fn SpSwitch(checked: bool, onclick: EventHandler<MouseEvent>, children: Element) -> Element {
+    rsx! {
+        sp-switch {
+            onclick: move |e| onclick.call(e),
+            // Boolean attribute: omit entirely when false; presence = checked.
+            "checked": if checked { "true" },
+            {children}
+        }
+    }
+}
+
 /// A scrollable, selectable vertical list of items — used as the examples
 /// picker sidebar.
 ///

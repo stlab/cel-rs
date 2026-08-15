@@ -39,6 +39,17 @@
     var MAX_ZOOM = 8;
     var latestData = null;
     var currentSourceId = null;                          // which demo/file `nodes`/`links` currently belong to
+    var showInactive = true;                              // NEW: true = dim inactive branches, false = hide/remove them
+    var hiddenNodeIds = new Set();                        // NEW: ids currently excluded from the graph (only non-empty when !showInactive)
+
+    // Returns true when sets `a` and `b` contain exactly the same values.
+    function setsEqual(a, b) {
+        if (a.size !== b.size) return false;
+        for (var v of a) {
+            if (!b.has(v)) return false;
+        }
+        return true;
+    }
 
     // Returns the point on the rect boundary of a cell centered at (tx,ty)
     // along the approach line from (sx,sy) to (tx,ty). `hw`/`hh` are that
@@ -87,15 +98,15 @@
         return { x1: srcPt.x, y1: srcPt.y, x2: tgtPt.x, y2: tgtPt.y };
     }
 
-    // Returns the axis-aligned bounding box of all node visuals, in graph
+    // Returns the axis-aligned bounding box of all visible node visuals (excluding
+    // anything in `hiddenNodeIds`, so hiding inactive branches shrinks the fit
+    // instead of fitting around their stale last-known positions), in graph
     // (pre-zoom-transform) coordinates. Falls back to the viewport when there
-    // are no nodes yet.
+    // are no visible nodes.
     function computeBBox() {
-        if (nodes.length === 0) {
-            return { minX: 0, minY: 0, maxX: width, maxY: height };
-        }
         var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         nodes.forEach(function (n) {
+            if (hiddenNodeIds.has(n.id)) return;
             var hw, hh;
             if (n.kind === 'Cell') { hw = cellWidth(n) / 2; hh = CELL_H / 2; }
             else if (n.kind === 'Conditional') { hw = COND_COLLIDE_R; hh = COND_COLLIDE_R; }
@@ -106,6 +117,9 @@
             maxX = Math.max(maxX, n.x + hw);
             maxY = Math.max(maxY, n.y + hh);
         });
+        if (!isFinite(minX)) {
+            return { minX: 0, minY: 0, maxX: width, maxY: height };
+        }
         return {
             minX: minX - FIT_MARGIN, minY: minY - FIT_MARGIN,
             maxX: maxX + FIT_MARGIN, maxY: maxY + FIT_MARGIN
@@ -179,6 +193,7 @@
         hasInitialFit = false;
         nodes = [];
         links = [];
+        hiddenNodeIds = new Set();
         latestData = data;
         currentSourceId = sourceId;
 
@@ -356,6 +371,13 @@
         // Guard: no-op if not yet initialized
         if (!svg) return;
 
+        // Captured before currentSourceId is overwritten below - distinguishes
+        // "a different demo/file just became active" (nothing to animate from,
+        // see the settleSimulation(true) call at the bottom) from "the same
+        // source's visible node/link set changed" (animate into the new layout;
+        // see the structureChanged branch at the bottom).
+        var sourceChanged = sourceId !== currentSourceId;
+
         // A different demo/file just became active: wipe the node/link cache
         // entirely rather than let the id-based merge below run against it.
         // Node ids are only unique within one Sheet (see cell_node_id() in
@@ -364,7 +386,7 @@
         // layout position — the same root cause the relabeledIds check below
         // guards against for stale box widths, generalized to every other
         // per-node field a stale reused object could carry over.
-        if (sourceId !== currentSourceId) {
+        if (sourceChanged) {
             nodes = [];
             links = [];
             currentSourceId = sourceId;
@@ -416,11 +438,51 @@
         links = data.links.map(function (l) { return Object.assign({}, l); });
 
         var changedSet = new Set(data.changed || []);
-        var cellNodes = nodes.filter(function (n) { return n.kind === 'Cell'; });
-        var relNodes = nodes.filter(function (n) { return n.kind === 'Relationship'; });
-        var condNodes = nodes.filter(function (n) { return n.kind === 'Conditional'; }); // NEW
-        var constraintLinks = links.filter(function (l) { return l.kind === 'Constraint'; }); // NEW
-        var controlLinks = links.filter(function (l) { return l.kind === 'Control'; });         // NEW
+
+        // NEW: Determine which node ids are "inactive" — targeted by at least one
+        // control link but none currently active. Covers both Relationship nodes
+        // and Branch junction nodes: a junction node's control links share its
+        // branch's branch_active flag (see push_branch_links in bridge.rs), so an
+        // inactive branch's junction node is marked inactive right alongside its
+        // relationships.
+        var controlledIds = new Set();
+        var activeIds = new Set();
+        links.forEach(function (l) {
+            if (l.kind !== 'Control') return;
+            var tgtId = typeof l.target === 'object' ? l.target.id : l.target;
+            controlledIds.add(tgtId);
+            if (l.branch_active) activeIds.add(tgtId);
+        });
+        function isInactive(id) {
+            return controlledIds.has(id) && !activeIds.has(id);
+        }
+
+        // NEW: When showInactive is false, inactive relationship/branch nodes and
+        // every link touching them are excluded from the graph entirely — not
+        // merely dimmed — so they occupy no space and exert no force on the
+        // layout (see setShowInactive). Feeds into structureChanged below so
+        // toggling (or a branch match flipping active/inactive) resettles the
+        // simulation to reflow around the change.
+        var newHiddenIds = showInactive ? new Set() : new Set(
+            nodes.filter(function (n) { return isInactive(n.id); }).map(function (n) { return n.id; })
+        );
+        var hiddenSetChanged = !setsEqual(newHiddenIds, hiddenNodeIds);
+        hiddenNodeIds = newHiddenIds;
+        structureChanged = structureChanged || hiddenSetChanged;
+
+        function touchesHidden(l) {
+            var srcId = typeof l.source === 'object' ? l.source.id : l.source;
+            var tgtId = typeof l.target === 'object' ? l.target.id : l.target;
+            return hiddenNodeIds.has(srcId) || hiddenNodeIds.has(tgtId);
+        }
+        var visibleNodes = nodes.filter(function (n) { return !hiddenNodeIds.has(n.id); });
+        var visibleLinks = links.filter(function (l) { return !touchesHidden(l); });
+
+        var cellNodes = visibleNodes.filter(function (n) { return n.kind === 'Cell'; });
+        var relNodes = visibleNodes.filter(function (n) { return n.kind === 'Relationship'; });
+        var condNodes = visibleNodes.filter(function (n) { return n.kind === 'Conditional'; }); // NEW
+        var constraintLinks = visibleLinks.filter(function (l) { return l.kind === 'Constraint'; }); // NEW
+        var controlLinks = visibleLinks.filter(function (l) { return l.kind === 'Control'; });         // NEW
 
         // Constraint links (marker-end and opacity set below in the dimming IIFE)
         linkLayer.selectAll('line')
@@ -512,34 +574,26 @@
             .call(dragBehavior(simulation))
             .on('dblclick', unpinNode);
 
-        // Dim inactive relationship circles and their constraint links.
-        // A relationship is inactive if any control link targets it but none are active.
+        // Dim inactive relationship circles and their constraint links (only
+        // relevant when showInactive is true — when it's false, inactive nodes/links
+        // were already excluded from relNodes/constraintLinks above, so isInactive()
+        // is never true for anything still in these selections).
         // Inactive links also lose their arrowheads.
         (function () {
-            var controlledRelIds = new Set();
-            var activeRelIds = new Set();
-            controlLinks.forEach(function (l) {
-                var tgtId = typeof l.target === 'object' ? l.target.id : l.target;
-                controlledRelIds.add(tgtId);
-                if (l.branch_active) activeRelIds.add(tgtId);
-            });
-            function isInactiveRel(id) {
-                return controlledRelIds.has(id) && !activeRelIds.has(id);
-            }
             relLayer.selectAll('circle').style('stroke', function (d) {
-                return isInactiveRel(d.id) ? INACTIVE_STROKE : null;
+                return isInactive(d.id) ? INACTIVE_STROKE : null;
             });
             linkLayer.selectAll('line')
                 .style('stroke', function (d) {
                     var srcId = typeof d.source === 'object' ? d.source.id : d.source;
                     var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
-                    return (isInactiveRel(srcId) || isInactiveRel(tgtId)) ? INACTIVE_STROKE : null;
+                    return (isInactive(srcId) || isInactive(tgtId)) ? INACTIVE_STROKE : null;
                 })
                 .attr('marker-end', function (d) {
                     if (!data.arrows) return null;
                     var srcId = typeof d.source === 'object' ? d.source.id : d.source;
                     var tgtId = typeof d.target === 'object' ? d.target.id : d.target;
-                    if (isInactiveRel(srcId) || isInactiveRel(tgtId)) return null;
+                    if (isInactive(srcId) || isInactive(tgtId)) return null;
                     var tgtNode = nodeMap.get(tgtId);
                     return tgtNode ? 'url(#arrowhead)' : null;
                 });
@@ -589,18 +643,31 @@
                 .style('fill', null);
         }
 
-        // Feed ALL links to the simulation (both constraint and control) so D3
-        // resolves source/target strings to node objects for ticked().
-        simulation.nodes(nodes);
-        simulation.force('link').links(links);
+        // Feed only the visible nodes/links to the simulation (both constraint and
+        // control) so hidden ones exert no collision/link force on the layout, and
+        // so D3 resolves the remaining source/target strings to node objects for
+        // ticked().
+        simulation.nodes(visibleNodes);
+        simulation.force('link').links(visibleLinks);
 
-        if (structureChanged) {
-            // Settle synchronously so the graph is stable before display, and
-            // fit the view to it: a structural change means a brand new
-            // Sheet (a different demo was picked, or the active demo's
-            // source hot-reloaded) with freshly laid-out node positions, so
-            // the old pan/zoom has nothing meaningful left to preserve.
+        if (sourceChanged) {
+            // A brand new Sheet (a different demo was picked, or a different file
+            // was opened) has nothing in common with whatever was on screen, so
+            // there's nothing meaningful to animate from: settle synchronously and
+            // snap the view to fit the fresh layout.
             settleSimulation(true);
+        } else if (structureChanged) {
+            // Same source, but the visible node/link set changed - a branch
+            // became (in)active, the show/hide-inactive toggle flipped, or a
+            // hot-reloaded edit added/removed a cell or relationship. Reheat and
+            // let the simulation's own tick handler (registered once in
+            // buildGraph, already driving drag/live-value updates) animate the
+            // layout into its new shape over the next several frames instead of
+            // jumping straight to the settled result; ticked() first positions
+            // anything whose place in the layout hasn't changed so it doesn't
+            // flash at a stale spot before the first animated frame lands.
+            ticked();
+            simulation.alpha(1).restart();
         } else {
             // Only labels/values changed — node positions are unchanged.
             ticked();
@@ -676,5 +743,18 @@
         svg.transition().duration(300).call(zoom.transform, fit.transform);
     }
 
-    window.beginGraph = { init: init, update: update, zoomIn: zoomIn, zoomOut: zoomOut, resetZoom: resetZoom };
+    // Called by the "Show inactive" control in graph_view.rs. `true` dims inactive
+    // branch relationships/links as before; `false` removes them from the graph
+    // (and the simulation) entirely — see the hiddenNodeIds handling in update().
+    // Re-runs update() against the latest data so the change takes effect
+    // immediately rather than waiting for the next unrelated data push.
+    function setShowInactive(value) {
+        showInactive = value;
+        if (svg) update(latestData, currentSourceId);
+    }
+
+    window.beginGraph = {
+        init: init, update: update, zoomIn: zoomIn, zoomOut: zoomOut, resetZoom: resetZoom,
+        setShowInactive: setShowInactive,
+    };
 }());
