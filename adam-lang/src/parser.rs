@@ -471,15 +471,21 @@ impl AdamParser {
     /// fixed-index scope `parse_body_with_input_scope` already uses for method/condition
     /// bodies, where the input list is instead explicitly declared.
     ///
+    /// `match_span` is used to report errors raised by this method or the shape inference it
+    /// delegates to; the caller already has it (from before parsing the expression) for its own
+    /// error reporting, so it's threaded through rather than recomputed.
+    ///
     /// # Errors
     /// Returns `Err` if the expression fails to parse, produced no value, or (for a `Named`
     /// output shape) its type isn't registered in the `TypeRegistry`.
     ///
     /// - Complexity: O(k) in the number of distinct cell identifiers referenced, for this
     ///   method's own bookkeeping (on top of `cel-parser`'s own parse cost).
-    fn parse_match_expr(&mut self, ctx: &mut ParseContext) -> Result<(TypeShape, MatchExpr)> {
-        let match_span = ctx.peek_span();
-
+    fn parse_match_expr(
+        &mut self,
+        ctx: &mut ParseContext,
+        match_span: proc_macro2::Span,
+    ) -> Result<(TypeShape, MatchExpr)> {
         // Precompute how to push each currently-declared cell, keyed by name. Built before
         // the scope closure captures anything, since `push_scope` requires `'static` (the
         // closure can't borrow `self.types`).
@@ -628,7 +634,7 @@ impl AdamParser {
     fn parse_conditional_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("conditional"); // consume
         let match_span = ctx.peek_span();
-        let (match_shape, match_expr) = self.parse_match_expr(ctx)?;
+        let (match_shape, match_expr) = self.parse_match_expr(ctx, match_span)?;
         ctx.expect_open_brace()?;
 
         let mut branches: Vec<(Box<dyn Any>, Vec<RelationshipId>)> = Vec::new();

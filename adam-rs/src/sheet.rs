@@ -78,6 +78,7 @@ enum MatchValue<'a> {
 }
 
 impl MatchValue<'_> {
+    /// Returns the contained value as a type-erased reference, regardless of variant.
     fn as_dyn(&self) -> &dyn Any {
         match self {
             MatchValue::Ref(r) => *r,
