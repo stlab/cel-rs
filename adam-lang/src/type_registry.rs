@@ -50,7 +50,7 @@ pub type CallDynFn = fn(&mut DynSegment, &[&dyn Any]) -> anyhow::Result<Box<dyn 
 /// branch. The default is a list of `RelationshipId`s active when no branch key matches.
 pub type AddConditionalFn = fn(
     &mut Sheet,
-    CellId,
+    MatchExpr,
     Vec<(Box<dyn Any>, Vec<RelationshipId>)>,
     Vec<RelationshipId>,
 ) -> Result<ConditionalId, adam_rs::Error>;
@@ -120,7 +120,7 @@ fn push_arg_impl<T: 'static + Clone>(segment: &mut DynSegment, index: usize) {
 /// - Precondition: each `Box<dyn Any>` in `branches` holds a value of type `T`.
 fn add_conditional_impl<T: Any + PartialEq + 'static>(
     sheet: &mut Sheet,
-    cell: CellId,
+    source: MatchExpr,
     branches: Vec<(Box<dyn Any>, Vec<RelationshipId>)>,
     default: Vec<RelationshipId>,
 ) -> Result<ConditionalId, adam_rs::Error> {
@@ -133,7 +133,7 @@ fn add_conditional_impl<T: Any + PartialEq + 'static>(
             (vec![v], rel_ids)
         })
         .collect();
-    sheet.add_conditional::<T>(MatchExpr::cell(cell), typed_branches, default)
+    sheet.add_conditional::<T>(source, typed_branches, default)
 }
 
 fn add_cell_impl<T: Any + PartialEq + 'static>(sheet: &mut Sheet, value: Box<dyn Any>) -> CellId {
