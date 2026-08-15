@@ -78,6 +78,18 @@ done, what's deliberately deferred, and what's left, before opening a PR for tha
 `docs/superpowers/2026-07-18-phase-3-handoff.md` for the established format. This is what lets a
 new conversation/context pick up the remaining work without re-deriving status from git history.
 
+## Code Review Findings
+
+When a review (self-review, subagent task review, or a final whole-branch/PR review) surfaces
+a finding, address it immediately rather than deferring it — this applies to Minor findings just
+as much as Critical/Important ones. "Minor, park it" is not a default; fix it in the same pass
+if the fix is small and in scope.
+
+If a finding is genuinely large (a real design change, a non-trivial refactor, a new feature) or
+out of scope for the current task/PR, don't just leave it noted in a ledger or PR comment —
+open a GitHub issue for it (`gh issue create`) so it survives past the current session/worktree,
+then reference the issue number in the PR/commit rather than silently dropping the finding.
+
 ## Project Status
 
 This project has not been released yet and has no clients. The API is not stable and may change at
