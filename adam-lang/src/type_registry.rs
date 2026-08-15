@@ -67,6 +67,8 @@ pub struct TypeEntry {
     pub add_cell_fn: AddCellFn,
     /// Calls `DynSegment::call_dyn::<T>` and boxes the result.
     pub call_dyn_fn: CallDynFn,
+    /// Compares two type-erased values of this type for equality.
+    pub eq_dyn_fn: fn(&dyn Any, &dyn Any) -> bool,
     /// Reads and clones a `T` from a raw pointer into a type-erased box; used to
     /// split a multi-output method's tuple result into per-cell values.
     pub extract_box_fn: BoxExtractor,
@@ -139,6 +141,16 @@ fn add_cell_impl<T: Any + PartialEq + 'static>(sheet: &mut Sheet, value: Box<dyn
         .downcast::<T>()
         .expect("add_cell_impl: type matches registration");
     sheet.add_cell(*v)
+}
+
+/// Compares two type-erased values of `T`, for `TypeEntry::eq_dyn_fn`.
+///
+/// A generic function monomorphized per registered `T`, with no captured state — this is
+/// what lets it coerce to a bare `fn` pointer despite `T` only being known via a runtime
+/// `TypeId` at the call site (exactly like `call_dyn_impl` already does for calling a
+/// compiled segment).
+fn eq_dyn_impl<T: PartialEq + 'static>(a: &dyn Any, b: &dyn Any) -> bool {
+    a.downcast_ref::<T>() == b.downcast_ref::<T>()
 }
 
 fn call_dyn_impl<T: 'static + Clone>(
@@ -214,6 +226,7 @@ impl TypeRegistry {
                 push_arg_fn: push_arg_impl::<T>,
                 add_cell_fn: add_cell_impl::<T>,
                 call_dyn_fn: call_dyn_impl::<T>,
+                eq_dyn_fn: eq_dyn_impl::<T>,
                 extract_box_fn: extract_box_impl::<T>,
                 default_fn: Some(|| Box::new(T::default()) as Box<dyn Any>),
                 add_conditional_fn: add_conditional_impl::<T>,
@@ -263,6 +276,7 @@ impl TypeRegistry {
                 push_arg_fn: push_arg_impl::<T>,
                 add_cell_fn: add_cell_impl::<T>,
                 call_dyn_fn: call_dyn_impl::<T>,
+                eq_dyn_fn: eq_dyn_impl::<T>,
                 extract_box_fn: extract_box_impl::<T>,
                 default_fn: None,
                 add_conditional_fn: add_conditional_impl::<T>,
@@ -961,5 +975,38 @@ mod tests {
         let seq = reg.default_dynamic_sequence(&shape).unwrap();
         // i32::default() Debug-formats as "0"; f64::default() (0.0) Debug-formats as "0.0", not "0".
         assert_eq!(format!("{seq:?}"), "(0, 0.0)");
+    }
+
+    #[test]
+    fn eq_dyn_fn_compares_equal_i32_values_as_equal() {
+        let reg = TypeRegistry::new();
+        let entry = reg.get("i32").unwrap();
+        let a: i32 = 7;
+        let b: i32 = 7;
+        assert!((entry.eq_dyn_fn)(&a, &b));
+    }
+
+    #[test]
+    fn eq_dyn_fn_compares_unequal_i32_values_as_unequal() {
+        let reg = TypeRegistry::new();
+        let entry = reg.get("i32").unwrap();
+        let a: i32 = 7;
+        let b: i32 = 8;
+        assert!(!(entry.eq_dyn_fn)(&a, &b));
+    }
+
+    #[test]
+    fn register_no_default_also_populates_eq_dyn_fn() {
+        #[derive(PartialEq, Clone, Debug)]
+        struct NoDefault(i32);
+
+        let mut reg = TypeRegistry::new();
+        reg.register_no_default::<NoDefault>("NoDefault");
+        let entry = reg.get("NoDefault").unwrap();
+        let a = NoDefault(1);
+        let b = NoDefault(1);
+        let c = NoDefault(2);
+        assert!((entry.eq_dyn_fn)(&a, &b));
+        assert!(!(entry.eq_dyn_fn)(&a, &c));
     }
 }
