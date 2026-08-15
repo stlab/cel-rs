@@ -5,10 +5,11 @@
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 
-use adam_rs::{CellId, Condition, Method, OutputId, RelationshipId, Sheet};
+use adam_rs::{CellId, Condition, MatchExpr, Method, OutputId, RelationshipId, Sheet};
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
 use cel_runtime::DynSegment;
@@ -458,14 +459,182 @@ impl AdamParser {
             .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))
     }
 
-    /// `conditional_decl = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".`
+    /// Compiles a conditional's match-subject expression, deducing its input cells from the
+    /// identifiers it references — a bare identifier (`mode`) is the degenerate single-cell
+    /// case; anything more (`a && b`) draws on however many already-declared cells it
+    /// references.
+    ///
+    /// Each 0-arity identifier lookup that names an already-declared cell is assigned the
+    /// next argument index on first reference within this expression and reuses it on repeat
+    /// reference (e.g. `a && a` allocates one argument slot, not two), via a scope pushed
+    /// onto the CEL operation lookup for the duration of this parse — generalizing the
+    /// fixed-index scope `parse_body_with_input_scope` already uses for method/condition
+    /// bodies, where the input list is instead explicitly declared.
+    ///
+    /// `match_span` is used to report errors raised by this method or the shape inference it
+    /// delegates to; the caller already has it (from before parsing the expression) for its own
+    /// error reporting, so it's threaded through rather than recomputed.
+    ///
+    /// # Errors
+    /// Returns `Err` if the expression fails to parse, produced no value, or (for a `Named`
+    /// output shape) its type isn't registered in the `TypeRegistry`.
+    ///
+    /// - Complexity: O(k) in the number of distinct cell identifiers referenced, for this
+    ///   method's own bookkeeping (on top of `cel-parser`'s own parse cost).
+    fn parse_match_expr(
+        &mut self,
+        ctx: &mut ParseContext,
+        match_span: proc_macro2::Span,
+    ) -> Result<(TypeShape, MatchExpr)> {
+        // Precompute how to push each currently-declared cell, keyed by name. Built before
+        // the scope closure captures anything, since `push_scope` requires `'static` (the
+        // closure can't borrow `self.types`).
+        let push_table: std::collections::HashMap<String, (CellId, TypeShape, InputPush)> = ctx
+            .cell_names
+            .iter()
+            .map(|(name, (cell_id, shape))| {
+                let push = match shape {
+                    TypeShape::Named(type_id) => InputPush::Scalar(
+                        self.types
+                            .entry_by_type_id(*type_id)
+                            .expect("declared cell type registered")
+                            .push_arg_fn,
+                    ),
+                    TypeShape::Tuple(_) => InputPush::Tuple(self.types.associated_prototype(shape)),
+                };
+                (name.clone(), (*cell_id, shape.clone(), push))
+            })
+            .collect();
+
+        let accumulator: Arc<Mutex<Vec<(String, CellId, TypeShape)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let scope_accumulator = Arc::clone(&accumulator);
+
+        self.cel
+            .op_lookup_mut()
+            .push_scope(move |name, segment, arity, _span| {
+                if arity != 0 {
+                    return Ok(false);
+                }
+                let Some((cell_id, shape, push)) = push_table.get(name) else {
+                    return Ok(false);
+                };
+                let idx = {
+                    let mut acc = scope_accumulator.lock().expect("scope mutex not poisoned");
+                    match acc.iter().position(|(n, ..)| n == name) {
+                        Some(pos) => pos,
+                        None => {
+                            acc.push((name.to_string(), *cell_id, shape.clone()));
+                            acc.len() - 1
+                        }
+                    }
+                };
+                match push {
+                    InputPush::Scalar(fn_ptr) => fn_ptr(segment, idx),
+                    InputPush::Tuple(associated) => {
+                        segment.push_arg_as_dynamic_sequence_tuple(idx, associated.clone())
+                    }
+                }
+                Ok(true)
+            });
+
+        let result = self.parse_cel_or_expression(ctx);
+        self.cel.op_lookup_mut().pop_scope();
+        let segment = result?;
+
+        let inputs = accumulator
+            .lock()
+            .expect("scope mutex not poisoned")
+            .clone();
+
+        self.build_match_expr(segment, inputs, match_span)
+    }
+
+    /// Builds a `(TypeShape, MatchExpr)` from a compiled match-expression segment and its
+    /// deduced input cells, dispatching on the segment's inferred output shape — mirrors
+    /// `build_method`'s single-output dispatch (`CompiledOutputs::Single`/`SingleTuple`), but
+    /// for a match value read repeatedly across `propagate()` calls rather than written once
+    /// per method call.
+    ///
+    /// - Precondition: `segment` was compiled with no pre-loaded arguments (`push_arg`-based),
+    ///   matching every input in `inputs` by index.
+    ///
+    /// # Errors
+    /// Returns `Err` if the segment produced no value, or (`Named` shape only) if its output
+    /// type isn't registered in the `TypeRegistry`.
+    fn build_match_expr(
+        &self,
+        segment: DynSegment,
+        inputs: Vec<(String, CellId, TypeShape)>,
+        match_span: proc_macro2::Span,
+    ) -> Result<(TypeShape, MatchExpr)> {
+        let input_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
+        let input_types: Vec<TypeId> = inputs
+            .iter()
+            .map(|(_, _, shape)| cell_type_id(shape))
+            .collect();
+
+        if segment.peek_tuple_arity().is_some() {
+            let associated = segment.peek_stack_infos(1)[0].associated.clone();
+            let shape = self
+                .shape_of_associated(&associated)
+                .map_err(|msg| ParseError::new(msg, match_span))?;
+            let table = self.types.element_descriptors_for(&shape);
+            let segment = RefCell::new(segment);
+
+            let function =
+                move |args: &[&dyn Any]| -> std::result::Result<Box<dyn Any>, anyhow::Error> {
+                    let leaf = |type_id: TypeId| {
+                        table
+                            .iter()
+                            .find(|(tid, ..)| *tid == type_id)
+                            .map(|(_, d, c, e, dbg)| (*d, *c, *e, *dbg))
+                    };
+                    let seq = segment
+                        .borrow_mut()
+                        .call_dyn_as_dynamic_sequence(args, &leaf)?;
+                    Ok(Box::new(seq) as Box<dyn Any>)
+                };
+
+            fn dynamic_sequence_eq(a: &dyn Any, b: &dyn Any) -> bool {
+                a.downcast_ref::<cel_runtime::DynamicSequence>()
+                    == b.downcast_ref::<cel_runtime::DynamicSequence>()
+            }
+
+            let match_expr = MatchExpr::new(
+                input_ids,
+                input_types,
+                TypeId::of::<cel_runtime::DynamicSequence>(),
+                dynamic_sequence_eq,
+                function,
+            );
+            Ok((shape, match_expr))
+        } else {
+            let type_id = segment
+                .peek_output_type_id()
+                .ok_or_else(|| ParseError::new("match expression produced no value", match_span))?;
+            let entry = self.types.entry_by_type_id(type_id).ok_or_else(|| {
+                ParseError::new("match expression type not in TypeRegistry", match_span)
+            })?;
+            let call_fn = entry.call_dyn_fn;
+            let eq_fn = entry.eq_dyn_fn;
+            let segment = RefCell::new(segment);
+
+            let function =
+                move |args: &[&dyn Any]| -> std::result::Result<Box<dyn Any>, anyhow::Error> {
+                    call_fn(&mut segment.borrow_mut(), args)
+                };
+
+            let match_expr = MatchExpr::new(input_ids, input_types, type_id, eq_fn, function);
+            Ok((TypeShape::Named(type_id), match_expr))
+        }
+    }
+
+    /// `conditional_decl = "conditional" or_expression "{" { conditional_branch } [ default_branch ] "}".`
     fn parse_conditional_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("conditional"); // consume
-        let (match_name, match_span) = ctx.consume_ident()?;
-        let (match_cell_id, match_shape) =
-            ctx.cell_names.get(&match_name).cloned().ok_or_else(|| {
-                ParseError::new(format!("undeclared cell `{match_name}`"), match_span)
-            })?;
+        let match_span = ctx.peek_span();
+        let (match_shape, match_expr) = self.parse_match_expr(ctx, match_span)?;
         ctx.expect_open_brace()?;
 
         let mut branches: Vec<(Box<dyn Any>, Vec<RelationshipId>)> = Vec::new();
@@ -518,7 +687,7 @@ impl AdamParser {
                         ParseError::new("match cell type not in TypeRegistry", match_span)
                     })?
                     .add_conditional_fn;
-                add_cond_fn(&mut ctx.sheet, match_cell_id, branches, default_rel_ids)
+                add_cond_fn(&mut ctx.sheet, match_expr, branches, default_rel_ids)
                     .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
             }
             TypeShape::Tuple(_) => {
@@ -535,7 +704,7 @@ impl AdamParser {
                         .collect();
                 ctx.sheet
                     .add_conditional::<cel_runtime::DynamicSequence>(
-                        match_cell_id,
+                        match_expr,
                         typed_branches,
                         default_rel_ids,
                     )
@@ -1561,6 +1730,176 @@ mod tests {
         sheet.propagate().unwrap();
         let (y_id, _) = sheet.cell_names["y"].clone();
         assert_eq!(*sheet.read::<f64>(y_id).unwrap(), 1.0);
+    }
+
+    #[test]
+    fn conditional_on_a_two_cell_boolean_expression_activates_and_reacts_to_writes() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell a: bool = false;
+                    cell b: bool = false;
+                    cell x: i32 = 1;
+                    cell y: i32 = 0;
+                    conditional a && b {
+                        true => { relationship { method [x] -> [y] { x } } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        let (a_id, _) = sheet.cell_names["a"].clone();
+        let (b_id, _) = sheet.cell_names["b"].clone();
+        let (y_id, _) = sheet.cell_names["y"].clone();
+
+        sheet.write(a_id, true).unwrap();
+        sheet.write(b_id, false).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 0);
+
+        sheet.write(b_id, true).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn conditional_expression_referencing_the_same_cell_twice_compiles_and_evaluates() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell a: bool = true;
+                    cell x: i32 = 1;
+                    cell y: i32 = 0;
+                    conditional a && a {
+                        true => { relationship { method [x] -> [y] { x } } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (y_id, _) = sheet.cell_names["y"].clone();
+        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn conditional_bare_identifier_match_subject_still_works() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell mode: i32 = 0;
+                    cell x: i32 = 1;
+                    cell y: i32 = 0;
+                    conditional mode {
+                        1i32 => { relationship { method [x] -> [y] { x } } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        let (mode_id, _) = sheet.cell_names["mode"].clone();
+        let (y_id, _) = sheet.cell_names["y"].clone();
+
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 0);
+
+        sheet.write(mode_id, 1_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn conditional_tuple_expression_match_subject_drives_branch_selection() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell a: i32 = 0;
+                    cell b: i32 = 0;
+                    cell x: i32 = 1;
+                    cell y: i32 = 0;
+                    conditional (a, b) {
+                        (1i32, 2i32) => { relationship { method [x] -> [y] { x } } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        let (a_id, _) = sheet.cell_names["a"].clone();
+        let (b_id, _) = sheet.cell_names["b"].clone();
+        let (y_id, _) = sheet.cell_names["y"].clone();
+
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 0);
+
+        sheet.write(a_id, 1_i32).unwrap();
+        sheet.write(b_id, 2_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn conditional_client_registered_type_match_expression_dispatches_correctly() {
+        // `Mode(1)` isn't valid CEL syntax here: adam-lang has no literal-construction syntax
+        // for a client-registered (non-built-in) type, so a bare "TypeName(args)" call parses
+        // as an unresolved 1-arity identifier lookup, not a constructor. Instead, register a
+        // stand-in 0-arity identifier `mode_one` directly on the CEL op lookup (the same
+        // mechanism `parse_match_expr`'s grow-on-demand scope and `parse_body_with_input_scope`
+        // both use for resolving bare identifiers) that pushes a `Mode(1)` constant via
+        // `DynSegment::just`. This lets the DSL source below produce a `Mode` value for both
+        // the cell initializer and the branch key, exercising `TypeRegistry`'s
+        // `entry_by_type_id`/`eq_dyn_fn`/`call_dyn_fn` dispatch for a client-registered type —
+        // the actual point of this test, independent of how the value is spelled.
+        #[derive(PartialEq, Clone, Debug, Default)]
+        struct Mode(i32);
+
+        let mut reg = TypeRegistry::new();
+        reg.register::<Mode>("Mode");
+        let mut parser = AdamParser::new(reg, OpLookup::new());
+        parser
+            .op_lookup_mut()
+            .push_scope(|name, segment, arity, _span| {
+                if name == "mode_one" && arity == 0 {
+                    segment.just(Mode(1));
+                    return Ok(true);
+                }
+                Ok(false)
+            });
+        let mut sheet = parser
+            .parse_str(
+                r#"
+                sheet s {
+                    cell m: Mode = mode_one;
+                    cell x: i32 = 1;
+                    cell y: i32 = 0;
+                    conditional m {
+                        mode_one => { relationship { method [x] -> [y] { x } } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (y_id, _) = sheet.cell_names["y"].clone();
+        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn conditional_expression_referencing_an_undeclared_identifier_is_a_parse_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell a: bool = true;
+                conditional a && nope {
+                    true => { relationship { method [a] -> [a] { a } } },
+                }
+            }
+        "#,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
