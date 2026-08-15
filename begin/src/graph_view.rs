@@ -17,7 +17,6 @@
 use dioxus::prelude::*;
 
 use crate::bridge::GraphData;
-use crate::spectrum::{SpActionButton, SpActionGroup, SpIconZoomIn, SpIconZoomOut};
 
 /// Renders the property model bipartite graph using D3.
 ///
@@ -26,6 +25,10 @@ use crate::spectrum::{SpActionButton, SpActionGroup, SpIconZoomIn, SpIconZoomOut
 /// On every change to `data`, writes the latest snapshot to
 /// `window.__beginGraphData` and calls `window.beginGraph.update`. The JS
 /// guard in `graph.js` makes any `update` call before `init` a no-op.
+///
+/// The zoom controls and the "Show inactive" toggle live in `App`'s top bar
+/// (not here) — they only ever call `window.beginGraph.*`/set a signal `App`
+/// owns, so they don't need to be inside this component to work.
 #[component]
 pub fn GraphView(data: ReadSignal<GraphData>, source_id: ReadSignal<String>) -> Element {
     use_effect(move || {
@@ -62,36 +65,6 @@ pub fn GraphView(data: ReadSignal<GraphData>, source_id: ReadSignal<String>) -> 
                 );
                 let _ = document::eval(&script).await;
             },
-            div {
-                class: "graph-zoom-controls",
-                SpActionGroup {
-                    compact: true,
-                    SpActionButton {
-                        onclick: move |_| {
-                            spawn(async move {
-                                let _ = document::eval("window.beginGraph.zoomOut();").await;
-                            });
-                        },
-                        SpIconZoomOut {}
-                    }
-                    SpActionButton {
-                        onclick: move |_| {
-                            spawn(async move {
-                                let _ = document::eval("window.beginGraph.resetZoom();").await;
-                            });
-                        },
-                        "Fit"
-                    }
-                    SpActionButton {
-                        onclick: move |_| {
-                            spawn(async move {
-                                let _ = document::eval("window.beginGraph.zoomIn();").await;
-                            });
-                        },
-                        SpIconZoomIn {}
-                    }
-                }
-            }
             GraphLegend {}
         }
     }
