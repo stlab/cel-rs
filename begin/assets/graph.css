@@ -80,13 +80,6 @@ html, body {
     stroke-width: 3;
 }
 
-.graph-zoom-controls {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    z-index: 10;
-}
-
 .node-cell.dragging,
 .node-relationship.dragging,
 .node-conditional.dragging {
