@@ -38,6 +38,9 @@ pub struct Sheet {
     /// `leading_comment`, this one has no enclosing sibling list to attach via — it covers the
     /// gap between the start of the source and the sheet's own span.
     pub leading_comment: Option<Comment>,
+    /// A leading `//!` doc comment immediately preceding the `sheet` keyword, if recovered by
+    /// [`crate::AdamAstParser`].
+    pub doc_comment: Option<String>,
     /// The span of the whole `sheet ... { ... }` construct.
     pub span: ExprSpan,
     /// Syntax errors recovered while parsing, in source order. Empty for a syntactically clean
@@ -65,6 +68,9 @@ pub enum SheetItem {
         /// a comment explaining a broken declaration (e.g. `// TODO: fix this`) isn't silently
         /// dropped.
         leading_comment: Option<Comment>,
+        /// A leading `///` doc comment immediately preceding this item, if recovered by
+        /// [`crate::AdamAstParser`] before parsing failed.
+        doc_comment: Option<String>,
         /// Whether the gap before this item contained a blank line, if recovered by
         /// [`crate::trivia::attach_trivia`].
         blank_line_before: bool,
@@ -106,6 +112,36 @@ impl SheetItem {
             SheetItem::Error {
                 blank_line_before, ..
             } => *blank_line_before = value,
+        }
+    }
+
+    /// Sets this item's doc comment and widens its span to start at `start` (the doc comment's
+    /// own first token), so `trivia::attach_trivia`'s gap scan stops before the doc comment's
+    /// source text instead of misparsing it as a plain `//` comment.
+    pub(crate) fn set_doc_comment(&mut self, text: String, start: proc_macro2::Span) {
+        match self {
+            SheetItem::Cell(c) => {
+                c.doc_comment = Some(text);
+                c.span.start = start;
+            }
+            SheetItem::Relationship(r) => {
+                r.doc_comment = Some(text);
+                r.span.start = start;
+            }
+            SheetItem::Conditional(c) => {
+                c.doc_comment = Some(text);
+                c.span.start = start;
+            }
+            SheetItem::Out(o) => {
+                o.doc_comment = Some(text);
+                o.span.start = start;
+            }
+            SheetItem::Error {
+                doc_comment, span, ..
+            } => {
+                *doc_comment = Some(text);
+                span.start = start;
+            }
         }
     }
 }
@@ -153,6 +189,9 @@ pub struct CellDecl {
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
+    /// A leading `///` doc comment immediately preceding this declaration, if recovered by
+    /// [`crate::AdamAstParser`].
+    pub doc_comment: Option<String>,
     /// Whether a blank line preceded this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -169,6 +208,9 @@ pub struct RelationshipDecl {
     pub methods: Vec<MethodDecl>,
     /// A leading comment immediately preceding this declaration, if recovered.
     pub leading_comment: Option<Comment>,
+    /// A leading `///` doc comment immediately preceding this declaration, if recovered by
+    /// [`crate::AdamAstParser`].
+    pub doc_comment: Option<String>,
     /// Whether a blank line preceded this declaration, if recovered.
     pub blank_line_before: bool,
     /// The span of the whole `relationship { ... }` declaration.
@@ -195,6 +237,9 @@ pub struct OutDecl {
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
+    /// A leading `///` doc comment immediately preceding this declaration, if recovered by
+    /// [`crate::AdamAstParser`].
+    pub doc_comment: Option<String>,
     /// Whether a blank line preceded this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -260,6 +305,9 @@ pub struct ConditionalDecl {
     pub default: Option<Vec<RelationshipDecl>>,
     /// A leading comment immediately preceding this declaration, if recovered.
     pub leading_comment: Option<Comment>,
+    /// A leading `///` doc comment immediately preceding this declaration, if recovered by
+    /// [`crate::AdamAstParser`].
+    pub doc_comment: Option<String>,
     /// Whether a blank line preceded this declaration, if recovered.
     pub blank_line_before: bool,
     /// The span of the whole `conditional ... { ... }` declaration.
@@ -330,6 +378,7 @@ mod tests {
             type_name: None,
             initializer: None,
             leading_comment: None,
+            doc_comment: None,
             blank_line_before: false,
             span,
         });
@@ -343,6 +392,7 @@ mod tests {
             name: None,
             methods: Vec::new(),
             leading_comment: None,
+            doc_comment: None,
             blank_line_before: false,
             span,
         });
@@ -358,6 +408,7 @@ mod tests {
             branches: Vec::new(),
             default: None,
             leading_comment: None,
+            doc_comment: None,
             blank_line_before: false,
             span,
         });
@@ -370,6 +421,7 @@ mod tests {
         let item = SheetItem::Error {
             span,
             leading_comment: None,
+            doc_comment: None,
             blank_line_before: false,
         };
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
@@ -384,6 +436,7 @@ mod tests {
             type_name: None,
             initializer: None,
             leading_comment: None,
+            doc_comment: None,
             blank_line_before: false,
             span,
         });
@@ -402,6 +455,7 @@ mod tests {
         let mut item = SheetItem::Error {
             span,
             leading_comment: None,
+            doc_comment: None,
             blank_line_before: false,
         };
         item.set_leading_comment(Comment::Line("hi".to_string()));
@@ -424,6 +478,7 @@ mod tests {
             type_name: None,
             initializer: None,
             leading_comment: None,
+            doc_comment: None,
             blank_line_before: false,
             span,
         });
@@ -453,6 +508,7 @@ mod tests {
             },
             conditions: Vec::new(),
             leading_comment: None,
+            doc_comment: None,
             blank_line_before: false,
             span,
         });
@@ -478,6 +534,7 @@ mod tests {
             },
             conditions: Vec::new(),
             leading_comment: None,
+            doc_comment: None,
             blank_line_before: false,
             span,
         });
@@ -519,6 +576,7 @@ mod tests {
             )),
             initializer: None,
             leading_comment: None,
+            doc_comment: None,
             blank_line_before: false,
             span,
         };
@@ -540,6 +598,7 @@ mod tests {
                 span,
             }),
             leading_comment: None,
+            doc_comment: None,
             blank_line_before: false,
             span,
         };

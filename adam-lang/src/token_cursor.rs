@@ -357,6 +357,33 @@ impl TokenCursor {
         unreachable!("peeked literal, advance must return it")
     }
 
+    /// Consumes a leading run of consecutive `Token::DocComment` tokens matching `inner`,
+    /// returning their joined text (`\n`-separated) and the first token's span, or `None` if the
+    /// next token isn't a matching doc comment.
+    ///
+    /// - Complexity: O(k), where k is the number of consecutive matching doc-comment tokens.
+    pub(crate) fn consume_doc_comment_run(&mut self, inner: bool) -> Option<(String, Span)> {
+        let first_span = match self.tokens.as_mut().and_then(|t| t.peek()) {
+            Some(Token::DocComment { inner: i, span, .. }) if *i == inner => Some(*span),
+            _ => None,
+        }?;
+        let mut lines = Vec::new();
+        loop {
+            let next_text = match self.tokens.as_mut().and_then(|t| t.peek()) {
+                Some(Token::DocComment { inner: i, text, .. }) if *i == inner => Some(text.clone()),
+                _ => None,
+            };
+            match next_text {
+                Some(text) => {
+                    lines.push(text);
+                    self.advance();
+                }
+                None => break,
+            }
+        }
+        Some((lines.join("\n"), first_span))
+    }
+
     pub(crate) fn at_close_brace(&mut self) -> bool {
         matches!(
             self.tokens.as_mut().and_then(|t| t.peek()),
@@ -525,5 +552,34 @@ mod tests {
         let stream = proc_macro2::TokenStream::from_str("").unwrap();
         let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
         assert!(cursor.at_close_paren());
+    }
+
+    #[test]
+    fn consume_doc_comment_run_returns_none_when_next_token_is_not_a_doc_comment() {
+        let stream = proc_macro2::TokenStream::from_str("cell").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        assert!(cursor.consume_doc_comment_run(false).is_none());
+    }
+
+    #[test]
+    fn consume_doc_comment_run_joins_consecutive_matching_doc_comments() {
+        let stream = proc_macro2::TokenStream::from_str("/// a\n/// b\ncell").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        let (text, _) = cursor
+            .consume_doc_comment_run(false)
+            .expect("doc comment run");
+        assert_eq!(text, " a\n b");
+        assert!(cursor.is_keyword("cell"));
+    }
+
+    #[test]
+    fn consume_doc_comment_run_does_not_consume_a_mismatched_inner_flag() {
+        let stream = proc_macro2::TokenStream::from_str("//! inner\ncell").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        assert!(cursor.consume_doc_comment_run(false).is_none());
+        let (text, _) = cursor
+            .consume_doc_comment_run(true)
+            .expect("doc comment run");
+        assert_eq!(text, " inner");
     }
 }
