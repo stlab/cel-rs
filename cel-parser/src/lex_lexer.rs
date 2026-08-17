@@ -5,11 +5,15 @@
 //!
 //! # Error Handling
 //!
-//! This lexer does not produce errors. All input `TokenTree` items come pre-validated from
-//! `proc_macro2`, which has already verified correct Rust lexical syntax. The lexer only
-//! transforms and flattens tokens, operations that cannot fail on valid input. Any impossible
-//! states (like receiving a `Punct` or `Group` in `convert_token`) use `unreachable!()` since
-//! they represent programming errors, not malformed input.
+//! This lexer does not produce errors for ordinary tokens. All input `TokenTree` items come
+//! pre-validated from `proc_macro2`, which has already verified correct Rust lexical syntax; the
+//! lexer only transforms and flattens those tokens, operations that cannot fail on valid input.
+//! The one exception is a `#`-led token sequence that doesn't match the doc-comment attribute
+//! shape (`#[doc = "..."]`/`#![doc = "..."]`) `proc_macro2` already produces for `///`/`//!`
+//! comments — general `#[...]` attribute syntax is deliberately unsupported, so any other shape
+//! becomes a `Token::Error` rather than an `unreachable!()`. Any other impossible state (like
+//! receiving a `Punct` or `Group` in `convert_token`) still uses `unreachable!()`, since those
+//! represent programming errors, not malformed or unsupported input.
 
 use proc_macro2::{Delimiter, Ident, Spacing, Span, TokenTree};
 use syn::Lit;
@@ -178,6 +182,87 @@ impl LexLexer {
         // Stack is empty, get from main input
         self.input.next()
     }
+
+    /// Parses the token sequence following a `#` as a doc-comment attribute
+    /// (`#[doc = "..."]`/`#![doc = "..."]`), the one shape `proc_macro2` produces for `///`/`//!`
+    /// comments. Committed, not speculative: once `#` is seen, this always returns a `Token`
+    /// (`DocComment` on success, `Error` on any mismatch) — it never falls back to re-emitting
+    /// `#` itself as an ordinary `Punct` token. General `#[...]` attribute syntax is not
+    /// supported; any other shape becomes a `Token::Error`.
+    fn parse_doc_comment_attribute(&mut self, hash_span: Span) -> Token {
+        let next = self.next_token_tree();
+        let (inner, group_token) = match next {
+            Some(TokenTree::Punct(p)) if p.as_char() == '!' => (true, self.next_token_tree()),
+            other => (false, other),
+        };
+        let group = match group_token {
+            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Bracket => g,
+            Some(other) => {
+                return Token::Error {
+                    message: "expected `[` after `#`".to_string(),
+                    span: other.span(),
+                };
+            }
+            None => {
+                return Token::Error {
+                    message: "expected `[` after `#`".to_string(),
+                    span: hash_span,
+                };
+            }
+        };
+        let mut inner_tokens = group.stream().into_iter();
+        let ident_ok = match inner_tokens.next() {
+            Some(TokenTree::Ident(id)) => id == "doc",
+            _ => false,
+        };
+        if !ident_ok {
+            return Token::Error {
+                message: "expected `doc` after `#[`".to_string(),
+                span: group.span(),
+            };
+        }
+        let eq_ok = matches!(
+            inner_tokens.next(),
+            Some(TokenTree::Punct(p)) if p.as_char() == '='
+        );
+        if !eq_ok {
+            return Token::Error {
+                message: "expected `=` after `doc`".to_string(),
+                span: group.span(),
+            };
+        }
+        let text = match inner_tokens.next() {
+            Some(TokenTree::Literal(lit)) => {
+                let token_stream: proc_macro2::TokenStream = TokenTree::Literal(lit).into();
+                match syn::parse2::<Lit>(token_stream) {
+                    Ok(Lit::Str(s)) => s.value(),
+                    _ => {
+                        return Token::Error {
+                            message: "expected a string literal after `doc =`".to_string(),
+                            span: group.span(),
+                        };
+                    }
+                }
+            }
+            _ => {
+                return Token::Error {
+                    message: "expected a string literal after `doc =`".to_string(),
+                    span: group.span(),
+                };
+            }
+        };
+        if inner_tokens.next().is_some() {
+            return Token::Error {
+                message: "unexpected token after `doc = \"...\"`".to_string(),
+                span: group.span(),
+            };
+        }
+        Token::DocComment {
+            text,
+            inner,
+            span: hash_span,
+        }
+    }
 }
 
 /// A parsed literal value using syn's Lit enum.
@@ -238,6 +323,29 @@ pub enum Token {
         /// Span for error reporting.
         span: Span,
     },
+
+    /// A recognized `///`/`//!` doc comment, unwrapped from the `#[doc = "..."]`/
+    /// `#![doc = "..."]` attribute-shaped token sequence `proc_macro2` produces for it. General
+    /// `#[...]` attribute syntax is not supported — see `Token::Error`.
+    DocComment {
+        /// The comment's text: the doc-attribute string literal's value verbatim (including its
+        /// leading space), e.g. `" the total"` for `/// the total`.
+        text: String,
+        /// `true` for `//!`/`#![doc]` (inner), `false` for `///`/`#[doc]` (outer).
+        inner: bool,
+        /// The `#` token's span.
+        span: Span,
+    },
+
+    /// A `#`-led token sequence that isn't the doc-comment shape above. Flows through like any
+    /// other token and fails to match whatever a grammar production expects, surfacing as a
+    /// normal parse error at that point.
+    Error {
+        /// A description of what was expected instead.
+        message: String,
+        /// Where the mismatch was detected.
+        span: Span,
+    },
 }
 
 impl HasSpan for Token {
@@ -248,6 +356,8 @@ impl HasSpan for Token {
             Token::Punct { span, .. } => *span,
             Token::OpenDelim { span, .. } => *span,
             Token::CloseDelim { span, .. } => *span,
+            Token::DocComment { span, .. } => *span,
+            Token::Error { span, .. } => *span,
         }
     }
 }
@@ -285,6 +395,17 @@ impl Iterator for LexLexer {
                 return None;
             }
         };
+
+        // A `#` commits to parsing a doc-comment attribute (`#[doc = "..."]`/`#![doc = "..."]`)
+        // — the only shape `proc_macro2` produces for `///`/`//!` comments. See
+        // `parse_doc_comment_attribute`'s doc comment for why there is no fallback here.
+        #[allow(clippy::collapsible_if)]
+        if let TokenTree::Punct(ref punct) = token {
+            if punct.as_char() == '#' {
+                let hash_span = punct.span();
+                return Some(self.parse_doc_comment_attribute(hash_span));
+            }
+        }
 
         // Handle Groups by pushing their iterator onto the stack
         if let TokenTree::Group(group) = token {
@@ -587,5 +708,109 @@ mod tests {
             "expected PunctOp::Two([\"=>\"]), got {tok:?}"
         );
         assert!(lexer.next().is_none(), "expected no more tokens");
+    }
+
+    #[test]
+    fn recognizes_an_outer_doc_comment() {
+        let input = TokenStream::from_str("/// the total").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        let token = lexer.next().unwrap();
+        match token {
+            Token::DocComment { text, inner, .. } => {
+                assert_eq!(text, " the total");
+                assert!(!inner);
+            }
+            other => panic!("expected DocComment, got {other:?}"),
+        }
+        assert!(lexer.next().is_none());
+    }
+
+    #[test]
+    fn recognizes_an_inner_doc_comment() {
+        let input = TokenStream::from_str("//! module docs").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        let token = lexer.next().unwrap();
+        match token {
+            Token::DocComment { text, inner, .. } => {
+                assert_eq!(text, " module docs");
+                assert!(inner);
+            }
+            other => panic!("expected DocComment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doc_comment_run_is_followed_by_the_next_real_token() {
+        let input = TokenStream::from_str("/// x\ncell").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        assert!(matches!(lexer.next(), Some(Token::DocComment { .. })));
+        match lexer.next() {
+            Some(Token::Identifier(ident)) => assert_eq!(ident.to_string(), "cell"),
+            other => panic!("expected Identifier(cell), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_doc_attribute_is_a_lex_error() {
+        let input = TokenStream::from_str("#[foo]").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        let token = lexer.next().unwrap();
+        assert!(
+            matches!(token, Token::Error { .. }),
+            "expected Error, got {token:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_string_doc_value_is_a_lex_error() {
+        let input = TokenStream::from_str("#[doc = 5]").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        let token = lexer.next().unwrap();
+        assert!(
+            matches!(token, Token::Error { .. }),
+            "expected Error, got {token:?}"
+        );
+    }
+
+    #[test]
+    fn a_bare_hash_with_no_group_is_a_lex_error() {
+        let input = TokenStream::from_str("# foo").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        let token = lexer.next().unwrap();
+        assert!(
+            matches!(token, Token::Error { .. }),
+            "expected Error, got {token:?}"
+        );
+    }
+
+    #[test]
+    fn a_hash_led_group_with_the_wrong_delimiter_is_a_lex_error() {
+        let input = TokenStream::from_str("#(foo)").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        let token = lexer.next().unwrap();
+        assert!(
+            matches!(token, Token::Error { .. }),
+            "expected Error, got {token:?}"
+        );
+    }
+
+    #[test]
+    fn extra_tokens_after_the_doc_string_are_a_lex_error() {
+        let input = TokenStream::from_str("#[doc = \"x\", extra]").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        let token = lexer.next().unwrap();
+        assert!(
+            matches!(token, Token::Error { .. }),
+            "expected Error, got {token:?}"
+        );
+    }
+
+    #[test]
+    fn doc_comment_token_has_a_span() {
+        let input = TokenStream::from_str("/// x").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        let token = lexer.next().unwrap();
+        let span = HasSpan::span(&token);
+        assert!(!span.source_text().unwrap_or_default().is_empty());
     }
 }
