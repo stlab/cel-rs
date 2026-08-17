@@ -101,7 +101,7 @@ impl AdamAstParser {
             return Err(cursor.err_at("expected `sheet`"));
         }
         let (name, name_span) = cursor.consume_ident()?;
-        cursor.expect_open_brace()?;
+        let open_span = cursor.expect_open_brace()?;
         let mut items = Vec::new();
         let mut errors = Vec::new();
         while !cursor.at_close_brace() {
@@ -142,6 +142,9 @@ impl AdamAstParser {
             items,
             leading_comment: None,
             doc_comment: None,
+            trailing_comment: None,
+            blank_line_before_close: false,
+            open_brace_span: point(open_span),
             span: ast::ExprSpan {
                 start: sheet_start,
                 end: close_span,
@@ -285,7 +288,7 @@ impl AdamAstParser {
         } else {
             None
         };
-        cursor.expect_open_brace()?;
+        let open_span = cursor.expect_open_brace()?;
         let mut methods = Vec::new();
         while !cursor.at_close_brace() {
             methods.push(self.parse_method_decl(cursor)?);
@@ -297,6 +300,9 @@ impl AdamAstParser {
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
+            trailing_comment: None,
+            blank_line_before_close: false,
+            open_brace_span: point(open_span),
             span: ast::ExprSpan {
                 start: decl_start,
                 end: close_span,
@@ -310,23 +316,33 @@ impl AdamAstParser {
         let decl_start = cursor.peek_span();
         cursor.is_keyword("conditional");
         let (match_name, match_span) = cursor.consume_ident()?;
-        cursor.expect_open_brace()?;
+        let outer_open = cursor.expect_open_brace()?;
         let mut branches = Vec::new();
         let mut default = None;
         while !cursor.at_close_brace() {
             if matches!(cursor.peek_token(), Some(Token::Identifier(id)) if id == "_") {
+                let underscore_span = cursor.peek_span();
                 cursor.advance();
                 cursor.expect_punct("=>")?;
-                cursor.expect_open_brace()?;
+                let branch_open = cursor.expect_open_brace()?;
                 let relationships = self.parse_branch_relationships(cursor)?;
-                cursor.expect_close_brace()?;
+                let close = cursor.expect_close_brace()?;
                 cursor.consume_punct(",");
-                default = Some(relationships);
+                default = Some(ast::DefaultBranch {
+                    relationships,
+                    trailing_comment: None,
+                    blank_line_before_close: false,
+                    open_brace_span: point(branch_open),
+                    span: ast::ExprSpan {
+                        start: underscore_span,
+                        end: close,
+                    },
+                });
                 break; // default branch is always last
             }
             let (lit, lit_span) = cursor.consume_literal()?;
             cursor.expect_punct("=>")?;
-            cursor.expect_open_brace()?;
+            let branch_open = cursor.expect_open_brace()?;
             let relationships = self.parse_branch_relationships(cursor)?;
             let close = cursor.expect_close_brace()?;
             cursor.consume_punct(",");
@@ -336,6 +352,9 @@ impl AdamAstParser {
                 relationships,
                 leading_comment: None,
                 blank_line_before: false,
+                trailing_comment: None,
+                blank_line_before_close: false,
+                open_brace_span: point(branch_open),
                 span: ast::ExprSpan {
                     start: lit_span,
                     end: close,
@@ -351,6 +370,9 @@ impl AdamAstParser {
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
+            trailing_comment: None,
+            blank_line_before_close: false,
+            open_brace_span: point(outer_open),
             span: ast::ExprSpan {
                 start: decl_start,
                 end: close_span,
@@ -402,6 +424,8 @@ impl AdamAstParser {
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
+            trailing_comment: None,
+            blank_line_before_close: false,
             span: ast::ExprSpan {
                 start: decl_start,
                 end: close_span,
@@ -665,7 +689,10 @@ mod tests {
         let ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
             panic!("expected Conditional");
         };
-        assert_eq!(cond.default.as_ref().map(Vec::len), Some(2));
+        assert_eq!(
+            cond.default.as_ref().map(|d| d.relationships.len()),
+            Some(2)
+        );
     }
 
     #[test]

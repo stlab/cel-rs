@@ -194,7 +194,7 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     if let Some(default) = &cond.default {
         out.push_str(&indent(depth + 1));
         out.push_str("_ => ");
-        write_branch_relationships(out, default, depth + 1);
+        write_branch_relationships(out, &default.relationships, depth + 1);
     }
     out.push_str(&indent(depth));
     out.push_str("}\n");

@@ -41,6 +41,15 @@ pub struct Sheet {
     /// A leading `//!` doc comment immediately preceding the `sheet` keyword, if recovered by
     /// [`crate::AdamAstParser`].
     pub doc_comment: Option<String>,
+    /// A trailing comment immediately preceding the sheet's own closing `}`, if recovered. See
+    /// <https://github.com/stlab/cel-rs/issues/52>.
+    pub trailing_comment: Option<Comment>,
+    /// Whether a blank line preceded the sheet's own closing `}`, if recovered. See
+    /// <https://github.com/stlab/cel-rs/issues/52>.
+    pub blank_line_before_close: bool,
+    /// The span of the sheet's own opening `{`, used to recover trailing trivia when `items` is
+    /// empty. See <https://github.com/stlab/cel-rs/issues/52>.
+    pub open_brace_span: ExprSpan,
     /// The span of the whole `sheet ... { ... }` construct.
     pub span: ExprSpan,
     /// Syntax errors recovered while parsing, in source order. Empty for a syntactically clean
@@ -213,6 +222,15 @@ pub struct RelationshipDecl {
     pub doc_comment: Option<String>,
     /// Whether a blank line preceded this declaration, if recovered.
     pub blank_line_before: bool,
+    /// A trailing comment immediately preceding this declaration's own closing `}`, if
+    /// recovered. See <https://github.com/stlab/cel-rs/issues/52>.
+    pub trailing_comment: Option<Comment>,
+    /// Whether a blank line preceded this declaration's own closing `}`, if recovered. See
+    /// <https://github.com/stlab/cel-rs/issues/52>.
+    pub blank_line_before_close: bool,
+    /// The span of this declaration's own opening `{`, used to recover trailing trivia when
+    /// `methods` is empty. See <https://github.com/stlab/cel-rs/issues/52>.
+    pub open_brace_span: ExprSpan,
     /// The span of the whole `relationship { ... }` declaration.
     pub span: ExprSpan,
 }
@@ -243,6 +261,12 @@ pub struct OutDecl {
     /// Whether a blank line preceded this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
+    /// A trailing comment immediately preceding this declaration's own closing `}`, if
+    /// recovered. See <https://github.com/stlab/cel-rs/issues/52>.
+    pub trailing_comment: Option<Comment>,
+    /// Whether a blank line preceded this declaration's own closing `}`, if recovered. See
+    /// <https://github.com/stlab/cel-rs/issues/52>.
+    pub blank_line_before_close: bool,
     /// The span of the whole `out ... { ... }` declaration.
     pub span: ExprSpan,
 }
@@ -301,8 +325,8 @@ pub struct ConditionalDecl {
     pub match_name_span: ExprSpan,
     /// The named (literal `=>`) branches, in declaration order.
     pub branches: Vec<ConditionalBranch>,
-    /// The `_ => { ... }` default branch's relationships, if present.
-    pub default: Option<Vec<RelationshipDecl>>,
+    /// The `_ => { ... }` default branch, if present.
+    pub default: Option<DefaultBranch>,
     /// A leading comment immediately preceding this declaration, if recovered.
     pub leading_comment: Option<Comment>,
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
@@ -310,7 +334,34 @@ pub struct ConditionalDecl {
     pub doc_comment: Option<String>,
     /// Whether a blank line preceded this declaration, if recovered.
     pub blank_line_before: bool,
+    /// A trailing comment immediately preceding this declaration's own closing `}`, if
+    /// recovered. See <https://github.com/stlab/cel-rs/issues/52>.
+    pub trailing_comment: Option<Comment>,
+    /// Whether a blank line preceded this declaration's own closing `}`, if recovered. See
+    /// <https://github.com/stlab/cel-rs/issues/52>.
+    pub blank_line_before_close: bool,
+    /// The span of this declaration's own opening `{`, used to recover trailing trivia when
+    /// there are no `branches`/`default`. See <https://github.com/stlab/cel-rs/issues/52>.
+    pub open_brace_span: ExprSpan,
     /// The span of the whole `conditional ... { ... }` declaration.
+    pub span: ExprSpan,
+}
+
+/// The `_ => { ... }` default branch of a `conditional_decl`, mirroring `ConditionalBranch`'s
+/// shape (it has no match literal of its own).
+#[derive(Debug, Clone)]
+pub struct DefaultBranch {
+    /// The default branch's relationships, in declaration order.
+    pub relationships: Vec<RelationshipDecl>,
+    /// A trailing comment immediately preceding this branch's own closing `}`, if recovered.
+    /// See <https://github.com/stlab/cel-rs/issues/52>.
+    pub trailing_comment: Option<Comment>,
+    /// Whether a blank line preceded this branch's own closing `}`, if recovered.
+    pub blank_line_before_close: bool,
+    /// The span of this branch's own opening `{`, used to recover trailing trivia when
+    /// `relationships` is empty.
+    pub open_brace_span: ExprSpan,
+    /// The span from the `_` token through this branch's own closing `}`.
     pub span: ExprSpan,
 }
 
@@ -329,6 +380,15 @@ pub struct ConditionalBranch {
     /// Whether a blank line preceded this branch, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
+    /// A trailing comment immediately preceding this branch's own closing `}`, if recovered.
+    /// See <https://github.com/stlab/cel-rs/issues/52>.
+    pub trailing_comment: Option<Comment>,
+    /// Whether a blank line preceded this branch's own closing `}`, if recovered. See
+    /// <https://github.com/stlab/cel-rs/issues/52>.
+    pub blank_line_before_close: bool,
+    /// The span of this branch's own opening `{`, used to recover trailing trivia when
+    /// `relationships` is empty. See <https://github.com/stlab/cel-rs/issues/52>.
+    pub open_brace_span: ExprSpan,
     /// The span from the branch's literal through its closing `}`.
     pub span: ExprSpan,
 }
@@ -394,6 +454,9 @@ mod tests {
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
+            trailing_comment: None,
+            blank_line_before_close: false,
+            open_brace_span: span,
             span,
         });
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
@@ -410,6 +473,9 @@ mod tests {
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
+            trailing_comment: None,
+            blank_line_before_close: false,
+            open_brace_span: span,
             span,
         });
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
@@ -510,6 +576,8 @@ mod tests {
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
+            trailing_comment: None,
+            blank_line_before_close: false,
             span,
         });
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
@@ -536,6 +604,8 @@ mod tests {
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
+            trailing_comment: None,
+            blank_line_before_close: false,
             span,
         });
         item.set_leading_comment(Comment::Line("hi".to_string()));
