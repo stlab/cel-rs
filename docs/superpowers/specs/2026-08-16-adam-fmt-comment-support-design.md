@@ -138,6 +138,27 @@ outer_doc_comment = { doc_comment }.   (* consecutive `///` tokens; inner = fals
 inner_doc_comment = { doc_comment }.   (* consecutive `//!` tokens; inner = true; legal only before `sheet` *)
 ```
 
+**Shared primitive.** `adam-lang/src/token_cursor.rs::TokenCursor` is already the pure-tokenizing
+layer shared by both of adam-lang's parsers (`AdamAstParser` in `ast_parser.rs`, building the
+tooling-facing span-carrying AST, and `AdamParser` in `parser.rs`, building the live `adam_rs::Sheet`
+that `begin` actually executes — see `ast_parser.rs`'s module doc). It gains one new method:
+
+```rust
+/// Consumes a leading run of consecutive `Token::DocComment` tokens matching `inner`, returning
+/// their joined text (`\n`-separated) and the first token's span, or `None` if the next token
+/// isn't a matching doc comment.
+pub(crate) fn consume_doc_comment_run(&mut self, inner: bool) -> Option<(String, Span)>
+```
+
+Both parsers call this at the same grammar positions (sheet-level with `inner = true`, before each
+sheet-item's `///` with `inner = false`). `AdamAstParser` uses the returned text/span as described
+below. `AdamParser` — which preserves no comments of any kind today — simply discards the result,
+matching its existing `ctx.consume_ident()?; // sheet name (ignored at runtime)` pattern for
+information it deliberately doesn't need. This keeps the two parsers' *accepted grammar* in sync:
+without it, a `.adm2` file using doc comments would format correctly (via `AdamAstParser`) but fail
+to load in `begin` (via `AdamParser`), since `Token::DocComment` would otherwise reach neither
+parser's dispatch and fail as an unexpected token in both.
+
 `AdamAstParser::parse_str` peels a leading run of `inner` `Token::DocComment`s before dispatching
 to `parse_sheet`, joining their `text` fields with `\n` into a new `Sheet::doc_comment:
 Option<String>` field.
@@ -181,7 +202,10 @@ stream, never gap-scanned text, so there is nothing for a blank line to interrup
 comment coexisting with a plain leading comment (order preserved); a doc comment separated from
 its item by a blank line still attaches; no plain-comment leakage into `leading_comment` when a
 doc comment is present (verifying the span-widening fix); a stray doc comment in an unsupported
-position (e.g. before a `method`) still produces the same class of syntax error as before.
+position (e.g. before a `method`) still produces the same class of syntax error as before; and,
+for `AdamParser` (`parser.rs`), a `.adm2` source string using doc comments at each of the same
+positions parses successfully end-to-end (`parse_str(...).unwrap()`), confirming the two parsers'
+grammars stay in sync.
 
 ## 3. Plain-comment representation fix (#53, #105)
 
