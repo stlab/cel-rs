@@ -53,6 +53,21 @@ fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
     }
 }
 
+/// Writes `doc_comment`'s lines (if present) as one `marker` line per stored line, at `depth`'s
+/// indentation. `marker` is `"///"` for a declaration's own doc comment or `"//!"` for the
+/// sheet's own (each stored line already includes the space rustdoc puts after the marker, e.g.
+/// `" the total"` for `/// the total`, so no extra space is inserted here).
+fn write_doc_comment(out: &mut String, marker: &str, doc_comment: Option<&str>, depth: usize) {
+    if let Some(doc) = doc_comment {
+        for line in doc.split('\n') {
+            out.push_str(&indent(depth));
+            out.push_str(marker);
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+}
+
 /// Emits `blank_line_before`/`leading_comment` ahead of an item, if either is present.
 fn write_trivia(
     out: &mut String,
@@ -114,6 +129,7 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
         rel.leading_comment.as_ref(),
         depth,
     );
+    write_doc_comment(out, "///", rel.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("relationship ");
     if let Some((name, _)) = &rel.name {
@@ -167,6 +183,7 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
         cond.leading_comment.as_ref(),
         depth,
     );
+    write_doc_comment(out, "///", cond.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("conditional ");
     out.push_str(&cond.match_name);
@@ -193,6 +210,7 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
         cell.leading_comment.as_ref(),
         depth,
     );
+    write_doc_comment(out, "///", cell.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("cell ");
     out.push_str(&cell.name);
@@ -252,6 +270,7 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
         decl.leading_comment.as_ref(),
         depth,
     );
+    write_doc_comment(out, "///", decl.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("out ");
     out.push_str(&decl.name);
@@ -307,6 +326,7 @@ pub fn format_sheet(sheet: &ast::Sheet) -> String {
     );
     let mut out = String::new();
     write_trivia(&mut out, false, sheet.leading_comment.as_ref(), 0);
+    write_doc_comment(&mut out, "//!", sheet.doc_comment.as_deref(), 0);
     out.push_str(&format!("sheet {} {{\n", sheet.name));
     for item in &sheet.items {
         write_sheet_item(&mut out, item, 1);
@@ -531,6 +551,50 @@ mod tests {
         // gap and is dropped on the *first* format, making `once == twice` trivially true
         // regardless of whether the comment round-trips.
         let source = "sheet s {\n    cell a: i32 = 1;\n    /*\n        line one\n        line two\n    */\n    cell x: i32 = 1;\n}";
+        let once = format(source);
+        let twice = format(&once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_a_cell_with_a_doc_comment() {
+        assert_eq!(
+            format("sheet s { /// the total\n cell x: i32 = 1; }"),
+            "sheet s {\n    /// the total\n    cell x: i32 = 1;\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_sheet_level_doc_comment() {
+        assert_eq!(
+            format("//! module docs\nsheet s { cell x: i32 = 1; }"),
+            "//! module docs\nsheet s {\n    cell x: i32 = 1;\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_plain_comment_and_doc_comment_together_in_source_order() {
+        // Two items, not one: `trivia::attach_gaps` never attaches a leading plain comment to a
+        // list's first element (a pre-existing, out-of-scope #52-adjacent limitation unrelated to
+        // doc comments — see Tasks 2/3's identical fixture fix), so `x` needs a preceding sibling
+        // for its `// TODO` to actually attach via the normal gap-scanning path.
+        let source =
+            "sheet s {\n    cell w: i32 = 0;\n    // TODO\n    /// docs\n    cell x: i32 = 1;\n}";
+        let expected =
+            "sheet s {\n    cell w: i32 = 0;\n    // TODO\n    /// docs\n    cell x: i32 = 1;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_doc_comments_on_a_relationship_conditional_and_out() {
+        let source = "sheet s {\n    /// r\n    relationship { method [a] -> [b] { a } }\n\n    /// o\n    out area: f64 {\n        method [w] { w }\n    }\n}";
+        let expected = "sheet s {\n    /// r\n    relationship {\n        method [a] -> [b] { a }\n    }\n\n    /// o\n    out area: f64 {\n        method [w] { w }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn doc_comment_formatting_is_idempotent_through_a_reparse() {
+        let source = "sheet s {\n    /// the total\n    cell x: i32 = 1;\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
