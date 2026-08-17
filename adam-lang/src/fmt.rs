@@ -19,23 +19,52 @@ fn indent(depth: usize) -> String {
     "    ".repeat(depth)
 }
 
+/// Writes one recovered `Comment` at `depth`'s indentation: a `Comment::Line` as one `// ` line
+/// per stored line; a `Comment::Block` as `/* text */` on one line when its text has no internal
+/// `\n`, or a multi-line `/*`/`*/`-delimited block (one line per stored line, indented one level
+/// past `depth`) when it does.
+fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
+    match comment {
+        ast::Comment::Line(text) => {
+            for line in text.split('\n') {
+                out.push_str(&indent(depth));
+                out.push_str("// ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        ast::Comment::Block(text) => {
+            out.push_str(&indent(depth));
+            if text.contains('\n') {
+                out.push_str("/*\n");
+                for line in text.split('\n') {
+                    out.push_str(&indent(depth + 1));
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                out.push_str(&indent(depth));
+                out.push_str("*/\n");
+            } else {
+                out.push_str("/* ");
+                out.push_str(text);
+                out.push_str(" */\n");
+            }
+        }
+    }
+}
+
 /// Emits `blank_line_before`/`leading_comment` ahead of an item, if either is present.
 fn write_trivia(
     out: &mut String,
     blank_line_before: bool,
-    leading_comment: Option<&str>,
+    leading_comment: Option<&ast::Comment>,
     depth: usize,
 ) {
     if blank_line_before {
         out.push('\n');
     }
     if let Some(comment) = leading_comment {
-        for line in comment.split('\n') {
-            out.push_str(&indent(depth));
-            out.push_str("// ");
-            out.push_str(line);
-            out.push('\n');
-        }
+        write_comment(out, comment, depth);
     }
 }
 
@@ -64,7 +93,7 @@ fn write_method(out: &mut String, method: &ast::MethodDecl, depth: usize) {
     write_trivia(
         out,
         method.blank_line_before,
-        method.leading_comment.as_deref(),
+        method.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
@@ -82,7 +111,7 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
     write_trivia(
         out,
         rel.blank_line_before,
-        rel.leading_comment.as_deref(),
+        rel.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
@@ -120,7 +149,7 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
     write_trivia(
         out,
         branch.blank_line_before,
-        branch.leading_comment.as_deref(),
+        branch.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
@@ -135,7 +164,7 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     write_trivia(
         out,
         cond.blank_line_before,
-        cond.leading_comment.as_deref(),
+        cond.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
@@ -161,7 +190,7 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     write_trivia(
         out,
         cell.blank_line_before,
-        cell.leading_comment.as_deref(),
+        cell.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
@@ -185,7 +214,7 @@ fn write_out_method(out: &mut String, method: &ast::OutMethodDecl, depth: usize)
     write_trivia(
         out,
         method.blank_line_before,
-        method.leading_comment.as_deref(),
+        method.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
@@ -201,7 +230,7 @@ fn write_condition(out: &mut String, cond: &ast::ConditionDecl, depth: usize) {
     write_trivia(
         out,
         cond.blank_line_before,
-        cond.leading_comment.as_deref(),
+        cond.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
@@ -220,7 +249,7 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     write_trivia(
         out,
         decl.blank_line_before,
-        decl.leading_comment.as_deref(),
+        decl.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
@@ -277,7 +306,7 @@ pub fn format_sheet(sheet: &ast::Sheet) -> String {
         "format_sheet's precondition: no recorded syntax errors"
     );
     let mut out = String::new();
-    write_trivia(&mut out, false, sheet.leading_comment.as_deref(), 0);
+    write_trivia(&mut out, false, sheet.leading_comment.as_ref(), 0);
     out.push_str(&format!("sheet {} {{\n", sheet.name));
     for item in &sheet.items {
         write_sheet_item(&mut out, item, 1);
@@ -455,6 +484,53 @@ mod tests {
     #[test]
     fn format_is_idempotent_through_a_reparse_with_a_tuple_cell() {
         let source = "sheet s {\n    cell a: (i32, f64) = (1, 2.5);\n}";
+        let once = format(source);
+        let twice = format(&once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_a_single_line_block_comment_preserving_its_style() {
+        // A comment immediately after the sheet's opening `{` (before its first item) falls into
+        // the untracked gap from issue #52 (see trivia.rs's module doc) — unrelated to this
+        // change — so a preceding cell is included here to land the comment in a tracked gap.
+        // The comment also needs its own source line: when a comment and its neighboring items
+        // all share one physical line, `analyze_gap`'s same-line-fragment handling (pre-existing,
+        // also unrelated to this change) can't distinguish trailing whitespace from a same-line
+        // comment. What this test is actually checking is that a `/* */` comment round-trips as
+        // `/* */`, not `//`.
+        let source =
+            "sheet s {\n    cell a: i32 = 1;\n    /* the total */\n    cell x: i32 = 1;\n}";
+        let expected =
+            "sheet s {\n    cell a: i32 = 1;\n    /* the total */\n    cell x: i32 = 1;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_multi_line_block_comment_preserving_its_style() {
+        // See the comment on `formats_a_single_line_block_comment_preserving_its_style` for why
+        // a preceding cell is included.
+        let source = "sheet s {\n    cell a: i32 = 1;\n    /*\n        line one\n        line two\n    */\n    cell x: i32 = 1;\n}";
+        let expected = "sheet s {\n    cell a: i32 = 1;\n    /*\n        line one\n        line two\n    */\n    cell x: i32 = 1;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_the_issue_105_license_header_repro_without_dropping_it() {
+        let source =
+            "/*\n    Copyright 2013 Adobe\n    ...\n*/\nsheet s {\n    cell a: i32 = 1;\n}";
+        let expected =
+            "/*\n    Copyright 2013 Adobe\n    ...\n*/\nsheet s {\n    cell a: i32 = 1;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn block_comment_formatting_is_idempotent_through_a_reparse() {
+        // See the comment on `formats_a_single_line_block_comment_preserving_its_style` for why
+        // a preceding cell is included: without it, the comment lands in issue #52's untracked
+        // gap and is dropped on the *first* format, making `once == twice` trivially true
+        // regardless of whether the comment round-trips.
+        let source = "sheet s {\n    cell a: i32 = 1;\n    /*\n        line one\n        line two\n    */\n    cell x: i32 = 1;\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
