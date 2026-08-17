@@ -1249,8 +1249,12 @@ In `adam-lang/src/fmt.rs`'s test module, add:
 
     #[test]
     fn formats_a_plain_comment_and_doc_comment_together_in_source_order() {
-        let source = "sheet s {\n    // TODO\n    /// docs\n    cell x: i32 = 1;\n}";
-        let expected = "sheet s {\n    // TODO\n    /// docs\n    cell x: i32 = 1;\n}\n";
+        // Two items, not one: `trivia::attach_gaps` never attaches a leading plain comment to a
+        // list's first element (a pre-existing, out-of-scope #52-adjacent limitation unrelated to
+        // doc comments — see Tasks 2/3's identical fixture fix), so `x` needs a preceding sibling
+        // for its `// TODO` to actually attach via the normal gap-scanning path.
+        let source = "sheet s {\n    cell w: i32 = 0;\n    // TODO\n    /// docs\n    cell x: i32 = 1;\n}";
+        let expected = "sheet s {\n    cell w: i32 = 0;\n    // TODO\n    /// docs\n    cell x: i32 = 1;\n}\n";
         assert_eq!(format(source), expected);
     }
 
