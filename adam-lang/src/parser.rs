@@ -170,7 +170,7 @@ impl AdamParser {
         Ok(())
     }
 
-    /// `sheet_item = cell_decl | relationship_decl | conditional_decl | out_decl.`
+    /// `sheet_item = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).`
     fn parse_sheet_item(&mut self, ctx: &mut ParseContext) -> Result<()> {
         let _ = ctx.consume_doc_comment_run(false); // outer `///` docs (ignored at runtime)
         match ctx.peek_token() {
