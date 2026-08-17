@@ -83,6 +83,23 @@ fn write_trivia(
     }
 }
 
+/// Emits a container's trailing comment (honoring `blank_line_before_close`) immediately before
+/// its closing `}` is written, reusing [`write_comment`] so block-vs-line style is preserved
+/// exactly as for leading comments. See <https://github.com/stlab/cel-rs/issues/52>.
+fn write_trailing_trivia(
+    out: &mut String,
+    blank_line_before_close: bool,
+    trailing_comment: Option<&ast::Comment>,
+    depth: usize,
+) {
+    if blank_line_before_close {
+        out.push('\n');
+    }
+    if let Some(comment) = trailing_comment {
+        write_comment(out, comment, depth);
+    }
+}
+
 /// Re-emits a literal's exact original text via its span, falling back to an empty string when
 /// none is recoverable — mirrors `cel_parser::fmt`'s identical fallback (see the module doc for
 /// why no `Literal` value is needed here).
@@ -140,6 +157,12 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
     for method in &rel.methods {
         write_method(out, method, depth + 1);
     }
+    write_trailing_trivia(
+        out,
+        rel.blank_line_before_close,
+        rel.trailing_comment.as_ref(),
+        depth + 1,
+    );
     out.push_str(&indent(depth));
     out.push_str("}\n");
 }
@@ -149,12 +172,15 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
 fn write_branch_relationships(
     out: &mut String,
     relationships: &[ast::RelationshipDecl],
+    trailing_comment: Option<&ast::Comment>,
+    blank_line_before_close: bool,
     depth: usize,
 ) {
     out.push_str("{\n");
     for rel in relationships {
         write_relationship(out, rel, depth + 1);
     }
+    write_trailing_trivia(out, blank_line_before_close, trailing_comment, depth + 1);
     out.push_str(&indent(depth));
     out.push_str("}\n");
 }
@@ -171,7 +197,13 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
     out.push_str(&indent(depth));
     out.push_str(&source_text_or_empty(branch.literal_span));
     out.push_str(" => ");
-    write_branch_relationships(out, &branch.relationships, depth);
+    write_branch_relationships(
+        out,
+        &branch.relationships,
+        branch.trailing_comment.as_ref(),
+        branch.blank_line_before_close,
+        depth,
+    );
 }
 
 /// Writes one `conditional match_name { ... }` declaration: its named branches in declaration
@@ -194,8 +226,20 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     if let Some(default) = &cond.default {
         out.push_str(&indent(depth + 1));
         out.push_str("_ => ");
-        write_branch_relationships(out, &default.relationships, depth + 1);
+        write_branch_relationships(
+            out,
+            &default.relationships,
+            default.trailing_comment.as_ref(),
+            default.blank_line_before_close,
+            depth + 1,
+        );
     }
+    write_trailing_trivia(
+        out,
+        cond.blank_line_before_close,
+        cond.trailing_comment.as_ref(),
+        depth + 1,
+    );
     out.push_str(&indent(depth));
     out.push_str("}\n");
 }
@@ -283,6 +327,12 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     for cond in &decl.conditions {
         write_condition(out, cond, depth + 1);
     }
+    write_trailing_trivia(
+        out,
+        decl.blank_line_before_close,
+        decl.trailing_comment.as_ref(),
+        depth + 1,
+    );
     out.push_str(&indent(depth));
     out.push_str("}\n");
 }
@@ -331,6 +381,12 @@ pub fn format_sheet(sheet: &ast::Sheet) -> String {
     for item in &sheet.items {
         write_sheet_item(&mut out, item, 1);
     }
+    write_trailing_trivia(
+        &mut out,
+        sheet.blank_line_before_close,
+        sheet.trailing_comment.as_ref(),
+        1,
+    );
     out.push_str("}\n");
     out
 }
@@ -595,6 +651,58 @@ mod tests {
     #[test]
     fn doc_comment_formatting_is_idempotent_through_a_reparse() {
         let source = "sheet s {\n    /// the total\n    cell x: i32 = 1;\n}";
+        let once = format(source);
+        let twice = format(&once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_before_the_sheets_closing_brace() {
+        assert_eq!(
+            format("sheet s {\n    cell x: i32 = 1;\n    // trailing\n}"),
+            "sheet s {\n    cell x: i32 = 1;\n    // trailing\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_in_an_empty_relationship() {
+        assert_eq!(
+            format("sheet s {\n    relationship {\n        // only this\n    }\n}"),
+            "sheet s {\n    relationship {\n        // only this\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_before_a_relationships_closing_brace() {
+        let source = "sheet s {\n    relationship {\n        method [a] -> [b] { a }\n        // trailing\n    }\n}";
+        let expected = "sheet s {\n    relationship {\n        method [a] -> [b] { a }\n        // trailing\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_before_a_conditionals_own_closing_brace() {
+        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { method [a] -> [b] { a } } }\n        // trailing\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship {\n                method [a] -> [b] { a }\n            }\n        }\n        // trailing\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_in_a_default_arm() {
+        let source = "sheet s {\n    conditional m {\n        _ => {\n            relationship { method [a] -> [b] { a } }\n            // trailing\n        }\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        _ => {\n            relationship {\n                method [a] -> [b] { a }\n            }\n            // trailing\n        }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_before_an_outs_closing_brace() {
+        let source = "sheet s {\n    out area: f64 {\n        method [w] { w }\n        // trailing\n    }\n}";
+        let expected = "sheet s {\n    out area: f64 {\n        method [w] { w }\n        // trailing\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn trailing_trivia_formatting_is_idempotent_through_a_reparse() {
+        let source = "sheet s {\n    cell a: i32 = 1;\n    // trailing\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
