@@ -3,7 +3,7 @@
 ## Goal
 
 Improve comment support in `adam-fmt`'s pipeline (`cel-parser`'s shared lexer, `adam-lang`'s
-grammar/AST, and its formatter) by resolving four related, previously-filed issues:
+grammar/AST, and its formatter) by resolving five related, previously-filed issues:
 
 - [#58](https://github.com/stlab/cel-rs/issues/58) — `///`/`//!` doc comments are tokenized as
   `#[doc = "..."]`/`#![doc = "..."]` attribute-shaped tokens by `proc_macro2` and always fail to
@@ -15,10 +15,15 @@ grammar/AST, and its formatter) by resolving four related, previously-filed issu
 - [#53](https://github.com/stlab/cel-rs/issues/53) — recovered comments collapse to a single
   `String` with no memory of delimiter style, so every `/* ... */` block comment is re-emitted by
   the formatter as one or more `//` lines.
+- [#52](https://github.com/stlab/cel-rs/issues/52) — a comment or blank line between a block's
+  *last* item and its own closing `}` has nothing to attach to, so it's silently dropped —
+  affecting `Sheet`, `RelationshipDecl`, `ConditionalDecl`/its default arm, `ConditionalBranch`,
+  and `OutDecl`.
 - [#57](https://github.com/stlab/cel-rs/issues/57) — the already-merged PR that introduced the
   formatter (`leading_comment`/`blank_line_before`, `attach_trivia`, `format_sheet`) and filed
-  #52–#56 as follow-up issues, #58 among them. Reviewed for background/context only; not itself an
-  open defect, so there is no code change attributable to it beyond what #53/#58 already cover.
+  #52–#56 as follow-up issues, #52/#58 among them. Reviewed for background/context only; not
+  itself an open defect, so there is no code change attributable to it beyond what #52/#53/#58
+  already cover.
 
 ## Background
 
@@ -51,10 +56,14 @@ change... revisit if/when adam-lang ever wants real attribute syntax").
   keyword, analogous to Rust's module-level `//!` — becoming the sheet's own doc comment.
 - Doc comments bind to the following declaration regardless of blank lines in between (matching
   real `///`/`//!` semantics) — unlike plain comments, where a blank line breaks the attachment.
+- #52's fix restructures `ConditionalDecl::default` from `Option<Vec<RelationshipDecl>>` to
+  `Option<DefaultBranch>` (a new struct mirroring `ConditionalBranch`) so the default arm has
+  somewhere to carry its own trailing-comment slot, and also covers a comment inside a completely
+  empty block (e.g. `relationship { /* only this */ }`), not just the literal
+  last-item-to-closing-brace case — see §5.
 - Out of scope, unchanged from existing deferred items: general `#[...]` attribute syntax; doc
-  comments surfaced via `adam-lsp` hover (design doc Phase 5, not yet built); #52 (comment/blank
-  line in the gap before a block's closing `}`); #54 (column-aware line-wrapping); #55 (range
-  formatting).
+  comments surfaced via `adam-lsp` hover (design doc Phase 5, not yet built); #54 (column-aware
+  line-wrapping); #55 (range formatting).
 
 ## 1. `cel-parser::lex_lexer` — recognizing doc comments
 
@@ -243,12 +252,81 @@ declaration itself.
 **Testing:** doc-comment re-emission at each of the four sheet-item kinds and at sheet level;
 combined plain-comment + doc-comment ordering; idempotency through a reparse.
 
+## 5. `attach_trivia`/formatter — trailing trivia before a block's closing `}` (#52)
+
+**Root cause:** `attach_gaps` only ever computes a gap *between two consecutive items*, so the
+gap between a container's *last* item and its own closing `}` — or, for an empty container, the
+gap between its opening `{` and closing `}` — is never scanned at all. Fixing this means every
+container type that owns a `{ ... }` child list grows its own trailing-trivia slot, separate from
+any child's leading trivia:
+
+- `Sheet` (its `items`)
+- `RelationshipDecl` (its `methods`)
+- `ConditionalDecl` (its `branches`, i.e. the gap before its own outer `}` — not to be confused
+  with each branch's own trailing gap)
+- `ConditionalBranch` (its `relationships`)
+- new `DefaultBranch` struct (its `relationships`)
+- `OutDecl` (its `conditions`, or the writer if `conditions` is empty — extending slightly past
+  the issue's literal wording to keep this pass exhaustive, since `OutDecl` already gets full
+  leading-trivia recursion today and a partial fix would be an inconsistent stopping point)
+
+Each of these gains two fields: `trailing_comment: Option<Comment>` and
+`blank_line_before_close: bool`.
+
+**Default-arm restructuring:** `ConditionalDecl::default` changes from
+`Option<Vec<RelationshipDecl>>` to `Option<DefaultBranch>`, a new struct mirroring
+`ConditionalBranch`'s shape:
+
+```rust
+pub struct DefaultBranch {
+    pub relationships: Vec<RelationshipDecl>,
+    pub trailing_comment: Option<Comment>,
+    pub blank_line_before_close: bool,
+    pub span: ExprSpan,
+}
+```
+
+This touches every existing read of `.default` (`ast_parser.rs`'s `parse_conditional_decl`,
+`trivia.rs`'s `attach_conditional`, `fmt.rs`'s `write_conditional`, and their tests), each becoming
+a small, mechanical adjustment (`Vec<RelationshipDecl>` → `DefaultBranch.relationships`).
+
+**Empty-block coverage:** `Sheet`, `RelationshipDecl`, `ConditionalDecl`, `ConditionalBranch`, and
+`DefaultBranch` each also gain an `open_brace_span: ExprSpan` field, capturing their own `{`
+token's span (currently parsed via `cursor.expect_open_brace()?` and discarded everywhere) —
+needed only as the trailing-gap's *start* boundary when their child list is empty. `OutDecl` is
+exempt: its writer is grammar-mandatory, so its block can never be child-empty. When a container's
+list is non-empty, the gap starts at the last child's `span.end` instead, and always ends at the
+container's own `span.end` (already stored today, since every container's `span.end` is already
+exactly its closing `}`'s span — no new field needed for that side).
+
+**`trivia.rs` mechanism:** a new small trait (alongside the existing `TriviaTarget`), implemented
+by each container type above, exposing its `open_brace_span()`, its own closing span
+(`self.span().end`), and setters for the two new fields. One generic helper computes the trailing
+gap (last child's end, or the open-brace span if the list is empty, through to the container's
+close) and reuses the existing `analyze_gap` unchanged — it's already agnostic to what sits on
+either side of a gap, so no new gap-parsing logic is needed, only new call sites.
+`ConditionalDecl`'s own trailing gap is computed specially (mirroring the existing special-casing
+`attach_out` already does for `OutDecl`): its "last child" is its `default` if present, else its
+last branch, else its own open brace.
+
+**Formatter:** each container's writer emits its trailing comment (honoring
+`blank_line_before_close`) immediately before writing its closing `}`, using the same
+comment-printing routine `write_trivia` uses for leading comments (factored out once the
+`Comment` enum lands in §3, and reused here rather than duplicated).
+
+**Testing:** the issue's literal repro (comment after a sheet's last item, before the closing
+`}`) plus one per nested container (relationship's last method, conditional's last branch, default
+arm, a branch's own relationships, out's last condition, out's writer with zero conditions); the
+empty-block case at every one of those sites; `blank_line_before_close` detection at each;
+idempotency through a reparse for all of the above.
+
 ## Summary of issue disposition
 
 | Issue | Disposition |
 | --- | --- |
 | #105 | Fixed — §3's `analyze_gap` rewrite recognizes multi-line block comments. |
 | #53 | Fixed — §3's `Comment` enum + formatter changes preserve block-vs-line style. |
+| #52 | Fixed — §5 adds trailing-trivia slots to every container type. |
 | #58 | Fixed — §1/§2 add first-class, narrowly-scoped `///`/`//!` support. |
 | #57 | Reviewed for background only (already-merged PR); no separate action item. |
 
@@ -256,7 +334,5 @@ combined plain-comment + doc-comment ordering; idempotency through a reparse.
 
 - General `#[...]` attribute syntax (only the doc-comment shape is recognized).
 - Doc comments surfaced via `adam-lsp` hover/completion (design doc Phase 5, not yet built).
-- [#52](https://github.com/stlab/cel-rs/issues/52) — comment/blank line in the gap before a
-  block's closing `}`, still dropped; unrelated to this work.
 - [#54](https://github.com/stlab/cel-rs/issues/54) — column-aware line-wrapping.
 - [#55](https://github.com/stlab/cel-rs/issues/55) — range formatting.
