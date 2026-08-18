@@ -53,8 +53,8 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                         }
                     }
                 }
-                if let Some(default_rels) = &cond.default {
-                    for rel in default_rels {
+                if let Some(default) = &cond.default {
+                    for rel in &default.relationships {
                         for method in &rel.methods {
                             check_method(method, registry, &shapes, &resolve, &mut diagnostics);
                         }

@@ -141,6 +141,7 @@ impl AdamParser {
             cell_names: IndexMap::new(),
             output_names: IndexMap::new(),
         };
+        let _ = ctx.consume_doc_comment_run(true); // sheet-level `//!` docs (ignored at runtime)
         self.parse_sheet(&mut ctx)?;
         if let Some(tok) = ctx.peek_token() {
             return Err(ParseError::new("unexpected token", tok.span()));
@@ -170,8 +171,9 @@ impl AdamParser {
         Ok(())
     }
 
-    /// `sheet_item = cell_decl | relationship_decl | conditional_decl | out_decl.`
+    /// `sheet_item = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).`
     fn parse_sheet_item(&mut self, ctx: &mut ParseContext) -> Result<()> {
+        let _ = ctx.consume_doc_comment_run(false); // outer `///` docs (ignored at runtime)
         match ctx.peek_token() {
             Some(Token::Identifier(id)) if id == "cell" => self.parse_cell_decl(ctx),
             Some(Token::Identifier(id)) if id == "relationship" => {
@@ -1351,6 +1353,29 @@ mod tests {
         "#,
             )
             .unwrap();
+    }
+
+    #[test]
+    fn parses_a_sheet_with_an_outer_doc_comment_on_a_cell() {
+        let parsed = parser()
+            .parse_str("sheet s {\n    /// the total\n    cell x: i32 = 1;\n}")
+            .unwrap();
+        assert_eq!(parsed.cell_names.len(), 1);
+    }
+
+    #[test]
+    fn parses_a_sheet_with_an_inner_doc_comment() {
+        let parsed = parser()
+            .parse_str("//! module docs\nsheet s {\n    cell x: i32 = 1;\n}")
+            .unwrap();
+        assert_eq!(parsed.cell_names.len(), 1);
+    }
+
+    #[test]
+    fn parses_a_sheet_with_doc_comments_on_every_declaration_kind() {
+        let source = "//! module docs\nsheet s {\n    /// a cell\n    cell x: i32 = 1;\n\n    /// another cell\n    cell y: i32 = 2;\n\n    /// a relationship\n    relationship { method [x] -> [y] { x } }\n}";
+        let parsed = parser().parse_str(source).unwrap();
+        assert_eq!(parsed.cell_names.len(), 2);
     }
 
     #[test]

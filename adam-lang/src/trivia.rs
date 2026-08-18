@@ -16,9 +16,12 @@
 //! for, so `cell a;\n\n// c\ncell b;`'s blank line (before the comment, not after it) still marks
 //! `b.blank_line_before` true even though the comment still attaches to `b`.
 //!
-//! A comment or blank line in the gap between a block's *last* item and that block's closing `}`
-//! (nothing follows it) is not attached to anything and is dropped — see
-//! <https://github.com/stlab/cel-rs/issues/52>.
+//! A comment or blank line in the gap between a block's *last* item and that block's own closing
+//! `}` (or, for a child-empty block, between its opening `{` and closing `}`) has nothing
+//! following it for the above machinery to attach to, so it is recovered separately, into each
+//! container's own `trailing_comment`/`blank_line_before_close` fields, by [`attach_trailing`]
+//! and its two special-cased siblings [`attach_conditional_trailing`]/[`attach_out_trailing`].
+//! See <https://github.com/stlab/cel-rs/issues/52>.
 
 use proc_macro2::LineColumn;
 
@@ -30,7 +33,7 @@ use crate::ast::{
 /// An AST node that can carry recovered leading trivia, attached by [`attach_gaps`].
 trait TriviaTarget {
     fn span(&self) -> ExprSpan;
-    fn set_leading_comment(&mut self, comment: String);
+    fn set_leading_comment(&mut self, comment: crate::ast::Comment);
     fn set_blank_line_before(&mut self, value: bool);
 }
 
@@ -38,7 +41,7 @@ impl TriviaTarget for crate::ast::SheetItem {
     fn span(&self) -> ExprSpan {
         crate::ast::SheetItem::span(self)
     }
-    fn set_leading_comment(&mut self, comment: String) {
+    fn set_leading_comment(&mut self, comment: crate::ast::Comment) {
         crate::ast::SheetItem::set_leading_comment(self, comment)
     }
     fn set_blank_line_before(&mut self, value: bool) {
@@ -50,7 +53,7 @@ impl TriviaTarget for MethodDecl {
     fn span(&self) -> ExprSpan {
         self.span
     }
-    fn set_leading_comment(&mut self, comment: String) {
+    fn set_leading_comment(&mut self, comment: crate::ast::Comment) {
         self.leading_comment = Some(comment);
     }
     fn set_blank_line_before(&mut self, value: bool) {
@@ -62,7 +65,7 @@ impl TriviaTarget for RelationshipDecl {
     fn span(&self) -> ExprSpan {
         self.span
     }
-    fn set_leading_comment(&mut self, comment: String) {
+    fn set_leading_comment(&mut self, comment: crate::ast::Comment) {
         self.leading_comment = Some(comment);
     }
     fn set_blank_line_before(&mut self, value: bool) {
@@ -74,7 +77,7 @@ impl TriviaTarget for ConditionalBranch {
     fn span(&self) -> ExprSpan {
         self.span
     }
-    fn set_leading_comment(&mut self, comment: String) {
+    fn set_leading_comment(&mut self, comment: crate::ast::Comment) {
         self.leading_comment = Some(comment);
     }
     fn set_blank_line_before(&mut self, value: bool) {
@@ -86,11 +89,177 @@ impl TriviaTarget for ConditionDecl {
     fn span(&self) -> ExprSpan {
         self.span
     }
-    fn set_leading_comment(&mut self, comment: String) {
+    fn set_leading_comment(&mut self, comment: crate::ast::Comment) {
         self.leading_comment = Some(comment);
     }
     fn set_blank_line_before(&mut self, value: bool) {
         self.blank_line_before = value;
+    }
+}
+
+/// A container whose own `{ ... }` block may carry trailing trivia — a comment or blank line
+/// between its last child and its own closing `}` — recovered by [`attach_trailing`]. See
+/// <https://github.com/stlab/cel-rs/issues/52>.
+trait TrailingTriviaTarget {
+    /// The span of this container's own opening `{`, used as the trailing gap's start when its
+    /// child list is empty.
+    fn open_brace_span(&self) -> proc_macro2::Span;
+    /// The span of this container's own closing `}`.
+    fn close_span(&self) -> proc_macro2::Span;
+    fn set_trailing_comment(&mut self, comment: crate::ast::Comment);
+    fn set_blank_line_before_close(&mut self, value: bool);
+}
+
+impl TrailingTriviaTarget for Sheet {
+    fn open_brace_span(&self) -> proc_macro2::Span {
+        self.open_brace_span.end
+    }
+    fn close_span(&self) -> proc_macro2::Span {
+        self.span.end
+    }
+    fn set_trailing_comment(&mut self, comment: crate::ast::Comment) {
+        self.trailing_comment = Some(comment);
+    }
+    fn set_blank_line_before_close(&mut self, value: bool) {
+        self.blank_line_before_close = value;
+    }
+}
+
+impl TrailingTriviaTarget for RelationshipDecl {
+    fn open_brace_span(&self) -> proc_macro2::Span {
+        self.open_brace_span.end
+    }
+    fn close_span(&self) -> proc_macro2::Span {
+        self.span.end
+    }
+    fn set_trailing_comment(&mut self, comment: crate::ast::Comment) {
+        self.trailing_comment = Some(comment);
+    }
+    fn set_blank_line_before_close(&mut self, value: bool) {
+        self.blank_line_before_close = value;
+    }
+}
+
+impl TrailingTriviaTarget for ConditionalBranch {
+    fn open_brace_span(&self) -> proc_macro2::Span {
+        self.open_brace_span.end
+    }
+    fn close_span(&self) -> proc_macro2::Span {
+        self.span.end
+    }
+    fn set_trailing_comment(&mut self, comment: crate::ast::Comment) {
+        self.trailing_comment = Some(comment);
+    }
+    fn set_blank_line_before_close(&mut self, value: bool) {
+        self.blank_line_before_close = value;
+    }
+}
+
+impl TrailingTriviaTarget for crate::ast::DefaultBranch {
+    fn open_brace_span(&self) -> proc_macro2::Span {
+        self.open_brace_span.end
+    }
+    fn close_span(&self) -> proc_macro2::Span {
+        self.span.end
+    }
+    fn set_trailing_comment(&mut self, comment: crate::ast::Comment) {
+        self.trailing_comment = Some(comment);
+    }
+    fn set_blank_line_before_close(&mut self, value: bool) {
+        self.blank_line_before_close = value;
+    }
+}
+
+/// Byte offset immediately after a container's own opening `{`.
+///
+/// `open_brace` is the flattened `OpenDelim` token's span, which `cel_parser::lex_lexer::LexLexer`
+/// sets to the *whole* delimited group's span (`proc_macro2::Group::span()`'s documented
+/// behavior) rather than to just the one-character `{` token — the same span value the matching
+/// `CloseDelim` token carries. So `open_brace.start()` is the position of the `{` character
+/// itself; advancing one byte (a brace is always exactly one ASCII byte) lands just past it.
+fn after_open_brace(source: &str, line_starts: &[usize], open_brace: proc_macro2::Span) -> usize {
+    line_column_to_byte(source, line_starts, open_brace.start()) + 1
+}
+
+/// Byte offset immediately before a container's own closing `}` — the mirror of
+/// [`after_open_brace`], exploiting the same whole-group-span quirk from the other end:
+/// `close_brace.end()` is the position just past the `}`; stepping back one byte lands just
+/// before it.
+fn before_close_brace(
+    source: &str,
+    line_starts: &[usize],
+    close_brace: proc_macro2::Span,
+) -> usize {
+    line_column_to_byte(source, line_starts, close_brace.end()) - 1
+}
+
+/// Recovers trailing trivia (a comment/blank line between the last child's end position —
+/// `last_child_end`, precomputed by the caller from its own child list before taking a mutable
+/// borrow of `container`, since `container` may be that same list's owner — and `container`'s
+/// own closing `}`, or between its opening `{` and closing `}` when `last_child_end` is `None`)
+/// and attaches it to `container`. See <https://github.com/stlab/cel-rs/issues/52>.
+fn attach_trailing<C: TrailingTriviaTarget>(
+    source: &str,
+    line_starts: &[usize],
+    last_child_end: Option<LineColumn>,
+    container: &mut C,
+) {
+    let start = match last_child_end {
+        Some(pos) => line_column_to_byte(source, line_starts, pos),
+        None => after_open_brace(source, line_starts, container.open_brace_span()),
+    };
+    let end = before_close_brace(source, line_starts, container.close_span());
+    if start < end {
+        let gap_text = &source[start..end];
+        let (comment, blank_line_before_close) = analyze_gap(gap_text);
+        container.set_blank_line_before_close(blank_line_before_close);
+        if let Some(comment) = comment {
+            container.set_trailing_comment(comment);
+        }
+    }
+}
+
+/// Recovers `ConditionalDecl`'s own trailing trivia — the gap before its outer closing `}`,
+/// after its default arm if present, else its last branch, else (an empty conditional) its own
+/// opening `{`. Handled specially, like [`attach_out_trailing`], because a `ConditionalDecl`'s
+/// "last child" isn't a single homogeneous list — it's whichever of `branches`/`default` came
+/// last in declaration order.
+fn attach_conditional_trailing(source: &str, line_starts: &[usize], cond: &mut ConditionalDecl) {
+    let start = if let Some(default) = &cond.default {
+        line_column_to_byte(source, line_starts, default.span.end.end())
+    } else if let Some(last_branch) = cond.branches.last() {
+        line_column_to_byte(source, line_starts, last_branch.span.end.end())
+    } else {
+        after_open_brace(source, line_starts, cond.open_brace_span.end)
+    };
+    let end = before_close_brace(source, line_starts, cond.span.end);
+    if start < end {
+        let gap_text = &source[start..end];
+        let (comment, blank_line_before_close) = analyze_gap(gap_text);
+        cond.blank_line_before_close = blank_line_before_close;
+        if let Some(comment) = comment {
+            cond.trailing_comment = Some(comment);
+        }
+    }
+}
+
+/// Recovers `OutDecl`'s own trailing trivia — the gap before its closing `}`, after its last
+/// condition if any, else its mandatory writer method (an `OutDecl`'s block can never be
+/// child-empty, since the writer is grammar-required).
+fn attach_out_trailing(source: &str, line_starts: &[usize], out_decl: &mut OutDecl) {
+    let start_pos = match out_decl.conditions.last() {
+        Some(last) => last.span.end.end(),
+        None => out_decl.writer.span.end.end(),
+    };
+    let start = line_column_to_byte(source, line_starts, start_pos);
+    let end = before_close_brace(source, line_starts, out_decl.span.end);
+    if start < end {
+        let gap_text = &source[start..end];
+        let (comment, blank_line_before_close) = analyze_gap(gap_text);
+        out_decl.blank_line_before_close = blank_line_before_close;
+        if let Some(comment) = comment {
+            out_decl.trailing_comment = Some(comment);
+        }
     }
 }
 
@@ -110,6 +279,8 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
     let (leading_comment, _) = analyze_gap(&source[..sheet_start]);
     sheet.leading_comment = leading_comment;
     attach_gaps(source, &line_starts, &mut sheet.items);
+    let last_child_end = sheet.items.last().map(|item| item.span().end.end());
+    attach_trailing(source, &line_starts, last_child_end, sheet);
     for item in &mut sheet.items {
         match item {
             crate::ast::SheetItem::Relationship(rel) => {
@@ -127,6 +298,8 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
 /// Recovers trivia for a relationship's methods.
 fn attach_relationship(source: &str, line_starts: &[usize], rel: &mut RelationshipDecl) {
     attach_gaps(source, line_starts, &mut rel.methods);
+    let last_child_end = rel.methods.last().map(|m| m.span().end.end());
+    attach_trailing(source, line_starts, last_child_end, rel);
 }
 
 /// Recovers trivia for a conditional's branches, its default, and their nested relationships.
@@ -134,16 +307,21 @@ fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut Conditiona
     attach_gaps(source, line_starts, &mut cond.branches);
     for branch in &mut cond.branches {
         attach_gaps(source, line_starts, &mut branch.relationships);
+        let last_child_end = branch.relationships.last().map(|r| r.span().end.end());
+        attach_trailing(source, line_starts, last_child_end, branch);
         for rel in &mut branch.relationships {
             attach_relationship(source, line_starts, rel);
         }
     }
     if let Some(default) = &mut cond.default {
-        attach_gaps(source, line_starts, default);
-        for rel in default.iter_mut() {
+        attach_gaps(source, line_starts, &mut default.relationships);
+        let last_child_end = default.relationships.last().map(|r| r.span().end.end());
+        attach_trailing(source, line_starts, last_child_end, default);
+        for rel in default.relationships.iter_mut() {
             attach_relationship(source, line_starts, rel);
         }
     }
+    attach_conditional_trailing(source, line_starts, cond);
 }
 
 /// Recovers trivia for an out declaration's conditions. Unlike other lists where the first
@@ -173,6 +351,7 @@ fn attach_out(source: &str, line_starts: &[usize], out_decl: &mut OutDecl) {
     }
     // Then attach gaps between conditions (if there are multiple)
     attach_gaps(source, line_starts, &mut out_decl.conditions);
+    attach_out_trailing(source, line_starts, out_decl);
 }
 
 /// Recovers comments/blank-lines from the gaps between consecutive `items`, attaching each to the
@@ -229,10 +408,14 @@ fn line_column_to_byte(source: &str, line_starts: &[usize], pos: LineColumn) -> 
 }
 
 /// Analyzes one gap between two consecutive items: the maximal trailing run of `//` line
-/// comments (or a single `/* ... */` block comment) immediately preceding the next item, if any,
-/// and whether a blank line remains anywhere in what's left of the gap once that trailing run is
-/// accounted for (see the module doc for why the scan order matters).
-fn analyze_gap(gap: &str) -> (Option<String>, bool) {
+/// comments, or a single `/* ... */` block comment (possibly spanning multiple lines),
+/// immediately preceding the next item, if any, and whether a blank line remains anywhere in
+/// what's left of the gap once that trailing run is accounted for (see the module doc for why
+/// the scan order matters).
+///
+/// - Complexity: O(n) in the length of `gap`.
+fn analyze_gap(gap: &str) -> (Option<crate::ast::Comment>, bool) {
+    use crate::ast::Comment;
     let mut lines: Vec<&str> = gap.lines().collect();
     // `gap` ends exactly where the following item's first token begins. When that token isn't
     // at column 0, `lines()`'s final entry is only the leading whitespace before it on its own
@@ -241,29 +424,65 @@ fn analyze_gap(gap: &str) -> (Option<String>, bool) {
     if !gap.ends_with('\n') {
         lines.pop();
     }
-    let mut collected = Vec::new();
-    while let Some(line) = lines.last() {
-        let trimmed = line.trim();
+    let mut comment = None;
+    if let Some(last) = lines.last() {
+        let trimmed = last.trim();
         if let Some(text) = trimmed.strip_prefix("//") {
-            collected.push(text.trim().to_string());
+            let mut collected = vec![text.trim().to_string()];
             lines.pop();
-        } else if let Some(text) = trimmed
+            while let Some(line) = lines.last() {
+                let trimmed = line.trim();
+                if let Some(text) = trimmed.strip_prefix("//") {
+                    collected.push(text.trim().to_string());
+                    lines.pop();
+                } else {
+                    break;
+                }
+            }
+            collected.reverse();
+            comment = Some(Comment::Line(collected.join("\n")));
+        } else if let Some(inner) = trimmed
             .strip_prefix("/*")
             .and_then(|s| s.strip_suffix("*/"))
         {
-            collected.push(text.trim().to_string());
+            // A single-line block comment.
+            comment = Some(Comment::Block(inner.trim().to_string()));
             lines.pop();
-            break; // a block comment is one unit; don't merge with an earlier `//` run
-        } else {
-            break;
+        } else if trimmed.ends_with("*/") {
+            // The close of a block comment that opened on an earlier line — collect backwards
+            // until the line that opens it (see #105). A block comment is one unit; don't merge
+            // with an earlier `//` run.
+            let mut collected = Vec::new();
+            let closing_prefix = trimmed
+                .strip_suffix("*/")
+                .expect("checked ends_with(\"*/\") above")
+                .trim();
+            if !closing_prefix.is_empty() {
+                collected.push(closing_prefix.to_string());
+            }
+            lines.pop();
+            let mut found_open = false;
+            while let Some(line) = lines.last() {
+                let trimmed = line.trim();
+                lines.pop();
+                if let Some(text) = trimmed.strip_prefix("/*") {
+                    let opening_suffix = text.trim();
+                    if !opening_suffix.is_empty() {
+                        collected.push(opening_suffix.to_string());
+                    }
+                    found_open = true;
+                    break;
+                }
+                collected.push(trimmed.to_string());
+            }
+            // If the gap is exhausted without finding a matching `/*` (not expected for
+            // well-formed input), `found_open` stays false and no comment is fabricated.
+            if found_open {
+                collected.reverse();
+                comment = Some(Comment::Block(collected.join("\n")));
+            }
         }
     }
-    let comment = if collected.is_empty() {
-        None
-    } else {
-        collected.reverse();
-        Some(collected.join("\n"))
-    };
     // `lines[0]` is always the trailing remainder of the *previous* item's own source line (the
     // fragment before the gap's first `\n`), which is empty whenever that item's last token is
     // already at end-of-line — the common case. It must be excluded here: only a line strictly
@@ -285,7 +504,10 @@ mod tests {
         let crate::ast::SheetItem::Cell(b) = &sheet.items[1] else {
             panic!("expected Cell");
         };
-        assert_eq!(b.leading_comment.as_deref(), Some("the total"));
+        assert_eq!(
+            b.leading_comment,
+            Some(crate::ast::Comment::Line("the total".to_string()))
+        );
     }
 
     #[test]
@@ -296,7 +518,10 @@ mod tests {
         let crate::ast::SheetItem::Cell(b) = &sheet.items[1] else {
             panic!("expected Cell");
         };
-        assert_eq!(b.leading_comment.as_deref(), Some("line one\nline two"));
+        assert_eq!(
+            b.leading_comment,
+            Some(crate::ast::Comment::Line("line one\nline two".to_string()))
+        );
     }
 
     #[test]
@@ -308,7 +533,52 @@ mod tests {
         let crate::ast::SheetItem::Cell(b) = &sheet.items[1] else {
             panic!("expected Cell");
         };
-        assert_eq!(b.leading_comment.as_deref(), Some("the total"));
+        assert_eq!(
+            b.leading_comment,
+            Some(crate::ast::Comment::Block("the total".to_string()))
+        );
+    }
+
+    #[test]
+    fn attaches_a_multi_line_block_comment() {
+        let source = "sheet s {\n    cell a: i32 = 1;\n    /*\n        line one\n        line two\n    */\n    cell b: i32 = 2;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Cell(b) = &sheet.items[1] else {
+            panic!("expected Cell");
+        };
+        assert_eq!(
+            b.leading_comment,
+            Some(crate::ast::Comment::Block("line one\nline two".to_string()))
+        );
+    }
+
+    #[test]
+    fn attaches_the_issue_105_license_header_repro_as_a_block_comment() {
+        let source =
+            "/*\n    Copyright 2013 Adobe\n    ...\n*/\nsheet s {\n    cell a: i32 = 1;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        assert_eq!(
+            sheet.leading_comment,
+            Some(crate::ast::Comment::Block(
+                "Copyright 2013 Adobe\n...".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_line_comment_is_recovered_as_comment_line() {
+        let source = "sheet s {\n    cell a: i32 = 1;\n    // the total\n    cell b: i32 = 2;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Cell(b) = &sheet.items[1] else {
+            panic!("expected Cell");
+        };
+        assert_eq!(
+            b.leading_comment,
+            Some(crate::ast::Comment::Line("the total".to_string()))
+        );
     }
 
     #[test]
@@ -342,11 +612,17 @@ mod tests {
         let crate::ast::SheetItem::Cell(b) = &sheet.items[1] else {
             panic!("expected Cell");
         };
-        assert_eq!(b.leading_comment.as_deref(), Some("first"));
+        assert_eq!(
+            b.leading_comment,
+            Some(crate::ast::Comment::Line("first".to_string()))
+        );
         let crate::ast::SheetItem::Cell(c) = &sheet.items[2] else {
             panic!("expected Cell");
         };
-        assert_eq!(c.leading_comment.as_deref(), Some("second"));
+        assert_eq!(
+            c.leading_comment,
+            Some(crate::ast::Comment::Line("second".to_string()))
+        );
     }
 
     #[test]
@@ -360,7 +636,10 @@ mod tests {
         else {
             panic!("expected Error");
         };
-        assert_eq!(leading_comment.as_deref(), Some("fix me"));
+        assert_eq!(
+            leading_comment,
+            &Some(crate::ast::Comment::Line("fix me".to_string()))
+        );
     }
 
     #[test]
@@ -422,7 +701,10 @@ mod tests {
         let crate::ast::SheetItem::Cell(b) = &sheet.items[1] else {
             panic!("expected Cell");
         };
-        assert_eq!(b.leading_comment.as_deref(), Some("c"));
+        assert_eq!(
+            b.leading_comment,
+            Some(crate::ast::Comment::Line("c".to_string()))
+        );
         assert!(b.blank_line_before);
     }
 
@@ -434,7 +716,10 @@ mod tests {
         let crate::ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
             panic!("expected Relationship");
         };
-        assert_eq!(rel.methods[1].leading_comment.as_deref(), Some("second"));
+        assert_eq!(
+            rel.methods[1].leading_comment,
+            Some(crate::ast::Comment::Line("second".to_string()))
+        );
         assert!(rel.methods[1].blank_line_before);
     }
 
@@ -446,7 +731,10 @@ mod tests {
         let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
             panic!("expected Conditional");
         };
-        assert_eq!(cond.branches[1].leading_comment.as_deref(), Some("one"));
+        assert_eq!(
+            cond.branches[1].leading_comment,
+            Some(crate::ast::Comment::Line("one".to_string()))
+        );
     }
 
     #[test]
@@ -458,8 +746,8 @@ mod tests {
             panic!("expected Conditional");
         };
         assert_eq!(
-            cond.branches[0].relationships[1].leading_comment.as_deref(),
-            Some("second")
+            cond.branches[0].relationships[1].leading_comment,
+            Some(crate::ast::Comment::Line("second".to_string()))
         );
     }
 
@@ -472,7 +760,10 @@ mod tests {
             panic!("expected Conditional");
         };
         let default = cond.default.as_ref().expect("default branch present");
-        assert_eq!(default[1].leading_comment.as_deref(), Some("second"));
+        assert_eq!(
+            default.relationships[1].leading_comment,
+            Some(crate::ast::Comment::Line("second".to_string()))
+        );
     }
 
     #[test]
@@ -480,7 +771,10 @@ mod tests {
         let source = "// file header\nsheet s {\n    cell a: i32 = 1;\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
-        assert_eq!(sheet.leading_comment.as_deref(), Some("file header"));
+        assert_eq!(
+            sheet.leading_comment,
+            Some(crate::ast::Comment::Line("file header".to_string()))
+        );
     }
 
     #[test]
@@ -488,7 +782,10 @@ mod tests {
         let source = "// line one\n// line two\nsheet s {\n    cell a: i32 = 1;\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
-        assert_eq!(sheet.leading_comment.as_deref(), Some("line one\nline two"));
+        assert_eq!(
+            sheet.leading_comment,
+            Some(crate::ast::Comment::Line("line one\nline two".to_string()))
+        );
     }
 
     #[test]
@@ -507,6 +804,135 @@ mod tests {
         let crate::ast::SheetItem::Out(out) = &sheet.items[0] else {
             panic!("expected Out");
         };
-        assert_eq!(out.conditions[0].leading_comment.as_deref(), Some("second"));
+        assert_eq!(
+            out.conditions[0].leading_comment,
+            Some(crate::ast::Comment::Line("second".to_string()))
+        );
+    }
+
+    #[test]
+    fn recovers_a_trailing_comment_before_a_sheets_closing_brace() {
+        let source = "sheet s {\n    cell a: i32 = 1;\n    // trailing\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        assert_eq!(
+            sheet.trailing_comment,
+            Some(crate::ast::Comment::Line("trailing".to_string()))
+        );
+    }
+
+    #[test]
+    fn recovers_a_trailing_comment_in_an_empty_relationship_block() {
+        let source = "sheet s {\n    relationship {\n        // only this\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
+        };
+        assert_eq!(
+            rel.trailing_comment,
+            Some(crate::ast::Comment::Line("only this".to_string()))
+        );
+    }
+
+    #[test]
+    fn recovers_a_trailing_comment_before_a_relationships_closing_brace() {
+        let source = "sheet s {\n    relationship {\n        method [a] -> [b] { a }\n        // trailing\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
+        };
+        assert_eq!(
+            rel.trailing_comment,
+            Some(crate::ast::Comment::Line("trailing".to_string()))
+        );
+    }
+
+    #[test]
+    fn recovers_a_trailing_comment_before_a_conditional_branchs_closing_brace() {
+        let source = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship { method [a] -> [b] { a } }\n            // trailing\n        }\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        assert_eq!(
+            cond.branches[0].trailing_comment,
+            Some(crate::ast::Comment::Line("trailing".to_string()))
+        );
+    }
+
+    #[test]
+    fn recovers_a_trailing_comment_in_a_default_arm() {
+        let source = "sheet s {\n    conditional m {\n        _ => {\n            relationship { method [a] -> [b] { a } }\n            // trailing\n        }\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        let default = cond.default.as_ref().expect("default branch present");
+        assert_eq!(
+            default.trailing_comment,
+            Some(crate::ast::Comment::Line("trailing".to_string()))
+        );
+    }
+
+    #[test]
+    fn recovers_a_trailing_comment_before_a_conditionals_own_closing_brace() {
+        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { method [a] -> [b] { a } } }\n        // trailing\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        assert_eq!(
+            cond.trailing_comment,
+            Some(crate::ast::Comment::Line("trailing".to_string()))
+        );
+    }
+
+    #[test]
+    fn recovers_a_trailing_comment_before_an_outs_closing_brace_with_no_conditions() {
+        let source = "sheet s {\n    out area: f64 {\n        method [w] { w }\n        // trailing\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Out(out) = &sheet.items[0] else {
+            panic!("expected Out");
+        };
+        assert_eq!(
+            out.trailing_comment,
+            Some(crate::ast::Comment::Line("trailing".to_string()))
+        );
+    }
+
+    #[test]
+    fn recovers_a_trailing_comment_before_an_outs_closing_brace_after_a_condition() {
+        let source = "sheet s {\n    out area: f64 {\n        method [w] { w }\n        condition c [w] { w <= 10.0 }\n        // trailing\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Out(out) = &sheet.items[0] else {
+            panic!("expected Out");
+        };
+        assert_eq!(
+            out.trailing_comment,
+            Some(crate::ast::Comment::Line("trailing".to_string()))
+        );
+    }
+
+    #[test]
+    fn sets_blank_line_before_close_when_a_blank_line_precedes_the_closing_brace() {
+        let source = "sheet s {\n    cell a: i32 = 1;\n\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        assert!(sheet.blank_line_before_close);
+    }
+
+    #[test]
+    fn no_trailing_comment_leaves_trailing_comment_none() {
+        let source = "sheet s {\n    cell a: i32 = 1;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        assert_eq!(sheet.trailing_comment, None);
     }
 }

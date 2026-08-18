@@ -19,23 +19,84 @@ fn indent(depth: usize) -> String {
     "    ".repeat(depth)
 }
 
+/// Writes one recovered `Comment` at `depth`'s indentation: a `Comment::Line` as one `// ` line
+/// per stored line; a `Comment::Block` as `/* text */` on one line when its text has no internal
+/// `\n`, or a multi-line `/*`/`*/`-delimited block (one line per stored line, indented one level
+/// past `depth`) when it does.
+fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
+    match comment {
+        ast::Comment::Line(text) => {
+            for line in text.split('\n') {
+                out.push_str(&indent(depth));
+                out.push_str("// ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        ast::Comment::Block(text) => {
+            out.push_str(&indent(depth));
+            if text.contains('\n') {
+                out.push_str("/*\n");
+                for line in text.split('\n') {
+                    out.push_str(&indent(depth + 1));
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                out.push_str(&indent(depth));
+                out.push_str("*/\n");
+            } else {
+                out.push_str("/* ");
+                out.push_str(text);
+                out.push_str(" */\n");
+            }
+        }
+    }
+}
+
+/// Writes `doc_comment`'s lines (if present) as one `marker` line per stored line, at `depth`'s
+/// indentation. `marker` is `"///"` for a declaration's own doc comment or `"//!"` for the
+/// sheet's own (each stored line already includes the space rustdoc puts after the marker, e.g.
+/// `" the total"` for `/// the total`, so no extra space is inserted here).
+fn write_doc_comment(out: &mut String, marker: &str, doc_comment: Option<&str>, depth: usize) {
+    if let Some(doc) = doc_comment {
+        for line in doc.split('\n') {
+            out.push_str(&indent(depth));
+            out.push_str(marker);
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+}
+
 /// Emits `blank_line_before`/`leading_comment` ahead of an item, if either is present.
 fn write_trivia(
     out: &mut String,
     blank_line_before: bool,
-    leading_comment: Option<&str>,
+    leading_comment: Option<&ast::Comment>,
     depth: usize,
 ) {
     if blank_line_before {
         out.push('\n');
     }
     if let Some(comment) = leading_comment {
-        for line in comment.split('\n') {
-            out.push_str(&indent(depth));
-            out.push_str("// ");
-            out.push_str(line);
-            out.push('\n');
-        }
+        write_comment(out, comment, depth);
+    }
+}
+
+/// Emits a container's trailing comment (honoring `blank_line_before_close`) immediately before
+/// its closing `}` is written, reusing [`write_comment`] so block-vs-line style is preserved
+/// exactly as for leading comments. See <https://github.com/stlab/cel-rs/issues/52>.
+fn write_trailing_trivia(
+    out: &mut String,
+    blank_line_before_close: bool,
+    trailing_comment: Option<&ast::Comment>,
+    depth: usize,
+) {
+    if blank_line_before_close {
+        out.push('\n');
+    }
+    if let Some(comment) = trailing_comment {
+        write_comment(out, comment, depth);
     }
 }
 
@@ -64,7 +125,7 @@ fn write_method(out: &mut String, method: &ast::MethodDecl, depth: usize) {
     write_trivia(
         out,
         method.blank_line_before,
-        method.leading_comment.as_deref(),
+        method.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
@@ -82,9 +143,10 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
     write_trivia(
         out,
         rel.blank_line_before,
-        rel.leading_comment.as_deref(),
+        rel.leading_comment.as_ref(),
         depth,
     );
+    write_doc_comment(out, "///", rel.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("relationship ");
     if let Some((name, _)) = &rel.name {
@@ -95,6 +157,12 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
     for method in &rel.methods {
         write_method(out, method, depth + 1);
     }
+    write_trailing_trivia(
+        out,
+        rel.blank_line_before_close,
+        rel.trailing_comment.as_ref(),
+        depth + 1,
+    );
     out.push_str(&indent(depth));
     out.push_str("}\n");
 }
@@ -104,12 +172,15 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
 fn write_branch_relationships(
     out: &mut String,
     relationships: &[ast::RelationshipDecl],
+    trailing_comment: Option<&ast::Comment>,
+    blank_line_before_close: bool,
     depth: usize,
 ) {
     out.push_str("{\n");
     for rel in relationships {
         write_relationship(out, rel, depth + 1);
     }
+    write_trailing_trivia(out, blank_line_before_close, trailing_comment, depth + 1);
     out.push_str(&indent(depth));
     out.push_str("}\n");
 }
@@ -120,13 +191,19 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
     write_trivia(
         out,
         branch.blank_line_before,
-        branch.leading_comment.as_deref(),
+        branch.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
     out.push_str(&source_text_or_empty(branch.literal_span));
     out.push_str(" => ");
-    write_branch_relationships(out, &branch.relationships, depth);
+    write_branch_relationships(
+        out,
+        &branch.relationships,
+        branch.trailing_comment.as_ref(),
+        branch.blank_line_before_close,
+        depth,
+    );
 }
 
 /// Writes one `conditional <expr> { ... }` declaration: its branches in declaration
@@ -135,9 +212,10 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     write_trivia(
         out,
         cond.blank_line_before,
-        cond.leading_comment.as_deref(),
+        cond.leading_comment.as_ref(),
         depth,
     );
+    write_doc_comment(out, "///", cond.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("conditional ");
     out.push_str(&cel_parser::format_expr(&cond.match_expr));
@@ -148,8 +226,20 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     if let Some(default) = &cond.default {
         out.push_str(&indent(depth + 1));
         out.push_str("_ => ");
-        write_branch_relationships(out, default, depth + 1);
+        write_branch_relationships(
+            out,
+            &default.relationships,
+            default.trailing_comment.as_ref(),
+            default.blank_line_before_close,
+            depth + 1,
+        );
     }
+    write_trailing_trivia(
+        out,
+        cond.blank_line_before_close,
+        cond.trailing_comment.as_ref(),
+        depth + 1,
+    );
     out.push_str(&indent(depth));
     out.push_str("}\n");
 }
@@ -161,9 +251,10 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     write_trivia(
         out,
         cell.blank_line_before,
-        cell.leading_comment.as_deref(),
+        cell.leading_comment.as_ref(),
         depth,
     );
+    write_doc_comment(out, "///", cell.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("cell ");
     out.push_str(&cell.name);
@@ -185,7 +276,7 @@ fn write_out_method(out: &mut String, method: &ast::OutMethodDecl, depth: usize)
     write_trivia(
         out,
         method.blank_line_before,
-        method.leading_comment.as_deref(),
+        method.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
@@ -201,7 +292,7 @@ fn write_condition(out: &mut String, cond: &ast::ConditionDecl, depth: usize) {
     write_trivia(
         out,
         cond.blank_line_before,
-        cond.leading_comment.as_deref(),
+        cond.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
@@ -220,9 +311,10 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     write_trivia(
         out,
         decl.blank_line_before,
-        decl.leading_comment.as_deref(),
+        decl.leading_comment.as_ref(),
         depth,
     );
+    write_doc_comment(out, "///", decl.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("out ");
     out.push_str(&decl.name);
@@ -235,6 +327,12 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     for cond in &decl.conditions {
         write_condition(out, cond, depth + 1);
     }
+    write_trailing_trivia(
+        out,
+        decl.blank_line_before_close,
+        decl.trailing_comment.as_ref(),
+        depth + 1,
+    );
     out.push_str(&indent(depth));
     out.push_str("}\n");
 }
@@ -277,11 +375,18 @@ pub fn format_sheet(sheet: &ast::Sheet) -> String {
         "format_sheet's precondition: no recorded syntax errors"
     );
     let mut out = String::new();
-    write_trivia(&mut out, false, sheet.leading_comment.as_deref(), 0);
+    write_trivia(&mut out, false, sheet.leading_comment.as_ref(), 0);
+    write_doc_comment(&mut out, "//!", sheet.doc_comment.as_deref(), 0);
     out.push_str(&format!("sheet {} {{\n", sheet.name));
     for item in &sheet.items {
         write_sheet_item(&mut out, item, 1);
     }
+    write_trailing_trivia(
+        &mut out,
+        sheet.blank_line_before_close,
+        sheet.trailing_comment.as_ref(),
+        1,
+    );
     out.push_str("}\n");
     out
 }
@@ -462,6 +567,149 @@ mod tests {
     #[test]
     fn format_is_idempotent_through_a_reparse_with_a_tuple_cell() {
         let source = "sheet s {\n    cell a: (i32, f64) = (1, 2.5);\n}";
+        let once = format(source);
+        let twice = format(&once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_a_single_line_block_comment_preserving_its_style() {
+        // A comment immediately after the sheet's opening `{` (before its first item) falls into
+        // the untracked gap from issue #52 (see trivia.rs's module doc) — unrelated to this
+        // change — so a preceding cell is included here to land the comment in a tracked gap.
+        // The comment also needs its own source line: when a comment and its neighboring items
+        // all share one physical line, `analyze_gap`'s same-line-fragment handling (pre-existing,
+        // also unrelated to this change) can't distinguish trailing whitespace from a same-line
+        // comment. What this test is actually checking is that a `/* */` comment round-trips as
+        // `/* */`, not `//`.
+        let source =
+            "sheet s {\n    cell a: i32 = 1;\n    /* the total */\n    cell x: i32 = 1;\n}";
+        let expected =
+            "sheet s {\n    cell a: i32 = 1;\n    /* the total */\n    cell x: i32 = 1;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_multi_line_block_comment_preserving_its_style() {
+        // See the comment on `formats_a_single_line_block_comment_preserving_its_style` for why
+        // a preceding cell is included.
+        let source = "sheet s {\n    cell a: i32 = 1;\n    /*\n        line one\n        line two\n    */\n    cell x: i32 = 1;\n}";
+        let expected = "sheet s {\n    cell a: i32 = 1;\n    /*\n        line one\n        line two\n    */\n    cell x: i32 = 1;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_the_issue_105_license_header_repro_without_dropping_it() {
+        let source =
+            "/*\n    Copyright 2013 Adobe\n    ...\n*/\nsheet s {\n    cell a: i32 = 1;\n}";
+        let expected =
+            "/*\n    Copyright 2013 Adobe\n    ...\n*/\nsheet s {\n    cell a: i32 = 1;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn block_comment_formatting_is_idempotent_through_a_reparse() {
+        // See the comment on `formats_a_single_line_block_comment_preserving_its_style` for why
+        // a preceding cell is included: without it, the comment lands in issue #52's untracked
+        // gap and is dropped on the *first* format, making `once == twice` trivially true
+        // regardless of whether the comment round-trips.
+        let source = "sheet s {\n    cell a: i32 = 1;\n    /*\n        line one\n        line two\n    */\n    cell x: i32 = 1;\n}";
+        let once = format(source);
+        let twice = format(&once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_a_cell_with_a_doc_comment() {
+        assert_eq!(
+            format("sheet s { /// the total\n cell x: i32 = 1; }"),
+            "sheet s {\n    /// the total\n    cell x: i32 = 1;\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_sheet_level_doc_comment() {
+        assert_eq!(
+            format("//! module docs\nsheet s { cell x: i32 = 1; }"),
+            "//! module docs\nsheet s {\n    cell x: i32 = 1;\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_plain_comment_and_doc_comment_together_in_source_order() {
+        // Two items, not one: `trivia::attach_gaps` never attaches a leading plain comment to a
+        // list's first element (a pre-existing, out-of-scope #52-adjacent limitation unrelated to
+        // doc comments — see Tasks 2/3's identical fixture fix), so `x` needs a preceding sibling
+        // for its `// TODO` to actually attach via the normal gap-scanning path.
+        let source =
+            "sheet s {\n    cell w: i32 = 0;\n    // TODO\n    /// docs\n    cell x: i32 = 1;\n}";
+        let expected =
+            "sheet s {\n    cell w: i32 = 0;\n    // TODO\n    /// docs\n    cell x: i32 = 1;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_doc_comments_on_a_relationship_conditional_and_out() {
+        let source = "sheet s {\n    /// r\n    relationship { method [a] -> [b] { a } }\n\n    /// o\n    out area: f64 {\n        method [w] { w }\n    }\n}";
+        let expected = "sheet s {\n    /// r\n    relationship {\n        method [a] -> [b] { a }\n    }\n\n    /// o\n    out area: f64 {\n        method [w] { w }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn doc_comment_formatting_is_idempotent_through_a_reparse() {
+        let source = "sheet s {\n    /// the total\n    cell x: i32 = 1;\n}";
+        let once = format(source);
+        let twice = format(&once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_before_the_sheets_closing_brace() {
+        assert_eq!(
+            format("sheet s {\n    cell x: i32 = 1;\n    // trailing\n}"),
+            "sheet s {\n    cell x: i32 = 1;\n    // trailing\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_in_an_empty_relationship() {
+        assert_eq!(
+            format("sheet s {\n    relationship {\n        // only this\n    }\n}"),
+            "sheet s {\n    relationship {\n        // only this\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_before_a_relationships_closing_brace() {
+        let source = "sheet s {\n    relationship {\n        method [a] -> [b] { a }\n        // trailing\n    }\n}";
+        let expected = "sheet s {\n    relationship {\n        method [a] -> [b] { a }\n        // trailing\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_before_a_conditionals_own_closing_brace() {
+        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { method [a] -> [b] { a } } }\n        // trailing\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship {\n                method [a] -> [b] { a }\n            }\n        }\n        // trailing\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_in_a_default_arm() {
+        let source = "sheet s {\n    conditional m {\n        _ => {\n            relationship { method [a] -> [b] { a } }\n            // trailing\n        }\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        _ => {\n            relationship {\n                method [a] -> [b] { a }\n            }\n            // trailing\n        }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_before_an_outs_closing_brace() {
+        let source = "sheet s {\n    out area: f64 {\n        method [w] { w }\n        // trailing\n    }\n}";
+        let expected = "sheet s {\n    out area: f64 {\n        method [w] { w }\n        // trailing\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn trailing_trivia_formatting_is_idempotent_through_a_reparse() {
+        let source = "sheet s {\n    cell a: i32 = 1;\n    // trailing\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
