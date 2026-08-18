@@ -624,6 +624,10 @@ mod tests {
         assert_eq!((labels.cells[&b].display)(&sheet), "3");
         assert_eq!((labels.cells[&c].display)(&sheet), "true");
         assert_eq!((labels.cells[&d].display)(&sheet), "hi");
+        assert!(!labels.cells[&a].is_bool);
+        assert!(!labels.cells[&b].is_bool);
+        assert!(labels.cells[&c].is_bool);
+        assert!(!labels.cells[&d].is_bool);
     }
 
     #[test]
@@ -649,6 +653,7 @@ mod tests {
 
         assert_eq!(labels.cells.len(), 1);
         assert_eq!((labels.cells[&pair].display)(&sheet), "(3, 4.5)");
+        assert!(!labels.cells[&pair].is_bool);
     }
 
     #[test]
