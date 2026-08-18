@@ -4,7 +4,7 @@ use adam_rs::{CellId, Sheet};
 use dioxus::prelude::*;
 
 use crate::bridge::{Labels, format_adam_error};
-use crate::spectrum::{SpDivider, SpFieldLabel, SpHeading, SpTextfield};
+use crate::spectrum::{SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpTextfield};
 
 use std::collections::HashSet;
 
@@ -114,12 +114,58 @@ fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
     is_match_cell || feeds_condition
 }
 
-/// Sidebar panel showing all cells with labels, current values, and text inputs for writing.
+/// Parses `val` for `id` via its `Labels` metadata, writes it to `sheet`, and propagates the
+/// sheet's constraints, updating `has_error` and reporting any error to `crate::diagnostics`.
 ///
-/// Editing an input field immediately writes the parsed value to the sheet and propagates
+/// - Postcondition: `has_error` is `false` on success, `true` on parse or propagation failure.
+fn write_and_propagate(
+    mut sheet: Signal<Sheet>,
+    labels: Signal<Labels>,
+    id: CellId,
+    val: &str,
+    mut has_error: Signal<bool>,
+    active_source: Signal<crate::example_source::ActiveSource>,
+) {
+    let mut sheet_w = sheet.write();
+    let labels_r = labels.read();
+    let Some(meta) = labels_r.cells.get(&id) else {
+        return;
+    };
+    let write_result = (meta.write_str)(&mut sheet_w, val);
+    drop(labels_r);
+    let propagate_result = match write_result {
+        Ok(()) => {
+            if sheet_w.is_source(id) && !cell_needs_full_propagate(&sheet_w, id) {
+                sheet_w.propagate_without_replan()
+            } else {
+                sheet_w.propagate()
+            }
+        }
+        Err(e) => Err(e),
+    };
+    match propagate_result {
+        Ok(()) => {
+            has_error.set(false);
+        }
+        Err(e) => {
+            has_error.set(true);
+            let active = active_source.read();
+            crate::diagnostics::report_error(&format_adam_error(
+                &e,
+                &active.text,
+                &active.file_name(),
+            ));
+        }
+    }
+}
+
+/// Sidebar panel showing all cells with labels and inputs for writing — a checkbox for
+/// `bool`-typed cells, a text field for everything else.
+///
+/// Editing an input immediately writes the parsed value to the sheet and propagates
 /// constraints. If parsing or propagation fails (for example, non-numeric input or division
 /// by zero), `SpTextfield` renders in its invalid state until the user blurs, and the
-/// formatted diagnostic is printed to stderr. The input is not reset while the field is
+/// formatted diagnostic is printed to stderr. The text field's input is not reset while it is
 /// focused; it syncs back to the computed value on blur, keeping non-edited cells up to date.
 #[component]
 pub fn Inspector(
@@ -168,6 +214,15 @@ fn CellRow(
             .unwrap_or_default()
     });
 
+    let is_bool = use_memo(move || {
+        labels
+            .read()
+            .cells
+            .get(&id)
+            .map(|m| m.is_bool)
+            .unwrap_or(false)
+    });
+
     let forced = use_memo(move || sheet.read().is_forced(id));
 
     let mut input = use_signal(|| value.peek().clone());
@@ -192,65 +247,50 @@ fn CellRow(
         div {
             style: "margin-bottom: 8px;",
             SpFieldLabel { for_: field_id.clone(), "{label}" }
-            SpTextfield {
-                id: field_id,
-                value: input.read().clone(),
-                invalid: flags.read().invalid,
-                warning: flags.read().warning,
-                disabled: flags.read().disabled,
-                // Dioxus's event serializer only reads event.target.value for
-                // HTMLInputElement — custom elements (sp-textfield) always give "".
-                // Use dioxus.send() in JS and eval.recv() to read the live value.
-                oninput: move |_: FormEvent| {
-                    spawn(async move {
-                        let mut eval = document::eval(&format!(
-                            r#"dioxus.send(document.getElementById("cell-{id:?}").value)"#
-                        ));
-                        let Ok(val) = eval.recv::<String>().await else { return; };
-                        // Discard the result if the user blurred while the round-trip was
-                        // in flight; blur already cleared the error and use_effect will
-                        // restore the last valid computed value.
-                        if !*is_focused.read() {
-                            return;
-                        }
-                        input.set(val.clone());
-                        let mut sheet_w = sheet.write();
-                        let labels_r = labels.read();
-                        let Some(meta) = labels_r.cells.get(&id) else { return; };
-                        let write_result = (meta.write_str)(&mut sheet_w, &val);
-                        drop(labels_r);
-                        let propagate_result = match write_result {
-                            Ok(()) => {
-                                if sheet_w.is_source(id) && !cell_needs_full_propagate(&sheet_w, id)
-                                {
-                                    sheet_w.propagate_without_replan()
-                                } else {
-                                    sheet_w.propagate()
-                                }
+            if *is_bool.read() {
+                SpCheckbox {
+                    id: field_id,
+                    checked: *value.read() == "true",
+                    invalid: flags.read().invalid,
+                    warning: flags.read().warning,
+                    disabled: flags.read().disabled,
+                    onclick: move |_| {
+                        let next = if *value.peek() == "true" { "false" } else { "true" };
+                        write_and_propagate(sheet, labels, id, next, has_error, active_source);
+                    },
+                }
+            } else {
+                SpTextfield {
+                    id: field_id,
+                    value: input.read().clone(),
+                    invalid: flags.read().invalid,
+                    warning: flags.read().warning,
+                    disabled: flags.read().disabled,
+                    // Dioxus's event serializer only reads event.target.value for
+                    // HTMLInputElement — custom elements (sp-textfield) always give "".
+                    // Use dioxus.send() in JS and eval.recv() to read the live value.
+                    oninput: move |_: FormEvent| {
+                        spawn(async move {
+                            let mut eval = document::eval(&format!(
+                                r#"dioxus.send(document.getElementById("cell-{id:?}").value)"#
+                            ));
+                            let Ok(val) = eval.recv::<String>().await else { return; };
+                            // Discard the result if the user blurred while the round-trip was
+                            // in flight; blur already cleared the error and use_effect will
+                            // restore the last valid computed value.
+                            if !*is_focused.read() {
+                                return;
                             }
-                            Err(e) => Err(e),
-                        };
-                        match propagate_result {
-                            Ok(()) => {
-                                has_error.set(false);
-                            }
-                            Err(e) => {
-                                has_error.set(true);
-                                let active = active_source.read();
-                                crate::diagnostics::report_error(&format_adam_error(
-                                    &e,
-                                    &active.text,
-                                    &active.file_name(),
-                                ));
-                            }
-                        }
-                    });
-                },
-                onfocus: move |_| is_focused.set(true),
-                onblur: move |_| {
-                    is_focused.set(false);
-                    has_error.set(false);
-                },
+                            input.set(val.clone());
+                            write_and_propagate(sheet, labels, id, &val, has_error, active_source);
+                        });
+                    },
+                    onfocus: move |_| is_focused.set(true),
+                    onblur: move |_| {
+                        is_focused.set(false);
+                        has_error.set(false);
+                    },
+                }
             }
         }
         SpDivider {}

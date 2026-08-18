@@ -14,6 +14,18 @@ sp-textfield.warning:not([invalid]) {
     --spectrum-textfield-border-color-hover: #e68619 !important;
 }
 
+/* Same softer alternative as the `sp-textfield.warning` rule above, applied to
+   `sp-checkbox`'s box border instead of a textfield's. `--spectrum-checkbox-control-color-default`
+   (unchecked box border) and `--spectrum-checkbox-control-selected-color-default` (checked box
+   border) are both set unconditionally by the component's own shadow stylesheet, so `!important`
+   is required for the same reason documented above. */
+sp-checkbox.warning:not([invalid]) {
+    --spectrum-checkbox-control-color-default: #e68619 !important;
+    --spectrum-checkbox-control-color-hover: #e68619 !important;
+    --spectrum-checkbox-control-selected-color-default: #e68619 !important;
+    --spectrum-checkbox-control-selected-color-hover: #e68619 !important;
+}
+
 /* An out cell's own field is always disabled (it's derived, never a direct input) as
    well as invalid when one of its conditions fails — but sp-textfield's `:host([disabled])
    #textfield .input` rule carries an ID selector, giving it higher specificity than the
