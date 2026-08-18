@@ -1478,7 +1478,7 @@ var require_focus_visible = __commonJS({
   "node_modules/focus-visible/dist/focus-visible.js"(exports, module) {
     (function(global, factory) {
       typeof exports === "object" && typeof module !== "undefined" ? factory() : typeof define === "function" && define.amd ? define(factory) : factory();
-    })(exports, function() {
+    })(exports, (function() {
       "use strict";
       function applyFocusVisiblePolyfill(scope) {
         var hadKeyboardEvent = true;
@@ -1632,7 +1632,7 @@ var require_focus_visible = __commonJS({
       if (typeof document !== "undefined") {
         applyFocusVisiblePolyfill(document);
       }
-    });
+    }));
   }
 });
 
@@ -2163,9 +2163,9 @@ var init_mutation_controller = __esm({
   "node_modules/@lit-labs/observers/mutation-controller.js"() {
     t7 = class {
       constructor(t43, { target: s28, config: i28, callback: h21, skipInitial: o56 }) {
-        this.t = /* @__PURE__ */ new Set(), this.o = false, this.i = false, this.h = t43, null !== s28 && this.t.add(s28 ?? t43), this.l = i28, this.o = o56 ?? this.o, this.callback = h21, window.MutationObserver ? (this.u = new MutationObserver((t44) => {
+        this.t = /* @__PURE__ */ new Set(), this.o = false, this.i = false, this.h = t43, null !== s28 && this.t.add(s28 ?? t43), this.l = i28, this.o = o56 ?? this.o, this.callback = h21, window.MutationObserver ? (this.u = new MutationObserver(((t44) => {
           this.handleChanges(t44), this.h.requestUpdate();
-        }), t43.addController(this)) : console.warn("MutationController error: browser does not support MutationObserver.");
+        })), t43.addController(this)) : console.warn("MutationController error: browser does not support MutationObserver.");
       }
       handleChanges(t43) {
         this.value = this.callback?.(t43, this.u);
@@ -7657,9 +7657,9 @@ var init_resize_controller = __esm({
   "node_modules/@lit-labs/observers/resize-controller.js"() {
     s12 = class {
       constructor(s28, { target: t43, config: i28, callback: h21, skipInitial: e46 }) {
-        this.t = /* @__PURE__ */ new Set(), this.o = false, this.i = false, this.h = s28, null !== t43 && this.t.add(t43 ?? s28), this.l = i28, this.o = e46 ?? this.o, this.callback = h21, window.ResizeObserver ? (this.u = new ResizeObserver((s29) => {
+        this.t = /* @__PURE__ */ new Set(), this.o = false, this.i = false, this.h = s28, null !== t43 && this.t.add(t43 ?? s28), this.l = i28, this.o = e46 ?? this.o, this.callback = h21, window.ResizeObserver ? (this.u = new ResizeObserver(((s29) => {
           this.handleChanges(s29), this.h.requestUpdate();
-        }), s28.addController(this)) : console.warn("ResizeController error: browser does not support ResizeObserver.");
+        })), s28.addController(this)) : console.warn("ResizeController error: browser does not support ResizeObserver.");
       }
       handleChanges(s28) {
         this.value = this.callback?.(s28, this.u);
@@ -25939,10 +25939,10 @@ init_define_element();
 // node_modules/@lit-labs/observers/intersection-controller.js
 var t36 = class {
   constructor(t43, { target: s28, config: i28, callback: h21, skipInitial: e46 }) {
-    this.t = /* @__PURE__ */ new Set(), this.o = false, this.i = false, this.h = t43, null !== s28 && this.t.add(s28 ?? t43), this.o = e46 ?? this.o, this.callback = h21, window.IntersectionObserver ? (this.u = new IntersectionObserver((t44) => {
+    this.t = /* @__PURE__ */ new Set(), this.o = false, this.i = false, this.h = t43, null !== s28 && this.t.add(s28 ?? t43), this.o = e46 ?? this.o, this.callback = h21, window.IntersectionObserver ? (this.u = new IntersectionObserver(((t44) => {
       const s29 = this.i;
       this.i = false, this.o && s29 || (this.handleChanges(t44), this.h.requestUpdate());
-    }, i28), t43.addController(this)) : console.warn("IntersectionController error: browser does not support IntersectionObserver.");
+    }), i28), t43.addController(this)) : console.warn("IntersectionController error: browser does not support IntersectionObserver.");
   }
   handleChanges(t43) {
     this.value = this.callback?.(t43, this.u);
@@ -27450,20 +27450,22 @@ defineElement("sp-icon-zoom-out", IconZoomOut);
    *)
 
 @lit/reactive-element/reactive-element.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
 lit-html/lit-html.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
 lit-element/lit-element.js:
+@lit/reactive-element/decorators/custom-element.js:
+@lit/reactive-element/decorators/property.js:
+@lit/reactive-element/decorators/state.js:
+@lit/reactive-element/decorators/event-options.js:
+@lit/reactive-element/decorators/base.js:
+@lit/reactive-element/decorators/query.js:
+@lit/reactive-element/decorators/query-all.js:
+@lit/reactive-element/decorators/query-async.js:
+@lit/reactive-element/decorators/query-assigned-nodes.js:
+lit-html/directive.js:
+lit-html/directives/repeat.js:
+lit-html/async-directive.js:
+lit-html/directives/until.js:
+lit-html/directives/unsafe-html.js:
   (**
    * @license
    * Copyright 2017 Google LLC
@@ -27477,111 +27479,25 @@ lit-html/is-server.js:
    * SPDX-License-Identifier: BSD-3-Clause
    *)
 
-@lit/reactive-element/decorators/custom-element.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit/reactive-element/decorators/property.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit/reactive-element/decorators/state.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit/reactive-element/decorators/event-options.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit/reactive-element/decorators/base.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit/reactive-element/decorators/query.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit/reactive-element/decorators/query-all.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit/reactive-element/decorators/query-async.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
 @lit/reactive-element/decorators/query-assigned-elements.js:
+lit-html/directives/private-async-helpers.js:
+lit-html/directives/when.js:
+lit-html/directives/join.js:
+@lit-labs/virtualizer/layouts/shared/SizeCache.js:
+@lit-labs/virtualizer/layouts/shared/BaseLayout.js:
+@lit-labs/virtualizer/layouts/flow.js:
+@lit-labs/virtualizer/events.js:
+@lit-labs/virtualizer/ScrollerController.js:
+@lit-labs/virtualizer/Virtualizer.js:
+@lit-labs/virtualizer/virtualize.js:
   (**
    * @license
    * Copyright 2021 Google LLC
    * SPDX-License-Identifier: BSD-3-Clause
    *)
 
-@lit/reactive-element/decorators/query-assigned-nodes.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
 lit-html/directives/if-defined.js:
-  (**
-   * @license
-   * Copyright 2018 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-lit-html/directive.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-lit-html/directive-helpers.js:
-  (**
-   * @license
-   * Copyright 2020 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-lit-html/directives/repeat.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
 lit-html/directives/class-map.js:
-  (**
-   * @license
-   * Copyright 2018 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
 lit-html/directives/style-map.js:
   (**
    * @license
@@ -27589,55 +27505,8 @@ lit-html/directives/style-map.js:
    * SPDX-License-Identifier: BSD-3-Clause
    *)
 
-lit-html/async-directive.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-lit-html/directives/private-async-helpers.js:
-  (**
-   * @license
-   * Copyright 2021 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-lit-html/directives/until.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
+lit-html/directive-helpers.js:
 lit-html/directives/live.js:
-  (**
-   * @license
-   * Copyright 2020 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-lit-html/directives/when.js:
-  (**
-   * @license
-   * Copyright 2021 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-lit-html/directives/join.js:
-  (**
-   * @license
-   * Copyright 2021 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-lit-html/directives/unsafe-html.js:
-  (**
-   * @license
-   * Copyright 2017 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
 lit-html/directives/ref.js:
   (**
    * @license
@@ -27656,53 +27525,4 @@ focus-trap/dist/focus-trap.esm.js:
   * focus-trap 7.6.5
   * @license MIT, https://github.com/focus-trap/focus-trap/blob/master/LICENSE
   *)
-
-@lit-labs/virtualizer/layouts/shared/SizeCache.js:
-  (**
-   * @license
-   * Copyright 2021 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit-labs/virtualizer/layouts/shared/BaseLayout.js:
-  (**
-   * @license
-   * Copyright 2021 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit-labs/virtualizer/layouts/flow.js:
-  (**
-   * @license
-   * Copyright 2021 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit-labs/virtualizer/events.js:
-  (**
-   * @license
-   * Copyright 2021 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit-labs/virtualizer/ScrollerController.js:
-  (**
-   * @license
-   * Copyright 2021 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit-labs/virtualizer/Virtualizer.js:
-  (**
-   * @license
-   * Copyright 2021 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
-
-@lit-labs/virtualizer/virtualize.js:
-  (**
-   * @license
-   * Copyright 2021 Google LLC
-   * SPDX-License-Identifier: BSD-3-Clause
-   *)
 */
