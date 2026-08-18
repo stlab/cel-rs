@@ -37,7 +37,10 @@ jobs:
       run: cargo test --workspace --exclude begin --verbose -- --nocapture
 
     - name: Clippy workspace (excluding begin app)
-      run: cargo clippy --workspace --exclude begin -- -D warnings
+      run: cargo clippy --workspace --exclude begin --all-targets -- -D warnings
 
     - name: Clippy begin app (renderer-agnostic)
-      run: cargo clippy -p begin --no-default-features -- -D warnings
+      run: cargo clippy -p begin --no-default-features --all-targets -- -D warnings
+
+    - name: Clippy begin app (desktop features)
+      run: cargo clippy -p begin --all-targets -- -D warnings

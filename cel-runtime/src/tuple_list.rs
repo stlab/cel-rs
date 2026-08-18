@@ -152,12 +152,12 @@ mod tests {
 
     #[test]
     fn empty_list() {
-        assert_eq!(<()>::empty(), ());
+        let () = <()>::empty();
     }
 
     #[test]
     fn into_list() {
-        assert_eq!(().into_tuple_list(), ());
+        let () = ().into_tuple_list();
         assert_eq!((1, 2, 3).into_tuple_list(), (1, (2, (3, ()))));
         assert_eq!(
             (1, 2.5, "Hello").into_tuple_list(),
@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(*list.index(U0::new()..), (1, (2.5, ("Hello", ()))));
         assert_eq!(*list.index(U1::new()..), (2.5, ("Hello", ())));
         assert_eq!(*list.index(U2::new()..), ("Hello", ()));
-        assert_eq!(*list.index(U3::new()..), ());
+        let () = *list.index(U3::new()..);
         // assert_eq!(*list.index(U4::new()..), ()); // Compiler error: index out of bounds
     }
 }
