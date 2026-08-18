@@ -20,6 +20,9 @@ pub type WriteStrFn = Box<dyn Fn(&mut Sheet, &str) -> Result<(), Error>>;
 pub struct CellMeta {
     /// Human-readable cell name shown in the graph and inspector.
     pub label: String,
+    /// `true` if the cell holds a `bool`, so the Inspector can render it as a checkbox
+    /// instead of a text field.
+    pub is_bool: bool,
     /// Returns the current cell value as a display string.
     pub display: Box<dyn Fn(&Sheet) -> String>,
     /// Parses `s` and writes the result to the cell; returns `Err` on parse failure or type
@@ -55,6 +58,7 @@ impl Labels {
             id,
             CellMeta {
                 label: label.to_owned(),
+                is_bool: TypeId::of::<T>() == TypeId::of::<bool>(),
                 display: Box::new(move |sheet| {
                     sheet
                         .read::<T>(id)
@@ -85,6 +89,7 @@ impl Labels {
             id,
             CellMeta {
                 label: label.to_owned(),
+                is_bool: false,
                 display: Box::new(move |sheet| {
                     sheet
                         .read::<cel_runtime::DynamicSequence>(id)

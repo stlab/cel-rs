@@ -159,6 +159,38 @@ pub fn SpSwitch(checked: bool, onclick: EventHandler<MouseEvent>, children: Elem
     }
 }
 
+/// A togglable checkbox for a `bool`-typed value.
+///
+/// Maps to `<sp-checkbox>`. Setting `invalid` to `true` renders the SWC error state.
+/// Setting `warning` to `true` (and `invalid` to `false`) renders a softer amber
+/// treatment via the `warning` CSS class, styled in `begin/assets/inspector.css` — not a
+/// native SWC state, mirroring `SpTextfield`'s `warning` prop. Setting `disabled` to
+/// `true` renders the SWC disabled state. `onclick` fires on every toggle press,
+/// mirroring `SpSwitch`'s `checked`/`onclick` pattern — the caller owns the boolean
+/// state and re-renders `checked` from it rather than reading the new state off a
+/// native `change` event.
+#[component]
+pub fn SpCheckbox(
+    id: String,
+    checked: bool,
+    invalid: bool,
+    warning: bool,
+    disabled: bool,
+    onclick: EventHandler<MouseEvent>,
+) -> Element {
+    rsx! {
+        sp-checkbox {
+            "id": "{id}",
+            onclick: move |e| onclick.call(e),
+            // Boolean attribute: omit entirely when false; presence = checked/invalid/disabled.
+            "checked": if checked { "true" },
+            "invalid": if invalid { "true" },
+            "disabled": if disabled { "true" },
+            class: if warning { "warning" },
+        }
+    }
+}
+
 /// A scrollable, selectable vertical list of items — used as the examples
 /// picker sidebar.
 ///
