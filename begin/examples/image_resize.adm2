@@ -34,11 +34,11 @@ sheet image_resize {
 
     cell resample_method: String = "bicubic";
 
-    cell dim_width_pixels: i32 = 1600;
-    cell dim_width_percent: f64 = 100.0;
+    cell width_pixels: i32 = 1600; // Photoshop: dim_width_pixels
+    cell width_percent: f64 = 100.0; // Photoshop: dim_width_percent
 
-    cell dim_height_pixels: i32 = 1200;
-    cell dim_height_percent: f64 = 100.0;
+    cell height_pixels: i32 = 1200; // Photoshop: dim_height_pixels
+    cell height_percent: f64 = 100.0; // Photoshop: dim_height_percent
 
     cell doc_width_inches: f64 = 5.333333333333333;
     cell doc_width_percent: f64 = 100.0;
@@ -92,34 +92,34 @@ sheet image_resize {
     conditional resample {
         true => {
             relationship {
-                method [dim_width_percent, original_width] -> [dim_width_pixels] { round(dim_width_percent * original_width as f64 / 100.0) as i32 }
-                method [dim_width_pixels, original_width] -> [dim_width_percent] { dim_width_pixels as f64 * 100.0 / original_width as f64 }
+                method [width_percent, original_width] -> [width_pixels] { round(width_percent * original_width as f64 / 100.0) as i32 }
+                method [width_pixels, original_width] -> [width_percent] { width_pixels as f64 * 100.0 / original_width as f64 }
             }
             relationship {
-                method [dim_height_percent, original_height] -> [dim_height_pixels] { round(dim_height_percent * original_height as f64 / 100.0) as i32 }
-                method [dim_height_pixels, original_height] -> [dim_height_percent] { dim_height_pixels as f64 * 100.0 / original_height as f64 }
+                method [height_percent, original_height] -> [height_pixels] { round(height_percent * original_height as f64 / 100.0) as i32 }
+                method [height_pixels, original_height] -> [height_percent] { height_pixels as f64 * 100.0 / original_height as f64 }
             }
             relationship {
-                method [dim_width_pixels, doc_resolution] -> [doc_width_inches] { dim_width_pixels as f64 / doc_resolution }
-                method [doc_width_inches, doc_resolution] -> [dim_width_pixels] { round(doc_width_inches * doc_resolution) as i32 }
-                method [dim_width_pixels, doc_width_inches] -> [doc_resolution] { dim_width_pixels as f64 / doc_width_inches }
+                method [width_pixels, doc_resolution] -> [doc_width_inches] { width_pixels as f64 / doc_resolution }
+                method [doc_width_inches, doc_resolution] -> [width_pixels] { round(doc_width_inches * doc_resolution) as i32 }
+                method [width_pixels, doc_width_inches] -> [doc_resolution] { width_pixels as f64 / doc_width_inches }
             }
             relationship {
-                method [dim_height_pixels, doc_resolution] -> [doc_height_inches] { dim_height_pixels as f64 / doc_resolution }
-                method [doc_height_inches, doc_resolution] -> [dim_height_pixels] { round(doc_height_inches * doc_resolution) as i32 }
-                method [dim_height_pixels, doc_height_inches] -> [doc_resolution] { dim_height_pixels as f64 / doc_height_inches }
+                method [height_pixels, doc_resolution] -> [doc_height_inches] { height_pixels as f64 / doc_resolution }
+                method [doc_height_inches, doc_resolution] -> [height_pixels] { round(doc_height_inches * doc_resolution) as i32 }
+                method [height_pixels, doc_height_inches] -> [doc_resolution] { height_pixels as f64 / doc_height_inches }
             }
         }
         false => {
             relationship {
                 method [resample] -> [constrain] { true }
             }
-            // dim_width_pixels/percent snap back to the un-resampled defaults.
+            // width_pixels/percent snap back to the un-resampled defaults.
             relationship {
-                method [original_width] -> [dim_width_pixels, dim_width_percent] { (original_width, 100.0) }
+                method [original_width] -> [width_pixels, width_percent] { (original_width, 100.0) }
             }
             relationship {
-                method [original_height] -> [dim_height_pixels, dim_height_percent] { (original_height, 100.0) }
+                method [original_height] -> [height_pixels, height_percent] { (original_height, 100.0) }
             }
             relationship {
                 method [doc_width_inches, original_width] -> [doc_resolution] { original_width as f64 / doc_width_inches }
@@ -135,8 +135,8 @@ sheet image_resize {
     conditional resample && constrain {
         true => {
             relationship {
-                method [dim_width_percent] -> [dim_height_percent] { dim_width_percent }
-                method [dim_height_percent] -> [dim_width_percent] { dim_height_percent }
+                method [width_percent] -> [height_percent] { width_percent }
+                method [height_percent] -> [width_percent] { height_percent }
             }
         }
         false => {
@@ -147,13 +147,13 @@ sheet image_resize {
     }
 
     out byte_count: i64 {
-        method [dim_width_pixels, dim_height_pixels] { dim_width_pixels as i64 * dim_height_pixels as i64 * 32i64 }
+        method [width_pixels, height_pixels] { width_pixels as i64 * height_pixels as i64 * 32i64 }
     }
 
     out result: (String, i32, i32, f64, bool, String) {
-        method [resample, dim_width_pixels, dim_height_pixels, doc_resolution, scale_styles, resample_method] { if resample { ("resize_image", dim_width_pixels, dim_height_pixels, doc_resolution, scale_styles, resample_method) } else { ("set_resolution", 0, 0, doc_resolution, false, "") } }
+        method [resample, width_pixels, height_pixels, doc_resolution, scale_styles, resample_method] { if resample { ("resize_image", width_pixels, height_pixels, doc_resolution, scale_styles, resample_method) } else { ("set_resolution", 0, 0, doc_resolution, false, "") } }
 
-        condition width_max [dim_width_pixels] { dim_width_pixels <= 300000 }
-        condition height_max [dim_height_pixels] { dim_height_pixels <= 300000 }
+        condition width_max [width_pixels] { width_pixels <= 300000 }
+        condition height_max [height_pixels] { height_pixels <= 300000 }
     }
 }

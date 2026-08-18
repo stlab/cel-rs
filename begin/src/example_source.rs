@@ -341,9 +341,9 @@ mod tests {
 
     #[test]
     fn image_resize_relevance_does_not_depend_on_which_cell_currently_holds_strength() {
-        // Regression test: `dim_width_pixels`/`dim_width_percent`/`doc_width_inches`/
+        // Regression test: `width_pixels`/`width_percent`/`doc_width_inches`/
         // `doc_resolution` form a strength-ambiguous diamond (any two determine the rest).
-        // In the default state, `dim_width_pixels` and `doc_resolution` happen to be the
+        // In the default state, `width_pixels` and `doc_resolution` happen to be the
         // strength-chosen sources — but every cell in the diamond, plus every cell feeding a
         // conditional match subject (`resample` and `constrain` are both inputs to one
         // conditional's match expression; `auto_quality` is a plain match cell), must show as
@@ -358,8 +358,8 @@ mod tests {
         parsed.propagate().unwrap();
         let relevant = parsed.output_relevant_cells();
         for name in [
-            "dim_width_pixels",
-            "dim_width_percent",
+            "width_pixels",
+            "width_percent",
             "doc_width_inches",
             "doc_resolution",
             "original_width",
