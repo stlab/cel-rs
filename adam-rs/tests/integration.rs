@@ -3,7 +3,7 @@
 use std::any::TypeId;
 use std::collections::HashSet;
 
-use adam_rs::{CellId, Condition, ConditionId, Error, Method, OutputId, Sheet};
+use adam_rs::{CellId, Condition, ConditionId, Error, MatchExpr, Method, OutputId, Sheet};
 
 fn sheet_with_area_output() -> (Sheet, OutputId, CellId, CellId, CellId) {
     let mut sheet = Sheet::new();
@@ -165,7 +165,11 @@ fn is_forced_respects_conditional_branch_activation() {
         .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
         .unwrap();
     sheet
-        .add_conditional(mode, vec![(vec![1_i32], vec![rel_on])], vec![])
+        .add_conditional(
+            MatchExpr::cell(mode),
+            vec![(vec![1_i32], vec![rel_on])],
+            vec![],
+        )
         .unwrap();
 
     // mode=0: rel_on inactive, b is not forced.
@@ -282,7 +286,11 @@ fn is_relationship_forced_respects_conditional_branch_activation() {
         .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
         .unwrap();
     sheet
-        .add_conditional(mode, vec![(vec![1_i32], vec![rel_on])], vec![])
+        .add_conditional(
+            MatchExpr::cell(mode),
+            vec![(vec![1_i32], vec![rel_on])],
+            vec![],
+        )
         .unwrap();
 
     // mode=0: rel_on inactive (not part of the planned active set at all).
@@ -613,7 +621,11 @@ fn conditional_activates_matching_branch() {
         .unwrap();
 
     sheet
-        .add_conditional(mode, vec![(vec![1_i32], vec![rel_on])], vec![])
+        .add_conditional(
+            MatchExpr::cell(mode),
+            vec![(vec![1_i32], vec![rel_on])],
+            vec![],
+        )
         .unwrap();
 
     sheet.write(mode, 1_i32).unwrap();
@@ -633,7 +645,11 @@ fn conditional_forced_cell_shadows_original_value() {
         .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
         .unwrap();
     sheet
-        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .add_conditional(
+            MatchExpr::cell(p),
+            vec![(vec![1_i32], vec![rel_force])],
+            vec![],
+        )
         .unwrap();
 
     sheet.write(p, 1_i32).unwrap();
@@ -654,7 +670,11 @@ fn conditional_forced_cell_reverts_to_source_when_deactivated() {
         .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
         .unwrap();
     sheet
-        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .add_conditional(
+            MatchExpr::cell(p),
+            vec![(vec![1_i32], vec![rel_force])],
+            vec![],
+        )
         .unwrap();
 
     sheet.write(p, 1_i32).unwrap();
@@ -683,7 +703,11 @@ fn changed_reports_cell_reverted_by_conditional_deactivation() {
         .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
         .unwrap();
     sheet
-        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .add_conditional(
+            MatchExpr::cell(p),
+            vec![(vec![1_i32], vec![rel_force])],
+            vec![],
+        )
         .unwrap();
 
     sheet.write(p, 1_i32).unwrap();
@@ -717,7 +741,11 @@ fn pure_input_never_observes_stale_derived_after_conditional_deactivates() {
         .add_relationship(vec![Method::from_fn_1_1(a, c, |x: &i32| Ok(*x * 10))])
         .unwrap();
     sheet
-        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .add_conditional(
+            MatchExpr::cell(p),
+            vec![(vec![1_i32], vec![rel_force])],
+            vec![],
+        )
         .unwrap();
 
     sheet.write(p, 1_i32).unwrap();
@@ -747,7 +775,11 @@ fn explicit_write_to_forced_cell_takes_immediate_effect() {
         .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
         .unwrap();
     sheet
-        .add_conditional(p, vec![(vec![1_i32], vec![rel_force])], vec![])
+        .add_conditional(
+            MatchExpr::cell(p),
+            vec![(vec![1_i32], vec![rel_force])],
+            vec![],
+        )
         .unwrap();
 
     sheet.write(p, 1_i32).unwrap();
@@ -773,7 +805,11 @@ fn conditional_no_match_and_no_default_succeeds_silently() {
         .unwrap();
 
     sheet
-        .add_conditional(mode, vec![(vec![1_i32], vec![rel_on])], vec![])
+        .add_conditional(
+            MatchExpr::cell(mode),
+            vec![(vec![1_i32], vec![rel_on])],
+            vec![],
+        )
         .unwrap();
 
     // mode=0, no match, rel_on inactive.
@@ -800,7 +836,7 @@ fn conditional_default_branch_activates_when_no_key_matches() {
 
     sheet
         .add_conditional(
-            mode,
+            MatchExpr::cell(mode),
             vec![(vec![1_i32], vec![rel_double])],
             vec![rel_triple], // default
         )
@@ -831,7 +867,11 @@ fn conditional_multi_key_branch_matches_any_key() {
         .unwrap();
 
     sheet
-        .add_conditional(mode, vec![(vec![0_i32, 2_i32], vec![rel])], vec![])
+        .add_conditional(
+            MatchExpr::cell(mode),
+            vec![(vec![0_i32, 2_i32], vec![rel])],
+            vec![],
+        )
         .unwrap();
 
     sheet.write(a, 7_i32).unwrap();
@@ -871,7 +911,7 @@ fn conditional_branch_switch_stability() {
 
     sheet
         .add_conditional(
-            mode,
+            MatchExpr::cell(mode),
             vec![(vec![0_i32], vec![rel_a]), (vec![1_i32], vec![rel_b])],
             vec![],
         )
@@ -929,7 +969,11 @@ fn conditional_match_cell_derived_from_multi_method_unconditional_relationship()
         .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
         .unwrap();
     sheet
-        .add_conditional(flag, vec![(vec![true], vec![rel_active])], vec![])
+        .add_conditional(
+            MatchExpr::cell(flag),
+            vec![(vec![true], vec![rel_active])],
+            vec![],
+        )
         .unwrap();
 
     // Write x with the highest strength so M0 (x,y→flag) is selected.
@@ -968,7 +1012,11 @@ fn conditional_match_cell_is_derived_from_unconditional_relationship() {
         .unwrap();
 
     sheet
-        .add_conditional(flag, vec![(vec![true], vec![rel_true])], vec![])
+        .add_conditional(
+            MatchExpr::cell(flag),
+            vec![(vec![true], vec![rel_true])],
+            vec![],
+        )
         .unwrap();
 
     // x=5 > 0 → flag=true → rel_true active.
@@ -1009,7 +1057,11 @@ fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
         ])
         .unwrap();
     sheet
-        .add_conditional(p, vec![(vec![0_i32], vec![rel_self_ref])], vec![rel_force])
+        .add_conditional(
+            MatchExpr::cell(p),
+            vec![(vec![0_i32], vec![rel_self_ref])],
+            vec![rel_force],
+        )
         .unwrap();
 
     // p == 0: self-referencing branch. a=4, b=9 already satisfy a <= b: unchanged.
@@ -1332,7 +1384,9 @@ fn add_output_returns_terminal_cell_when_output_cell_already_has_a_relationship(
 fn add_output_returns_terminal_cell_when_output_cell_is_a_conditional_match_cell() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(0_i32);
-    sheet.add_conditional::<i32>(mode, vec![], vec![]).unwrap();
+    sheet
+        .add_conditional::<i32>(MatchExpr::cell(mode), vec![], vec![])
+        .unwrap();
     let a = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(a, mode, |x: &i32| Ok(*x));
     let result = sheet.add_output(writer, Vec::<(&str, Condition)>::new());
@@ -1646,7 +1700,7 @@ fn contributing_cells_follows_active_conditional_branch_and_includes_match_cell(
         .unwrap();
     sheet
         .add_conditional(
-            p,
+            MatchExpr::cell(p),
             vec![(vec![0_i32], vec![rel0]), (vec![1_i32], vec![rel1])],
             vec![],
         )
@@ -1719,7 +1773,11 @@ fn contributing_cells_includes_transitive_contributors_of_a_conditional_match_ce
         .add_relationship(vec![Method::from_fn_1_1(p, target, |v: &i32| Ok(*v))])
         .unwrap();
     sheet
-        .add_conditional(p, vec![(vec![1_i32], vec![rel_branch_one])], vec![])
+        .add_conditional(
+            MatchExpr::cell(p),
+            vec![(vec![1_i32], vec![rel_branch_one])],
+            vec![],
+        )
         .unwrap();
 
     sheet.propagate().unwrap();
@@ -1831,7 +1889,7 @@ fn output_relevant_cells_updates_when_a_different_relationship_becomes_active() 
         .unwrap();
     sheet
         .add_conditional(
-            p,
+            MatchExpr::cell(p),
             vec![(vec![0_i32], vec![rel0]), (vec![1_i32], vec![rel1])],
             vec![],
         )

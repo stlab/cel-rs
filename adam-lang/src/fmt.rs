@@ -206,8 +206,8 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
     );
 }
 
-/// Writes one `conditional match_name { ... }` declaration: its named branches in declaration
-/// order, followed by its optional `_ => { ... }` default arm.
+/// Writes one `conditional <expr> { ... }` declaration: its branches in declaration
+/// order (dispatching on the match-subject expression), followed by its optional `_ => { ... }` default arm.
 fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize) {
     write_trivia(
         out,
@@ -218,7 +218,7 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     write_doc_comment(out, "///", cond.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("conditional ");
-    out.push_str(&cond.match_name);
+    out.push_str(&cel_parser::format_expr(&cond.match_expr));
     out.push_str(" {\n");
     for branch in &cond.branches {
         write_branch(out, branch, depth + 1);
@@ -479,6 +479,13 @@ mod tests {
     fn formats_a_conditional_with_branches_and_a_default_and_no_trailing_commas() {
         let source = "sheet s {\n    conditional p {\n        0i32 => { relationship { method [a] -> [b] { a } } },\n        _ => { relationship { method [b] -> [a] { b } } },\n    }\n}";
         let expected = "sheet s {\n    conditional p {\n        0i32 => {\n            relationship {\n                method [a] -> [b] { a }\n            }\n        }\n        _ => {\n            relationship {\n                method [b] -> [a] { b }\n            }\n        }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_conditional_with_an_expression_match_subject() {
+        let source = "sheet s {\n    conditional a && b {\n        _ => { relationship { method [c] -> [d] { c } } },\n    }\n}";
+        let expected = "sheet s {\n    conditional a && b {\n        _ => {\n            relationship {\n                method [c] -> [d] { c }\n            }\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 

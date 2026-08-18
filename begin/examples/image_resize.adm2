@@ -1,3 +1,23 @@
+// Copyright 2013 Adobe
+// Distributed under the Boost Software License, Version 1.0.
+// (See accompanying file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+//
+// Ported from ASL's classic `image_size` Adam sheet. adam-lang has no separate
+// input/constant/interface/output/invariant sections and no `unlink`. The translation below:
+// - ASL `constant`/one-directional `<==` rules -> a `relationship` with a single method
+// (the planner always derives that cell; there is no alternative method to pick).
+// - ASL `when (cond) relate {}` (arbitrary boolean expressions) -> `conditional <expr> {
+// true => {...} false => {...} }`.
+// - ASL `unlink x : init <== cond ? x : fallback;` -> `conditional cond`'s "false" branch
+// forces `x` back to `fallback`; its "true" branch leaves `x` untouched (a free,
+// directly writable cell), matching the checkbox-like behavior `unlink` describes.
+// - ASL's `@bicubic`/`@draft`/etc. symbolic tags -> `String` literals (adam-lang has no
+// atom/enum literal).
+// The `result` output is approximated as a single tuple `(command, width, height,
+// resolution, scale_styles, resample_method)`, command first — adam-lang has no
+// tagged-union/struct output type, only tuples. Unlike ASL, the pixel/scale_styles/
+// resample_method fields are present (and treated as relevant) even in the
+// `set_resolution` case, where ASL would omit them entirely.
 sheet image_resize {
     cell original_width: i32 = 1600;
     cell original_height: i32 = 1200;
@@ -10,9 +30,6 @@ sheet image_resize {
     // --- interface ---
     cell resample: bool = true;
     cell constrain: bool = true;
-    // Helper for ASL's `when (constrain && resample)` / `unlink scale_styles`'s compound
-    // guard: adam-lang's `conditional` can only dispatch on one cell's own value.
-    cell resample_and_constrain: bool = true;
     cell scale_styles: bool = true;
 
     cell resample_method: String = "bicubic";
@@ -53,10 +70,6 @@ sheet image_resize {
     }
     relationship {
         method [original_height, original_resolution] -> [original_doc_height] { original_height as f64 / original_resolution }
-    }
-
-    relationship {
-        method [resample, constrain] -> [resample_and_constrain] { resample && constrain }
     }
 
     // Unconditional: doc_width_inches <-> doc_width_percent, pinned to original_doc_width.
@@ -119,7 +132,7 @@ sheet image_resize {
         }
     }
 
-    conditional resample_and_constrain {
+    conditional resample && constrain {
         true => {
             relationship {
                 method [dim_width_percent] -> [dim_height_percent] { dim_width_percent }
@@ -128,7 +141,7 @@ sheet image_resize {
         }
         false => {
             relationship {
-                method [resample_and_constrain] -> [scale_styles] { false }
+                method [resample, constrain] -> [scale_styles] { false }
             }
         }
     }

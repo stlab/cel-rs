@@ -272,7 +272,7 @@ fn attach_out_trailing(source: &str, line_starts: &[usize], out_decl: &mut OutDe
 ///
 /// - Complexity: O(n) in the length of `source` plus the number of nested lists — every gap's
 ///   `LineColumn -> byte offset` conversion reuses the shared `line_starts` table computed once
-///   up front (see [`line_start_byte_offsets`]), rather than rescanning `source` per gap.
+///   up front (see `line_start_byte_offsets`), rather than rescanning `source` per gap.
 pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
     let line_starts = line_start_byte_offsets(source);
     let sheet_start = line_column_to_byte(source, &line_starts, sheet.span.start.start());

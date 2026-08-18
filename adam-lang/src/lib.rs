@@ -12,7 +12,7 @@
 //! cell_type_init     = (":" type_expr [ "=" or_expression ]) | ("=" or_expression).
 //! type_expr          = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 //! relationship_decl  = "relationship" [ identifier ] "{" { method_decl } "}".
-//! conditional_decl   = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".
+//! conditional_decl   = "conditional" or_expression "{" { conditional_branch } [ default_branch ] "}".
 //! conditional_branch = or_expression "=>" "{" { relationship_decl } "}" [ "," ].
 //! default_branch     = "_"   "=>" "{" { relationship_decl } "}" [ "," ].
 //! method_decl        = "method" cell_list "->" cell_list method_body.

@@ -472,18 +472,25 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
             value: String::new(),
         });
 
-        // Constraint link: match cell → conditional node
-        if let Some(match_cell) = sheet.conditional_match_cell(cond_id) {
-            links.push(LinkData {
-                source: cell_node_id(match_cell),
-                target: node_id.clone(),
-                kind: LinkKind::Constraint,
-                branch_index: None,
-                branch_active: None,
-            });
+        // Constraint links: every match cell → conditional node
+        if let Some(match_cells) = sheet.conditional_match_cells(cond_id) {
+            for &match_cell in match_cells {
+                links.push(LinkData {
+                    source: cell_node_id(match_cell),
+                    target: node_id.clone(),
+                    kind: LinkKind::Constraint,
+                    branch_index: None,
+                    branch_active: None,
+                });
+            }
         }
 
-        let active_branch = sheet.conditional_active_branch(cond_id);
+        // `to_graph_data` is read-only display code, not the `propagate()` path: by the
+        // time it runs, `propagate()` has already evaluated this same expression
+        // successfully, so a fresh failure here would itself be a precondition violation.
+        // Treat it as "no active branch" for rendering rather than threading Result through
+        // graph construction.
+        let active_branch = sheet.conditional_active_branch(cond_id).ok().flatten();
 
         // Control links for named branches
         let branch_count = sheet.conditional_branch_count(cond_id).unwrap_or(0);
@@ -534,7 +541,7 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adam_rs::{Method, Sheet};
+    use adam_rs::{MatchExpr, Method, Sheet};
 
     #[test]
     fn format_adam_error_invalid_id_falls_back_to_display() {
@@ -717,7 +724,7 @@ mod tests {
             .unwrap();
 
         sheet
-            .add_conditional(p, vec![(vec![0_i32], vec![rel])], vec![])
+            .add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![])
             .unwrap();
 
         (sheet, labels)
@@ -739,7 +746,7 @@ mod tests {
             .unwrap();
 
         sheet
-            .add_conditional(p, vec![(vec![0_i32], vec![rel])], vec![])
+            .add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![])
             .unwrap();
 
         (sheet, labels)
@@ -766,7 +773,11 @@ mod tests {
             .unwrap();
 
         sheet
-            .add_conditional(p, vec![(vec![0_i32], vec![rel1, rel2])], vec![])
+            .add_conditional(
+                MatchExpr::cell(p),
+                vec![(vec![0_i32], vec![rel1, rel2])],
+                vec![],
+            )
             .unwrap();
 
         (sheet, labels)
@@ -793,7 +804,7 @@ mod tests {
             .unwrap();
 
         sheet
-            .add_conditional::<i32>(p, vec![], vec![rel1, rel2])
+            .add_conditional::<i32>(MatchExpr::cell(p), vec![], vec![rel1, rel2])
             .unwrap();
 
         (sheet, labels)

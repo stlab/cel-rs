@@ -316,13 +316,12 @@ pub struct ConditionDecl {
     pub span: ExprSpan,
 }
 
-/// `conditional_decl = "conditional" identifier "{" { conditional_branch } [ default_branch ] "}".`
+/// `conditional_decl = "conditional" or_expression "{" { conditional_branch } [ default_branch ] "}".`
 #[derive(Debug, Clone)]
 pub struct ConditionalDecl {
-    /// The name of the cell this conditional matches on.
-    pub match_name: String,
-    /// The match cell name token's span.
-    pub match_name_span: ExprSpan,
+    /// The match subject: an arbitrary expression over already-declared cells (a bare
+    /// identifier, e.g. `mode`, is the degenerate single-cell case).
+    pub match_expr: cel_parser::Expr,
     /// The named (literal `=>`) branches, in declaration order.
     pub branches: Vec<ConditionalBranch>,
     /// The `_ => { ... }` default branch, if present.
@@ -466,8 +465,10 @@ mod tests {
     fn sheet_item_span_reads_the_conditional_variant() {
         let span = point(Span::call_site());
         let item = SheetItem::Conditional(ConditionalDecl {
-            match_name: "m".to_string(),
-            match_name_span: span,
+            match_expr: cel_parser::Expr::Ident {
+                name: "m".to_string(),
+                span,
+            },
             branches: Vec::new(),
             default: None,
             leading_comment: None,
