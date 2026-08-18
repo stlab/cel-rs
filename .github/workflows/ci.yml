@@ -42,5 +42,14 @@ jobs:
     - name: Clippy begin app (renderer-agnostic)
       run: cargo clippy -p begin --no-default-features --all-targets -- -D warnings
 
+    # dioxus's desktop feature pulls in wry/tao, which link against WebKitGTK/GTK on Linux.
+    # No earlier step needs these: the workspace build/test excludes begin, and the other
+    # begin checks use --no-default-features (renderer-agnostic), so this is the first step
+    # that actually compiles the desktop feature on the ubuntu-latest runner.
+    - name: Install Linux dependencies for begin desktop build
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+
     - name: Clippy begin app (desktop features)
       run: cargo clippy -p begin --all-targets -- -D warnings
