@@ -114,6 +114,11 @@ fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
     is_match_cell || feeds_condition
 }
 
+/// Returns the toggled value ("true"/"false") for a bool cell currently displaying `current`.
+fn toggled_bool_value(current: &str) -> &'static str {
+    if current == "true" { "false" } else { "true" }
+}
+
 /// Parses `val` for `id` via its `Labels` metadata, writes it to `sheet`, and propagates the
 /// sheet's constraints, updating `has_error` and reporting any error to `crate::diagnostics`.
 ///
@@ -255,7 +260,7 @@ fn CellRow(
                     warning: flags.read().warning,
                     disabled: flags.read().disabled,
                     onclick: move |_| {
-                        let next = if *value.peek() == "true" { "false" } else { "true" };
+                        let next = toggled_bool_value(&value.peek());
                         write_and_propagate(sheet, labels, id, next, has_error, active_source);
                     },
                 }
@@ -449,5 +454,15 @@ mod tests {
             .unwrap();
 
         assert!(!cell_needs_full_propagate(&sheet, unrelated));
+    }
+
+    #[test]
+    fn toggled_bool_value_true_becomes_false() {
+        assert_eq!(toggled_bool_value("true"), "false");
+    }
+
+    #[test]
+    fn toggled_bool_value_false_becomes_true() {
+        assert_eq!(toggled_bool_value("false"), "true");
     }
 }
