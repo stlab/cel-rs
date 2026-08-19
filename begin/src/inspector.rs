@@ -262,6 +262,20 @@ fn CellRow(
                     onclick: move |_| {
                         let next = toggled_bool_value(&value.peek());
                         write_and_propagate(sheet, labels, id, next, has_error, active_source);
+                        // `sp-checkbox` toggles its own shadow-DOM `checked` state
+                        // natively in response to the click, before this handler runs
+                        // and independent of the `checked` prop below. If the write above
+                        // was rejected, `value` recomputes to the same string as before,
+                        // so Dioxus's diff sees no change and never re-touches the DOM —
+                        // leaving the visual checkbox desynced from the sheet. Force the
+                        // element back to the actual committed value here.
+                        let checked = *value.read() == "true";
+                        spawn(async move {
+                            let _ = document::eval(&format!(
+                                r#"document.getElementById("cell-{id:?}").checked = {checked};"#
+                            ))
+                            .await;
+                        });
                     },
                 }
             } else {
