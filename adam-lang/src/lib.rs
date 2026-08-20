@@ -14,7 +14,7 @@
 //! relate_decl      = "relate" "{" { binding } "}".
 //! binding          = identifier {"," identifier} ":=" or_expression ";".
 //! conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".
-//! conditional_branch = (or_expression | "_") "=>" "{" { relate_decl } "}".
+//! conditional_branch = (or_expression | "_") "=>" "{" { relate_decl } "}" [ "," ].
 //! out_decl         = "out" identifier [":" type_expr] ":=" or_expression
 //!                      [ "require" "{" { requirement } "}" ] ";".
 //! requirement      = identifier ":" or_expression ";".

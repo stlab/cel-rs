@@ -367,7 +367,7 @@ impl TokenCursor {
     /// `expect_open_bracket`/`expect_close_bracket`/`expect_open_paren`/`expect_close_paren` —
     /// `type_expr` is the one adam-lang-grammar production that uses parens, so a malformed
     /// `type_expr`'s own unmatched `(`/`)` must unwind `depth` the same way a malformed
-    /// `relate`/`conditional`/`out` body's brace does.
+    /// `relate`/`conditional` body or `out`'s `require` body's brace does.
     /// `Delimiter::None` is treated as an ordinary token (consumed, no depth change): it never
     /// appears in adam-lang's own grammar, or in a way `cel_parser` leaves dangling.
     ///
