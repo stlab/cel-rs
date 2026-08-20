@@ -398,12 +398,12 @@ impl TokenCursor {
     /// cursor's [`Self::depth`] as observed by the caller *before* it dispatched to the
     /// production that failed. A recovery point is: a `;` seen while at or below `target_depth`
     /// (consumed); a `}` that closes back to at or below `target_depth` (not consumed, so the
-    /// caller's `at_close_brace` check still sees it); or the `cell`/`relationship`/`conditional`
+    /// caller's `at_close_brace` check still sees it); or the `cell`/`relate`/`conditional`
     /// keyword that starts the next sheet item, seen while at or below `target_depth` (not
     /// consumed).
     ///
     /// The failed production may have already consumed one or more of its own opening delimiters
-    /// before the error occurred (e.g. a malformed `relationship { .. }`'s own `{`) — the running
+    /// before the error occurred (e.g. a malformed `relate { .. }`'s own `{`) — the running
     /// [`Self::depth`] this method reads and updates reflects that, so this method first skips
     /// back out through those still-open delimiters before applying the stopping conditions.
     /// Comparing with `<=` rather than strict equality is a defensive guard: malformed input with
@@ -441,7 +441,7 @@ impl TokenCursor {
     ///
     /// `fallback` is returned as-is when this method consumes zero tokens — i.e. the very next
     /// token already satisfies a stopping condition (most commonly: the failed production
-    /// didn't consume the token that turned out to be a sibling `cell`/`relationship`/
+    /// didn't consume the token that turned out to be a sibling `cell`/`relate`/
     /// `conditional` keyword). Without this, the first stopping check's `return last` would
     /// return `last`'s pre-loop initial value, which — if nothing has been consumed yet — would
     /// be the *next* item's own first token's span, not any part of the item that actually
@@ -449,7 +449,7 @@ impl TokenCursor {
     /// production returns), seeded via [`Self::set_last_span`] to the failed item's own first
     /// token immediately before dispatching to that production: this way, a zero-tokens-skipped
     /// recovery reports the last token the failed production genuinely consumed before giving up
-    /// (e.g. a malformed `cell bad relationship { .. }`'s `Error` span covers `cell bad`, not
+    /// (e.g. a malformed `cell bad relate { .. }`'s `Error` span covers `cell bad`, not
     /// just `cell`) — never the seeded starting point alone when more was actually parsed, and
     /// never overlapping into the sibling item that follows.
     ///
@@ -496,7 +496,7 @@ impl TokenCursor {
                 Some(Token::Identifier(id))
                     if at_or_below_target
                         && (id == "cell"
-                            || id == "relationship"
+                            || id == "relate"
                             || id == "conditional"
                             || id == "out") =>
                 {
