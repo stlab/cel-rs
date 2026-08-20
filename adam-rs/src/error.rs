@@ -52,12 +52,12 @@ pub enum Error {
     InvalidConditional,
 
     /// An `add_output` call is structurally invalid: the writer method does not have
-    /// exactly one output cell, a condition has an empty name, two conditions in the same
-    /// call share a name, or a condition's `inputs` and `input_types` lengths differ.
+    /// exactly one output cell, a requirement has an empty name, two requirements in the same
+    /// call share a name, or a requirement's `inputs` and `input_types` lengths differ.
     InvalidOutput,
 
     /// A cell belonging to an existing output (see `Sheet::add_output`) was referenced as
-    /// an input to a relationship, conditional, condition, or a second output; was the
+    /// an input to a relationship, conditional, requirement, or a second output; was the
     /// target of `Sheet::write`; or an `add_output` call tried to reuse a cell that already
     /// had a relationship or conditional referencing it before becoming an output.
     TerminalCell,

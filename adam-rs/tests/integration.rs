@@ -3,7 +3,7 @@
 use std::any::TypeId;
 use std::collections::HashSet;
 
-use adam_rs::{CellId, Condition, ConditionId, Error, MatchExpr, Method, OutputId, Sheet};
+use adam_rs::{CellId, Error, MatchExpr, Method, OutputId, Requirement, RequirementId, Sheet};
 
 fn sheet_with_area_output() -> (Sheet, OutputId, CellId, CellId, CellId) {
     let mut sheet = Sheet::new();
@@ -19,7 +19,7 @@ fn sheet_with_area_output() -> (Sheet, OutputId, CellId, CellId, CellId) {
             writer,
             vec![(
                 "max_area",
-                Condition::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
+                Requirement::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
             )],
         )
         .unwrap();
@@ -1242,20 +1242,20 @@ fn mutually_dependent_relationships_with_no_external_input_remain_cycle() {
 }
 
 #[test]
-fn add_output_succeeds_with_no_conditions() {
+fn add_output_succeeds_with_no_requirements() {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
     let height = sheet.add_cell(0_i32);
     let area = sheet.add_cell(0_i32);
     let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h));
     let output = sheet
-        .add_output(writer, Vec::<(&str, Condition)>::new())
+        .add_output(writer, Vec::<(&str, Requirement)>::new())
         .unwrap();
     assert_eq!(sheet.output_cell(output), Some(area));
 }
 
 #[test]
-fn add_output_succeeds_with_one_condition() {
+fn add_output_succeeds_with_one_requirement() {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
     let height = sheet.add_cell(0_i32);
@@ -1269,15 +1269,15 @@ fn add_output_succeeds_with_one_condition() {
             writer,
             vec![(
                 "max_area",
-                Condition::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
+                Requirement::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
             )],
         )
         .unwrap();
-    assert_eq!(sheet.output_conditions(output).unwrap().len(), 1);
+    assert_eq!(sheet.output_requirements(output).unwrap().len(), 1);
 }
 
 #[test]
-fn add_output_succeeds_with_multiple_conditions() {
+fn add_output_succeeds_with_multiple_requirements() {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
     let height = sheet.add_cell(0_i32);
@@ -1293,16 +1293,16 @@ fn add_output_succeeds_with_multiple_conditions() {
             vec![
                 (
                     "max_width",
-                    Condition::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
+                    Requirement::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
                 ),
                 (
                     "max_height",
-                    Condition::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
+                    Requirement::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
                 ),
             ],
         )
         .unwrap();
-    assert_eq!(sheet.output_conditions(output).unwrap().len(), 2);
+    assert_eq!(sheet.output_requirements(output).unwrap().len(), 2);
 }
 
 #[test]
@@ -1312,7 +1312,7 @@ fn add_output_returns_invalid_output_for_writer_with_zero_outputs() {
     let writer = Method::new(vec![a], vec![], vec![TypeId::of::<i32>()], vec![], |_| {
         Ok(vec![])
     });
-    let result = sheet.add_output(writer, Vec::<(&str, Condition)>::new());
+    let result = sheet.add_output(writer, Vec::<(&str, Requirement)>::new());
     assert!(matches!(result, Err(Error::InvalidOutput)));
 }
 
@@ -1332,12 +1332,12 @@ fn add_output_returns_invalid_output_for_writer_with_two_outputs() {
             Ok(vec![Box::new(*x), Box::new(*x)])
         },
     );
-    let result = sheet.add_output(writer, Vec::<(&str, Condition)>::new());
+    let result = sheet.add_output(writer, Vec::<(&str, Requirement)>::new());
     assert!(matches!(result, Err(Error::InvalidOutput)));
 }
 
 #[test]
-fn add_output_returns_invalid_output_for_duplicate_condition_names() {
+fn add_output_returns_invalid_output_for_duplicate_requirement_names() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -1345,22 +1345,22 @@ fn add_output_returns_invalid_output_for_duplicate_condition_names() {
     let result = sheet.add_output(
         writer,
         vec![
-            ("check", Condition::from_fn_1(a, |x: &i32| Ok(*x >= 0))),
-            ("check", Condition::from_fn_1(a, |x: &i32| Ok(*x < 100))),
+            ("check", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0))),
+            ("check", Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100))),
         ],
     );
     assert!(matches!(result, Err(Error::InvalidOutput)));
 }
 
 #[test]
-fn add_output_returns_invalid_output_for_empty_condition_name() {
+fn add_output_returns_invalid_output_for_empty_requirement_name() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(a, b, |x: &i32| Ok(*x));
     let result = sheet.add_output(
         writer,
-        vec![("", Condition::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
+        vec![("", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
     );
     assert!(matches!(result, Err(Error::InvalidOutput)));
 }
@@ -1376,7 +1376,7 @@ fn add_output_returns_terminal_cell_when_output_cell_already_has_a_relationship(
         .unwrap();
     let c = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(c, b, |x: &i32| Ok(*x));
-    let result = sheet.add_output(writer, Vec::<(&str, Condition)>::new());
+    let result = sheet.add_output(writer, Vec::<(&str, Requirement)>::new());
     assert!(matches!(result, Err(Error::TerminalCell)));
 }
 
@@ -1389,7 +1389,7 @@ fn add_output_returns_terminal_cell_when_output_cell_is_a_conditional_match_cell
         .unwrap();
     let a = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(a, mode, |x: &i32| Ok(*x));
-    let result = sheet.add_output(writer, Vec::<(&str, Condition)>::new());
+    let result = sheet.add_output(writer, Vec::<(&str, Requirement)>::new());
     assert!(matches!(result, Err(Error::TerminalCell)));
 }
 
@@ -1401,47 +1401,47 @@ fn add_output_returns_terminal_cell_when_writer_input_is_already_an_output_cell(
     sheet
         .add_output(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            Vec::<(&str, Condition)>::new(),
+            Vec::<(&str, Requirement)>::new(),
         )
         .unwrap();
     let c = sheet.add_cell(0_i32);
     // b is already terminal; using it as a new writer's input must be rejected.
     let result = sheet.add_output(
         Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)),
-        Vec::<(&str, Condition)>::new(),
+        Vec::<(&str, Requirement)>::new(),
     );
     assert!(matches!(result, Err(Error::TerminalCell)));
 }
 
 #[test]
-fn add_output_returns_terminal_cell_when_condition_input_is_already_an_output_cell() {
+fn add_output_returns_terminal_cell_when_requirement_input_is_already_an_output_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     sheet
         .add_output(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            Vec::<(&str, Condition)>::new(),
+            Vec::<(&str, Requirement)>::new(),
         )
         .unwrap();
     let c = sheet.add_cell(0_i32);
     let d = sheet.add_cell(0_i32);
-    // b is already terminal; referencing it from another output's condition must be rejected.
+    // b is already terminal; referencing it from another output's requirement must be rejected.
     let result = sheet.add_output(
         Method::from_fn_1_1(c, d, |x: &i32| Ok(*x)),
-        vec![("uses_b", Condition::from_fn_1(b, |x: &i32| Ok(*x >= 0)))],
+        vec![("uses_b", Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0)))],
     );
     assert!(matches!(result, Err(Error::TerminalCell)));
 }
 
 #[test]
-fn add_output_allows_a_condition_to_reference_the_outputs_own_cell() {
+fn add_output_allows_a_requirement_to_reference_the_outputs_own_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     let result = sheet.add_output(
         Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-        vec![("positive", Condition::from_fn_1(b, |x: &i32| Ok(*x >= 0)))],
+        vec![("positive", Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0)))],
     );
     assert!(result.is_ok());
 }
@@ -1454,7 +1454,7 @@ fn write_returns_terminal_cell_for_an_output_cell() {
     sheet
         .add_output(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            Vec::<(&str, Condition)>::new(),
+            Vec::<(&str, Requirement)>::new(),
         )
         .unwrap();
     assert!(matches!(sheet.write(b, 5_i32), Err(Error::TerminalCell)));
@@ -1468,7 +1468,7 @@ fn add_relationship_returns_terminal_cell_for_an_output_cell() {
     sheet
         .add_output(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            Vec::<(&str, Condition)>::new(),
+            Vec::<(&str, Requirement)>::new(),
         )
         .unwrap();
     let c = sheet.add_cell(0_i32);
@@ -1483,7 +1483,7 @@ fn output_cell_returns_none_for_invalid_id() {
 }
 
 #[test]
-fn output_conditions_returns_condition_ids_in_declaration_order() {
+fn output_requirements_returns_requirement_ids_in_declaration_order() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -1491,39 +1491,39 @@ fn output_conditions_returns_condition_ids_in_declaration_order() {
         .add_output(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             vec![
-                ("first", Condition::from_fn_1(a, |x: &i32| Ok(*x >= 0))),
-                ("second", Condition::from_fn_1(a, |x: &i32| Ok(*x < 100))),
+                ("first", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0))),
+                ("second", Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100))),
             ],
         )
         .unwrap();
-    let ids = sheet.output_conditions(output).unwrap();
-    assert_eq!(sheet.condition_name(ids[0]), Some("first"));
-    assert_eq!(sheet.condition_name(ids[1]), Some("second"));
+    let ids = sheet.output_requirements(output).unwrap();
+    assert_eq!(sheet.requirement_name(ids[0]), Some("first"));
+    assert_eq!(sheet.requirement_name(ids[1]), Some("second"));
 }
 
 #[test]
-fn condition_output_and_inputs_return_correct_values() {
+fn requirement_output_and_inputs_return_correct_values() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     let output = sheet
         .add_output(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            vec![("check", Condition::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
+            vec![("check", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
         )
         .unwrap();
-    let id = sheet.output_conditions(output).unwrap()[0];
-    assert_eq!(sheet.condition_output(id), Some(output));
-    assert_eq!(sheet.condition_inputs(id), Some([a].as_slice()));
+    let id = sheet.output_requirements(output).unwrap()[0];
+    assert_eq!(sheet.requirement_output(id), Some(output));
+    assert_eq!(sheet.requirement_inputs(id), Some([a].as_slice()));
 }
 
 #[test]
-fn condition_name_output_inputs_return_none_for_invalid_id() {
+fn requirement_name_output_inputs_return_none_for_invalid_id() {
     let sheet = Sheet::new();
-    let id = ConditionId::default();
-    assert_eq!(sheet.condition_name(id), None);
-    assert_eq!(sheet.condition_output(id), None);
-    assert_eq!(sheet.condition_inputs(id), None);
+    let id = RequirementId::default();
+    assert_eq!(sheet.requirement_name(id), None);
+    assert_eq!(sheet.requirement_output(id), None);
+    assert_eq!(sheet.requirement_inputs(id), None);
 }
 
 #[test]
@@ -1533,17 +1533,17 @@ fn output_valid_false_before_propagate() {
 }
 
 #[test]
-fn output_valid_true_when_condition_holds() {
+fn output_valid_true_when_requirement_holds() {
     let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 5_i32).unwrap();
     sheet.write(height, 4_i32).unwrap();
     sheet.propagate().unwrap();
     assert!(sheet.output_valid(output));
-    assert_eq!(sheet.violated_conditions(output).count(), 0);
+    assert_eq!(sheet.violated_requirements(output).count(), 0);
 }
 
 #[test]
-fn output_valid_false_when_condition_fails() {
+fn output_valid_false_when_requirement_fails() {
     let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
     sheet.write(height, 40_i32).unwrap();
@@ -1552,18 +1552,18 @@ fn output_valid_false_when_condition_fails() {
 }
 
 #[test]
-fn violated_conditions_lists_the_failing_condition() {
+fn violated_requirements_lists_the_failing_requirement() {
     let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
     sheet.write(height, 40_i32).unwrap();
     sheet.propagate().unwrap();
-    let violated: Vec<_> = sheet.violated_conditions(output).collect();
+    let violated: Vec<_> = sheet.violated_requirements(output).collect();
     assert_eq!(violated.len(), 1);
-    assert_eq!(sheet.condition_name(violated[0]), Some("max_area"));
+    assert_eq!(sheet.requirement_name(violated[0]), Some("max_area"));
 }
 
 #[test]
-fn violated_conditions_returns_only_the_failing_subset_of_multiple_conditions() {
+fn violated_requirements_returns_only_the_failing_subset_of_multiple_requirements() {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
     let height = sheet.add_cell(0_i32);
@@ -1579,11 +1579,11 @@ fn violated_conditions_returns_only_the_failing_subset_of_multiple_conditions() 
             vec![
                 (
                     "max_width",
-                    Condition::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
+                    Requirement::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
                 ),
                 (
                     "max_height",
-                    Condition::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
+                    Requirement::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
                 ),
             ],
         )
@@ -1595,9 +1595,9 @@ fn violated_conditions_returns_only_the_failing_subset_of_multiple_conditions() 
     sheet.propagate().unwrap();
 
     assert!(!sheet.output_valid(output));
-    let violated: Vec<_> = sheet.violated_conditions(output).collect();
+    let violated: Vec<_> = sheet.violated_requirements(output).collect();
     assert_eq!(violated.len(), 1);
-    assert_eq!(sheet.condition_name(violated[0]), Some("max_height"));
+    assert_eq!(sheet.requirement_name(violated[0]), Some("max_height"));
 }
 
 #[test]
@@ -1614,7 +1614,7 @@ fn output_valid_updates_across_propagate_calls() {
 }
 
 #[test]
-fn condition_function_error_aborts_propagate_with_method_failed() {
+fn requirement_function_error_aborts_propagate_with_method_failed() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -1623,7 +1623,7 @@ fn condition_function_error_aborts_propagate_with_method_failed() {
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             vec![(
                 "always_errors",
-                Condition::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("check failed"))),
+                Requirement::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("check failed"))),
             )],
         )
         .unwrap();
@@ -1788,21 +1788,21 @@ fn contributing_cells_includes_transitive_contributors_of_a_conditional_match_ce
 }
 
 #[test]
-fn condition_contributing_cells_unions_inputs_outside_writer() {
+fn requirement_contributing_cells_unions_inputs_outside_writer() {
     let (mut sheet, output, width, height, max_area) = sheet_with_area_output();
     sheet.write(width, 5_i32).unwrap();
     sheet.write(height, 4_i32).unwrap();
     sheet.propagate().unwrap();
-    let id = sheet.output_conditions(output).unwrap()[0];
-    let contrib = sheet.condition_contributing_cells(id);
+    let id = sheet.output_requirements(output).unwrap()[0];
+    let contrib = sheet.requirement_contributing_cells(id);
     assert_eq!(contrib, HashSet::from([width, height, max_area]));
 }
 
 #[test]
-fn condition_contributing_cells_returns_empty_for_invalid_id() {
+fn requirement_contributing_cells_returns_empty_for_invalid_id() {
     let sheet = Sheet::new();
     assert_eq!(
-        sheet.condition_contributing_cells(ConditionId::default()),
+        sheet.requirement_contributing_cells(RequirementId::default()),
         HashSet::new()
     );
 }
@@ -1914,7 +1914,7 @@ fn output_violation_cells_empty_when_sheet_has_no_outputs() {
 }
 
 #[test]
-fn output_violation_cells_empty_when_all_conditions_hold() {
+fn output_violation_cells_empty_when_all_requirements_hold() {
     let (mut sheet, _output, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 5_i32).unwrap();
     sheet.write(height, 4_i32).unwrap();
@@ -1923,7 +1923,7 @@ fn output_violation_cells_empty_when_all_conditions_hold() {
 }
 
 #[test]
-fn output_violation_cells_returns_contributing_cells_for_the_failing_condition() {
+fn output_violation_cells_returns_contributing_cells_for_the_failing_requirement() {
     let (mut sheet, output, width, height, max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
     sheet.write(height, 40_i32).unwrap();
@@ -1936,7 +1936,7 @@ fn output_violation_cells_returns_contributing_cells_for_the_failing_condition()
 }
 
 #[test]
-fn output_violation_cells_unions_across_multiple_violated_conditions() {
+fn output_violation_cells_unions_across_multiple_violated_requirements() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let max_a = sheet.add_cell(5_i32);
@@ -1950,7 +1950,7 @@ fn output_violation_cells_unions_across_multiple_violated_conditions() {
             Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)),
             vec![(
                 "max_a",
-                Condition::from_fn_2([a, max_a], |v: &i32, max: &i32| Ok(v <= max)),
+                Requirement::from_fn_2([a, max_a], |v: &i32, max: &i32| Ok(v <= max)),
             )],
         )
         .unwrap();
@@ -1959,7 +1959,7 @@ fn output_violation_cells_unions_across_multiple_violated_conditions() {
             Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)),
             vec![(
                 "max_b",
-                Condition::from_fn_2([b, max_b], |v: &i32, max: &i32| Ok(v <= max)),
+                Requirement::from_fn_2([b, max_b], |v: &i32, max: &i32| Ok(v <= max)),
             )],
         )
         .unwrap();

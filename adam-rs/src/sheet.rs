@@ -10,11 +10,11 @@ use slotmap::SlotMap;
 
 use crate::{
     cell::{CellData, CellId},
-    condition::{Condition, ConditionData, ConditionId},
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::Error,
     output::{OutputData, OutputId},
     relationship::{Method, RelationshipData, RelationshipId},
+    requirement::{Requirement, RequirementData, RequirementId},
 };
 
 /// Owns a complete property model constraint graph.
@@ -57,17 +57,17 @@ pub struct Sheet {
     /// Used to exclude them from the unconditional active set.
     pub(crate) conditional_relationships: HashSet<RelationshipId>,
     /// Cells belonging to a registered output (see [`Sheet::add_output`]). Such a cell
-    /// can never be referenced as an input to a relationship, conditional, condition, or
+    /// can never be referenced as an input to a relationship, conditional, requirement, or
     /// another output, and can never be the target of `write`.
     terminal_cells: HashSet<CellId>,
     /// All outputs registered on this sheet.
     outputs: SlotMap<OutputId, OutputData>,
-    /// All conditions registered on this sheet, across all outputs.
-    conditions: SlotMap<ConditionId, ConditionData>,
-    /// Conditions that evaluated `false` as of the last `propagate()` call, grouped by
-    /// output. Sparse: an output with no entry had all its conditions hold. Not
+    /// All requirements registered on this sheet, across all outputs.
+    requirements: SlotMap<RequirementId, RequirementData>,
+    /// Requirements that evaluated `false` as of the last `propagate()` call, grouped by
+    /// output. Sparse: an output with no entry had all its requirements hold. Not
     /// recomputed by `propagate_without_replan`.
-    last_violated: HashMap<OutputId, Vec<ConditionId>>,
+    last_violated: HashMap<OutputId, Vec<RequirementId>>,
 }
 
 /// A conditional's evaluated match value: borrowed (existing cell, no allocation) or owned
@@ -102,7 +102,7 @@ impl Sheet {
             conditional_relationships: HashSet::new(),
             terminal_cells: HashSet::new(),
             outputs: SlotMap::with_key(),
-            conditions: SlotMap::with_key(),
+            requirements: SlotMap::with_key(),
             last_violated: HashMap::new(),
         }
     }
@@ -426,34 +426,34 @@ impl Sheet {
     }
 
     /// Registers an output: a cell written by exactly one method, together with zero or
-    /// more named conditions checked after every `propagate()`.
+    /// more named requirements checked after every `propagate()`.
     ///
     /// `writer` must have exactly one output cell — that cell becomes terminal: it can
     /// never afterward be referenced as an input to a relationship, conditional,
-    /// condition, or another output, nor be the target of `write`. A condition's inputs
-    /// may be any cells in the sheet, including the output's own cell, but not a cell that
-    /// already belongs to a different output.
+    /// requirement, or another output, nor be the target of `write`. A requirement's
+    /// inputs may be any cells in the sheet, including the output's own cell, but not a
+    /// cell that already belongs to a different output.
     ///
     /// # Errors
     ///
     /// - `Error::InvalidOutput` — `writer` does not have exactly one output cell, a
-    ///   condition name is empty, or two conditions share a name.
-    /// - `Error::TerminalCell` — a condition input is already another output's cell, or
+    ///   requirement name is empty, or two requirements share a name.
+    /// - `Error::TerminalCell` — a requirement input is already another output's cell, or
     ///   the writer's output cell already has prior use (see `cell_has_prior_use`)
     ///   and so cannot become terminal.
-    /// - `Error::InvalidId` — a cell referenced by `writer` or a condition is not in this
+    /// - `Error::InvalidId` — a cell referenced by `writer` or a requirement is not in this
     ///   sheet.
-    /// - `Error::TypeMismatch` — a condition input's declared type does not match the
+    /// - `Error::TypeMismatch` — a requirement input's declared type does not match the
     ///   cell's registered type.
     /// - Any error `add_relationship` can return, for `writer`'s own validation.
     ///
-    /// - Complexity: O(k + m²×c) where k is the number of conditions (each validated
+    /// - Complexity: O(k + m²×c) where k is the number of requirements (each validated
     ///   in a single pass over its inputs), plus the cost of `add_relationship` for
     ///   `writer` alone (m = 1 method, c = cells in that method).
     pub fn add_output(
         &mut self,
         writer: Method,
-        conditions: Vec<(&str, Condition)>,
+        requirements: Vec<(&str, Requirement)>,
     ) -> Result<OutputId, Error> {
         if writer.outputs.len() != 1 {
             return Err(Error::InvalidOutput);
@@ -461,17 +461,21 @@ impl Sheet {
         let output_cell = writer.outputs[0];
 
         let mut seen_names: HashSet<&str> = HashSet::new();
-        for &(name, _) in &conditions {
+        for &(name, _) in &requirements {
             if name.is_empty() || !seen_names.insert(name) {
                 return Err(Error::InvalidOutput);
             }
         }
 
-        for (_, condition) in &conditions {
-            if condition.inputs.len() != condition.input_types.len() {
+        for (_, requirement) in &requirements {
+            if requirement.inputs.len() != requirement.input_types.len() {
                 return Err(Error::InvalidOutput);
             }
-            for (&cell_id, &declared) in condition.inputs.iter().zip(condition.input_types.iter()) {
+            for (&cell_id, &declared) in requirement
+                .inputs
+                .iter()
+                .zip(requirement.input_types.iter())
+            {
                 if self.terminal_cells.contains(&cell_id) {
                     return Err(Error::TerminalCell);
                 }
@@ -494,21 +498,21 @@ impl Sheet {
 
         let output_id = self.outputs.insert(OutputData {
             cell: output_cell,
-            conditions: Vec::new(),
+            requirements: Vec::new(),
         });
 
-        let condition_ids: Vec<ConditionId> = conditions
+        let requirement_ids: Vec<RequirementId> = requirements
             .into_iter()
-            .map(|(name, condition)| {
-                self.conditions.insert(ConditionData {
+            .map(|(name, requirement)| {
+                self.requirements.insert(RequirementData {
                     name: name.to_string(),
                     output: output_id,
-                    inputs: condition.inputs,
-                    function: condition.function,
+                    inputs: requirement.inputs,
+                    function: requirement.function,
                 })
             })
             .collect();
-        self.outputs[output_id].conditions = condition_ids;
+        self.outputs[output_id].requirements = requirement_ids;
 
         Ok(output_id)
     }
@@ -520,38 +524,38 @@ impl Sheet {
         self.outputs.get(id).map(|o| o.cell)
     }
 
-    /// Returns the conditions registered on output `id`, in declaration order.
+    /// Returns the requirements registered on output `id`, in declaration order.
     ///
     /// Returns `None` if `id` is not a live output in this sheet.
-    pub fn output_conditions(&self, id: OutputId) -> Option<&[ConditionId]> {
-        self.outputs.get(id).map(|o| o.conditions.as_slice())
+    pub fn output_requirements(&self, id: OutputId) -> Option<&[RequirementId]> {
+        self.outputs.get(id).map(|o| o.requirements.as_slice())
     }
 
-    /// Returns the name of condition `id`.
+    /// Returns the name of requirement `id`.
     ///
-    /// Returns `None` if `id` is not a live condition in this sheet.
-    pub fn condition_name(&self, id: ConditionId) -> Option<&str> {
-        self.conditions.get(id).map(|c| c.name.as_str())
+    /// Returns `None` if `id` is not a live requirement in this sheet.
+    pub fn requirement_name(&self, id: RequirementId) -> Option<&str> {
+        self.requirements.get(id).map(|c| c.name.as_str())
     }
 
-    /// Returns the output that condition `id` belongs to.
+    /// Returns the output that requirement `id` belongs to.
     ///
-    /// Returns `None` if `id` is not a live condition in this sheet.
-    pub fn condition_output(&self, id: ConditionId) -> Option<OutputId> {
-        self.conditions.get(id).map(|c| c.output)
+    /// Returns `None` if `id` is not a live requirement in this sheet.
+    pub fn requirement_output(&self, id: RequirementId) -> Option<OutputId> {
+        self.requirements.get(id).map(|c| c.output)
     }
 
-    /// Returns the cells condition `id` reads.
+    /// Returns the cells requirement `id` reads.
     ///
-    /// Returns `None` if `id` is not a live condition in this sheet.
-    pub fn condition_inputs(&self, id: ConditionId) -> Option<&[CellId]> {
-        self.conditions.get(id).map(|c| c.inputs.as_slice())
+    /// Returns `None` if `id` is not a live requirement in this sheet.
+    pub fn requirement_inputs(&self, id: RequirementId) -> Option<&[CellId]> {
+        self.requirements.get(id).map(|c| c.inputs.as_slice())
     }
 
-    /// Returns `true` if every condition on `id` held as of the last `propagate()` call.
+    /// Returns `true` if every requirement on `id` held as of the last `propagate()` call.
     ///
     /// Returns `false` if no propagation has run yet. Also returns `true` for an `id`
-    /// that is not a live output in this sheet, since no condition can have failed
+    /// that is not a live output in this sheet, since no requirement can have failed
     /// for an output that doesn't exist.
     pub fn output_valid(&self, id: OutputId) -> bool {
         if self.last_plan.is_none() {
@@ -560,12 +564,12 @@ impl Sheet {
         !self.last_violated.contains_key(&id)
     }
 
-    /// Iterates the conditions on `id` that evaluated to `false` as of the last
+    /// Iterates the requirements on `id` that evaluated to `false` as of the last
     /// `propagate()` call.
     ///
-    /// - Postcondition: empty if `id`'s conditions all held, `id` is not a live
+    /// - Postcondition: empty if `id`'s requirements all held, `id` is not a live
     ///   output in this sheet, or no propagation has run yet.
-    pub fn violated_conditions(&self, id: OutputId) -> impl Iterator<Item = ConditionId> + '_ {
+    pub fn violated_requirements(&self, id: OutputId) -> impl Iterator<Item = RequirementId> + '_ {
         self.last_violated.get(&id).into_iter().flatten().copied()
     }
 
@@ -674,18 +678,18 @@ impl Sheet {
             .collect()
     }
 
-    /// Returns the union of [`Sheet::contributing_cells`] over condition `id`'s own
+    /// Returns the union of [`Sheet::contributing_cells`] over requirement `id`'s own
     /// declared inputs.
     ///
-    /// Returns an empty set if `id` is not a live condition in this sheet.
+    /// Returns an empty set if `id` is not a live requirement in this sheet.
     ///
-    /// - Complexity: O(K·N) where K is the condition's input count and N is the size of
+    /// - Complexity: O(K·N) where K is the requirement's input count and N is the size of
     ///   each input's contributing set.
-    pub fn condition_contributing_cells(&self, id: ConditionId) -> HashSet<CellId> {
-        let Some(condition) = self.conditions.get(id) else {
+    pub fn requirement_contributing_cells(&self, id: RequirementId) -> HashSet<CellId> {
+        let Some(requirement) = self.requirements.get(id) else {
             return HashSet::new();
         };
-        condition
+        requirement
             .inputs
             .iter()
             .flat_map(|&input| self.contributing_cells(input))
@@ -705,18 +709,18 @@ impl Sheet {
             .collect()
     }
 
-    /// Returns the union of `condition_contributing_cells` over every condition that
+    /// Returns the union of `requirement_contributing_cells` over every requirement that
     /// evaluated `false` as of the last `propagate()` call, across every output in the
     /// sheet.
     ///
-    /// - Postcondition: empty if the sheet has no outputs, or if every condition on
+    /// - Postcondition: empty if the sheet has no outputs, or if every requirement on
     ///   every output currently holds.
-    /// - Complexity: O(sum of `condition_contributing_cells` cost over every violated
-    ///   condition).
+    /// - Complexity: O(sum of `requirement_contributing_cells` cost over every violated
+    ///   requirement).
     pub fn output_violation_cells(&self) -> HashSet<CellId> {
         self.outputs()
-            .flat_map(|id| self.violated_conditions(id))
-            .flat_map(|cid| self.condition_contributing_cells(cid))
+            .flat_map(|id| self.violated_requirements(id))
+            .flat_map(|cid| self.requirement_contributing_cells(cid))
             .collect()
     }
 
@@ -1043,15 +1047,15 @@ impl Sheet {
     /// reverted to its source value (e.g. its forcing conditional went inactive); it is
     /// marked changed even though no method wrote to it this round.
     ///
-    /// **Phase 6 — Condition evaluation:** every registered condition is evaluated
+    /// **Phase 6 — Requirement evaluation:** every registered requirement is evaluated
     /// against current cell values, rebuilding `last_violated` from scratch, so
-    /// [`Sheet::output_valid`] and [`Sheet::violated_conditions`] reflect this round.
+    /// [`Sheet::output_valid`] and [`Sheet::violated_requirements`] reflect this round.
     ///
     /// # Errors
     ///
     /// - `Error::Conflict` — no valid method assignment exists.
     /// - `Error::MethodFailed` — a method's function returned an error, a method
-    ///   produced the wrong number of outputs, or a condition's function returned
+    ///   produced the wrong number of outputs, or a requirement's function returned
     ///   an error.
     /// - `Error::TypeMismatch` — a method output's runtime type does not match the
     ///   cell's registered type.
@@ -1106,20 +1110,20 @@ impl Sheet {
             }
         }
 
-        // Phase 6: evaluate every registered condition against current cell values.
-        let mut last_violated: HashMap<OutputId, Vec<ConditionId>> = HashMap::new();
-        for (condition_id, condition) in self.conditions.iter() {
-            let inputs: Vec<&dyn Any> = condition
+        // Phase 6: evaluate every registered requirement against current cell values.
+        let mut last_violated: HashMap<OutputId, Vec<RequirementId>> = HashMap::new();
+        for (requirement_id, requirement) in self.requirements.iter() {
+            let inputs: Vec<&dyn Any> = requirement
                 .inputs
                 .iter()
                 .map(|&id| self.cells[id].effective())
                 .collect();
-            let holds = (condition.function)(&inputs).map_err(Error::MethodFailed)?;
+            let holds = (requirement.function)(&inputs).map_err(Error::MethodFailed)?;
             if !holds {
                 last_violated
-                    .entry(condition.output)
+                    .entry(requirement.output)
                     .or_default()
-                    .push(condition_id);
+                    .push(requirement_id);
             }
         }
         self.last_violated = last_violated;
@@ -1388,8 +1392,8 @@ impl Sheet {
     ///
     /// `is_forced` and `forced_cells` continue to reflect the last full `propagate()`
     /// call; this method does not recompute them. Likewise, `output_valid` and
-    /// `violated_conditions` continue to reflect the last full `propagate()` call; this
-    /// method does not re-evaluate output conditions.
+    /// `violated_requirements` continue to reflect the last full `propagate()` call; this
+    /// method does not re-evaluate output requirements.
     ///
     /// # Errors
     ///
