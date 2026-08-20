@@ -8,13 +8,13 @@ sheet demo {
     cell g = 0.0;
     cell p: i32 = 0;
 
-    relate {
+    relationship {
         c := a * b;
         a := c / b;
         b := c / a;
     }
 
-    relate {
+    relationship {
         f := d * e;
         d := f / e;
         e := f / d;
@@ -22,22 +22,22 @@ sheet demo {
 
     conditional p {
         0i32 => {
-            relate {
+            relationship {
                 c := f;
                 f := c;
             }
         }
         1i32 => {
-            relate {
+            relationship {
                 c := f * 2.0;
                 f := c / 2.0;
             }
-            relate {
+            relationship {
                 g := c * 10.0;
             }
         }
         _ => {
-            relate {
+            relationship {
                 c := f;
             }
         }

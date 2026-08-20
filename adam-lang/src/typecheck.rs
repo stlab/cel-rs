@@ -1,6 +1,6 @@
 //! A best-effort static type checker over [`crate::ast::Sheet`] trees, built on
 //! [`cel_parser::ty::check_expr`]. Checks each `cell`'s literal initializer against its `:
-//! type_name` annotation, each `relate`/`conditional` binding's body against its declared
+//! type_name` annotation, each `relationship`/`conditional` binding's body against its declared
 //! outputs (arity: does the body actually produce as many values as declared; and per-output
 //! type), and each `out`'s initializer body against its optional `: type_name` annotation, with
 //! each `requirement` body checked to produce `bool` type. An absent annotation, an annotation
@@ -40,7 +40,7 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
     for item in &sheet.items {
         match item {
             SheetItem::Cell(cell) => check_cell_initializer(cell, registry, &mut diagnostics),
-            SheetItem::Relate(rel) => {
+            SheetItem::Relationship(rel) => {
                 for binding in &rel.bindings {
                     check_binding(binding, registry, &shapes, &resolve, &mut diagnostics);
                 }
@@ -394,13 +394,14 @@ fn check_tuple_output_body(
     }
 }
 
-/// Checks one `binding`'s body against its declared outputs: for a single output, the body's
-/// inferred type must unify with that output cell's declared type (or, when that output's
-/// declared type is itself a tuple — per `shapes` — the body is checked recursively via
-/// [`expr_matches_shape`] instead); for `n > 1` outputs, the body is checked recursively via
-/// [`check_tuple_output_body`] against each output cell. Operator-level diagnostics from inside
-/// the body (via [`check_expr`]) are always included exactly once, regardless of which branch
-/// below runs.
+/// Checks one `binding`'s body against its declared outputs, dispatching on
+/// [`BindingDecl::destructure`]: a destructuring binding (`(a, b) := ...` or the single-element
+/// `(a,) := ...`) is checked recursively via [`check_tuple_output_body`] against each output
+/// cell; a direct-bind single output's inferred type must instead unify with that output cell's
+/// declared type (or, when that output's declared type is itself a tuple — per `shapes` — the
+/// body is checked recursively via [`expr_matches_shape`] instead). Operator-level diagnostics
+/// from inside the body (via [`check_expr`]) are always included exactly once, regardless of
+/// which branch below runs.
 fn check_binding(
     binding: &BindingDecl,
     registry: &TypeRegistry,
@@ -408,43 +409,41 @@ fn check_binding(
     resolve: &impl Fn(&str) -> Ty,
     diagnostics: &mut Vec<ParseError>,
 ) {
-    match binding.outputs.as_slice() {
-        [] => {
-            let (_, body_diags) = check_expr(&binding.body, resolve);
-            diagnostics.extend(body_diags);
-        }
-        [(name, _)] => {
-            if let Some(shape @ TypeShape::Tuple(_)) = shapes.get(name) {
-                expr_matches_shape(&binding.body, shape, registry, resolve, diagnostics);
-                return;
-            }
-            let (body_ty, body_diags) = check_expr(&binding.body, resolve);
-            diagnostics.extend(body_diags);
-            if let Expr::Tuple { elements, .. } = &binding.body {
-                let n = elements.len();
-                diagnostics.push(ParseError::new_range(
-                    format!("binding declares 1 output but its body is a {n}-tuple"),
-                    binding.body.span().start,
-                    binding.body.span().end,
-                ));
-                return;
-            }
-            let declared = resolve(name);
-            if !declared.unifies_with(&body_ty) {
-                diagnostics.push(ParseError::new_range(
-                    format!(
-                        "binding body produces `{}`, but `{name}` is declared `{}`",
-                        body_ty.name(),
-                        declared.name()
-                    ),
-                    binding.body.span().start,
-                    binding.body.span().end,
-                ));
-            }
-        }
-        outputs => {
-            check_tuple_output_body(&binding.body, outputs, resolve, diagnostics);
-        }
+    if binding.destructure {
+        check_tuple_output_body(&binding.body, &binding.outputs, resolve, diagnostics);
+        return;
+    }
+    let Some((name, _)) = binding.outputs.first() else {
+        let (_, body_diags) = check_expr(&binding.body, resolve);
+        diagnostics.extend(body_diags);
+        return;
+    };
+    if let Some(shape @ TypeShape::Tuple(_)) = shapes.get(name) {
+        expr_matches_shape(&binding.body, shape, registry, resolve, diagnostics);
+        return;
+    }
+    let (body_ty, body_diags) = check_expr(&binding.body, resolve);
+    diagnostics.extend(body_diags);
+    if let Expr::Tuple { elements, .. } = &binding.body {
+        let n = elements.len();
+        diagnostics.push(ParseError::new_range(
+            format!("binding declares 1 output but its body is a {n}-tuple"),
+            binding.body.span().start,
+            binding.body.span().end,
+        ));
+        return;
+    }
+    let declared = resolve(name);
+    if !declared.unifies_with(&body_ty) {
+        diagnostics.push(ParseError::new_range(
+            format!(
+                "binding body produces `{}`, but `{name}` is declared `{}`",
+                body_ty.name(),
+                declared.name()
+            ),
+            binding.body.span().start,
+            binding.body.span().end,
+        ));
     }
 }
 
@@ -567,7 +566,7 @@ mod tests {
     fn binding_single_output_matching_declared_type_has_no_diagnostic() {
         let sheet = parse(
             "sheet s { cell width: f64; cell height: f64; cell area: f64; \
-             relate { area := width * height; } }",
+             relationship { area := width * height; } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
@@ -577,7 +576,7 @@ mod tests {
     fn binding_single_output_mismatched_with_declared_type_is_a_diagnostic() {
         let sheet = parse(
             "sheet s { cell width: f64; cell height: f64; cell area: i32; \
-             relate { area := width * height; } }",
+             relationship { area := width * height; } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
@@ -587,7 +586,7 @@ mod tests {
     fn binding_multi_output_matching_tuple_has_no_diagnostic() {
         let sheet = parse(
             "sheet s { cell a: i32; cell b: i32; cell sum: i32; cell diff: i32; \
-             relate { sum, diff := (a + b, a - b); } }",
+             relationship { (sum, diff) := (a + b, a - b); } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
@@ -597,7 +596,7 @@ mod tests {
     fn binding_multi_output_arity_mismatch_is_a_diagnostic() {
         let sheet = parse(
             "sheet s { cell a: i32; cell b: i32; cell sum: i32; cell diff: i32; \
-             relate { sum, diff := a + b; } }",
+             relationship { (sum, diff) := a + b; } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
@@ -609,7 +608,7 @@ mod tests {
         // `Ty::Any` for the tuple and let this slip through with no diagnostic at all.
         let sheet = parse(
             "sheet s { cell a: i32; cell b: i32; cell out: i32; \
-             relate { out := (a, b); } }",
+             relationship { out := (a, b); } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
@@ -619,7 +618,7 @@ mod tests {
     fn binding_multi_output_per_element_type_mismatch_is_a_diagnostic() {
         let sheet = parse(
             "sheet s { cell a: i32; cell b: i32; cell sum: i32; cell diff: f64; \
-             relate { sum, diff := (a + b, a - b); } }",
+             relationship { (sum, diff) := (a + b, a - b); } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
@@ -629,7 +628,7 @@ mod tests {
     fn an_operator_error_inside_a_binding_body_surfaces() {
         let sheet = parse(
             "sheet s { cell name: String; cell count: i32; cell out: i32; \
-             relate { out := name + count; } }",
+             relationship { out := name + count; } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
@@ -640,8 +639,8 @@ mod tests {
         let sheet = parse(
             "sheet s { cell mode: i32; cell a: i32; cell b: i32; cell out: i32; \
              conditional mode { \
-                 0i32 => { relate { out := a; } }, \
-                 _ => { relate { out := b; } }, \
+                 0i32 => { relationship { out := a; } }, \
+                 _ => { relationship { out := b; } }, \
              } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
@@ -654,7 +653,7 @@ mod tests {
         // Ty::Any, which must unify silently with `out`'s declared `i32`.
         let sheet = parse(
             "sheet s { cell a = 1; cell out: i32; \
-             relate { out := a; } }",
+             relationship { out := a; } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
@@ -760,7 +759,7 @@ mod tests {
     fn binding_single_tuple_typed_output_matching_body_has_no_diagnostic() {
         let sheet = parse(
             "sheet s { cell a: i32; cell b: i32; cell pair: (i32, i32); \
-             relate { pair := (a, b); } }",
+             relationship { pair := (a, b); } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
@@ -770,7 +769,7 @@ mod tests {
     fn binding_single_tuple_typed_output_element_type_mismatch_is_a_diagnostic() {
         let sheet = parse(
             "sheet s { cell a: i32; cell b: f64; cell pair: (i32, i32); \
-             relate { pair := (a, b); } }",
+             relationship { pair := (a, b); } }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
@@ -780,7 +779,7 @@ mod tests {
     fn binding_single_tuple_typed_output_if_else_body_matching_both_branches_has_no_diagnostic() {
         let sheet = parse(
             "sheet s { cell cond: bool; cell a: i32; cell b: i32; cell pair: (i32, i32); \
-             relate { pair := \
+             relationship { pair := \
                  if cond { (a, b) } else { (b, a) }; \
              } }",
         );
@@ -792,7 +791,7 @@ mod tests {
     fn binding_single_tuple_typed_output_if_without_else_matching_then_branch_has_no_diagnostic() {
         let sheet = parse(
             "sheet s { cell cond: bool; cell a: i32; cell b: i32; cell pair: (i32, i32); \
-             relate { pair := \
+             relationship { pair := \
                  if cond { (a, b) }; \
              } }",
         );
@@ -805,7 +804,7 @@ mod tests {
     {
         let sheet = parse(
             "sheet s { cell mode: i32; cell a: i32; cell b: i32; cell pair: (i32, i32); \
-             relate { pair := \
+             relationship { pair := \
                  if mode == 0 { (a, b) } else if mode == 1 { (b, a) } else { (0, 0) }; \
              } }",
         );
@@ -824,7 +823,7 @@ mod tests {
         // when only one branch mismatches).
         let sheet = parse(
             "sheet s { cell cond: bool; cell a: i32; cell c: f64; cell pair: (i32, i32); \
-             relate { pair := \
+             relationship { pair := \
                  if cond { (a, c) } else { (a, c) }; \
              } }",
         );
@@ -836,7 +835,7 @@ mod tests {
     fn binding_multi_output_if_else_body_matching_both_branches_has_no_diagnostic() {
         let sheet = parse(
             "sheet s { cell cond: bool; cell a: i32; cell b: i32; cell sum: i32; cell diff: i32; \
-             relate { sum, diff := \
+             relationship { (sum, diff) := \
                  if cond { (a + b, a - b) } else { (a - b, a + b) }; \
              } }",
         );
@@ -849,10 +848,33 @@ mod tests {
         let sheet = parse(
             "sheet s { cell cond: bool; cell a: i32; cell b: i32; cell c: f64; \
              cell sum: i32; cell diff: i32; \
-             relate { sum, diff := \
+             relationship { (sum, diff) := \
                  if cond { (a, b) } else { (a, c) }; \
              } }",
         );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn binding_single_element_tuple_destructure_has_no_diagnostic() {
+        let sheet =
+            parse("sheet s { cell a: i32; cell out: i32; relationship { (out,) := (a,); } }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn binding_single_element_tuple_destructure_type_mismatch_is_a_diagnostic() {
+        let sheet =
+            parse("sheet s { cell a: f64; cell out: i32; relationship { (out,) := (a,); } }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn binding_single_element_tuple_destructure_arity_mismatch_is_a_diagnostic() {
+        let sheet = parse("sheet s { cell a: i32; cell out: i32; relationship { (out,) := a; } }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }

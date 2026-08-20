@@ -132,7 +132,7 @@ impl AdamParser {
     /// # Errors
     ///
     /// Returns `Err` on any syntax error, unknown type name, type mismatch between a
-    /// cell annotation and its initializer, undeclared cell name in a `relate` binding's
+    /// cell annotation and its initializer, undeclared cell name in a `relationship` binding's
     /// output list, or a tuple arity/element-type mismatch between the output expression
     /// and its declared outputs.
     pub fn parse_str(&mut self, source: &str) -> Result<ParsedSheet> {
@@ -176,18 +176,18 @@ impl AdamParser {
         Ok(())
     }
 
-    /// `sheet_item = [ doc_comment ] (cell_decl | relate_decl | conditional_decl | out_decl).`
+    /// `sheet_item = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).`
     fn parse_sheet_item(&mut self, ctx: &mut ParseContext) -> Result<()> {
         let _ = ctx.consume_doc_comment_run(false); // outer `///` docs (ignored at runtime)
         match ctx.peek_token() {
             Some(Token::Identifier(id)) if id == "cell" => self.parse_cell_decl(ctx),
-            Some(Token::Identifier(id)) if id == "relate" => {
-                self.parse_relate_decl(ctx).map(|_| ())
+            Some(Token::Identifier(id)) if id == "relationship" => {
+                self.parse_relationship_decl(ctx).map(|_| ())
             }
             Some(Token::Identifier(id)) if id == "conditional" => self.parse_conditional_decl(ctx),
             Some(Token::Identifier(id)) if id == "out" => self.parse_out_decl(ctx),
             Some(tok) => Err(ParseError::new(
-                "expected `cell`, `relate`, `conditional`, or `out`",
+                "expected `cell`, `relationship`, `conditional`, or `out`",
                 tok.span(),
             )),
             None => Err(ParseError::new(
@@ -259,7 +259,7 @@ impl AdamParser {
     /// [`build_cell_from_segment`](Self::build_cell_from_segment)).
     ///
     /// - Precondition: `segment` requires no pre-loaded arguments (a `cell` initializer never
-    ///   has an input-cell scope pushed, unlike a `relate` binding's, `out` declaration's, or
+    ///   has an input-cell scope pushed, unlike a `relationship` binding's, `out` declaration's, or
     ///   `require`ment's body).
     ///
     /// # Errors
@@ -447,12 +447,12 @@ impl AdamParser {
         ))
     }
 
-    /// `relate_decl = "relate" "{" { binding } "}".`
+    /// `relationship_decl = "relationship" "{" { binding } "}".`
     ///
     /// - Postcondition: the returned `RelationshipId` identifies the relationship just added to
     ///   `ctx.sheet`.
-    fn parse_relate_decl(&mut self, ctx: &mut ParseContext) -> Result<RelationshipId> {
-        ctx.is_keyword("relate"); // consume
+    fn parse_relationship_decl(&mut self, ctx: &mut ParseContext) -> Result<RelationshipId> {
+        ctx.is_keyword("relationship"); // consume
         ctx.expect_open_brace()?;
         let mut methods = Vec::new();
         while !ctx.at_close_brace() {
@@ -464,32 +464,29 @@ impl AdamParser {
             .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))
     }
 
-    /// `binding = identifier { "," identifier } ":=" or_expression ";".`
+    /// `binding = binding_target ":=" or_expression ";".`
     fn parse_binding(&mut self, ctx: &mut ParseContext) -> Result<Method> {
-        let mut outputs: NamedCells = Vec::new();
-        loop {
-            let (name, span) = ctx.consume_ident()?;
+        let (names, destructure) = parse_binding_target(ctx)?;
+        let mut outputs: NamedCells = Vec::with_capacity(names.len());
+        for (name, span) in names {
             let (cell_id, shape) = ctx
                 .cell_names
                 .get(&name)
                 .cloned()
                 .ok_or_else(|| ParseError::new(format!("undeclared cell `{name}`"), span))?;
             outputs.push((name, cell_id, shape));
-            if !ctx.consume_punct(",") {
-                break;
-            }
         }
         ctx.expect_punct(":=")?;
         let (segment, inputs) = self.parse_deduced_expr(ctx)?;
         ctx.expect_punct(";")?;
-        let compiled = self.compile_outputs(ctx, &segment, &outputs)?;
+        let compiled = self.compile_outputs(ctx, &segment, &outputs, destructure)?;
         Ok(build_method(inputs, outputs, segment, compiled))
     }
 
     /// Parses an `or_expression` whose input cells are deduced from whichever already-declared
     /// cell identifiers it references, rather than an explicit `cell_list` — the mechanism
     /// shared by a conditional's match-subject expression ([`Self::parse_match_expr`]), a
-    /// `relate` binding's right-hand side, an `out` declaration's initializer, and a
+    /// `relationship` binding's right-hand side, an `out` declaration's initializer, and a
     /// `require`ment body.
     ///
     /// Each 0-arity identifier lookup that names an already-declared cell is assigned the
@@ -750,7 +747,7 @@ impl AdamParser {
         Ok(())
     }
 
-    /// Parses one `conditional_branch`/`default_branch`'s shared body: `"{" { relate_decl }
+    /// Parses one `conditional_branch`/`default_branch`'s shared body: `"{" { relationship_decl }
     /// "}"`, up to (not including) the closing `}`.
     fn parse_branch_relationships(
         &mut self,
@@ -758,10 +755,10 @@ impl AdamParser {
     ) -> Result<Vec<RelationshipId>> {
         let mut rel_ids = Vec::new();
         while !ctx.at_close_brace() {
-            if !matches!(ctx.peek_token(), Some(Token::Identifier(id)) if id == "relate") {
-                return Err(ctx.err_at("expected `relate`"));
+            if !matches!(ctx.peek_token(), Some(Token::Identifier(id)) if id == "relationship") {
+                return Err(ctx.err_at("expected `relationship`"));
             }
-            rel_ids.push(self.parse_relate_decl(ctx)?);
+            rel_ids.push(self.parse_relationship_decl(ctx)?);
         }
         Ok(rel_ids)
     }
@@ -928,28 +925,31 @@ impl AdamParser {
     }
 
     /// Determines how to split a compiled body segment's result across `outputs`, given their
-    /// declared shapes — used by `parse_binding` to dispatch a `relate` binding's single- vs.
-    /// multi-output cases against a single compiled `or_expression`. Written generically so any
-    /// future N-output construct can reuse it; `out` declarations are always single-output and
-    /// currently use their own simpler, separate dispatch instead.
+    /// declared shapes — used by `parse_binding` to dispatch a `relationship` binding's direct-bind vs.
+    /// destructuring cases against a single compiled `or_expression`. Written generically so any
+    /// future N-output construct can reuse it; `out` declarations are always single-output,
+    /// never destructuring, and currently use their own simpler, separate dispatch instead.
     ///
-    /// One output takes the segment's single result directly (scalar via `call_dyn`, tuple-typed
-    /// via `call_dyn_as_dynamic_sequence`, or the trivial empty-tuple case); more than one
-    /// requires the result to be a tuple of matching arity and element shapes, split element-wise
-    /// via `call_dyn_tuple_mixed`.
+    /// A non-destructuring single output (`destructure` false; always `outputs.len() == 1`)
+    /// takes the segment's single result directly (scalar via `call_dyn`, tuple-typed via
+    /// `call_dyn_as_dynamic_sequence`, or the trivial empty-tuple case). A destructuring binding
+    /// (`destructure` true, one or more outputs — see `ast::BindingDecl::destructure`) requires
+    /// the result to be a tuple of matching arity and element shapes, split element-wise via
+    /// `call_dyn_tuple_mixed`.
     ///
     /// # Errors
     /// Returns `Err` if any output's declared shape doesn't structurally match the body's actual
     /// result (scalar type mismatch, tuple arity mismatch, or tuple element shape mismatch, at
-    /// any nesting depth), or if a single scalar/empty-tuple output's expression produced no
-    /// value.
+    /// any nesting depth), or if a single non-destructuring scalar/empty-tuple output's
+    /// expression produced no value.
     fn compile_outputs(
         &self,
         ctx: &mut ParseContext,
         segment: &DynSegment,
         outputs: &[(String, CellId, TypeShape)],
+        destructure: bool,
     ) -> Result<CompiledOutputs> {
-        if outputs.len() == 1 {
+        if outputs.len() == 1 && !destructure {
             let (out_name, _, out_shape) = &outputs[0];
             match out_shape {
                 TypeShape::Named(out_type_id) => {
@@ -1123,7 +1123,8 @@ enum CompiledOutputs {
     /// a distinct leaf `TypeId`, not `DynTuple`) — so this is its own case, matched directly
     /// against a `()`-typed body result and stored as a trivially-empty `DynamicSequence`.
     EmptyTuple,
-    /// N > 1 outputs: the segment's tuple result, split element-wise via `call_dyn_tuple_mixed`.
+    /// A destructuring binding (one or more outputs): the segment's tuple result, split
+    /// element-wise via `call_dyn_tuple_mixed`.
     Tuple(Vec<cel_runtime::DynExtractor>),
 }
 
@@ -1203,6 +1204,48 @@ fn point(span: Span) -> crate::ast::ExprSpan {
     }
 }
 
+/// `binding_target = identifier | "(" identifier { "," identifier } [ "," ] ")".`
+///
+/// Returns the output names in declaration order alongside whether the left-hand side requests
+/// destructuring: `false` for a bare identifier or a single parenthesized identifier with no
+/// comma (mere grouping, matching Rust's `(a)` pattern); `true` for `(a,)` (a 1-tuple pattern,
+/// trailing comma mandatory) or `(a, b, ...)`.
+fn parse_binding_target(ctx: &mut ParseContext) -> Result<(Vec<(String, Span)>, bool)> {
+    if !ctx.at_open_paren() {
+        let (name, span) = ctx.consume_ident()?;
+        return Ok((vec![(name, span)], false));
+    }
+
+    ctx.expect_open_paren()?;
+    let (first_name, first_span) = ctx.consume_ident()?;
+    if ctx.at_close_paren() {
+        // Grouping: exactly one identifier, no comma -- same as the bare form.
+        ctx.expect_close_paren()?;
+        return Ok((vec![(first_name, first_span)], false));
+    }
+    if !ctx.consume_punct(",") {
+        return Err(ctx.err_at("expected ',' or closing parenthesis"));
+    }
+    if ctx.at_close_paren() {
+        // Single identifier + trailing comma: destructures a 1-tuple.
+        ctx.expect_close_paren()?;
+        return Ok((vec![(first_name, first_span)], true));
+    }
+    let mut outputs = vec![(first_name, first_span)];
+    loop {
+        let (name, span) = ctx.consume_ident()?;
+        outputs.push((name, span));
+        if ctx.at_close_paren() {
+            break;
+        }
+        if !ctx.consume_punct(",") {
+            return Err(ctx.err_at("expected ',' or closing parenthesis"));
+        }
+    }
+    ctx.expect_close_paren()?;
+    Ok((outputs, true))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1279,14 +1322,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_relate_with_a_single_binding() {
+    fn parse_relationship_with_a_single_binding() {
         let mut sheet = parser()
             .parse_str(
                 r#"
                 sheet s {
                     cell a: i32 = 2;
                     cell b: i32 = 0;
-                    relate {
+                    relationship {
                         b := a;
                     }
                 }
@@ -1299,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_relate_deduces_inputs_from_referenced_identifiers() {
+    fn parse_relationship_deduces_inputs_from_referenced_identifiers() {
         let mut sheet = parser()
             .parse_str(
                 r#"
@@ -1307,7 +1350,7 @@ mod tests {
                     cell a: i32 = 2;
                     cell b: i32 = 3;
                     cell c: i32 = 0;
-                    relate {
+                    relationship {
                         c := a * b;
                     }
                 }
@@ -1320,7 +1363,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_relate_with_multiple_bindings_lets_the_planner_pick_a_direction() {
+    fn parse_relationship_with_multiple_bindings_lets_the_planner_pick_a_direction() {
         // `c` is declared first (and so has the weakest cell strength — `adam_rs`'s
         // planner processes cells in *descending* strength order, preferentially
         // leaving the strongest cells as sources, so the earliest-declared cell is the
@@ -1334,7 +1377,7 @@ mod tests {
                     cell c: i32 = 0;
                     cell a: i32 = 2;
                     cell b: i32 = 3;
-                    relate {
+                    relationship {
                         c := a * b;
                         a := c / b;
                         b := c / a;
@@ -1354,7 +1397,7 @@ mod tests {
             r#"
             sheet s {
                 cell a: i32 = 1;
-                relate {
+                relationship {
                     missing := a;
                 }
             }
@@ -1372,8 +1415,8 @@ mod tests {
                     cell w: i32 = 4;
                     cell x: i32 = 0;
                     cell y: i32 = 0;
-                    relate {
-                        x, y := (w, w * 2);
+                    relationship {
+                        (x, y) := (w, w * 2);
                     }
                 }
             "#,
@@ -1394,13 +1437,70 @@ mod tests {
                 cell w: i32 = 4;
                 cell x: i32 = 0;
                 cell y: i32 = 0;
-                relate {
-                    x, y := w;
+                relationship {
+                    (x, y) := w;
                 }
             }
         "#,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_binding_multi_output_without_parens_is_a_parse_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell w: i32 = 4;
+                cell x: i32 = 0;
+                cell y: i32 = 0;
+                relationship {
+                    x, y := (w, w * 2);
+                }
+            }
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_binding_single_element_tuple_destructure_extracts_the_element() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell w: i32 = 4;
+                    cell x: i32 = 0;
+                    relationship {
+                        (x,) := (w,);
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (x_id, _) = sheet.cell_names["x"].clone();
+        assert_eq!(*sheet.read::<i32>(x_id).unwrap(), 4);
+    }
+
+    #[test]
+    fn parse_binding_single_parenthesized_identifier_without_comma_is_a_direct_bind() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell w: i32 = 4;
+                    cell x: i32 = 0;
+                    relationship {
+                        (x) := w;
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (x_id, _) = sheet.cell_names["x"].clone();
+        assert_eq!(*sheet.read::<i32>(x_id).unwrap(), 4);
     }
 
     #[test]
@@ -1522,7 +1622,7 @@ mod tests {
 
     #[test]
     fn parses_a_sheet_with_doc_comments_on_every_declaration_kind() {
-        let source = "//! module docs\nsheet s {\n    /// a cell\n    cell x: i32 = 1;\n\n    /// another cell\n    cell y: i32 = 2;\n\n    /// a relate\n    relate { y := x; }\n}";
+        let source = "//! module docs\nsheet s {\n    /// a cell\n    cell x: i32 = 1;\n\n    /// another cell\n    cell y: i32 = 2;\n\n    /// a relationship\n    relationship { y := x; }\n}";
         let parsed = parser().parse_str(source).unwrap();
         assert_eq!(parsed.cell_names.len(), 2);
     }
@@ -1533,7 +1633,7 @@ mod tests {
             r#"
             sheet s {
                 cell x: f64 = 1.0;
-                relate { x := bogus; }
+                relationship { x := bogus; }
             }
         "#,
         );
@@ -1550,7 +1650,7 @@ mod tests {
             sheet s {
                 cell x: f64 = 0.0;
                 cell n: i32 = 0;
-                relate { n := x; }
+                relationship { n := x; }
             }
         "#,
         );
@@ -1567,7 +1667,7 @@ mod tests {
                 cell b:    i32 = 4;
                 cell sum:  i32;
                 cell diff: i32;
-                relate { sum, diff := (a + b, a - b); }
+                relationship { (sum, diff) := (a + b, a - b); }
             }
         "#,
             )
@@ -1591,7 +1691,7 @@ mod tests {
                 cell x: i32;
                 cell y: i32;
                 cell z: i32;
-                relate { x, y, z := (a + b, a - b); }
+                relationship { (x, y, z) := (a + b, a - b); }
             }
         "#,
         );
@@ -1613,7 +1713,7 @@ mod tests {
                 cell b: f64 = 2.0;
                 cell x: i32;
                 cell y: i32;
-                relate { x, y := (a, b); }
+                relationship { (x, y) := (a, b); }
             }
         "#,
         );
@@ -1633,7 +1733,7 @@ mod tests {
             sheet s {
                 cell x: i32 = 1;
                 cell y: i32;
-                relate { y := (x,); }
+                relationship { y := (x,); }
             }
         "#,
         );
@@ -1652,7 +1752,7 @@ mod tests {
                     cell a: i32 = 3;
                     cell b: i32 = 4;
                     cell pair: (i32, i32);
-                    relate { pair := (a, b); }
+                    relationship { pair := (a, b); }
                 }
             "#,
             )
@@ -1674,7 +1774,7 @@ mod tests {
                     cell b: i32 = 4;
                     cell pair: (i32, i32);
                     cell extra: i32;
-                    relate { pair, extra := ((a, b), a); }
+                    relationship { (pair, extra) := ((a, b), a); }
                 }
             "#,
             )
@@ -1696,7 +1796,7 @@ mod tests {
                 sheet s {
                     cell pair: (i32, i32) = (10, 20);
                     cell sum: i32;
-                    relate { sum := pair.0 + pair.1; }
+                    relationship { sum := pair.0 + pair.1; }
                 }
             "#,
             )
@@ -1714,7 +1814,7 @@ mod tests {
                 cell a: i32 = 1;
                 cell b: f64 = 2.0;
                 cell pair: (i32, i32);
-                relate { pair := (a, b); }
+                relationship { pair := (a, b); }
             }
         "#,
         );
@@ -1733,7 +1833,7 @@ mod tests {
                     cell b: i32 = 4;
                     cell sum: i32;
                     cell diff: i32;
-                    relate { sum, diff := (a + b, a - b); }
+                    relationship { (sum, diff) := (a + b, a - b); }
                 }
             "#,
             )
@@ -1756,7 +1856,7 @@ mod tests {
                     // `()` alone references no cell, and adam_rs rejects a method with no
                     // inputs -- reference `x` via an if/else whose branches both still
                     // evaluate to `()`, so the binding has a deduced input.
-                    relate { nothing := if x > 0 { () } else { () }; }
+                    relationship { nothing := if x > 0 { () } else { () }; }
                 }
             "#,
             )
@@ -1779,13 +1879,13 @@ mod tests {
                 cell mode:   i32 = 0;
                 conditional mode {
                     0i32 => {
-                        relate { height := width; }
+                        relationship { height := width; }
                     },
                     1i32 => {
-                        relate { height := width * ratio; }
+                        relationship { height := width * ratio; }
                     },
                     _ => {
-                        relate { height := width; }
+                        relationship { height := width; }
                     },
                 }
             }
@@ -1809,8 +1909,8 @@ mod tests {
                 cell f: f64;
                 conditional mode {
                     0i32 => {
-                        relate { c := a * b; }
-                        relate { f := d * e; }
+                        relationship { c := a * b; }
+                        relationship { f := d * e; }
                     }
                 }
             }
@@ -1821,7 +1921,7 @@ mod tests {
     }
 
     #[test]
-    fn conditional_branch_bare_binding_without_relate_wrapper_is_error() {
+    fn conditional_branch_bare_binding_without_relationship_wrapper_is_error() {
         let result = parser().parse_str(
             r#"
             sheet s {
@@ -1832,7 +1932,7 @@ mod tests {
         );
         assert!(
             result.is_err(),
-            "a conditional_branch body now requires relate_decl, not a bare binding"
+            "a conditional_branch body now requires relationship_decl, not a bare binding"
         );
     }
 
@@ -1842,7 +1942,7 @@ mod tests {
             r#"
             sheet s {
                 cell x: i32 = 0;
-                conditional bogus { 0i32 => { relate { x := x; } } }
+                conditional bogus { 0i32 => { relationship { x := x; } } }
             }
         "#,
         );
@@ -1859,7 +1959,7 @@ mod tests {
             sheet s {
                 cell mode: i32 = 0;
                 cell x:    f64 = 0.0;
-                conditional mode { 1.0 => { relate { x := x; } } }
+                conditional mode { 1.0 => { relationship { x := x; } } }
             }
         "#,
         );
@@ -1879,8 +1979,8 @@ mod tests {
                     cell x: f64 = 1.0;
                     cell y: f64;
                     conditional mode {
-                        (0, 0) => { relate { y := x; } },
-                        _ => { relate { y := x * 2.0; } },
+                        (0, 0) => { relationship { y := x; } },
+                        _ => { relationship { y := x * 2.0; } },
                     }
                 }
             "#,
@@ -1902,7 +2002,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional a && b {
-                        true => { relate { y := x; } },
+                        true => { relationship { y := x; } },
                     }
                 }
             "#,
@@ -1932,7 +2032,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional a && a {
-                        true => { relate { y := x; } },
+                        true => { relationship { y := x; } },
                     }
                 }
             "#,
@@ -1953,7 +2053,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional mode {
-                        1i32 => { relate { y := x; } },
+                        1i32 => { relationship { y := x; } },
                     }
                 }
             "#,
@@ -1981,7 +2081,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional (a, b) {
-                        (1i32, 2i32) => { relate { y := x; } },
+                        (1i32, 2i32) => { relationship { y := x; } },
                     }
                 }
             "#,
@@ -2035,7 +2135,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional m {
-                        mode_one => { relate { y := x; } },
+                        mode_one => { relationship { y := x; } },
                     }
                 }
             "#,
@@ -2053,7 +2153,7 @@ mod tests {
             sheet s {
                 cell a: bool = true;
                 conditional a && nope {
-                    true => { relate { a := a; } },
+                    true => { relationship { a := a; } },
                 }
             }
         "#,
@@ -2081,7 +2181,7 @@ mod tests {
                 cell width:  f64 = 4.0;
                 cell height: f64 = 3.0;
                 cell area:   f64;
-                relate {
+                relationship {
                     area := width * height;
                     width := area / height;
                     height := area / width;
@@ -2271,7 +2371,7 @@ mod tests {
                 cell width: f64 = 4.0;
                 cell height: f64 = 3.0;
                 out area: f64 := width * height;
-                relate { width := area; }
+                relationship { width := area; }
             }
         "#,
         );
@@ -2307,7 +2407,7 @@ mod tests {
                 cell mode: i32 = 0;
                 out area: f64 := width * height;
                 conditional mode {
-                    0i32 => { relate { width := area; } }
+                    0i32 => { relationship { width := area; } }
                 }
             }
         "#,

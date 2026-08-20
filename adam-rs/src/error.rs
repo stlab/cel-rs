@@ -29,10 +29,10 @@ pub enum Error {
     /// A method's function returned an error during execution.
     MethodFailed(anyhow::Error),
 
-    /// A method is structurally invalid (e.g. inputs ∩ outputs is non-empty,
-    /// the outputs list is empty, a relationship's methods reference
-    /// different sets of cells, or two methods in a relationship share an
-    /// identical output set).
+    /// A method is structurally invalid (e.g. the outputs list is empty, a
+    /// relationship's methods reference different sets of cells, or two methods in
+    /// a relationship share an identical output set). A method with no inputs is
+    /// not an error: it defines a fixed point (a constant) rather than a derivation.
     InvalidMethod,
 
     /// Two methods in the same relationship have `inputs ∪ outputs` sets that don't

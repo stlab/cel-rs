@@ -62,8 +62,8 @@ pub struct Sheet {
 pub enum SheetItem {
     /// A `cell` declaration.
     Cell(CellDecl),
-    /// A `relate` declaration.
-    Relate(RelateDecl),
+    /// A `relationship` declaration.
+    Relationship(RelationshipDecl),
     /// A `conditional` declaration.
     Conditional(ConditionalDecl),
     /// An `out` declaration.
@@ -91,7 +91,7 @@ impl SheetItem {
     pub fn span(&self) -> ExprSpan {
         match self {
             SheetItem::Cell(c) => c.span,
-            SheetItem::Relate(r) => r.span,
+            SheetItem::Relationship(r) => r.span,
             SheetItem::Conditional(c) => c.span,
             SheetItem::Out(o) => o.span,
             SheetItem::Error { span, .. } => *span,
@@ -102,7 +102,7 @@ impl SheetItem {
     pub(crate) fn set_leading_comment(&mut self, comment: Comment) {
         match self {
             SheetItem::Cell(c) => c.leading_comment = Some(comment),
-            SheetItem::Relate(r) => r.leading_comment = Some(comment),
+            SheetItem::Relationship(r) => r.leading_comment = Some(comment),
             SheetItem::Conditional(c) => c.leading_comment = Some(comment),
             SheetItem::Out(o) => o.leading_comment = Some(comment),
             SheetItem::Error {
@@ -115,7 +115,7 @@ impl SheetItem {
     pub(crate) fn set_blank_line_before(&mut self, value: bool) {
         match self {
             SheetItem::Cell(c) => c.blank_line_before = value,
-            SheetItem::Relate(r) => r.blank_line_before = value,
+            SheetItem::Relationship(r) => r.blank_line_before = value,
             SheetItem::Conditional(c) => c.blank_line_before = value,
             SheetItem::Out(o) => o.blank_line_before = value,
             SheetItem::Error {
@@ -133,7 +133,7 @@ impl SheetItem {
                 c.doc_comment = Some(text);
                 c.span.start = start;
             }
-            SheetItem::Relate(r) => {
+            SheetItem::Relationship(r) => {
                 r.doc_comment = Some(text);
                 r.span.start = start;
             }
@@ -208,10 +208,10 @@ pub struct CellDecl {
     pub span: ExprSpan,
 }
 
-/// `relate_decl = "relate" "{" { binding } "}".`
+/// `relationship_decl = "relationship" "{" { binding } "}".`
 #[derive(Debug, Clone)]
-pub struct RelateDecl {
-    /// The relate block's bindings, in declaration order.
+pub struct RelationshipDecl {
+    /// The relationship block's bindings, in declaration order.
     pub bindings: Vec<BindingDecl>,
     /// A leading comment immediately preceding this declaration, if recovered.
     pub leading_comment: Option<Comment>,
@@ -229,21 +229,35 @@ pub struct RelateDecl {
     /// The span of this declaration's own opening `{`, used to recover trailing trivia when
     /// `bindings` is empty. See <https://github.com/stlab/cel-rs/issues/52>.
     pub open_brace_span: ExprSpan,
-    /// The span of the whole `relate { ... }` declaration.
+    /// The span of the whole `relationship { ... }` declaration.
     pub span: ExprSpan,
 }
 
-/// `binding = identifier { "," identifier } ":=" or_expression ";".`
+/// `binding = binding_target ":=" or_expression ";".`
+/// `binding_target = identifier | "(" identifier { "," identifier } [ "," ] ")".`
 ///
 /// Unlike the old `method_decl` this replaces, a binding names no explicit input cell list —
 /// its inputs are whichever already-declared cells `body` references, deduced at compile time
 /// (see `crate::parser::AdamParser::parse_deduced_expr`); this untyped CST parser has no cell
 /// declarations to resolve against, so it records no input list at all, only the outputs.
+///
+/// Parenthesizing the left-hand side requests tuple destructuring, matching Rust's tuple-pattern
+/// syntax: `(a, b) := ...` and the single-element `(a,) := ...` (trailing comma mandatory,
+/// exactly as in a Rust 1-tuple pattern) both destructure `body`'s tuple result element-wise into
+/// `outputs`. A bare identifier, or a single parenthesized identifier with no comma (`(a) :=
+/// ...`, mere grouping), binds `body`'s whole result directly to that one output instead — see
+/// [`Self::destructure`].
 #[derive(Debug, Clone)]
 pub struct BindingDecl {
-    /// The binding's output cell names (the comma-separated left-hand side), in declaration
-    /// order.
+    /// The binding's output cell names (the left-hand side), in declaration order.
     pub outputs: Vec<(String, ExprSpan)>,
+    /// Whether the left-hand side requests destructuring (`(a, b) := ...` or `(a,) := ...`) as
+    /// opposed to a direct bind (`a := ...` or the equivalent grouping `(a) := ...`). Always
+    /// `true` when `outputs.len() > 1`; when `outputs.len() == 1`, distinguishes "destructure
+    /// this single-element tuple" from "bind this whole value directly" — a distinction the
+    /// parenthesized-or-not left-hand side is the only way to express, since both forms name
+    /// exactly one output.
+    pub destructure: bool,
     /// The parsed right-hand-side expression.
     pub body: cel_parser::Expr,
     /// A leading comment immediately preceding this binding, if recovered by
@@ -252,7 +266,7 @@ pub struct BindingDecl {
     /// Whether a blank line preceded this binding, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
-    /// The span of the whole `a, b := ...;` declaration.
+    /// The span of the whole `a := ...;` / `(a, b) := ...;` declaration.
     pub span: ExprSpan,
 }
 
@@ -363,7 +377,7 @@ pub struct ConditionalDecl {
 #[derive(Debug, Clone)]
 pub struct DefaultBranch {
     /// The default branch's relationships, in declaration order.
-    pub relationships: Vec<RelateDecl>,
+    pub relationships: Vec<RelationshipDecl>,
     /// A trailing comment immediately preceding this branch's own closing `}`, if recovered.
     /// See <https://github.com/stlab/cel-rs/issues/52>.
     pub trailing_comment: Option<Comment>,
@@ -376,7 +390,7 @@ pub struct DefaultBranch {
     pub span: ExprSpan,
 }
 
-/// `conditional_branch = literal "=>" "{" { relate_decl } "}" [ "," ].`
+/// `conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].`
 #[derive(Debug, Clone)]
 pub struct ConditionalBranch {
     /// The branch's unresolved match literal.
@@ -384,7 +398,7 @@ pub struct ConditionalBranch {
     /// The literal token's span.
     pub literal_span: ExprSpan,
     /// The branch's relationships, in declaration order.
-    pub relationships: Vec<RelateDecl>,
+    pub relationships: Vec<RelationshipDecl>,
     /// A leading comment immediately preceding this branch, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
@@ -433,9 +447,9 @@ mod tests {
     }
 
     #[test]
-    fn sheet_item_span_reads_the_relate_variant() {
+    fn sheet_item_span_reads_the_relationship_variant() {
         let span = point(Span::call_site());
-        let item = SheetItem::Relate(RelateDecl {
+        let item = SheetItem::Relationship(RelationshipDecl {
             bindings: Vec::new(),
             leading_comment: None,
             doc_comment: None,

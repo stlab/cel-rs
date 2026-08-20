@@ -31,7 +31,7 @@ pub(crate) struct TokenCursor {
     /// `depth` correctly. It does not hold for `Delimiter::Brace` or, now, `Delimiter::Parenthesis`
     /// when the dangling delimiter comes from CEL's own internal grouping instead: CEL's `if`/
     /// `else` expressions use braces for their branches, and CEL's tuple/group literals use
-    /// parens, the same delimiter kinds adam-lang uses for `relate`/`conditional`/`out`'s
+    /// parens, the same delimiter kinds adam-lang uses for `relationship`/`conditional`/`out`'s
     /// `require` bodies and for `type_expr`, respectively. A CEL `if` expression whose then-branch fails to
     /// parse (e.g. `if a { }`), or a CEL tuple/group literal that fails partway through (e.g.
     /// `(+)`), can leave a stray `}`/`)` in the stream that this counter — and
@@ -255,6 +255,17 @@ impl TokenCursor {
         }
     }
 
+    /// Returns whether the next token is `(`.
+    pub(crate) fn at_open_paren(&mut self) -> bool {
+        matches!(
+            self.tokens.as_mut().and_then(|t| t.peek()),
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        )
+    }
+
     /// Returns whether the next token is `)` (or the stream is exhausted).
     pub(crate) fn at_close_paren(&mut self) -> bool {
         matches!(
@@ -350,12 +361,12 @@ impl TokenCursor {
     /// cursor's [`Self::depth`] as observed by the caller *before* it dispatched to the
     /// production that failed. A recovery point is: a `;` seen while at or below `target_depth`
     /// (consumed); a `}` that closes back to at or below `target_depth` (not consumed, so the
-    /// caller's `at_close_brace` check still sees it); or the `cell`/`relate`/`conditional`
+    /// caller's `at_close_brace` check still sees it); or the `cell`/`relationship`/`conditional`
     /// keyword that starts the next sheet item, seen while at or below `target_depth` (not
     /// consumed).
     ///
     /// The failed production may have already consumed one or more of its own opening delimiters
-    /// before the error occurred (e.g. a malformed `relate { .. }`'s own `{`) — the running
+    /// before the error occurred (e.g. a malformed `relationship { .. }`'s own `{`) — the running
     /// [`Self::depth`] this method reads and updates reflects that, so this method first skips
     /// back out through those still-open delimiters before applying the stopping conditions.
     /// Comparing with `<=` rather than strict equality is a defensive guard: malformed input with
@@ -367,7 +378,7 @@ impl TokenCursor {
     /// `expect_open_bracket`/`expect_close_bracket`/`expect_open_paren`/`expect_close_paren` —
     /// `type_expr` is the one adam-lang-grammar production that uses parens, so a malformed
     /// `type_expr`'s own unmatched `(`/`)` must unwind `depth` the same way a malformed
-    /// `relate`/`conditional` body or `out`'s `require` body's brace does.
+    /// `relationship`/`conditional` body or `out`'s `require` body's brace does.
     /// `Delimiter::None` is treated as an ordinary token (consumed, no depth change): it never
     /// appears in adam-lang's own grammar, or in a way `cel_parser` leaves dangling.
     ///
@@ -393,7 +404,7 @@ impl TokenCursor {
     ///
     /// `fallback` is returned as-is when this method consumes zero tokens — i.e. the very next
     /// token already satisfies a stopping condition (most commonly: the failed production
-    /// didn't consume the token that turned out to be a sibling `cell`/`relate`/
+    /// didn't consume the token that turned out to be a sibling `cell`/`relationship`/
     /// `conditional` keyword). Without this, the first stopping check's `return last` would
     /// return `last`'s pre-loop initial value, which — if nothing has been consumed yet — would
     /// be the *next* item's own first token's span, not any part of the item that actually
@@ -401,7 +412,7 @@ impl TokenCursor {
     /// production returns), seeded via [`Self::set_last_span`] to the failed item's own first
     /// token immediately before dispatching to that production: this way, a zero-tokens-skipped
     /// recovery reports the last token the failed production genuinely consumed before giving up
-    /// (e.g. a malformed `cell bad relate { .. }`'s `Error` span covers `cell bad`, not
+    /// (e.g. a malformed `cell bad relationship { .. }`'s `Error` span covers `cell bad`, not
     /// just `cell`) — never the seeded starting point alone when more was actually parsed, and
     /// never overlapping into the sibling item that follows.
     ///
@@ -448,7 +459,7 @@ impl TokenCursor {
                 Some(Token::Identifier(id))
                     if at_or_below_target
                         && (id == "cell"
-                            || id == "relate"
+                            || id == "relationship"
                             || id == "conditional"
                             || id == "out") =>
                 {
@@ -484,6 +495,21 @@ mod tests {
         cursor.expect_open_paren().unwrap();
         cursor.expect_close_paren().unwrap();
         assert_eq!(cursor.depth(), 0);
+    }
+
+    #[test]
+    fn at_open_paren_is_true_at_an_open_paren() {
+        let stream = proc_macro2::TokenStream::from_str("( )").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        assert!(cursor.at_open_paren());
+    }
+
+    #[test]
+    fn at_open_paren_is_false_after_the_open_paren_is_consumed() {
+        let stream = proc_macro2::TokenStream::from_str("( )").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        cursor.expect_open_paren().unwrap();
+        assert!(!cursor.at_open_paren());
     }
 
     #[test]

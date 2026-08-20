@@ -7,7 +7,7 @@ sheet out_cell {
 
     conditional p {
         true => {
-            relate {
+            relationship {
                 b := c;
             }
         }

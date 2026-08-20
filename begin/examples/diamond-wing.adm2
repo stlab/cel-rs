@@ -5,18 +5,18 @@ sheet diamond_wing {
     cell d = 2.0;
     cell e = 3.0;
 
-    relate {
+    relationship {
         e := b;
         b := e;
     }
 
-    relate {
+    relationship {
         c := a * b;
         b := c / a;
         a := c / b;
     }
 
-    relate {
+    relationship {
         d := b * c;
         c := d / b;
         b := d / c;

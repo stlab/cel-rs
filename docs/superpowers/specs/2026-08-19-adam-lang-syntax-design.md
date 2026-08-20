@@ -14,26 +14,26 @@ every decision point. Concretely:
 - `default_branch` and `conditional_branch` are described as two different grammar
   productions when the implementation already treats them as one, with `_` as a
   special-cased wildcard pattern.
-- `relationship` is longer than it needs to be for how often it's typed.
 
 ## Grammar (new)
 
 ```
-sheet            = "sheet" identifier "{" { sheet_item } "}".
-sheet_item       = [ doc_comment ] (cell_decl | relate_decl | conditional_decl | out_decl).
+sheet              = "sheet" identifier "{" { sheet_item } "}".
+sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).
 
-cell_decl        = "cell" identifier cell_type_init [ ":=" or_expression ] ";".
-cell_type_init   = (":" type_expr ["=" or_expression]) | ("=" or_expression).
+cell_decl          = "cell" identifier cell_type_init [ ":=" or_expression ] ";".
+cell_type_init     = (":" type_expr ["=" or_expression]) | ("=" or_expression).
 
-relate_decl      = "relate" "{" { binding } "}".
-binding          = identifier {"," identifier} ":=" or_expression ";".
+relationship_decl  = "relationship" "{" { binding } "}".
+binding            = binding_target ":=" or_expression ";".
+binding_target     = identifier | "(" identifier {"," identifier} ["," ] ")".
 
-out_decl         = "out" identifier [":" type_expr] ":=" or_expression
-                     [ "require" "{" { requirement } "}" ] ";".
-requirement      = identifier ":" or_expression ";".
+out_decl           = "out" identifier [":" type_expr] ":=" or_expression
+                       [ "require" "{" { requirement } "}" ] ";".
+requirement        = identifier ":" or_expression ";".
 
-conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".
-conditional_branch = (or_expression | "_") "=>" "{" { relate_decl } "}".
+conditional_decl   = "conditional" or_expression "{" { conditional_branch } "}".
+conditional_branch = (or_expression | "_") "=>" "{" { relationship_decl } "}".
 ```
 
 Unchanged from today: `sheet`, `cell_type_init`, `type_expr`, and the mechanism by
@@ -43,7 +43,12 @@ match subject — extended to method/out/binding bodies rather than reinvented).
 
 ## Design decisions
 
-**`relationship` → `relate`.** Pure rename, no grammar shape change.
+**Keyword stays `relationship` (a later revisit of this pass's original `relate`
+rename).** This pass originally renamed the keyword to `relate` — shorter, and named
+for what the block does. Revisited afterward: `conditional` already names what it
+*is*, not what it does, and the DSL reads more consistently if every block-level
+keyword follows that same noun pattern rather than mixing it with a verb like
+`relate`. `relationship` is kept; no grammar shape change either way.
 
 **Deduced inputs everywhere.** `cell_list` (`"[" identifier {","} "]"`) is gone from
 method/out/binding bodies. A binding or out-writer's inputs are whichever
@@ -51,10 +56,19 @@ already-declared cell names its expression references — reusing
 `parse_match_expr`'s existing identifier-scope mechanism rather than adding new
 machinery. `->` is retired from the grammar entirely (it had no other use).
 
-**Multi-output bindings.** `sum, diff := a + b, a - b` becomes `sum, diff := expr;`
-where the LHS is a comma-separated cell-name list and the RHS's inferred shape must
-be a tuple type of matching arity/element types — this reuses the existing
-`CompiledOutputs::Tuple` shape-matching, not new validation.
+**Multi-output bindings, parenthesized to request destructuring.** `sum, diff := a +
+b, a - b` becomes `(sum, diff) := expr;`, matching Rust's tuple-pattern syntax: the
+parenthesized, comma-separated cell-name list on the LHS requests destructuring, and
+the RHS's inferred shape must be a tuple type of matching arity/element types — this
+reuses the existing `CompiledOutputs::Tuple` shape-matching, not new validation. A
+bare identifier (`x := expr;`) or a single parenthesized identifier with no comma
+(`(x) := expr;`, mere grouping) instead binds `expr`'s whole result directly to `x`.
+Parentheses are mandatory for a real destructure — including the one-output case,
+`(x,) := expr;` (trailing comma required, exactly as in a Rust 1-tuple pattern) —
+because a bare `x := expr;` is otherwise ambiguous between "destructure this
+1-tuple into `x`" and "bind this whole tuple value to `x`" whenever `x`'s declared
+type and the RHS's inferred shape could both be tuples; the parenthesized-or-not LHS
+is the only syntax that can disambiguate the two without a type-directed parse.
 
 **Token: `:=` (not `<==`, not `<-`).** `<-` was rejected early: the lexer's
 Joint-`Punct` combiner joins adjacent punctuation based on *source spacing*
@@ -86,14 +100,14 @@ more optional trailing clause rather than a new production, exactly because
 `cell_type_init` already makes the default/initializer optional given a type
 annotation (mirroring how `out` already seeds via a registered default with no `=`
 syntax at all). Desugars to the unchanged `cell_decl` followed by a synthesized
-`relate { name := expr; }`. **Open question, deliberately deferred:** whether the
+`relationship { name := expr; }`. **Open question, deliberately deferred:** whether the
 synthesized binding is inserted at the declaration's point (forward references to
 not-yet-declared cells stay illegal, consistent with everything else in the grammar
 today) or hoisted to end-of-sheet (would need a new forward-reference concept that
 nothing else in the grammar has). Needs a decision before implementation, not
 included in this pass.
 
-**`relate` drops its optional name entirely** (previously parsed and discarded —
+**`relationship` drops its optional name entirely** (previously parsed and discarded —
 "ignored at runtime"). Named relationships are a future feature to design when there's
 an actual consumer for the name (e.g. diagnostics); the grammar carries no vestigial
 syntax for it in the meantime.
@@ -159,7 +173,7 @@ Untouched: `Conditional`, `ConditionalId`, `add_conditional`, `conditional_decl`
   productions.
 - Likely downstream touch points to check during planning: `adam-lsp` and
   `editors/vscode-adam-lang` (syntax highlighting / keyword lists), if they hardcode
-  the old keyword or token set (`method`, `relationship`, `->`, `condition`).
+  the old keyword or token set (`method`, `->`, `condition`).
 - No migration/back-compat path needed — the project has no clients yet (per root
   `CLAUDE.md`); existing `.adam` fixtures/tests in the repo need updating as part of
   the implementation, not a compatibility shim.

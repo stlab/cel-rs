@@ -3,11 +3,11 @@ sheet inequality {
     cell b = 0.0;
     cell c = 2.0;
 
-    relate {
+    relationship {
         a := if a < b { a } else { b };
         b := if b < a { a } else { b };
     }
-    relate {
+    relationship {
         b := if b < c { b } else { c };
         c := if c < b { b } else { c };
     }

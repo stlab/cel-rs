@@ -48,21 +48,21 @@ impl AdamAstParser {
 
     /// Parses an adam-lang source string into an [`ast::Sheet`].
     ///
-    /// A syntax error inside one `cell`/`relate`/`conditional` item is recorded in
+    /// A syntax error inside one `cell`/`relationship`/`conditional` item is recorded in
     /// `Sheet.errors` and replaced by a `SheetItem::Error` placeholder covering the skipped
     /// tokens; parsing resumes at the next sheet item instead of aborting (see
     /// `TokenCursor::skip_to_recovery_point`). This recovery is declaration-level only: a
-    /// malformed `binding` inside a `relate`/`conditional` block causes the whole
+    /// malformed `binding` inside a `relationship`/`conditional` block causes the whole
     /// enclosing item to become one `SheetItem::Error`.
     ///
     /// Recovery is reliable for syntax errors adam-lang's own grammar detects directly (malformed
-    /// `cell` declarations; `relate`/`conditional`/`binding` structure outside their CEL
+    /// `cell` declarations; `relationship`/`conditional`/`binding` structure outside their CEL
     /// expression bodies, including a malformed `type_expr`'s own dangling `(`/`)`) and for CEL
     /// expression errors that don't leave an unbalanced delimiter of a kind CEL also uses for its
     /// own internal grouping. It is **not** guaranteed when a CEL expression's failure leaves a
     /// dangling, unmatched delimiter of a kind CEL reuses for its own internal structure — e.g. an
     /// `if`/`else` expression's braces, which are the same `Delimiter::Brace` kind adam-lang uses
-    /// for its own `relate`/`conditional` blocks (`if a { }` is one such case), or a
+    /// for its own `relationship`/`conditional` blocks (`if a { }` is one such case), or a
     /// tuple/group literal's parens, the same `Delimiter::Parenthesis` kind `type_expr` uses
     /// (`(+)` is one such case). In that narrower case recovery may abort the entire parse
     /// (returning `Err`) rather than isolating the one malformed item; see
@@ -153,16 +153,16 @@ impl AdamAstParser {
         })
     }
 
-    /// `sheet_item = cell_decl | relate_decl | conditional_decl | out_decl.`
+    /// `sheet_item = cell_decl | relationship_decl | conditional_decl | out_decl.`
     fn parse_sheet_item(&mut self, cursor: &mut TokenCursor) -> Result<ast::SheetItem> {
         use cel_parser::lex_lexer::{HasSpan, Token};
         match cursor.peek_token() {
             Some(Token::Identifier(id)) if id == "cell" => {
                 self.parse_cell_decl(cursor).map(ast::SheetItem::Cell)
             }
-            Some(Token::Identifier(id)) if id == "relate" => {
-                self.parse_relate_decl(cursor).map(ast::SheetItem::Relate)
-            }
+            Some(Token::Identifier(id)) if id == "relationship" => self
+                .parse_relationship_decl(cursor)
+                .map(ast::SheetItem::Relationship),
             Some(Token::Identifier(id)) if id == "conditional" => self
                 .parse_conditional_decl(cursor)
                 .map(ast::SheetItem::Conditional),
@@ -170,7 +170,7 @@ impl AdamAstParser {
                 self.parse_out_decl(cursor).map(ast::SheetItem::Out)
             }
             Some(tok) => Err(cel_parser::ParseError::new(
-                "expected `cell`, `relate`, `conditional`, or `out`",
+                "expected `cell`, `relationship`, `conditional`, or `out`",
                 tok.span(),
             )),
             None => Err(cel_parser::ParseError::new(
@@ -274,17 +274,20 @@ impl AdamAstParser {
         ))
     }
 
-    /// `relate_decl = "relate" "{" { binding } "}".`
-    fn parse_relate_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::RelateDecl> {
+    /// `relationship_decl = "relationship" "{" { binding } "}".`
+    fn parse_relationship_decl(
+        &mut self,
+        cursor: &mut TokenCursor,
+    ) -> Result<ast::RelationshipDecl> {
         let decl_start = cursor.peek_span();
-        cursor.is_keyword("relate");
+        cursor.is_keyword("relationship");
         let open_span = cursor.expect_open_brace()?;
         let mut bindings = Vec::new();
         while !cursor.at_close_brace() {
             bindings.push(self.parse_binding(cursor)?);
         }
         let close_span = cursor.expect_close_brace()?;
-        Ok(ast::RelateDecl {
+        Ok(ast::RelationshipDecl {
             bindings,
             leading_comment: None,
             doc_comment: None,
@@ -299,22 +302,16 @@ impl AdamAstParser {
         })
     }
 
-    /// `binding = identifier { "," identifier } ":=" or_expression ";".`
+    /// `binding = binding_target ":=" or_expression ";".`
     fn parse_binding(&mut self, cursor: &mut TokenCursor) -> Result<ast::BindingDecl> {
         let decl_start = cursor.peek_span();
-        let mut outputs = Vec::new();
-        loop {
-            let (name, span) = cursor.consume_ident()?;
-            outputs.push((name, point(span)));
-            if !cursor.consume_punct(",") {
-                break;
-            }
-        }
+        let (outputs, destructure) = parse_binding_target(cursor)?;
         cursor.expect_punct(":=")?;
         let body = self.parse_cel_or_expression(cursor)?;
         let semi_span = cursor.expect_punct(";")?;
         Ok(ast::BindingDecl {
             outputs,
+            destructure,
             body,
             leading_comment: None,
             blank_line_before: false,
@@ -394,19 +391,19 @@ impl AdamAstParser {
         })
     }
 
-    /// Parses one `conditional_branch`/`default_branch`'s shared body: `"{" { relate_decl }
+    /// Parses one `conditional_branch`/`default_branch`'s shared body: `"{" { relationship_decl }
     /// "}"`, up to (not including) the closing `}`.
     fn parse_branch_relationships(
         &mut self,
         cursor: &mut TokenCursor,
-    ) -> Result<Vec<ast::RelateDecl>> {
+    ) -> Result<Vec<ast::RelationshipDecl>> {
         use cel_parser::lex_lexer::Token;
         let mut relationships = Vec::new();
         while !cursor.at_close_brace() {
-            if !matches!(cursor.peek_token(), Some(Token::Identifier(id)) if id == "relate") {
-                return Err(cursor.err_at("expected `relate`"));
+            if !matches!(cursor.peek_token(), Some(Token::Identifier(id)) if id == "relationship") {
+                return Err(cursor.err_at("expected `relationship`"));
             }
-            relationships.push(self.parse_relate_decl(cursor)?);
+            relationships.push(self.parse_relationship_decl(cursor)?);
         }
         Ok(relationships)
     }
@@ -501,6 +498,48 @@ fn point(span: proc_macro2::Span) -> ast::ExprSpan {
     }
 }
 
+/// `binding_target = identifier | "(" identifier { "," identifier } [ "," ] ")".`
+///
+/// Returns the output names in declaration order alongside whether the left-hand side requests
+/// destructuring: `false` for a bare identifier or a single parenthesized identifier with no
+/// comma (mere grouping, matching Rust's `(a)` pattern); `true` for `(a,)` (a 1-tuple pattern,
+/// trailing comma mandatory) or `(a, b, ...)`.
+fn parse_binding_target(cursor: &mut TokenCursor) -> Result<(Vec<(String, ast::ExprSpan)>, bool)> {
+    if !cursor.at_open_paren() {
+        let (name, span) = cursor.consume_ident()?;
+        return Ok((vec![(name, point(span))], false));
+    }
+
+    cursor.expect_open_paren()?;
+    let (first_name, first_span) = cursor.consume_ident()?;
+    if cursor.at_close_paren() {
+        // Grouping: exactly one identifier, no comma -- same as the bare form.
+        cursor.expect_close_paren()?;
+        return Ok((vec![(first_name, point(first_span))], false));
+    }
+    if !cursor.consume_punct(",") {
+        return Err(cursor.err_at("expected ',' or closing parenthesis"));
+    }
+    if cursor.at_close_paren() {
+        // Single identifier + trailing comma: destructures a 1-tuple.
+        cursor.expect_close_paren()?;
+        return Ok((vec![(first_name, point(first_span))], true));
+    }
+    let mut outputs = vec![(first_name, point(first_span))];
+    loop {
+        let (name, span) = cursor.consume_ident()?;
+        outputs.push((name, point(span)));
+        if cursor.at_close_paren() {
+            break;
+        }
+        if !cursor.consume_punct(",") {
+            return Err(cursor.err_at("expected ',' or closing parenthesis"));
+        }
+    }
+    cursor.expect_close_paren()?;
+    Ok((outputs, true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,12 +595,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_relate_records_bindings_in_order() {
+    fn parse_relationship_records_bindings_in_order() {
         let sheet = AdamAstParser::new()
             .parse_str(
                 r#"
                 sheet s {
-                    relate {
+                    relationship {
                         area := width * height;
                         width := area / height;
                     }
@@ -569,12 +608,90 @@ mod tests {
             "#,
             )
             .unwrap();
-        let ast::SheetItem::Relate(rel) = &sheet.items[0] else {
-            panic!("expected Relate");
+        let ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
         };
         assert_eq!(rel.bindings.len(), 2);
         assert_eq!(rel.bindings[0].outputs[0].0, "area");
         assert!(matches!(rel.bindings[0].body, Expr::Op { ref name, .. } if name == "*"));
+    }
+
+    #[test]
+    fn parse_binding_bare_identifier_target_is_not_a_destructure() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { relationship { x := a; } }")
+            .unwrap();
+        let ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
+        };
+        assert!(!rel.bindings[0].destructure);
+        assert_eq!(rel.bindings[0].outputs.len(), 1);
+    }
+
+    #[test]
+    fn parse_binding_grouped_single_identifier_target_is_not_a_destructure() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { relationship { (x) := a; } }")
+            .unwrap();
+        let ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
+        };
+        assert!(!rel.bindings[0].destructure);
+        assert_eq!(rel.bindings[0].outputs.len(), 1);
+    }
+
+    #[test]
+    fn parse_binding_single_element_tuple_target_is_a_destructure() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { relationship { (x,) := (a,); } }")
+            .unwrap();
+        let ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
+        };
+        assert!(rel.bindings[0].destructure);
+        assert_eq!(rel.bindings[0].outputs.len(), 1);
+        assert_eq!(rel.bindings[0].outputs[0].0, "x");
+    }
+
+    #[test]
+    fn parse_binding_multi_identifier_target_is_a_destructure() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { relationship { (x, y) := (a, b); } }")
+            .unwrap();
+        let ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
+        };
+        assert!(rel.bindings[0].destructure);
+        assert_eq!(
+            rel.bindings[0]
+                .outputs
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["x", "y"]
+        );
+    }
+
+    #[test]
+    fn multi_output_binding_without_parens_recovers_at_sheet_item_level() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell good_before: i32 = 1;
+                    relationship {
+                        x, y := (a, b);
+                    }
+                    cell good_after: i32 = 2;
+                }
+            "#,
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
     #[test]
@@ -584,8 +701,8 @@ mod tests {
                 r#"
                 sheet s {
                     conditional mode {
-                        0i32 => { relate { height := width; } },
-                        _ => { relate { height := width; } },
+                        0i32 => { relationship { height := width; } },
+                        _ => { relationship { height := width; } },
                     }
                 }
             "#,
@@ -606,7 +723,7 @@ mod tests {
                 r#"
                 sheet s {
                     conditional a && b {
-                        _ => { relate { height := width; } },
+                        _ => { relationship { height := width; } },
                     }
                 }
             "#,
@@ -632,8 +749,8 @@ mod tests {
                 sheet s {
                     conditional mode {
                         0i32 => {
-                            relate { b := a; }
-                            relate { d := c; }
+                            relationship { b := a; }
+                            relationship { d := c; }
                         },
                     }
                 }
@@ -654,8 +771,8 @@ mod tests {
                 sheet s {
                     conditional mode {
                         _ => {
-                            relate { b := a; }
-                            relate { d := c; }
+                            relationship { b := a; }
+                            relationship { d := c; }
                         },
                     }
                 }
@@ -672,8 +789,8 @@ mod tests {
     }
 
     #[test]
-    fn conditional_branch_bare_binding_without_relate_wrapper_recovers() {
-        // A branch body is now `{ relate_decl }`, not `{ binding }` directly — a bare binding is
+    fn conditional_branch_bare_binding_without_relationship_wrapper_recovers() {
+        // A branch body is now `{ relationship_decl }`, not `{ binding }` directly — a bare binding is
         // a syntax error, recovered at the enclosing conditional_decl's sheet-item level (see
         // `recovery_malformed_conditional_item_recovers`).
         let sheet = AdamAstParser::new()
@@ -697,10 +814,10 @@ mod tests {
     #[test]
     fn parse_binding_body_is_a_cel_expr_tree() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { relate { c := (a + b, a - b); } }")
+            .parse_str("sheet s { relationship { c := (a + b, a - b); } }")
             .unwrap();
-        let ast::SheetItem::Relate(rel) = &sheet.items[0] else {
-            panic!("expected Relate");
+        let ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
         };
         assert!(matches!(rel.bindings[0].body, Expr::Tuple { .. }));
     }
@@ -750,7 +867,7 @@ mod tests {
         // must still cover whatever the failed production consumed before giving up (here,
         // "cell bad" -- the name it read before failing the ':'/'=' check) rather than
         // collapsing to just its first token ("cell").
-        let source = "sheet s { cell bad relate { y := x; } }";
+        let source = "sheet s { cell bad relationship { y := x; } }";
         let sheet = AdamAstParser::new().parse_str(source).unwrap();
         let ast::SheetItem::Error { span, .. } = &sheet.items[0] else {
             panic!("expected Error");
@@ -790,19 +907,19 @@ mod tests {
 
     /// Regression test for a bug where `skip_to_recovery_point` tracked nesting depth with a
     /// fresh local counter starting at 0 on every call, instead of the cursor's actual running
-    /// depth. A malformed `relate { .. }` item opens its own `{` before the inner error (on
+    /// depth. A malformed `relationship { .. }` item opens its own `{` before the inner error (on
     /// `bad`, which isn't a valid binding) is detected, so recovery begins already one delimiter
-    /// deep; the old code treated the relate's own closing `}` as if it were back at
+    /// deep; the old code treated the relationship's own closing `}` as if it were back at
     /// sheet-item level, leaving it and everything after unconsumed and causing the whole parse
     /// to abort with `Err` instead of recovering just this one item.
     #[test]
-    fn recovery_malformed_relate_item_recovers() {
+    fn recovery_malformed_relationship_item_recovers() {
         let sheet = AdamAstParser::new()
             .parse_str(
                 r#"
                 sheet s {
                     cell good_before: i32 = 1;
-                    relate { bad }
+                    relationship { bad }
                     cell good_after: i32 = 2;
                 }
             "#,
@@ -815,8 +932,8 @@ mod tests {
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
-    /// Same regression as `recovery_malformed_relate_item_recovers`, but for a malformed
-    /// `conditional` item, which — like `relate` — unconditionally opens its own `{`
+    /// Same regression as `recovery_malformed_relationship_item_recovers`, but for a malformed
+    /// `conditional` item, which — like `relationship` — unconditionally opens its own `{`
     /// before any inner error can occur.
     #[test]
     fn recovery_malformed_conditional_item_recovers() {
@@ -839,7 +956,7 @@ mod tests {
     }
 
     /// Deeper regression case: the syntax error occurs inside a binding's own body expression (an
-    /// incomplete CEL expression), one delimiter below the sheet-item level (the relate's own
+    /// incomplete CEL expression), one delimiter below the sheet-item level (the relationship's own
     /// `{`) — unlike the old `method_decl` grammar, a binding's body has no brace of its own, so
     /// there is one less delimiter to unwind through than before. Recovery must still land at
     /// sheet-item level rather than aborting the whole parse.
@@ -850,7 +967,7 @@ mod tests {
                 r#"
                 sheet s {
                     cell good_before: i32 = 1;
-                    relate {
+                    relationship {
                         b := a + ;
                     }
                     cell good_after: i32 = 2;
@@ -871,7 +988,7 @@ mod tests {
     /// malformed `type_expr`'s own dangling paren unwinds `TokenCursor::depth` correctly (see
     /// `malformed_tuple_type_recovers_at_the_next_sheet_item`) — `type_expr` is the first
     /// adam-lang-grammar production to use parens, so its own unmatched `(`/`)` must be tracked
-    /// exactly like a malformed `relate`/`conditional` block's brace. Previously this
+    /// exactly like a malformed `relationship`/`conditional` block's brace. Previously this
     /// exact scenario recovered cleanly: `Delimiter::Parenthesis` was deliberately treated as
     /// depth-neutral during recovery, safe *only* because CEL owned every paren back then, so a
     /// dangling one could never be mistaken for an adam-lang-tracked one. Now that `type_expr` also
@@ -882,7 +999,7 @@ mod tests {
     /// expression like `(+)` causes the embedded CEL sub-parser to consume the opening `(` (via
     /// `is_tuple_or_group`) but fail before consuming the matching `)`, since it never went through
     /// `TokenCursor` (see `TokenCursor::depth`'s own docs); that leftover, untracked `)` is now
-    /// mistaken by `skip_to_recovery_point` for the enclosing `relate`'s own paren-tracked
+    /// mistaken by `skip_to_recovery_point` for the enclosing `relationship`'s own paren-tracked
     /// nesting closing, mis-stopping recovery one delimiter early and aborting the whole parse with
     /// `Err` rather than isolating just this one malformed item. Fixing this in general requires
     /// `cel_parser`'s `Parser<C>` to report back exactly what it left unbalanced on a failed parse —
@@ -894,7 +1011,7 @@ mod tests {
             r#"
                 sheet s {
                     cell good_before: i32 = 1;
-                    relate { b := (+); }
+                    relationship { b := (+); }
                     cell good_after: i32 = 2;
                 }
             "#,
@@ -915,12 +1032,12 @@ mod tests {
     /// opening `{` directly (bypassing `TokenCursor`, exactly like the paren case) but fails
     /// before consuming the matching `}` when the then-branch itself fails to parse (here, an
     /// empty `{ }`). Because CEL's `if`/`else` grammar reuses `Delimiter::Brace` — the same kind
-    /// adam-lang's own `relate`/`conditional` blocks use — `skip_to_recovery_point`
+    /// adam-lang's own `relationship`/`conditional` blocks use — `skip_to_recovery_point`
     /// cannot tell "a stray brace CEL left dangling" apart from "a real adam-lang-tracked brace" by
     /// delimiter kind alone (`Delimiter::Parenthesis` now shares this exact ambiguity too, since
     /// `type_expr` started using parens at the adam-lang-grammar level; only `Delimiter::None`,
     /// never used by adam-lang's own grammar, remains safely depth-neutral). The stray `}` here is
-    /// mistaken for the `relate`'s own closing brace, so recovery stops one brace early and
+    /// mistaken for the `relationship`'s own closing brace, so recovery stops one brace early and
     /// the whole parse aborts with `Err` instead of isolating just this one item.
     ///
     /// Fixing this in general requires `cel_parser`'s `Parser<C>` to report back exactly what
@@ -933,7 +1050,7 @@ mod tests {
             r#"
                 sheet s {
                     cell good_before: i32 = 1;
-                    relate { b := if a { }; }
+                    relationship { b := if a { }; }
                     cell good_after: i32 = 2;
                 }
             "#,
@@ -950,8 +1067,8 @@ mod tests {
     /// `is_or_expression` call doesn't consume — so the very next token `skip_to_recovery_point`
     /// sees is a keyword-shaped identifier (`cell`) written just after it. Because that
     /// identifier is encountered while `depth` is still elevated (still inside the
-    /// `relate`'s own brace, not yet unwound), the `at_or_below_target` guard on
-    /// the `cell`/`relate`/`conditional` stopping check doesn't fire for it, so it's
+    /// `relationship`'s own brace, not yet unwound), the `at_or_below_target` guard on
+    /// the `cell`/`relationship`/`conditional` stopping check doesn't fire for it, so it's
     /// swallowed as ordinary garbage rather than treated as a boundary.
     ///
     /// This does not corrupt the result or panic, and it does not silently drop a *subsequent,
@@ -965,7 +1082,7 @@ mod tests {
     #[test]
     fn recovery_known_limitation_keyword_shaped_garbage_still_aborts_cleanly() {
         let result = AdamAstParser::new().parse_str(
-            "sheet s { relate { b := if a { + cell good: i32 = 1; }; } cell trailing: i32 = 2; }",
+            "sheet s { relationship { b := if a { + cell good: i32 = 1; }; } cell trailing: i32 = 2; }",
         );
         assert!(
             result.is_err(),
@@ -1185,12 +1302,12 @@ mod tests {
     }
 
     #[test]
-    fn attaches_an_outer_doc_comment_to_a_relate() {
+    fn attaches_an_outer_doc_comment_to_a_relationship() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s {\n    /// docs\n    relate { b := a; }\n}")
+            .parse_str("sheet s {\n    /// docs\n    relationship { b := a; }\n}")
             .unwrap();
-        let ast::SheetItem::Relate(rel) = &sheet.items[0] else {
-            panic!("expected Relate");
+        let ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
         };
         assert_eq!(rel.doc_comment.as_deref(), Some(" docs"));
     }
@@ -1199,7 +1316,7 @@ mod tests {
     fn attaches_an_outer_doc_comment_to_a_conditional() {
         let sheet = AdamAstParser::new()
             .parse_str(
-                "sheet s {\n    cell p: i32 = 0;\n    /// docs\n    conditional p {\n        _ => { relate { b := a; } }\n    }\n}",
+                "sheet s {\n    cell p: i32 = 0;\n    /// docs\n    conditional p {\n        _ => { relationship { b := a; } }\n    }\n}",
             )
             .unwrap();
         let ast::SheetItem::Conditional(cond) = &sheet.items[1] else {
@@ -1279,7 +1396,7 @@ mod tests {
     fn a_doc_comment_before_a_binding_recovers_as_a_declaration_level_error() {
         let sheet = AdamAstParser::new()
             .parse_str(
-                "sheet s {\n    relate {\n        /// not allowed here\n        b := a;\n    }\n}",
+                "sheet s {\n    relationship {\n        /// not allowed here\n        b := a;\n    }\n}",
             )
             .unwrap();
         assert!(!sheet.errors.is_empty());

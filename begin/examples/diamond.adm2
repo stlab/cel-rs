@@ -4,13 +4,13 @@ sheet diamond {
     cell c = 2.0;
     cell d = 3.0;
 
-    relate {
+    relationship {
         c := a * b;
         b := c / a;
         a := c / b;
     }
 
-    relate {
+    relationship {
         d := b * c;
         c := d / b;
         b := d / c;

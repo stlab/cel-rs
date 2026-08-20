@@ -74,9 +74,9 @@ imperative event handlers.
 ## adam-lang
 
 **Mission:** the DSL, built on `cel-parser` infrastructure, that expresses `adam-rs`
-constraint systems as source text (`sheet { cell ...; relate { name := expr; } }`).
+constraint systems as source text (`sheet { cell ...; relationship { name := expr; } }`).
 
-**Current state:** functional parser covering cells, `relate` blocks, `out` cells, and
+**Current state:** functional parser covering cells, `relationship` blocks, `out` cells, and
 conditional groups; the only `cel-parser` client so far.
 
 **Directions being explored:**
@@ -87,7 +87,7 @@ conditional groups; the only `cel-parser` client so far.
 
   ```text
   sheet multiply(a, b, c) {
-      relate {
+      relationship {
           c := a * b;
           a := c / b;
           b := c / a;
@@ -99,7 +99,7 @@ conditional groups; the only `cel-parser` client so far.
       cell f = 5.0;
       cell g = 6.0;
 
-      relate multiply(f, g, e);
+      relationship multiply(f, g, e);
   }
   ```
 
@@ -115,7 +115,7 @@ conditional groups; the only `cel-parser` client so far.
       cell min_scale = fit_scale;
       cell max_scale = max(fit_scale, max_zoom);
 
-      relate {
+      relationship {
           view := view.clamp_scale(min_scale, max_scale)
               .clamp_translation(content_bounds, viewport);
       }
@@ -125,7 +125,7 @@ conditional groups; the only `cel-parser` client so far.
       cell bounds: Rect;
       cell size: Size;
 
-      relate view_constraints(bounds, size, 8.0);
+      relationship view_constraints(bounds, size, 8.0);
   }
   ```
 

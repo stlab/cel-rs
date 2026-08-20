@@ -2,7 +2,7 @@
 //! re-slicing the gap between two consecutive AST nodes' spans (the same technique `rustfmt` uses
 //! for the identical problem — see `cel-parser/src/lex_lexer.rs`'s `test_span_preservation`), and
 //! attaches each to the nearest following node. Applied recursively to every sibling list in the
-//! tree — `Sheet.items`, a `RelateDecl`'s `bindings`, a `ConditionalDecl`'s `branches` and
+//! tree — `Sheet.items`, a `RelationshipDecl`'s `bindings`, a `ConditionalDecl`'s `branches` and
 //! `default`, each `ConditionalBranch`'s `relationships`, and an `OutDecl`'s `require` block's
 //! `requirements` — not just the top level. Also
 //! recovers a comment preceding the `sheet` keyword itself (e.g. a file header) into
@@ -28,8 +28,8 @@
 use proc_macro2::LineColumn;
 
 use crate::ast::{
-    BindingDecl, ConditionalBranch, ConditionalDecl, ExprSpan, OutDecl, RelateDecl, RequireBlock,
-    RequirementDecl, Sheet,
+    BindingDecl, ConditionalBranch, ConditionalDecl, ExprSpan, OutDecl, RelationshipDecl,
+    RequireBlock, RequirementDecl, Sheet,
 };
 
 /// An AST node that can carry recovered leading trivia, attached by [`attach_gaps`].
@@ -63,7 +63,7 @@ impl TriviaTarget for BindingDecl {
     }
 }
 
-impl TriviaTarget for RelateDecl {
+impl TriviaTarget for RelationshipDecl {
     fn span(&self) -> ExprSpan {
         self.span
     }
@@ -127,7 +127,7 @@ impl TrailingTriviaTarget for Sheet {
     }
 }
 
-impl TrailingTriviaTarget for RelateDecl {
+impl TrailingTriviaTarget for RelationshipDecl {
     fn open_brace_span(&self) -> proc_macro2::Span {
         self.open_brace_span.end
     }
@@ -260,7 +260,7 @@ fn attach_conditional_trailing(source: &str, line_starts: &[usize], cond: &mut C
 }
 
 /// Recovers comments/blank-lines from every gap in `sheet` — a leading comment before the
-/// `sheet` keyword itself, its own top-level items, and every nested `relate`/`conditional`
+/// `sheet` keyword itself, its own top-level items, and every nested `relationship`/`conditional`
 /// body — attaching each to the nearest following node.
 ///
 /// - Precondition: `sheet` was parsed from exactly `source` (unmodified), so its items' spans'
@@ -279,7 +279,9 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
     attach_trailing(source, &line_starts, last_child_end, sheet);
     for item in &mut sheet.items {
         match item {
-            crate::ast::SheetItem::Relate(rel) => attach_relate(source, &line_starts, rel),
+            crate::ast::SheetItem::Relationship(rel) => {
+                attach_relationship(source, &line_starts, rel)
+            }
             crate::ast::SheetItem::Conditional(cond) => {
                 attach_conditional(source, &line_starts, cond)
             }
@@ -289,8 +291,8 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
     }
 }
 
-/// Recovers trivia for a relate block's bindings.
-fn attach_relate(source: &str, line_starts: &[usize], rel: &mut RelateDecl) {
+/// Recovers trivia for a relationship block's bindings.
+fn attach_relationship(source: &str, line_starts: &[usize], rel: &mut RelationshipDecl) {
     attach_gaps(source, line_starts, &mut rel.bindings);
     let last_child_end = rel.bindings.last().map(|b| b.span().end.end());
     attach_trailing(source, line_starts, last_child_end, rel);
@@ -304,7 +306,7 @@ fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut Conditiona
         let last_child_end = branch.relationships.last().map(|r| r.span().end.end());
         attach_trailing(source, line_starts, last_child_end, branch);
         for rel in &mut branch.relationships {
-            attach_relate(source, line_starts, rel);
+            attach_relationship(source, line_starts, rel);
         }
     }
     if let Some(default) = &mut cond.default {
@@ -312,7 +314,7 @@ fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut Conditiona
         let last_child_end = default.relationships.last().map(|r| r.span().end.end());
         attach_trailing(source, line_starts, last_child_end, default);
         for rel in default.relationships.iter_mut() {
-            attach_relate(source, line_starts, rel);
+            attach_relationship(source, line_starts, rel);
         }
     }
     attach_conditional_trailing(source, line_starts, cond);
@@ -621,14 +623,17 @@ mod tests {
 
     #[test]
     fn recovery_span_that_abuts_the_next_keyword_does_not_invert_the_gap() {
-        let source = "sheet s { cell bad relate { y := x; } }";
+        let source = "sheet s { cell bad relationship { y := x; } }";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet); // must not panic
         assert!(matches!(
             sheet.items[0],
             crate::ast::SheetItem::Error { .. }
         ));
-        assert!(matches!(sheet.items[1], crate::ast::SheetItem::Relate(_)));
+        assert!(matches!(
+            sheet.items[1],
+            crate::ast::SheetItem::Relationship(_)
+        ));
     }
 
     #[test]
@@ -683,12 +688,12 @@ mod tests {
     }
 
     #[test]
-    fn attaches_a_comment_and_blank_line_to_a_binding_inside_a_relate() {
-        let source = "sheet s {\n    relate {\n        b := a;\n\n        // second\n        a := b;\n    }\n}";
+    fn attaches_a_comment_and_blank_line_to_a_binding_inside_a_relationship() {
+        let source = "sheet s {\n    relationship {\n        b := a;\n\n        // second\n        a := b;\n    }\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
-        let crate::ast::SheetItem::Relate(rel) = &sheet.items[0] else {
-            panic!("expected Relate");
+        let crate::ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
         };
         assert_eq!(
             rel.bindings[1].leading_comment,
@@ -699,7 +704,7 @@ mod tests {
 
     #[test]
     fn attaches_a_comment_to_a_conditional_branch() {
-        let source = "sheet s {\n    conditional m {\n        0i32 => { relate { b := a; } }\n        // one\n        1i32 => { relate { b := a; } }\n    }\n}";
+        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { b := a; } }\n        // one\n        1i32 => { relationship { b := a; } }\n    }\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
@@ -712,8 +717,8 @@ mod tests {
     }
 
     #[test]
-    fn attaches_a_comment_to_a_relate_nested_inside_a_conditional_branch() {
-        let source = "sheet s {\n    conditional m {\n        0i32 => {\n            relate { b := a; }\n            // second\n            relate { a := b; }\n        }\n    }\n}";
+    fn attaches_a_comment_to_a_relationship_nested_inside_a_conditional_branch() {
+        let source = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship { b := a; }\n            // second\n            relationship { a := b; }\n        }\n    }\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
@@ -726,8 +731,8 @@ mod tests {
     }
 
     #[test]
-    fn attaches_a_comment_to_a_relate_nested_inside_the_default_branch() {
-        let source = "sheet s {\n    conditional m {\n        _ => {\n            relate { b := a; }\n            // second\n            relate { a := b; }\n        }\n    }\n}";
+    fn attaches_a_comment_to_a_relationship_nested_inside_the_default_branch() {
+        let source = "sheet s {\n    conditional m {\n        _ => {\n            relationship { b := a; }\n            // second\n            relationship { a := b; }\n        }\n    }\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
@@ -806,12 +811,12 @@ mod tests {
     }
 
     #[test]
-    fn recovers_a_trailing_comment_in_an_empty_relate_block() {
-        let source = "sheet s {\n    relate {\n        // only this\n    }\n}";
+    fn recovers_a_trailing_comment_in_an_empty_relationship_block() {
+        let source = "sheet s {\n    relationship {\n        // only this\n    }\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
-        let crate::ast::SheetItem::Relate(rel) = &sheet.items[0] else {
-            panic!("expected Relate");
+        let crate::ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
         };
         assert_eq!(
             rel.trailing_comment,
@@ -820,12 +825,13 @@ mod tests {
     }
 
     #[test]
-    fn recovers_a_trailing_comment_before_a_relates_closing_brace() {
-        let source = "sheet s {\n    relate {\n        b := a;\n        // trailing\n    }\n}";
+    fn recovers_a_trailing_comment_before_a_relationships_closing_brace() {
+        let source =
+            "sheet s {\n    relationship {\n        b := a;\n        // trailing\n    }\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
-        let crate::ast::SheetItem::Relate(rel) = &sheet.items[0] else {
-            panic!("expected Relate");
+        let crate::ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
         };
         assert_eq!(
             rel.trailing_comment,
@@ -835,7 +841,7 @@ mod tests {
 
     #[test]
     fn recovers_a_trailing_comment_before_a_conditional_branchs_closing_brace() {
-        let source = "sheet s {\n    conditional m {\n        0i32 => {\n            relate { b := a; }\n            // trailing\n        }\n    }\n}";
+        let source = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship { b := a; }\n            // trailing\n        }\n    }\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
@@ -849,7 +855,7 @@ mod tests {
 
     #[test]
     fn recovers_a_trailing_comment_in_a_default_arm() {
-        let source = "sheet s {\n    conditional m {\n        _ => {\n            relate { b := a; }\n            // trailing\n        }\n    }\n}";
+        let source = "sheet s {\n    conditional m {\n        _ => {\n            relationship { b := a; }\n            // trailing\n        }\n    }\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
@@ -864,7 +870,7 @@ mod tests {
 
     #[test]
     fn recovers_a_trailing_comment_before_a_conditionals_own_closing_brace() {
-        let source = "sheet s {\n    conditional m {\n        0i32 => { relate { b := a; } }\n        // trailing\n    }\n}";
+        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { b := a; } }\n        // trailing\n    }\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {

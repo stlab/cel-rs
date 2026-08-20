@@ -1,12 +1,12 @@
 // Copyright 2013 Adobe
 // Distributed under the Boost Software License, Version 1.0.
 // (See accompanying file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
-//
+// 
 // Ported from ASL's classic `image_size` Adam sheet. adam-lang has no separate
 // input/constant/interface/output/invariant sections and no `unlink`. The translation below:
-// - ASL `constant`/one-directional `<==` rules -> a `relate` block with a single binding
+// - ASL `constant`/one-directional `<==` rules -> a `relationship` block with a single binding
 // (the planner always derives that cell; there is no alternative binding to pick).
-// - ASL `when (cond) relate {}` (arbitrary boolean expressions) -> `conditional <expr> {
+// - ASL `when (cond) relationship {}` (arbitrary boolean expressions) -> `conditional <expr> {
 // true => {...} false => {...} }`.
 // - ASL `unlink x : init <== cond ? x : fallback;` -> `conditional cond`'s "false" branch
 // forces `x` back to `fallback`; its "true" branch leaves `x` untouched (a free,
@@ -34,11 +34,13 @@ sheet image_resize {
 
     cell resample_method: String = "bicubic";
 
-    cell width_pixels: i32 = 1600; // Photoshop: dim_width_pixels
-    cell width_percent: f64 = 100.0; // Photoshop: dim_width_percent
+    cell width_pixels: i32 = 1600;
+    // Photoshop: dim_width_pixels
+    cell width_percent: f64 = 100.0;
 
-    cell height_pixels: i32 = 1200; // Photoshop: dim_height_pixels
-    cell height_percent: f64 = 100.0; // Photoshop: dim_height_percent
+    cell height_pixels: i32 = 1200;
+    // Photoshop: dim_height_pixels
+    cell height_percent: f64 = 100.0;
 
     cell doc_width_inches: f64 = 5.333333333333333;
     cell doc_width_percent: f64 = 100.0;
@@ -65,67 +67,67 @@ sheet image_resize {
     // quality (factor 1): 300.0 / 1 = 300.0.
     cell screen_lpi: f64 = 300.0;
 
-    relate {
+    relationship {
         original_doc_width := original_width as f64 / original_resolution;
     }
-    relate {
+    relationship {
         original_doc_height := original_height as f64 / original_resolution;
     }
 
     // Unconditional: doc_width_inches <-> doc_width_percent, pinned to original_doc_width.
-    relate {
+    relationship {
         doc_width_inches := doc_width_percent * original_doc_width / 100.0;
         doc_width_percent := doc_width_inches * 100.0 / original_doc_width;
     }
 
     // Unconditional: doc_height_inches <-> doc_height_percent, pinned to original_doc_height.
-    relate {
+    relationship {
         doc_height_inches := doc_height_percent * original_doc_height / 100.0;
         doc_height_percent := doc_height_inches * 100.0 / original_doc_height;
     }
 
-    relate {
+    relationship {
         screen_lpi := doc_resolution / if auto_quality == "draft" { 1.0 } else if auto_quality == "good" { 1.5 } else { 2.0 };
         doc_resolution := screen_lpi * if auto_quality == "draft" { 1.0 } else if auto_quality == "good" { 1.5 } else { 2.0 };
     }
 
     conditional resample {
         true => {
-            relate {
+            relationship {
                 width_pixels := round(width_percent * original_width as f64 / 100.0) as i32;
                 width_percent := width_pixels as f64 * 100.0 / original_width as f64;
             }
-            relate {
+            relationship {
                 height_pixels := round(height_percent * original_height as f64 / 100.0) as i32;
                 height_percent := height_pixels as f64 * 100.0 / original_height as f64;
             }
-            relate {
+            relationship {
                 doc_width_inches := width_pixels as f64 / doc_resolution;
                 width_pixels := round(doc_width_inches * doc_resolution) as i32;
                 doc_resolution := width_pixels as f64 / doc_width_inches;
             }
-            relate {
+            relationship {
                 doc_height_inches := height_pixels as f64 / doc_resolution;
                 height_pixels := round(doc_height_inches * doc_resolution) as i32;
                 doc_resolution := height_pixels as f64 / doc_height_inches;
             }
         }
         false => {
-            relate {
-                constrain := resample == false;
+            relationship {
+                constrain := true;
             }
             // width_pixels/percent snap back to the un-resampled defaults.
-            relate {
-                width_pixels, width_percent := (original_width, 100.0);
+            relationship {
+                (width_pixels, width_percent) := (original_width, 100.0);
             }
-            relate {
-                height_pixels, height_percent := (original_height, 100.0);
+            relationship {
+                (height_pixels, height_percent) := (original_height, 100.0);
             }
-            relate {
+            relationship {
                 doc_resolution := original_width as f64 / doc_width_inches;
                 doc_width_inches := original_width as f64 / doc_resolution;
             }
-            relate {
+            relationship {
                 doc_resolution := original_height as f64 / doc_height_inches;
                 doc_height_inches := original_height as f64 / doc_resolution;
             }
@@ -134,24 +136,22 @@ sheet image_resize {
 
     conditional resample && constrain {
         true => {
-            relate {
+            relationship {
                 height_percent := width_percent;
                 width_percent := height_percent;
             }
         }
         false => {
-            relate {
-                scale_styles := resample && constrain;
+            relationship {
+                scale_styles := false;
             }
         }
     }
 
     out byte_count: i64 := width_pixels as i64 * height_pixels as i64 * 32i64;
 
-    out result: (String, i32, i32, f64, bool, String) :=
-        if resample { ("resize_image", width_pixels, height_pixels, doc_resolution, scale_styles, resample_method) } else { ("set_resolution", 0, 0, doc_resolution, false, "") }
-        require {
-            width_max: width_pixels <= 300000;
-            height_max: height_pixels <= 300000;
-        };
+    out result: (String, i32, i32, f64, bool, String) := if resample { ("resize_image", width_pixels, height_pixels, doc_resolution, scale_styles, resample_method) } else { ("set_resolution", 0, 0, doc_resolution, false, "") } require {
+        width_max: width_pixels <= 300000;
+        height_max: height_pixels <= 300000;
+    };
 }

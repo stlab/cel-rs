@@ -133,7 +133,9 @@ impl Sheet {
     /// Registers a relationship defined by a non-empty list of methods.
     ///
     /// All methods are validated: their declared `TypeId`s must match the
-    /// registered cells, and each method must have at least one input and one output.
+    /// registered cells, and each method must have at least one output. A method
+    /// with no inputs is explicitly allowed: it defines a fixed point (a constant,
+    /// independent of every other cell) rather than a derivation.
     /// On success the `RelationshipId` is added to each adjacent cell's adjacency list.
     ///
     /// A cell that appears in both a method's inputs and its outputs is a self-referencing
@@ -141,8 +143,7 @@ impl Sheet {
     ///
     /// # Errors
     ///
-    /// - `Error::InvalidMethod` — `methods` is empty, a method has no inputs,
-    ///   or a method has no outputs.
+    /// - `Error::InvalidMethod` — `methods` is empty, or a method has no outputs.
     /// - `Error::MismatchedMethodCells` — some method's `inputs ∪ outputs` differs
     ///   from another method's in the same relationship.
     /// - `Error::DuplicateMethodOutputs` — a method's own `outputs` list names a cell
@@ -162,7 +163,7 @@ impl Sheet {
         }
 
         for method in &methods {
-            if method.inputs.is_empty() || method.outputs.is_empty() {
+            if method.outputs.is_empty() {
                 return Err(Error::InvalidMethod);
             }
 
@@ -1780,6 +1781,22 @@ mod tests {
             sheet.add_relationship(vec![method]),
             Err(Error::TypeMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn add_relationship_zero_input_method_defines_a_fixed_point() {
+        // A method with no inputs is a valid degenerate case: it always produces the
+        // same value, independent of every other cell in the sheet.
+        let mut sheet = Sheet::new();
+        let b = sheet.add_cell(0_i32);
+        let method = Method::new(vec![], vec![b], vec![], vec![TypeId::of::<i32>()], |_| {
+            Ok(vec![Box::new(42_i32)])
+        });
+        let rel = sheet.add_relationship(vec![method]).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 42);
+        assert!(sheet.is_forced(b));
+        assert!(sheet.is_relationship_forced(rel));
     }
 
     #[test]

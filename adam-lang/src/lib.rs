@@ -6,18 +6,19 @@
 //! # Grammar
 //!
 //! ```text
-//! sheet            = "sheet" identifier "{" { sheet_item } "}".
-//! sheet_item       = [ doc_comment ] (cell_decl | relate_decl | conditional_decl | out_decl).
-//! cell_decl        = "cell" identifier cell_type_init [ ":=" or_expression ] ";".
-//! cell_type_init   = (":" type_expr ["=" or_expression]) | ("=" or_expression).
-//! type_expr        = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
-//! relate_decl      = "relate" "{" { binding } "}".
-//! binding          = identifier {"," identifier} ":=" or_expression ";".
-//! conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".
-//! conditional_branch = (or_expression | "_") "=>" "{" { relate_decl } "}" [ "," ].
-//! out_decl         = "out" identifier [":" type_expr] ":=" or_expression
-//!                      [ "require" "{" { requirement } "}" ] ";".
-//! requirement      = identifier ":" or_expression ";".
+//! sheet              = "sheet" identifier "{" { sheet_item } "}".
+//! sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).
+//! cell_decl          = "cell" identifier cell_type_init [ ":=" or_expression ] ";".
+//! cell_type_init     = (":" type_expr ["=" or_expression]) | ("=" or_expression).
+//! type_expr          = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
+//! relationship_decl  = "relationship" "{" { binding } "}".
+//! binding            = binding_target ":=" or_expression ";".
+//! binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
+//! conditional_decl   = "conditional" or_expression "{" { conditional_branch } "}".
+//! conditional_branch = (or_expression | "_") "=>" "{" { relationship_decl } "}" [ "," ].
+//! out_decl           = "out" identifier [":" type_expr] ":=" or_expression
+//!                        [ "require" "{" { requirement } "}" ] ";".
+//! requirement        = identifier ":" or_expression ";".
 //! ```
 //!
 //! The `cell_decl` grammar shown above includes an optional trailing `":=" or_expression`
