@@ -928,8 +928,10 @@ impl AdamParser {
     }
 
     /// Determines how to split a compiled body segment's result across `outputs`, given their
-    /// declared shapes — shared by every construct that writes one or more named cells from a
-    /// single compiled `or_expression` (a `relate` binding, an `out` declaration's initializer).
+    /// declared shapes — used by `parse_binding` to dispatch a `relate` binding's single- vs.
+    /// multi-output cases against a single compiled `or_expression`. Written generically so any
+    /// future N-output construct can reuse it; `out` declarations are always single-output and
+    /// currently use their own simpler, separate dispatch instead.
     ///
     /// One output takes the segment's single result directly (scalar via `call_dyn`, tuple-typed
     /// via `call_dyn_as_dynamic_sequence`, or the trivial empty-tuple case); more than one
