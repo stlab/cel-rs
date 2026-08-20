@@ -231,54 +231,6 @@ impl TokenCursor {
         }
     }
 
-    /// Consumes `[`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the next token is not `[`.
-    ///
-    /// - Postcondition: on success, increments [`Self::depth`] by 1.
-    pub(crate) fn expect_open_bracket(&mut self) -> Result<Span> {
-        let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
-            Some(Token::OpenDelim {
-                delimiter: Delimiter::Bracket,
-                span,
-            }) => (true, *span),
-            other => (false, other.map(|t| t.span()).unwrap_or(Span::call_site())),
-        };
-        if ok {
-            self.advance();
-            self.depth += 1;
-            Ok(span)
-        } else {
-            Err(ParseError::new("expected `[`", span))
-        }
-    }
-
-    /// Consumes `]`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the next token is not `]`.
-    ///
-    /// - Postcondition: on success, decrements [`Self::depth`] by 1.
-    pub(crate) fn expect_close_bracket(&mut self) -> Result<Span> {
-        let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
-            Some(Token::CloseDelim {
-                delimiter: Delimiter::Bracket,
-                span,
-            }) => (true, *span),
-            other => (false, other.map(|t| t.span()).unwrap_or(Span::call_site())),
-        };
-        if ok {
-            self.advance();
-            self.depth -= 1;
-            Ok(span)
-        } else {
-            Err(ParseError::new("expected `]`", span))
-        }
-    }
-
     /// Consumes `(`.
     ///
     /// # Errors
