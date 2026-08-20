@@ -28,7 +28,7 @@
       "patterns": [
         {
           "name": "keyword.declaration.adam-lang",
-          "match": "\\b(sheet|cell|relationship|conditional|out|condition|method)\\b"
+          "match": "\\b(sheet|cell|relate|conditional|out|require)\\b"
         },
         {
           "name": "keyword.other.wildcard.adam-lang",
@@ -64,7 +64,7 @@
       "patterns": [
         {
           "name": "keyword.operator.arrow.adam-lang",
-          "match": "->|=>"
+          "match": ":=|=>"
         },
         {
           "name": "keyword.operator.adam-lang",
