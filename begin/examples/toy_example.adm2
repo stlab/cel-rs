@@ -8,37 +8,37 @@ sheet demo {
     cell g = 0.0;
     cell p: i32 = 0;
 
-    relationship {
-        method [a, b] -> [c] { a * b }
-        method [b, c] -> [a] { c / b }
-        method [a, c] -> [b] { c / a }
+    relate {
+        c := a * b;
+        a := c / b;
+        b := c / a;
     }
 
-    relationship {
-        method [d, e] -> [f] { d * e }
-        method [e, f] -> [d] { f / e }
-        method [d, f] -> [e] { f / d }
+    relate {
+        f := d * e;
+        d := f / e;
+        e := f / d;
     }
 
     conditional p {
         0i32 => {
-            relationship {
-                method [f] -> [c] { f }
-                method [c] -> [f] { c }
+            relate {
+                c := f;
+                f := c;
             }
         }
         1i32 => {
-            relationship {
-                method [f] -> [c] { f * 2.0 }
-                method [c] -> [f] { c / 2.0 }
+            relate {
+                c := f * 2.0;
+                f := c / 2.0;
             }
-            relationship {
-                method [c] -> [g] { c * 10.0 }
+            relate {
+                g := c * 10.0;
             }
         }
         _ => {
-            relationship {
-                method [f] -> [c] { f }
+            relate {
+                c := f;
             }
         }
     }

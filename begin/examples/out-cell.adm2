@@ -1,4 +1,4 @@
-// out cell with condition and "don't care" value.
+// out cell with requirement and "don't care" value.
 sheet out_cell {
     cell a = 0.0;
     cell b = 0.0;
@@ -7,15 +7,13 @@ sheet out_cell {
 
     conditional p {
         true => {
-            relationship {
-                method [c] -> [b] { c }
+            relate {
+                b := c;
             }
         }
     }
 
-    out result {
-        method [a, b] { (a, b) }
-
-        condition min_a [a, b] { a <= b }
-    }
+    out result := (a, b) require {
+        min_a: a <= b;
+    };
 }

@@ -5,20 +5,20 @@ sheet diamond_wing {
     cell d = 2.0;
     cell e = 3.0;
 
-    relationship {
-        method [b] -> [e] { b }
-        method [e] -> [b] { e }
+    relate {
+        e := b;
+        b := e;
     }
 
-    relationship {
-        method [a, b] -> [c] { a * b }
-        method [a, c] -> [b] { c / a }
-        method [b, c] -> [a] { c / b }
+    relate {
+        c := a * b;
+        b := c / a;
+        a := c / b;
     }
 
-    relationship {
-        method [b, c] -> [d] { b * c }
-        method [b, d] -> [c] { d / b }
-        method [c, d] -> [b] { d / c }
+    relate {
+        d := b * c;
+        c := d / b;
+        b := d / c;
     }
 }

@@ -13,12 +13,12 @@
 //!   Inspector field is disabled and it is highlighted in the graph.
 //! - Any other `p`: the two systems are independent and `g` is not forced.
 //!
-//! `g`'s relationship is its own `relationship { .. }` block within the `1i32` branch,
-//! not folded into the `c`/`f` relationship's methods: a relationship's forced outputs
-//! are the *intersection* of its methods' pure outputs, so mixing `[c] -> [g]` in with
-//! the `c`/`f` methods would make that intersection empty, forcing nothing. A single
-//! `conditional` branch can hold any number of `relationship` blocks, each contributing
-//! its own independent forced-output set while that branch is active.
+//! `g`'s relate block is its own `relate { .. }` block within the `1i32` branch, not
+//! folded into the `c`/`f` relate block's bindings: a relationship's forced outputs
+//! are the *intersection* of its bindings' pure outputs, so mixing `g := ..` in with
+//! the `c`/`f` bindings would make that intersection empty, forcing nothing. A single
+//! `conditional` branch can hold any number of `relate` blocks, each contributing its
+//! own independent forced-output set while that branch is active.
 
 use adam_lang::{AdamParser, TypeRegistry};
 use adam_rs::Sheet;
@@ -274,10 +274,10 @@ mod tests {
             cell a: f64 = 2.0;
             cell b: f64 = 3.0;
             cell c: f64;
-            relationship {
-                method [a, b] -> [c] { a * b }
-                method [b, c] -> [a] { c / b }
-                method [a, c] -> [b] { c / a }
+            relate {
+                c := a * b;
+                a := c / b;
+                b := c / a;
             }
         }
     "#;
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn build_sheet_runtime_error_still_returns_sheet_and_message() {
-        let source = "sheet s { cell x: i32 = 0; cell y: i32; relationship { method [x] -> [y] { 10i32 / x } } }";
+        let source = "sheet s { cell x: i32 = 0; cell y: i32; relate { y := 10i32 / x; } }";
         let outcome = build_sheet(source, "test.adm2");
         assert!(
             outcome.sheet_labels.is_some(),

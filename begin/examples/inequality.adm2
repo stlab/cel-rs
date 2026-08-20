@@ -3,12 +3,12 @@ sheet inequality {
     cell b = 0.0;
     cell c = 2.0;
 
-    relationship {
-        method [a, b] -> [a] { if a < b { a } else { b } }
-        method [a, b] -> [b] { if b < a { a } else { b } }
+    relate {
+        a := if a < b { a } else { b };
+        b := if b < a { a } else { b };
     }
-    relationship {
-        method [b, c] -> [b] { if b < c { b } else { c } }
-        method [b, c] -> [c] { if c < b { b } else { c } }
+    relate {
+        b := if b < c { b } else { c };
+        c := if c < b { b } else { c };
     }
 }
