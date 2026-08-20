@@ -328,7 +328,7 @@ pub struct RequirementDecl {
     pub span: ExprSpan,
 }
 
-/// `conditional_decl = "conditional" or_expression "{" { conditional_branch } [ default_branch ] "}".`
+/// `conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".`
 #[derive(Debug, Clone)]
 pub struct ConditionalDecl {
     /// The match subject: an arbitrary expression over already-declared cells (a bare

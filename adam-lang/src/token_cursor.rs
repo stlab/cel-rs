@@ -31,8 +31,8 @@ pub(crate) struct TokenCursor {
     /// `depth` correctly. It does not hold for `Delimiter::Brace` or, now, `Delimiter::Parenthesis`
     /// when the dangling delimiter comes from CEL's own internal grouping instead: CEL's `if`/
     /// `else` expressions use braces for their branches, and CEL's tuple/group literals use
-    /// parens, the same delimiter kinds adam-lang uses for `relationship`/`conditional`/method
-    /// bodies and for `type_expr`, respectively. A CEL `if` expression whose then-branch fails to
+    /// parens, the same delimiter kinds adam-lang uses for `relate`/`conditional`/`out`'s
+    /// `require` bodies and for `type_expr`, respectively. A CEL `if` expression whose then-branch fails to
     /// parse (e.g. `if a { }`), or a CEL tuple/group literal that fails partway through (e.g.
     /// `(+)`), can leave a stray `}`/`)` in the stream that this counter — and
     /// [`skip_to_recovery_point`], which reads it — has no way to distinguish from a real
@@ -367,7 +367,7 @@ impl TokenCursor {
     /// `expect_open_bracket`/`expect_close_bracket`/`expect_open_paren`/`expect_close_paren` —
     /// `type_expr` is the one adam-lang-grammar production that uses parens, so a malformed
     /// `type_expr`'s own unmatched `(`/`)` must unwind `depth` the same way a malformed
-    /// `relationship`/`conditional`/method body's brace or `cell_list`'s bracket does.
+    /// `relate`/`conditional`/`out` body's brace does.
     /// `Delimiter::None` is treated as an ordinary token (consumed, no depth change): it never
     /// appears in adam-lang's own grammar, or in a way `cel_parser` leaves dangling.
     ///

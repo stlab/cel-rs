@@ -488,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_an_out_with_explicit_type_and_no_conditions() {
+    fn formats_an_out_with_explicit_type_and_no_requirements() {
         let source = "sheet s {\n    out area: f64 := width * height;\n}";
         let expected = "sheet s {\n    out area: f64 := width * height;\n}\n";
         assert_eq!(format(source), expected);

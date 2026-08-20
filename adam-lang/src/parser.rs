@@ -665,7 +665,7 @@ impl AdamParser {
         }
     }
 
-    /// `conditional_decl = "conditional" or_expression "{" { conditional_branch } [ default_branch ] "}".`
+    /// `conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".`
     fn parse_conditional_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("conditional"); // consume
         let match_span = ctx.peek_span();
@@ -2201,7 +2201,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_out_with_conditions_reports_output_valid_and_violated() {
+    fn parse_out_with_requirements_reports_output_valid_and_violated() {
         let mut sheet = parser()
             .parse_str(
                 r#"
@@ -2223,7 +2223,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_out_condition_violation_is_reported_after_propagate() {
+    fn parse_out_requirement_violation_is_reported_after_propagate() {
         let mut sheet = parser()
             .parse_str(
                 r#"
@@ -2245,7 +2245,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_out_duplicate_condition_names_is_error() {
+    fn parse_out_duplicate_requirement_names_is_error() {
         let result = parser().parse_str(
             r#"
             sheet s {
@@ -2259,7 +2259,7 @@ mod tests {
         );
         assert!(
             result.is_err(),
-            "two conditions sharing a name must be an error"
+            "two requirements sharing a name must be an error"
         );
     }
 

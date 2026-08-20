@@ -325,7 +325,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `conditional_decl = "conditional" or_expression "{" { conditional_branch } [ default_branch ] "}".`
+    /// `conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".`
     fn parse_conditional_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::ConditionalDecl> {
         use cel_parser::lex_lexer::Token;
         let decl_start = cursor.peek_span();
@@ -975,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_out_with_explicit_type_and_no_conditions() {
+    fn parse_out_with_explicit_type_and_no_requirements() {
         let sheet = AdamAstParser::new()
             .parse_str(
                 r#"
