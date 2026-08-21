@@ -22,6 +22,7 @@ type FilterFn = Box<dyn Fn(&dyn Any, &[&dyn Any]) -> Result<Box<dyn Any>, anyhow
 /// to a cell with [`crate::sheet::Sheet::add_filter`].
 pub struct Filter(pub(crate) FilterData);
 
+/// Internal storage for a single filter.
 pub(crate) struct FilterData {
     /// The `TypeId` of the value this filter operates on, validated against its cell's
     /// registered type by `add_filter`.
