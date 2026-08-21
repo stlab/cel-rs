@@ -22,6 +22,7 @@ indexmap = "2"
 anyhow = "1"
 slotmap = "1.1"
 cel-parser = { path = "../cel-parser" }
+cel-std = { path = "../cel-std" }
 annotate-snippets = "0.12"
 adam-lang = { path = "../adam-lang" }
 rfd = { version = "0.17.2", optional = true }

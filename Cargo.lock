@@ -314,6 +314,7 @@ dependencies = [
  "anyhow",
  "cel-parser",
  "cel-runtime",
+ "cel-std",
  "dioxus",
  "futures-channel",
  "futures-util",

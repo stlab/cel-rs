@@ -153,6 +153,15 @@ pub struct BuildOutcome {
     pub error: Option<String>,
 }
 
+/// Builds an [`cel_parser::OpLookup`] with the CEL standard library installed, so every
+/// adam-lang source `begin` parses — bundled examples and test sources alike — has the
+/// same function set (`min`, `max`, `clamp`, etc.) available.
+fn op_lookup() -> cel_parser::OpLookup {
+    let mut lookup = cel_parser::OpLookup::new();
+    cel_std::install(&mut lookup);
+    lookup
+}
+
 /// Parses `source` as adam-lang, builds a `Sheet` and `Labels`, and propagates
 /// once so initial derived values are populated. `file_name` is used only to
 /// build diagnostic headers (e.g. `--> begin/examples/toy_example.adm2:8:11`),
@@ -160,7 +169,7 @@ pub struct BuildOutcome {
 ///
 /// - Complexity: O(n) in the length of `source` plus the cost of one `propagate()`.
 pub fn build_sheet(source: &str, file_name: &str) -> BuildOutcome {
-    let mut parser = AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new());
+    let mut parser = AdamParser::new(TypeRegistry::new(), op_lookup());
     let mut parsed = match parser.parse_str(source) {
         Ok(p) => p,
         Err(e) => {
@@ -332,7 +341,7 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/image_resize.adm2"),
         )
         .unwrap();
-        let mut parser = AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new());
+        let mut parser = AdamParser::new(TypeRegistry::new(), op_lookup());
         let mut parsed = parser.parse_str(&source).unwrap();
         parsed.propagate().unwrap();
         let (constrain_id, _) = *parsed.cell_names.get("constrain").unwrap();
@@ -353,7 +362,7 @@ mod tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/image_resize.adm2"),
         )
         .unwrap();
-        let mut parser = AdamParser::new(TypeRegistry::new(), cel_parser::OpLookup::new());
+        let mut parser = AdamParser::new(TypeRegistry::new(), op_lookup());
         let mut parsed = parser.parse_str(&source).unwrap();
         parsed.propagate().unwrap();
         let relevant = parsed.output_relevant_cells();
