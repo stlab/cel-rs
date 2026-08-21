@@ -19,13 +19,13 @@
 // resample_method fields are present (and treated as relevant) even in the
 // `set_resolution` case, where ASL would omit them entirely.
 sheet image_resize {
-    cell original_width: i32 = 1600;
-    cell original_height: i32 = 1200;
+    cell original_width_pixels: i32 = 1600;
+    cell original_height_pixels: i32 = 1200;
     cell original_resolution: f64 = 300.0;
 
     // --- constant (derived once from input; never a source) ---
-    cell original_doc_width: f64;
-    cell original_doc_height: f64;
+    cell original_width_inches: f64;
+    cell original_height_inches: f64;
 
     // --- interface ---
     cell resample: bool = true;
@@ -36,80 +36,80 @@ sheet image_resize {
 
     cell width_pixels: i32 = 1600;
     // Photoshop: dim_width_pixels
-    cell width_percent: f64 = 100.0;
+    cell width_pixels_percent: f64 = 100.0;
 
     cell height_pixels: i32 = 1200;
     // Photoshop: dim_height_pixels
-    cell height_percent: f64 = 100.0;
+    cell height_pixels_percent: f64 = 100.0;
 
-    cell doc_width_inches: f64 = 5.333333333333333;
-    cell doc_width_percent: f64 = 100.0;
+    cell width_inches: f64 = 5.333333333333333;
+    cell width_inches_percent: f64 = 100.0;
 
     // Resolution is declared before the height/inches cells below, mirroring the ASL
     // source's own comment: "Resolution must be initialized before width and height
     // inches to allow proportions to be constrained." adam-rs assigns each cell's initial
     // solver priority from declaration order, so this ordering is preserved best-effort;
     // the two solvers don't guarantee identical tie-breaking.
-    cell doc_resolution: f64 = 300.0;
+    cell resolution: f64 = 300.0;
 
-    cell doc_height_inches: f64 = 4.0;
-    cell doc_height_percent: f64 = 100.0;
+    cell height_inches: f64 = 4.0;
+    cell height_inches_percent: f64 = 100.0;
 
     cell auto_quality: String = "draft";
 
-    // ASL leaves this uninitialized ("initialized from doc_resolution"), relying on
-    // its solver to seed it from doc_resolution's *current* value before first use.
+    // ASL leaves this uninitialized ("initialized from resolution"), relying on
+    // its solver to seed it from resolution's *current* value before first use.
     // adam-lang cell initializers are literals only, and the planner's strength-based
     // release order can pick screen_lpi itself as the free source rather than deriving
-    // it from doc_resolution — so unlike the sheet's other derived cells, leaving this
+    // it from resolution — so unlike the sheet's other derived cells, leaving this
     // at a default 0.0 does NOT get corrected by the first propagate(); it must already
-    // be consistent with doc_resolution's own default (300.0) at the default "draft"
+    // be consistent with resolution's own default (300.0) at the default "draft"
     // quality (factor 1): 300.0 / 1 = 300.0.
     cell screen_lpi: f64 = 300.0;
 
     relationship {
-        original_doc_width := original_width as f64 / original_resolution;
+        original_width_inches := original_width_pixels as f64 / original_resolution;
     }
     relationship {
-        original_doc_height := original_height as f64 / original_resolution;
-    }
-
-    // Unconditional: doc_width_inches <-> doc_width_percent, pinned to original_doc_width.
-    relationship {
-        doc_width_inches := doc_width_percent * original_doc_width / 100.0;
-        doc_width_percent := doc_width_inches * 100.0 / original_doc_width;
+        original_height_inches := original_height_pixels as f64 / original_resolution;
     }
 
-    // Unconditional: doc_height_inches <-> doc_height_percent, pinned to original_doc_height.
+    // Unconditional: width_inches <-> width_inches_percent, pinned to original_width_inches.
     relationship {
-        doc_height_inches := doc_height_percent * original_doc_height / 100.0;
-        doc_height_percent := doc_height_inches * 100.0 / original_doc_height;
+        width_inches := width_inches_percent * original_width_inches / 100.0;
+        width_inches_percent := width_inches * 100.0 / original_width_inches;
+    }
+
+    // Unconditional: height_inches <-> height_inches_percent, pinned to original_height_inches.
+    relationship {
+        height_inches := height_inches_percent * original_height_inches / 100.0;
+        height_inches_percent := height_inches * 100.0 / original_height_inches;
     }
 
     relationship {
-        screen_lpi := doc_resolution / if auto_quality == "draft" { 1.0 } else if auto_quality == "good" { 1.5 } else { 2.0 };
-        doc_resolution := screen_lpi * if auto_quality == "draft" { 1.0 } else if auto_quality == "good" { 1.5 } else { 2.0 };
+        screen_lpi := resolution / if auto_quality == "draft" { 1.0 } else if auto_quality == "good" { 1.5 } else { 2.0 };
+        resolution := screen_lpi * if auto_quality == "draft" { 1.0 } else if auto_quality == "good" { 1.5 } else { 2.0 };
     }
 
     conditional resample {
         true => {
             relationship {
-                width_pixels := round(width_percent * original_width as f64 / 100.0) as i32;
-                width_percent := width_pixels as f64 * 100.0 / original_width as f64;
+                width_pixels := round(width_pixels_percent * original_width_pixels as f64 / 100.0) as i32;
+                width_pixels_percent := width_pixels as f64 * 100.0 / original_width_pixels as f64;
             }
             relationship {
-                height_pixels := round(height_percent * original_height as f64 / 100.0) as i32;
-                height_percent := height_pixels as f64 * 100.0 / original_height as f64;
+                height_pixels := round(height_pixels_percent * original_height_pixels as f64 / 100.0) as i32;
+                height_pixels_percent := height_pixels as f64 * 100.0 / original_height_pixels as f64;
             }
             relationship {
-                doc_width_inches := width_pixels as f64 / doc_resolution;
-                width_pixels := round(doc_width_inches * doc_resolution) as i32;
-                doc_resolution := width_pixels as f64 / doc_width_inches;
+                width_inches := width_pixels as f64 / resolution;
+                width_pixels := round(width_inches * resolution) as i32;
+                resolution := width_pixels as f64 / width_inches;
             }
             relationship {
-                doc_height_inches := height_pixels as f64 / doc_resolution;
-                height_pixels := round(doc_height_inches * doc_resolution) as i32;
-                doc_resolution := height_pixels as f64 / doc_height_inches;
+                height_inches := height_pixels as f64 / resolution;
+                height_pixels := round(height_inches * resolution) as i32;
+                resolution := height_pixels as f64 / height_inches;
             }
         }
         false => {
@@ -118,18 +118,18 @@ sheet image_resize {
             }
             // width_pixels/percent snap back to the un-resampled defaults.
             relationship {
-                (width_pixels, width_percent) := (original_width, 100.0);
+                (width_pixels, width_pixels_percent) := (original_width_pixels, 100.0);
             }
             relationship {
-                (height_pixels, height_percent) := (original_height, 100.0);
+                (height_pixels, height_pixels_percent) := (original_height_pixels, 100.0);
             }
             relationship {
-                doc_resolution := original_width as f64 / doc_width_inches;
-                doc_width_inches := original_width as f64 / doc_resolution;
+                resolution := original_width_pixels as f64 / width_inches;
+                width_inches := original_width_pixels as f64 / resolution;
             }
             relationship {
-                doc_resolution := original_height as f64 / doc_height_inches;
-                doc_height_inches := original_height as f64 / doc_resolution;
+                resolution := original_height_pixels as f64 / height_inches;
+                height_inches := original_height_pixels as f64 / resolution;
             }
         }
     }
@@ -137,8 +137,8 @@ sheet image_resize {
     conditional resample && constrain {
         true => {
             relationship {
-                height_percent := width_percent;
-                width_percent := height_percent;
+                height_pixels_percent := width_pixels_percent;
+                width_pixels_percent := height_pixels_percent;
             }
         }
         false => {
@@ -150,7 +150,7 @@ sheet image_resize {
 
     out byte_count: i64 := width_pixels as i64 * height_pixels as i64 * 32i64;
 
-    out result: (String, i32, i32, f64, bool, String) := if resample { ("resize_image", width_pixels, height_pixels, doc_resolution, scale_styles, resample_method) } else { ("set_resolution", 0, 0, doc_resolution, false, "") } require {
+    out result: (String, i32, i32, f64, bool, String) := if resample { ("resize_image", width_pixels, height_pixels, resolution, scale_styles, resample_method) } else { ("set_resolution", 0, 0, resolution, false, "") } require {
         width_max: width_pixels <= 300000;
         height_max: height_pixels <= 300000;
     };
