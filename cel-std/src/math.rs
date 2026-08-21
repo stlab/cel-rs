@@ -198,6 +198,80 @@ pub(crate) fn abs_scope(
     }
 }
 
+/// Marker pushed for a bare `signum` lookup; consumed by the paired `"()"` call.
+struct SignumFn;
+/// Marker pushed for a bare `sqrt` lookup; consumed by the paired `"()"` call.
+struct SqrtFn;
+/// Marker pushed for a bare `floor` lookup; consumed by the paired `"()"` call.
+struct FloorFn;
+/// Marker pushed for a bare `ceil` lookup; consumed by the paired `"()"` call.
+struct CeilFn;
+/// Marker pushed for a bare `trunc` lookup; consumed by the paired `"()"` call.
+struct TruncFn;
+
+/// `signum(x)` (signed integers and floats), `sqrt(x)`/`floor(x)`/`ceil(x)`/`trunc(x)`
+/// (floats only) — all infallible, matching the semantics of Rust's method of the same
+/// name (e.g. `sqrt` of a negative float yields `NaN`, not an error).
+pub(crate) fn unary_math_scope(
+    name: &str,
+    segment: &mut DynSegment,
+    num_operands: usize,
+    _span: SourceSpan,
+) -> Result<bool> {
+    match (name, num_operands) {
+        ("signum", 0) => {
+            segment.op0(|| SignumFn);
+            Ok(true)
+        }
+        ("sqrt", 0) => {
+            segment.op0(|| SqrtFn);
+            Ok(true)
+        }
+        ("floor", 0) => {
+            segment.op0(|| FloorFn);
+            Ok(true)
+        }
+        ("ceil", 0) => {
+            segment.op0(|| CeilFn);
+            Ok(true)
+        }
+        ("trunc", 0) => {
+            segment.op0(|| TruncFn);
+            Ok(true)
+        }
+        ("()", 2) => {
+            let top = segment.peek_stack_infos(2);
+            if top.len() != 2 {
+                return Ok(false);
+            }
+            let callee_type = top[0].type_id;
+            let operand_type = top[1].type_id;
+
+            macro_rules! dispatch {
+                ($marker:ty, $method:ident, [$($t:ty),+ $(,)?]) => {
+                    if callee_type == TypeId::of::<$marker>() {
+                        $(
+                            if operand_type == TypeId::of::<$t>() {
+                                segment.op2(|_callee: $marker, x: $t| x.$method())?;
+                                return Ok(true);
+                            }
+                        )+
+                        return Ok(false);
+                    }
+                };
+            }
+
+            dispatch!(SignumFn, signum, [i8, i16, i32, i64, i128, isize, f32, f64]);
+            dispatch!(SqrtFn, sqrt, [f32, f64]);
+            dispatch!(FloorFn, floor, [f32, f64]);
+            dispatch!(CeilFn, ceil, [f32, f64]);
+            dispatch!(TruncFn, trunc, [f32, f64]);
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,6 +552,160 @@ mod tests {
             .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
             .map_err(|_| anyhow::anyhow!("lookup failed"))?;
         assert_eq!(segment.call0::<f64>()?, 2.5);
+        Ok(())
+    }
+
+    #[test]
+    fn signum_of_a_negative_signed_integer_is_minus_one() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "signum",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(-7i32);
+        lookup
+            .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<i32>()?, -1);
+        Ok(())
+    }
+
+    #[test]
+    fn signum_of_a_nan_float_is_nan() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "signum",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(f64::NAN);
+        lookup
+            .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert!(segment.call0::<f64>()?.is_nan());
+        Ok(())
+    }
+
+    #[test]
+    fn sqrt_of_a_negative_float_is_nan() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "sqrt",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(-4.0f64);
+        lookup
+            .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert!(segment.call0::<f64>()?.is_nan());
+        Ok(())
+    }
+
+    #[test]
+    fn sqrt_of_a_positive_float_returns_the_positive_root() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "sqrt",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(9.0f64);
+        lookup
+            .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<f64>()?, 3.0);
+        Ok(())
+    }
+
+    #[test]
+    fn floor_rounds_a_float_toward_negative_infinity() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "floor",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(3.7f64);
+        lookup
+            .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<f64>()?, 3.0);
+        Ok(())
+    }
+
+    #[test]
+    fn ceil_rounds_a_float_toward_positive_infinity() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "ceil",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(3.2f64);
+        lookup
+            .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<f64>()?, 4.0);
+        Ok(())
+    }
+
+    #[test]
+    fn trunc_rounds_a_float_toward_zero() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "trunc",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(-3.7f64);
+        lookup
+            .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<f64>()?, -3.0);
         Ok(())
     }
 }
