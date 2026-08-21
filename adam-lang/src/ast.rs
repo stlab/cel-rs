@@ -208,13 +208,11 @@ pub struct CellDecl {
     pub span: ExprSpan,
 }
 
-/// `relationship_decl = "relationship" [ identifier ] "{" { method_decl } "}".`
+/// `relationship_decl = "relationship" "{" { binding } "}".`
 #[derive(Debug, Clone)]
 pub struct RelationshipDecl {
-    /// The relationship's optional name.
-    pub name: Option<(String, ExprSpan)>,
-    /// The relationship's methods, in declaration order.
-    pub methods: Vec<MethodDecl>,
+    /// The relationship block's bindings, in declaration order.
+    pub bindings: Vec<BindingDecl>,
     /// A leading comment immediately preceding this declaration, if recovered.
     pub leading_comment: Option<Comment>,
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
@@ -229,16 +227,54 @@ pub struct RelationshipDecl {
     /// <https://github.com/stlab/cel-rs/issues/52>.
     pub blank_line_before_close: bool,
     /// The span of this declaration's own opening `{`, used to recover trailing trivia when
-    /// `methods` is empty. See <https://github.com/stlab/cel-rs/issues/52>.
+    /// `bindings` is empty. See <https://github.com/stlab/cel-rs/issues/52>.
     pub open_brace_span: ExprSpan,
     /// The span of the whole `relationship { ... }` declaration.
     pub span: ExprSpan,
 }
 
-/// `out_decl = "out" identifier [ ":" type_expr ] "{" out_method { condition_decl } "}".`
+/// `binding = binding_target ":=" or_expression ";".`
+/// `binding_target = identifier | "(" identifier { "," identifier } [ "," ] ")".`
+///
+/// Unlike the old `method_decl` this replaces, a binding names no explicit input cell list —
+/// its inputs are whichever already-declared cells `body` references, deduced at compile time
+/// (see `crate::parser::AdamParser::parse_deduced_expr`); this untyped CST parser has no cell
+/// declarations to resolve against, so it records no input list at all, only the outputs.
+///
+/// Parenthesizing the left-hand side requests tuple destructuring, matching Rust's tuple-pattern
+/// syntax: `(a, b) := ...` and the single-element `(a,) := ...` (trailing comma mandatory,
+/// exactly as in a Rust 1-tuple pattern) both destructure `body`'s tuple result element-wise into
+/// `outputs`. A bare identifier, or a single parenthesized identifier with no comma (`(a) :=
+/// ...`, mere grouping), binds `body`'s whole result directly to that one output instead — see
+/// [`Self::destructure`].
+#[derive(Debug, Clone)]
+pub struct BindingDecl {
+    /// The binding's output cell names (the left-hand side), in declaration order.
+    pub outputs: Vec<(String, ExprSpan)>,
+    /// Whether the left-hand side requests destructuring (`(a, b) := ...` or `(a,) := ...`) as
+    /// opposed to a direct bind (`a := ...` or the equivalent grouping `(a) := ...`). Always
+    /// `true` when `outputs.len() > 1`; when `outputs.len() == 1`, distinguishes "destructure
+    /// this single-element tuple" from "bind this whole value directly" — a distinction the
+    /// parenthesized-or-not left-hand side is the only way to express, since both forms name
+    /// exactly one output.
+    pub destructure: bool,
+    /// The parsed right-hand-side expression.
+    pub body: cel_parser::Expr,
+    /// A leading comment immediately preceding this binding, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub leading_comment: Option<Comment>,
+    /// Whether a blank line preceded this binding, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub blank_line_before: bool,
+    /// The span of the whole `a := ...;` / `(a, b) := ...;` declaration.
+    pub span: ExprSpan,
+}
+
+/// `out_decl = "out" identifier [ ":" type_expr ] ":=" or_expression [ "require" "{" {
+/// requirement } "}" ] ";".`
 ///
 /// `type_expr` is unresolved here (no `TypeRegistry` lookup), matching `CellDecl`. When
-/// absent, the cell's type is inferred from `writer.body`'s result type by the compile phase
+/// absent, the cell's type is inferred from `initializer`'s result type by the compile phase
 /// (`crate::parser::AdamParser`) — never here.
 #[derive(Debug, Clone)]
 pub struct OutDecl {
@@ -248,10 +284,10 @@ pub struct OutDecl {
     pub name_span: ExprSpan,
     /// The `: type_expr` annotation, if present.
     pub type_name: Option<TypeExpr>,
-    /// The single writer method that computes this cell's value.
-    pub writer: OutMethodDecl,
-    /// This output's conditions, in declaration order.
-    pub conditions: Vec<ConditionDecl>,
+    /// The parsed initializer expression that computes this cell's value.
+    pub initializer: cel_parser::Expr,
+    /// The `require { ... }` validation block, if present.
+    pub require: Option<RequireBlock>,
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
@@ -261,62 +297,52 @@ pub struct OutDecl {
     /// Whether a blank line preceded this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
-    /// A trailing comment immediately preceding this declaration's own closing `}`, if
-    /// recovered. See <https://github.com/stlab/cel-rs/issues/52>.
+    /// The span of the whole `out ... ;` declaration.
+    pub span: ExprSpan,
+}
+
+/// The optional `require { ... }` block trailing an `out` declaration's initializer.
+#[derive(Debug, Clone)]
+pub struct RequireBlock {
+    /// The block's requirements, in declaration order.
+    pub requirements: Vec<RequirementDecl>,
+    /// A trailing comment immediately preceding this block's own closing `}`, if recovered.
+    /// See <https://github.com/stlab/cel-rs/issues/52>.
     pub trailing_comment: Option<Comment>,
-    /// Whether a blank line preceded this declaration's own closing `}`, if recovered. See
+    /// Whether a blank line preceded this block's own closing `}`, if recovered. See
     /// <https://github.com/stlab/cel-rs/issues/52>.
     pub blank_line_before_close: bool,
-    /// The span of the whole `out ... { ... }` declaration.
+    /// The span of this block's own opening `{`, used to recover trailing trivia when
+    /// `requirements` is empty.
+    pub open_brace_span: ExprSpan,
+    /// The span of the whole `require { ... }` block.
     pub span: ExprSpan,
 }
 
-/// `out_method = "method" cell_list method_body.`
-///
-/// Unlike [`MethodDecl`], carries no `outputs` list: an out cell's writer always writes
-/// exactly the enclosing [`OutDecl`]'s cell, so naming it again would be redundant.
-#[derive(Debug, Clone)]
-pub struct OutMethodDecl {
-    /// The method's input cell names.
-    pub inputs: Vec<(String, ExprSpan)>,
-    /// The parsed method body expression.
-    pub body: cel_parser::Expr,
-    /// A leading comment immediately preceding this method, if recovered by
-    /// [`crate::trivia::attach_trivia`].
-    pub leading_comment: Option<Comment>,
-    /// Whether a blank line preceded this method, if recovered by
-    /// [`crate::trivia::attach_trivia`].
-    pub blank_line_before: bool,
-    /// The span of the whole `method [...] { ... }` declaration.
-    pub span: ExprSpan,
-}
-
-/// `condition_decl = "condition" identifier cell_list "{" or_expression "}".`
+/// `requirement = identifier ":" or_expression ";".`
 ///
 /// `name` is a plain string label passed to `adam_rs::Sheet::add_output`, not a cell
 /// reference — it may coincide with a cell name declared elsewhere in the sheet but doesn't
 /// have to.
 #[derive(Debug, Clone)]
-pub struct ConditionDecl {
-    /// The condition's declared name.
+pub struct RequirementDecl {
+    /// The requirement's declared name.
     pub name: String,
     /// The name token's span.
     pub name_span: ExprSpan,
-    /// The condition's input cell names.
-    pub inputs: Vec<(String, ExprSpan)>,
-    /// The parsed condition body expression; must type-check as `bool`.
+    /// The parsed requirement body expression; must type-check as `bool`.
     pub body: cel_parser::Expr,
-    /// A leading comment immediately preceding this condition, if recovered by
+    /// A leading comment immediately preceding this requirement, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
-    /// Whether a blank line preceded this condition, if recovered by
+    /// Whether a blank line preceded this requirement, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
-    /// The span of the whole `condition ... { ... }` declaration.
+    /// The span of the whole `name: ...;` declaration.
     pub span: ExprSpan,
 }
 
-/// `conditional_decl = "conditional" or_expression "{" { conditional_branch } [ default_branch ] "}".`
+/// `conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".`
 #[derive(Debug, Clone)]
 pub struct ConditionalDecl {
     /// The match subject: an arbitrary expression over already-declared cells (a bare
@@ -392,30 +418,6 @@ pub struct ConditionalBranch {
     pub span: ExprSpan,
 }
 
-/// `method_decl = "method" cell_list "->" cell_list method_body.`
-///
-/// `method_body = "{" or_expression "}"`, parsed via `cel_parser::Parser<AstContext>` into
-/// `body`. Cell names referenced in `body` (e.g. `width` in `{ width * height }`) are recorded
-/// as plain `Expr::Ident` nodes — resolving them against `inputs` is deferred to the compile
-/// phase, exactly as `cel_parser::AstContext` defers all identifier resolution.
-#[derive(Debug, Clone)]
-pub struct MethodDecl {
-    /// The method's input cell names (the first `cell_list`).
-    pub inputs: Vec<(String, ExprSpan)>,
-    /// The method's output cell names (the second `cell_list`).
-    pub outputs: Vec<(String, ExprSpan)>,
-    /// The parsed method body expression.
-    pub body: cel_parser::Expr,
-    /// A leading comment immediately preceding this method, if recovered by
-    /// [`crate::trivia::attach_trivia`].
-    pub leading_comment: Option<Comment>,
-    /// Whether a blank line preceded this method, if recovered by
-    /// [`crate::trivia::attach_trivia`].
-    pub blank_line_before: bool,
-    /// The span of the whole `method [...] -> [...] { ... }` declaration.
-    pub span: ExprSpan,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,8 +450,7 @@ mod tests {
     fn sheet_item_span_reads_the_relationship_variant() {
         let span = point(Span::call_site());
         let item = SheetItem::Relationship(RelationshipDecl {
-            name: None,
-            methods: Vec::new(),
+            bindings: Vec::new(),
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -563,22 +564,14 @@ mod tests {
             name: "o".to_string(),
             name_span: span,
             type_name: None,
-            writer: OutMethodDecl {
-                inputs: Vec::new(),
-                body: cel_parser::Expr::Ident {
-                    name: "x".to_string(),
-                    span,
-                },
-                leading_comment: None,
-                blank_line_before: false,
+            initializer: cel_parser::Expr::Ident {
+                name: "x".to_string(),
                 span,
             },
-            conditions: Vec::new(),
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
-            trailing_comment: None,
-            blank_line_before_close: false,
             span,
         });
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
@@ -591,22 +584,14 @@ mod tests {
             name: "o".to_string(),
             name_span: span,
             type_name: None,
-            writer: OutMethodDecl {
-                inputs: Vec::new(),
-                body: cel_parser::Expr::Ident {
-                    name: "x".to_string(),
-                    span,
-                },
-                leading_comment: None,
-                blank_line_before: false,
+            initializer: cel_parser::Expr::Ident {
+                name: "x".to_string(),
                 span,
             },
-            conditions: Vec::new(),
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
-            trailing_comment: None,
-            blank_line_before_close: false,
             span,
         });
         item.set_leading_comment(Comment::Line("hi".to_string()));

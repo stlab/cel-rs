@@ -91,27 +91,27 @@ fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) 
 ///
 /// This holds for a conditional's match cell (writing it can switch the active branch,
 /// which `propagate_without_replan` never re-evaluates) and for any cell that feeds an
-/// output condition's inputs (`propagate_without_replan` does not re-evaluate output
-/// conditions at all, per its own documented contract — so `output_valid`/
+/// output requirement's inputs (`propagate_without_replan` does not re-evaluate output
+/// requirements at all, per its own documented contract — so `output_valid`/
 /// `output_violation_cells` would otherwise go stale after such a write).
 ///
-/// - Complexity: O(number of conditionals + number of output conditions in the sheet).
+/// - Complexity: O(number of conditionals + number of output requirements in the sheet).
 fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
     let is_match_cell = sheet.conditionals().any(|cid| {
         sheet
             .conditional_match_cells(cid)
             .is_some_and(|c| c.contains(&id))
     });
-    let feeds_condition = sheet.outputs().any(|oid| {
-        sheet.output_conditions(oid).is_some_and(|conditions| {
-            conditions.iter().any(|&cid| {
+    let feeds_requirement = sheet.outputs().any(|oid| {
+        sheet.output_requirements(oid).is_some_and(|requirements| {
+            requirements.iter().any(|&rid| {
                 sheet
-                    .condition_inputs(cid)
+                    .requirement_inputs(rid)
                     .is_some_and(|inputs| inputs.contains(&id))
             })
         })
     });
-    is_match_cell || feeds_condition
+    is_match_cell || feeds_requirement
 }
 
 /// Returns the toggled value ("true"/"false") for a bool cell currently displaying `current`.
@@ -427,8 +427,8 @@ mod tests {
     }
 
     #[test]
-    fn cell_needs_full_propagate_true_for_cell_feeding_an_output_condition() {
-        use adam_rs::{Condition, Method};
+    fn cell_needs_full_propagate_true_for_cell_feeding_an_output_requirement() {
+        use adam_rs::{Method, Requirement};
 
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -439,7 +439,7 @@ mod tests {
                 Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
                 vec![(
                     "min_a",
-                    Condition::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
+                    Requirement::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
                 )],
             )
             .unwrap();
@@ -449,8 +449,8 @@ mod tests {
     }
 
     #[test]
-    fn cell_needs_full_propagate_false_for_cell_not_a_match_cell_or_condition_input() {
-        use adam_rs::{Condition, Method};
+    fn cell_needs_full_propagate_false_for_cell_not_a_match_cell_or_requirement_input() {
+        use adam_rs::{Method, Requirement};
 
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -462,7 +462,7 @@ mod tests {
                 Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
                 vec![(
                     "min_a",
-                    Condition::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
+                    Requirement::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
                 )],
             )
             .unwrap();

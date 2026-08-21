@@ -1,8 +1,8 @@
 //! Pretty-prints an [`crate::ast::Sheet`] back to adam-lang source text: 4-space indentation,
 //! opening braces on the same line, `leading_comment`/`blank_line_before` reproduced exactly as
 //! [`crate::trivia::attach_trivia`] recovered them (including a file-header-style comment
-//! preceding the `sheet` keyword itself, `Sheet.leading_comment`), and method bodies/cell
-//! initializers/condition bodies delegated to [`cel_parser::format_expr`] (a normalization
+//! preceding the `sheet` keyword itself, `Sheet.leading_comment`), and binding bodies/cell
+//! initializers/requirement bodies delegated to [`cel_parser::format_expr`] (a normalization
 //! improvement over span-based re-emit, which was only ever a stopgap for when there was no
 //! parsed `Expr` to format). Type annotations are re-emitted via `Span::source_text()` directly
 //! via `TypeExpr::span()`, and branch-match literals via `ConditionalBranch::literal_span` — see
@@ -107,38 +107,42 @@ fn source_text_or_empty(span: ast::ExprSpan) -> String {
     span.start.source_text().unwrap_or_default()
 }
 
-/// Writes a bracketed, comma-separated cell-name list (e.g. `[a, b]`).
-fn write_cell_list(out: &mut String, cells: &[(String, ast::ExprSpan)]) {
-    out.push('[');
-    for (i, (name, _)) in cells.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        out.push_str(name);
-    }
-    out.push(']');
-}
-
-/// Writes one `method [...] -> [...] { ... }` declaration, delegating its body to
+/// Writes one `a := ...;` / `(a, b) := ...;` binding, delegating its body to
 /// [`cel_parser::format_expr`].
-fn write_method(out: &mut String, method: &ast::MethodDecl, depth: usize) {
+fn write_binding(out: &mut String, binding: &ast::BindingDecl, depth: usize) {
     write_trivia(
         out,
-        method.blank_line_before,
-        method.leading_comment.as_ref(),
+        binding.blank_line_before,
+        binding.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
-    out.push_str("method ");
-    write_cell_list(out, &method.inputs);
-    out.push_str(" -> ");
-    write_cell_list(out, &method.outputs);
-    out.push_str(" { ");
-    out.push_str(&cel_parser::format_expr(&method.body));
-    out.push_str(" }\n");
+    if binding.destructure {
+        out.push('(');
+        for (i, (name, _)) in binding.outputs.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(name);
+        }
+        if binding.outputs.len() == 1 {
+            out.push(',');
+        }
+        out.push(')');
+    } else {
+        debug_assert_eq!(
+            binding.outputs.len(),
+            1,
+            "a non-destructuring binding names exactly one output"
+        );
+        out.push_str(&binding.outputs[0].0);
+    }
+    out.push_str(" := ");
+    out.push_str(&cel_parser::format_expr(&binding.body));
+    out.push_str(";\n");
 }
 
-/// Writes one `relationship [name] { ... }` declaration and its methods, in declaration order.
+/// Writes one `relationship { ... }` declaration and its bindings, in declaration order.
 fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usize) {
     write_trivia(
         out,
@@ -148,14 +152,9 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
     );
     write_doc_comment(out, "///", rel.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
-    out.push_str("relationship ");
-    if let Some((name, _)) = &rel.name {
-        out.push_str(name);
-        out.push(' ');
-    }
-    out.push_str("{\n");
-    for method in &rel.methods {
-        write_method(out, method, depth + 1);
+    out.push_str("relationship {\n");
+    for binding in &rel.bindings {
+        write_binding(out, binding, depth + 1);
     }
     write_trailing_trivia(
         out,
@@ -269,44 +268,22 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     out.push_str(";\n");
 }
 
-/// Writes one `method [...] { ... }` writer declaration inside an `out` block — like
-/// `write_method`, but with no `-> [...]` half: an out cell's writer always writes exactly the
-/// enclosing declaration's cell, so naming it again would be redundant.
-fn write_out_method(out: &mut String, method: &ast::OutMethodDecl, depth: usize) {
+/// Writes one `name: ...;` requirement.
+fn write_requirement(out: &mut String, req: &ast::RequirementDecl, depth: usize) {
     write_trivia(
         out,
-        method.blank_line_before,
-        method.leading_comment.as_ref(),
+        req.blank_line_before,
+        req.leading_comment.as_ref(),
         depth,
     );
     out.push_str(&indent(depth));
-    out.push_str("method ");
-    write_cell_list(out, &method.inputs);
-    out.push_str(" { ");
-    out.push_str(&cel_parser::format_expr(&method.body));
-    out.push_str(" }\n");
+    out.push_str(&req.name);
+    out.push_str(": ");
+    out.push_str(&cel_parser::format_expr(&req.body));
+    out.push_str(";\n");
 }
 
-/// Writes one `condition name [...] { ... }` declaration.
-fn write_condition(out: &mut String, cond: &ast::ConditionDecl, depth: usize) {
-    write_trivia(
-        out,
-        cond.blank_line_before,
-        cond.leading_comment.as_ref(),
-        depth,
-    );
-    out.push_str(&indent(depth));
-    out.push_str("condition ");
-    out.push_str(&cond.name);
-    out.push(' ');
-    write_cell_list(out, &cond.inputs);
-    out.push_str(" { ");
-    out.push_str(&cel_parser::format_expr(&cond.body));
-    out.push_str(" }\n");
-}
-
-/// Writes one `out name[: type] { ... }` declaration: its writer method followed by its
-/// conditions, in declaration order.
+/// Writes one `out name[: type] := ...[ require { ... } ];` declaration.
 fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     write_trivia(
         out,
@@ -322,19 +299,23 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
         out.push_str(": ");
         out.push_str(&source_text_or_empty(type_expr.span()));
     }
-    out.push_str(" {\n");
-    write_out_method(out, &decl.writer, depth + 1);
-    for cond in &decl.conditions {
-        write_condition(out, cond, depth + 1);
+    out.push_str(" := ");
+    out.push_str(&cel_parser::format_expr(&decl.initializer));
+    if let Some(require) = &decl.require {
+        out.push_str(" require {\n");
+        for req in &require.requirements {
+            write_requirement(out, req, depth + 1);
+        }
+        write_trailing_trivia(
+            out,
+            require.blank_line_before_close,
+            require.trailing_comment.as_ref(),
+            depth + 1,
+        );
+        out.push_str(&indent(depth));
+        out.push('}');
     }
-    write_trailing_trivia(
-        out,
-        decl.blank_line_before_close,
-        decl.trailing_comment.as_ref(),
-        depth + 1,
-    );
-    out.push_str(&indent(depth));
-    out.push_str("}\n");
+    out.push_str(";\n");
 }
 
 /// Dispatches to the writer for one top-level sheet item.
@@ -449,8 +430,8 @@ mod tests {
 
     #[test]
     fn packed_cells_stay_packed_and_a_blank_line_before_a_relationship_is_preserved() {
-        let source = "sheet s {\n    cell a: i32 = 1;\n    cell b: i32 = 2;\n\n    relationship { method [a] -> [b] { a } }\n}";
-        let expected = "sheet s {\n    cell a: i32 = 1;\n    cell b: i32 = 2;\n\n    relationship {\n        method [a] -> [b] { a }\n    }\n}\n";
+        let source = "sheet s {\n    cell a: i32 = 1;\n    cell b: i32 = 2;\n\n    relationship { b := a; }\n}";
+        let expected = "sheet s {\n    cell a: i32 = 1;\n    cell b: i32 = 2;\n\n    relationship {\n        b := a;\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
@@ -462,50 +443,73 @@ mod tests {
     }
 
     #[test]
-    fn formats_a_named_relationship_with_multiple_methods() {
-        let source = "sheet s {\n    relationship r {\n        method [width, height] -> [area] { width * height }\n        method [area, height] -> [width] { area / height }\n    }\n}";
-        let expected = "sheet s {\n    relationship r {\n        method [width, height] -> [area] { width * height }\n        method [area, height] -> [width] { area / height }\n    }\n}\n";
+    fn formats_a_relationship_with_multiple_bindings() {
+        let source = "sheet s {\n    relationship {\n        area := width * height;\n        width := area / height;\n    }\n}";
+        let expected = "sheet s {\n    relationship {\n        area := width * height;\n        width := area / height;\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
-    fn preserves_a_comment_on_a_nested_method() {
-        let source = "sheet s {\n    relationship {\n        method [a] -> [b] { a }\n\n        // second\n        method [b] -> [a] { b }\n    }\n}";
-        let expected = "sheet s {\n    relationship {\n        method [a] -> [b] { a }\n\n        // second\n        method [b] -> [a] { b }\n    }\n}\n";
+    fn formats_a_multi_output_destructuring_binding_with_parens() {
+        let source =
+            "sheet s {\n    relationship {\n        (sum, diff) := (a + b, a - b);\n    }\n}";
+        let expected =
+            "sheet s {\n    relationship {\n        (sum, diff) := (a + b, a - b);\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_single_element_tuple_destructuring_binding_with_a_trailing_comma() {
+        let source = "sheet s {\n    relationship {\n        (x,) := (a,);\n    }\n}";
+        let expected = "sheet s {\n    relationship {\n        (x,) := (a,);\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn drops_redundant_grouping_parens_from_a_non_destructuring_binding() {
+        let source = "sheet s {\n    relationship {\n        (x) := a;\n    }\n}";
+        let expected = "sheet s {\n    relationship {\n        x := a;\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn preserves_a_comment_on_a_nested_binding() {
+        let source = "sheet s {\n    relationship {\n        b := a;\n\n        // second\n        a := b;\n    }\n}";
+        let expected = "sheet s {\n    relationship {\n        b := a;\n\n        // second\n        a := b;\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn formats_a_conditional_with_branches_and_a_default_and_no_trailing_commas() {
-        let source = "sheet s {\n    conditional p {\n        0i32 => { relationship { method [a] -> [b] { a } } },\n        _ => { relationship { method [b] -> [a] { b } } },\n    }\n}";
-        let expected = "sheet s {\n    conditional p {\n        0i32 => {\n            relationship {\n                method [a] -> [b] { a }\n            }\n        }\n        _ => {\n            relationship {\n                method [b] -> [a] { b }\n            }\n        }\n    }\n}\n";
+        let source = "sheet s {\n    conditional p {\n        0i32 => { relationship { b := a; } },\n        _ => { relationship { a := b; } },\n    }\n}";
+        let expected = "sheet s {\n    conditional p {\n        0i32 => {\n            relationship {\n                b := a;\n            }\n        }\n        _ => {\n            relationship {\n                a := b;\n            }\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn formats_a_conditional_with_an_expression_match_subject() {
-        let source = "sheet s {\n    conditional a && b {\n        _ => { relationship { method [c] -> [d] { c } } },\n    }\n}";
-        let expected = "sheet s {\n    conditional a && b {\n        _ => {\n            relationship {\n                method [c] -> [d] { c }\n            }\n        }\n    }\n}\n";
+        let source = "sheet s {\n    conditional a && b {\n        _ => { relationship { d := c; } },\n    }\n}";
+        let expected = "sheet s {\n    conditional a && b {\n        _ => {\n            relationship {\n                d := c;\n            }\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn preserves_a_comment_on_a_conditional_branch() {
-        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { method [a] -> [b] { a } } }\n        // one\n        1i32 => { relationship { method [a] -> [b] { a } } }\n    }\n}";
-        let expected = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship {\n                method [a] -> [b] { a }\n            }\n        }\n        // one\n        1i32 => {\n            relationship {\n                method [a] -> [b] { a }\n            }\n        }\n    }\n}\n";
+        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { b := a; } }\n        // one\n        1i32 => { relationship { b := a; } }\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship {\n                b := a;\n            }\n        }\n        // one\n        1i32 => {\n            relationship {\n                b := a;\n            }\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
-    fn method_body_delegates_precedence_aware_parenthesization_to_cel_parser() {
-        let source = "sheet s { relationship { method [a, b] -> [c] { (a + b) * 2i32 } } }";
-        let expected = "sheet s {\n    relationship {\n        method [a, b] -> [c] { (a + b) * 2i32 }\n    }\n}\n";
+    fn binding_body_delegates_precedence_aware_parenthesization_to_cel_parser() {
+        let source = "sheet s { relationship { c := (a + b) * 2i32; } }";
+        let expected = "sheet s {\n    relationship {\n        c := (a + b) * 2i32;\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn format_is_idempotent_through_a_reparse() {
-        let source = "sheet demo {\n    cell a: f64 = 2.0;\n    cell b: f64 = 3.0;\n\n    relationship {\n        method [a, b] -> [c] { a * b }\n    }\n}";
+        let source = "sheet demo {\n    cell a: f64 = 2.0;\n    cell b: f64 = 3.0;\n\n    relationship {\n        c := a * b;\n    }\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
@@ -513,30 +517,30 @@ mod tests {
 
     #[test]
     fn format_is_idempotent_through_a_reparse_with_a_conditional() {
-        let source = "sheet demo {\n    cell p: i32 = 0;\n    cell c: f64;\n\n    conditional p {\n        0i32 => {\n            relationship {\n                method [c] -> [c] { c }\n            }\n        }\n        _ => {\n            relationship {\n                method [c] -> [c] { c }\n            }\n        }\n    }\n}";
+        let source = "sheet demo {\n    cell p: i32 = 0;\n    cell c: f64;\n\n    conditional p {\n        0i32 => {\n            relationship {\n                c := c;\n            }\n        }\n        _ => {\n            relationship {\n                c := c;\n            }\n        }\n    }\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
     }
 
     #[test]
-    fn formats_an_out_with_explicit_type_and_no_conditions() {
-        let source = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n    }\n}";
-        let expected = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n    }\n}\n";
+    fn formats_an_out_with_explicit_type_and_no_requirements() {
+        let source = "sheet s {\n    out area: f64 := width * height;\n}";
+        let expected = "sheet s {\n    out area: f64 := width * height;\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn formats_an_out_with_no_type_annotation() {
-        let source = "sheet s {\n    out area {\n        method [width] { width }\n    }\n}";
-        let expected = "sheet s {\n    out area {\n        method [width] { width }\n    }\n}\n";
+        let source = "sheet s {\n    out area := width;\n}";
+        let expected = "sheet s {\n    out area := width;\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
-    fn formats_an_out_with_conditions_in_declaration_order() {
-        let source = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n        condition max_area [width, height, max_area] { width * height <= max_area }\n    }\n}";
-        let expected = "sheet s {\n    out area: f64 {\n        method [width, height] { width * height }\n        condition max_area [width, height, max_area] { width * height <= max_area }\n    }\n}\n";
+    fn formats_an_out_with_requirements_in_declaration_order() {
+        let source = "sheet s {\n    out area: f64 := width * height require {\n        max_area: width * height <= max_area;\n    };\n}";
+        let expected = "sheet s {\n    out area: f64 := width * height require {\n        max_area: width * height <= max_area;\n    };\n}\n";
         assert_eq!(format(source), expected);
     }
 
@@ -559,8 +563,8 @@ mod tests {
     #[test]
     fn formats_an_out_with_an_explicit_tuple_type() {
         assert_eq!(
-            format("sheet s { out a: (i32, i32) { method [x] { (x, x) } } }"),
-            "sheet s {\n    out a: (i32, i32) {\n        method [x] { (x, x) }\n    }\n}\n"
+            format("sheet s { out a: (i32, i32) := (x, x); }"),
+            "sheet s {\n    out a: (i32, i32) := (x, x);\n}\n"
         );
     }
 
@@ -650,8 +654,8 @@ mod tests {
 
     #[test]
     fn formats_doc_comments_on_a_relationship_conditional_and_out() {
-        let source = "sheet s {\n    /// r\n    relationship { method [a] -> [b] { a } }\n\n    /// o\n    out area: f64 {\n        method [w] { w }\n    }\n}";
-        let expected = "sheet s {\n    /// r\n    relationship {\n        method [a] -> [b] { a }\n    }\n\n    /// o\n    out area: f64 {\n        method [w] { w }\n    }\n}\n";
+        let source = "sheet s {\n    /// r\n    relationship { b := a; }\n\n    /// o\n    out area: f64 := w;\n}";
+        let expected = "sheet s {\n    /// r\n    relationship {\n        b := a;\n    }\n\n    /// o\n    out area: f64 := w;\n}\n";
         assert_eq!(format(source), expected);
     }
 
@@ -681,29 +685,31 @@ mod tests {
 
     #[test]
     fn formats_a_trailing_comment_before_a_relationships_closing_brace() {
-        let source = "sheet s {\n    relationship {\n        method [a] -> [b] { a }\n        // trailing\n    }\n}";
-        let expected = "sheet s {\n    relationship {\n        method [a] -> [b] { a }\n        // trailing\n    }\n}\n";
+        let source =
+            "sheet s {\n    relationship {\n        b := a;\n        // trailing\n    }\n}";
+        let expected =
+            "sheet s {\n    relationship {\n        b := a;\n        // trailing\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn formats_a_trailing_comment_before_a_conditionals_own_closing_brace() {
-        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { method [a] -> [b] { a } } }\n        // trailing\n    }\n}";
-        let expected = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship {\n                method [a] -> [b] { a }\n            }\n        }\n        // trailing\n    }\n}\n";
+        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { b := a; } }\n        // trailing\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship {\n                b := a;\n            }\n        }\n        // trailing\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn formats_a_trailing_comment_in_a_default_arm() {
-        let source = "sheet s {\n    conditional m {\n        _ => {\n            relationship { method [a] -> [b] { a } }\n            // trailing\n        }\n    }\n}";
-        let expected = "sheet s {\n    conditional m {\n        _ => {\n            relationship {\n                method [a] -> [b] { a }\n            }\n            // trailing\n        }\n    }\n}\n";
+        let source = "sheet s {\n    conditional m {\n        _ => {\n            relationship { b := a; }\n            // trailing\n        }\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        _ => {\n            relationship {\n                b := a;\n            }\n            // trailing\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
-    fn formats_a_trailing_comment_before_an_outs_closing_brace() {
-        let source = "sheet s {\n    out area: f64 {\n        method [w] { w }\n        // trailing\n    }\n}";
-        let expected = "sheet s {\n    out area: f64 {\n        method [w] { w }\n        // trailing\n    }\n}\n";
+    fn formats_a_trailing_comment_before_a_requires_closing_brace() {
+        let source = "sheet s {\n    out area: f64 := w require {\n        c: w <= 10.0;\n        // trailing\n    };\n}";
+        let expected = "sheet s {\n    out area: f64 := w require {\n        c: w <= 10.0;\n        // trailing\n    };\n}\n";
         assert_eq!(format(source), expected);
     }
 

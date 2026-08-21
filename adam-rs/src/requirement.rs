@@ -1,8 +1,8 @@
 //! Named boolean checks attached to outputs.
 //!
-//! Each [`Condition`] is a pure predicate over some set of cells, evaluated after every
+//! Each [`Requirement`] is a pure predicate over some set of cells, evaluated after every
 //! `Sheet::propagate` to determine whether an output's preconditions currently hold. A
-//! condition's inputs may be any cells in the sheet, not only the inputs of the output's
+//! requirement's inputs may be any cells in the sheet, not only the inputs of the output's
 //! writer method. See [`crate::sheet::Sheet::add_output`].
 
 use std::any::{Any, TypeId};
@@ -13,22 +13,22 @@ use crate::cell::CellId;
 use crate::output::OutputId;
 
 new_key_type! {
-    /// A stable handle to a condition in a [`crate::sheet::Sheet`].
-    pub struct ConditionId;
+    /// A stable handle to a requirement in a [`crate::sheet::Sheet`].
+    pub struct RequirementId;
 }
 
-/// Type-erased predicate stored inside a [`Condition`].
-type ConditionFn = Box<dyn Fn(&[&dyn Any]) -> Result<bool, anyhow::Error>>;
+/// Type-erased predicate stored inside a [`Requirement`].
+type RequirementFn = Box<dyn Fn(&[&dyn Any]) -> Result<bool, anyhow::Error>>;
 
 /// A single named boolean check over some set of cells, attached to an output.
-pub struct Condition {
+pub struct Requirement {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) input_types: Vec<TypeId>,
-    pub(crate) function: ConditionFn,
+    pub(crate) function: RequirementFn,
 }
 
-impl Condition {
-    /// Creates a condition from explicit TypeIds and a type-erased predicate.
+impl Requirement {
+    /// Creates a requirement from explicit TypeIds and a type-erased predicate.
     ///
     /// - Precondition: `inputs.len() == input_types.len()`.
     pub fn new<F>(inputs: Vec<CellId>, input_types: Vec<TypeId>, f: F) -> Self
@@ -36,23 +36,23 @@ impl Condition {
         F: Fn(&[&dyn Any]) -> Result<bool, anyhow::Error> + 'static,
     {
         debug_assert_eq!(inputs.len(), input_types.len());
-        Condition {
+        Requirement {
             inputs,
             input_types,
             function: Box::new(f),
         }
     }
 
-    /// Creates a 1-input condition from a typed closure.
+    /// Creates a 1-input requirement from a typed closure.
     ///
-    /// The TypeId for `A` is captured automatically. The condition is validated against
+    /// The TypeId for `A` is captured automatically. The requirement is validated against
     /// its cell registration when passed to [`crate::sheet::Sheet::add_output`].
     pub fn from_fn_1<A, F>(input: CellId, f: F) -> Self
     where
         A: Any + 'static,
         F: Fn(&A) -> Result<bool, anyhow::Error> + 'static,
     {
-        Condition {
+        Requirement {
             inputs: vec![input],
             input_types: vec![TypeId::of::<A>()],
             function: Box::new(move |args| {
@@ -64,10 +64,10 @@ impl Condition {
         }
     }
 
-    /// Creates a 2-input condition from a typed closure.
+    /// Creates a 2-input requirement from a typed closure.
     ///
     /// `inputs[0]` maps to `A` and `inputs[1]` maps to `B`. TypeIds are captured
-    /// automatically. The condition is validated when passed to
+    /// automatically. The requirement is validated when passed to
     /// [`crate::sheet::Sheet::add_output`].
     pub fn from_fn_2<A, B, F>(inputs: [CellId; 2], f: F) -> Self
     where
@@ -75,7 +75,7 @@ impl Condition {
         B: Any + 'static,
         F: Fn(&A, &B) -> Result<bool, anyhow::Error> + 'static,
     {
-        Condition {
+        Requirement {
             inputs: inputs.to_vec(),
             input_types: vec![TypeId::of::<A>(), TypeId::of::<B>()],
             function: Box::new(move |args| {
@@ -91,12 +91,12 @@ impl Condition {
     }
 }
 
-/// Internal storage for a single condition.
-pub(crate) struct ConditionData {
+/// Internal storage for a single requirement.
+pub(crate) struct RequirementData {
     pub(crate) name: String,
     pub(crate) output: OutputId,
     pub(crate) inputs: Vec<CellId>,
-    pub(crate) function: ConditionFn,
+    pub(crate) function: RequirementFn,
 }
 
 #[cfg(test)]
@@ -104,20 +104,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn condition_id_is_copy() {
+    fn requirement_id_is_copy() {
         fn takes_copy<T: Copy>(_: T) {}
-        takes_copy(ConditionId::default());
+        takes_copy(RequirementId::default());
     }
 
     #[test]
-    fn condition_new_stores_types_and_cell_ids() {
+    fn requirement_new_stores_types_and_cell_ids() {
         use slotmap::SlotMap;
 
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
         let a = map.insert(());
         let b = map.insert(());
 
-        let condition = Condition::new(
+        let requirement = Requirement::new(
             vec![a, b],
             vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
             |args| {
@@ -127,18 +127,18 @@ mod tests {
             },
         );
 
-        assert_eq!(condition.inputs, vec![a, b]);
+        assert_eq!(requirement.inputs, vec![a, b]);
         assert_eq!(
-            condition.input_types,
+            requirement.input_types,
             vec![TypeId::of::<i32>(), TypeId::of::<i32>()]
         );
 
         let x: i32 = 3;
         let y: i32 = 4;
-        assert!((condition.function)(&[&x, &y]).unwrap());
+        assert!((requirement.function)(&[&x, &y]).unwrap());
         let x: i32 = 8;
         let y: i32 = 8;
-        assert!(!(condition.function)(&[&x, &y]).unwrap());
+        assert!(!(requirement.function)(&[&x, &y]).unwrap());
     }
 
     #[test]
@@ -148,15 +148,15 @@ mod tests {
         let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
         let a = map.insert(());
 
-        let condition = Condition::from_fn_1(a, |x: &i32| Ok(*x <= 5));
+        let requirement = Requirement::from_fn_1(a, |x: &i32| Ok(*x <= 5));
 
-        assert_eq!(condition.inputs, vec![a]);
-        assert_eq!(condition.input_types, vec![TypeId::of::<i32>()]);
+        assert_eq!(requirement.inputs, vec![a]);
+        assert_eq!(requirement.input_types, vec![TypeId::of::<i32>()]);
 
         let x: i32 = 3;
-        assert!((condition.function)(&[&x]).unwrap());
+        assert!((requirement.function)(&[&x]).unwrap());
         let x: i32 = 9;
-        assert!(!(condition.function)(&[&x]).unwrap());
+        assert!(!(requirement.function)(&[&x]).unwrap());
     }
 
     #[test]
@@ -167,19 +167,19 @@ mod tests {
         let a = map.insert(());
         let b = map.insert(());
 
-        let condition = Condition::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x * y <= 20));
+        let requirement = Requirement::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x * y <= 20));
 
-        assert_eq!(condition.inputs, vec![a, b]);
+        assert_eq!(requirement.inputs, vec![a, b]);
         assert_eq!(
-            condition.input_types,
+            requirement.input_types,
             vec![TypeId::of::<i32>(), TypeId::of::<i32>()]
         );
 
         let x: i32 = 4;
         let y: i32 = 5;
-        assert!((condition.function)(&[&x, &y]).unwrap());
+        assert!((requirement.function)(&[&x, &y]).unwrap());
         let x: i32 = 5;
         let y: i32 = 5;
-        assert!(!(condition.function)(&[&x, &y]).unwrap());
+        assert!(!(requirement.function)(&[&x, &y]).unwrap());
     }
 }

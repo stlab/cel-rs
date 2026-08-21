@@ -157,6 +157,7 @@ impl LexLexer {
                 | ('>', '>')
                 | ('-', '>')
                 | ('=', '>')
+                | (':', '=')
         )
     }
 
@@ -812,5 +813,25 @@ mod tests {
         let token = lexer.next().unwrap();
         let span = HasSpan::span(&token);
         assert!(!span.source_text().unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn walrus_operator_lexes_as_one_compound_token() {
+        let stream: TokenStream = ":=".parse().unwrap();
+        let mut lexer = LexLexer::new(stream.into_iter());
+        let token = lexer.next().expect("one token");
+        assert!(matches!(
+            token,
+            Token::Punct { ref op, .. } if op == ":="
+        ));
+        assert!(lexer.next().is_none());
+    }
+
+    #[test]
+    fn colon_followed_by_non_equals_stays_two_separate_tokens() {
+        let stream: TokenStream = ": x".parse().unwrap();
+        let mut lexer = LexLexer::new(stream.into_iter());
+        let first = lexer.next().expect("colon token");
+        assert!(matches!(first, Token::Punct { ref op, .. } if op == ":"));
     }
 }
