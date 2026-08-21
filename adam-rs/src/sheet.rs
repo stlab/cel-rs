@@ -13,6 +13,7 @@ use crate::{
     condition::{Condition, ConditionData, ConditionId},
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::Error,
+    filter::Filter,
     output::{OutputData, OutputId},
     relationship::{Method, RelationshipData, RelationshipId},
 };
@@ -127,6 +128,7 @@ impl Sheet {
             changed: false,
             adj: Vec::new(),
             eq_fn: |a, b| a.downcast_ref::<T>() == b.downcast_ref::<T>(),
+            filter: None,
         })
     }
 
@@ -511,6 +513,68 @@ impl Sheet {
         self.outputs[output_id].conditions = condition_ids;
 
         Ok(output_id)
+    }
+
+    /// Attaches `filter` to `cell`.
+    ///
+    /// Immediately applies `filter` to `cell`'s current `source` value, exactly as
+    /// [`Sheet::write`] would, so a filtered cell's value is guaranteed to conform from
+    /// this call onward — not just from the next external write.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidId` — `cell`, or one of `filter`'s argument cells, is not a
+    ///   live cell in this sheet.
+    /// - `Error::TerminalCell` — `cell` already belongs to an existing output.
+    /// - `Error::InvalidFilter` — `cell` already has a filter, or `filter`'s own value
+    ///   type does not match `cell`'s registered type.
+    /// - `Error::TypeMismatch` — an argument cell's registered type does not match the
+    ///   type `filter` declared for it, or (defensively) `filter`'s function returned
+    ///   a value of a different type than `cell`'s registered type.
+    /// - `Error::MethodFailed` — `filter` rejected `cell`'s current value.
+    ///
+    /// - Complexity: O(a) where a is the number of `filter`'s argument cells.
+    pub fn add_filter(&mut self, cell: CellId, filter: Filter) -> Result<(), Error> {
+        let cell_type = self.cells.get(cell).ok_or(Error::InvalidId)?.type_id;
+        if self.terminal_cells.contains(&cell) {
+            return Err(Error::TerminalCell);
+        }
+        if self.cells[cell].filter.is_some() {
+            return Err(Error::InvalidFilter);
+        }
+        if filter.0.value_type != cell_type {
+            return Err(Error::InvalidFilter);
+        }
+        for (&arg_id, &declared) in filter.0.args.iter().zip(filter.0.arg_types.iter()) {
+            let arg_cell = self.cells.get(arg_id).ok_or(Error::InvalidId)?;
+            if arg_cell.type_id != declared {
+                return Err(Error::TypeMismatch {
+                    expected: arg_cell.type_id,
+                    found: declared,
+                });
+            }
+        }
+
+        let args: Vec<&dyn Any> = filter
+            .0
+            .args
+            .iter()
+            .map(|&a| self.cells[a].effective())
+            .collect();
+        let conformed = (filter.0.function)(self.cells[cell].source.as_ref(), &args)
+            .map_err(Error::MethodFailed)?;
+        if conformed.as_ref().type_id() != cell_type {
+            return Err(Error::TypeMismatch {
+                expected: cell_type,
+                found: conformed.as_ref().type_id(),
+            });
+        }
+
+        let cell_data = &mut self.cells[cell];
+        cell_data.source = conformed;
+        cell_data.derived = None;
+        cell_data.filter = Some(filter.0);
+        Ok(())
     }
 
     /// Returns the terminal cell backing output `id`. Read its value with [`Sheet::read`].
@@ -1423,7 +1487,8 @@ impl Default for Sheet {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ConditionalId, Error, MatchExpr, Method, Sheet, cell::CellId, relationship::RelationshipId,
+        ConditionalId, Error, MatchExpr, Method, Sheet, cell::CellId, filter::Filter,
+        relationship::RelationshipId,
     };
     use std::any::TypeId;
 
@@ -2460,5 +2525,119 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn add_filter_conforms_the_cells_current_value_immediately() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(500_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+    }
+
+    #[test]
+    fn add_filter_leaves_a_conforming_value_unchanged() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    }
+
+    #[test]
+    fn add_filter_returns_method_failed_when_current_value_cannot_conform() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let result = sheet.add_filter(
+            a,
+            Filter::from_fn_0(|_x: &i32| Err(anyhow::anyhow!("cannot conform"))),
+        );
+        assert!(matches!(result, Err(Error::MethodFailed(_))));
+        // Rejected: the cell's original value must survive untouched.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    }
+
+    #[test]
+    fn add_filter_returns_invalid_id_for_missing_cell() {
+        let mut sheet = Sheet::new();
+        let result = sheet.add_filter(CellId::default(), Filter::from_fn_0(|x: &i32| Ok(*x)));
+        assert!(matches!(result, Err(Error::InvalidId)));
+    }
+
+    #[test]
+    fn add_filter_returns_terminal_cell_for_an_output_cell() {
+        let mut sheet = Sheet::new();
+        let writer_input = sheet.add_cell(1_i32);
+        let out_cell = sheet.add_cell(0_i32);
+        let out = sheet
+            .add_output(
+                Method::from_fn_1_1(writer_input, out_cell, |x: &i32| Ok(*x)),
+                vec![],
+            )
+            .unwrap();
+        let terminal = sheet.output_cell(out).unwrap();
+        let result = sheet.add_filter(terminal, Filter::from_fn_0(|x: &i32| Ok(*x)));
+        assert!(matches!(result, Err(Error::TerminalCell)));
+    }
+
+    #[test]
+    fn add_filter_returns_invalid_filter_when_cell_already_has_a_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
+            .unwrap();
+        let result = sheet.add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)));
+        assert!(matches!(result, Err(Error::InvalidFilter)));
+    }
+
+    #[test]
+    fn add_filter_returns_invalid_filter_for_mismatched_value_type() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let result = sheet.add_filter(a, Filter::from_fn_0(|x: &f64| Ok(*x)));
+        assert!(matches!(result, Err(Error::InvalidFilter)));
+    }
+
+    #[test]
+    fn add_filter_returns_invalid_id_for_missing_arg_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let result = sheet.add_filter(
+            a,
+            Filter::from_fn_1(CellId::default(), |x: &i32, bound: &i32| {
+                Ok((*x).min(*bound))
+            }),
+        );
+        assert!(matches!(result, Err(Error::InvalidId)));
+    }
+
+    #[test]
+    fn add_filter_returns_type_mismatch_for_wrong_arg_cell_type() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let bound = sheet.add_cell(1.0_f64); // wrong type: filter declares i32
+        let result = sheet.add_filter(
+            a,
+            Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
+        );
+        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
+    }
+
+    #[test]
+    fn add_filter_resolves_a_dynamic_argument_cells_current_value() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(500_i32);
+        let bound = sheet.add_cell(10_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
+            )
+            .unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
     }
 }

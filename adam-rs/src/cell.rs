@@ -6,6 +6,7 @@ use std::any::{Any, TypeId};
 
 use slotmap::new_key_type;
 
+use crate::filter::FilterData;
 use crate::relationship::RelationshipId;
 
 new_key_type! {
@@ -40,6 +41,9 @@ pub(crate) struct CellData {
     /// Type-erased equality: returns `true` iff both arguments hold equal values of the
     /// cell's registered type. Captured at `add_cell` time from the concrete `T: PartialEq`.
     pub(crate) eq_fn: fn(&dyn Any, &dyn Any) -> bool,
+    /// This cell's filter, if one is attached via `Sheet::add_filter`. At most one per
+    /// cell.
+    pub(crate) filter: Option<FilterData>,
 }
 
 impl CellData {
@@ -63,6 +67,7 @@ mod tests {
             changed: false,
             adj: vec![],
             eq_fn: |a, b| a.downcast_ref::<i32>() == b.downcast_ref::<i32>(),
+            filter: None,
         };
         assert_eq!(data.type_id, TypeId::of::<i32>());
         assert_eq!(data.strength, 0);
