@@ -139,6 +139,65 @@ pub(crate) fn clamp_scope(
     }
 }
 
+/// Marker pushed for a bare `abs` lookup; consumed by the paired `"()"` call.
+struct AbsFn;
+
+/// `abs(x)` over signed integers (checked; `Err` on overflow) and floats (infallible).
+///
+/// # Errors
+///
+/// Returns `Err("arithmetic overflow")` if `x` is a signed integer at its type's minimum
+/// value (the one value whose absolute value doesn't fit in that type).
+pub(crate) fn abs_scope(
+    name: &str,
+    segment: &mut DynSegment,
+    num_operands: usize,
+    _span: SourceSpan,
+) -> Result<bool> {
+    match (name, num_operands) {
+        ("abs", 0) => {
+            segment.op0(|| AbsFn);
+            Ok(true)
+        }
+        ("()", 2) => {
+            let top = segment.peek_stack_infos(2);
+            if top.len() != 2 || top[0].type_id != TypeId::of::<AbsFn>() {
+                return Ok(false);
+            }
+            let operand_type = top[1].type_id;
+
+            macro_rules! dispatch_checked {
+                ([$($t:ty),+ $(,)?]) => {
+                    $(
+                        if operand_type == TypeId::of::<$t>() {
+                            segment.op2r(|_callee: AbsFn, x: $t| {
+                                x.checked_abs()
+                                    .ok_or_else(|| anyhow::anyhow!("arithmetic overflow"))
+                            })?;
+                            return Ok(true);
+                        }
+                    )+
+                };
+            }
+            macro_rules! dispatch_float {
+                ([$($t:ty),+ $(,)?]) => {
+                    $(
+                        if operand_type == TypeId::of::<$t>() {
+                            segment.op2(|_callee: AbsFn, x: $t| x.abs())?;
+                            return Ok(true);
+                        }
+                    )+
+                };
+            }
+
+            dispatch_checked!([i8, i16, i32, i64, i128, isize]);
+            dispatch_float!([f32, f64]);
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +428,56 @@ mod tests {
         let result = segment.call0::<f64>();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "invalid clamp bounds");
+        Ok(())
+    }
+
+    #[test]
+    fn abs_returns_the_absolute_value_of_a_negative_signed_integer() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup("abs", &mut segment, 0, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(-7i32);
+        lookup
+            .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<i32>()?, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn abs_errs_on_signed_integer_overflow() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup("abs", &mut segment, 0, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(i32::MIN);
+        lookup
+            .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        let result = segment.call0::<i32>();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "arithmetic overflow");
+        Ok(())
+    }
+
+    #[test]
+    fn abs_returns_the_absolute_value_of_a_negative_float() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup("abs", &mut segment, 0, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(-2.5f64);
+        lookup
+            .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<f64>()?, 2.5);
         Ok(())
     }
 }
