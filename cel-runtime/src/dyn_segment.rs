@@ -1315,6 +1315,36 @@ impl DynSegment {
         Ok(())
     }
 
+    /// Pushes a ternary operation that takes three arguments of types `T`, `U`, and `V` and
+    /// returns a `Result<R>`.
+    ///
+    /// If the operation succeeds, the result is pushed onto the stack. If it fails,
+    /// the stack is unwound to its previous state and the error is propagated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the argument types do not match the expected types.
+    pub fn op3r<T, U, V, R, F>(&mut self, op: F) -> Result<()>
+    where
+        F: Fn(T, U, V) -> anyhow::Result<R> + 'static,
+        T: 'static,
+        U: 'static,
+        V: 'static,
+        R: 'static,
+    {
+        let [p0, p1, p2] = self.get_last_n_padded::<3>();
+        self.pop_types::<(T, (U, (V, ())))>()?;
+        let unwind = self.capture_unwind();
+        self.segment.raw3(
+            move |stack, t, u, v| Self::unwind_on_err(&unwind, stack, op(t, u, v)),
+            p0,
+            p1,
+            p2,
+        );
+        self.push_type::<R>();
+        Ok(())
+    }
+
     /// Joins two conditional fragments into a conditional execution operation.
     ///
     /// This method creates a conditional operation that executes one of two fragments
@@ -1937,6 +1967,40 @@ mod tests {
         assert!(result.is_err(), "expected Err, got {:?}", result);
         assert_eq!(result.unwrap_err().to_string(), "op2r error");
         // DropCounter (under the two u32s) was unwound when op2r failed.
+        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn op3r_success() -> Result<(), anyhow::Error> {
+        let mut segment = DynSegment::new::<()>();
+        segment.op0(|| 10u32);
+        segment.op0(|| 20u32);
+        segment.op0(|| 12u32);
+        segment.op3r(|a: u32, b: u32, c: u32| Ok::<_, anyhow::Error>(a + b + c))?;
+        let result: u32 = segment.call0()?;
+        assert_eq!(result, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn op3r_error_unwinds() -> Result<(), anyhow::Error> {
+        let mut segment = DynSegment::new::<()>();
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let tracker = DropCounter(drop_count.clone());
+        segment.op0(move || tracker.clone());
+        segment.op0(|| 7u32);
+        segment.op0(|| 8u32);
+        segment.op0(|| 9u32);
+        segment.op3r(|_a: u32, _b: u32, _c: u32| -> Result<DropCounter> {
+            Err(anyhow::anyhow!("op3r error"))
+        })?;
+        segment.op1(|_: DropCounter| 0u32)?;
+        segment.op2(|_: DropCounter, x: u32| x)?; // consume to single u32 for call0
+        let result = segment.call0::<u32>();
+        assert!(result.is_err(), "expected Err, got {:?}", result);
+        assert_eq!(result.unwrap_err().to_string(), "op3r error");
+        // DropCounter (under the three u32s) was unwound when op3r failed.
         assert_eq!(drop_count.load(Ordering::SeqCst), 1);
         Ok(())
     }

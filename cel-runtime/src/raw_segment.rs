@@ -308,6 +308,51 @@ impl RawSegment {
         self.base_alignment = max(self.base_alignment, align_of::<R>());
     }
 
+    /// Pushes the op-dispatch closure for a ternary fallible operation with compile-time padding.
+    #[expect(clippy::many_single_char_names, reason = "patterned code")]
+    fn push_op3r_<const PADDING0: bool, const PADDING1: bool, const PADDING2: bool, T, U, V, R, F>(
+        &mut self,
+    ) where
+        F: Fn(&mut RawStack, T, U, V) -> Result<R> + 'static,
+        T: 'static,
+        U: 'static,
+        V: 'static,
+        R: 'static,
+    {
+        self.ops.push(|storage, p, stack| {
+            let (f, r) = unsafe { storage.next::<F>(p) };
+            let z: V = unsafe { stack.pop(PADDING2) };
+            let y: U = unsafe { stack.pop(PADDING1) };
+            let x: T = unsafe { stack.pop(PADDING0) };
+            let result = f(stack, x, y, z)?;
+            stack.push(result);
+            Ok(r)
+        });
+    }
+
+    /// Push a fallible ternary operation that can manipulate the stack.
+    pub fn raw3<T, U, V, R, F>(&mut self, op: F, padding0: bool, padding1: bool, padding2: bool)
+    where
+        F: Fn(&mut RawStack, T, U, V) -> Result<R> + 'static,
+        T: 'static,
+        U: 'static,
+        V: 'static,
+        R: 'static,
+    {
+        self.push_storage(op);
+        match (padding0, padding1, padding2) {
+            (false, false, false) => self.push_op3r_::<false, false, false, T, U, V, R, F>(),
+            (false, false, true) => self.push_op3r_::<false, false, true, T, U, V, R, F>(),
+            (false, true, false) => self.push_op3r_::<false, true, false, T, U, V, R, F>(),
+            (false, true, true) => self.push_op3r_::<false, true, true, T, U, V, R, F>(),
+            (true, false, false) => self.push_op3r_::<true, false, false, T, U, V, R, F>(),
+            (true, false, true) => self.push_op3r_::<true, false, true, T, U, V, R, F>(),
+            (true, true, false) => self.push_op3r_::<true, true, false, T, U, V, R, F>(),
+            (true, true, true) => self.push_op3r_::<true, true, true, T, U, V, R, F>(),
+        }
+        self.base_alignment = max(self.base_alignment, align_of::<R>());
+    }
+
     /// Executes all operations in the segment on the supplied stack.
     ///
     /// # Errors
