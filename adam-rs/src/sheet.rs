@@ -582,6 +582,57 @@ impl Sheet {
         Ok(())
     }
 
+    /// Returns the argument cells of `id`'s filter, in declaration order.
+    ///
+    /// Returns `None` if `id` is not a live cell in this sheet, or has no filter.
+    pub fn filter_args(&self, id: CellId) -> Option<&[CellId]> {
+        self.cells
+            .get(id)?
+            .filter
+            .as_ref()
+            .map(|f| f.args.as_slice())
+    }
+
+    /// Returns the filter violation recorded for `id` as of the last full
+    /// `propagate()` call, if any.
+    ///
+    /// - Postcondition: `None` if `id` has no filter, `id`'s filter's last-checked
+    ///   value held, or no full `propagate()` has run since `id` was last a plain
+    ///   external write.
+    pub fn filter_violation(&self, id: CellId) -> Option<&FilterViolation> {
+        self.last_filter_violations.get(&id)
+    }
+
+    /// Iterates cells whose filter is currently violated, as of the last full
+    /// `propagate()` call.
+    ///
+    /// - Complexity: O(n) where n is the number of currently-violated filters.
+    pub fn filter_violated_cells(&self) -> impl Iterator<Item = CellId> + '_ {
+        self.last_filter_violations.keys().copied()
+    }
+
+    /// Returns the set of root cells currently determining a violated filter's own
+    /// value or any of its argument values, as of the last full `propagate()` call —
+    /// the same "which upstream cells caused this" query
+    /// `condition_contributing_cells`/`output_violation_cells` already provide for
+    /// `Condition`.
+    ///
+    /// - Postcondition: empty if no filter is currently violated.
+    /// - Complexity: O(sum of `contributing_cells` cost over every violated filter and
+    ///   its argument cells).
+    pub fn filter_violation_cells(&self) -> HashSet<CellId> {
+        let mut result = HashSet::new();
+        for cell_id in self.filter_violated_cells() {
+            result.extend(self.contributing_cells(cell_id));
+            if let Some(args) = self.filter_args(cell_id) {
+                for &arg in args {
+                    result.extend(self.contributing_cells(arg));
+                }
+            }
+        }
+        result
+    }
+
     /// Returns the terminal cell backing output `id`. Read its value with [`Sheet::read`].
     ///
     /// Returns `None` if `id` is not a live output in this sheet.
@@ -2873,5 +2924,93 @@ mod tests {
         // Still reports the *old* violation: propagate_without_replan doesn't
         // recompute it, matching last_violated's existing behavior.
         assert!(sheet.last_filter_violations.contains_key(&b));
+    }
+
+    #[test]
+    fn filter_args_returns_the_filters_argument_cells() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let bound = sheet.add_cell(10_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
+            )
+            .unwrap();
+        assert_eq!(sheet.filter_args(a), Some(&[bound][..]));
+    }
+
+    #[test]
+    fn filter_args_returns_none_for_a_cell_with_no_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        assert_eq!(sheet.filter_args(a), None);
+    }
+
+    #[test]
+    fn filter_args_returns_none_for_an_invalid_cell() {
+        let sheet = Sheet::new();
+        assert_eq!(sheet.filter_args(CellId::default()), None);
+    }
+
+    #[test]
+    fn filter_violation_returns_none_before_any_propagate() {
+        let sheet = Sheet::new();
+        assert!(sheet.filter_violation(CellId::default()).is_none());
+    }
+
+    #[test]
+    fn filter_violated_cells_reports_a_currently_violated_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(60_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+        sheet.propagate().unwrap();
+        assert!(sheet.filter_violated_cells().any(|id| id == b));
+        assert!(matches!(
+            sheet.filter_violation(b),
+            Some(FilterViolation::NotConformed)
+        ));
+    }
+
+    #[test]
+    fn filter_violation_cells_is_empty_when_nothing_is_violated() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(10_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+        sheet.propagate().unwrap();
+        assert!(sheet.filter_violation_cells().is_empty());
+    }
+
+    #[test]
+    fn filter_violation_cells_includes_root_causes_of_a_violation() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(60_i32);
+        let bound = sheet.add_cell(100_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_filter(
+                b,
+                Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
+            )
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+        sheet.propagate().unwrap();
+        let violation_cells = sheet.filter_violation_cells();
+        // `b` is forced (its relationship has only one method), so — mirroring
+        // `contributing_cells`'s existing semantics — it is `a` and `bound` that
+        // appear as the upstream root causes, not `b` itself. `b`'s own membership
+        // is already answered by `filter_violated_cells()`, tested separately above.
+        assert!(violation_cells.contains(&a));
+        assert!(violation_cells.contains(&bound));
     }
 }
