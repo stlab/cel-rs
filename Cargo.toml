@@ -24,6 +24,7 @@ members = [
     "cel-runtime",
     "cel-parser",
     "cel-rs-macros",
+    "cel-std",
     "adam-rs",
     "adam-lang",
     "adam-lsp",

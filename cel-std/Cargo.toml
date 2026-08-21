@@ -1,0 +1,16 @@
+[package]
+name = "cel-std"
+version = "0.1.0"
+edition = "2024"
+description = "CEL standard library functions"
+
+[dependencies]
+cel-parser = { path = "../cel-parser" }
+cel-runtime = { path = "../cel-runtime" }
+anyhow = "1.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proc-macro2 = "1.0"
