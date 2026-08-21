@@ -70,6 +70,39 @@
 //! sheet.propagate().unwrap();
 //! assert!(!sheet.output_valid(output));
 //! ```
+//!
+//! # Filters
+//!
+//! A filter conforms or rejects a value written externally to its cell. It's also
+//! re-checked, as a non-gating diagnostic only, against a value a relationship's
+//! method derives for that cell — a derived value is never corrected, only flagged.
+//!
+//! ```rust
+//! use adam_rs::{Filter, Method, Sheet};
+//!
+//! let mut sheet = Sheet::new();
+//! let a = sheet.add_cell(0_i32);
+//! let b = sheet.add_cell(0_i32);
+//! sheet
+//!     .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+//!     .unwrap();
+//! sheet
+//!     .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+//!     .unwrap();
+//! sheet
+//!     .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+//!     .unwrap();
+//!
+//! // An out-of-range external write is silently conformed...
+//! sheet.write(a, 500_i32).unwrap();
+//! assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+//!
+//! // ...but a derived value that would fail the same filter is only diagnosed, never
+//! // corrected: `b` doubles `a`'s already-conformed value, exceeding the filter's range.
+//! sheet.propagate().unwrap();
+//! assert_eq!(*sheet.read::<i32>(b).unwrap(), 200);
+//! assert!(sheet.filter_violated_cells().any(|id| id == b));
+//! ```
 
 pub mod cell;
 pub mod condition;
@@ -85,6 +118,7 @@ pub use cell::CellId;
 pub use condition::{Condition, ConditionId};
 pub use conditional::{ConditionalId, MatchExpr};
 pub use error::Error;
+pub use filter::{Filter, FilterViolation};
 pub use output::OutputId;
 pub use relationship::{Method, RelationshipId};
 pub use sheet::Sheet;
