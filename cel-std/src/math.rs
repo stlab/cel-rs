@@ -14,6 +14,8 @@ use std::any::TypeId;
 struct MinFn;
 /// Marker pushed for a bare `max` lookup; consumed by the paired `"()"` call.
 struct MaxFn;
+/// Marker pushed for a bare `clamp` lookup; consumed by the paired `"()"` call.
+struct ClampFn;
 
 /// `min(a, b) = a.min(b)`, `max(a, b) = a.max(b)` over all 14 numeric types — `Ord::min`/
 /// `max` for integers, the inherent (NaN-avoiding) `f32`/`f64` `min`/`max` for floats.
@@ -70,6 +72,67 @@ pub(crate) fn min_max_scope(
                     u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
                 ]
             );
+            Ok(false)
+        }
+        _ => Ok(false),
+    }
+}
+
+/// `clamp(x, lo, hi)` bounds `x` to `[lo, hi]`, over all 14 numeric types.
+///
+/// Dispatches as two chained ops: the first computes the clamped value from `x`/`lo`/`hi`
+/// alone (and can fail if `lo > hi`); the second discards the still-buried `ClampFn`
+/// marker and passes the result through unchanged.
+///
+/// - Precondition: `x`, `lo`, and `hi` all have the same type.
+///
+/// # Errors
+///
+/// Returns `Err("invalid clamp bounds")` if `!(lo <= hi)` — this single comparison is
+/// `false` whenever either bound is `NaN`, so no separate `NaN` check is needed.
+pub(crate) fn clamp_scope(
+    name: &str,
+    segment: &mut DynSegment,
+    num_operands: usize,
+    _span: SourceSpan,
+) -> Result<bool> {
+    match (name, num_operands) {
+        ("clamp", 0) => {
+            segment.op0(|| ClampFn);
+            Ok(true)
+        }
+        ("()", 4) => {
+            let top = segment.peek_stack_infos(4);
+            if top.len() != 4
+                || top[0].type_id != TypeId::of::<ClampFn>()
+                || top[1].type_id != top[2].type_id
+                || top[1].type_id != top[3].type_id
+            {
+                return Ok(false);
+            }
+            let operand_type = top[1].type_id;
+
+            macro_rules! dispatch {
+                ([$($t:ty),+ $(,)?]) => {
+                    $(
+                        if operand_type == TypeId::of::<$t>() {
+                            segment.op3r(move |x: $t, lo: $t, hi: $t| {
+                                if lo <= hi {
+                                    Ok(x.clamp(lo, hi))
+                                } else {
+                                    Err(anyhow::anyhow!("invalid clamp bounds"))
+                                }
+                            })?;
+                            segment.op2(|_callee: ClampFn, result: $t| result)?;
+                            return Ok(true);
+                        }
+                    )+
+                };
+            }
+
+            dispatch!([
+                u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
+            ]);
             Ok(false)
         }
         _ => Ok(false),
@@ -182,6 +245,130 @@ mod tests {
             .lookup("()", &mut segment, 3, Span::call_site(), Span::call_site())
             .map_err(|_| anyhow::anyhow!("lookup failed"))?;
         assert_eq!(segment.call0::<f64>()?, 3.5);
+        Ok(())
+    }
+
+    #[test]
+    fn clamp_bounds_a_value_inside_its_range_unchanged() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "clamp",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(5i32);
+        segment.just(0i32);
+        segment.just(10i32);
+        lookup
+            .lookup("()", &mut segment, 4, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<i32>()?, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn clamp_bounds_a_value_below_its_range_up_to_lo() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "clamp",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(-5i32);
+        segment.just(0i32);
+        segment.just(10i32);
+        lookup
+            .lookup("()", &mut segment, 4, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<i32>()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn clamp_bounds_a_value_above_its_range_down_to_hi() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "clamp",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(15i32);
+        segment.just(0i32);
+        segment.just(10i32);
+        lookup
+            .lookup("()", &mut segment, 4, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<i32>()?, 10);
+        Ok(())
+    }
+
+    #[test]
+    fn clamp_errs_when_lo_is_greater_than_hi() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "clamp",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(5i32);
+        segment.just(10i32);
+        segment.just(0i32);
+        lookup
+            .lookup("()", &mut segment, 4, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        let result = segment.call0::<i32>();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "invalid clamp bounds");
+        Ok(())
+    }
+
+    #[test]
+    fn clamp_errs_when_a_bound_is_nan() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "clamp",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(5.0f64);
+        segment.just(f64::NAN);
+        segment.just(10.0f64);
+        lookup
+            .lookup("()", &mut segment, 4, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        let result = segment.call0::<f64>();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().to_string(), "invalid clamp bounds");
         Ok(())
     }
 }

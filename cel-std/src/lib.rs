@@ -15,4 +15,5 @@ mod math;
 /// Registers every CEL standard-library function on `lookup`.
 pub fn install(lookup: &mut cel_parser::OpLookup) {
     lookup.push_scope(math::min_max_scope);
+    lookup.push_scope(math::clamp_scope);
 }
