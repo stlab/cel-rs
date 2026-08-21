@@ -18,7 +18,7 @@ struct MaxFn;
 /// `min(a, b) = a.min(b)`, `max(a, b) = a.max(b)` over all 14 numeric types — `Ord::min`/
 /// `max` for integers, the inherent (NaN-avoiding) `f32`/`f64` `min`/`max` for floats.
 ///
-/// - Precondition: `a` and `b` have the same type.
+/// Declines the call (returns `Ok(false)`) when the two operands have different types.
 pub(crate) fn min_max_scope(
     name: &str,
     segment: &mut DynSegment,
