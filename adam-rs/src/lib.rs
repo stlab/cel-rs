@@ -75,6 +75,7 @@ pub mod cell;
 pub mod condition;
 pub mod conditional;
 pub mod error;
+pub mod filter;
 pub mod output;
 mod planner;
 pub mod relationship;
