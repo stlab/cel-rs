@@ -84,7 +84,8 @@ pub(crate) fn min_max_scope(
 /// alone (and can fail if `lo > hi`); the second discards the still-buried `ClampFn`
 /// marker and passes the result through unchanged.
 ///
-/// - Precondition: `x`, `lo`, and `hi` all have the same type.
+/// Declines the call (returns `Ok(false)`) when `x`, `lo`, and `hi` don't all have the
+/// same type.
 ///
 /// # Errors
 ///
@@ -502,6 +503,54 @@ mod tests {
         let result = segment.call0::<f64>();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "invalid clamp bounds");
+        Ok(())
+    }
+
+    #[test]
+    fn clamp_bounds_an_unsigned_integer_correctly() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "clamp",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(100u32);
+        segment.just(0u32);
+        segment.just(10u32);
+        lookup
+            .lookup("()", &mut segment, 4, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<u32>()?, 10);
+        Ok(())
+    }
+
+    #[test]
+    fn clamp_bounds_a_float_value_inside_its_range_unchanged() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "clamp",
+                &mut segment,
+                0,
+                Span::call_site(),
+                Span::call_site(),
+            )
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        segment.just(5.0f64);
+        segment.just(0.0f64);
+        segment.just(10.0f64);
+        lookup
+            .lookup("()", &mut segment, 4, Span::call_site(), Span::call_site())
+            .map_err(|_| anyhow::anyhow!("lookup failed"))?;
+        assert_eq!(segment.call0::<f64>()?, 5.0);
         Ok(())
     }
 

@@ -153,7 +153,7 @@ pub struct BuildOutcome {
     pub error: Option<String>,
 }
 
-/// Builds an [`cel_parser::OpLookup`] with the CEL standard library installed, so every
+/// Builds a [`cel_parser::OpLookup`] with the CEL standard library installed, so every
 /// adam-lang source `begin` parses — bundled examples and test sources alike — has the
 /// same function set (`min`, `max`, `clamp`, etc.) available.
 fn op_lookup() -> cel_parser::OpLookup {
