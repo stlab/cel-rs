@@ -1616,7 +1616,7 @@ mod tests {
         filter::{Filter, FilterViolation},
         relationship::RelationshipId,
     };
-    use std::any::TypeId;
+    use std::any::{Any, TypeId};
 
     #[test]
     fn add_conditional_returns_error_for_invalid_cell() {
@@ -2768,6 +2768,64 @@ mod tests {
     }
 
     #[test]
+    fn from_fn_2_conforms_values_through_sheet_using_both_dynamic_arguments() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(50_i32);
+        let lo = sheet.add_cell(0_i32);
+        let hi = sheet.add_cell(100_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_2([lo, hi], |x: &i32, lo: &i32, hi: &i32| {
+                    Ok((*x).clamp(*lo, *hi))
+                }),
+            )
+            .unwrap();
+        // Attach-time value (50) already conforms.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 50);
+        // A later write is conformed against both dynamic argument cells.
+        sheet.write(a, 500_i32).unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+        sheet.write(a, -10_i32).unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+    }
+
+    #[test]
+    fn add_filter_returns_type_mismatch_when_the_filters_function_returns_the_wrong_type() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        // `value_type` matches `a`'s registered type (so add_filter's own value-type
+        // check passes), but the function itself always returns a `f64`, tripping
+        // add_filter's defensive check on the conformed result.
+        let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |_value, _args| {
+            Ok(Box::new(1.5_f64) as Box<dyn Any>)
+        });
+        let result = sheet.add_filter(a, filter);
+        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
+    }
+
+    #[test]
+    fn write_returns_type_mismatch_when_the_filters_function_returns_the_wrong_type() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        // Conforms correctly for the attach-time value (5), so `add_filter` succeeds,
+        // but returns a `f64` for any other input, tripping `write`'s defensive check.
+        let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |value, _args| {
+            let v = *value.downcast_ref::<i32>().unwrap();
+            if v == 5 {
+                Ok(Box::new(v) as Box<dyn Any>)
+            } else {
+                Ok(Box::new(1.5_f64) as Box<dyn Any>)
+            }
+        });
+        sheet.add_filter(a, filter).unwrap();
+        let result = sheet.write(a, 99_i32);
+        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
+        // Rejected write: cell fully untouched.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    }
+
+    #[test]
     fn write_conforms_a_value_through_the_cells_filter() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2893,6 +2951,36 @@ mod tests {
     }
 
     #[test]
+    fn propagate_reports_failed_when_the_filter_returns_the_wrong_type_on_a_derived_value() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(0_i32);
+        // Conforms correctly for the attach-time value (b's initial 0), so
+        // `add_filter` succeeds, but returns a `f64` for any other input — tripping
+        // propagate()'s diagnostic-phase defensive check once `a`'s value (1) is
+        // copied into `b` this round.
+        let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |value, _args| {
+            let v = *value.downcast_ref::<i32>().unwrap();
+            if v == 0 {
+                Ok(Box::new(v) as Box<dyn Any>)
+            } else {
+                Ok(Box::new(1.5_f64) as Box<dyn Any>)
+            }
+        });
+        sheet.add_filter(b, filter).unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // propagate() must not abort even though the filter's function returns the
+        // wrong type.
+        sheet.propagate().unwrap();
+        assert!(matches!(
+            sheet.filter_violation(b),
+            Some(FilterViolation::Failed(_))
+        ));
+    }
+
+    #[test]
     fn propagate_never_flags_a_filtered_cell_that_stayed_a_plain_source() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(60_i32);
@@ -3010,6 +3098,42 @@ mod tests {
         // `contributing_cells`'s existing semantics — it is `a` and `bound` that
         // appear as the upstream root causes, not `b` itself. `b`'s own membership
         // is already answered by `filter_violated_cells()`, tested separately above.
+        assert!(violation_cells.contains(&a));
+        assert!(violation_cells.contains(&bound));
+    }
+
+    #[test]
+    fn filter_violation_cells_includes_root_causes_of_a_failed_violation() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(1_i32);
+        let bound = sheet.add_cell(100_i32);
+        let b = sheet.add_cell(0_i32);
+        // Accepts b's attach-time value (0) so add_filter succeeds, but errors on any
+        // other input so the relationship's derived value (copied from `a`) trips a
+        // `Failed` violation instead of `NotConformed`.
+        sheet
+            .add_filter(
+                b,
+                Filter::from_fn_1(bound, |x: &i32, _bound: &i32| {
+                    if *x == 0 {
+                        Ok(*x)
+                    } else {
+                        Err(anyhow::anyhow!("cannot conform"))
+                    }
+                }),
+            )
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        sheet.propagate().unwrap();
+        assert!(matches!(
+            sheet.filter_violation(b),
+            Some(FilterViolation::Failed(_))
+        ));
+        let violation_cells = sheet.filter_violation_cells();
+        // Mirroring the `NotConformed` case above: `b` is forced, so `a` and `bound`
+        // are the upstream root causes, not `b` itself.
         assert!(violation_cells.contains(&a));
         assert!(violation_cells.contains(&bound));
     }
