@@ -727,13 +727,24 @@ Add to `sheet.rs`'s `mod tests`:
     fn write_rejects_a_value_the_filter_cannot_conform() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
+        // `add_filter` re-checks the cell's *current* value immediately (see §3.2),
+        // so a filter that unconditionally errors would reject at attach time —
+        // accept anything up to 100 so attach succeeds, and let the write below (500)
+        // be the one that trips the filter. (Task 4's implementation, commit
+        // 620b7bbd, made exactly this fix after hitting the same bug live.)
         sheet
             .add_filter(
                 a,
-                Filter::from_fn_0(|_x: &i32| Err(anyhow::anyhow!("cannot conform"))),
+                Filter::from_fn_0(|x: &i32| {
+                    if *x > 100 {
+                        Err(anyhow::anyhow!("value exceeds maximum"))
+                    } else {
+                        Ok(*x)
+                    }
+                }),
             )
             .unwrap();
-        let result = sheet.write(a, 9_i32);
+        let result = sheet.write(a, 500_i32);
         assert!(matches!(result, Err(Error::MethodFailed(_))));
         // Rejected write: cell fully untouched.
         assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
@@ -907,10 +918,21 @@ Method, Sheet, cell::CellId, relationship::RelationshipId};`:
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(1_i32);
         let b = sheet.add_cell(0_i32);
+        // `add_filter` re-checks the cell's *current* value immediately (see §3.2 of
+        // the design), so a filter that unconditionally errors would reject at
+        // attach time (b's initial value is 0) before propagate() ever runs. Accept
+        // exactly 0 so attach succeeds, and let the relationship's derived value (1,
+        // copied from `a`) be the one that trips the filter.
         sheet
             .add_filter(
                 b,
-                Filter::from_fn_0(|_x: &i32| Err(anyhow::anyhow!("cannot conform"))),
+                Filter::from_fn_0(|x: &i32| {
+                    if *x == 0 {
+                        Ok(*x)
+                    } else {
+                        Err(anyhow::anyhow!("cannot conform"))
+                    }
+                }),
             )
             .unwrap();
         sheet
