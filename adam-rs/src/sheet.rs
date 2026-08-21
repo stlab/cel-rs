@@ -797,20 +797,42 @@ impl Sheet {
     /// - `Error::InvalidId` — `id` is not a cell in this sheet.
     /// - `Error::TypeMismatch` — `T` does not match the cell's registered `TypeId`.
     /// - `Error::TerminalCell` — `id` already belongs to an existing output.
+    /// - `Error::MethodFailed` — the cell has a filter and it rejected `value`; the
+    ///   cell is left completely unchanged (no strength bump, no `source` change).
     pub fn write<T: Any + 'static>(&mut self, id: CellId, value: T) -> Result<(), Error> {
         if self.terminal_cells.contains(&id) {
             return Err(Error::TerminalCell);
         }
-        let cell = self.cells.get_mut(id).ok_or(Error::InvalidId)?;
-        if cell.type_id != TypeId::of::<T>() {
+        let cell_type = self.cells.get(id).ok_or(Error::InvalidId)?.type_id;
+        if cell_type != TypeId::of::<T>() {
             return Err(Error::TypeMismatch {
-                expected: cell.type_id,
+                expected: cell_type,
                 found: TypeId::of::<T>(),
             });
         }
+
+        let boxed: Box<dyn Any> = if let Some(filter) = self.cells[id].filter.as_ref() {
+            let args: Vec<&dyn Any> = filter
+                .args
+                .iter()
+                .map(|&a| self.cells[a].effective())
+                .collect();
+            let conformed = (filter.function)(&value, &args).map_err(Error::MethodFailed)?;
+            if conformed.as_ref().type_id() != cell_type {
+                return Err(Error::TypeMismatch {
+                    expected: cell_type,
+                    found: conformed.as_ref().type_id(),
+                });
+            }
+            conformed
+        } else {
+            Box::new(value)
+        };
+
         self.next_strength += 1;
+        let cell = &mut self.cells[id];
         cell.strength = self.next_strength | (1u64 << 63);
-        cell.source = Box::new(value);
+        cell.source = boxed;
         cell.derived = None;
         Ok(())
     }
@@ -2639,5 +2661,61 @@ mod tests {
             )
             .unwrap();
         assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+    }
+
+    #[test]
+    fn write_conforms_a_value_through_the_cells_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+        sheet.write(a, 500_i32).unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+    }
+
+    #[test]
+    fn write_rejects_a_value_the_filter_cannot_conform() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_0(|x: &i32| {
+                    if *x > 100 {
+                        Err(anyhow::anyhow!("value exceeds maximum"))
+                    } else {
+                        Ok(*x)
+                    }
+                }),
+            )
+            .unwrap();
+        let result = sheet.write(a, 500_i32);
+        assert!(matches!(result, Err(Error::MethodFailed(_))));
+        // Rejected write: cell fully untouched.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    }
+
+    #[test]
+    fn write_without_a_filter_behaves_exactly_as_before() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        sheet.write(a, 42_i32).unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 42);
+    }
+
+    #[test]
+    fn write_through_a_filter_still_bumps_strength() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+        sheet.write(b, 1_i32).unwrap();
+        sheet.write(a, 500_i32).unwrap();
+        // `a` was written after `b`, so its strength must be higher even though its
+        // stored value was conformed away from what was passed in.
+        assert!(sheet.cells[a].strength > sheet.cells[b].strength);
     }
 }
