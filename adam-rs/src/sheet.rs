@@ -13,7 +13,7 @@ use crate::{
     condition::{Condition, ConditionData, ConditionId},
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::Error,
-    filter::Filter,
+    filter::{Filter, FilterViolation},
     output::{OutputData, OutputId},
     relationship::{Method, RelationshipData, RelationshipId},
 };
@@ -69,6 +69,10 @@ pub struct Sheet {
     /// output. Sparse: an output with no entry had all its conditions hold. Not
     /// recomputed by `propagate_without_replan`.
     last_violated: HashMap<OutputId, Vec<ConditionId>>,
+    /// Filter violations recorded against a derived value as of the last `propagate()`
+    /// call. Not recomputed by `propagate_without_replan`, consistent with
+    /// `last_violated`.
+    last_filter_violations: HashMap<CellId, FilterViolation>,
 }
 
 /// A conditional's evaluated match value: borrowed (existing cell, no allocation) or owned
@@ -105,6 +109,7 @@ impl Sheet {
             outputs: SlotMap::with_key(),
             conditions: SlotMap::with_key(),
             last_violated: HashMap::new(),
+            last_filter_violations: HashMap::new(),
         }
     }
 
@@ -1210,6 +1215,52 @@ impl Sheet {
         }
         self.last_violated = last_violated;
 
+        // Phase 6b: evaluate every filter against a value derived by a method this
+        // round — a non-gating diagnostic. A filter is never re-checked against a
+        // value that came from a plain external write: `write`/`add_filter` already
+        // conformed it, and nothing here ever mutates a cell.
+        let mut derived_this_round: HashSet<CellId> = HashSet::new();
+        for &(rel_id, method_idx) in &plan.execution_order {
+            if let Some(method) = self
+                .relationships
+                .get(rel_id)
+                .and_then(|r| r.methods.get(method_idx))
+            {
+                derived_this_round.extend(method.outputs.iter().copied());
+            }
+        }
+        let mut last_filter_violations: HashMap<CellId, FilterViolation> = HashMap::new();
+        for &cell_id in &derived_this_round {
+            let Some(filter) = self.cells[cell_id].filter.as_ref() else {
+                continue;
+            };
+            let args: Vec<&dyn Any> = filter
+                .args
+                .iter()
+                .map(|&a| self.cells[a].effective())
+                .collect();
+            let current = self.cells[cell_id].effective();
+            match (filter.function)(current, &args) {
+                Ok(conformed) => {
+                    let cell = &self.cells[cell_id];
+                    if conformed.as_ref().type_id() != cell.type_id {
+                        last_filter_violations.insert(
+                            cell_id,
+                            FilterViolation::Failed(anyhow::anyhow!(
+                                "filter returned a value of a different type than the cell"
+                            )),
+                        );
+                    } else if !(cell.eq_fn)(conformed.as_ref(), current) {
+                        last_filter_violations.insert(cell_id, FilterViolation::NotConformed);
+                    }
+                }
+                Err(e) => {
+                    last_filter_violations.insert(cell_id, FilterViolation::Failed(e));
+                }
+            }
+        }
+        self.last_filter_violations = last_filter_violations;
+
         self.last_forced = Some(plan.forced_outputs);
         self.last_forced_relationships = Some(plan.forced_relationships);
         self.last_plan = Some(plan.execution_order);
@@ -1509,7 +1560,9 @@ impl Default for Sheet {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ConditionalId, Error, MatchExpr, Method, Sheet, cell::CellId, filter::Filter,
+        ConditionalId, Error, MatchExpr, Method, Sheet,
+        cell::CellId,
+        filter::{Filter, FilterViolation},
         relationship::RelationshipId,
     };
     use std::any::TypeId;
@@ -2717,5 +2770,108 @@ mod tests {
         // `a` was written after `b`, so its strength must be higher even though its
         // stored value was conformed away from what was passed in.
         assert!(sheet.cells[a].strength > sheet.cells[b].strength);
+    }
+
+    #[test]
+    fn propagate_reports_no_violation_when_a_derived_value_conforms() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(10_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+        assert!(sheet.last_filter_violations.is_empty());
+    }
+
+    #[test]
+    fn propagate_reports_not_conformed_when_a_derived_value_violates_its_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(60_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+        sheet.propagate().unwrap();
+        // 60 * 2 = 120, clamp(0, 100) => 100 != 120.
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 120);
+        assert!(matches!(
+            sheet.last_filter_violations.get(&b),
+            Some(FilterViolation::NotConformed)
+        ));
+    }
+
+    #[test]
+    fn propagate_reports_failed_when_the_filter_errors_on_a_derived_value() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(0_i32);
+        // `add_filter` re-checks the cell's *current* value immediately (see §3.2 of
+        // the design), so a filter that unconditionally errors would reject at
+        // attach time (b's initial value is 0) before propagate() ever runs. Accept
+        // exactly 0 so attach succeeds, and let the relationship's derived value (1,
+        // copied from `a`) be the one that trips the filter.
+        sheet
+            .add_filter(
+                b,
+                Filter::from_fn_0(|x: &i32| {
+                    if *x == 0 {
+                        Ok(*x)
+                    } else {
+                        Err(anyhow::anyhow!("cannot conform"))
+                    }
+                }),
+            )
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // propagate() must not abort even though the filter errors.
+        sheet.propagate().unwrap();
+        assert!(matches!(
+            sheet.last_filter_violations.get(&b),
+            Some(FilterViolation::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn propagate_never_flags_a_filtered_cell_that_stayed_a_plain_source() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(60_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+        sheet.propagate().unwrap();
+        assert!(sheet.last_filter_violations.is_empty());
+    }
+
+    #[test]
+    fn propagate_without_replan_does_not_recompute_filter_violations() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(60_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+        sheet.propagate().unwrap();
+        assert!(sheet.last_filter_violations.contains_key(&b));
+
+        // Rewrite `a` back into range and re-run only the cached plan.
+        sheet.write(a, 10_i32).unwrap();
+        sheet.propagate_without_replan().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+        // Still reports the *old* violation: propagate_without_replan doesn't
+        // recompute it, matching last_violated's existing behavior.
+        assert!(sheet.last_filter_violations.contains_key(&b));
     }
 }
