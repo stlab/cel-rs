@@ -1469,6 +1469,7 @@ fn round_scope(
 /// ```
 pub struct OpLookup {
     scopes: Vec<ScopeFn>,
+    library_scope_count: usize,
     builtin_scope: BuiltinScope,
     tuple_signatures: Vec<TupleOpSignature>,
 }
@@ -1488,10 +1489,11 @@ impl OpLookup {
     pub fn new() -> Self {
         let mut lookup = OpLookup {
             scopes: Vec::new(),
+            library_scope_count: 0,
             builtin_scope: BuiltinScope,
             tuple_signatures: Vec::new(),
         };
-        lookup.push_scope(round_scope);
+        lookup.push_library_scope(round_scope);
         lookup
     }
 
@@ -1557,20 +1559,50 @@ impl OpLookup {
     /// Pops the most recent scope from the stack.
     ///
     /// Returns the popped scope, or `None` if the stack is empty.
+    ///
+    /// - Precondition: must not remove a library scope registered via
+    ///   [`push_library_scope`](Self::push_library_scope) — those are permanent setup-time
+    ///   registrations that must survive across multiple parses.
     pub fn pop_scope(&mut self) -> Option<ScopeFn> {
+        debug_assert!(
+            self.scopes.len() > self.library_scope_count,
+            "pop_scope must not remove a library scope — use isolate_scopes/restore_scopes semantics instead"
+        );
         self.scopes.pop()
     }
 
-    /// Temporarily removes every scope pushed via [`push_scope`](Self::push_scope), returning them
-    /// so a later [`restore_scopes`](Self::restore_scopes) call can put them back.
+    /// Registers a permanent, library-level scope that is reachable from every parse,
+    /// including inside closure bodies.
+    ///
+    /// Used for built-in language features (like `round`) and statically-installed library
+    /// functions (like `clamp` from a `cel-std`-style crate). These scopes are registered
+    /// once at setup time and must always be available, even when [`isolate_scopes`](Self::isolate_scopes)
+    /// is active — library scopes are *never* isolated.
+    ///
+    /// Do not use for scopes tied to a single parse's lifetime — use [`push_scope`](Self::push_scope)
+    /// for those, which can be isolated during nested body compilation (closures).
+    ///
+    /// - Complexity: O(1).
+    pub fn push_library_scope<F>(&mut self, scope: F)
+    where
+        F: Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync + 'static,
+    {
+        self.scopes.push(Box::new(scope));
+        self.library_scope_count = self.scopes.len();
+    }
+
+    /// Temporarily removes every transient scope (those pushed via [`push_scope`](Self::push_scope)),
+    /// returning them so a later [`restore_scopes`](Self::restore_scopes) call can put them back.
+    /// Library scopes registered via [`push_library_scope`](Self::push_library_scope) are *never*
+    /// isolated and remain reachable.
     ///
     /// Used when compiling an independent nested body (a closure literal) that must resolve names
-    /// against only its own declared parameters and built-ins — never whatever enclosing scopes
-    /// happen to be active, which the LIFO `scopes` stack would otherwise still make reachable to a
-    /// scope pushed on top of them. `builtin_scope` (the fixed bottom-level built-in fallback) is a
-    /// separate field, so it stays reachable regardless — only caller-pushed scopes are removed.
+    /// against only its own declared parameters and library functions (like `round`, `clamp`) —
+    /// never whatever transient per-parse scopes happen to be active. This maintains the invariant
+    /// that library functions are always available, including inside closures, while per-declaration
+    /// scopes (which tie to a single outer parse's lifetime) are hidden from nested bodies.
     ///
-    /// - Postcondition: `self` behaves as if freshly constructed, scope-wise, until
+    /// - Postcondition: library scopes remain reachable; transient scopes are inaccessible until
     ///   [`restore_scopes`](Self::restore_scopes) is called.
     ///
     /// # Examples
@@ -1602,11 +1634,14 @@ impl OpLookup {
     /// assert!(result.is_ok());
     /// ```
     pub fn isolate_scopes(&mut self) -> Vec<ScopeFn> {
-        std::mem::take(&mut self.scopes)
+        self.scopes.split_off(self.library_scope_count)
     }
 
     /// Restores a scope stack previously removed by [`isolate_scopes`](Self::isolate_scopes),
     /// discarding whatever scopes were pushed while isolated.
+    ///
+    /// Library scopes (those registered via [`push_library_scope`](Self::push_library_scope))
+    /// are unaffected by isolation and restoration — they persist across the entire operation.
     ///
     /// - Precondition: `scopes` came from a matching `isolate_scopes()` call on this same
     ///   `OpLookup` — restoring an arbitrary `Vec<ScopeFn>` is well-typed but not a meaningful use
@@ -1633,7 +1668,8 @@ impl OpLookup {
     /// // The outer scope is now reachable again
     /// ```
     pub fn restore_scopes(&mut self, scopes: Vec<ScopeFn>) {
-        self.scopes = scopes;
+        self.scopes.truncate(self.library_scope_count);
+        self.scopes.extend(scopes);
     }
 
     /// Looks up and applies an operation, attaching the expression span to any error.
@@ -2804,5 +2840,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(segment.call0::<i32>().unwrap(), 1);
+    }
+
+    #[test]
+    fn isolate_scopes_leaves_library_scopes_reachable() {
+        // round_scope's own protocol is two lookups: ("round", 0) pushes a marker value, then
+        // ("()", 2) (with the marker plus an f64 operand on the stack) computes the actual round.
+        // This test only needs to prove the *first* half is still reachable while isolated — that's
+        // enough to demonstrate round_scope (a library scope) survived isolate_scopes, without
+        // needing to replicate the whole call protocol.
+        let mut lookup = OpLookup::new(); // registers round_scope via push_library_scope
+        let mut segment = DynSegment::new::<()>();
+        let isolated = lookup.isolate_scopes();
+        lookup
+            .lookup(
+                "round",
+                &mut segment,
+                0,
+                proc_macro2::Span::call_site(),
+                proc_macro2::Span::call_site(),
+            )
+            .expect("round is a library scope and must survive isolation");
+        lookup.restore_scopes(isolated);
+        assert_eq!(segment.peek_stack_infos(1).len(), 1); // the RoundFn marker was pushed
     }
 }
