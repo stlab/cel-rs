@@ -68,6 +68,10 @@ candidate value) that isn't resolved until the filter actually runs.
   the filter use case; the closure literal is consumed at the point it's written.
 - Any support for the compile-time-checked `Segment<Args, Stack>` / `cel-rs-macros` path. Closures
   are a `DynSegment`-level (dynamically-typed) feature only, matching where adam-lang already lives.
+- Any support in `AstContext` (the formatter/language-server AST-building `ParserContext` impl).
+  `ParserContext::push_closure` ships with a default "unsupported" implementation and
+  `AstContext` simply doesn't override it — parsing a closure literal through that path is a
+  parse error until/unless a later spec adds real support.
 - Recursive or mutually-recursive closure calls (see "Reentrancy" below).
 - Type inference for closure parameters. Every parameter carries an explicit `: Type` annotation;
   the body compiles once, eagerly, at parse time, exactly like every other CEL body today.
@@ -173,22 +177,55 @@ closure_param       = identifier ":" type_expression .
 `|` is already tokenized (bitwise-or) but is never valid as a prefix operator, so seeing it where a
 primary expression is expected is unambiguous with no lexer changes.
 
+`type_expression` here is a *new*, cel-parser-level (not adam-lang) type annotation grammar — a bare
+identifier naming one of the fixed built-in scalar types (`i32`, `f64`, `bool`, `String`, ...; the
+same closed set `op_table.rs`'s `signatures_for_cast` already names for `as` casts), or a
+parenthesized, recursively-nested tuple of `type_expression`s. This is new surface area: today
+nothing in raw `cel-parser` needs to resolve a type *name* to a concrete Rust type outside of a cast
+(`OpLookup::lookup_cast`, which converts an already-stack-resident value — it doesn't need to know
+how to *declare an argument* of that type). Closures are the first feature needing that, so
+`op_table.rs` gains a small table (mirroring `signatures_for_cast`'s match-by-name shape) mapping
+each built-in scalar name to its `TypeId`/size/align/`RawDropper`/a `push_arg::<T>` function
+pointer; a tuple `type_expression` recurses, building an `AssociatedType` list via the existing
+public `cel_runtime::layout_associated` at each nesting level (the same bottom-up-then-flat
+composition `dyn_segment.rs`'s private `layout_associated_recursive` already does internally, just
+assembled explicitly here since that helper isn't `pub`), bound to its argument via the existing
+`DynSegment::push_arg_as_dynamic_sequence_tuple`.
+
 Compiling a closure literal:
 
-1. Parse the parameter list; resolve each `type_expression` to a `TypeId` the same way a cell type
-   annotation already does.
+1. Parse the parameter list, resolving each `type_expression` per the paragraph above.
 2. Start a **new, independent `DynSegment`** for the body — not the segment currently being built
-   around the closure literal.
-3. `push_scope` a `ScopeFn`, live only for this body, resolving each parameter name to "read
-   positional argument N" (`push_arg`) — the same "identifier resolves to a scope-emitted read" flow
-   every other identifier lookup already uses.
-4. Parse `expression` via the normal grammar entry point, targeting the new segment. Any name that
-   isn't one of the closure's own parameters falls through this scope and must resolve via a
-   built-in or a name meaningful at parse time (e.g. `clamp`) — there is deliberately no enclosing
-   fallback to "the cell being declared" or similar; an unresolved name is a plain parse error,
-   exactly like referencing an undeclared identifier anywhere else today.
-5. `pop_scope`, wrap the finished body segment plus the parameter/return `TypeId`s as a `DynClosure`,
-   and push it as an ordinary literal constant onto the *outer* segment.
+   around the closure literal. Mechanically, this is a new capability on `Parser<C>` itself (not
+   just `ParserContext`): swap `self.context` out for `C::new_context()`, keep parsing (tokens,
+   `op_lookup`, and `last_span` are untouched), then swap the original back in once the body is
+   done, taking the finished fresh context as the closure's body. `ParserContext` gains one new
+   method to package that finished body into a value pushed onto the (now-restored) outer context —
+   `push_closure(&mut self, param_types: Vec<TypeId>, return_type: TypeId, body: Self, span: Span)`
+   — with a default implementation returning "closures are not supported in this context" (so any
+   future `ParserContext` impl, e.g. an AST-building context for the formatter/language server,
+   need not support closures just to keep compiling), overridden by `DynSegmentContext` to build a
+   `DynClosure` from `body.into_inner()` and `push_literal` it.
+3. **Isolate the scope stack** before pushing the parameter scope: `OpLookup`'s `scopes: Vec<ScopeFn>`
+   is LIFO with fallthrough (any enclosing scope — e.g. adam-lang's own cell-name-binding scope from
+   `parse_deduced_expr` — stays reachable to whatever's pushed on top of it). Simply pushing the
+   closure's own param scope on top would let a closure body silently resolve outer names too,
+   quietly reintroducing the free-variable capture this design explicitly rejects. `OpLookup` gains
+   `isolate_scopes(&mut self) -> Vec<ScopeFn>` (swaps `scopes` for an empty `Vec`, returning the
+   displaced ones) and `restore_scopes(&mut self, scopes: Vec<ScopeFn>)`, used as a
+   save/clear/restore bracket around the whole body compile. Only `push_scope` a `ScopeFn` resolving
+   each parameter name to "read positional argument N" (`push_arg`) once isolated.
+4. Parse `expression` via the normal grammar entry point, targeting the new segment. With the
+   enclosing scope stack isolated, any name that isn't one of the closure's own parameters can only
+   resolve via a built-in (`builtin_scope`, a fixed field on `OpLookup` separate from the `scopes`
+   stack, so it's unaffected by isolation) or a name meaningful at parse time (e.g. `clamp`) — an
+   unresolved name is a plain parse error, exactly like referencing an undeclared identifier
+   anywhere else today.
+5. `pop_scope` then `restore_scopes`, wrap the finished body segment plus the parameter/return
+   `TypeId`s as a `DynClosure`, and push it as an ordinary literal constant onto the *outer* segment.
+   The return type is read off the finished body segment's own single-result `StackInfo` (the same
+   way any other expression's result type is already inferred) — closures have no return-type
+   annotation in the grammar, only parameter annotations.
 
 Because every parameter type is explicit, the body compiles exactly once, eagerly — no deferred
 compilation, no per-call-site monomorphization. A closure passed as an ordinary argument to some
@@ -264,8 +301,12 @@ Per the workspace's contract-only convention:
   `dyn_segment.rs` patterns).
 - `cel-parser`: parsing `|x: i32| x + 1` produces a `DynClosure` pushed as a literal; a closure body
   referencing an undeclared name is a parse error; a closure with 0 params and one with 2+ params
-  both compile and call correctly; nested closures (a closure literal appearing inside another
-  closure's body, referencing only its own innermost parameters) compile and call correctly.
+  both compile and call correctly; a tuple-typed parameter (`|r: (i32, i32)| r.0 + r.1`) compiles
+  and calls correctly; nested closures (a closure literal appearing inside another closure's body,
+  referencing only its own innermost parameters) compile and call correctly; a closure body that
+  references a name bound only by an *enclosing* scope (e.g. a name adam-lang's own
+  `parse_deduced_expr` scope would otherwise resolve) is a parse error, proving `isolate_scopes`
+  actually blocks it rather than silently falling through.
 - `adam-lang`: `cell a: i32 filter |x: i32| clamp(x, 1, 100);` parses, typechecks, and — via
   `Sheet::add_filter`/`write` — actually conforms an out-of-range value on write, matching the
   behavior of an equivalent hand-written `Filter::from_fn_0`. The `filter(a_range) |x, r| ...`
