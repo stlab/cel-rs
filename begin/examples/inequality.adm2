@@ -9,6 +9,6 @@ sheet inequality {
     }
     relationship {
         b := min(b, c);
-        c := mac(b, c);
+        c := max(b, c);
     }
 }
