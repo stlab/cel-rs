@@ -206,21 +206,38 @@ Compiling a closure literal:
    future `ParserContext` impl, e.g. an AST-building context for the formatter/language server,
    need not support closures just to keep compiling), overridden by `DynSegmentContext` to build a
    `DynClosure` from `body.into_inner()` and `push_literal` it.
-3. **Isolate the scope stack** before pushing the parameter scope: `OpLookup`'s `scopes: Vec<ScopeFn>`
-   is LIFO with fallthrough (any enclosing scope — e.g. adam-lang's own cell-name-binding scope from
-   `parse_deduced_expr` — stays reachable to whatever's pushed on top of it). Simply pushing the
-   closure's own param scope on top would let a closure body silently resolve outer names too,
-   quietly reintroducing the free-variable capture this design explicitly rejects. `OpLookup` gains
-   `isolate_scopes(&mut self) -> Vec<ScopeFn>` (swaps `scopes` for an empty `Vec`, returning the
-   displaced ones) and `restore_scopes(&mut self, scopes: Vec<ScopeFn>)`, used as a
-   save/clear/restore bracket around the whole body compile. Only `push_scope` a `ScopeFn` resolving
-   each parameter name to "read positional argument N" (`push_arg`) once isolated.
+3. **Isolate the scope stack down to the library floor** before pushing the parameter scope:
+   `OpLookup`'s `scopes: Vec<ScopeFn>` is LIFO with fallthrough (any enclosing scope — e.g.
+   adam-lang's own cell-name-binding scope from `parse_deduced_expr` — stays reachable to whatever's
+   pushed on top of it). Simply pushing the closure's own param scope on top would let a closure
+   body silently resolve outer names too, quietly reintroducing the free-variable capture this
+   design explicitly rejects — but blanket-clearing the *entire* `scopes` stack goes too far the
+   other way: built-in library functions like `round` (`op_table.rs`'s own `round_scope`) and, once
+   a caller wires it in, `clamp`/`min`/`max`/etc. (`cel-std`) are *also* registered via `push_scope`,
+   not via the separate `builtin_scope` field — they'd become unreachable inside every closure body
+   too, which is backwards: those should always be reachable, from anywhere, including inside a
+   closure. `OpLookup` therefore distinguishes two kinds of scope: **library scopes**, registered
+   once at setup time and meant to be reachable unconditionally, and **transient scopes**, pushed
+   and popped around a single parse (a `parse_deduced_expr` call, or a closure's own body compile).
+   A new `push_library_scope` method pushes a scope *and* advances a `library_scope_count: usize`
+   floor; `OpLookup::new()` registers `round_scope` through it (so it stays a library scope, not a
+   transient one), and `isolate_scopes(&mut self) -> Vec<ScopeFn>` removes only scopes *above* that
+   floor (`self.scopes.split_off(self.library_scope_count)`), returning them for
+   `restore_scopes(&mut self, scopes: Vec<ScopeFn>)` to put back. Only `push_scope` (the ordinary,
+   transient kind) a `ScopeFn` resolving each parameter name to "read positional argument N"
+   (`push_arg`) once isolated.
 4. Parse `expression` via the normal grammar entry point, targeting the new segment. With the
-   enclosing scope stack isolated, any name that isn't one of the closure's own parameters can only
-   resolve via a built-in (`builtin_scope`, a fixed field on `OpLookup` separate from the `scopes`
-   stack, so it's unaffected by isolation) or a name meaningful at parse time (e.g. `clamp`) — an
-   unresolved name is a plain parse error, exactly like referencing an undeclared identifier
-   anywhere else today.
+   scope stack isolated down to the library floor, any name that isn't one of the closure's own
+   parameters can only resolve via a library scope (`round`, and any future library registered
+   through `push_library_scope`) or `builtin_scope` (the fixed field handling infix/prefix operators
+   and casts, always reachable regardless of isolation) — an unresolved name is a plain parse error,
+   exactly like referencing an undeclared identifier anywhere else today. Note: `cel-std`'s own
+   `install` currently registers `clamp`/`min`/`max`/`abs`/the unary math functions via plain
+   `push_scope`, not `push_library_scope` — those calls need updating to `push_library_scope` for
+   this to actually cover them (a small, mechanical one-file change bundled with this same piece of
+   work); separately, `adam-lang` has no dependency on `cel-std` and never calls `install` at all
+   today, which is a pre-existing gap unrelated to closures, tracked in
+   [stlab/cel-rs#137](https://github.com/stlab/cel-rs/issues/137) rather than fixed here.
 5. `pop_scope` then `restore_scopes`, wrap the finished body segment plus the parameter/return
    `TypeId`s as a `DynClosure`, and push it as an ordinary literal constant onto the *outer* segment.
    The return type is read off the finished body segment's own single-result `StackInfo` (the same
@@ -311,13 +328,16 @@ Per the workspace's contract-only convention:
   references a name bound only by an *enclosing* scope (e.g. a name adam-lang's own
   `parse_deduced_expr` scope would otherwise resolve) is a parse error, proving `isolate_scopes`
   actually blocks it rather than silently falling through.
-- `adam-lang`: `cell a: i32 filter |x: i32| clamp(x, 1, 100);` parses, typechecks, and — via
-  `Sheet::add_filter`/`write` — actually conforms an out-of-range value on write, matching the
-  behavior of an equivalent hand-written `Filter::from_fn_0`. The `filter(a_range) |x, r| ...`
-  form: typechecks argument-cell type matching (including a deliberate mismatch case, expecting a
-  diagnostic), and end-to-end through `propagate()` confirms the filter's conformed output tracks
-  `a_range` after it changes (proving the "fresh value every call" behavior, not a stale one from
-  filter-declaration time).
+- `adam-lang`: `cell a: i32 filter |x: i32| clamp(x, 1, 100);` (or, since `adam-lang` has no
+  dependency on `cel-std` and never calls `install` today — a pre-existing gap tracked in
+  [stlab/cel-rs#137](https://github.com/stlab/cel-rs/issues/137), not fixed by this spec — the
+  actual test uses an equivalent built from `if`/comparisons instead of `clamp` itself) parses,
+  typechecks, and — via `Sheet::add_filter`/`write` — actually conforms an out-of-range value on
+  write, matching the behavior of an equivalent hand-written `Filter::from_fn_0`. The
+  `filter(a_range) |x, r| ...` form: typechecks argument-cell type matching (including a deliberate
+  mismatch case, expecting a diagnostic), and end-to-end through `propagate()` confirms the
+  filter's conformed output tracks `a_range` after it changes (proving the "fresh value every call"
+  behavior, not a stale one from filter-declaration time).
 
 ## Open questions
 
