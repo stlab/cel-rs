@@ -20,9 +20,10 @@ unmodified `Filter`/`Sheet::add_filter` API. No task changes any public API used
 
 ## Global Constraints
 
-- Every new/changed `pub` function needs a contract-style `///` doc comment per the workspace
-  `CLAUDE.md` (Summary; `- Precondition:`/`# Errors`/`# Safety` bullets; `- Postcondition:` only
-  when non-obvious; `- Complexity:` whenever not O(1)).
+- Every new/changed function — `pub`, `pub(crate)`, or private — needs a contract-style `///` doc
+  comment per the workspace `CLAUDE.md` (Summary; `- Precondition:`/`# Errors`/`# Safety` bullets;
+  `- Postcondition:` only when non-obvious; `- Complexity:` whenever not O(1)). CLAUDE.md's rule is
+  not limited to `pub` items.
 - Preconditions are `debug_assert!`-checked, never `Result`-checked — only genuine runtime error
   conditions (data-dependent, not caller-bug) return `Err`.
 - Tests are derived from each function's contract/public interface only — never from reading the
