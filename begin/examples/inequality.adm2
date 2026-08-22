@@ -1,5 +1,5 @@
 sheet inequality {
-    cell a = 0.0;
+    cell a = 0.0 filter |x: f64| clamp(x, 0.0, 100.0);
     cell b = 0.0;
     cell c = 2.0;
 

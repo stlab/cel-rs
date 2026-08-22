@@ -1306,6 +1306,61 @@ pub fn cast_source_types(target_name: &str) -> impl Iterator<Item = TypeId> {
         .flat_map(|sigs| sigs.iter().map(CastSignature::source_type_id))
 }
 
+/// One built-in scalar type's identity plus everything needed to declare a `DynSegment`
+/// argument or tuple leaf of that type without the caller knowing it as a static Rust generic.
+///
+/// Covers exactly the fixed set of scalar type names [`signatures_for_cast`] already recognizes
+/// as `as`-cast targets — closures are the first feature needing to *declare* a value of a named
+/// type (rather than convert an already-stack-resident one), so this is new, additive surface
+/// area; it deliberately reuses that same closed name set rather than inventing a second one.
+pub(crate) struct BuiltinScalarType {
+    pub(crate) type_id: TypeId,
+    pub(crate) type_name: &'static str,
+    pub(crate) size: usize,
+    pub(crate) align: usize,
+    pub(crate) dropper: cel_runtime::RawDropper,
+    pub(crate) push_arg: fn(&mut DynSegment, usize),
+}
+
+macro_rules! builtin_scalar {
+    ($name:literal, $ty:ty) => {
+        BuiltinScalarType {
+            type_id: TypeId::of::<$ty>(),
+            type_name: $name,
+            size: std::mem::size_of::<$ty>(),
+            align: std::mem::align_of::<$ty>(),
+            dropper: cel_runtime::raw_dropper_for::<$ty>(),
+            push_arg: |seg, idx| seg.push_arg::<$ty>(idx),
+        }
+    };
+}
+
+/// Resolves a closure parameter type annotation's bare identifier to its full built-in
+/// descriptor, or `None` if `name` names no recognized scalar type.
+///
+/// - Complexity: O(1).
+pub(crate) fn builtin_scalar_type(name: &str) -> Option<BuiltinScalarType> {
+    Some(match name {
+        "u8" => builtin_scalar!("u8", u8),
+        "u16" => builtin_scalar!("u16", u16),
+        "u32" => builtin_scalar!("u32", u32),
+        "u64" => builtin_scalar!("u64", u64),
+        "u128" => builtin_scalar!("u128", u128),
+        "usize" => builtin_scalar!("usize", usize),
+        "i8" => builtin_scalar!("i8", i8),
+        "i16" => builtin_scalar!("i16", i16),
+        "i32" => builtin_scalar!("i32", i32),
+        "i64" => builtin_scalar!("i64", i64),
+        "i128" => builtin_scalar!("i128", i128),
+        "isize" => builtin_scalar!("isize", isize),
+        "f32" => builtin_scalar!("f32", f32),
+        "f64" => builtin_scalar!("f64", f64),
+        "bool" => builtin_scalar!("bool", bool),
+        "String" => builtin_scalar!("String", String),
+        _ => return None,
+    })
+}
+
 /// Built-in operation scope.
 ///
 /// Provides lookup for standard operations using a compile-time hash table.
@@ -1412,6 +1467,7 @@ fn round_scope(
 /// ```
 pub struct OpLookup {
     scopes: Vec<ScopeFn>,
+    library_scope_count: usize,
     builtin_scope: BuiltinScope,
     tuple_signatures: Vec<TupleOpSignature>,
 }
@@ -1431,10 +1487,11 @@ impl OpLookup {
     pub fn new() -> Self {
         let mut lookup = OpLookup {
             scopes: Vec::new(),
+            library_scope_count: 0,
             builtin_scope: BuiltinScope,
             tuple_signatures: Vec::new(),
         };
-        lookup.push_scope(round_scope);
+        lookup.push_library_scope(round_scope);
         lookup
     }
 
@@ -1500,8 +1557,121 @@ impl OpLookup {
     /// Pops the most recent scope from the stack.
     ///
     /// Returns the popped scope, or `None` if the stack is empty.
+    ///
+    /// - Precondition: must not remove a library scope registered via
+    ///   [`push_library_scope`](Self::push_library_scope) — those are permanent setup-time
+    ///   registrations that must survive across multiple parses.
     pub fn pop_scope(&mut self) -> Option<ScopeFn> {
+        debug_assert!(
+            self.scopes.len() > self.library_scope_count,
+            "pop_scope must not remove a library scope — use isolate_scopes/restore_scopes semantics instead"
+        );
         self.scopes.pop()
+    }
+
+    /// Registers a permanent, library-level scope that is reachable from every parse,
+    /// including inside closure bodies.
+    ///
+    /// Used for built-in language features (like `round`) and statically-installed library
+    /// functions (like `clamp` from a `cel-std`-style crate). These scopes are registered
+    /// once at setup time and must always be available, even when [`isolate_scopes`](Self::isolate_scopes)
+    /// is active — library scopes are *never* isolated.
+    ///
+    /// Do not use for scopes tied to a single parse's lifetime — use [`push_scope`](Self::push_scope)
+    /// for those, which can be isolated during nested body compilation (closures).
+    ///
+    /// - Complexity: O(1).
+    pub fn push_library_scope<F>(&mut self, scope: F)
+    where
+        F: Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync + 'static,
+    {
+        debug_assert!(
+            self.scopes.len() == self.library_scope_count,
+            "push_library_scope must not be called after a transient scope — use isolate_scopes/restore_scopes semantics instead"
+        );
+        self.scopes.push(Box::new(scope));
+        self.library_scope_count = self.scopes.len();
+    }
+
+    /// Temporarily removes every transient scope (those pushed via [`push_scope`](Self::push_scope)),
+    /// returning them so a later [`restore_scopes`](Self::restore_scopes) call can put them back.
+    /// Library scopes registered via [`push_library_scope`](Self::push_library_scope) are *never*
+    /// isolated and remain reachable.
+    ///
+    /// Used when compiling an independent nested body (a closure literal) that must resolve names
+    /// against only its own declared parameters and library functions (like `round`, `clamp`) —
+    /// never whatever transient per-parse scopes happen to be active. This maintains the invariant
+    /// that library functions are always available, including inside closures, while per-declaration
+    /// scopes (which tie to a single outer parse's lifetime) are hidden from nested bodies.
+    ///
+    /// - Postcondition: library scopes remain reachable; transient scopes are inaccessible until
+    ///   [`restore_scopes`](Self::restore_scopes) is called.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::OpLookup;
+    /// use cel_runtime::DynSegment;
+    ///
+    /// let mut lookup = OpLookup::new();
+    /// lookup.push_scope(|name, segment, arity, _span| {
+    ///     if name == "custom" && arity == 0 {
+    ///         segment.just(42i32);
+    ///         Ok(true)
+    ///     } else {
+    ///         Ok(false)
+    ///     }
+    /// });
+    ///
+    /// let saved = lookup.isolate_scopes();
+    /// // Now the custom scope is inaccessible
+    /// let mut segment = DynSegment::new::<()>();
+    /// let result = lookup.lookup("custom", &mut segment, 0, proc_macro2::Span::call_site(), proc_macro2::Span::call_site());
+    /// assert!(result.is_err());
+    ///
+    /// lookup.restore_scopes(saved);
+    /// // Now the custom scope is reachable again
+    /// let mut segment = DynSegment::new::<()>();
+    /// let result = lookup.lookup("custom", &mut segment, 0, proc_macro2::Span::call_site(), proc_macro2::Span::call_site());
+    /// assert!(result.is_ok());
+    /// ```
+    pub fn isolate_scopes(&mut self) -> Vec<ScopeFn> {
+        self.scopes.split_off(self.library_scope_count)
+    }
+
+    /// Restores a scope stack previously removed by [`isolate_scopes`](Self::isolate_scopes),
+    /// discarding whatever scopes were pushed while isolated.
+    ///
+    /// Library scopes (those registered via [`push_library_scope`](Self::push_library_scope))
+    /// are unaffected by isolation and restoration — they persist across the entire operation.
+    ///
+    /// - Precondition: `scopes` came from a matching `isolate_scopes()` call on this same
+    ///   `OpLookup` — restoring an arbitrary `Vec<ScopeFn>` is well-typed but not a meaningful use
+    ///   of this method.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::OpLookup;
+    /// use cel_runtime::DynSegment;
+    ///
+    /// let mut lookup = OpLookup::new();
+    /// lookup.push_scope(|name, segment, arity, _span| {
+    ///     if name == "outer" && arity == 0 {
+    ///         segment.just(100i32);
+    ///         Ok(true)
+    ///     } else {
+    ///         Ok(false)
+    ///     }
+    /// });
+    ///
+    /// let saved = lookup.isolate_scopes();
+    /// lookup.restore_scopes(saved);
+    /// // The outer scope is now reachable again
+    /// ```
+    pub fn restore_scopes(&mut self, scopes: Vec<ScopeFn>) {
+        self.scopes.truncate(self.library_scope_count);
+        self.scopes.extend(scopes);
     }
 
     /// Looks up and applies an operation, attaching the expression span to any error.
@@ -2601,5 +2771,99 @@ mod tests {
         // (OpLookup::register_tuple_op), never in the static BUILTINS table this function reads —
         // confirming they're invisible here, not an oversight.
         assert!(builtin_operand_types("greet").is_empty());
+    }
+
+    #[test]
+    fn builtin_scalar_type_resolves_every_documented_name() {
+        for name in [
+            "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+            "f32", "f64", "bool", "String",
+        ] {
+            let scalar =
+                builtin_scalar_type(name).unwrap_or_else(|| panic!("expected `{name}` to resolve"));
+            assert_eq!(scalar.type_name, name);
+        }
+        assert!(builtin_scalar_type("not_a_type").is_none());
+    }
+
+    #[test]
+    fn builtin_scalar_type_i32_matches_std_any_type_id() {
+        let scalar = builtin_scalar_type("i32").unwrap();
+        assert_eq!(scalar.type_id, TypeId::of::<i32>());
+        assert_eq!(scalar.size, std::mem::size_of::<i32>());
+        assert_eq!(scalar.align, std::mem::align_of::<i32>());
+    }
+
+    #[test]
+    fn builtin_scalar_type_push_arg_declares_a_readable_argument() {
+        let scalar = builtin_scalar_type("i32").unwrap();
+        let mut segment = DynSegment::new::<()>();
+        (scalar.push_arg)(&mut segment, 0);
+        let value = 42i32;
+        let result: i32 = segment.call_dyn(&[&value]).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn isolate_scopes_removes_pushed_scopes_until_restored() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, arity, _span| {
+            if name == "custom" && arity == 0 {
+                segment.just(1i32);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        });
+
+        let mut segment = DynSegment::new::<()>();
+        let isolated = lookup.isolate_scopes();
+        let err = lookup.lookup(
+            "custom",
+            &mut segment,
+            0,
+            proc_macro2::Span::call_site(),
+            proc_macro2::Span::call_site(),
+        );
+        assert!(
+            err.is_err(),
+            "custom scope must not be reachable while isolated"
+        );
+
+        lookup.restore_scopes(isolated);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "custom",
+                &mut segment,
+                0,
+                proc_macro2::Span::call_site(),
+                proc_macro2::Span::call_site(),
+            )
+            .unwrap();
+        assert_eq!(segment.call0::<i32>().unwrap(), 1);
+    }
+
+    #[test]
+    fn isolate_scopes_leaves_library_scopes_reachable() {
+        // round_scope's own protocol is two lookups: ("round", 0) pushes a marker value, then
+        // ("()", 2) (with the marker plus an f64 operand on the stack) computes the actual round.
+        // This test only needs to prove the *first* half is still reachable while isolated — that's
+        // enough to demonstrate round_scope (a library scope) survived isolate_scopes, without
+        // needing to replicate the whole call protocol.
+        let mut lookup = OpLookup::new(); // registers round_scope via push_library_scope
+        let mut segment = DynSegment::new::<()>();
+        let isolated = lookup.isolate_scopes();
+        lookup
+            .lookup(
+                "round",
+                &mut segment,
+                0,
+                proc_macro2::Span::call_site(),
+                proc_macro2::Span::call_site(),
+            )
+            .expect("round is a library scope and must survive isolation");
+        lookup.restore_scopes(isolated);
+        assert_eq!(segment.peek_stack_infos(1).len(), 1); // the RoundFn marker was pushed
     }
 }
