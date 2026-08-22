@@ -1585,6 +1585,10 @@ impl OpLookup {
     where
         F: Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync + 'static,
     {
+        debug_assert!(
+            self.scopes.len() == self.library_scope_count,
+            "push_library_scope must not be called after a transient scope — use isolate_scopes/restore_scopes semantics instead"
+        );
         self.scopes.push(Box::new(scope));
         self.library_scope_count = self.scopes.len();
     }
