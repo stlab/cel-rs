@@ -129,23 +129,32 @@ struct ClosureData {
   `'static` Rust type" mechanism the stack already uses for pushing e.g. a `u32` or `String`
   literal, getting a `RawDropper` generated for it the same way (`raw_dropper_for::<DynClosure>()`).
 
-Calling one:
+Calling one requires **no new cel-runtime primitive at all** — `DynSegment::call_dyn<R: 'static>(&mut self, inputs: &[&dyn Any]) -> anyhow::Result<R>` (`dyn_segment.rs:957`) already does exactly this: executes the segment against positional `inputs`, and its documented `# Errors` already cover "the `TypeId` of `R` does not match the top-of-stack type." `DynClosure::call` is a thin generic pass-through:
 
 ```rust
 impl DynClosure {
     /// Invokes `body` with `args`, positionally matched against `param_types`.
     ///
-    /// - Precondition: `args.len() == self.param_types.len()`, adam-lang typechecks this before
-    ///   ever constructing a `DynClosure` value, so a mismatch here is a caller bug, not user error.
+    /// - Precondition: `args.len() == self.0.param_types.len()` and each `args[i]`'s runtime type
+    ///   matches `param_types[i]` — adam-lang typechecks both before ever constructing a
+    ///   `DynClosure` for a `filter` clause, so a violation here is a caller bug, not user error
+    ///   (matches `push_arg`'s own existing precondition, which this delegates to unchanged).
+    /// - Precondition: `TypeId::of::<R>() == self.0.return_type`.
     /// - Complexity: whatever `body`'s own evaluation complexity is.
-    pub fn call(&self, args: &[&dyn Any]) -> anyhow::Result<Box<dyn Any>>
+    pub fn call<R: 'static>(&self, args: &[&dyn Any]) -> anyhow::Result<R> {
+        debug_assert_eq!(args.len(), self.0.param_types.len());
+        debug_assert_eq!(TypeId::of::<R>(), self.0.return_type);
+        self.0.body.borrow_mut().call_dyn::<R>(args)
+    }
 }
 ```
 
-Implemented as a single-value analog of the existing `call_dyn_tuple_mixed`: build a
-`DynExtractor::Scalar(self.return_type, ...)` for the one result and delegate to the same
-`push_arg`/`CALL_DYN_PTR` calling convention every other `DynSegment` invocation already uses. This
-is the one small new primitive `cel-runtime` needs — everything else it's built from already exists.
+The caller always knows `R` statically — the generated `Filter` wrapper knows the filtered cell's
+concrete type, and a future builtin receiving a `DynClosure` operand would be monomorphized for a
+concrete type the same way every other builtin in `op_table.rs` already is (e.g. `sig!(TYPE_I32,
+...)`). `param_types`/`return_type` on `ClosureData` exist for this kind of caller-side
+introspection (and the `debug_assert!`s above) — the actual runtime type safety of the call itself
+is entirely `call_dyn`'s and `push_arg`'s existing responsibility, unchanged.
 
 **Reentrancy:** `RefCell::borrow_mut()` panics if a closure's body, while running, ends up calling
 back into the same closure (directly or through another closure) before the outer call returns.
