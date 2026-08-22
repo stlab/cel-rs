@@ -1490,6 +1490,32 @@ mod tests {
     }
 
     #[test]
+    fn filter_tracks_a_tuple_typed_range_cell_dynamically() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let mut parsed = parser
+            .parse_str(
+                "sheet s { \
+                     cell a_range: (i32, i32) = (1, 100); \
+                     cell max: i32 = 100; \
+                     relationship { a_range := (1, max); } \
+                     cell a: i32 filter(a_range) |x: i32, r: (i32, i32)| \
+                         if x < r.0 { r.0 } else if x > r.1 { r.1 } else { x }; \
+                 }",
+            )
+            .unwrap();
+        let (a_id, _) = parsed.cell_names["a"];
+        let (max_id, _) = parsed.cell_names["max"];
+
+        parsed.sheet.write(a_id, 500i32).unwrap();
+        assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 100);
+
+        parsed.sheet.write(max_id, 10i32).unwrap();
+        parsed.sheet.propagate().unwrap();
+        parsed.sheet.write(a_id, 500i32).unwrap();
+        assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 10);
+    }
+
+    #[test]
     fn parse_multiple_cells() {
         let _sheet = parser()
             .parse_str(

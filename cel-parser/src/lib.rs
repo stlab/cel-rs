@@ -315,14 +315,20 @@ impl ClosureParamType {
     /// Returns the `TypeId` this parameter type resolves to for [`cel_runtime::DynClosure`]'s
     /// declared parameter list.
     ///
-    /// Every tuple shape shares [`cel_runtime::DynTuple`]'s marker `TypeId`, matching how a
-    /// tuple value is identified everywhere else in this runtime — the tuple's real element
-    /// shape lives in the `AssociatedType` list built by
-    /// [`elements_to_associated`], not in this `TypeId`.
+    /// Every tuple shape resolves to [`cel_runtime::DynamicSequence`]'s `TypeId` — the actual
+    /// runtime type of the boxed `dyn Any` argument a caller must hand to
+    /// [`cel_runtime::DynClosure::call`]/`call_boxed` for this parameter, matching what
+    /// [`is_closure_expression`](Self::is_closure_expression) pushes via
+    /// `DynSegment::push_arg_as_dynamic_sequence_tuple`. [`cel_runtime::DynTuple`] is a distinct,
+    /// stack-internal marker type used only for compile-time tuple-boundary tracking inside a
+    /// `DynSegment`'s own operand stack — it is never the type of a boxed argument crossing this
+    /// boundary, so using it here would make every tuple-typed closure parameter's declared type
+    /// unmatchable against its real argument. The tuple's real element shape lives in the
+    /// `AssociatedType` list built by [`elements_to_associated`], not in this `TypeId`.
     fn type_id(&self) -> TypeId {
         match self {
             ClosureParamType::Scalar(s) => s.type_id,
-            ClosureParamType::Tuple(_) => TypeId::of::<cel_runtime::DynTuple>(),
+            ClosureParamType::Tuple(_) => TypeId::of::<cel_runtime::DynamicSequence>(),
         }
     }
 }
