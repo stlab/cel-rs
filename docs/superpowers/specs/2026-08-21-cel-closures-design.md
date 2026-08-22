@@ -93,12 +93,32 @@ struct ClosureData {
 }
 ```
 
-- `Rc`-wrapped so cloning a `DynClosure` value (e.g. copying it between stack slots) is a pointer
-  bump, never a deep copy of the compiled body.
-- `body` needs `RefCell`: `DynSegment`'s call methods (`call_dyn`, `call_dyn_tuple_mixed`, etc.) take
-  `&mut self` to use their own scratch stack space per call. `Rc<RefCell<_>>` is the standard
-  single-threaded pattern for "shared, callable, mutates transient internal state per call" — this
-  runtime has no `Send`/`Sync` requirement to preserve elsewhere in this design.
+- `Rc` is load-bearing, not a performance nicety: `DynSegment` has **no `Clone` impl** (its ops are
+  boxed `dyn Fn` closures with no clone-box mechanism — giving it one would mean threading a clone
+  path through every op-emission call site in the runtime, an unrelated and much larger change).
+  But `DynSegment::just<T: 'static + Clone>(&mut self, value: T)` — the exact, existing mechanism a
+  closure literal must go through to be embedded as a constant in whatever segment it's written
+  inside — clones `value` on **every single invocation** of that segment
+  (`self.op0(move || value.clone())`, `dyn_segment.rs:765-767`). `DynClosure` therefore *must*
+  implement `Clone` just to be embeddable as a literal at all. `Rc<ClosureData>` is how it gets that
+  `Clone` impl without `DynSegment` needing one: `Rc::clone` bumps a refcount regardless of whether
+  the pointee is `Clone`, and as a side effect avoids deep-copying the whole compiled body on every
+  re-execution of whatever segment holds the literal — relevant once a closure sits inside a body
+  that itself re-runs on every `write`/`propagate` (the deferred, non-`filter` use case), though the
+  in-scope `filter` path never actually clones it at all (see below).
+- `body` needs `RefCell`: `Filter`'s `function` field is `Box<dyn Fn(...)>` (`Fn`, not `FnMut` —
+  `adam-rs/src/filter.rs:33`), so the generated `wrapper_fn` that closes over a `DynClosure` can only
+  reach it through `&DynClosure`, never `&mut`. `DynSegment`'s call methods (`call_dyn`,
+  `call_dyn_tuple_mixed`, etc.) need `&mut self` for their own scratch stack space per call, so
+  `call`'s `&self` has to reach `&mut DynSegment` through interior mutability. `RefCell` (not
+  `Mutex`) matches the rest of this single-threaded runtime, which has no `Send`/`Sync` requirement
+  to preserve.
+- For the in-scope `filter` use case specifically, the `wrapper_fn` built in `adam-lang`'s design
+  (section 3) captures one `DynClosure` by move and calls it many times over the `Filter`'s whole
+  lifetime — it is never cloned. The `Clone` bound above only matters if/when a closure literal is
+  used inside an ordinary CEL sub-expression that gets re-embedded via `just` (the deferred
+  first-class-value use case) — it's required by that future path, not by anything `filter` does
+  today.
 - Unlike `DynTuple`, **no new `StackInfo`/`AssociatedType`/`RawDropper` plumbing is needed.**
   `DynTuple` exists because a tuple flattens multiple *independent* values into one aggregated
   stack region, which the existing type-checking/dropping machinery has to know how to walk
