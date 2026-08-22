@@ -1,6 +1,6 @@
 //! [`Inspector`] — sidebar listing all cells with their current values and a write form.
 
-use adam_rs::{CellId, Sheet};
+use adam_rs::{CellId, FilterViolation, Sheet};
 use dioxus::prelude::*;
 
 use crate::bridge::{Labels, format_adam_error};
@@ -24,16 +24,22 @@ struct OutputStatus {
     /// active. Match cells are therefore always treated as relevant, independent of
     /// which branch is currently active.
     relevant: HashSet<CellId>,
-    /// Union of `Sheet::output_violation_cells()`.
+    /// Union of `Sheet::output_violation_cells()` and `Sheet::filter_violation_cells()` —
+    /// the root cells that produced a violating value, shown less severely than the cell
+    /// actually carrying the violation (see `invalid_outputs`/`filter_violated`).
     warning: HashSet<CellId>,
     /// Cells backing an output whose `Sheet::output_valid` is currently `false`.
     invalid_outputs: HashSet<CellId>,
+    /// `Sheet::filter_violated_cells()` — cells whose own filter didn't hold, shown the
+    /// same way a parse error is: this is the cell's own value that's out of domain, not
+    /// just a contributor to someone else's.
+    filter_violated: HashSet<CellId>,
 }
 
 /// Computes `sheet`'s current out-cell status for the Inspector.
 ///
 /// - Complexity: O(`Sheet::output_relevant_cells` + `Sheet::output_violation_cells` +
-///   the number of conditionals in the sheet).
+///   `Sheet::filter_violation_cells` + the number of conditionals in the sheet).
 fn compute_output_status(sheet: &Sheet) -> OutputStatus {
     let outputs: Vec<_> = sheet.outputs().collect();
     let relevant = sheet
@@ -52,11 +58,31 @@ fn compute_output_status(sheet: &Sheet) -> OutputStatus {
         .filter(|&&id| !sheet.output_valid(id))
         .filter_map(|&id| sheet.output_cell(id))
         .collect();
+    let warning = sheet
+        .output_violation_cells()
+        .into_iter()
+        .chain(sheet.filter_violation_cells())
+        .collect();
+    let filter_violated = sheet.filter_violated_cells().collect();
     OutputStatus {
         has_outputs: !outputs.is_empty(),
         relevant,
-        warning: sheet.output_violation_cells(),
+        warning,
         invalid_outputs,
+        filter_violated,
+    }
+}
+
+/// Formats a diagnostic message for `label`'s filter `violation`, for
+/// `crate::diagnostics::report_error`.
+fn format_filter_violation(label: &str, violation: &FilterViolation) -> String {
+    match violation {
+        FilterViolation::NotConformed => {
+            format!("filter violation: `{label}`'s derived value does not conform to its filter")
+        }
+        FilterViolation::Failed(e) => {
+            format!("filter violation: `{label}`'s filter failed on its derived value: {e}")
+        }
     }
 }
 
@@ -76,7 +102,8 @@ struct CellFlags {
 ///   shows both states at once.
 fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) -> CellFlags {
     let disabled = forced || (status.has_outputs && !status.relevant.contains(&id));
-    let invalid = has_error || status.invalid_outputs.contains(&id);
+    let invalid =
+        has_error || status.invalid_outputs.contains(&id) || status.filter_violated.contains(&id);
     let warning = !invalid && status.warning.contains(&id);
     CellFlags {
         disabled,
@@ -120,7 +147,8 @@ fn toggled_bool_value(current: &str) -> &'static str {
 }
 
 /// Parses `val` for `id` via its `Labels` metadata, writes it to `sheet`, and propagates the
-/// sheet's constraints, updating `has_error` and reporting any error to `crate::diagnostics`.
+/// sheet's constraints, updating `has_error` and reporting any error — or, on success, any
+/// currently-violated filter — to `crate::diagnostics`.
 ///
 /// - Postcondition: `has_error` is `false` on success, `true` on parse or propagation failure.
 fn write_and_propagate(
@@ -151,6 +179,18 @@ fn write_and_propagate(
     match propagate_result {
         Ok(()) => {
             has_error.set(false);
+            let labels_r = labels.read();
+            for violated_id in sheet_w.filter_violated_cells().collect::<Vec<_>>() {
+                let Some(violation) = sheet_w.filter_violation(violated_id) else {
+                    continue;
+                };
+                let label = labels_r
+                    .cells
+                    .get(&violated_id)
+                    .map(|m| m.label.as_str())
+                    .unwrap_or("<unknown cell>");
+                crate::diagnostics::report_error(&format_filter_violation(label, violation));
+            }
         }
         Err(e) => {
             has_error.set(true);
@@ -326,12 +366,82 @@ mod tests {
         warning: &[CellId],
         invalid_outputs: &[CellId],
     ) -> OutputStatus {
+        status_with_filter_violated(has_outputs, relevant, warning, invalid_outputs, &[])
+    }
+
+    fn status_with_filter_violated(
+        has_outputs: bool,
+        relevant: &[CellId],
+        warning: &[CellId],
+        invalid_outputs: &[CellId],
+        filter_violated: &[CellId],
+    ) -> OutputStatus {
         OutputStatus {
             has_outputs,
             relevant: relevant.iter().copied().collect(),
             warning: warning.iter().copied().collect(),
             invalid_outputs: invalid_outputs.iter().copied().collect(),
+            filter_violated: filter_violated.iter().copied().collect(),
         }
+    }
+
+    #[test]
+    fn compute_output_status_filter_violated_includes_the_cell_whose_own_filter_failed() {
+        use adam_rs::{Filter, Method};
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0.0_f64);
+        let b = sheet.add_cell(0.0_f64);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))))
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, a, |v: &f64| Ok(*v))])
+            .unwrap();
+        sheet.write(b, -30.0_f64).unwrap();
+        sheet.propagate().unwrap();
+
+        let status = compute_output_status(&sheet);
+        assert!(status.filter_violated.contains(&a));
+        assert!(status.warning.contains(&b));
+    }
+
+    #[test]
+    fn compute_output_status_filter_violated_empty_when_no_filter_is_violated() {
+        use adam_rs::{Filter, Method};
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0.0_f64);
+        let b = sheet.add_cell(0.0_f64);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))))
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, a, |v: &f64| Ok(*v))])
+            .unwrap();
+        sheet.write(b, 30.0_f64).unwrap();
+        sheet.propagate().unwrap();
+
+        let status = compute_output_status(&sheet);
+        assert!(status.filter_violated.is_empty());
+        assert!(status.warning.is_empty());
+    }
+
+    #[test]
+    fn format_filter_violation_not_conformed_names_the_cell() {
+        let msg = format_filter_violation("a", &FilterViolation::NotConformed);
+        assert!(msg.contains('a'));
+        assert!(msg.contains("does not conform"));
+    }
+
+    #[test]
+    fn format_filter_violation_failed_includes_the_underlying_error() {
+        let msg = format_filter_violation(
+            "a",
+            &FilterViolation::Failed(anyhow::anyhow!("out of range")),
+        );
+        assert!(msg.contains('a'));
+        assert!(msg.contains("out of range"));
     }
 
     fn dummy_cell() -> CellId {
@@ -383,6 +493,18 @@ mod tests {
     fn cell_flags_invalid_when_cell_is_an_invalid_output() {
         let id = dummy_cell();
         let flags = cell_flags(id, false, false, &status(true, &[id], &[], &[id]));
+        assert!(flags.invalid);
+    }
+
+    #[test]
+    fn cell_flags_invalid_when_cell_is_filter_violated() {
+        let id = dummy_cell();
+        let flags = cell_flags(
+            id,
+            false,
+            false,
+            &status_with_filter_violated(true, &[id], &[], &[], &[id]),
+        );
         assert!(flags.invalid);
     }
 
