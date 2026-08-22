@@ -263,7 +263,7 @@ git commit -m "feat(cel-runtime): add DynClosure, a first-class callable CEL val
 - Produces (for Task 3):
   - `pub(crate) struct BuiltinScalarType { pub type_id: TypeId, pub type_name: &'static str, pub size: usize, pub align: usize, pub dropper: RawDropper, pub push_arg: fn(&mut DynSegment, usize) }`
   - `pub(crate) fn builtin_scalar_type(name: &str) -> Option<BuiltinScalarType>`
-  - `impl OpLookup { pub fn isolate_scopes(&mut self) -> Vec<ScopeFn>; pub fn restore_scopes(&mut self, scopes: Vec<ScopeFn>); }`
+  - `impl OpLookup { pub fn push_library_scope<F>(&mut self, scope: F) where F: Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync + 'static; pub fn isolate_scopes(&mut self) -> Vec<ScopeFn>; pub fn restore_scopes(&mut self, scopes: Vec<ScopeFn>); }` — `isolate_scopes` only removes scopes pushed via the ordinary, transient `push_scope`; anything pushed via `push_library_scope` (including `OpLookup::new()`'s own `round_scope`, changed to use it) survives isolation.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -403,45 +403,165 @@ pub(crate) fn builtin_scalar_type(name: &str) -> Option<BuiltinScalarType> {
 }
 ```
 
+**Design correction (found during this task's own review — see the plan-level ledger/spec for
+the full ruling):** a blanket "remove everything" `isolate_scopes` is wrong. `round_scope`
+(registered in `OpLookup::new()`, below) and, once a caller wires `cel-std` in, `clamp`/`min`/
+`max`/etc. are *also* registered via plain `push_scope` — not via the separate `builtin_scope`
+field — so a blanket clear would make them unreachable from inside every closure body too, which
+is backwards (library functions should always be reachable, including inside a closure; only
+*transient*, per-declaration/per-closure scopes must be isolated). `OpLookup` gains a
+`library_scope_count: usize` field and a `push_library_scope` method that pushes a scope *and*
+advances that floor; `isolate_scopes`/`restore_scopes` operate only on scopes *above* the floor.
+
+Add the new field to `OpLookup`'s struct definition and initialize it in `new()`:
+
+```rust
+pub struct OpLookup {
+    scopes: Vec<ScopeFn>,
+    /// How many of `scopes`'s bottom entries are permanent "library" scopes (registered once at
+    /// setup time via `push_library_scope`, e.g. this module's own `round_scope`) rather than
+    /// transient ones pushed/popped around a single parse — see `isolate_scopes`.
+    library_scope_count: usize,
+    builtin_scope: BuiltinScope,
+    tuple_signatures: Vec<TupleOpSignature>,
+}
+```
+
+In `OpLookup::new()`, change the existing `lookup.push_scope(round_scope);` to
+`lookup.push_library_scope(round_scope);` (and initialize `library_scope_count: 0` in the struct
+literal alongside the other fields — `push_library_scope` sets it correctly on that first call).
+
 Add to `impl OpLookup` (near `push_scope`/`pop_scope`):
 
 ```rust
-/// Temporarily removes every scope pushed via [`push_scope`](Self::push_scope), returning them
-/// so a later [`restore_scopes`](Self::restore_scopes) call can put them back.
+/// Pushes a permanent "library" scope — always reachable, including from inside an isolated
+/// (closure-body) scope stack — as opposed to [`push_scope`](Self::push_scope)'s transient kind.
+///
+/// Intended for setup-time registration only (this module's own `round_scope`; a future
+/// `cel-std`-style crate's own functions). Never call this for a scope tied to one parse's
+/// lifetime — use [`push_scope`](Self::push_scope) for that.
+///
+/// - Postcondition: the pushed scope is included in every future [`lookup`](Self::lookup) call,
+///   even while isolated via [`isolate_scopes`](Self::isolate_scopes).
+pub fn push_library_scope<F>(&mut self, scope: F)
+where
+    F: Fn(&str, &mut DynSegment, usize, SourceSpan) -> Result<bool> + Send + Sync + 'static,
+{
+    self.scopes.push(Box::new(scope));
+    self.library_scope_count = self.scopes.len();
+}
+
+/// Temporarily removes every *transient* scope pushed via [`push_scope`](Self::push_scope),
+/// returning them so a later [`restore_scopes`](Self::restore_scopes) call can put them back.
+/// Scopes pushed via [`push_library_scope`](Self::push_library_scope) are never removed.
 ///
 /// Used when compiling an independent nested body (a closure literal) that must resolve names
-/// against only its own declared parameters and built-ins — never whatever enclosing scopes
-/// happen to be active, which the LIFO `scopes` stack would otherwise still make reachable to a
-/// scope pushed on top of them. `builtin_scope` (the fixed bottom-level built-in fallback) is a
-/// separate field, so it stays reachable regardless — only caller-pushed scopes are removed.
+/// against only its own declared parameters, library functions, and built-ins — never whatever
+/// enclosing *transient* scope happens to be active (e.g. adam-lang's own per-declaration
+/// cell-name scope), which the LIFO `scopes` stack would otherwise still make reachable to a
+/// scope pushed on top of it.
 ///
-/// - Postcondition: `self` behaves as if freshly constructed, scope-wise, until
+/// - Postcondition: only scopes at or below `library_scope_count` remain reachable until
 ///   [`restore_scopes`](Self::restore_scopes) is called.
 pub fn isolate_scopes(&mut self) -> Vec<ScopeFn> {
-    std::mem::take(&mut self.scopes)
+    self.scopes.split_off(self.library_scope_count)
 }
 
 /// Restores a scope stack previously removed by [`isolate_scopes`](Self::isolate_scopes),
-/// discarding whatever scopes were pushed while isolated.
+/// discarding whatever transient scopes were pushed while isolated.
 ///
 /// - Precondition: `scopes` came from a matching `isolate_scopes()` call on this same
 ///   `OpLookup` — restoring an arbitrary `Vec<ScopeFn>` is well-typed but not a meaningful use
 ///   of this method.
 pub fn restore_scopes(&mut self, scopes: Vec<ScopeFn>) {
-    self.scopes = scopes;
+    self.scopes.truncate(self.library_scope_count);
+    self.scopes.extend(scopes);
+}
+```
+
+Also add a defensive precondition check to the existing `pop_scope` (this task touches it because
+it now shares the file's new invariant — a library scope must never be popped via the transient
+path):
+
+```rust
+pub fn pop_scope(&mut self) -> Option<ScopeFn> {
+    debug_assert!(
+        self.scopes.len() > self.library_scope_count,
+        "pop_scope must not remove a library scope — use isolate_scopes/restore_scopes semantics instead"
+    );
+    self.scopes.pop()
+}
+```
+
+(This changes an existing method's body, not just adds new ones — `pop_scope`'s own doc comment
+doesn't need to change, just this one line added inside it.)
+
+Add one more test (alongside `isolate_scopes_removes_pushed_scopes_until_restored`) proving the
+actual bug this design correction fixes — that a library scope survives isolation:
+
+```rust
+#[test]
+fn isolate_scopes_leaves_library_scopes_reachable() {
+    // round_scope's own protocol is two lookups: ("round", 0) pushes a marker value, then
+    // ("()", 2) (with the marker plus an f64 operand on the stack) computes the actual round.
+    // This test only needs to prove the *first* half is still reachable while isolated -- that's
+    // enough to demonstrate round_scope (a library scope) survived isolate_scopes, without
+    // needing to replicate the whole call protocol.
+    let mut lookup = OpLookup::new(); // registers round_scope via push_library_scope
+    let mut segment = DynSegment::new::<()>();
+    let isolated = lookup.isolate_scopes();
+    lookup
+        .lookup(
+            "round",
+            &mut segment,
+            0,
+            proc_macro2::Span::call_site(),
+            proc_macro2::Span::call_site(),
+        )
+        .expect("round is a library scope and must survive isolation");
+    lookup.restore_scopes(isolated);
+    assert_eq!(segment.peek_stack_infos(1).len(), 1); // the RoundFn marker was pushed
 }
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p cel-parser op_table::tests`
-Expected: PASS (4 new tests, plus all existing `op_table.rs` tests still pass).
+Expected: PASS (5 new tests, plus all existing `op_table.rs` tests still pass — including
+`OpLookup::new()`'s change from `push_scope(round_scope)` to `push_library_scope(round_scope)`,
+which must not change `round`'s ordinary (non-isolated) behavior at all).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Update `cel-std` to register its functions as library scopes too**
+
+`cel-std/src/lib.rs`'s `install` currently registers every one of its functions via plain
+`push_scope`, which means they'd suffer the exact same bug `round_scope` had — unreachable from
+inside an isolated (closure-body) scope stack once a caller wires `cel-std` in (tracked
+separately, in [stlab/cel-rs#137](https://github.com/stlab/cel-rs/issues/137), for *whether*
+`adam-lang` ever calls `install` at all — this step fixes the mechanism regardless). Change all
+four calls from `push_scope` to `push_library_scope`:
+
+```rust
+// cel-std/src/lib.rs
+pub fn install(lookup: &mut cel_parser::OpLookup) {
+    lookup.push_library_scope(math::min_max_scope);
+    lookup.push_library_scope(math::clamp_scope);
+    lookup.push_library_scope(math::abs_scope);
+    lookup.push_library_scope(math::unary_math_scope);
+}
+```
+
+Run `cargo test -p cel-std` to confirm nothing else in that crate broke (it shouldn't — this is a
+pure rename of which `OpLookup` method each call uses, with identical scope-resolution behavior
+outside of isolation).
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add cel-parser/src/op_table.rs
-git commit -m "feat(cel-parser): built-in scalar type table + OpLookup scope isolation"
+git add cel-parser/src/op_table.rs cel-std/src/lib.rs
+git commit -m "feat(cel-parser): built-in scalar type table + OpLookup scope isolation
+
+Distinguishes library scopes (round, and now cel-std's functions) from
+transient per-parse scopes, so isolate_scopes only removes the latter."
 ```
 
 ---
@@ -938,7 +1058,7 @@ git commit -m "feat(cel-parser): |params: Type| expr closure literal grammar"
 fn cell_filter_with_no_extra_args_clamps_on_write() {
     let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
     let mut parsed = parser
-        .parse_str("sheet s { cell a: i32 filter |x: i32| clamp(x, 1, 100); }")
+        .parse_str("sheet s { cell a: i32 filter |x: i32| if x < 1 { 1 } else if x > 100 { 100 } else { x }; }")
         .unwrap();
     let (cell_id, _) = parsed.cell_names["a"];
     parsed.sheet.write(cell_id, 500i32).unwrap();
@@ -952,7 +1072,7 @@ fn cell_filter_with_named_arg_cell_tracks_its_current_value() {
         .parse_str(
             "sheet s { \
                  cell hi: i32 = 100; \
-                 cell a: i32 filter(hi) |x: i32, h: i32| clamp(x, 1, h); \
+                 cell a: i32 filter(hi) |x: i32, h: i32| if x < 1 { 1 } else if x > h { h } else { x }; \
              }",
         )
         .unwrap();
@@ -980,7 +1100,7 @@ fn cell_filter_named_arg_type_mismatch_is_a_parse_error() {
     let err = parser.parse_str(
         "sheet s { \
              cell hi: f64 = 100.0; \
-             cell a: i32 filter(hi) |x: i32, h: i32| clamp(x, 1, h); \
+             cell a: i32 filter(hi) |x: i32, h: i32| if x < 1 { 1 } else if x > h { h } else { x }; \
          }",
     );
     assert!(err.is_err());
@@ -994,12 +1114,13 @@ fn cell_filter_undeclared_arg_cell_is_a_parse_error() {
 }
 ```
 
-Note: `clamp` must already be a registered built-in (either in `cel-parser`'s `OpLookup::new()`
-built-ins or `cel-std`) — confirm before writing this step for real; if it isn't yet registered
-anywhere reachable from `AdamParser::new`, substitute a comparison-based equivalent already known
-to work (e.g. `if x > h { h } else { x }`, matching whatever conditional-expression grammar
-adam-lang's CEL body already supports) so this task doesn't silently depend on unrelated,
-unshipped `cel-std` work.
+Note: confirmed (during Task 2's review) that `adam-lang` has no dependency on `cel-std` and never
+calls `install` anywhere, so `clamp` itself is not reachable from any adam-lang source text today —
+a pre-existing gap unrelated to closures, tracked in
+[stlab/cel-rs#137](https://github.com/stlab/cel-rs/issues/137). The tests above already use the
+`if`/comparison-based equivalent instead, per `cel-parser/src/lib.rs`'s existing
+`if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" |
+if_expression ) ]` grammar (confirmed to support chained `else if` directly).
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1248,10 +1369,20 @@ implements. Since none of these tests actually need an explicit initializer (eac
 overwrites the cell via `write`, and `i32`'s `Default` already gives `0`), fixed by dropping `= 0`
 entirely rather than reordering it, matching the spec's own examples exactly.
 
+**Also found and fixed during SDD execution (Task 2's review, ledger has the full ruling):**
+`isolate_scopes`'s original blanket-clear design would have made `round` — and, once `cel-std` is
+ever wired into `adam-lang` (tracked separately, `stlab/cel-rs#137`), `clamp`/`min`/`max`/etc. —
+unreachable from inside every closure body, backwards from the "library functions should always
+be reachable" intent. Fixed via a `push_library_scope`/`library_scope_count` floor (Task 2) that
+`isolate_scopes` respects. Confirmed `adam-lang` has no `cel-std` dependency and never calls
+`install` today, so Tasks 5/6's tests were switched from `clamp(...)` to an equivalent built from
+`cel-parser`'s existing `if`/`else if` expression grammar, verified against
+`cel-parser/src/lib.rs`'s `is_if_expression` (confirmed to support chained `else if` directly, no
+extra braces needed).
+
 **Placeholder scan:** No `TBD`/`unimplemented!()`/hand-waved steps remain in the tasks above. The
 only remaining "confirm before writing this step for real" notes are the exact-helper-name
-confirmations in Tasks 4/5/6 (`is_open_paren`/`expect_identifier`, whether `clamp` is registered
-anywhere reachable from `AdamParser::new`, the `if`-expression's exact surface syntax) — each names
-precisely what to check and where, not "figure it out later" in the abstract; they exist because
-this plan was written from reading the source rather than running it, and a fresh executor should
+confirmations in Tasks 4/6 (`is_open_paren`/`expect_identifier`) — each names precisely what to
+check and where, not "figure it out later" in the abstract; they exist because this plan was
+written from reading the source rather than running it, and a fresh executor should
 verify a symbol's exact spelling before typing it, not because the design has a gap.
