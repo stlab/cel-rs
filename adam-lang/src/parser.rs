@@ -96,7 +96,7 @@ impl std::ops::DerefMut for ParseContext {
 ///
 /// # Example
 ///
-/// ```rust,no_run
+/// ```rust
 /// use adam_lang::{AdamParser, TypeRegistry};
 /// use cel_parser::OpLookup;
 ///
@@ -112,7 +112,9 @@ impl AdamParser {
     /// Creates a parser with the given type registry and operation lookup.
     ///
     /// `op_lookup` is forwarded to the embedded [`CELParser`] when compiling method
-    /// body expressions.
+    /// body expressions. See
+    /// [`OpLookup::push_library_scope`](cel_parser::OpLookup::push_library_scope) for how to
+    /// install a function library (e.g. `cel-std`) before parsing.
     pub fn new(types: TypeRegistry, op_lookup: OpLookup) -> Self {
         AdamParser {
             types,

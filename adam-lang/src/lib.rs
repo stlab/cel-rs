@@ -33,7 +33,11 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
+//! `AdamParser::new` takes an [`OpLookup`](cel_parser::OpLookup) instance. See
+//! [`OpLookup::push_library_scope`](cel_parser::OpLookup::push_library_scope) for how to
+//! install one (e.g. `cel-std`) before parsing.
+//!
+//! ```rust
 //! use adam_lang::{AdamParser, TypeRegistry};
 //! use cel_parser::OpLookup;
 //!
