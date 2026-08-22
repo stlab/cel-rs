@@ -61,6 +61,13 @@ pub enum Error {
     /// target of `Sheet::write`; or an `add_output` call tried to reuse a cell that already
     /// had a relationship or conditional referencing it before becoming an output.
     TerminalCell,
+
+    /// An `add_filter` call is structurally invalid: the cell already has a filter, or
+    /// the filter's own value type does not match the cell's registered type. (An
+    /// unknown cell, a terminal cell, or an argument-cell type mismatch use the shared
+    /// `InvalidId`/`TerminalCell`/`TypeMismatch` variants instead, matching
+    /// `add_relationship`/`add_conditional`'s existing convention.)
+    InvalidFilter,
 }
 
 impl std::fmt::Display for Error {
@@ -89,6 +96,7 @@ impl std::fmt::Display for Error {
                 f,
                 "cell belongs to a terminal output and cannot be used as an input or written directly"
             ),
+            Error::InvalidFilter => write!(f, "filter is structurally invalid"),
         }
     }
 }
@@ -237,5 +245,15 @@ mod tests {
     #[test]
     fn terminal_cell_has_no_source() {
         assert!(std::error::Error::source(&Error::TerminalCell).is_none());
+    }
+
+    #[test]
+    fn invalid_filter_display_contains_filter() {
+        assert!(Error::InvalidFilter.to_string().contains("filter"));
+    }
+
+    #[test]
+    fn invalid_filter_has_no_source() {
+        assert!(std::error::Error::source(&Error::InvalidFilter).is_none());
     }
 }

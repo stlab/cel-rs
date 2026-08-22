@@ -189,13 +189,19 @@ write-time transform doesn't apply retroactively, and the diagnostic phase (§4)
 runs for cells a method actually produced this round.
 
 `add_filter` closes this by running the filter against the cell's current `source`
-value at attach time, exactly as if it were being rewritten through §3.1 (including
-updating `source` on success). This gives a clean, checkable invariant:
+value at attach time, updating `source` on success exactly as §3.1's conforming path
+does — but, unlike an actual `write()`, it does **not** bump strength: attaching a
+filter is not a fresh external input and shouldn't reprioritize the cell. This gives a
+clean, checkable invariant:
 
 > **A filtered cell's value is always conforming, except when a method produced it this
 > round.**
 
-which is exactly the case §4 exists to catch.
+which is exactly the case §4 exists to catch. This invariant has one known boundary:
+a filter with a *dynamic* argument cell can go stale if that argument's value changes
+after the filtered cell was last conformed, and the filtered cell is itself a plain,
+always-source cell no method ever produces — tracked as
+[#132](https://github.com/stlab/cel-rs/issues/132), out of scope for this phase.
 
 ---
 
