@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 
-use adam_rs::{CellId, Condition, MatchExpr, Method, OutputId, RelationshipId, Sheet};
+use adam_rs::{CellId, MatchExpr, Method, OutputId, RelationshipId, Requirement, Sheet};
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
 use cel_runtime::DynSegment;
@@ -20,6 +20,11 @@ use crate::type_registry::{AddConditionalFn, CallDynFn, PushArgFn, TypeShape};
 
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, ParseError>;
+
+/// A parsed identifier's resolved `(CellId, TypeShape)`, paired with its source name — used both
+/// for a construct's declared outputs and for the inputs [`AdamParser::parse_deduced_expr`]
+/// deduces from whichever already-declared cells an expression references.
+type NamedCells = Vec<(String, CellId, TypeShape)>;
 
 // ---------------------------------------------------------------------------
 // ParsedSheet
@@ -36,7 +41,7 @@ pub struct ParsedSheet {
     /// Cell name → `(CellId, TypeShape)`, in declaration order.
     pub cell_names: IndexMap<String, (CellId, TypeShape)>,
     /// Output name → `OutputId`, in declaration order — parity with `cell_names`, for callers
-    /// that need to look up `Sheet::output_valid`/`Sheet::violated_conditions` by name.
+    /// that need to look up `Sheet::output_valid`/`Sheet::violated_requirements` by name.
     pub output_names: IndexMap<String, OutputId>,
 }
 
@@ -127,9 +132,9 @@ impl AdamParser {
     /// # Errors
     ///
     /// Returns `Err` on any syntax error, unknown type name, type mismatch between a
-    /// cell annotation and its initializer, undeclared cell name in a method cell list,
-    /// or a tuple arity/element-type mismatch between the output expression and the
-    /// method's declared outputs.
+    /// cell annotation and its initializer, undeclared cell name in a `relationship` binding's
+    /// output list, or a tuple arity/element-type mismatch between the output expression
+    /// and its declared outputs.
     pub fn parse_str(&mut self, source: &str) -> Result<ParsedSheet> {
         let stream =
             TokenStream::from_str(source).map_err(|e| ParseError::from_lex_error(source, e))?;
@@ -254,7 +259,8 @@ impl AdamParser {
     /// [`build_cell_from_segment`](Self::build_cell_from_segment)).
     ///
     /// - Precondition: `segment` requires no pre-loaded arguments (a `cell` initializer never
-    ///   has an input-cell scope pushed, unlike a `method`/`out`/`condition` body).
+    ///   has an input-cell scope pushed, unlike a `relationship` binding's, `out` declaration's, or
+    ///   `require`ment's body).
     ///
     /// # Errors
     /// Returns `Err` if the segment's result type isn't registered (scalar case) or contains an
@@ -441,19 +447,16 @@ impl AdamParser {
         ))
     }
 
-    /// `relationship_decl = "relationship" [ identifier ] "{" { method_decl } "}".`
+    /// `relationship_decl = "relationship" "{" { binding } "}".`
     ///
     /// - Postcondition: the returned `RelationshipId` identifies the relationship just added to
     ///   `ctx.sheet`.
     fn parse_relationship_decl(&mut self, ctx: &mut ParseContext) -> Result<RelationshipId> {
         ctx.is_keyword("relationship"); // consume
-        if matches!(ctx.peek_token(), Some(Token::Identifier(_))) {
-            ctx.consume_ident()?; // optional name
-        }
         ctx.expect_open_brace()?;
         let mut methods = Vec::new();
         while !ctx.at_close_brace() {
-            methods.push(self.parse_method_decl(ctx)?);
+            methods.push(self.parse_binding(ctx)?);
         }
         ctx.expect_close_brace()?;
         ctx.sheet
@@ -461,33 +464,42 @@ impl AdamParser {
             .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))
     }
 
-    /// Compiles a conditional's match-subject expression, deducing its input cells from the
-    /// identifiers it references — a bare identifier (`mode`) is the degenerate single-cell
-    /// case; anything more (`a && b`) draws on however many already-declared cells it
-    /// references.
+    /// `binding = binding_target ":=" or_expression ";".`
+    fn parse_binding(&mut self, ctx: &mut ParseContext) -> Result<Method> {
+        let (names, destructure) = parse_binding_target(ctx)?;
+        let mut outputs: NamedCells = Vec::with_capacity(names.len());
+        for (name, span) in names {
+            let (cell_id, shape) = ctx
+                .cell_names
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| ParseError::new(format!("undeclared cell `{name}`"), span))?;
+            outputs.push((name, cell_id, shape));
+        }
+        ctx.expect_punct(":=")?;
+        let (segment, inputs) = self.parse_deduced_expr(ctx)?;
+        ctx.expect_punct(";")?;
+        let compiled = self.compile_outputs(ctx, &segment, &outputs, destructure)?;
+        Ok(build_method(inputs, outputs, segment, compiled))
+    }
+
+    /// Parses an `or_expression` whose input cells are deduced from whichever already-declared
+    /// cell identifiers it references, rather than an explicit `cell_list` — the mechanism
+    /// shared by a conditional's match-subject expression ([`Self::parse_match_expr`]), a
+    /// `relationship` binding's right-hand side, an `out` declaration's initializer, and a
+    /// `require`ment body.
     ///
     /// Each 0-arity identifier lookup that names an already-declared cell is assigned the
     /// next argument index on first reference within this expression and reuses it on repeat
     /// reference (e.g. `a && a` allocates one argument slot, not two), via a scope pushed
-    /// onto the CEL operation lookup for the duration of this parse — generalizing the
-    /// fixed-index scope `parse_body_with_input_scope` already uses for method/condition
-    /// bodies, where the input list is instead explicitly declared.
-    ///
-    /// `match_span` is used to report errors raised by this method or the shape inference it
-    /// delegates to; the caller already has it (from before parsing the expression) for its own
-    /// error reporting, so it's threaded through rather than recomputed.
+    /// onto the CEL operation lookup for the duration of this parse.
     ///
     /// # Errors
-    /// Returns `Err` if the expression fails to parse, produced no value, or (for a `Named`
-    /// output shape) its type isn't registered in the `TypeRegistry`.
+    /// Returns `Err` if the expression fails to parse.
     ///
     /// - Complexity: O(k) in the number of distinct cell identifiers referenced, for this
     ///   method's own bookkeeping (on top of `cel-parser`'s own parse cost).
-    fn parse_match_expr(
-        &mut self,
-        ctx: &mut ParseContext,
-        match_span: proc_macro2::Span,
-    ) -> Result<(TypeShape, MatchExpr)> {
+    fn parse_deduced_expr(&mut self, ctx: &mut ParseContext) -> Result<(DynSegment, NamedCells)> {
         // Precompute how to push each currently-declared cell, keyed by name. Built before
         // the scope closure captures anything, since `push_scope` requires `'static` (the
         // closure can't borrow `self.types`).
@@ -508,8 +520,7 @@ impl AdamParser {
             })
             .collect();
 
-        let accumulator: Arc<Mutex<Vec<(String, CellId, TypeShape)>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let accumulator: Arc<Mutex<NamedCells>> = Arc::new(Mutex::new(Vec::new()));
         let scope_accumulator = Arc::clone(&accumulator);
 
         self.cel
@@ -548,7 +559,26 @@ impl AdamParser {
             .lock()
             .expect("scope mutex not poisoned")
             .clone();
+        Ok((segment, inputs))
+    }
 
+    /// Compiles a conditional's match-subject expression — a bare identifier (`mode`) is the
+    /// degenerate single-cell case; anything more (`a && b`) draws on however many
+    /// already-declared cells it references, via [`Self::parse_deduced_expr`].
+    ///
+    /// `match_span` is used to report errors raised by this method or the shape inference it
+    /// delegates to; the caller already has it (from before parsing the expression) for its own
+    /// error reporting, so it's threaded through rather than recomputed.
+    ///
+    /// # Errors
+    /// Returns `Err` if the expression fails to parse, produced no value, or (for a `Named`
+    /// output shape) its type isn't registered in the `TypeRegistry`.
+    fn parse_match_expr(
+        &mut self,
+        ctx: &mut ParseContext,
+        match_span: proc_macro2::Span,
+    ) -> Result<(TypeShape, MatchExpr)> {
+        let (segment, inputs) = self.parse_deduced_expr(ctx)?;
         self.build_match_expr(segment, inputs, match_span)
     }
 
@@ -567,7 +597,7 @@ impl AdamParser {
     fn build_match_expr(
         &self,
         segment: DynSegment,
-        inputs: Vec<(String, CellId, TypeShape)>,
+        inputs: NamedCells,
         match_span: proc_macro2::Span,
     ) -> Result<(TypeShape, MatchExpr)> {
         let input_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
@@ -632,7 +662,7 @@ impl AdamParser {
         }
     }
 
-    /// `conditional_decl = "conditional" or_expression "{" { conditional_branch } [ default_branch ] "}".`
+    /// `conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".`
     fn parse_conditional_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("conditional"); // consume
         let match_span = ctx.peek_span();
@@ -733,7 +763,8 @@ impl AdamParser {
         Ok(rel_ids)
     }
 
-    /// `out_decl = "out" identifier [ ":" type_expr ] "{" out_method { condition_decl } "}".`
+    /// `out_decl = "out" identifier [ ":" type_expr ] ":=" or_expression [ "require" "{" {
+    /// requirement } "}" ] ";".`
     fn parse_out_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("out"); // consume
         let (name, name_span) = ctx.consume_ident()?;
@@ -755,13 +786,8 @@ impl AdamParser {
             None
         };
 
-        ctx.expect_open_brace()?;
-
-        if !ctx.is_keyword("method") {
-            return Err(ctx.err_at("expected `method`"));
-        }
-        let inputs = self.parse_cell_list(ctx)?;
-        let segment = self.parse_body_with_input_scope(ctx, &inputs)?;
+        ctx.expect_punct(":=")?;
+        let (segment, inputs) = self.parse_deduced_expr(ctx)?;
 
         // Unlike a `cell` initializer's segment (zero-argument, safe to evaluate once eagerly
         // via `eval_segment_boxed`/`build_cell_from_segment`), an `out` writer's segment takes
@@ -823,41 +849,47 @@ impl AdamParser {
             compiled,
         );
 
-        let mut condition_names: Vec<String> = Vec::new();
-        let mut conditions: Vec<Condition> = Vec::new();
-        while matches!(ctx.peek_token(), Some(Token::Identifier(id)) if id == "condition") {
-            let (cond_name, condition) = self.parse_condition_decl(ctx)?;
-            condition_names.push(cond_name);
-            conditions.push(condition);
+        let mut requirement_names: Vec<String> = Vec::new();
+        let mut requirements: Vec<Requirement> = Vec::new();
+        if ctx.is_keyword("require") {
+            ctx.expect_open_brace()?;
+            while !ctx.at_close_brace() {
+                let (req_name, requirement) = self.parse_requirement(ctx)?;
+                requirement_names.push(req_name);
+                requirements.push(requirement);
+            }
+            ctx.expect_close_brace()?;
         }
 
-        ctx.expect_close_brace()?;
+        ctx.expect_punct(";")?;
 
-        let named_conditions: Vec<(&str, Condition)> = condition_names
+        let named_requirements: Vec<(&str, Requirement)> = requirement_names
             .iter()
             .map(String::as_str)
-            .zip(conditions)
+            .zip(requirements)
             .collect();
 
         let output_id = ctx
             .sheet
-            .add_output(writer, named_conditions)
+            .add_output(writer, named_requirements)
             .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
         ctx.output_names.insert(name, output_id);
 
         Ok(())
     }
 
-    /// `condition_decl = "condition" identifier cell_list "{" or_expression "}".`
-    fn parse_condition_decl(&mut self, ctx: &mut ParseContext) -> Result<(String, Condition)> {
-        ctx.is_keyword("condition"); // consume
+    /// `requirement = identifier ":" or_expression ";".`
+    fn parse_requirement(&mut self, ctx: &mut ParseContext) -> Result<(String, Requirement)> {
         let (name, _name_span) = ctx.consume_ident()?;
-        let inputs = self.parse_cell_list(ctx)?;
-        let segment = self.parse_body_with_input_scope(ctx, &inputs)?;
+        ctx.expect_punct(":")?;
+        let (segment, inputs) = self.parse_deduced_expr(ctx)?;
+        ctx.expect_punct(";")?;
 
         let bool_type_id = TypeId::of::<bool>();
         let actual_type_id = segment.peek_output_type_id().ok_or_else(|| {
-            ctx.err_at(format!("condition `{name}`: expression produced no value"))
+            ctx.err_at(format!(
+                "requirement `{name}`: expression produced no value"
+            ))
         })?;
         if actual_type_id != bool_type_id {
             let got = self
@@ -865,7 +897,9 @@ impl AdamParser {
                 .entry_by_type_id(actual_type_id)
                 .map(|e| e.type_name)
                 .unwrap_or("?");
-            return Err(ctx.err_at(format!("condition `{name}`: expected `bool`, got `{got}`")));
+            return Err(ctx.err_at(format!(
+                "requirement `{name}`: expected `bool`, got `{got}`"
+            )));
         }
 
         let call_fn = self
@@ -879,7 +913,7 @@ impl AdamParser {
             .map(|(_, _, shape)| cell_type_id(shape))
             .collect();
         let segment = RefCell::new(segment);
-        let condition = Condition::new(input_ids, input_types, move |args| {
+        let requirement = Requirement::new(input_ids, input_types, move |args| {
             let seg = &mut *segment.borrow_mut();
             let boxed = call_fn(seg, args)?;
             Ok(*boxed
@@ -887,129 +921,38 @@ impl AdamParser {
                 .expect("checked TypeId::of::<bool>() above"))
         });
 
-        Ok((name, condition))
+        Ok((name, requirement))
     }
 
-    /// `method_decl = "method" cell_list "->" cell_list method_body.`
-    fn parse_method_decl(&mut self, ctx: &mut ParseContext) -> Result<Method> {
-        if !ctx.is_keyword("method") {
-            return Err(ctx.err_at("expected `method`"));
-        }
-        let inputs = self.parse_cell_list(ctx)?;
-        ctx.expect_punct("->")?;
-        let outputs = self.parse_cell_list(ctx)?;
-        let (segment, compiled) = self.parse_method_body(ctx, &inputs, &outputs)?;
-        Ok(build_method(inputs, outputs, segment, compiled))
-    }
-
-    /// `cell_list = "[" identifier { "," identifier } "]".`
-    fn parse_cell_list(&self, ctx: &mut ParseContext) -> Result<Vec<(String, CellId, TypeShape)>> {
-        ctx.expect_open_bracket()?;
-        let mut cells = Vec::new();
-        loop {
-            let (name, span) = ctx.consume_ident()?;
-            let (cell_id, shape) = ctx
-                .cell_names
-                .get(&name)
-                .cloned()
-                .ok_or_else(|| ParseError::new(format!("undeclared cell `{name}`"), span))?;
-            cells.push((name, cell_id, shape));
-            if !ctx.consume_punct(",") {
-                break;
-            }
-        }
-        ctx.expect_close_bracket()?;
-        Ok(cells)
-    }
-
-    /// Parses a `{ or_expression }` body with `inputs` cells available as a resolvable
-    /// identifier scope, pushed for the duration of the parse and popped afterward regardless of
-    /// success or failure of the body's own parse (mirrors the push/pop pairing already used by
-    /// `parse_method_body`'s single call site before this extraction). A scalar-typed input cell
-    /// resolves to a plain `push_arg`; a tuple-typed input cell resolves to
-    /// `push_arg_as_dynamic_sequence_tuple`, so ordinary CEL tuple indexing (`pair.0`) works on it
-    /// exactly as on an inline tuple literal.
+    /// Determines how to split a compiled body segment's result across `outputs`, given their
+    /// declared shapes — used by `parse_binding` to dispatch a `relationship` binding's direct-bind vs.
+    /// destructuring cases against a single compiled `or_expression`. Written generically so any
+    /// future N-output construct can reuse it; `out` declarations are always single-output,
+    /// never destructuring, and currently use their own simpler, separate dispatch instead.
     ///
-    /// - Complexity: O(k) to build the scope's dispatch table, where k = `inputs.len()`.
-    fn parse_body_with_input_scope(
-        &mut self,
-        ctx: &mut ParseContext,
-        inputs: &[(String, CellId, TypeShape)],
-    ) -> Result<DynSegment> {
-        ctx.expect_open_brace()?;
-
-        let scope_data: Vec<(String, InputPush, usize)> = inputs
-            .iter()
-            .enumerate()
-            .map(|(idx, (name, _, shape))| {
-                let push: InputPush = match shape {
-                    TypeShape::Named(type_id) => {
-                        let fn_ptr = self
-                            .types
-                            .entry_by_type_id(*type_id)
-                            .expect("input cell type registered")
-                            .push_arg_fn;
-                        InputPush::Scalar(fn_ptr)
-                    }
-                    TypeShape::Tuple(_) => InputPush::Tuple(self.types.associated_prototype(shape)),
-                };
-                (name.clone(), push, idx)
-            })
-            .collect();
-
-        self.cel
-            .op_lookup_mut()
-            .push_scope(move |name, segment, arity, _span| {
-                if arity != 0 {
-                    return Ok(false);
-                }
-                for (n, push, idx) in &scope_data {
-                    if n == name {
-                        match push {
-                            InputPush::Scalar(fn_ptr) => fn_ptr(segment, *idx),
-                            InputPush::Tuple(associated) => {
-                                segment.push_arg_as_dynamic_sequence_tuple(*idx, associated.clone())
-                            }
-                        }
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            });
-
-        let result = self.parse_cel_or_expression(ctx);
-        self.cel.op_lookup_mut().pop_scope();
-        let segment = result?;
-
-        ctx.expect_close_brace()?;
-        Ok(segment)
-    }
-
-    /// `method_body = "{" or_expression "}".`
-    ///
-    /// Returns the compiled body segment and how to split its result across `outputs`:
-    /// one output takes the segment's single result directly (scalar via `call_dyn`, tuple-typed
-    /// via `call_dyn_as_dynamic_sequence`, or the trivial empty-tuple case); more than one
-    /// requires the result to be a tuple of matching arity and element shapes, split element-wise
-    /// via `call_dyn_tuple_mixed`.
+    /// A non-destructuring single output (`destructure` false; always `outputs.len() == 1`)
+    /// takes the segment's single result directly (scalar via `call_dyn`, tuple-typed via
+    /// `call_dyn_as_dynamic_sequence`, or the trivial empty-tuple case). A destructuring binding
+    /// (`destructure` true, one or more outputs — see `ast::BindingDecl::destructure`) requires
+    /// the result to be a tuple of matching arity and element shapes, split element-wise via
+    /// `call_dyn_tuple_mixed`.
     ///
     /// # Errors
     /// Returns `Err` if any output's declared shape doesn't structurally match the body's actual
     /// result (scalar type mismatch, tuple arity mismatch, or tuple element shape mismatch, at
-    /// any nesting depth).
-    fn parse_method_body(
-        &mut self,
+    /// any nesting depth), or if a single non-destructuring scalar/empty-tuple output's
+    /// expression produced no value.
+    fn compile_outputs(
+        &self,
         ctx: &mut ParseContext,
-        inputs: &[(String, CellId, TypeShape)],
+        segment: &DynSegment,
         outputs: &[(String, CellId, TypeShape)],
-    ) -> Result<(DynSegment, CompiledOutputs)> {
-        let segment = self.parse_body_with_input_scope(ctx, inputs)?;
-
-        let compiled = if outputs.len() == 1 {
+        destructure: bool,
+    ) -> Result<CompiledOutputs> {
+        if outputs.len() == 1 && !destructure {
             let (out_name, _, out_shape) = &outputs[0];
             match out_shape {
                 TypeShape::Named(out_type_id) => {
-                    // unchanged from before: scalar single-output path
                     let actual_type_id = segment.peek_output_type_id().ok_or_else(|| {
                         ctx.err_at(format!("output `{out_name}`: expression produced no value"))
                     })?;
@@ -1029,7 +972,7 @@ impl AdamParser {
                         .entry_by_type_id(*out_type_id)
                         .expect("registered")
                         .call_dyn_fn;
-                    CompiledOutputs::Single(call_fn)
+                    Ok(CompiledOutputs::Single(call_fn))
                 }
                 TypeShape::Tuple(elements) if elements.is_empty() => {
                     // () is CEL's concrete unit type, a distinct leaf TypeId -- not DynTuple.
@@ -1042,7 +985,7 @@ impl AdamParser {
                              value"
                         )));
                     }
-                    CompiledOutputs::EmptyTuple
+                    Ok(CompiledOutputs::EmptyTuple)
                 }
                 TypeShape::Tuple(_) => {
                     let stack_info = segment.peek_stack_infos(1).first();
@@ -1059,14 +1002,16 @@ impl AdamParser {
                             self.types.display_name(out_shape)
                         )));
                     }
-                    CompiledOutputs::SingleTuple(self.types.element_descriptors_for(out_shape))
+                    Ok(CompiledOutputs::SingleTuple(
+                        self.types.element_descriptors_for(out_shape),
+                    ))
                 }
             }
         } else {
             let arity = segment.peek_tuple_arity().unwrap_or(0);
             if arity != outputs.len() {
                 return Err(ctx.err_at(format!(
-                    "output expression has arity {arity} but method declares {} output(s)",
+                    "output expression has arity {arity} but {} output(s) declared",
                     outputs.len()
                 )));
             }
@@ -1097,10 +1042,8 @@ impl AdamParser {
                     }
                 });
             }
-            CompiledOutputs::Tuple(extractors)
-        };
-
-        Ok((segment, compiled))
+            Ok(CompiledOutputs::Tuple(extractors))
+        }
     }
 
     /// Delegates one `or_expression` to CELParser, sharing the token stream.
@@ -1118,8 +1061,8 @@ impl AdamParser {
 // Free functions
 // ---------------------------------------------------------------------------
 
-/// How one input cell's identifier scope entry pushes its value onto a method/out/condition
-/// body's segment: a scalar cell via a plain `push_arg`-family function pointer, or a
+/// How one input cell's identifier scope entry pushes its value onto a deduced-expression body's
+/// segment: a scalar cell via a plain `push_arg`-family function pointer, or a
 /// tuple-typed cell via `cel_runtime::DynSegment::push_arg_as_dynamic_sequence_tuple` (given the
 /// declared shape's `AssociatedType` prototype, so ordinary CEL tuple indexing/operators work on
 /// it exactly as on an inline tuple literal).
@@ -1180,15 +1123,16 @@ enum CompiledOutputs {
     /// a distinct leaf `TypeId`, not `DynTuple`) — so this is its own case, matched directly
     /// against a `()`-typed body result and stored as a trivially-empty `DynamicSequence`.
     EmptyTuple,
-    /// N > 1 outputs: the segment's tuple result, split element-wise via `call_dyn_tuple_mixed`.
+    /// A destructuring binding (one or more outputs): the segment's tuple result, split
+    /// element-wise via `call_dyn_tuple_mixed`.
     Tuple(Vec<cel_runtime::DynExtractor>),
 }
 
 /// Builds a [`Method`] from parsed inputs, outputs, the compiled body segment, and how
 /// to split its result across `outputs`.
 fn build_method(
-    inputs: Vec<(String, CellId, TypeShape)>,
-    outputs: Vec<(String, CellId, TypeShape)>,
+    inputs: NamedCells,
+    outputs: NamedCells,
     segment: DynSegment,
     compiled: CompiledOutputs,
 ) -> Method {
@@ -1258,6 +1202,48 @@ fn point(span: Span) -> crate::ast::ExprSpan {
         start: span,
         end: span,
     }
+}
+
+/// `binding_target = identifier | "(" identifier { "," identifier } [ "," ] ")".`
+///
+/// Returns the output names in declaration order alongside whether the left-hand side requests
+/// destructuring: `false` for a bare identifier or a single parenthesized identifier with no
+/// comma (mere grouping, matching Rust's `(a)` pattern); `true` for `(a,)` (a 1-tuple pattern,
+/// trailing comma mandatory) or `(a, b, ...)`.
+fn parse_binding_target(ctx: &mut ParseContext) -> Result<(Vec<(String, Span)>, bool)> {
+    if !ctx.at_open_paren() {
+        let (name, span) = ctx.consume_ident()?;
+        return Ok((vec![(name, span)], false));
+    }
+
+    ctx.expect_open_paren()?;
+    let (first_name, first_span) = ctx.consume_ident()?;
+    if ctx.at_close_paren() {
+        // Grouping: exactly one identifier, no comma -- same as the bare form.
+        ctx.expect_close_paren()?;
+        return Ok((vec![(first_name, first_span)], false));
+    }
+    if !ctx.consume_punct(",") {
+        return Err(ctx.err_at("expected ',' or closing parenthesis"));
+    }
+    if ctx.at_close_paren() {
+        // Single identifier + trailing comma: destructures a 1-tuple.
+        ctx.expect_close_paren()?;
+        return Ok((vec![(first_name, first_span)], true));
+    }
+    let mut outputs = vec![(first_name, first_span)];
+    loop {
+        let (name, span) = ctx.consume_ident()?;
+        outputs.push((name, span));
+        if ctx.at_close_paren() {
+            break;
+        }
+        if !ctx.consume_punct(",") {
+            return Err(ctx.err_at("expected ',' or closing parenthesis"));
+        }
+    }
+    ctx.expect_close_paren()?;
+    Ok((outputs, true))
 }
 
 // ---------------------------------------------------------------------------
@@ -1336,23 +1322,286 @@ mod tests {
     }
 
     #[test]
-    fn parse_relationship_single_method() {
-        let _sheet = parser()
+    fn parse_relationship_with_a_single_binding() {
+        let mut sheet = parser()
             .parse_str(
                 r#"
+                sheet s {
+                    cell a: i32 = 2;
+                    cell b: i32 = 0;
+                    relationship {
+                        b := a;
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (b_id, _) = sheet.cell_names["b"].clone();
+        assert_eq!(*sheet.read::<i32>(b_id).unwrap(), 2);
+    }
+
+    #[test]
+    fn parse_relationship_deduces_inputs_from_referenced_identifiers() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell a: i32 = 2;
+                    cell b: i32 = 3;
+                    cell c: i32 = 0;
+                    relationship {
+                        c := a * b;
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (c_id, _) = sheet.cell_names["c"].clone();
+        assert_eq!(*sheet.read::<i32>(c_id).unwrap(), 6);
+    }
+
+    #[test]
+    fn parse_relationship_with_multiple_bindings_lets_the_planner_pick_a_direction() {
+        // `c` is declared first (and so has the weakest cell strength — `adam_rs`'s
+        // planner processes cells in *descending* strength order, preferentially
+        // leaving the strongest cells as sources, so the earliest-declared cell is the
+        // one left to be computed): with `a`/`b` fixed as sources, the only
+        // self-consistent choice among these three mutually-referencing bindings is to
+        // compute `c := a * b`.
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell c: i32 = 0;
+                    cell a: i32 = 2;
+                    cell b: i32 = 3;
+                    relationship {
+                        c := a * b;
+                        a := c / b;
+                        b := c / a;
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (c_id, _) = sheet.cell_names["c"].clone();
+        assert_eq!(*sheet.read::<i32>(c_id).unwrap(), 6);
+    }
+
+    #[test]
+    fn parse_binding_undeclared_output_is_an_error() {
+        let result = parser().parse_str(
+            r#"
             sheet s {
-                cell width:  f64 = 4.0;
-                cell height: f64 = 3.0;
-                cell area:   f64;
+                cell a: i32 = 1;
                 relationship {
-                    method [width, height] -> [area]   { width * height }
-                    method [area, height]  -> [width]  { area / height }
-                    method [width, area]   -> [height] { area / width }
+                    missing := a;
                 }
             }
         "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_binding_multi_output_tuple_matches_existing_tuple_shape_rules() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell w: i32 = 4;
+                    cell x: i32 = 0;
+                    cell y: i32 = 0;
+                    relationship {
+                        (x, y) := (w, w * 2);
+                    }
+                }
+            "#,
             )
             .unwrap();
+        sheet.propagate().unwrap();
+        let (x_id, _) = sheet.cell_names["x"].clone();
+        let (y_id, _) = sheet.cell_names["y"].clone();
+        assert_eq!(*sheet.read::<i32>(x_id).unwrap(), 4);
+        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 8);
+    }
+
+    #[test]
+    fn parse_binding_multi_output_arity_mismatch_is_an_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell w: i32 = 4;
+                cell x: i32 = 0;
+                cell y: i32 = 0;
+                relationship {
+                    (x, y) := w;
+                }
+            }
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_binding_multi_output_without_parens_is_a_parse_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell w: i32 = 4;
+                cell x: i32 = 0;
+                cell y: i32 = 0;
+                relationship {
+                    x, y := (w, w * 2);
+                }
+            }
+        "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_binding_single_element_tuple_destructure_extracts_the_element() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell w: i32 = 4;
+                    cell x: i32 = 0;
+                    relationship {
+                        (x,) := (w,);
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (x_id, _) = sheet.cell_names["x"].clone();
+        assert_eq!(*sheet.read::<i32>(x_id).unwrap(), 4);
+    }
+
+    #[test]
+    fn parse_binding_single_parenthesized_identifier_without_comma_is_a_direct_bind() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell w: i32 = 4;
+                    cell x: i32 = 0;
+                    relationship {
+                        (x) := w;
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (x_id, _) = sheet.cell_names["x"].clone();
+        assert_eq!(*sheet.read::<i32>(x_id).unwrap(), 4);
+    }
+
+    #[test]
+    fn parse_out_with_direct_initializer_and_no_require_block() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell a: i32 = 3;
+                    cell b: i32 = 4;
+                    out area: i32 := a * b;
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let output_id = sheet.output_names["area"];
+        let cell_id = sheet.sheet.output_cell(output_id).unwrap();
+        assert_eq!(*sheet.sheet.read::<i32>(cell_id).unwrap(), 12);
+    }
+
+    #[test]
+    fn parse_out_with_no_type_annotation_infers_from_initializer() {
+        let sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell a: i32 = 3;
+                    out doubled := a * 2;
+                }
+            "#,
+            )
+            .unwrap();
+        let (_, shape) = sheet.cell_names["doubled"].clone();
+        assert_eq!(
+            shape,
+            crate::type_registry::TypeShape::Named(std::any::TypeId::of::<i32>())
+        );
+    }
+
+    #[test]
+    fn parse_out_with_a_require_block_registers_named_requirements() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell a: i32 = 3;
+                    cell b: i32 = 4;
+                    out area: i32 := a * b require {
+                        positive: area > 0;
+                        small: area < 1000;
+                    };
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let output_id = sheet.output_names["area"];
+        assert!(sheet.sheet.output_requirements(output_id).unwrap().len() == 2);
+        assert!(
+            sheet
+                .sheet
+                .violated_requirements(output_id)
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_out_require_block_requirement_can_violate() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell a: i32 = 3;
+                    cell b: i32 = 4;
+                    out area: i32 := a * b require {
+                        too_small: area > 1000;
+                    };
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let output_id = sheet.output_names["area"];
+        assert_eq!(sheet.sheet.violated_requirements(output_id).count(), 1);
+    }
+
+    #[test]
+    fn parse_requirement_non_bool_body_is_an_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell a: i32 = 3;
+                out x: i32 := a require {
+                    bad: a;
+                };
+            }
+        "#,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1373,25 +1622,25 @@ mod tests {
 
     #[test]
     fn parses_a_sheet_with_doc_comments_on_every_declaration_kind() {
-        let source = "//! module docs\nsheet s {\n    /// a cell\n    cell x: i32 = 1;\n\n    /// another cell\n    cell y: i32 = 2;\n\n    /// a relationship\n    relationship { method [x] -> [y] { x } }\n}";
+        let source = "//! module docs\nsheet s {\n    /// a cell\n    cell x: i32 = 1;\n\n    /// another cell\n    cell y: i32 = 2;\n\n    /// a relationship\n    relationship { y := x; }\n}";
         let parsed = parser().parse_str(source).unwrap();
         assert_eq!(parsed.cell_names.len(), 2);
     }
 
     #[test]
-    fn parse_method_undeclared_input_is_error() {
+    fn parse_binding_undeclared_input_is_error() {
         let result = parser().parse_str(
             r#"
             sheet s {
                 cell x: f64 = 1.0;
-                relationship { method [x, bogus] -> [x] { x } }
+                relationship { x := bogus; }
             }
         "#,
         );
         assert!(result.is_err());
         let err = result.err().expect("expected Err");
         let msg = err.message().to_lowercase();
-        assert!(msg.contains("bogus") || msg.contains("undeclared"), "{msg}");
+        assert!(msg.contains("bogus") || msg.contains("undefined"), "{msg}");
     }
 
     #[test]
@@ -1401,28 +1650,11 @@ mod tests {
             sheet s {
                 cell x: f64 = 0.0;
                 cell n: i32 = 0;
-                relationship { method [x] -> [n] { x } }
+                relationship { n := x; }
             }
         "#,
         );
         assert!(result.is_err(), "f64 body for i32 output must be an error");
-    }
-
-    #[test]
-    fn parse_relationship_multi_output_tuple() {
-        let _sheet = parser()
-            .parse_str(
-                r#"
-            sheet s {
-                cell a:    i32 = 3;
-                cell b:    i32 = 4;
-                cell sum:  i32;
-                cell diff: i32;
-                relationship { method [a, b] -> [sum, diff] { (a + b, a - b) } }
-            }
-        "#,
-            )
-            .unwrap();
     }
 
     #[test]
@@ -1435,17 +1667,16 @@ mod tests {
                 cell b:    i32 = 4;
                 cell sum:  i32;
                 cell diff: i32;
-                relationship { method [a, b] -> [sum, diff] { (a + b, a - b) } }
+                relationship { (sum, diff) := (a + b, a - b); }
             }
         "#,
             )
             .unwrap();
 
-        // sum = a + b = 7, diff = a - b = -1. We can't read cells by name yet
-        // (no name->CellId API on Sheet), so we verify the sheet propagated
-        // without error, which exercises the CompiledOutputs::Tuple runtime
-        // path end to end (RefCell wrapping + seg.call_dyn_tuple). A future
-        // test can assert specific cell values once a name-lookup API exists.
+        // sum = a + b = 7, diff = a - b = -1. This exercises the CompiledOutputs::Tuple
+        // runtime path end to end (RefCell wrapping + seg.call_dyn_tuple); see
+        // `existing_multi_output_scalar_methods_still_work_unchanged` for the value-level
+        // assertion of the same mechanism.
         sheet.propagate().unwrap();
         let _ = sheet; // sheet is live and propagated
     }
@@ -1460,7 +1691,7 @@ mod tests {
                 cell x: i32;
                 cell y: i32;
                 cell z: i32;
-                relationship { method [a, b] -> [x, y, z] { (a + b, a - b) } }
+                relationship { (x, y, z) := (a + b, a - b); }
             }
         "#,
         );
@@ -1482,7 +1713,7 @@ mod tests {
                 cell b: f64 = 2.0;
                 cell x: i32;
                 cell y: i32;
-                relationship { method [a, b] -> [x, y] { (a, b) } }
+                relationship { (x, y) := (a, b); }
             }
         "#,
         );
@@ -1502,7 +1733,7 @@ mod tests {
             sheet s {
                 cell x: i32 = 1;
                 cell y: i32;
-                relationship { method [x] -> [y] { (x,) } }
+                relationship { y := (x,); }
             }
         "#,
         );
@@ -1521,7 +1752,7 @@ mod tests {
                     cell a: i32 = 3;
                     cell b: i32 = 4;
                     cell pair: (i32, i32);
-                    relationship { method [a, b] -> [pair] { (a, b) } }
+                    relationship { pair := (a, b); }
                 }
             "#,
             )
@@ -1543,7 +1774,7 @@ mod tests {
                     cell b: i32 = 4;
                     cell pair: (i32, i32);
                     cell extra: i32;
-                    relationship { method [a, b] -> [pair, extra] { ((a, b), a) } }
+                    relationship { (pair, extra) := ((a, b), a); }
                 }
             "#,
             )
@@ -1565,7 +1796,7 @@ mod tests {
                 sheet s {
                     cell pair: (i32, i32) = (10, 20);
                     cell sum: i32;
-                    relationship { method [pair] -> [sum] { pair.0 + pair.1 } }
+                    relationship { sum := pair.0 + pair.1; }
                 }
             "#,
             )
@@ -1583,7 +1814,7 @@ mod tests {
                 cell a: i32 = 1;
                 cell b: f64 = 2.0;
                 cell pair: (i32, i32);
-                relationship { method [a, b] -> [pair] { (a, b) } }
+                relationship { pair := (a, b); }
             }
         "#,
         );
@@ -1602,7 +1833,7 @@ mod tests {
                     cell b: i32 = 4;
                     cell sum: i32;
                     cell diff: i32;
-                    relationship { method [a, b] -> [sum, diff] { (a + b, a - b) } }
+                    relationship { (sum, diff) := (a + b, a - b); }
                 }
             "#,
             )
@@ -1622,7 +1853,10 @@ mod tests {
                 sheet s {
                     cell x: i32 = 1;
                     cell nothing: ();
-                    relationship { method [x] -> [nothing] { () } }
+                    // `()` alone references no cell, and adam_rs rejects a method with no
+                    // inputs -- reference `x` via an if/else whose branches both still
+                    // evaluate to `()`, so the binding has a deduced input.
+                    relationship { nothing := if x > 0 { () } else { () }; }
                 }
             "#,
             )
@@ -1645,13 +1879,13 @@ mod tests {
                 cell mode:   i32 = 0;
                 conditional mode {
                     0i32 => {
-                        relationship { method [width] -> [height] { width } }
+                        relationship { height := width; }
                     },
                     1i32 => {
-                        relationship { method [width, ratio] -> [height] { width * ratio } }
+                        relationship { height := width * ratio; }
                     },
                     _ => {
-                        relationship { method [width] -> [height] { width } }
+                        relationship { height := width; }
                     },
                 }
             }
@@ -1675,8 +1909,8 @@ mod tests {
                 cell f: f64;
                 conditional mode {
                     0i32 => {
-                        relationship { method [a, b] -> [c] { a * b } }
-                        relationship { method [d, e] -> [f] { d * e } }
+                        relationship { c := a * b; }
+                        relationship { f := d * e; }
                     }
                 }
             }
@@ -1687,18 +1921,18 @@ mod tests {
     }
 
     #[test]
-    fn conditional_branch_bare_method_without_relationship_wrapper_is_error() {
+    fn conditional_branch_bare_binding_without_relationship_wrapper_is_error() {
         let result = parser().parse_str(
             r#"
             sheet s {
                 cell x: i32 = 0;
-                conditional x { 0i32 => { method [x] -> [x] { x } } }
+                conditional x { 0i32 => { x := x; } }
             }
         "#,
         );
         assert!(
             result.is_err(),
-            "a conditional_branch body now requires relationship_decl, not a bare method_decl"
+            "a conditional_branch body now requires relationship_decl, not a bare binding"
         );
     }
 
@@ -1708,7 +1942,7 @@ mod tests {
             r#"
             sheet s {
                 cell x: i32 = 0;
-                conditional bogus { 0i32 => { relationship { method [x] -> [x] { x } } } }
+                conditional bogus { 0i32 => { relationship { x := x; } } }
             }
         "#,
         );
@@ -1725,7 +1959,7 @@ mod tests {
             sheet s {
                 cell mode: i32 = 0;
                 cell x:    f64 = 0.0;
-                conditional mode { 1.0 => { relationship { method [x] -> [x] { x } } } }
+                conditional mode { 1.0 => { relationship { x := x; } } }
             }
         "#,
         );
@@ -1745,8 +1979,8 @@ mod tests {
                     cell x: f64 = 1.0;
                     cell y: f64;
                     conditional mode {
-                        (0, 0) => { relationship { method [x] -> [y] { x } } },
-                        _ => { relationship { method [x] -> [y] { x * 2.0 } } },
+                        (0, 0) => { relationship { y := x; } },
+                        _ => { relationship { y := x * 2.0; } },
                     }
                 }
             "#,
@@ -1768,7 +2002,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional a && b {
-                        true => { relationship { method [x] -> [y] { x } } },
+                        true => { relationship { y := x; } },
                     }
                 }
             "#,
@@ -1798,7 +2032,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional a && a {
-                        true => { relationship { method [x] -> [y] { x } } },
+                        true => { relationship { y := x; } },
                     }
                 }
             "#,
@@ -1819,7 +2053,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional mode {
-                        1i32 => { relationship { method [x] -> [y] { x } } },
+                        1i32 => { relationship { y := x; } },
                     }
                 }
             "#,
@@ -1847,7 +2081,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional (a, b) {
-                        (1i32, 2i32) => { relationship { method [x] -> [y] { x } } },
+                        (1i32, 2i32) => { relationship { y := x; } },
                     }
                 }
             "#,
@@ -1872,8 +2106,8 @@ mod tests {
         // for a client-registered (non-built-in) type, so a bare "TypeName(args)" call parses
         // as an unresolved 1-arity identifier lookup, not a constructor. Instead, register a
         // stand-in 0-arity identifier `mode_one` directly on the CEL op lookup (the same
-        // mechanism `parse_match_expr`'s grow-on-demand scope and `parse_body_with_input_scope`
-        // both use for resolving bare identifiers) that pushes a `Mode(1)` constant via
+        // mechanism `parse_deduced_expr`'s grow-on-demand scope uses for resolving bare
+        // identifiers) that pushes a `Mode(1)` constant via
         // `DynSegment::just`. This lets the DSL source below produce a `Mode` value for both
         // the cell initializer and the branch key, exercising `TypeRegistry`'s
         // `entry_by_type_id`/`eq_dyn_fn`/`call_dyn_fn` dispatch for a client-registered type —
@@ -1901,7 +2135,7 @@ mod tests {
                     cell x: i32 = 1;
                     cell y: i32 = 0;
                     conditional m {
-                        mode_one => { relationship { method [x] -> [y] { x } } },
+                        mode_one => { relationship { y := x; } },
                     }
                 }
             "#,
@@ -1919,7 +2153,7 @@ mod tests {
             sheet s {
                 cell a: bool = true;
                 conditional a && nope {
-                    true => { relationship { method [a] -> [a] { a } } },
+                    true => { relationship { a := a; } },
                 }
             }
         "#,
@@ -1948,9 +2182,9 @@ mod tests {
                 cell height: f64 = 3.0;
                 cell area:   f64;
                 relationship {
-                    method [width, height] -> [area]   { width * height }
-                    method [area, height]  -> [width]  { area / height }
-                    method [width, area]   -> [height] { area / width }
+                    area := width * height;
+                    width := area / height;
+                    height := area / width;
                 }
             }
         "#,
@@ -2004,9 +2238,7 @@ mod tests {
                 sheet s {
                     cell width: f64 = 4.0;
                     cell height: f64 = 3.0;
-                    out area: f64 {
-                        method [width, height] { width * height }
-                    }
+                    out area: f64 := width * height;
                 }
             "#,
             )
@@ -2024,7 +2256,7 @@ mod tests {
                 r#"
                 sheet s {
                     cell x: i32 = 3;
-                    out pair: (i32, i32) { method [x] { (x, x) } }
+                    out pair: (i32, i32) := (x, x);
                 }
             "#,
             )
@@ -2043,7 +2275,7 @@ mod tests {
                 r#"
                 sheet s {
                     cell width: f64 = 4.0;
-                    out doubled { method [width] { width + width } }
+                    out doubled := width + width;
                 }
             "#,
             )
@@ -2058,7 +2290,7 @@ mod tests {
             r#"
             sheet s {
                 cell width: f64 = 4.0;
-                out area: i32 { method [width] { width } }
+                out area: i32 := width;
             }
         "#,
         );
@@ -2069,7 +2301,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_out_with_conditions_reports_output_valid_and_violated() {
+    fn parse_out_with_requirements_reports_output_valid_and_violated() {
         let mut sheet = parser()
             .parse_str(
                 r#"
@@ -2077,10 +2309,9 @@ mod tests {
                     cell width: f64 = 4.0;
                     cell height: f64 = 3.0;
                     cell max_area: f64 = 100.0;
-                    out area: f64 {
-                        method [width, height] { width * height }
-                        condition max_area [width, height, max_area] { width * height <= max_area }
-                    }
+                    out area: f64 := width * height require {
+                        max_area: width * height <= max_area;
+                    };
                 }
             "#,
             )
@@ -2088,11 +2319,11 @@ mod tests {
         sheet.propagate().unwrap();
         let output_id = *sheet.output_names.get("area").unwrap();
         assert!(sheet.output_valid(output_id));
-        assert_eq!(sheet.violated_conditions(output_id).count(), 0);
+        assert_eq!(sheet.violated_requirements(output_id).count(), 0);
     }
 
     #[test]
-    fn parse_out_condition_violation_is_reported_after_propagate() {
+    fn parse_out_requirement_violation_is_reported_after_propagate() {
         let mut sheet = parser()
             .parse_str(
                 r#"
@@ -2100,10 +2331,9 @@ mod tests {
                     cell width: f64 = 40.0;
                     cell height: f64 = 30.0;
                     cell max_area: f64 = 100.0;
-                    out area: f64 {
-                        method [width, height] { width * height }
-                        condition max_area [width, height, max_area] { width * height <= max_area }
-                    }
+                    out area: f64 := width * height require {
+                        max_area: width * height <= max_area;
+                    };
                 }
             "#,
             )
@@ -2111,42 +2341,25 @@ mod tests {
         sheet.propagate().unwrap();
         let output_id = *sheet.output_names.get("area").unwrap();
         assert!(!sheet.output_valid(output_id));
-        assert_eq!(sheet.violated_conditions(output_id).count(), 1);
+        assert_eq!(sheet.violated_requirements(output_id).count(), 1);
     }
 
     #[test]
-    fn parse_condition_non_bool_body_is_error() {
+    fn parse_out_duplicate_requirement_names_is_error() {
         let result = parser().parse_str(
             r#"
             sheet s {
                 cell width: f64 = 4.0;
-                out area: f64 {
-                    method [width] { width }
-                    condition bogus [width] { width }
-                }
-            }
-        "#,
-        );
-        assert!(result.is_err(), "an f64 condition body must be an error");
-    }
-
-    #[test]
-    fn parse_out_duplicate_condition_names_is_error() {
-        let result = parser().parse_str(
-            r#"
-            sheet s {
-                cell width: f64 = 4.0;
-                out area: f64 {
-                    method [width] { width }
-                    condition dup [width] { width <= 10.0 }
-                    condition dup [width] { width >= 0.0 }
-                }
+                out area: f64 := width require {
+                    dup: width <= 10.0;
+                    dup: width >= 0.0;
+                };
             }
         "#,
         );
         assert!(
             result.is_err(),
-            "two conditions sharing a name must be an error"
+            "two requirements sharing a name must be an error"
         );
     }
 
@@ -2157,8 +2370,8 @@ mod tests {
             sheet s {
                 cell width: f64 = 4.0;
                 cell height: f64 = 3.0;
-                out area: f64 { method [width, height] { width * height } }
-                relationship { method [area] -> [width] { area } }
+                out area: f64 := width * height;
+                relationship { width := area; }
             }
         "#,
         );
@@ -2174,7 +2387,7 @@ mod tests {
             r#"
             sheet s {
                 cell dummy: i32 = 0;
-                out x { method [dummy] { () } }
+                out x := ();
             }
         "#,
         );
@@ -2192,9 +2405,9 @@ mod tests {
                 cell width: f64 = 4.0;
                 cell height: f64 = 3.0;
                 cell mode: i32 = 0;
-                out area: f64 { method [width, height] { width * height } }
+                out area: f64 := width * height;
                 conditional mode {
-                    0i32 => { relationship { method [area] -> [width] { area } } }
+                    0i32 => { relationship { width := area; } }
                 }
             }
         "#,
@@ -2270,7 +2483,7 @@ mod tests {
                 r#"
                 sheet s {
                     cell x: i32 = 3;
-                    out pair: (i32, i32) { method [x] { (x, x) } }
+                    out pair: (i32, i32) := (x, x);
                 }
             "#,
             )

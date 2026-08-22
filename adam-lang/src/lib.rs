@@ -7,21 +7,25 @@
 //!
 //! ```text
 //! sheet              = "sheet" identifier "{" { sheet_item } "}".
-//! sheet_item         = cell_decl | relationship_decl | conditional_decl | out_decl.
-//! cell_decl          = "cell" identifier cell_type_init ";".
-//! cell_type_init     = (":" type_expr [ "=" or_expression ]) | ("=" or_expression).
+//! sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).
+//! cell_decl          = "cell" identifier cell_type_init [ ":=" or_expression ] ";".
+//! cell_type_init     = (":" type_expr ["=" or_expression]) | ("=" or_expression).
 //! type_expr          = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
-//! relationship_decl  = "relationship" [ identifier ] "{" { method_decl } "}".
-//! conditional_decl   = "conditional" or_expression "{" { conditional_branch } [ default_branch ] "}".
-//! conditional_branch = or_expression "=>" "{" { relationship_decl } "}" [ "," ].
-//! default_branch     = "_"   "=>" "{" { relationship_decl } "}" [ "," ].
-//! method_decl        = "method" cell_list "->" cell_list method_body.
-//! out_decl           = "out" identifier [ ":" type_expr ] "{" out_method { condition_decl } "}".
-//! out_method         = "method" cell_list method_body.
-//! condition_decl     = "condition" identifier cell_list "{" or_expression "}".
-//! cell_list          = "[" identifier { "," identifier } "]".
-//! method_body        = "{" or_expression "}".
+//! relationship_decl  = "relationship" "{" { binding } "}".
+//! binding            = binding_target ":=" or_expression ";".
+//! binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
+//! conditional_decl   = "conditional" or_expression "{" { conditional_branch } "}".
+//! conditional_branch = (or_expression | "_") "=>" "{" { relationship_decl } "}" [ "," ].
+//! out_decl           = "out" identifier [":" type_expr] ":=" or_expression
+//!                        [ "require" "{" { requirement } "}" ] ";".
+//! requirement        = identifier ":" or_expression ";".
 //! ```
+//!
+//! The `cell_decl` grammar shown above includes an optional trailing `":=" or_expression`
+//! clause per the design spec, but **this crate does not yet implement it** — see
+//! `docs/superpowers/specs/2026-08-19-adam-lang-syntax-design.md`'s "Explicitly out of scope"
+//! section; it's deferred pending a forward-reference/hoisting decision. Only `cell_decl`'s
+//! `"=" or_expression` one-time initializer is implemented today.
 //!
 //! `or_expression` and its descendants (`literal`, `identifier`, and the rest of the
 //! CEL expression grammar) are defined by `cel_parser` — see that crate's own

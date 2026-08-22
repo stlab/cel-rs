@@ -33,14 +33,14 @@
 //! assert_eq!(*sheet.read::<f64>(c).unwrap(), 6.0);
 //! ```
 //!
-//! # Outputs and conditions
+//! # Outputs and requirements
 //!
-//! An output is a terminal cell written by a single method, with named conditions
+//! An output is a terminal cell written by a single method, with named requirements
 //! checked after every `propagate()`. Unlike an ordinary derived cell, an output's cell
 //! can never be used as an input elsewhere in the sheet.
 //!
 //! ```rust
-//! use adam_rs::{Condition, Method, Sheet};
+//! use adam_rs::{Requirement, Method, Sheet};
 //!
 //! let mut sheet = Sheet::new();
 //! let width = sheet.add_cell(0_i32);
@@ -56,7 +56,7 @@
 //!         writer,
 //!         vec![(
 //!             "max_area",
-//!             Condition::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
+//!             Requirement::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
 //!         )],
 //!     )
 //!     .unwrap();
@@ -105,20 +105,20 @@
 //! ```
 
 pub mod cell;
-pub mod condition;
 pub mod conditional;
 pub mod error;
 pub mod filter;
 pub mod output;
 mod planner;
 pub mod relationship;
+pub mod requirement;
 pub mod sheet;
 
 pub use cell::CellId;
-pub use condition::{Condition, ConditionId};
 pub use conditional::{ConditionalId, MatchExpr};
 pub use error::Error;
 pub use filter::{Filter, FilterViolation};
 pub use output::OutputId;
 pub use relationship::{Method, RelationshipId};
+pub use requirement::{Requirement, RequirementId};
 pub use sheet::Sheet;

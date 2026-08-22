@@ -142,7 +142,7 @@ pub enum FilterViolation {
     /// The filter's function itself returned an error, or returned a value of a
     /// different type than the cell — both treated as an equally soft diagnostic (see
     /// the design spec §4 for why a filter's own `Err` is not a propagation-aborting
-    /// failure the way a `Condition`'s is).
+    /// failure the way a `Requirement`'s is).
     Failed(anyhow::Error),
 }
 

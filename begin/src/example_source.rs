@@ -13,12 +13,12 @@
 //!   Inspector field is disabled and it is highlighted in the graph.
 //! - Any other `p`: the two systems are independent and `g` is not forced.
 //!
-//! `g`'s relationship is its own `relationship { .. }` block within the `1i32` branch,
-//! not folded into the `c`/`f` relationship's methods: a relationship's forced outputs
-//! are the *intersection* of its methods' pure outputs, so mixing `[c] -> [g]` in with
-//! the `c`/`f` methods would make that intersection empty, forcing nothing. A single
-//! `conditional` branch can hold any number of `relationship` blocks, each contributing
-//! its own independent forced-output set while that branch is active.
+//! `g`'s relationship block is its own `relationship { .. }` block within the `1i32` branch, not
+//! folded into the `c`/`f` relationship block's bindings: a relationship's forced outputs
+//! are the *intersection* of its bindings' pure outputs, so mixing `g := ..` in with
+//! the `c`/`f` bindings would make that intersection empty, forcing nothing. A single
+//! `conditional` branch can hold any number of `relationship` blocks, each contributing its
+//! own independent forced-output set while that branch is active.
 
 use adam_lang::{AdamParser, TypeRegistry};
 use adam_rs::Sheet;
@@ -275,9 +275,9 @@ mod tests {
             cell b: f64 = 3.0;
             cell c: f64;
             relationship {
-                method [a, b] -> [c] { a * b }
-                method [b, c] -> [a] { c / b }
-                method [a, c] -> [b] { c / a }
+                c := a * b;
+                a := c / b;
+                b := c / a;
             }
         }
     "#;
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn build_sheet_runtime_error_still_returns_sheet_and_message() {
-        let source = "sheet s { cell x: i32 = 0; cell y: i32; relationship { method [x] -> [y] { 10i32 / x } } }";
+        let source = "sheet s { cell x: i32 = 0; cell y: i32; relationship { y := 10i32 / x; } }";
         let outcome = build_sheet(source, "test.adm2");
         assert!(
             outcome.sheet_labels.is_some(),
@@ -341,9 +341,9 @@ mod tests {
 
     #[test]
     fn image_resize_relevance_does_not_depend_on_which_cell_currently_holds_strength() {
-        // Regression test: `width_pixels`/`width_percent`/`doc_width_inches`/
-        // `doc_resolution` form a strength-ambiguous diamond (any two determine the rest).
-        // In the default state, `width_pixels` and `doc_resolution` happen to be the
+        // Regression test: `width_pixels`/`width_pixels_percent`/`width_inches`/
+        // `resolution` form a strength-ambiguous diamond (any two determine the rest).
+        // In the default state, `width_pixels` and `resolution` happen to be the
         // strength-chosen sources — but every cell in the diamond, plus every cell feeding a
         // conditional match subject (`resample` and `constrain` are both inputs to one
         // conditional's match expression; `auto_quality` is a plain match cell), must show as
@@ -359,10 +359,10 @@ mod tests {
         let relevant = parsed.output_relevant_cells();
         for name in [
             "width_pixels",
-            "width_percent",
-            "doc_width_inches",
-            "doc_resolution",
-            "original_width",
+            "width_pixels_percent",
+            "width_inches",
+            "resolution",
+            "original_width_pixels",
             "resample",
             "constrain",
             "auto_quality",
