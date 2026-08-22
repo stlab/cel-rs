@@ -119,6 +119,34 @@ pub trait ParserContext: Sized {
         start: Span,
         end: Span,
     ) -> crate::Result<()>;
+
+    /// Packages a fully-parsed, independent nested context — the body of a closure literal — as a
+    /// value pushed onto `self`, given the closure's declared parameter/return types.
+    ///
+    /// The default implementation reports closures as unsupported, so a `ParserContext`
+    /// implementation that has no use for them (e.g. an AST-building context for the formatter or
+    /// language server) needs no changes to keep compiling.
+    ///
+    /// - Precondition: `body` was built via `Self::new_context()` and its own argument-binding
+    ///   mechanism, in the same style [`Self::new_context`]'s other consumers already use.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if this `ParserContext` implementation doesn't support closures.
+    fn push_closure(
+        &mut self,
+        param_types: Vec<std::any::TypeId>,
+        return_type: std::any::TypeId,
+        body: Self,
+        span: Span,
+    ) -> crate::Result<()> {
+        let _ = (param_types, return_type, body);
+        Err(crate::ParseError::new_range(
+            "closures are not supported in this context".to_string(),
+            span,
+            span,
+        ))
+    }
 }
 
 /// [`ParserContext`] implementation that executes directly into a [`DynSegment`], reproducing
@@ -246,6 +274,22 @@ impl ParserContext for DynSegmentContext {
     ) -> crate::Result<()> {
         op_lookup.lookup_cast(type_name, &mut self.0, start, end)
     }
+
+    fn push_closure(
+        &mut self,
+        param_types: Vec<std::any::TypeId>,
+        return_type: std::any::TypeId,
+        body: Self,
+        span: Span,
+    ) -> crate::Result<()> {
+        self.0.just(cel_runtime::DynClosure::new(
+            param_types,
+            return_type,
+            body.into_inner(),
+        ));
+        let _ = span;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +297,7 @@ mod tests {
     use super::*;
     use crate::op_table::OpLookup;
     use proc_macro2::Span;
+    use std::any::TypeId;
 
     #[test]
     fn new_context_is_empty_and_ready_for_literals() {
@@ -382,5 +427,26 @@ mod tests {
         ctx.apply_logical("&&", rhs, Span::call_site(), Span::call_site())
             .unwrap();
         assert!(!ctx.into_inner().call0::<bool>().unwrap());
+    }
+
+    #[test]
+    fn dyn_segment_context_push_closure_builds_a_callable_closure() {
+        let mut outer = DynSegmentContext::new_context();
+        let mut body = DynSegmentContext::new_context();
+        body.0.push_arg::<i32>(0);
+        body.0.op1(|x: i32| x + 1).unwrap();
+
+        outer
+            .push_closure(
+                vec![TypeId::of::<i32>()],
+                TypeId::of::<i32>(),
+                body,
+                Span::call_site(),
+            )
+            .unwrap();
+
+        let closure: cel_runtime::DynClosure = outer.into_inner().call0().unwrap();
+        let x = 5i32;
+        assert_eq!(closure.call::<i32>(&[&x]).unwrap(), 6);
     }
 }

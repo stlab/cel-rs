@@ -413,6 +413,35 @@ impl<C: ParserContext> Parser<C> {
         Ok(std::mem::replace(&mut self.context, C::new_context()))
     }
 
+    /// Compiles a fully independent nested context — used for a closure literal's body — by
+    /// swapping `self.context` out for a fresh one, running `f` against it, then swapping the
+    /// original context back in and returning the finished nested one.
+    ///
+    /// Unlike [`parse_or_expression_ctx`](Self::parse_or_expression_ctx), this does not reset
+    /// `self.tokens`/`self.op_lookup`/`self.last_span` — it's for compiling a sub-expression in the
+    /// middle of an already-in-progress outer parse, not starting a fresh top-level parse.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `f` does, or if `f` returns `Ok(false)` (no expression found) — in both
+    /// cases the outer context is still restored before returning.
+    ///
+    /// - Complexity: whatever `f`'s own parse cost is.
+    #[allow(dead_code)] // Consumed by the closure-literal grammar production, not yet wired in.
+    pub(crate) fn parse_nested_context<F>(&mut self, f: F) -> Result<C>
+    where
+        F: FnOnce(&mut Self) -> Result<bool>,
+    {
+        let outer = std::mem::replace(&mut self.context, C::new_context());
+        let outcome = f(self);
+        let nested = std::mem::replace(&mut self.context, outer);
+        match outcome {
+            Ok(true) => Ok(nested),
+            Ok(false) => Err(self.error_at("expected expression")),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Returns the remaining token stream after expression parsing.
     ///
     /// Call after [`parse_or_expression_ctx`](Self::parse_or_expression_ctx) to recover the
@@ -1346,6 +1375,27 @@ mod tests {
         let result = parser.parse_str("10");
         assert!(result.is_ok());
         assert_eq!(result.unwrap().call0::<i32>().unwrap(), 10);
+    }
+
+    #[test]
+    fn parse_nested_context_compiles_an_independent_segment_without_disturbing_the_outer_one()
+    -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_tokens(quote::quote! { 1 + 2 }.into_iter());
+        // Start the outer expression: push a literal directly onto the (not-yet-swapped) context.
+        parser
+            .context
+            .push_literal(100i32, proc_macro2::Span::call_site());
+
+        let nested = parser
+            .parse_nested_context(|p| p.is_or_expression())
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // The outer context still only has the one literal pushed before the nested parse.
+        assert_eq!(parser.context.into_inner().call0::<i32>()?, 100);
+        // The nested context has its own, independently-evaluated result.
+        assert_eq!(nested.into_inner().call0::<i32>()?, 3);
+        Ok(())
     }
 
     #[test]
