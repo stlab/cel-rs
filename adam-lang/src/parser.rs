@@ -112,7 +112,10 @@ impl AdamParser {
     /// Creates a parser with the given type registry and operation lookup.
     ///
     /// `op_lookup` is forwarded to the embedded [`CELParser`] when compiling method
-    /// body expressions.
+    /// body expressions, exactly as given — this crate has no dependency on and installs
+    /// no function library of its own. Pass an `op_lookup` with `cel_std::install` (or any
+    /// other library) already applied if the source being parsed calls those functions;
+    /// see the crate-root [`# Example`](crate#example).
     pub fn new(types: TypeRegistry, op_lookup: OpLookup) -> Self {
         AdamParser {
             types,

@@ -33,11 +33,20 @@
 //!
 //! # Example
 //!
+//! `AdamParser::new` takes the [`OpLookup`](cel_parser::OpLookup) as-is — this crate has no
+//! opinion on, and no dependency on, which CEL functions it carries. A bare `OpLookup::new()`
+//! only has CEL's own built-in operators; the caller installs anything else (e.g. `cel-std`'s
+//! `min`/`max`/`clamp`/...) before parsing, the same way `begin` does in its own
+//! `op_lookup()` helper (`begin/src/example_source.rs`).
+//!
 //! ```rust,no_run
 //! use adam_lang::{AdamParser, TypeRegistry};
 //! use cel_parser::OpLookup;
 //!
-//! let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+//! let mut lookup = OpLookup::new();
+//! cel_std::install(&mut lookup); // optional: only if the sheet needs cel-std functions
+//!
+//! let mut parser = AdamParser::new(TypeRegistry::new(), lookup);
 //! let parsed = parser.parse_str(r#"
 //!     sheet image_resize {
 //!         cell width:  f64 = 1920.0;
