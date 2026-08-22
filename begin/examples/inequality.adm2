@@ -4,11 +4,11 @@ sheet inequality {
     cell c = 2.0;
 
     relationship {
-        a := if a < b { a } else { b };
-        b := if b < a { a } else { b };
+        a := min(a, b);
+        b := max(a, b);
     }
     relationship {
-        b := if b < c { b } else { c };
-        c := if c < b { b } else { c };
+        b := min(b, c);
+        c := max(b, c);
     }
 }

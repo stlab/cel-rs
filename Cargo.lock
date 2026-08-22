@@ -314,6 +314,7 @@ dependencies = [
  "anyhow",
  "cel-parser",
  "cel-runtime",
+ "cel-std",
  "dioxus",
  "futures-channel",
  "futures-util",
@@ -496,6 +497,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "typenum",
+]
+
+[[package]]
+name = "cel-std"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cel-parser",
+ "cel-runtime",
+ "proc-macro2",
 ]
 
 [[package]]
