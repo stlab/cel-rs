@@ -1306,6 +1306,63 @@ pub fn cast_source_types(target_name: &str) -> impl Iterator<Item = TypeId> {
         .flat_map(|sigs| sigs.iter().map(CastSignature::source_type_id))
 }
 
+/// One built-in scalar type's identity plus everything needed to declare a `DynSegment`
+/// argument or tuple leaf of that type without the caller knowing it as a static Rust generic.
+///
+/// Covers exactly the fixed set of scalar type names [`signatures_for_cast`] already recognizes
+/// as `as`-cast targets — closures are the first feature needing to *declare* a value of a named
+/// type (rather than convert an already-stack-resident one), so this is new, additive surface
+/// area; it deliberately reuses that same closed name set rather than inventing a second one.
+#[allow(dead_code)]
+pub(crate) struct BuiltinScalarType {
+    pub(crate) type_id: TypeId,
+    pub(crate) type_name: &'static str,
+    pub(crate) size: usize,
+    pub(crate) align: usize,
+    pub(crate) dropper: cel_runtime::RawDropper,
+    pub(crate) push_arg: fn(&mut DynSegment, usize),
+}
+
+macro_rules! builtin_scalar {
+    ($name:literal, $ty:ty) => {
+        BuiltinScalarType {
+            type_id: TypeId::of::<$ty>(),
+            type_name: $name,
+            size: std::mem::size_of::<$ty>(),
+            align: std::mem::align_of::<$ty>(),
+            dropper: cel_runtime::raw_dropper_for::<$ty>(),
+            push_arg: |seg, idx| seg.push_arg::<$ty>(idx),
+        }
+    };
+}
+
+/// Resolves a closure parameter type annotation's bare identifier to its full built-in
+/// descriptor, or `None` if `name` names no recognized scalar type.
+///
+/// - Complexity: O(1).
+#[allow(dead_code)]
+pub(crate) fn builtin_scalar_type(name: &str) -> Option<BuiltinScalarType> {
+    Some(match name {
+        "u8" => builtin_scalar!("u8", u8),
+        "u16" => builtin_scalar!("u16", u16),
+        "u32" => builtin_scalar!("u32", u32),
+        "u64" => builtin_scalar!("u64", u64),
+        "u128" => builtin_scalar!("u128", u128),
+        "usize" => builtin_scalar!("usize", usize),
+        "i8" => builtin_scalar!("i8", i8),
+        "i16" => builtin_scalar!("i16", i16),
+        "i32" => builtin_scalar!("i32", i32),
+        "i64" => builtin_scalar!("i64", i64),
+        "i128" => builtin_scalar!("i128", i128),
+        "isize" => builtin_scalar!("isize", isize),
+        "f32" => builtin_scalar!("f32", f32),
+        "f64" => builtin_scalar!("f64", f64),
+        "bool" => builtin_scalar!("bool", bool),
+        "String" => builtin_scalar!("String", String),
+        _ => return None,
+    })
+}
+
 /// Built-in operation scope.
 ///
 /// Provides lookup for standard operations using a compile-time hash table.
@@ -1502,6 +1559,81 @@ impl OpLookup {
     /// Returns the popped scope, or `None` if the stack is empty.
     pub fn pop_scope(&mut self) -> Option<ScopeFn> {
         self.scopes.pop()
+    }
+
+    /// Temporarily removes every scope pushed via [`push_scope`](Self::push_scope), returning them
+    /// so a later [`restore_scopes`](Self::restore_scopes) call can put them back.
+    ///
+    /// Used when compiling an independent nested body (a closure literal) that must resolve names
+    /// against only its own declared parameters and built-ins — never whatever enclosing scopes
+    /// happen to be active, which the LIFO `scopes` stack would otherwise still make reachable to a
+    /// scope pushed on top of them. `builtin_scope` (the fixed bottom-level built-in fallback) is a
+    /// separate field, so it stays reachable regardless — only caller-pushed scopes are removed.
+    ///
+    /// - Postcondition: `self` behaves as if freshly constructed, scope-wise, until
+    ///   [`restore_scopes`](Self::restore_scopes) is called.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::OpLookup;
+    /// use cel_runtime::DynSegment;
+    ///
+    /// let mut lookup = OpLookup::new();
+    /// lookup.push_scope(|name, segment, arity, _span| {
+    ///     if name == "custom" && arity == 0 {
+    ///         segment.just(42i32);
+    ///         Ok(true)
+    ///     } else {
+    ///         Ok(false)
+    ///     }
+    /// });
+    ///
+    /// let saved = lookup.isolate_scopes();
+    /// // Now the custom scope is inaccessible
+    /// let mut segment = DynSegment::new::<()>();
+    /// let result = lookup.lookup("custom", &mut segment, 0, proc_macro2::Span::call_site(), proc_macro2::Span::call_site());
+    /// assert!(result.is_err());
+    ///
+    /// lookup.restore_scopes(saved);
+    /// // Now the custom scope is reachable again
+    /// let mut segment = DynSegment::new::<()>();
+    /// let result = lookup.lookup("custom", &mut segment, 0, proc_macro2::Span::call_site(), proc_macro2::Span::call_site());
+    /// assert!(result.is_ok());
+    /// ```
+    pub fn isolate_scopes(&mut self) -> Vec<ScopeFn> {
+        std::mem::take(&mut self.scopes)
+    }
+
+    /// Restores a scope stack previously removed by [`isolate_scopes`](Self::isolate_scopes),
+    /// discarding whatever scopes were pushed while isolated.
+    ///
+    /// - Precondition: `scopes` came from a matching `isolate_scopes()` call on this same
+    ///   `OpLookup` — restoring an arbitrary `Vec<ScopeFn>` is well-typed but not a meaningful use
+    ///   of this method.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::OpLookup;
+    /// use cel_runtime::DynSegment;
+    ///
+    /// let mut lookup = OpLookup::new();
+    /// lookup.push_scope(|name, segment, arity, _span| {
+    ///     if name == "outer" && arity == 0 {
+    ///         segment.just(100i32);
+    ///         Ok(true)
+    ///     } else {
+    ///         Ok(false)
+    ///     }
+    /// });
+    ///
+    /// let saved = lookup.isolate_scopes();
+    /// lookup.restore_scopes(saved);
+    /// // The outer scope is now reachable again
+    /// ```
+    pub fn restore_scopes(&mut self, scopes: Vec<ScopeFn>) {
+        self.scopes = scopes;
     }
 
     /// Looks up and applies an operation, attaching the expression span to any error.
@@ -2601,5 +2733,76 @@ mod tests {
         // (OpLookup::register_tuple_op), never in the static BUILTINS table this function reads —
         // confirming they're invisible here, not an oversight.
         assert!(builtin_operand_types("greet").is_empty());
+    }
+
+    #[test]
+    fn builtin_scalar_type_resolves_every_documented_name() {
+        for name in [
+            "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+            "f32", "f64", "bool", "String",
+        ] {
+            let scalar =
+                builtin_scalar_type(name).unwrap_or_else(|| panic!("expected `{name}` to resolve"));
+            assert_eq!(scalar.type_name, name);
+        }
+        assert!(builtin_scalar_type("not_a_type").is_none());
+    }
+
+    #[test]
+    fn builtin_scalar_type_i32_matches_std_any_type_id() {
+        let scalar = builtin_scalar_type("i32").unwrap();
+        assert_eq!(scalar.type_id, TypeId::of::<i32>());
+        assert_eq!(scalar.size, std::mem::size_of::<i32>());
+        assert_eq!(scalar.align, std::mem::align_of::<i32>());
+    }
+
+    #[test]
+    fn builtin_scalar_type_push_arg_declares_a_readable_argument() {
+        let scalar = builtin_scalar_type("i32").unwrap();
+        let mut segment = DynSegment::new::<()>();
+        (scalar.push_arg)(&mut segment, 0);
+        let value = 42i32;
+        let result: i32 = segment.call_dyn(&[&value]).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn isolate_scopes_removes_pushed_scopes_until_restored() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, arity, _span| {
+            if name == "custom" && arity == 0 {
+                segment.just(1i32);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        });
+
+        let mut segment = DynSegment::new::<()>();
+        let isolated = lookup.isolate_scopes();
+        let err = lookup.lookup(
+            "custom",
+            &mut segment,
+            0,
+            proc_macro2::Span::call_site(),
+            proc_macro2::Span::call_site(),
+        );
+        assert!(
+            err.is_err(),
+            "custom scope must not be reachable while isolated"
+        );
+
+        lookup.restore_scopes(isolated);
+        let mut segment = DynSegment::new::<()>();
+        lookup
+            .lookup(
+                "custom",
+                &mut segment,
+                0,
+                proc_macro2::Span::call_site(),
+                proc_macro2::Span::call_site(),
+            )
+            .unwrap();
+        assert_eq!(segment.call0::<i32>().unwrap(), 1);
     }
 }
