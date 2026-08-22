@@ -147,6 +147,23 @@ pub trait ParserContext: Sized {
             span,
         ))
     }
+
+    /// Returns the `TypeId` of the single value `self` currently holds, or `None` if that isn't
+    /// known/applicable for this `ParserContext` implementation.
+    ///
+    /// Used by the closure-literal grammar production to infer a closure's return type from its
+    /// already-compiled body, mirroring [`Self::peek_tuple_arity`]'s "ask the context what it
+    /// currently holds" shape, generalized from "is it a tuple" to "what type is it".
+    ///
+    /// The default implementation returns `None`, matching [`Self::push_closure`]'s default
+    /// "unsupported" behavior — an implementation with no notion of a parse-time runtime type
+    /// (e.g. an AST-building context) simply can't answer this, which surfaces to the caller the
+    /// same way an empty or multi-valued body does (a plain parse error), and in practice never
+    /// matters for such an implementation anyway, since its `push_closure` override (if any)
+    /// would reject the closure regardless.
+    fn output_type_id(&self) -> Option<std::any::TypeId> {
+        None
+    }
 }
 
 /// [`ParserContext`] implementation that executes directly into a [`DynSegment`], reproducing
@@ -289,6 +306,10 @@ impl ParserContext for DynSegmentContext {
         ));
         let _ = span;
         Ok(())
+    }
+
+    fn output_type_id(&self) -> Option<std::any::TypeId> {
+        self.0.peek_output_type_id()
     }
 }
 

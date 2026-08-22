@@ -27,9 +27,12 @@
 //! cast_expression = unary_expression { "as" identifier }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
 //! postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.
-//! primary_expression = literal | identifier | tuple_or_group | if_expression.
+//! primary_expression = literal | identifier | tuple_or_group | if_expression | closure_expression.
 //! tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".
 //! if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].
+//! closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression.
+//! closure_param = identifier ":" closure_type_expression.
+//! closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")".
 //! parameter_list = [ or_expression { "," or_expression } ].
 //! ```
 //!
@@ -106,6 +109,8 @@ use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};
 
 use cel_runtime::DynSegment;
 use proc_macro2::{Delimiter, Span, TokenStream};
+use std::any::TypeId;
+use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::FromStr;
 
@@ -296,6 +301,65 @@ fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Resu
     Ok(())
 }
 
+/// One resolved closure parameter type: a built-in scalar, or a (possibly nested) tuple of them
+/// — the result of resolving a `closure_type_expression` production (see
+/// [`Parser::parse_closure_type_expression`]).
+enum ClosureParamType {
+    /// A single built-in scalar type (e.g. `i32`, `bool`).
+    Scalar(crate::op_table::BuiltinScalarType),
+    /// A (possibly nested) tuple of closure parameter types.
+    Tuple(Vec<ClosureParamType>),
+}
+
+impl ClosureParamType {
+    /// Returns the `TypeId` this parameter type resolves to for [`cel_runtime::DynClosure`]'s
+    /// declared parameter list.
+    ///
+    /// Every tuple shape shares [`cel_runtime::DynTuple`]'s marker `TypeId`, matching how a
+    /// tuple value is identified everywhere else in this runtime — the tuple's real element
+    /// shape lives in the `AssociatedType` list built by
+    /// [`elements_to_associated`], not in this `TypeId`.
+    fn type_id(&self) -> TypeId {
+        match self {
+            ClosureParamType::Scalar(s) => s.type_id,
+            ClosureParamType::Tuple(_) => TypeId::of::<cel_runtime::DynTuple>(),
+        }
+    }
+}
+
+/// Builds a fresh `AssociatedType` prototype list from resolved closure parameter element
+/// types, for [`cel_runtime::DynSegment::push_arg_as_dynamic_sequence_tuple`] — leaf
+/// `size`/`align` are the scalar's real values (that method's own precondition), while a nested
+/// tuple's are placeholders (`push_arg_as_dynamic_sequence_tuple` recomputes them recursively
+/// from `associated`).
+///
+/// - Complexity: O(n) in the total (nested) element count.
+fn elements_to_associated(elements: &[ClosureParamType]) -> Vec<cel_runtime::AssociatedType> {
+    elements
+        .iter()
+        .map(|ty| match ty {
+            ClosureParamType::Scalar(s) => cel_runtime::AssociatedType {
+                type_id: s.type_id,
+                type_name: std::borrow::Cow::Borrowed(s.type_name),
+                offset: 0,
+                size: s.size,
+                align: s.align,
+                dropper: s.dropper,
+                associated: Vec::new(),
+            },
+            ClosureParamType::Tuple(nested) => cel_runtime::AssociatedType {
+                type_id: TypeId::of::<cel_runtime::DynTuple>(),
+                type_name: std::borrow::Cow::Borrowed("tuple"),
+                offset: 0,
+                size: 0,
+                align: 1,
+                dropper: cel_runtime::drop_tuple,
+                associated: elements_to_associated(nested),
+            },
+        })
+        .collect()
+}
+
 /// A recursive descent parser for expressions, generic over the [`ParserContext`] it emits
 /// into.
 ///
@@ -427,7 +491,6 @@ impl<C: ParserContext> Parser<C> {
     /// cases the outer context is still restored before returning.
     ///
     /// - Complexity: whatever `f`'s own parse cost is.
-    #[allow(dead_code)] // Consumed by the closure-literal grammar production, not yet wired in.
     pub(crate) fn parse_nested_context<F>(&mut self, f: F) -> Result<C>
     where
         F: FnOnce(&mut Self) -> Result<bool>,
@@ -576,6 +639,54 @@ impl<C: ParserContext> Parser<C> {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Consumes and returns the next token's text if it is an identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error with `message` if the next token is not an identifier.
+    fn expect_identifier(&mut self, message: &str) -> Result<String> {
+        match self.peek_token() {
+            Some(Token::Identifier(ident)) => {
+                let name = ident.to_string();
+                self.advance();
+                Ok(name)
+            }
+            _ => Err(self.error_at(message)),
+        }
+    }
+
+    /// Consumes and returns `true` if the next token is an opening parenthesis `(`.
+    fn is_open_paren(&mut self) -> bool {
+        if matches!(
+            self.peek_token(),
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consumes and returns `true` if the next token is a closing parenthesis `)`.
+    fn is_close_paren(&mut self) -> bool {
+        if matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            self.advance();
+            true
+        } else {
+            false
         }
     }
 
@@ -1049,10 +1160,17 @@ impl<C: ParserContext> Parser<C> {
         Ok(count)
     }
 
-    /// `primary_expression = literal | identifier | tuple_or_group | if_expression.`
+    /// `primary_expression = literal | identifier | tuple_or_group | if_expression |
+    /// closure_expression.`
     ///
     /// Dispatches to [`is_if_expression`](Self::is_if_expression) when the `if` keyword is seen,
-    /// and to [`is_tuple_or_group`](Self::is_tuple_or_group) when `(` is seen.
+    /// to [`is_tuple_or_group`](Self::is_tuple_or_group) when `(` is seen, and to
+    /// [`is_closure_expression`](Self::is_closure_expression) when `|` or `||` is seen.
+    ///
+    /// A zero-parameter closure's opening and closing pipes (`||`) have nothing between them to
+    /// keep them apart, so the lexer combines them into one two-character token exactly like it
+    /// does for `&&`/`<=`/etc. elsewhere in this grammar — checked first, before the
+    /// one-character `|` case, so `is_punctuation("|")` doesn't (and can't) partially match it.
     ///
     /// # Errors
     ///
@@ -1061,7 +1179,14 @@ impl<C: ParserContext> Parser<C> {
     /// - An identifier is not found in the op lookup table.
     /// - A tuple-or-group expression fails to parse.
     /// - An `if` expression fails to parse.
+    /// - A closure expression fails to parse.
     fn is_primary_expression(&mut self) -> Result<bool> {
+        if self.is_punctuation("||") {
+            return self.is_closure_expression(true);
+        }
+        if self.is_punctuation("|") {
+            return self.is_closure_expression(false);
+        }
         match self.peek_token() {
             Some(Token::Literal(lit)) => {
                 let lit_clone = lit.clone();
@@ -1173,6 +1298,121 @@ impl<C: ParserContext> Parser<C> {
         self.context
             .make_tuple(count, ambient_start, open_span, self.last_span);
         Ok(true)
+    }
+
+    /// `closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression .`
+    /// `closure_param = identifier ":" closure_type_expression .`
+    ///
+    /// Compiles the body as a fully independent nested context (via
+    /// [`parse_nested_context`](Self::parse_nested_context)) whose only visible names are its own
+    /// declared parameters plus whatever library/built-in functions are always reachable —
+    /// [`OpLookup::isolate_scopes`] hides every other transient scope (including one an enclosing
+    /// caller, e.g. adam-lang, pushed around this whole parse) for the duration of the body parse,
+    /// so a closure never resolves a free variable from its lexical surroundings.
+    ///
+    /// - Precondition: the opening `|` (`params_already_closed == false`) or the combined `||`
+    ///   token naming an empty parameter list (`params_already_closed == true`) has already been
+    ///   consumed by [`is_primary_expression`](Self::is_primary_expression); `self.last_span` is
+    ///   its span.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a parameter name, its `:`, its type, or the closing `|` is malformed
+    /// or missing; if a parameter's type names an unrecognized type; if the body expression is
+    /// missing or malformed; if the body produces zero or more than one value; or if this
+    /// `ParserContext` implementation doesn't support closures (see
+    /// [`ParserContext::push_closure`]'s default implementation).
+    ///
+    /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
+    fn is_closure_expression(&mut self, params_already_closed: bool) -> Result<bool> {
+        let start_span = self.last_span;
+        let mut params: Vec<(String, ClosureParamType)> = Vec::new();
+        if !params_already_closed {
+            loop {
+                let name = self.expect_identifier("expected closure parameter name")?;
+                if !self.is_punctuation(":") {
+                    return Err(self.error_at("expected ':' after closure parameter name"));
+                }
+                let ty = self.parse_closure_type_expression()?;
+                params.push((name, ty));
+                if self.is_punctuation(",") {
+                    continue;
+                }
+                break;
+            }
+            if !self.is_punctuation("|") {
+                return Err(self.error_at("expected ',' or closing '|'"));
+            }
+        }
+
+        let param_types: Vec<TypeId> = params.iter().map(|(_, ty)| ty.type_id()).collect();
+        let isolated = self.op_lookup.isolate_scopes();
+        let param_table: HashMap<String, (usize, ClosureParamType)> = params
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (name, ty))| (name, (idx, ty)))
+            .collect();
+        self.op_lookup
+            .push_scope(move |name, segment, arity, _span| {
+                if arity != 0 {
+                    return Ok(false);
+                }
+                let Some((idx, ty)) = param_table.get(name) else {
+                    return Ok(false);
+                };
+                match ty {
+                    ClosureParamType::Scalar(scalar) => (scalar.push_arg)(segment, *idx),
+                    ClosureParamType::Tuple(elements) => segment
+                        .push_arg_as_dynamic_sequence_tuple(*idx, elements_to_associated(elements)),
+                }
+                Ok(true)
+            });
+
+        let body_result = self.parse_nested_context(|p| p.is_or_expression());
+        self.op_lookup.pop_scope();
+        self.op_lookup.restore_scopes(isolated);
+        let body = body_result?;
+
+        let return_type = body
+            .output_type_id()
+            .ok_or_else(|| self.error_at("closure body must produce exactly one value"))?;
+
+        self.context
+            .push_closure(param_types, return_type, body, start_span)?;
+        Ok(true)
+    }
+
+    /// `closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")" .`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a bare identifier doesn't name a recognized built-in scalar type, or
+    /// if the parenthesized element list is malformed or missing its closing `)`.
+    fn parse_closure_type_expression(&mut self) -> Result<ClosureParamType> {
+        if let Some(Token::Identifier(ident)) = self.peek_token() {
+            let name = ident.to_string();
+            self.advance();
+            return crate::op_table::builtin_scalar_type(&name)
+                .map(ClosureParamType::Scalar)
+                .ok_or_else(|| self.error_at(&format!("unknown type `{name}`")));
+        }
+        if !self.is_open_paren() {
+            return Err(self.error_at("expected a type name or '('"));
+        }
+        let mut elements = Vec::new();
+        if !self.is_close_paren() {
+            loop {
+                elements.push(self.parse_closure_type_expression()?);
+                if self.is_punctuation(",") {
+                    continue;
+                }
+                break;
+            }
+            if !self.is_close_paren() {
+                return Err(self.error_at("expected ',' or closing ')'"));
+            }
+        }
+        Ok(ClosureParamType::Tuple(elements))
     }
 
     /// `if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].`
@@ -2545,6 +2785,117 @@ mod tests {
         parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
         let result = parser.parse_or_expression();
         assert!(result.is_err(), "expected Err for empty input");
+    }
+
+    #[test]
+    fn closure_literal_with_one_param_compiles_and_calls() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("|x: i32| x + 1")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let closure: cel_runtime::DynClosure = segment.call0()?;
+        let x = 5i32;
+        assert_eq!(closure.call::<i32>(&[&x])?, 6);
+        Ok(())
+    }
+
+    #[test]
+    fn closure_literal_with_zero_params_compiles_and_calls() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("|| 42")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let closure: cel_runtime::DynClosure = segment.call0()?;
+        assert_eq!(closure.call::<i32>(&[])?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn closure_literal_with_two_params_compiles_and_calls_in_order() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("|a: i32, b: i32| a - b")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let closure: cel_runtime::DynClosure = segment.call0()?;
+        let (a, b) = (10i32, 3i32);
+        assert_eq!(closure.call::<i32>(&[&a, &b])?, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn closure_literal_with_tuple_typed_param_compiles_and_calls() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("|r: (i32, i32)| r.0 + r.1")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let closure: cel_runtime::DynClosure = segment.call0()?;
+
+        // Build a `DynamicSequence` shaped like `(i32, i32)` — the runtime-erased tuple value a
+        // real caller (e.g. adam-lang, reading a tuple-typed cell) would hand a closure whose
+        // parameter type is a tuple.
+        let mut pair = DynSegment::new::<()>();
+        let ambient_start = pair.current_stack_offset();
+        pair.op0(|| 10i32);
+        pair.op0(|| 20i32);
+        pair.make_tuple(2, ambient_start);
+        let leaf = |type_id: TypeId| {
+            (type_id == TypeId::of::<i32>()).then(|| {
+                (
+                    cel_runtime::element_dropper_for::<i32>(),
+                    cel_runtime::element_cloner_for::<i32>(),
+                    cel_runtime::element_eq_for::<i32>(),
+                    cel_runtime::element_debug_for::<i32>(),
+                )
+            })
+        };
+        let pair: cel_runtime::DynamicSequence = pair.call_dyn_as_dynamic_sequence(&[], &leaf)?;
+
+        assert_eq!(closure.call::<i32>(&[&pair])?, 30);
+        Ok(())
+    }
+
+    #[test]
+    fn closure_body_referencing_an_undeclared_name_is_a_parse_error() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = parser.parse_str("|x: i32| x + y");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn nested_closure_referencing_only_its_own_param_compiles_and_calls() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        // The outer closure's own parameter `x` must NOT be visible inside the inner closure
+        // body — a bare nested closure literal parses fine directly as the outer body's
+        // `expression`, with no extra block grouping needed (this grammar has no bare
+        // block-expression production, only `if`'s own braces, so `{ ... }` grouping isn't an
+        // option here anyway).
+        let mut segment = parser
+            .parse_str("|x: i32| |y: i32| y + 1")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let outer: cel_runtime::DynClosure = segment.call0()?;
+        let x = 0i32;
+        let inner: cel_runtime::DynClosure = outer.call(&[&x])?;
+        let y = 41i32;
+        assert_eq!(inner.call::<i32>(&[&y])?, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn closure_body_cannot_see_an_enclosing_scopes_names() {
+        // A scope pushed before parsing (standing in for e.g. adam-lang's own cell-name scope)
+        // must not leak into a closure body's name resolution.
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, arity, _span| {
+            if name == "outer_only" && arity == 0 {
+                segment.just(1i32);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        });
+        let mut parser = CELParser::new(lookup);
+        let err = parser.parse_str("|x: i32| x + outer_only");
+        assert!(err.is_err());
     }
 }
 

@@ -1313,7 +1313,6 @@ pub fn cast_source_types(target_name: &str) -> impl Iterator<Item = TypeId> {
 /// as `as`-cast targets — closures are the first feature needing to *declare* a value of a named
 /// type (rather than convert an already-stack-resident one), so this is new, additive surface
 /// area; it deliberately reuses that same closed name set rather than inventing a second one.
-#[allow(dead_code)]
 pub(crate) struct BuiltinScalarType {
     pub(crate) type_id: TypeId,
     pub(crate) type_name: &'static str,
@@ -1340,7 +1339,6 @@ macro_rules! builtin_scalar {
 /// descriptor, or `None` if `name` names no recognized scalar type.
 ///
 /// - Complexity: O(1).
-#[allow(dead_code)]
 pub(crate) fn builtin_scalar_type(name: &str) -> Option<BuiltinScalarType> {
     Some(match name {
         "u8" => builtin_scalar!("u8", u8),

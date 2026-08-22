@@ -58,7 +58,7 @@ pub mod segment;
 pub mod tuple_list;
 
 pub use c_stack_list::*;
-pub use dyn_closure::DynClosure;
+pub use dyn_closure::{CallDynFn, DynClosure};
 pub use dyn_segment::*;
 pub use dynamic_sequence::*;
 pub use list_traits::*;

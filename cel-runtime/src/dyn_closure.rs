@@ -38,6 +38,11 @@ use std::rc::Rc;
 
 use crate::dyn_segment::DynSegment;
 
+/// A monomorphized dispatcher for [`DynClosure::call_boxed`]: runs a closure's body via
+/// `DynSegment::call_dyn::<R>` for some concrete `R` the dispatcher itself already knows, boxing
+/// the result so the caller (which only knows `R` dynamically, as a `TypeId`) doesn't need to.
+pub type CallDynFn = fn(&mut DynSegment, &[&dyn Any]) -> anyhow::Result<Box<dyn Any>>;
+
 struct ClosureData {
     param_types: Vec<TypeId>,
     return_type: TypeId,
@@ -227,7 +232,7 @@ impl DynClosure {
     pub fn call_boxed(
         &self,
         args: &[&dyn Any],
-        call_dyn_fn: fn(&mut DynSegment, &[&dyn Any]) -> anyhow::Result<Box<dyn Any>>,
+        call_dyn_fn: CallDynFn,
     ) -> anyhow::Result<Box<dyn Any>> {
         debug_assert_eq!(args.len(), self.0.param_types.len());
         call_dyn_fn(&mut self.0.body.borrow_mut(), args)
