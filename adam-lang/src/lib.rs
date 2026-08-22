@@ -33,12 +33,11 @@
 //!
 //! # Example
 //!
-//! `AdamParser::new` takes the [`OpLookup`](cel_parser::OpLookup) as-is — this crate has no
-//! dependency on, and installs no, CEL function library beyond the built-in operators. See
-//! [`OpLookup::push_library_scope`](cel_parser::OpLookup::push_library_scope) for how a caller
-//! installs one (e.g. `cel-std`) before parsing.
+//! `AdamParser::new` takes an [`OpLookup`](cel_parser::OpLookup) instance. See
+//! [`OpLookup::push_library_scope`](cel_parser::OpLookup::push_library_scope) for how to
+//! install one (e.g. `cel-std`) before parsing.
 //!
-//! ```rust,no_run
+//! ```rust
 //! use adam_lang::{AdamParser, TypeRegistry};
 //! use cel_parser::OpLookup;
 //!
