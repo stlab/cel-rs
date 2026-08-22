@@ -10,7 +10,6 @@ dependencies = [
  "anyhow",
  "cel-parser",
  "cel-runtime",
- "cel-std",
  "indexmap",
  "proc-macro2",
  "syn 2.0.119",
