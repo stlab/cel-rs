@@ -2,6 +2,35 @@
 //!
 //! See `docs/superpowers/specs/2026-08-21-cel-closures-design.md` for the full design rationale
 //! (why `Rc`, why `RefCell`, why no captured environment).
+//!
+//! # Examples
+//!
+//! Build a closure that adds two `i32` values, then call it with different arguments:
+//!
+//! ```rust
+//! use cel_runtime::{DynClosure, DynSegment};
+//! use std::any::TypeId;
+//!
+//! // Compile a body that takes two i32 arguments and returns their sum.
+//! let mut body = DynSegment::new::<()>();
+//! body.push_arg::<i32>(0);
+//! body.push_arg::<i32>(1);
+//! body.op2(|a: i32, b: i32| a + b).unwrap();
+//!
+//! // Wrap it as a callable closure with its declared signature.
+//! let closure = DynClosure::new(
+//!     vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+//!     TypeId::of::<i32>(),
+//!     body,
+//! );
+//!
+//! // Call the closure multiple times with different arguments.
+//! let (a, b) = (2i32, 3i32);
+//! assert_eq!(closure.call::<i32>(&[&a, &b]).unwrap(), 5);
+//!
+//! let (c, d) = (10i32, 20i32);
+//! assert_eq!(closure.call::<i32>(&[&c, &d]).unwrap(), 30);
+//! ```
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
@@ -15,6 +44,9 @@ struct ClosureData {
     body: RefCell<DynSegment>,
 }
 
+/// `Debug` implementation that formats the closure's signature but deliberately omits `body` from the output
+/// (via `finish_non_exhaustive`), since `DynSegment` is not easily debuggable and the signature alone
+/// is typically what callers need to see.
 impl std::fmt::Debug for ClosureData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClosureData")
@@ -41,6 +73,25 @@ impl DynClosure {
     /// - Precondition: `body` was compiled expecting exactly `param_types.len()` positional
     ///   arguments (via `push_arg`/`push_arg_as_dynamic_sequence_tuple`), in that order, and
     ///   produces exactly one result of `return_type`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{DynClosure, DynSegment};
+    /// use std::any::TypeId;
+    ///
+    /// let mut body = DynSegment::new::<()>();
+    /// body.push_arg::<i32>(0);
+    /// body.push_arg::<i32>(1);
+    /// body.op2(|a: i32, b: i32| a + b).unwrap();
+    ///
+    /// let closure = DynClosure::new(
+    ///     vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+    ///     TypeId::of::<i32>(),
+    ///     body,
+    /// );
+    /// assert_eq!(closure.param_types().len(), 2);
+    /// ```
     #[must_use]
     pub fn new(param_types: Vec<TypeId>, return_type: TypeId, body: DynSegment) -> Self {
         DynClosure(Rc::new(ClosureData {
@@ -51,12 +102,50 @@ impl DynClosure {
     }
 
     /// Returns this closure's declared parameter types, in order.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{DynClosure, DynSegment};
+    /// use std::any::TypeId;
+    ///
+    /// let mut body = DynSegment::new::<()>();
+    /// body.push_arg::<i32>(0);
+    /// body.push_arg::<i32>(1);
+    /// body.op2(|a: i32, b: i32| a + b).unwrap();
+    ///
+    /// let closure = DynClosure::new(
+    ///     vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+    ///     TypeId::of::<i32>(),
+    ///     body,
+    /// );
+    /// assert_eq!(closure.param_types(), &[TypeId::of::<i32>(), TypeId::of::<i32>()]);
+    /// ```
     #[must_use]
     pub fn param_types(&self) -> &[TypeId] {
         &self.0.param_types
     }
 
     /// Returns this closure's declared return type.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{DynClosure, DynSegment};
+    /// use std::any::TypeId;
+    ///
+    /// let mut body = DynSegment::new::<()>();
+    /// body.push_arg::<i32>(0);
+    /// body.push_arg::<i32>(1);
+    /// body.op2(|a: i32, b: i32| a + b).unwrap();
+    ///
+    /// let closure = DynClosure::new(
+    ///     vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+    ///     TypeId::of::<i32>(),
+    ///     body,
+    /// );
+    /// assert_eq!(closure.return_type(), TypeId::of::<i32>());
+    /// ```
     #[must_use]
     pub fn return_type(&self) -> TypeId {
         self.0.return_type
@@ -71,6 +160,27 @@ impl DynClosure {
     ///   to unchanged).
     /// - Precondition: `TypeId::of::<R>() == self.return_type()`.
     /// - Complexity: whatever the body's own evaluation complexity is.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{DynClosure, DynSegment};
+    /// use std::any::TypeId;
+    ///
+    /// let mut body = DynSegment::new::<()>();
+    /// body.push_arg::<i32>(0);
+    /// body.push_arg::<i32>(1);
+    /// body.op2(|a: i32, b: i32| a + b).unwrap();
+    ///
+    /// let closure = DynClosure::new(
+    ///     vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+    ///     TypeId::of::<i32>(),
+    ///     body,
+    /// );
+    /// let (a, b) = (2i32, 3i32);
+    /// let result: i32 = closure.call(&[&a, &b]).unwrap();
+    /// assert_eq!(result, 5);
+    /// ```
     pub fn call<R: 'static>(&self, args: &[&dyn Any]) -> anyhow::Result<R> {
         debug_assert_eq!(args.len(), self.0.param_types.len());
         debug_assert_eq!(TypeId::of::<R>(), self.0.return_type);
@@ -87,6 +197,33 @@ impl DynClosure {
     /// - Precondition: `call_dyn_fn` is a dispatcher for `self.return_type()` (i.e. it calls
     ///   `DynSegment::call_dyn::<R>` for the same concrete `R` that `TypeId` names).
     /// - Complexity: whatever the body's own evaluation complexity is.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{DynClosure, DynSegment};
+    /// use std::any::{Any, TypeId};
+    ///
+    /// let mut body = DynSegment::new::<()>();
+    /// body.push_arg::<i32>(0);
+    /// body.push_arg::<i32>(1);
+    /// body.op2(|a: i32, b: i32| a + b).unwrap();
+    ///
+    /// let closure = DynClosure::new(
+    ///     vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+    ///     TypeId::of::<i32>(),
+    ///     body,
+    /// );
+    ///
+    /// fn dispatch_i32(seg: &mut DynSegment, inputs: &[&dyn Any]) -> anyhow::Result<Box<dyn Any>> {
+    ///     let result: i32 = seg.call_dyn(inputs)?;
+    ///     Ok(Box::new(result))
+    /// }
+    ///
+    /// let (a, b) = (4i32, 5i32);
+    /// let result = closure.call_boxed(&[&a, &b], dispatch_i32).unwrap();
+    /// assert_eq!(*result.downcast_ref::<i32>().unwrap(), 9);
+    /// ```
     pub fn call_boxed(
         &self,
         args: &[&dyn Any],
