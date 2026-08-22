@@ -118,7 +118,9 @@ struct ClosureData {
   lifetime — it is never cloned. The `Clone` bound above only matters if/when a closure literal is
   used inside an ordinary CEL sub-expression that gets re-embedded via `just` (the deferred
   first-class-value use case) — it's required by that future path, not by anything `filter` does
-  today.
+  today. Whether `Rc<RefCell<_>>` remains the right representation once that path is actually
+  built (versus giving `DynSegment` its own `Clone` impl instead) is tracked in
+  [stlab/cel-rs#136](https://github.com/stlab/cel-rs/issues/136) rather than decided here.
 - Unlike `DynTuple`, **no new `StackInfo`/`AssociatedType`/`RawDropper` plumbing is needed.**
   `DynTuple` exists because a tuple flattens multiple *independent* values into one aggregated
   stack region, which the existing type-checking/dropping machinery has to know how to walk
@@ -265,7 +267,10 @@ Per the workspace's contract-only convention:
 
 ## Open questions
 
-None outstanding — every fork raised during brainstorming (closure generality, capture semantics,
-free-variable handling, parameter typing) was resolved above. The exact keyword/punctuation for the
-adam-lang `filter(...)` extra-argument list is a small, low-risk bikeshed left to implementation
-planning rather than pinned here.
+Every fork raised during brainstorming (closure generality, capture semantics, free-variable
+handling, parameter typing) was resolved above. The exact keyword/punctuation for the adam-lang
+`filter(...)` extra-argument list is a small, low-risk bikeshed left to implementation planning
+rather than pinned here. Whether `DynClosure` should stay `Rc<RefCell<DynSegment>>` or move to a
+`DynSegment` with its own `Clone` impl is deliberately deferred, not resolved — tracked in
+[stlab/cel-rs#136](https://github.com/stlab/cel-rs/issues/136) for revisit once closures have a
+consumer beyond `filter`.
