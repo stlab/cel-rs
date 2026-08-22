@@ -34,6 +34,8 @@
 
 /// Compile-time stack list implementation for type-safe stack operations.
 pub mod c_stack_list;
+/// First-class callable CEL values with declared signatures.
+pub mod dyn_closure;
 /// Dynamic segment implementation with runtime type checking.
 pub mod dyn_segment;
 /// Owned, type-erased CEL tuple value that can outlive a `DynSegment` evaluation.
@@ -56,6 +58,7 @@ pub mod segment;
 pub mod tuple_list;
 
 pub use c_stack_list::*;
+pub use dyn_closure::DynClosure;
 pub use dyn_segment::*;
 pub use dynamic_sequence::*;
 pub use list_traits::*;
