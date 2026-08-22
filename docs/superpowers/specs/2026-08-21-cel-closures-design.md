@@ -280,10 +280,14 @@ looks anything up — it only ever sees whatever `wrapper_fn` hands it for that 
 ## Error handling
 
 - A `cell_filter`'s closure parameter types that don't match the filtered cell's type or the named
-  argument cells' declared types (in order) is a typecheck diagnostic
-  (`adam-lang/src/typecheck.rs`), reported the same way other cell/initializer type mismatches are
-  today — not a `DynClosure` runtime error, since typechecking happens before a `DynClosure` value
-  is ever built for this position.
+  argument cells' declared types (in order) is a `ParseError` raised inline in
+  `parse_cell_decl`/its new `filter`-clause helper, the same way `parse_cell_decl`'s existing
+  declared-vs-initializer type-mismatch check works today (`adam-lang/src/parser.rs:228-239`) — not
+  a separate `adam-lang/src/typecheck.rs` pass (that pass exists for checks needing the *whole*,
+  already-built `Sheet`, e.g. forward references; a `filter(...)` clause's named cells must already
+  be declared earlier in the sheet, exactly like a `relate` binding's right-hand side, so nothing
+  here needs a second pass) — and not a `DynClosure` runtime error, since this happens before a
+  `DynClosure` value is ever built for this position.
 - An identifier inside a closure body that isn't one of its own declared parameters and doesn't
   resolve to a built-in is a plain parse error at the point of the closure literal — the same
   "unresolved identifier" error path used everywhere else in `cel-parser`.
