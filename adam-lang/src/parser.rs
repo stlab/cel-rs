@@ -12,7 +12,7 @@ use indexmap::IndexMap;
 use adam_rs::{CellId, MatchExpr, Method, OutputId, RelationshipId, Requirement, Sheet};
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
-use cel_runtime::DynSegment;
+use cel_runtime::{DynClosure, DynSegment};
 use proc_macro2::{Span, TokenStream};
 
 use crate::TypeRegistry;
@@ -197,7 +197,7 @@ impl AdamParser {
         }
     }
 
-    /// `cell_decl = "cell" identifier cell_type_init ";".`
+    /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] ";".`
     ///
     /// `cell_type_init = (":" type_expr ["=" or_expression]) | ("=" or_expression).`
     fn parse_cell_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
@@ -246,9 +246,134 @@ impl AdamParser {
             (declared, cell_id)
         };
 
+        let filter = if ctx.is_keyword("filter") {
+            Some(self.parse_cell_filter(ctx, &name, name_span, &shape)?)
+        } else {
+            None
+        };
+
         ctx.expect_punct(";")?;
         ctx.cell_names.insert(name, (cell_id, shape));
+        if let Some(filter) = filter {
+            ctx.sheet
+                .add_filter(cell_id, filter)
+                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+        }
         Ok(())
+    }
+
+    /// `cell_filter = "filter" [ "(" identifier { "," identifier } ")" ] closure_expression .`
+    ///
+    /// Builds an [`adam_rs::Filter`] from a closure literal: the closure's first parameter binds
+    /// the candidate value being written to the filtered cell, and each subsequent parameter (if
+    /// any) binds the current value of the correspondingly-named, already-declared cell in
+    /// `"(" identifier { "," identifier } ")"`. `declared_shape` is the filtered cell's own
+    /// declared type, already resolved by the caller in [`parse_cell_decl`] — used to validate
+    /// the closure's first parameter and to build the returned `Filter`'s `value_type`. The
+    /// filtered cell's own `CellId` is not needed here: the caller attaches the returned `Filter`
+    /// to it afterwards, via `Sheet::add_filter`.
+    ///
+    /// # Errors
+    /// Returns `Err` if an argument-cell name isn't already declared, if the closure literal
+    /// itself fails to compile/evaluate, or if the closure's parameter/return types don't match
+    /// the filtered cell's type followed by the argument cells' declared types, in order.
+    ///
+    /// - Complexity: O(m) in the number of named argument cells, for this method's own
+    ///   bookkeeping (on top of the closure literal's own parse/compile cost).
+    fn parse_cell_filter(
+        &mut self,
+        ctx: &mut ParseContext,
+        cell_name: &str,
+        cell_span: Span,
+        declared_shape: &TypeShape,
+    ) -> Result<adam_rs::Filter> {
+        let mut arg_cells: Vec<(CellId, TypeShape)> = Vec::new();
+        if ctx.at_open_paren() {
+            ctx.expect_open_paren()?;
+            loop {
+                let (arg_name, arg_span) = ctx.consume_ident()?;
+                let (arg_id, arg_shape) =
+                    ctx.cell_names.get(&arg_name).cloned().ok_or_else(|| {
+                        ParseError::new(format!("undeclared cell `{arg_name}`"), arg_span)
+                    })?;
+                arg_cells.push((arg_id, arg_shape));
+                if ctx.consume_punct(",") {
+                    continue;
+                }
+                break;
+            }
+            ctx.expect_close_paren()?;
+        }
+
+        let mut segment = self.parse_cel_or_expression(ctx)?;
+        let closure: DynClosure = segment
+            .call0()
+            .map_err(|e| ParseError::new(format!("filter: {e}"), cell_span))?;
+
+        let value_type_id = cell_type_id(declared_shape);
+        let expected_param_types: Vec<TypeId> = std::iter::once(value_type_id)
+            .chain(arg_cells.iter().map(|(_, shape)| cell_type_id(shape)))
+            .collect();
+        if closure.param_types() != expected_param_types.as_slice() {
+            return Err(ParseError::new(
+                format!(
+                    "cell `{cell_name}`: filter closure parameter types don't match \
+                     `{cell_name}`'s type followed by the filter's declared argument cells' types"
+                ),
+                cell_span,
+            ));
+        }
+        if closure.return_type() != value_type_id {
+            return Err(ParseError::new(
+                format!(
+                    "cell `{cell_name}`: filter closure must return `{}`",
+                    self.types.display_name(declared_shape)
+                ),
+                cell_span,
+            ));
+        }
+
+        // `call_dyn_fn` is the same monomorphized-per-registered-type dispatcher `build_method`
+        // already uses (see `TypeRegistry::TypeEntry::call_dyn_fn`) — reused here via
+        // `DynClosure::call_boxed` instead of `DynClosure::call::<T>`, since `T` (the filtered
+        // cell's value type) is only known dynamically here, as `value_type_id`, not as a static
+        // Rust generic.
+        let call_dyn_fn = self
+            .types
+            .entry_by_type_id(value_type_id)
+            .expect("declared cell type registered")
+            .call_dyn_fn;
+
+        let arg_ids: Vec<CellId> = arg_cells.iter().map(|(id, _)| *id).collect();
+        let arg_type_ids: Vec<TypeId> = arg_cells
+            .iter()
+            .map(|(_, shape)| cell_type_id(shape))
+            .collect();
+
+        // No outer `RefCell` needed here (unlike `build_method`'s `DynSegment`, which needs one
+        // since `DynSegment`'s call methods take `&mut self`): `DynClosure::call_boxed` takes
+        // `&self` and already holds its own body behind a `RefCell` internally
+        // (`cel_runtime::DynClosure`'s `ClosureData::body`), so a plain `move` capture below is
+        // enough to call it from this `Fn` (not `FnMut`) closure, matching `Filter::new`'s
+        // `function` field.
+        Ok(adam_rs::Filter::new(
+            value_type_id,
+            arg_ids,
+            arg_type_ids,
+            move |value, args| {
+                let mut call_args: Vec<&dyn Any> = Vec::with_capacity(1 + args.len());
+                call_args.push(value);
+                call_args.extend_from_slice(args);
+                // `Filter::new`'s own `value`/`args` are already downcast-checked by
+                // `Sheet::add_filter`/`write`/`propagate` against `value_type_id`/`arg_type_ids`
+                // before this closure runs, matching `closure.param_types()` exactly (checked
+                // above) — so `DynClosure::call_boxed`'s own type-matching precondition already
+                // holds here.
+                closure
+                    .call_boxed(&call_args, call_dyn_fn)
+                    .map_err(|e| anyhow::anyhow!("filter: {e}"))
+            },
+        ))
     }
 
     /// Evaluates `segment` eagerly with no inputs, inferring its result's `TypeShape` from the
@@ -1303,6 +1428,65 @@ mod tests {
         let mut p = AdamParser::new(reg, OpLookup::new());
         let result = p.parse_str("sheet s { cell x: NoDef; }");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cell_filter_with_no_extra_args_clamps_on_write() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let mut parsed = parser
+            .parse_str("sheet s { cell a: i32 filter |x: i32| if x < 1 { 1 } else if x > 100 { 100 } else { x }; }")
+            .unwrap();
+        let (cell_id, _) = parsed.cell_names["a"];
+        parsed.sheet.write(cell_id, 500i32).unwrap();
+        assert_eq!(*parsed.sheet.read::<i32>(cell_id).unwrap(), 100);
+    }
+
+    #[test]
+    fn cell_filter_with_named_arg_cell_tracks_its_current_value() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let mut parsed = parser
+            .parse_str(
+                "sheet s { \
+                     cell hi: i32 = 100; \
+                     cell a: i32 filter(hi) |x: i32, h: i32| if x < 1 { 1 } else if x > h { h } else { x }; \
+                 }",
+            )
+            .unwrap();
+        let (a_id, _) = parsed.cell_names["a"];
+        let (hi_id, _) = parsed.cell_names["hi"];
+
+        parsed.sheet.write(a_id, 500i32).unwrap();
+        assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 100);
+
+        parsed.sheet.write(hi_id, 10i32).unwrap();
+        parsed.sheet.write(a_id, 500i32).unwrap();
+        assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 10);
+    }
+
+    #[test]
+    fn cell_filter_first_param_type_mismatch_is_a_parse_error() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let err = parser.parse_str("sheet s { cell a: i32 filter |x: f64| x; }");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn cell_filter_named_arg_type_mismatch_is_a_parse_error() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let err = parser.parse_str(
+            "sheet s { \
+                 cell hi: f64 = 100.0; \
+                 cell a: i32 filter(hi) |x: i32, h: i32| if x < 1 { 1 } else if x > h { h } else { x }; \
+             }",
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn cell_filter_undeclared_arg_cell_is_a_parse_error() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let err = parser.parse_str("sheet s { cell a: i32 filter(nope) |x: i32, h: i32| x; }");
+        assert!(err.is_err());
     }
 
     #[test]
