@@ -15,14 +15,15 @@ use super::scc::tarjan_scc;
 ///
 /// Modeling relationships as their own nodes (rather than only cells) allows a
 /// relationship with no plain inputs to still appear in this graph via its output
-/// edges. Every relationship with a valid method (at least one input, at least one
-/// output — enforced by `Sheet::add_relationship`) contributes at least one edge and
-/// therefore always appears in this graph: a fully self-referencing method (every cell
-/// is both an input and an output) contributes no input edges (they're all
-/// self-referencing and thus skipped), but still contributes an output edge for each of
-/// its outputs, since `build_digraph` draws output edges from *all* of a method's
-/// outputs, not just its pure ones — it is exactly this output edge that guarantees
-/// the relationship is never absent from the graph.
+/// edges. Every relationship with a valid method (at least one output — enforced by
+/// `Sheet::add_relationship`) contributes at least one edge and therefore always
+/// appears in this graph: a method with no inputs at all (a fixed point) or a fully
+/// self-referencing method (every cell is both an input and an output) contributes no
+/// input edges (there are none, or they're all self-referencing and thus skipped), but
+/// still contributes an output edge for each of its outputs, since `build_digraph`
+/// draws output edges from *all* of a method's outputs, not just its pure ones — it is
+/// exactly this output edge that guarantees the relationship is never absent from the
+/// graph.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Node {
     Cell(CellId),

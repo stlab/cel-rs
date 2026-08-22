@@ -4,11 +4,11 @@ sheet inequality {
     cell c = 2.0;
 
     relationship {
-        method [a, b] -> [a] { min(a, b) }
-        method [a, b] -> [b] { max(a, b) }
+        a := min(a, b);
+        b := max(a, b);
     }
     relationship {
-        method [b, c] -> [b] { min(b, c) }
-        method [b, c] -> [c] { max(b, c) }
+        b := min(b, c);
+        c := mac(b, c);
     }
 }

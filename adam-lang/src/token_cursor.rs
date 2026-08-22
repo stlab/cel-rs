@@ -31,8 +31,8 @@ pub(crate) struct TokenCursor {
     /// `depth` correctly. It does not hold for `Delimiter::Brace` or, now, `Delimiter::Parenthesis`
     /// when the dangling delimiter comes from CEL's own internal grouping instead: CEL's `if`/
     /// `else` expressions use braces for their branches, and CEL's tuple/group literals use
-    /// parens, the same delimiter kinds adam-lang uses for `relationship`/`conditional`/method
-    /// bodies and for `type_expr`, respectively. A CEL `if` expression whose then-branch fails to
+    /// parens, the same delimiter kinds adam-lang uses for `relationship`/`conditional`/`out`'s
+    /// `require` bodies and for `type_expr`, respectively. A CEL `if` expression whose then-branch fails to
     /// parse (e.g. `if a { }`), or a CEL tuple/group literal that fails partway through (e.g.
     /// `(+)`), can leave a stray `}`/`)` in the stream that this counter — and
     /// [`skip_to_recovery_point`], which reads it — has no way to distinguish from a real
@@ -231,54 +231,6 @@ impl TokenCursor {
         }
     }
 
-    /// Consumes `[`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the next token is not `[`.
-    ///
-    /// - Postcondition: on success, increments [`Self::depth`] by 1.
-    pub(crate) fn expect_open_bracket(&mut self) -> Result<Span> {
-        let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
-            Some(Token::OpenDelim {
-                delimiter: Delimiter::Bracket,
-                span,
-            }) => (true, *span),
-            other => (false, other.map(|t| t.span()).unwrap_or(Span::call_site())),
-        };
-        if ok {
-            self.advance();
-            self.depth += 1;
-            Ok(span)
-        } else {
-            Err(ParseError::new("expected `[`", span))
-        }
-    }
-
-    /// Consumes `]`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if the next token is not `]`.
-    ///
-    /// - Postcondition: on success, decrements [`Self::depth`] by 1.
-    pub(crate) fn expect_close_bracket(&mut self) -> Result<Span> {
-        let (ok, span) = match self.tokens.as_mut().and_then(|t| t.peek()) {
-            Some(Token::CloseDelim {
-                delimiter: Delimiter::Bracket,
-                span,
-            }) => (true, *span),
-            other => (false, other.map(|t| t.span()).unwrap_or(Span::call_site())),
-        };
-        if ok {
-            self.advance();
-            self.depth -= 1;
-            Ok(span)
-        } else {
-            Err(ParseError::new("expected `]`", span))
-        }
-    }
-
     /// Consumes `(`.
     ///
     /// # Errors
@@ -301,6 +253,17 @@ impl TokenCursor {
         } else {
             Err(ParseError::new("expected `(`", span))
         }
+    }
+
+    /// Returns whether the next token is `(`.
+    pub(crate) fn at_open_paren(&mut self) -> bool {
+        matches!(
+            self.tokens.as_mut().and_then(|t| t.peek()),
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        )
     }
 
     /// Returns whether the next token is `)` (or the stream is exhausted).
@@ -415,7 +378,7 @@ impl TokenCursor {
     /// `expect_open_bracket`/`expect_close_bracket`/`expect_open_paren`/`expect_close_paren` —
     /// `type_expr` is the one adam-lang-grammar production that uses parens, so a malformed
     /// `type_expr`'s own unmatched `(`/`)` must unwind `depth` the same way a malformed
-    /// `relationship`/`conditional`/method body's brace or `cell_list`'s bracket does.
+    /// `relationship`/`conditional` body or `out`'s `require` body's brace does.
     /// `Delimiter::None` is treated as an ordinary token (consumed, no depth change): it never
     /// appears in adam-lang's own grammar, or in a way `cel_parser` leaves dangling.
     ///
@@ -532,6 +495,21 @@ mod tests {
         cursor.expect_open_paren().unwrap();
         cursor.expect_close_paren().unwrap();
         assert_eq!(cursor.depth(), 0);
+    }
+
+    #[test]
+    fn at_open_paren_is_true_at_an_open_paren() {
+        let stream = proc_macro2::TokenStream::from_str("( )").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        assert!(cursor.at_open_paren());
+    }
+
+    #[test]
+    fn at_open_paren_is_false_after_the_open_paren_is_consumed() {
+        let stream = proc_macro2::TokenStream::from_str("( )").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        cursor.expect_open_paren().unwrap();
+        assert!(!cursor.at_open_paren());
     }
 
     #[test]

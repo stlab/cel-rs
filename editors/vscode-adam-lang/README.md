@@ -48,7 +48,7 @@ happens to be focused.
    runs: open Settings (Ctrl+,), search "adam-lang", and set `adam-lang.serverPath` to the absolute
    path of `target/debug/adam-lsp.exe` in your checkout (e.g.
    `D:\path\to\cel-rs\target\debug\adam-lsp.exe`). Then confirm:
-   - Syntax highlighting: `sheet`/`cell`/`relationship`/`conditional`/`method` are colored as
+   - Syntax highlighting: `sheet`/`cell`/`relationship`/`conditional`/`out`/`require` are colored as
      keywords, `f64`/`i32`/etc. as types, `//` comments dimmed.
    - Live diagnostics: edit a cell's initializer to the wrong type (e.g. change
      `cell a: f64 = 2.0;` to `cell a: f64 = 2;`) — a red squiggle and a Problems-panel entry

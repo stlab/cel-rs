@@ -5,14 +5,14 @@ sheet diamond {
     cell d = 3.0;
 
     relationship {
-        method [a, b] -> [c] { a * b }
-        method [a, c] -> [b] { c / a }
-        method [b, c] -> [a] { c / b }
+        c := a * b;
+        b := c / a;
+        a := c / b;
     }
 
     relationship {
-        method [b, c] -> [d] { b * c }
-        method [b, d] -> [c] { d / b }
-        method [c, d] -> [b] { d / c }
+        d := b * c;
+        c := d / b;
+        b := d / c;
     }
 }
