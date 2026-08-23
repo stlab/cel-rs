@@ -487,6 +487,24 @@ impl ParserContext for AstContext {
         });
         Ok(())
     }
+
+    fn push_closure(
+        &mut self,
+        param_types: Vec<std::any::TypeId>,
+        params: Vec<ClosureParam>,
+        body: Self,
+        span: Span,
+    ) -> crate::Result<()> {
+        let _ = param_types;
+        let body_expr = body.into_expr();
+        let end = body_expr.span().end;
+        self.values.push(Expr::Closure {
+            params,
+            body: Box::new(body_expr),
+            span: ExprSpan { start: span, end },
+        });
+        Ok(())
+    }
 }
 
 #[cfg(test)]
