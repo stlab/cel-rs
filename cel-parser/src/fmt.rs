@@ -56,6 +56,23 @@ fn render_literal(span: crate::ExprSpan) -> String {
     span.start.source_text().unwrap_or_default()
 }
 
+/// Renders a closure parameter's unresolved type expression, e.g. `"i32"` or `"(i32, f64)"`.
+///
+/// - Complexity: O(n) in the number of (nested) tuple elements in the type expression.
+fn render_closure_param_type(type_expr: &crate::ClosureParamTypeExpr) -> String {
+    match type_expr {
+        crate::ClosureParamTypeExpr::Named(name, _) => name.clone(),
+        crate::ClosureParamTypeExpr::Tuple(elements, _) => {
+            let inner = elements
+                .iter()
+                .map(render_closure_param_type)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({inner})")
+        }
+    }
+}
+
 /// Renders `expr` on its own, returning its text alongside its binding-strength level, so the
 /// caller ([`format_at`]) can decide whether the context it's being placed in requires parens.
 fn render(expr: &Expr) -> (String, Level) {
@@ -153,6 +170,20 @@ fn render(expr: &Expr) -> (String, Level) {
                     text.push_str(&format!(" else {{ {else_s} }}"));
                 }
             }
+            (text, Level::PRIMARY)
+        }
+        Expr::Closure { params, body, .. } => {
+            let body_s = format_at(body, Level::OR);
+            let text = if params.is_empty() {
+                format!("|| {body_s}")
+            } else {
+                let params_s = params
+                    .iter()
+                    .map(|p| format!("{}: {}", p.name, render_closure_param_type(&p.type_expr)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("|{params_s}| {body_s}")
+            };
             (text, Level::PRIMARY)
         }
     }
@@ -369,5 +400,34 @@ mod tests {
         let once = format_expr(&parse(source));
         let twice = format_expr(&parse(&once));
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn closure_with_one_param_reprints_with_its_type() {
+        assert_eq!(
+            format_expr(&parse("|x: i32| x + 1i32")),
+            "|x: i32| x + 1i32"
+        );
+    }
+
+    #[test]
+    fn closure_with_no_params_reprints_with_double_pipe() {
+        assert_eq!(format_expr(&parse("|| 1i32")), "|| 1i32");
+    }
+
+    #[test]
+    fn closure_with_multiple_params_joins_them_with_commas() {
+        assert_eq!(
+            format_expr(&parse("|x: i32, y: i32| x + y")),
+            "|x: i32, y: i32| x + y"
+        );
+    }
+
+    #[test]
+    fn closure_with_a_tuple_typed_param_reprints_the_tuple_type() {
+        assert_eq!(
+            format_expr(&parse("|x: (i32, f64)| x.0")),
+            "|x: (i32, f64)| x.0"
+        );
     }
 }

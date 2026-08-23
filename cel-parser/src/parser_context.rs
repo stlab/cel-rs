@@ -9,6 +9,7 @@
 use cel_runtime::DynSegment;
 use proc_macro2::Span;
 
+use crate::ast::ClosureParam;
 use crate::op_table::OpLookup;
 
 /// The pluggable target a grammar production emits into.
@@ -120,27 +121,32 @@ pub trait ParserContext: Sized {
         end: Span,
     ) -> crate::Result<()>;
 
-    /// Packages a fully-parsed, independent nested context — the body of a closure literal — as a
-    /// value pushed onto `self`, given the closure's declared parameter/return types.
+    /// Packages a fully-parsed, independent nested context — the body of a closure literal — as
+    /// a value pushed onto `self`, given the closure's declared parameter types in two parallel
+    /// forms: `param_types` (each parameter's runtime `TypeId`, in order) for an implementation
+    /// that executes, and `params` (each parameter's name, span, and unresolved type expression)
+    /// for one that builds an AST instead. An implementation uses whichever it needs and ignores
+    /// the other.
     ///
     /// The default implementation reports closures as unsupported, so a `ParserContext`
-    /// implementation that has no use for them (e.g. an AST-building context for the formatter or
-    /// language server) needs no changes to keep compiling.
+    /// implementation that has no use for them needs no changes to keep compiling.
     ///
     /// - Precondition: `body` was built via `Self::new_context()` and its own argument-binding
     ///   mechanism, in the same style [`Self::new_context`]'s other consumers already use.
     ///
     /// # Errors
     ///
-    /// Returns `Err` if this `ParserContext` implementation doesn't support closures.
+    /// Returns `Err` if this `ParserContext` implementation doesn't support closures, or (for an
+    /// implementation that validates during parsing) if `body` is otherwise unsuitable — e.g.
+    /// [`DynSegmentContext`] rejects a `body` that doesn't produce exactly one value.
     fn push_closure(
         &mut self,
         param_types: Vec<std::any::TypeId>,
-        return_type: std::any::TypeId,
+        params: Vec<ClosureParam>,
         body: Self,
         span: Span,
     ) -> crate::Result<()> {
-        let _ = (param_types, return_type, body);
+        let _ = (param_types, params, body);
         Err(crate::ParseError::new_range(
             "closures are not supported in this context".to_string(),
             span,
@@ -295,16 +301,23 @@ impl ParserContext for DynSegmentContext {
     fn push_closure(
         &mut self,
         param_types: Vec<std::any::TypeId>,
-        return_type: std::any::TypeId,
+        params: Vec<ClosureParam>,
         body: Self,
         span: Span,
     ) -> crate::Result<()> {
+        let _ = params;
+        let return_type = body.output_type_id().ok_or_else(|| {
+            crate::ParseError::new_range(
+                "closure body must produce exactly one value".to_string(),
+                span,
+                span,
+            )
+        })?;
         self.0.just(cel_runtime::DynClosure::new(
             param_types,
             return_type,
             body.into_inner(),
         ));
-        let _ = span;
         Ok(())
     }
 
@@ -460,7 +473,7 @@ mod tests {
         outer
             .push_closure(
                 vec![TypeId::of::<i32>()],
-                TypeId::of::<i32>(),
+                Vec::new(),
                 body,
                 Span::call_site(),
             )

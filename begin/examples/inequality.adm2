@@ -1,7 +1,8 @@
 sheet inequality {
-    cell a = 0.0 filter |x: f64| clamp(x, 0.0, 100.0);
-    cell b = 0.0;
-    cell c = 2.0;
+    cell range = (0.0, 100.0);
+    cell a = 0.0 filter (range) |x: f64, r: (f64, f64)| clamp(x, 0.0, 100.0);
+    cell b = 0.0 filter (range) |x: f64, r: (f64, f64)| clamp(x, 0.0, 100.0);
+    cell c = 2.0 filter (range) |x: f64, r: (f64, f64)| clamp(x, 0.0, 100.0);
 
     relationship {
         a := min(a, b);

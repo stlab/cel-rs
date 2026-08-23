@@ -194,6 +194,15 @@ pub enum Expr {
         /// The span of the whole `expr as Type` construct.
         span: ExprSpan,
     },
+    /// A closure literal (`|x: i32| x + 1`, or `|| 1i32` with no parameters).
+    Closure {
+        /// The closure's declared parameters, in source order.
+        params: Vec<ClosureParam>,
+        /// The closure's body expression.
+        body: Box<Expr>,
+        /// The span of the whole closure literal, from its opening `|`/`||` through `body`.
+        span: ExprSpan,
+    },
 }
 
 impl Expr {
@@ -208,9 +217,38 @@ impl Expr {
             | Expr::TupleIndex { span, .. }
             | Expr::If { span, .. }
             | Expr::Logical { span, .. }
-            | Expr::Cast { span, .. } => *span,
+            | Expr::Cast { span, .. }
+            | Expr::Closure { span, .. } => *span,
         }
     }
+}
+
+/// One `closure_param = identifier ":" closure_type_expression` — a closure literal's declared
+/// parameter.
+#[derive(Clone, Debug)]
+pub struct ClosureParam {
+    /// The parameter's declared name.
+    pub name: String,
+    /// The name token's span.
+    pub name_span: ExprSpan,
+    /// The parameter's declared, unresolved type.
+    pub type_expr: ClosureParamTypeExpr,
+}
+
+/// `closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")".`
+///
+/// Unresolved — mirrors `adam_lang::ast::TypeExpr`'s shape exactly (a bare name, or a
+/// recursively-nested tuple), but lives here because closures are a `cel-parser` construct, not
+/// an `adam-lang` one. A bare name is only ever a `crate::op_table::builtin_scalar_type` name,
+/// already validated during parsing — see `Parser::parse_closure_type_expression`.
+#[derive(Clone, Debug)]
+pub enum ClosureParamTypeExpr {
+    /// A single built-in scalar type name (e.g. `"i32"`, `"bool"`).
+    Named(String, ExprSpan),
+    /// A (possibly nested) tuple of parameter types — `Vec::new()` for `()`. Note: unlike
+    /// `adam_lang::ast::TypeExpr::Tuple`, this production has no dedicated 1-element form; see
+    /// `Parser::parse_closure_type_expression`'s doc comment (added in Task 2).
+    Tuple(Vec<ClosureParamTypeExpr>, ExprSpan),
 }
 
 /// Converts a statically-known literal value into its [`Literal`] variant.
@@ -449,6 +487,24 @@ impl ParserContext for AstContext {
         });
         Ok(())
     }
+
+    fn push_closure(
+        &mut self,
+        param_types: Vec<std::any::TypeId>,
+        params: Vec<ClosureParam>,
+        body: Self,
+        span: Span,
+    ) -> crate::Result<()> {
+        let _ = param_types;
+        let body_expr = body.into_expr();
+        let end = body_expr.span().end;
+        self.values.push(Expr::Closure {
+            params,
+            body: Box::new(body_expr),
+            span: ExprSpan { start: span, end },
+        });
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -489,6 +545,23 @@ mod tests {
                 value: Literal::I32(2),
                 span: target,
             })),
+            span: target,
+        };
+        assert_eq!(format!("{:?}", expr.span()), format!("{target:?}"));
+    }
+
+    #[test]
+    fn closure_span_is_the_stored_span() {
+        let target = ExprSpan {
+            start: Span::call_site(),
+            end: Span::call_site(),
+        };
+        let expr = Expr::Closure {
+            params: Vec::new(),
+            body: Box::new(Expr::Literal {
+                value: Literal::I32(1),
+                span: target,
+            }),
             span: target,
         };
         assert_eq!(format!("{:?}", expr.span()), format!("{target:?}"));

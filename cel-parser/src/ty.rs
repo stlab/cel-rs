@@ -261,10 +261,12 @@ impl Ty {
 ///
 /// Only [`Expr::Op`] (via [`builtin_operand_types`]) and [`Expr::Logical`] (CEL's fixed `&&`/`||`
 /// semantics: both operands must unify with `bool`) are checked directly. [`Expr::Apply`],
-/// [`Expr::Tuple`], [`Expr::TupleIndex`], and [`Expr::If`] are recursed into — so an `Op` nested
-/// inside one is still checked — but the node itself always infers as [`Ty::Any`]: checking call
-/// return types, tuple shapes, and if/else branch agreement is deferred to a later phase (see the
-/// design doc's "Type checking (v1)" section).
+/// [`Expr::Tuple`], [`Expr::TupleIndex`], [`Expr::If`], and [`Expr::Closure`] are recursed into —
+/// so an `Op` nested inside one is still checked ([`Expr::Closure`] recurses into its own `body`
+/// with a resolver that shadows the outer one with the closure's own parameter names first) — but
+/// the node itself always infers as [`Ty::Any`]: checking call return types, tuple shapes, and
+/// if/else branch agreement is deferred to a later phase (see the design doc's "Type checking
+/// (v1)" section), and CEL has no first-class function type for a closure literal to infer as.
 ///
 /// - Complexity: O(n) in the number of nodes in `expr`.
 ///
@@ -286,7 +288,7 @@ impl Ty {
 /// assert_eq!(ty, Ty::I32);
 /// assert!(diagnostics.is_empty());
 /// ```
-pub fn check_expr(expr: &Expr, resolve_ident: &impl Fn(&str) -> Ty) -> (Ty, Vec<ParseError>) {
+pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<ParseError>) {
     match expr {
         Expr::Literal { value, .. } => (Ty::from_literal(value), Vec::new()),
         Expr::Ident { name, .. } => (resolve_ident(name), Vec::new()),
@@ -329,6 +331,17 @@ pub fn check_expr(expr: &Expr, resolve_ident: &impl Fn(&str) -> Ty) -> (Ty, Vec<
             }
             (Ty::Any, diagnostics)
         }
+        Expr::Closure { params, body, .. } => {
+            let resolve_with_params = |name: &str| -> Ty {
+                if let Some(p) = params.iter().find(|p| p.name == name) {
+                    closure_param_ty(&p.type_expr)
+                } else {
+                    resolve_ident(name)
+                }
+            };
+            let (_, diagnostics) = check_expr(body, &resolve_with_params);
+            (Ty::Any, diagnostics)
+        }
     }
 }
 
@@ -343,7 +356,7 @@ fn check_op(
     name: &str,
     operands: &[Expr],
     span: ExprSpan,
-    resolve_ident: &impl Fn(&str) -> Ty,
+    resolve_ident: &dyn Fn(&str) -> Ty,
 ) -> (Ty, Vec<ParseError>) {
     let mut diagnostics = Vec::new();
     let operand_tys: Vec<Ty> = operands
@@ -395,6 +408,19 @@ fn result_ty_for_op(name: &str, operand_ty: Ty) -> Ty {
     }
 }
 
+/// Approximates a closure parameter's declared type as a [`Ty`], for use as the identifier
+/// resolver when checking a closure's own body: a tuple-shaped parameter has no `Ty` variant
+/// (`Ty` has none) and maps to [`Ty::Any`]; a scalar parameter maps via [`Ty::from_name`] —
+/// always `Some` in practice, since a [`crate::ClosureParamTypeExpr::Named`] is only ever built
+/// from a name `crate::op_table::builtin_scalar_type` already validated during parsing, the
+/// identical name set `Ty::from_name` recognizes.
+fn closure_param_ty(type_expr: &crate::ClosureParamTypeExpr) -> Ty {
+    match type_expr {
+        crate::ClosureParamTypeExpr::Named(name, _) => Ty::from_name(name).unwrap_or(Ty::Any),
+        crate::ClosureParamTypeExpr::Tuple(..) => Ty::Any,
+    }
+}
+
 /// Checks an [`Expr::Cast`] node (`expr as type_name`): infers `expr`'s type, then (only if it
 /// resolved to a concrete type) checks that a conversion to `type_name` is registered via
 /// [`cast_source_types`]. Unlike [`check_op`], the node always infers as the target type once
@@ -408,7 +434,7 @@ fn check_cast(
     expr: &Expr,
     type_name: &str,
     span: ExprSpan,
-    resolve_ident: &impl Fn(&str) -> Ty,
+    resolve_ident: &dyn Fn(&str) -> Ty,
 ) -> (Ty, Vec<ParseError>) {
     let (expr_ty, mut diagnostics) = check_expr(expr, resolve_ident);
     let Some(target_ty) = Ty::from_name(type_name) else {
@@ -438,7 +464,7 @@ fn check_logical(
     lhs: &Expr,
     rhs: &Expr,
     span: ExprSpan,
-    resolve_ident: &impl Fn(&str) -> Ty,
+    resolve_ident: &dyn Fn(&str) -> Ty,
 ) -> (Ty, Vec<ParseError>) {
     let (lhs_ty, mut diagnostics) = check_expr(lhs, resolve_ident);
     let (rhs_ty, rhs_diags) = check_expr(rhs, resolve_ident);
@@ -805,6 +831,77 @@ mod tests {
         };
         let (ty, diags) = check_expr(&cast(expr, "i32"), &any_resolver);
         assert_eq!(ty, Ty::I32);
+        assert!(diags.is_empty());
+    }
+
+    fn closure_param(name: &str, type_name: &str) -> crate::ClosureParam {
+        crate::ClosureParam {
+            name: name.to_string(),
+            name_span: point(proc_macro2::Span::call_site()),
+            type_expr: crate::ClosureParamTypeExpr::Named(
+                type_name.to_string(),
+                point(proc_macro2::Span::call_site()),
+            ),
+        }
+    }
+
+    fn closure(params: Vec<crate::ClosureParam>, body: Expr) -> Expr {
+        Expr::Closure {
+            params,
+            body: Box::new(body),
+            span: point(proc_macro2::Span::call_site()),
+        }
+    }
+
+    #[test]
+    fn closure_literal_itself_infers_as_any() {
+        let expr = closure(
+            vec![closure_param("x", "i32")],
+            Expr::Ident {
+                name: "x".to_string(),
+                span: point(proc_macro2::Span::call_site()),
+            },
+        );
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Any);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn closure_body_type_error_surfaces_through_the_closure() {
+        let body = op(
+            "+",
+            vec![
+                Expr::Ident {
+                    name: "x".to_string(),
+                    span: point(proc_macro2::Span::call_site()),
+                },
+                lit_str("s"),
+            ],
+        );
+        let expr = closure(vec![closure_param("x", "i32")], body);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Any, "the closure's own type is always Any");
+        assert_eq!(diags.len(), 1, "the body's i32 + String mismatch surfaces");
+    }
+
+    #[test]
+    fn closure_param_shadows_the_outer_resolver() {
+        // Outer resolver claims "x" is a String; the closure's own "x: i32" parameter must win
+        // inside the body, so `x + 1i32` type-checks cleanly with no diagnostic.
+        let outer_resolver = |_: &str| Ty::String;
+        let body = op(
+            "+",
+            vec![
+                Expr::Ident {
+                    name: "x".to_string(),
+                    span: point(proc_macro2::Span::call_site()),
+                },
+                lit_i32(1),
+            ],
+        );
+        let expr = closure(vec![closure_param("x", "i32")], body);
+        let (_, diags) = check_expr(&expr, &outer_resolver);
         assert!(diags.is_empty());
     }
 }

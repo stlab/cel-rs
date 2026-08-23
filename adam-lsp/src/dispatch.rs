@@ -283,6 +283,16 @@ mod tests {
     }
 
     #[test]
+    fn format_edits_formats_a_cell_with_a_filter() {
+        let edits = format_edits("sheet s { cell a:i32=1 filter |x:i32| x; }");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            edits[0].new_text,
+            "sheet s {\n    cell a: i32 = 1 filter |x: i32| x;\n}\n"
+        );
+    }
+
+    #[test]
     fn formatting_request_returns_the_edit_for_a_previously_opened_document() {
         let (server, client) = Connection::memory();
         let server_thread = std::thread::spawn(move || serve(&server));

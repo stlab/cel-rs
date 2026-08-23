@@ -97,7 +97,7 @@ pub mod op_table;
 pub mod parser_context;
 pub mod ty;
 
-pub use ast::{AstContext, Expr, ExprSpan, Literal, LogicalOp};
+pub use ast::{AstContext, ClosureParam, ClosureParamTypeExpr, Expr, ExprSpan, Literal, LogicalOp};
 pub use error::{CELError, FormatRustcStyle, ParseError, SourceSpan, SpanContext};
 pub use fmt::format_expr;
 pub use op_table::{OpLookup, OperandTypes, builtin_operand_types};
@@ -1310,11 +1310,18 @@ impl<C: ParserContext> Parser<C> {
     /// `closure_param = identifier ":" closure_type_expression .`
     ///
     /// Compiles the body as a fully independent nested context (via
-    /// [`parse_nested_context`](Self::parse_nested_context)) whose only visible names are its own
-    /// declared parameters plus whatever library/built-in functions are always reachable —
+    /// [`parse_nested_context`](Self::parse_nested_context)) whose only visible names are its
+    /// own declared parameters plus whatever library/built-in functions are always reachable —
     /// [`OpLookup::isolate_scopes`] hides every other transient scope (including one an enclosing
-    /// caller, e.g. adam-lang, pushed around this whole parse) for the duration of the body parse,
-    /// so a closure never resolves a free variable from its lexical surroundings.
+    /// caller, e.g. adam-lang, pushed around this whole parse) for the duration of the body
+    /// parse, so a closure never resolves a free variable from its lexical surroundings.
+    ///
+    /// Each parameter's declared type is threaded through in two parallel forms: the existing
+    /// runtime-facing `ClosureParamType` (which `DynSegmentContext`'s `push_closure` needs a
+    /// concrete `TypeId` from) and the unresolved, span-carrying `ClosureParamTypeExpr` (which
+    /// `AstContext`'s needs instead) — both built from the same tokens in the same
+    /// [`parse_closure_type_expression`](Self::parse_closure_type_expression) call, so nothing
+    /// is parsed twice.
     ///
     /// - Precondition: the opening `|` (`params_already_closed == false`) or the combined `||`
     ///   token naming an empty parameter list (`params_already_closed == true`) has already been
@@ -1325,22 +1332,22 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// Returns an error if a parameter name, its `:`, its type, or the closing `|` is malformed
     /// or missing; if a parameter's type names an unrecognized type; if the body expression is
-    /// missing or malformed; if the body produces zero or more than one value; or if this
-    /// `ParserContext` implementation doesn't support closures (see
-    /// [`ParserContext::push_closure`]'s default implementation).
+    /// missing or malformed; or if this `ParserContext` implementation's `push_closure` rejects
+    /// the closure (e.g. `DynSegmentContext` when the body doesn't produce exactly one value).
     ///
     /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
     fn is_closure_expression(&mut self, params_already_closed: bool) -> Result<bool> {
         let start_span = self.last_span;
-        let mut params: Vec<(String, ClosureParamType)> = Vec::new();
+        let mut params: Vec<(String, Span, ClosureParamType, ClosureParamTypeExpr)> = Vec::new();
         if !params_already_closed {
             loop {
                 let name = self.expect_identifier("expected closure parameter name")?;
+                let name_span = self.last_span;
                 if !self.is_punctuation(":") {
                     return Err(self.error_at("expected ':' after closure parameter name"));
                 }
-                let ty = self.parse_closure_type_expression()?;
-                params.push((name, ty));
+                let (ty, ty_ast) = self.parse_closure_type_expression()?;
+                params.push((name, name_span, ty, ty_ast));
                 if self.is_punctuation(",") {
                     continue;
                 }
@@ -1351,12 +1358,23 @@ impl<C: ParserContext> Parser<C> {
             }
         }
 
-        let param_types: Vec<TypeId> = params.iter().map(|(_, ty)| ty.type_id()).collect();
+        let param_types: Vec<TypeId> = params.iter().map(|(_, _, ty, _)| ty.type_id()).collect();
+        let ast_params: Vec<ClosureParam> = params
+            .iter()
+            .map(|(name, name_span, _, ty_ast)| ClosureParam {
+                name: name.clone(),
+                name_span: ExprSpan {
+                    start: *name_span,
+                    end: *name_span,
+                },
+                type_expr: ty_ast.clone(),
+            })
+            .collect();
         let isolated = self.op_lookup.isolate_scopes();
         let param_table: HashMap<String, (usize, ClosureParamType)> = params
             .into_iter()
             .enumerate()
-            .map(|(idx, (name, ty))| (name, (idx, ty)))
+            .map(|(idx, (name, _, ty, _))| (name, (idx, ty)))
             .collect();
         self.op_lookup
             .push_scope(move |name, segment, arity, _span| {
@@ -1379,36 +1397,56 @@ impl<C: ParserContext> Parser<C> {
         self.op_lookup.restore_scopes(isolated);
         let body = body_result?;
 
-        let return_type = body
-            .output_type_id()
-            .ok_or_else(|| self.error_at("closure body must produce exactly one value"))?;
-
         self.context
-            .push_closure(param_types, return_type, body, start_span)?;
+            .push_closure(param_types, ast_params, body, start_span)?;
         Ok(true)
     }
 
     /// `closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")" .`
     ///
+    /// Builds both the runtime-facing `ClosureParamType` and the unresolved, span-carrying
+    /// `ClosureParamTypeExpr` from the same tokens in one pass (see
+    /// [`is_closure_expression`](Self::is_closure_expression)'s doc comment for why both are
+    /// needed). Note this production has no 1-element-tuple form (unlike
+    /// `adam_lang::ast::TypeExpr`): the element loop here continues on a trailing `,` rather
+    /// than treating one as a terminator, so `(i32,)` fails to parse as a closure parameter
+    /// type — an existing grammar quirk, unchanged by this addition.
+    ///
     /// # Errors
     ///
     /// Returns an error if a bare identifier doesn't name a recognized built-in scalar type, or
     /// if the parenthesized element list is malformed or missing its closing `)`.
-    fn parse_closure_type_expression(&mut self) -> Result<ClosureParamType> {
+    fn parse_closure_type_expression(
+        &mut self,
+    ) -> Result<(ClosureParamType, ClosureParamTypeExpr)> {
         if let Some(Token::Identifier(ident)) = self.peek_token() {
             let name = ident.to_string();
             self.advance();
-            return crate::op_table::builtin_scalar_type(&name)
-                .map(ClosureParamType::Scalar)
-                .ok_or_else(|| self.error_at(&format!("unknown type `{name}`")));
+            let name_span = self.last_span;
+            let scalar = crate::op_table::builtin_scalar_type(&name)
+                .ok_or_else(|| self.error_at(&format!("unknown type `{name}`")))?;
+            return Ok((
+                ClosureParamType::Scalar(scalar),
+                ClosureParamTypeExpr::Named(
+                    name,
+                    ExprSpan {
+                        start: name_span,
+                        end: name_span,
+                    },
+                ),
+            ));
         }
         if !self.is_open_paren() {
             return Err(self.error_at("expected a type name or '('"));
         }
+        let open_span = self.last_span;
         let mut elements = Vec::new();
+        let mut element_asts = Vec::new();
         if !self.is_close_paren() {
             loop {
-                elements.push(self.parse_closure_type_expression()?);
+                let (ty, ty_ast) = self.parse_closure_type_expression()?;
+                elements.push(ty);
+                element_asts.push(ty_ast);
                 if self.is_punctuation(",") {
                     continue;
                 }
@@ -1418,7 +1456,17 @@ impl<C: ParserContext> Parser<C> {
                 return Err(self.error_at("expected ',' or closing ')'"));
             }
         }
-        Ok(ClosureParamType::Tuple(elements))
+        let close_span = self.last_span;
+        Ok((
+            ClosureParamType::Tuple(elements),
+            ClosureParamTypeExpr::Tuple(
+                element_asts,
+                ExprSpan {
+                    start: open_span,
+                    end: close_span,
+                },
+            ),
+        ))
     }
 
     /// `if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].`
@@ -2902,6 +2950,45 @@ mod tests {
         let mut parser = CELParser::new(lookup);
         let err = parser.parse_str("|x: i32| x + outer_only");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn ast_context_parses_a_one_param_closure() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("|x: i32| x").unwrap();
+        let Expr::Closure { params, body, .. } = expr else {
+            panic!("expected Closure");
+        };
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "x");
+        assert!(matches!(
+            &params[0].type_expr,
+            ClosureParamTypeExpr::Named(n, _) if n == "i32"
+        ));
+        assert!(matches!(*body, Expr::Ident { ref name, .. } if name == "x"));
+    }
+
+    #[test]
+    fn ast_context_parses_a_zero_param_closure() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("|| 1i32").unwrap();
+        let Expr::Closure { params, .. } = expr else {
+            panic!("expected Closure");
+        };
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn ast_context_parses_a_tuple_typed_closure_param() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("|x: (i32, f64)| x.0").unwrap();
+        let Expr::Closure { params, .. } = expr else {
+            panic!("expected Closure");
+        };
+        match &params[0].type_expr {
+            ClosureParamTypeExpr::Tuple(elements, _) => assert_eq!(elements.len(), 2),
+            other => panic!("expected Tuple, got {other:?}"),
+        }
     }
 }
 
