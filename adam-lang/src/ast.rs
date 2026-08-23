@@ -195,6 +195,8 @@ pub struct CellDecl {
     /// `crate::parser::AdamParser` for the compile-to-`Sheet` phase, which parses this with no
     /// cell scope pushed and evaluates it eagerly, once, at parse time.
     pub initializer: Option<cel_parser::Expr>,
+    /// The `filter` clause, if present.
+    pub filter: Option<CellFilter>,
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
@@ -205,6 +207,18 @@ pub struct CellDecl {
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
     /// The span of the whole `cell ...;` declaration.
+    pub span: ExprSpan,
+}
+
+/// `cell_filter = "filter" [ "(" identifier { "," identifier } ")" ] closure_expression.`
+#[derive(Debug, Clone)]
+pub struct CellFilter {
+    /// The filter's declared argument-cell names, in source order (empty if the `(...)` list
+    /// was omitted).
+    pub arg_cells: Vec<(String, ExprSpan)>,
+    /// The filter's closure literal.
+    pub closure: cel_parser::Expr,
+    /// The span of the whole `filter ...` clause.
     pub span: ExprSpan,
 }
 
@@ -438,6 +452,7 @@ mod tests {
             name_span: span,
             type_name: None,
             initializer: None,
+            filter: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -503,6 +518,7 @@ mod tests {
             name_span: span,
             type_name: None,
             initializer: None,
+            filter: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -545,6 +561,7 @@ mod tests {
             name_span: span,
             type_name: None,
             initializer: None,
+            filter: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -631,6 +648,7 @@ mod tests {
                 span,
             )),
             initializer: None,
+            filter: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -653,6 +671,7 @@ mod tests {
                 name: "x".to_string(),
                 span,
             }),
+            filter: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -662,5 +681,30 @@ mod tests {
             cell.initializer,
             Some(cel_parser::Expr::Ident { .. })
         ));
+    }
+
+    #[test]
+    fn cell_decl_filter_field_holds_a_cell_filter() {
+        let span = point(Span::call_site());
+        let cell = CellDecl {
+            name: "a".to_string(),
+            name_span: span,
+            type_name: None,
+            initializer: None,
+            filter: Some(CellFilter {
+                arg_cells: vec![("hi".to_string(), span)],
+                closure: cel_parser::Expr::Ident {
+                    name: "x".to_string(),
+                    span,
+                },
+                span,
+            }),
+            leading_comment: None,
+            doc_comment: None,
+            blank_line_before: false,
+            span,
+        };
+        let filter = cell.filter.as_ref().expect("filter present");
+        assert_eq!(filter.arg_cells[0].0, "hi");
     }
 }
