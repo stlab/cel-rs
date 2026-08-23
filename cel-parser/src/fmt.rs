@@ -57,6 +57,8 @@ fn render_literal(span: crate::ExprSpan) -> String {
 }
 
 /// Renders a closure parameter's unresolved type expression, e.g. `"i32"` or `"(i32, f64)"`.
+///
+/// - Complexity: O(n) in the number of (nested) tuple elements in the type expression.
 fn render_closure_param_type(type_expr: &crate::ClosureParamTypeExpr) -> String {
     match type_expr {
         crate::ClosureParamTypeExpr::Named(name, _) => name.clone(),

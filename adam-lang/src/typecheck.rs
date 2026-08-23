@@ -348,6 +348,8 @@ fn check_cell_initializer(
 /// Every declared `cell`'s name (not `out`s) — used to validate a `filter` clause's argument-cell
 /// list, which (mirroring `adam_lang::parser::AdamParser::parse_cell_filter`'s real runtime
 /// restriction) may only reference other `cell`s, not `out`s.
+///
+/// - Complexity: O(n) in the number of sheet items.
 fn declared_cell_names(sheet: &Sheet) -> std::collections::HashSet<String> {
     sheet
         .items
@@ -365,6 +367,9 @@ fn declared_cell_names(sheet: &Sheet) -> std::collections::HashSet<String> {
 /// to a concrete `Ty` (from `cell_types`, converted via `Ty::type_id`). `None` when nothing is
 /// known (an unannotated cell, or a name neither map has an entry for), mirroring `Ty::Any`'s
 /// existing "never flagged" leniency elsewhere in this file.
+///
+/// - Complexity: O(1) amortized lookup plus an O(k) clone of a possibly-nested `TypeShape`
+///   (k = the shape's own element count) when found in `shapes`.
 fn expected_shape(
     name: &str,
     cell_types: &std::collections::HashMap<String, Ty>,
@@ -384,6 +389,8 @@ fn expected_shape(
 /// crate already uses — `cel_parser::ClosureParamTypeExpr` mirrors `TypeExpr`'s shape exactly (a
 /// bare name, or a recursively-nested tuple) but lives in `cel-parser` since closures are that
 /// crate's own construct.
+///
+/// - Complexity: O(n) in the number of (nested) tuple elements in the type expression.
 fn closure_param_type_expr_to_type_expr(expr: &ClosureParamTypeExpr) -> crate::ast::TypeExpr {
     match expr {
         ClosureParamTypeExpr::Named(name, span) => crate::ast::TypeExpr::Named(name.clone(), *span),
@@ -414,9 +421,14 @@ fn closure_param_ty(type_expr: &ClosureParamTypeExpr) -> Ty {
 /// no declaration-order constraint, matching every other check in this file); the closure's own
 /// parameter types must line up, in order, with `[this cell's own declared/inferred shape, the
 /// first argument cell's shape, the second's, ...]`; and the closure body's checked type must
-/// unify with this cell's own declared/inferred shape. A malformed filter closure (not an
-/// `Expr::Closure`) is silently skipped — already reported as a recovered syntax error, not a
-/// type error.
+/// unify with this cell's own declared/inferred shape. The parameter-type check and the
+/// return-type check are independent and can both fire for the same root-cause mismatch (e.g. a
+/// closure parameter typed `f64` against an `i32` cell also makes the body's inferred type
+/// disagree) — this is intentional, matching this file's existing precedent of not de-duplicating
+/// diagnostics from genuinely distinct checks (see the
+/// `filter_first_param_type_mismatch_is_two_diagnostics` test). A malformed filter closure (not an
+/// `Expr::Closure`) is silently skipped with no diagnostic at all (tracked as
+/// [#141](https://github.com/stlab/cel-rs/issues/141), out of scope here).
 fn check_filter(
     cell: &CellDecl,
     registry: &TypeRegistry,

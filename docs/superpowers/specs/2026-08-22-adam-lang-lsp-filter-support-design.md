@@ -217,11 +217,11 @@ if let Some(filter) = &cell.filter {
    against the full sheet regardless of source order, so a filter's arg cell declared later in
    the same sheet is not flagged here (a stricter ordering check, if ever wanted, belongs to the
    real `parser.rs` path, which already enforces it at actual `Sheet`-build time).
-2. Destructures `filter.closure` as `Expr::Closure { params, body, .. }` (always true by
-   construction — `parse_cel_or_expression` at this grammar point can only ever produce a
-   `Closure`, since `cell_filter`'s grammar requires `closure_expression` unconditionally, not
-   `or_expression`; a malformed closure is already a recovered syntax error before type-checking
-   runs).
+2. Destructures `filter.closure` as `Expr::Closure { params, body, .. }`, returning early
+   (skipping all further checks) if it isn't — `parse_cel_or_expression` at this grammar point
+   parses the full `or_expression` grammar, not a production narrowed to `closure_expression`, so
+   a syntactically valid non-closure filter body currently produces no diagnostic here (tracked as
+   [#141](https://github.com/stlab/cel-rs/issues/141), out of scope for this spec).
 3. Resolves each param's `ClosureParamTypeExpr` against `registry` (a small local recursive
    helper mirroring `TypeRegistry::resolve`'s existing `TypeExpr`-shaped logic) and compares the
    resulting list against `[cell's own declared/inferred `TypeShape`, arg_cells[0]'s shape, arg_cells[1]'s shape, ...]`

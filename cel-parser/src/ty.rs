@@ -261,10 +261,12 @@ impl Ty {
 ///
 /// Only [`Expr::Op`] (via [`builtin_operand_types`]) and [`Expr::Logical`] (CEL's fixed `&&`/`||`
 /// semantics: both operands must unify with `bool`) are checked directly. [`Expr::Apply`],
-/// [`Expr::Tuple`], [`Expr::TupleIndex`], and [`Expr::If`] are recursed into — so an `Op` nested
-/// inside one is still checked — but the node itself always infers as [`Ty::Any`]: checking call
-/// return types, tuple shapes, and if/else branch agreement is deferred to a later phase (see the
-/// design doc's "Type checking (v1)" section).
+/// [`Expr::Tuple`], [`Expr::TupleIndex`], [`Expr::If`], and [`Expr::Closure`] are recursed into —
+/// so an `Op` nested inside one is still checked ([`Expr::Closure`] recurses into its own `body`
+/// with a resolver that shadows the outer one with the closure's own parameter names first) — but
+/// the node itself always infers as [`Ty::Any`]: checking call return types, tuple shapes, and
+/// if/else branch agreement is deferred to a later phase (see the design doc's "Type checking
+/// (v1)" section), and CEL has no first-class function type for a closure literal to infer as.
 ///
 /// - Complexity: O(n) in the number of nodes in `expr`.
 ///
