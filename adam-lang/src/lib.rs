@@ -8,7 +8,8 @@
 //! ```text
 //! sheet              = "sheet" identifier "{" { sheet_item } "}".
 //! sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).
-//! cell_decl          = "cell" identifier cell_type_init [ ":=" or_expression ] ";".
+//! cell_decl          = "cell" identifier cell_type_init [ cell_filter ] ";".
+//! cell_filter        = "filter" [ "(" identifier { "," identifier } ")" ] closure_expression.
 //! cell_type_init     = (":" type_expr ["=" or_expression]) | ("=" or_expression).
 //! type_expr          = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 //! relationship_decl  = "relationship" "{" { binding } "}".
@@ -21,11 +22,12 @@
 //! requirement        = identifier ":" or_expression ";".
 //! ```
 //!
-//! The `cell_decl` grammar shown above includes an optional trailing `":=" or_expression`
-//! clause per the design spec, but **this crate does not yet implement it** — see
+//! The design spec for `cell_decl` also calls for an optional trailing `":=" or_expression`
+//! clause, not shown above because **this crate does not yet implement it** — see
 //! `docs/superpowers/specs/2026-08-19-adam-lang-syntax-design.md`'s "Explicitly out of scope"
 //! section; it's deferred pending a forward-reference/hoisting decision. Only `cell_decl`'s
-//! `"=" or_expression` one-time initializer is implemented today.
+//! `"=" or_expression` one-time initializer and its optional `cell_filter` clause are
+//! implemented today.
 //!
 //! `or_expression` and its descendants (`literal`, `identifier`, and the rest of the
 //! CEL expression grammar) are defined by `cel_parser` — see that crate's own

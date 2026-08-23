@@ -180,7 +180,7 @@ impl AdamAstParser {
         }
     }
 
-    /// `cell_decl = "cell" identifier cell_type_init ";".`
+    /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] ";".`
     fn parse_cell_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::CellDecl> {
         let decl_start = cursor.peek_span();
         cursor.is_keyword("cell");
@@ -198,18 +198,59 @@ impl AdamAstParser {
         } else {
             return Err(cursor.err_at("expected `:` or `=` in cell declaration"));
         };
+        let filter = if cursor.is_keyword("filter") {
+            let filter_start = cursor.last_span();
+            Some(self.parse_cell_filter(cursor, filter_start)?)
+        } else {
+            None
+        };
         let semi_span = cursor.expect_punct(";")?;
         Ok(ast::CellDecl {
             name,
             name_span: point(name_span),
             type_name,
             initializer,
+            filter,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
                 end: semi_span,
+            },
+        })
+    }
+
+    /// `cell_filter = "filter" [ "(" identifier { "," identifier } ")" ] closure_expression.`
+    ///
+    /// - Precondition: the `filter` keyword has already been consumed by the caller; `filter_start`
+    ///   is its span.
+    fn parse_cell_filter(
+        &mut self,
+        cursor: &mut TokenCursor,
+        filter_start: proc_macro2::Span,
+    ) -> Result<ast::CellFilter> {
+        let mut arg_cells = Vec::new();
+        if cursor.at_open_paren() {
+            cursor.expect_open_paren()?;
+            loop {
+                let (name, span) = cursor.consume_ident()?;
+                arg_cells.push((name, point(span)));
+                if cursor.consume_punct(",") {
+                    continue;
+                }
+                break;
+            }
+            cursor.expect_close_paren()?;
+        }
+        let closure = self.parse_cel_or_expression(cursor)?;
+        let closure_end = closure.span().end;
+        Ok(ast::CellFilter {
+            arg_cells,
+            closure,
+            span: ast::ExprSpan {
+                start: filter_start,
+                end: closure_end,
             },
         })
     }
@@ -1187,6 +1228,65 @@ mod tests {
             }
             other => panic!("expected Tuple, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_cell_with_a_filter_and_no_arg_list() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { cell a: i32 = 1 filter |x: i32| x; }")
+            .unwrap();
+        let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
+            panic!("expected Cell");
+        };
+        let filter = cell.filter.as_ref().expect("filter present");
+        assert!(filter.arg_cells.is_empty());
+        assert!(matches!(filter.closure, Expr::Closure { .. }));
+    }
+
+    #[test]
+    fn parse_cell_with_a_filter_and_an_arg_list() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter(hi) |x: i32, h: i32| x; }",
+            )
+            .unwrap();
+        let ast::SheetItem::Cell(cell) = &sheet.items[1] else {
+            panic!("expected Cell");
+        };
+        let filter = cell.filter.as_ref().expect("filter present");
+        assert_eq!(filter.arg_cells.len(), 1);
+        assert_eq!(filter.arg_cells[0].0, "hi");
+    }
+
+    #[test]
+    fn parse_cell_without_a_filter_leaves_it_none() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { cell a: i32 = 1; }")
+            .unwrap();
+        let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
+            panic!("expected Cell");
+        };
+        assert!(cell.filter.is_none());
+    }
+
+    #[test]
+    fn recovery_malformed_filter_recovers_at_the_next_sheet_item() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell good_before: i32 = 1;
+                    cell bad: i32 = 1 filter |x: i32|;
+                    cell good_after: i32 = 2;
+                }
+            "#,
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
     #[test]
