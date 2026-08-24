@@ -3219,10 +3219,16 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("expected a parse error"),
         };
+        let message = err.message();
         assert!(
-            err.message().starts_with("no operation"),
-            "expected a 'no operation `==`' error from inside the range's right endpoint, got: {}",
-            err.message()
+            message.starts_with("no operation `==`"),
+            "expected a 'no operation `==`' error, got: {message}"
+        );
+        assert!(
+            !message.contains("Range"),
+            "expected the error to be about `i32`/`bool` (the inner endpoint's own comparison), \
+             not `Range<i32>` (which would mean `..` grabbed only `5i32` and `==` applied afterward \
+             to an already-built range) — got: {message}"
         );
     }
 }
