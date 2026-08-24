@@ -16,8 +16,11 @@
 //! expression = or_expression ?eos?.
 //! or_expression = and_expression { "||" and_expression }.
 //! and_expression = comparison_expression { "&&" comparison_expression }.
-//! comparison_expression = bitwise_or_expression
-//!     [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
+//! comparison_expression = range_expression
+//!     [ ("==" | "!=" | "<" | ">" | "<=" | ">=") range_expression ].
+//! range_expression = bitwise_or_expression [ ".." [ bitwise_or_expression ] | "..=" bitwise_or_expression ]
+//!                   | ".." [ bitwise_or_expression ]
+//!                   | "..=" bitwise_or_expression .
 //! bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.
 //! bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.
 //! bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
@@ -765,10 +768,10 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].`
+    /// `comparison_expression = range_expression [ comparison_op range_expression ].`
     fn is_comparison_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
-        if self.is_bitwise_or_expression()? {
+        if self.is_range_expression()? {
             // Longer operators first: must check "==" before "=", "<=" before "<", etc.
             let op_name = if self.is_punctuation("==") {
                 Some("==")
@@ -787,8 +790,8 @@ impl<C: ParserContext> Parser<C> {
             };
 
             if let Some(op_name) = op_name {
-                if !self.is_bitwise_or_expression()? {
-                    return Err(self.error_at("expected bitwise_or_expression"));
+                if !self.is_range_expression()? {
+                    return Err(self.error_at("expected range_expression"));
                 }
                 self.context.apply_op(
                     &self.op_lookup,
@@ -797,6 +800,101 @@ impl<C: ParserContext> Parser<C> {
                     start_span.expect("production has token at start"),
                     self.last_span,
                 )?;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// `range_expression = bitwise_or_expression [ ".." [ bitwise_or_expression ] | "..=" bitwise_or_expression ]
+    ///                   | ".." [ bitwise_or_expression ]
+    ///                   | "..=" bitwise_or_expression .`
+    ///
+    /// Left-factored so every alternative is chosen by one concrete leading token rather
+    /// than by first deciding whether an optional `bitwise_or_expression` is present: the
+    /// three alternatives start with `bitwise_or_expression`'s own FIRST set, the literal
+    /// `".."`, or the literal `"..="` respectively — pairwise disjoint (`..`/`..=` can never
+    /// be the first token of a `bitwise_or_expression`), so picking among them needs exactly
+    /// one token, and none of them opens with a bracketed, possibly-empty non-terminal.
+    ///
+    /// `..`'s right operand is optional wherever it appears (covering, across the three
+    /// alternatives, `Range`/`RangeFrom`/`RangeTo`/`RangeFull`); `..=`'s right operand is
+    /// never optional (covering `RangeInclusive`/`RangeToInclusive`) — there is no
+    /// inclusive-from-only range in Rust, and no such form is registered in the op-table for
+    /// it to dispatch to, so a bare `..=`, or a left operand followed by `..=` and nothing
+    /// after, is a parse error, not a valid empty match.
+    ///
+    /// Endpoints are `bitwise_or_expression`s — the same level this production sits just
+    /// above — so `1 + 2..3 * 4` and `a | b..c & d` both parse with the expected grouping.
+    fn is_range_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
+
+        if self.is_punctuation("..=") {
+            if !self.is_bitwise_or_expression()? {
+                return Err(self.error_at("expected bitwise_or_expression"));
+            }
+            self.context.apply_op(
+                &self.op_lookup,
+                "range_to_inclusive",
+                1,
+                start_span.expect("production has token at start"),
+                self.last_span,
+            )?;
+            return Ok(true);
+        }
+
+        if self.is_punctuation("..") {
+            if self.is_bitwise_or_expression()? {
+                self.context.apply_op(
+                    &self.op_lookup,
+                    "range_to",
+                    1,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
+            } else {
+                self.context.apply_op(
+                    &self.op_lookup,
+                    "range_full",
+                    0,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
+            }
+            return Ok(true);
+        }
+
+        if self.is_bitwise_or_expression()? {
+            if self.is_punctuation("..=") {
+                if !self.is_bitwise_or_expression()? {
+                    return Err(self.error_at("expected bitwise_or_expression"));
+                }
+                self.context.apply_op(
+                    &self.op_lookup,
+                    "range_inclusive",
+                    2,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
+            } else if self.is_punctuation("..") {
+                if self.is_bitwise_or_expression()? {
+                    self.context.apply_op(
+                        &self.op_lookup,
+                        "range",
+                        2,
+                        start_span.expect("production has token at start"),
+                        self.last_span,
+                    )?;
+                } else {
+                    self.context.apply_op(
+                        &self.op_lookup,
+                        "range_from",
+                        1,
+                        start_span.expect("production has token at start"),
+                        self.last_span,
+                    )?;
+                }
             }
             Ok(true)
         } else {
@@ -3027,6 +3125,82 @@ mod tests {
             ClosureParamTypeExpr::Tuple(elements, _) => assert_eq!(elements.len(), 2),
             other => panic!("expected Tuple, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn range_expression_constructs_a_range() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("1i32..5i32").unwrap();
+        assert_eq!(seg.call0::<std::ops::Range<i32>>().unwrap(), 1i32..5i32);
+    }
+
+    #[test]
+    fn range_inclusive_expression_constructs_a_range_inclusive() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("1i32..=5i32").unwrap();
+        assert_eq!(
+            seg.call0::<std::ops::RangeInclusive<i32>>().unwrap(),
+            1i32..=5i32
+        );
+    }
+
+    #[test]
+    fn range_from_expression_constructs_a_range_from() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("3i32..").unwrap();
+        assert_eq!(seg.call0::<std::ops::RangeFrom<i32>>().unwrap(), 3i32..);
+    }
+
+    #[test]
+    fn range_to_expression_constructs_a_range_to() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("..7i32").unwrap();
+        assert_eq!(seg.call0::<std::ops::RangeTo<i32>>().unwrap(), ..7i32);
+    }
+
+    #[test]
+    fn range_to_inclusive_expression_constructs_a_range_to_inclusive() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("..=7i32").unwrap();
+        assert_eq!(
+            seg.call0::<std::ops::RangeToInclusive<i32>>().unwrap(),
+            ..=7i32
+        );
+    }
+
+    #[test]
+    fn range_full_expression_constructs_a_range_full() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("..").unwrap();
+        seg.call0::<std::ops::RangeFull>().unwrap();
+    }
+
+    #[test]
+    fn range_endpoints_are_full_bitwise_or_expressions() {
+        // `1 + 2..3 * 4` must group as `(1 + 2)..(3 * 4)`, matching Rust's own precedence
+        // (range binds looser than every arithmetic/bitwise operator).
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("1i32 + 2i32..3i32 * 4i32").unwrap();
+        assert_eq!(seg.call0::<std::ops::Range<i32>>().unwrap(), 3i32..12i32);
+    }
+
+    #[test]
+    fn chained_ranges_are_a_parse_error() {
+        // Ranges don't chain, matching Rust (`1..2..3` is also a compile error there). No
+        // special "non-chainable" check is needed in `is_range_expression` itself: after
+        // parsing `1..2`, the leftover `..3` fails the top-level `expression = or_expression
+        // <EOF>` check the same way `"10 + 25 25"` already does (see `incomplete_expression`).
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("1i32..2i32..3i32");
+        assert!(result.is_err(), "expected a parse error, got Ok");
+    }
+
+    #[test]
+    fn range_to_inclusive_without_a_right_operand_is_a_parse_error() {
+        // `..=` always requires a right endpoint — there is no inclusive-from-only range.
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("..=");
+        assert!(result.is_err(), "expected a parse error, got Ok");
     }
 }
 
