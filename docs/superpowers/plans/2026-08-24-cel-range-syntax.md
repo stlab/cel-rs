@@ -711,19 +711,23 @@ fn is_comparison_expression(&mut self) -> Result<bool> {
     }
 }
 
-/// `range_expression = [ bitwise_or_expression ] ".." [ bitwise_or_expression ]
-///                   | [ bitwise_or_expression ] "..=" bitwise_or_expression .`
+/// `range_expression = bitwise_or_expression [ ".." [ bitwise_or_expression ] | "..=" bitwise_or_expression ]
+///                   | ".." [ bitwise_or_expression ]
+///                   | "..=" bitwise_or_expression .`
 ///
-/// Both the left and right operand of `..` are optional (covering, in order,
-/// `RangeFull`/`RangeTo`/`RangeFrom`/`Range`); `..=`'s left operand is optional but its
-/// right operand is not (covering `RangeToInclusive`/`RangeInclusive`) — there is no
+/// Left-factored so every alternative is chosen by one concrete leading token rather
+/// than by first deciding whether an optional `bitwise_or_expression` is present: the
+/// three alternatives start with `bitwise_or_expression`'s own FIRST set, the literal
+/// `".."`, or the literal `"..="` respectively — pairwise disjoint (`..`/`..=` can never
+/// be the first token of a `bitwise_or_expression`), so picking among them needs exactly
+/// one token, and none of them opens with a bracketed, possibly-empty non-terminal.
+///
+/// `..`'s right operand is optional wherever it appears (covering, across the three
+/// alternatives, `Range`/`RangeFrom`/`RangeTo`/`RangeFull`); `..=`'s right operand is
+/// never optional (covering `RangeInclusive`/`RangeToInclusive`) — there is no
 /// inclusive-from-only range in Rust, and no such form is registered in the op-table for
-/// it to dispatch to, so a bare `..=` is a parse error, not a valid empty match.
-/// Determining whether a left operand is present needs only one token of lookahead:
-/// `..`/`..=` can never be the first token of a `bitwise_or_expression`, so seeing one
-/// immediately means "no left operand" — this is the same one-token-lookahead style
-/// every other optional construct in this grammar already uses (e.g. `if`'s optional
-/// `else`).
+/// it to dispatch to, so a bare `..=`, or a left operand followed by `..=` and nothing
+/// after, is a parse error, not a valid empty match.
 ///
 /// Endpoints are `bitwise_or_expression`s — the same level this production sits just
 /// above — so `1 + 2..3 * 4` and `a | b..c & d` both parse with the expected grouping.
