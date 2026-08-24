@@ -711,16 +711,22 @@ fn is_comparison_expression(&mut self) -> Result<bool> {
     }
 }
 
-/// `range_expression = bitwise_or_expression [ (".." | "..=") bitwise_or_expression ]
-///                   | (".." | "..=") bitwise_or_expression
-///                   | ".." .`
+/// `range_expression = [ bitwise_or_expression ] ".." [ bitwise_or_expression ]
+///                   | [ bitwise_or_expression ] "..=" bitwise_or_expression .`
+///
+/// Both the left and right operand of `..` are optional (covering, in order,
+/// `RangeFull`/`RangeTo`/`RangeFrom`/`Range`); `..=`'s left operand is optional but its
+/// right operand is not (covering `RangeToInclusive`/`RangeInclusive`) — there is no
+/// inclusive-from-only range in Rust, and no such form is registered in the op-table for
+/// it to dispatch to, so a bare `..=` is a parse error, not a valid empty match.
+/// Determining whether a left operand is present needs only one token of lookahead:
+/// `..`/`..=` can never be the first token of a `bitwise_or_expression`, so seeing one
+/// immediately means "no left operand" — this is the same one-token-lookahead style
+/// every other optional construct in this grammar already uses (e.g. `if`'s optional
+/// `else`).
 ///
 /// Endpoints are `bitwise_or_expression`s — the same level this production sits just
 /// above — so `1 + 2..3 * 4` and `a | b..c & d` both parse with the expected grouping.
-/// Constructs one of `Range`/`RangeFrom`/`RangeTo`/`RangeFull`/`RangeInclusive`/
-/// `RangeToInclusive` depending on which endpoints are present and which operator was
-/// used; `..=` never omits its right endpoint (there is no inclusive-from-only range in
-/// Rust, and none is registered in the op-table for it to dispatch to).
 fn is_range_expression(&mut self) -> Result<bool> {
     let start_span = self.peek_span();
 
