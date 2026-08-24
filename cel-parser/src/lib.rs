@@ -13,14 +13,14 @@
 //! # Grammar
 //!
 //! ```text
-//! expression = or_expression ?eos?.
+//! expression = range_expression ?eos?.
+//! range_expression = ( or_expression [ ".." [ or_expression ] | "..=" or_expression ] )
+//!                   | ( ".." [ or_expression ] )
+//!                   | ( "..=" or_expression ) .
 //! or_expression = and_expression { "||" and_expression }.
 //! and_expression = comparison_expression { "&&" comparison_expression }.
-//! comparison_expression = range_expression
-//!     [ ("==" | "!=" | "<" | ">" | "<=" | ">=") range_expression ].
-//! range_expression = bitwise_or_expression [ ".." [ bitwise_or_expression ] | "..=" bitwise_or_expression ]
-//!                   | ".." [ bitwise_or_expression ]
-//!                   | "..=" bitwise_or_expression .
+//! comparison_expression = bitwise_or_expression
+//!     [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].
 //! bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression }.
 //! bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression }.
 //! bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression }.
@@ -699,9 +699,9 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `expression = or_expression <EOF>.`
+    /// `expression = range_expression ?eos?.`
     pub fn is_expression(&mut self) -> Result<bool> {
-        if !self.is_or_expression()? {
+        if !self.is_range_expression()? {
             return Ok(false);
         }
         if self.peek_token().is_some() {
@@ -768,10 +768,11 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `comparison_expression = range_expression [ comparison_op range_expression ].`
+    /// `comparison_expression = bitwise_or_expression
+    ///     [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].`
     fn is_comparison_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
-        if self.is_range_expression()? {
+        if self.is_bitwise_or_expression()? {
             // Longer operators first: must check "==" before "=", "<=" before "<", etc.
             let op_name = if self.is_punctuation("==") {
                 Some("==")
@@ -790,8 +791,8 @@ impl<C: ParserContext> Parser<C> {
             };
 
             if let Some(op_name) = op_name {
-                if !self.is_range_expression()? {
-                    return Err(self.error_at("expected range_expression"));
+                if !self.is_bitwise_or_expression()? {
+                    return Err(self.error_at("expected bitwise_or_expression"));
                 }
                 self.context.apply_op(
                     &self.op_lookup,
@@ -807,16 +808,16 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `range_expression = bitwise_or_expression [ ".." [ bitwise_or_expression ] | "..=" bitwise_or_expression ]
-    ///                   | ".." [ bitwise_or_expression ]
-    ///                   | "..=" bitwise_or_expression .`
+    /// `range_expression = ( or_expression [ ".." [ or_expression ] | "..=" or_expression ] )
+    ///                   | ( ".." [ or_expression ] )
+    ///                   | ( "..=" or_expression ) .`
     ///
     /// Left-factored so every alternative is chosen by one concrete leading token rather
-    /// than by first deciding whether an optional `bitwise_or_expression` is present: the
-    /// three alternatives start with `bitwise_or_expression`'s own FIRST set, the literal
-    /// `".."`, or the literal `"..="` respectively — pairwise disjoint (`..`/`..=` can never
-    /// be the first token of a `bitwise_or_expression`), so picking among them needs exactly
-    /// one token, and none of them opens with a bracketed, possibly-empty non-terminal.
+    /// than by first deciding whether an optional `or_expression` is present: the three
+    /// alternatives start with `or_expression`'s own FIRST set, the literal `".."`, or the
+    /// literal `"..="` respectively — pairwise disjoint (`..`/`..=` can never be the first
+    /// token of an `or_expression`), so picking among them needs exactly one token, and none
+    /// of them opens with a bracketed, possibly-empty non-terminal.
     ///
     /// `..`'s right operand is optional wherever it appears (covering, across the three
     /// alternatives, `Range`/`RangeFrom`/`RangeTo`/`RangeFull`); `..=`'s right operand is
@@ -825,14 +826,17 @@ impl<C: ParserContext> Parser<C> {
     /// it to dispatch to, so a bare `..=`, or a left operand followed by `..=` and nothing
     /// after, is a parse error, not a valid empty match.
     ///
-    /// Endpoints are `bitwise_or_expression`s — the same level this production sits just
-    /// above — so `1 + 2..3 * 4` and `a | b..c & d` both parse with the expected grouping.
+    /// Operands are `or_expression` — matching Rust's own precedence, where `..`/`..=` bind
+    /// *looser* than `||` (and everything below it: `&&`, comparisons, bitwise ops,
+    /// arithmetic). So `1 + 2..3 * 4` still groups as `(1 + 2)..(3 * 4)` (arithmetic is well
+    /// inside `or_expression`'s own chain), and `a == b..c == d` groups the *whole*
+    /// comparisons as the two endpoints: `(a == b)..(c == d)`, not `a == (b..c) == d`.
     fn is_range_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
 
         if self.is_punctuation("..=") {
-            if !self.is_bitwise_or_expression()? {
-                return Err(self.error_at("expected bitwise_or_expression"));
+            if !self.is_or_expression()? {
+                return Err(self.error_at("expected or_expression"));
             }
             self.context.apply_op(
                 &self.op_lookup,
@@ -845,7 +849,7 @@ impl<C: ParserContext> Parser<C> {
         }
 
         if self.is_punctuation("..") {
-            if self.is_bitwise_or_expression()? {
+            if self.is_or_expression()? {
                 self.context.apply_op(
                     &self.op_lookup,
                     "range_to",
@@ -865,10 +869,10 @@ impl<C: ParserContext> Parser<C> {
             return Ok(true);
         }
 
-        if self.is_bitwise_or_expression()? {
+        if self.is_or_expression()? {
             if self.is_punctuation("..=") {
-                if !self.is_bitwise_or_expression()? {
-                    return Err(self.error_at("expected bitwise_or_expression"));
+                if !self.is_or_expression()? {
+                    return Err(self.error_at("expected or_expression"));
                 }
                 self.context.apply_op(
                     &self.op_lookup,
@@ -878,7 +882,7 @@ impl<C: ParserContext> Parser<C> {
                     self.last_span,
                 )?;
             } else if self.is_punctuation("..") {
-                if self.is_bitwise_or_expression()? {
+                if self.is_or_expression()? {
                     self.context.apply_op(
                         &self.op_lookup,
                         "range",
@@ -3201,6 +3205,25 @@ mod tests {
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str("..=");
         assert!(result.is_err(), "expected a parse error, got Ok");
+    }
+
+    #[test]
+    fn range_endpoint_absorbs_a_trailing_comparison_confirming_or_expression_operands() {
+        // Confirms range operands are `or_expression`, not `bitwise_or_expression`: in
+        // `1i32..5i32 == true`, `5i32 == true` must group together as the range's right
+        // endpoint's own `or_expression` and fail *there* (`i32` vs `bool`) — proving the
+        // endpoint absorbed the whole comparison, rather than `..` grabbing only `5i32` and
+        // `==` applying afterward to an already-built `Range`.
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = match parser.parse_str("1i32..5i32 == true") {
+            Err(e) => e,
+            Ok(_) => panic!("expected a parse error"),
+        };
+        assert!(
+            err.message().starts_with("no operation"),
+            "expected a 'no operation `==`' error from inside the range's right endpoint, got: {}",
+            err.message()
+        );
     }
 }
 
