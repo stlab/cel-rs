@@ -24,14 +24,143 @@ No `cel-runtime` changes are needed: `DynSegment::op0`/`op1`/`op2` already push/
 
 ---
 
-### Task 1: Lexer — combine `.`+`.` and `.`+`.`+`=` into single tokens
+### Task 1: Grammar hygiene — left-factor `parameter_list`'s optionality to its call site
+
+Unrelated to range syntax itself, but surfaced while editing this same grammar: `parameter_list`'s own production currently bakes in "zero or more" (`parameter_list = [ or_expression { "," or_expression } ]`), so its one caller invokes it unconditionally and relies on it to silently produce `0` for an empty `()`. Move the optionality to the call site instead — `parameter_list` becomes "one or more" (`or_expression { "," or_expression }`), and `postfix_expression`'s own grammar line changes from `"(" parameter_list ")"` to `"(" [ parameter_list ] ")"`, with `is_postfix_expression` deciding explicitly (by peeking for `)`) whether to call it at all. Same accepted language, same argument counts in every case exercised by the existing test suite (verified below); the only observable change is that a malformed call with a leading comma right after `(` (e.g. `f(,5)`, not covered by any existing test) now reports `"expected expression"` at the point of failure instead of a delayed `"expected closing parenthesis"`.
+
+**Files:**
+
+- Modify: `cel-parser/src/lib.rs` (top-of-file grammar summary comment, `parameter_list`, `is_postfix_expression`)
+- Test: `cel-parser/src/lib.rs` (existing `#[cfg(test)] mod tests`)
+
+**Interfaces:**
+
+- Consumes: nothing from later tasks — this is pre-existing grammar, independent of range syntax.
+- Produces: `parameter_list(&mut self) -> Result<usize>` now requires at least one `or_expression` (errors otherwise); `is_postfix_expression` gains an explicit zero-args check before calling it. No later task depends on this — it's ordered first only because the user asked for it while the file was already open for grammar changes.
+
+- [ ] **Step 1: Write a failing test for the new error message on a leading comma**
+
+```rust
+#[test]
+fn call_leading_comma_reports_expected_expression_at_the_comma() {
+    let mut lookup = OpLookup::new();
+    lookup.push_scope(
+        |name, segment, num_operands, _span| match (name, num_operands) {
+            ("f", 0) => {
+                segment.op0(|| 0i32);
+                Ok(true)
+            }
+            _ => Ok(false),
+        },
+    );
+    let mut parser = CELParser::new(lookup);
+    let err = match parser.parse_str("f(,5)") {
+        Err(e) => e,
+        Ok(_) => panic!("expected parse error for leading comma"),
+    };
+    assert_eq!(err.message(), "expected expression");
+}
+```
+
+- [ ] **Step 2: Run it to verify it fails (with today's message, not the new one)**
+
+Run: `cargo test -p cel-parser call_leading_comma_reports_expected_expression_at_the_comma`
+Expected: FAIL — today this input produces `"expected closing parenthesis"` (parameter_list currently swallows the empty case and the mismatch is only caught once the parser looks for `)`), not `"expected expression"`.
+
+- [ ] **Step 3: Left-factor `parameter_list` and its call site**
+
+```rust
+/// `parameter_list = or_expression { "," or_expression }.`
+///
+/// Always parses at least one `or_expression` — callers that need to allow zero
+/// arguments (`postfix_expression`'s `"(" [ parameter_list ] ")"`) check for that
+/// possibility themselves before calling, rather than `parameter_list` swallowing it.
+///
+/// Returns the argument count.
+///
+/// # Errors
+/// Returns an error if the first token can't start an `or_expression`, or if a comma
+/// isn't followed by one.
+fn parameter_list(&mut self) -> Result<usize> {
+    if !self.is_or_expression()? {
+        return Err(self.error_at("expected expression"));
+    }
+    let mut count = 1;
+    while self.is_punctuation(",") {
+        if !self.is_or_expression()? {
+            return Err(self.error_at("expected expression after comma"));
+        }
+        count += 1;
+    }
+    Ok(count)
+}
+```
+
+In `is_postfix_expression`, replace the unconditional call:
+
+```rust
+self.advance(); // consume "("
+let arg_count = self.parameter_list()?;
+```
+
+with an explicit check for the empty case:
+
+```rust
+self.advance(); // consume "("
+let arg_count = if matches!(
+    self.peek_token(),
+    Some(Token::CloseDelim {
+        delimiter: Delimiter::Parenthesis,
+        ..
+    })
+) {
+    0
+} else {
+    self.parameter_list()?
+};
+```
+
+- [ ] **Step 4: Update the grammar doc comments**
+
+Top-of-file summary (`//!` block):
+
+```text
+postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." unsuffixed_integer }.
+```
+
+```text
+parameter_list = or_expression { "," or_expression }.
+```
+
+`is_postfix_expression`'s own doc comment (currently `` `postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.` ``) gets the same `[ parameter_list ]` update.
+
+- [ ] **Step 5: Run the new test and the existing call/parameter-list tests to verify no regressions**
+
+Run: `cargo test -p cel-parser call_leading_comma_reports_expected_expression_at_the_comma call_empty_arg_list call_single_arg call_multiple_args call_missing_closing_paren call_trailing_comma call_undefined_call_op`
+Expected: PASS — the new test now gets `"expected expression"`; all six pre-existing tests are unaffected (`call_empty_arg_list`'s `"f()"` is caught by the new peek-for-`)` check before `parameter_list` is ever called; `call_missing_closing_paren`'s `"f(42 43)"` and `call_trailing_comma`'s `"f(42,)"` both still reach the same error paths as before, since their first token after `(` is a valid expression start, not `)`).
+
+- [ ] **Step 6: Run the full workspace test suite**
+
+Run: `cargo test --workspace`
+Expected: PASS, no regressions elsewhere (in particular any `adam-lang`/`cel-rs-macros` test that exercises a function call with arguments).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add cel-parser/src/lib.rs
+git commit -m "refactor(cel-parser): left-factor parameter_list's optionality to its call site"
+```
+
+---
+
+### Task 2: Lexer — combine `.`+`.` and `.`+`.`+`=` into single tokens
 
 **Files:**
 - Modify: `cel-parser/src/lex_lexer.rs`
 - Test: `cel-parser/src/lex_lexer.rs` (existing `#[cfg(test)] mod tests`)
 
 **Interfaces:**
-- Produces: `PunctOp::Three([char; 3])` variant (alongside the existing `One`/`Two`); `LexLexer` emits `Token::Punct { op: PunctOp::Two(['.', '.']), .. }` for `..` and `Token::Punct { op: PunctOp::Three(['.', '.', '=']), .. }` for `..=`. Consumed by Task 4's `is_punctuation("..")`/`is_punctuation("..=")` calls, which need no changes themselves — `is_punctuation` already compares generically via `PunctOp`'s `PartialEq<str>`.
+- Produces: `PunctOp::Three([char; 3])` variant (alongside the existing `One`/`Two`); `LexLexer` emits `Token::Punct { op: PunctOp::Two(['.', '.']), .. }` for `..` and `Token::Punct { op: PunctOp::Three(['.', '.', '=']), .. }` for `..=`. Consumed by Task 5's `is_punctuation("..")`/`is_punctuation("..=")` calls, which need no changes themselves — `is_punctuation` already compares generically via `PunctOp`'s `PartialEq<str>`.
 
 - [ ] **Step 1: Write a failing test proving `proc_macro2` doesn't merge a trailing dot-dot into a float literal**
 
@@ -249,15 +378,15 @@ git commit -m "feat(cel-parser): lex '..' and '..=' as combined punctuation toke
 
 ---
 
-### Task 2: Op-table — two-endpoint range constructors (`Range<T>`, `RangeInclusive<T>`)
+### Task 3: Op-table — two-endpoint range constructors (`Range<T>`, `RangeInclusive<T>`)
 
 **Files:**
 - Modify: `cel-parser/src/op_table.rs`
 - Test: `cel-parser/src/op_table.rs` (existing `#[cfg(test)] mod tests`)
 
 **Interfaces:**
-- Consumes: nothing from Task 1 (this task can be written and tested independently, via direct `OpLookup::lookup` calls, before the grammar wiring in Task 4 exists).
-- Produces: op-table entries `"range"` (arity 2) and `"range_inclusive"` (arity 2), one signature per numeric type each, dispatched through the existing `BuiltinScope::lookup`/`OpLookup::lookup` machinery exactly like `"+"`. Consumed by Task 4's `is_range_expression`.
+- Consumes: nothing from Task 2 (this task can be written and tested independently, via direct `OpLookup::lookup` calls, before the grammar wiring in Task 5 exists).
+- Produces: op-table entries `"range"` (arity 2) and `"range_inclusive"` (arity 2), one signature per numeric type each, dispatched through the existing `BuiltinScope::lookup`/`OpLookup::lookup` machinery exactly like `"+"`. Consumed by Task 5's `is_range_expression`.
 
 - [ ] **Step 1: Write failing tests for both op-table entries**
 
@@ -390,14 +519,14 @@ git commit -m "feat(cel-parser): register Range<T>/RangeInclusive<T> constructio
 
 ---
 
-### Task 3: Op-table — one-endpoint and zero-endpoint range constructors
+### Task 4: Op-table — one-endpoint and zero-endpoint range constructors
 
 **Files:**
 - Modify: `cel-parser/src/op_table.rs`
 
 **Interfaces:**
-- Consumes: the `sig!` macro, `BUILTINS` map, and `push_library_scope`/`OpLookup::new` — all already present (Task 2 doesn't need to land first; this task is independent of it, just conventionally ordered after).
-- Produces: op-table entries `"range_from"`, `"range_to"`, `"range_to_inclusive"` (arity 1 each) and `"range_full"` (arity 0, via a new `range_full_scope`). Consumed by Task 4's `is_range_expression`.
+- Consumes: the `sig!` macro, `BUILTINS` map, and `push_library_scope`/`OpLookup::new` — all already present (Task 3 doesn't need to land first; this task is independent of it, just conventionally ordered after).
+- Produces: op-table entries `"range_from"`, `"range_to"`, `"range_to_inclusive"` (arity 1 each) and `"range_full"` (arity 0, via a new `range_full_scope`). Consumed by Task 5's `is_range_expression`.
 
 - [ ] **Step 1: Write failing tests for all four**
 
@@ -577,13 +706,13 @@ git commit -m "feat(cel-parser): register RangeFrom/RangeTo/RangeToInclusive/Ran
 
 ---
 
-### Task 4: Grammar — `range_expression` production and end-to-end parsing
+### Task 5: Grammar — `range_expression` production and end-to-end parsing
 
 **Files:**
 - Modify: `cel-parser/src/lib.rs`
 
 **Interfaces:**
-- Consumes: `is_bitwise_or_expression` (existing, unchanged), `self.context.apply_op` (existing `ParserContext` method), the six op-table names from Tasks 1–3 (`"range"`, `"range_inclusive"`, `"range_from"`, `"range_to"`, `"range_to_inclusive"`, `"range_full"`).
+- Consumes: `is_bitwise_or_expression` (existing, unchanged), `self.context.apply_op` (existing `ParserContext` method), the six op-table names from Tasks 3–4 (`"range"`, `"range_inclusive"`, `"range_from"`, `"range_to"`, `"range_to_inclusive"`, `"range_full"`).
 - Produces: `is_range_expression(&mut self) -> Result<bool>`, wired into `is_comparison_expression` in place of its two direct `is_bitwise_or_expression()?` calls. No new public API — `parse_str`/`parse_str_ast` pick this up automatically since they already route through `is_expression -> is_or_expression -> ... -> is_comparison_expression`.
 
 - [ ] **Step 1: Write failing end-to-end tests for all six forms**
@@ -665,7 +794,7 @@ fn range_to_inclusive_without_a_right_operand_is_a_parse_error() {
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p cel-parser range_expression_constructs_a_range range_inclusive_expression_constructs_a_range_inclusive range_from_expression_constructs_a_range_from range_to_expression_constructs_a_range_to range_to_inclusive_expression_constructs_a_range_to_inclusive range_full_expression_constructs_a_range_full range_endpoints_are_full_bitwise_or_expressions chained_ranges_are_a_parse_error range_to_inclusive_without_a_right_operand_is_a_parse_error`
-Expected: FAIL — `is_range_expression` doesn't exist yet; `.`/`..`/`..=` aren't recognized at the grammar level (only at the lexer level from Task 1).
+Expected: FAIL — `is_range_expression` doesn't exist yet; `.`/`..`/`..=` aren't recognized at the grammar level (only at the lexer level from Task 2).
 
 - [ ] **Step 3: Add `is_range_expression` and wire it into `is_comparison_expression`**
 
@@ -835,7 +964,7 @@ git commit -m "feat(cel-parser): add range_expression grammar production for all
 ## Out of Scope (confirmed, not deferred by accident)
 
 - Any operation on a constructed range value beyond holding/returning it: no `==`, no `.contains()`, no iteration, no `for` loops, no slicing/indexing with a range.
-- `cel-parser::ast`/`ty.rs` changes: none needed — named operators already flow through the generic `Expr::Op`/`builtin_operand_types` machinery. Confirmed by Task 4's tests exercising `parse_str` (the `DynSegmentContext` path); if a follow-up plan touches `parse_str_ast`, add an equivalent `Expr::Op { name: "range", .. }`-shape assertion there rather than assuming it works.
+- `cel-parser::ast`/`ty.rs` changes: none needed — named operators already flow through the generic `Expr::Op`/`builtin_operand_types` machinery. Confirmed by Task 5's tests exercising `parse_str` (the `DynSegmentContext` path); if a follow-up plan touches `parse_str_ast`, add an equivalent `Expr::Op { name: "range", .. }`-shape assertion there rather than assuming it works.
 - `cel-runtime` changes: none needed — `op0`/`op1`/`op2` already push/pop any `'static` type generically.
-- `cel-rs-macros` changes: none anticipated (it calls into `cel-parser` generically); not verified by a dedicated task here — if `cargo test -p cel-rs-macros` regresses in Step 5 of Task 4, treat that as a signal this assumption was wrong, not as unrelated flakiness.
+- `cel-rs-macros` changes: none anticipated (it calls into `cel-parser` generically); not verified by a dedicated task here — if `cargo test -p cel-rs-macros` regresses in Step 5 of Task 5, treat that as a signal this assumption was wrong, not as unrelated flakiness.
 - `adam-lang`'s filter grammar (deduced dependencies, `_` placeholder, `FilterKind`, `begin` UI): separate, later plans per the spec.
