@@ -916,6 +916,47 @@ static GREATER_THAN_OR_EQUAL_SIGNATURES: &[OpSignature] = &[
         .op2(|a: String, b: String| a >= b)),
 ];
 
+// Range construction (`a..b`, `a..=b`) — no operations beyond construction; see the
+// design spec's "Compatibility Notes" for why the recognized structural form is a real
+// `RangeInclusive<T>` type rather than a name-matched builtin.
+static RANGE_SIGNATURES: &[OpSignature] = &[
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2(|a: u8, b: u8| a..b)),
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2(|a: u16, b: u16| a..b)),
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2(|a: u32, b: u32| a..b)),
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2(|a: u64, b: u64| a..b)),
+    sig!(TYPE_U128, 2, |seg, _span| seg.op2(|a: u128, b: u128| a..b)),
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
+        .op2(|a: usize, b: usize| a..b)),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2(|a: i8, b: i8| a..b)),
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2(|a: i16, b: i16| a..b)),
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2(|a: i32, b: i32| a..b)),
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2(|a: i64, b: i64| a..b)),
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2(|a: i128, b: i128| a..b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg
+        .op2(|a: isize, b: isize| a..b)),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a..b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a..b)),
+];
+
+static RANGE_INCLUSIVE_SIGNATURES: &[OpSignature] = &[
+    sig!(TYPE_U8, 2, |seg, _span| seg.op2(|a: u8, b: u8| a..=b)),
+    sig!(TYPE_U16, 2, |seg, _span| seg.op2(|a: u16, b: u16| a..=b)),
+    sig!(TYPE_U32, 2, |seg, _span| seg.op2(|a: u32, b: u32| a..=b)),
+    sig!(TYPE_U64, 2, |seg, _span| seg.op2(|a: u64, b: u64| a..=b)),
+    sig!(TYPE_U128, 2, |seg, _span| seg.op2(|a: u128, b: u128| a..=b)),
+    sig!(TYPE_USIZE, 2, |seg, _span| seg
+        .op2(|a: usize, b: usize| a..=b)),
+    sig!(TYPE_I8, 2, |seg, _span| seg.op2(|a: i8, b: i8| a..=b)),
+    sig!(TYPE_I16, 2, |seg, _span| seg.op2(|a: i16, b: i16| a..=b)),
+    sig!(TYPE_I32, 2, |seg, _span| seg.op2(|a: i32, b: i32| a..=b)),
+    sig!(TYPE_I64, 2, |seg, _span| seg.op2(|a: i64, b: i64| a..=b)),
+    sig!(TYPE_I128, 2, |seg, _span| seg.op2(|a: i128, b: i128| a..=b)),
+    sig!(TYPE_ISIZE, 2, |seg, _span| seg
+        .op2(|a: isize, b: isize| a..=b)),
+    sig!(TYPE_F32, 2, |seg, _span| seg.op2(|a: f32, b: f32| a..=b)),
+    sig!(TYPE_F64, 2, |seg, _span| seg.op2(|a: f64, b: f64| a..=b)),
+];
+
 /// Compile-time perfect hash map for built-in operations.
 ///
 /// Maps operator symbols to their signature arrays for O(1) lookup.
@@ -935,6 +976,8 @@ static BUILTINS: phf::Map<&'static str, &'static [OpSignature]> = phf_map! {
     "<=" => LESS_THAN_OR_EQUAL_SIGNATURES,
     ">" => GREATER_THAN_SIGNATURES,
     ">=" => GREATER_THAN_OR_EQUAL_SIGNATURES,
+    "range" => RANGE_SIGNATURES,
+    "range_inclusive" => RANGE_INCLUSIVE_SIGNATURES,
 };
 
 /// A single built-in overload's declared operand types, exposed for the static type checker
@@ -2865,5 +2908,75 @@ mod tests {
             .expect("round is a library scope and must survive isolation");
         lookup.restore_scopes(isolated);
         assert_eq!(segment.peek_stack_infos(1).len(), 1); // the RoundFn marker was pushed
+    }
+
+    #[test]
+    fn range_i32_constructs_a_range() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1i32);
+        segment.just(5i32);
+        lookup.lookup(
+            "range",
+            &mut segment,
+            2,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        assert_eq!(segment.call0::<std::ops::Range<i32>>()?, 1i32..5i32);
+        Ok(())
+    }
+
+    #[test]
+    fn range_f64_constructs_a_range() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1.5f64);
+        segment.just(5.5f64);
+        lookup.lookup(
+            "range",
+            &mut segment,
+            2,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        assert_eq!(segment.call0::<std::ops::Range<f64>>()?, 1.5f64..5.5f64);
+        Ok(())
+    }
+
+    #[test]
+    fn range_inclusive_i32_constructs_a_range_inclusive() -> Result<()> {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1i32);
+        segment.just(5i32);
+        lookup.lookup(
+            "range_inclusive",
+            &mut segment,
+            2,
+            Span::call_site(),
+            Span::call_site(),
+        )?;
+        assert_eq!(
+            segment.call0::<std::ops::RangeInclusive<i32>>()?,
+            1i32..=5i32
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn range_rejects_mismatched_operand_types() {
+        let lookup = OpLookup::new();
+        let mut segment = DynSegment::new::<()>();
+        segment.just(1i32);
+        segment.just(5.0f64);
+        let result = lookup.lookup(
+            "range",
+            &mut segment,
+            2,
+            Span::call_site(),
+            Span::call_site(),
+        );
+        assert!(result.is_err(), "expected a type-mismatch error, got Ok");
     }
 }
