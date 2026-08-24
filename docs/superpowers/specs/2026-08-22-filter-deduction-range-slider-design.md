@@ -139,17 +139,48 @@ and continues to hold once it does, with no changes needed at this layer.
 
 ### Range Grammar
 
+**Corrected from an earlier draft of this spec**, which placed `range_expression` between
+`comparison_expression` and `additive_expression` — too tight: Rust's own range operator binds
+*looser* than `||` (it sits just above assignment/`return`/closures in Rust's precedence table,
+below everything else), not down among the arithmetic/comparison operators. The corrected grammar:
+
 ```ebnf
-range_expression = additive_expression [ "..=" additive_expression ] .
+expression       = range_expression .
+range_expression = ( or_expression [ ".." [ or_expression ] | "..=" or_expression ] )
+                  | ( ".." [ or_expression ] )
+                  | ( "..=" or_expression ) .
 ```
 
-Inserted between `comparison_expression` and `additive_expression` in `cel-parser`'s grammar
-(non-chainable — `a..=b..=c` is not a valid range expression, matching Rust's own range syntax).
+`range_expression` replaces `or_expression` as `expression`'s own top-level production, with
+`or_expression` operands — checked once, at the top of the grammar, rather than inserted partway
+down the comparison chain. Still non-chainable (`a..=b..=c` is not a valid range expression,
+matching Rust) — with `range_expression` no longer nested inside a lower-precedence production,
+this falls out from ordinary leftover-token handling at whatever now plays `expression`'s old
+"and nothing else follows" role (see below), not from a bespoke check.
+
+This generalizes at the *grammar* level to all six of Rust's range forms
+(`Range`/`RangeFrom`/`RangeTo`/`RangeFull` alongside `RangeInclusive`/`RangeToInclusive`) — that
+generalization is the implementing plan's concern, not this spec's; a filter only ever needs the
+one inclusive, both-endpoints form, `lo..=hi`.
+
+**A consequence for `cel-parser` itself:** `expression` previously meant both "this production"
+and "and nothing else follows" (`expression = or_expression ?eos?.`, enforced by
+`is_expression()`). Once `range_expression` sits above `or_expression`, that's no longer a
+property `expression` itself should bake in — the end-of-stream check moves to a separate
+`parse_expression()`-style helper, kept only for the one real caller that needs it:
+`cel-rs-macros`'s `expression!` proc-macro (which must still reject trailing tokens in a macro
+body). adam-lang's own entry points (cell initializers, relationship bindings, conditionals'
+match expressions, etc.) already parse an expression embedded in a larger token stream and never
+required end-of-stream — they gain range syntax for free by parsing `expression` instead of
+`or_expression` directly, with no behavior change to their own "there's more sheet syntax after
+this" handling.
 
 **Implementation note for the plan:** `cel-parser`'s lexer currently combines 2-token punctuation
 (`==`, `<=`, `>=`, `&&`, `||`) into single ops; `..=` is three tokens (`.`, `.`, `=`) and needs
 either a 3-token lookahead added to the combiner or an intermediate `..` token combined with a
-trailing `=`. Flagging now since it's a real (if small) piece of lexer work, not just grammar.
+trailing `=`. (Already implemented, alongside full six-form support, in
+`docs/superpowers/plans/2026-08-24-cel-range-syntax.md`; this note is left for historical
+context.)
 
 ### Type checking
 
