@@ -26,14 +26,14 @@
 //! multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression }.
 //! cast_expression = unary_expression { "as" identifier }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
-//! postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.
+//! postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." unsuffixed_integer }.
 //! primary_expression = literal | identifier | tuple_or_group | if_expression | closure_expression.
 //! tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".
 //! if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].
 //! closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression.
 //! closure_param = identifier ":" closure_type_expression.
 //! closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")".
-//! parameter_list = [ or_expression { "," or_expression } ].
+//! parameter_list = or_expression { "," or_expression }.
 //! ```
 //!
 //! # Note
@@ -1033,7 +1033,7 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.`
+    /// `postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." unsuffixed_integer }.`
     ///
     /// The repetition allows chained indices (`t.0.1`): each `"." unsuffixed_integer`
     /// is applied in turn to whatever value the previous step left on top of the
@@ -1055,7 +1055,17 @@ impl<C: ParserContext> Parser<C> {
                 })
             ) {
                 self.advance(); // consume "("
-                let arg_count = self.parameter_list()?;
+                let arg_count = if matches!(
+                    self.peek_token(),
+                    Some(Token::CloseDelim {
+                        delimiter: Delimiter::Parenthesis,
+                        ..
+                    })
+                ) {
+                    0
+                } else {
+                    self.parameter_list()?
+                };
                 match self.peek_token() {
                     Some(Token::CloseDelim {
                         delimiter: Delimiter::Parenthesis,
@@ -1149,19 +1159,27 @@ impl<C: ParserContext> Parser<C> {
         Ok(())
     }
 
-    /// `parameter_list = [ or_expression { "," or_expression } ].`
+    /// `parameter_list = or_expression { "," or_expression }.`
+    ///
+    /// Always parses at least one `or_expression` — callers that need to allow zero
+    /// arguments (`postfix_expression`'s `"(" [ parameter_list ] ")"`) check for that
+    /// possibility themselves before calling, rather than `parameter_list` swallowing it.
     ///
     /// Returns the argument count.
+    ///
+    /// # Errors
+    /// Returns an error if the first token can't start an `or_expression`, or if a comma
+    /// isn't followed by one.
     fn parameter_list(&mut self) -> Result<usize> {
-        let mut count = 0;
-        if self.is_or_expression()? {
-            count += 1;
-            while self.is_punctuation(",") {
-                if !self.is_or_expression()? {
-                    return Err(self.error_at("expected expression after comma"));
-                }
-                count += 1;
+        if !self.is_or_expression()? {
+            return Err(self.error_at("expected expression"));
+        }
+        let mut count = 1;
+        while self.is_punctuation(",") {
+            if !self.is_or_expression()? {
+                return Err(self.error_at("expected expression after comma"));
             }
+            count += 1;
         }
         Ok(count)
     }
@@ -2577,6 +2595,26 @@ mod tests {
             "error should report no operation found, got: {}",
             err.message()
         );
+    }
+
+    #[test]
+    fn call_leading_comma_reports_expected_expression_at_the_comma() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
+        let mut parser = CELParser::new(lookup);
+        let err = match parser.parse_str("f(,5)") {
+            Err(e) => e,
+            Ok(_) => panic!("expected parse error for leading comma"),
+        };
+        assert_eq!(err.message(), "expected expression");
     }
 
     #[test]
