@@ -41,7 +41,15 @@
 //!
 //! # Note
 //!
-//! `?eos?` denotes end of stream.
+//! `?eos?` denotes end of stream. `expression` above is the bare grammar production and does
+//! not by itself require end-of-stream — [`Parser::is_expression`] only checks the grammar.
+//! [`Parser::parse_tokens_ctx`] (and the `parse_tokens`/`parse_str`/`parse_tokens_ast`/
+//! `parse_str_ast` convenience wrappers built on it) additionally require end-of-stream, for
+//! parsing a whole, self-contained token stream (e.g. `cel-rs-macros`'s `expression!`
+//! proc-macro, which must reject a macro body with anything left over).
+//! [`Parser::parse_expression_ctx`] (and its `parse_expression`/`parse_expression_ast`
+//! wrappers) do not, for parsing an expression embedded in a larger token stream — this is
+//! what adam-lang's entry points use.
 //!
 //! # Examples
 //!
@@ -64,8 +72,7 @@
 //!
 //! let input = TokenStream::from_str("10").unwrap();
 //! let mut parser = CELParser::new(OpLookup::new());
-//! parser.set_tokens(input.into_iter());
-//! let result = parser.is_expression();
+//! let result = parser.parse_tokens(input.into_iter());
 //! assert!(result.is_ok());
 //! ```
 //!
@@ -84,9 +91,8 @@
 //! "#; // Invalid: missing operator
 //! let input = TokenStream::from_str(source).unwrap();
 //! let mut parser = CELParser::new(OpLookup::new());
-//! parser.set_tokens(input.into_iter());
 //!
-//! if let Err(e) = parser.is_expression() {
+//! if let Err(e) = parser.parse_tokens(input.into_iter()) {
 //!     // Format error starting at line 1
 //!     println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::plain()));
 //! }
@@ -388,8 +394,7 @@ fn elements_to_associated(elements: &[ClosureParamType]) -> Vec<cel_runtime::Ass
 ///
 /// let input = TokenStream::from_str("10").unwrap();
 /// let mut parser = CELParser::new(OpLookup::new());
-/// parser.set_tokens(input.into_iter());
-/// let result = parser.is_expression();
+/// let result = parser.parse_tokens(input.into_iter());
 /// assert!(result.is_ok());
 /// ```
 ///
@@ -408,9 +413,8 @@ fn elements_to_associated(elements: &[ClosureParamType]) -> Vec<cel_runtime::Ass
 /// "#; // Invalid: missing operator
 /// let input = TokenStream::from_str(source).unwrap();
 /// let mut parser = CELParser::new(OpLookup::new());
-/// parser.set_tokens(input.into_iter());
 ///
-/// if let Err(e) = parser.is_expression() {
+/// if let Err(e) = parser.parse_tokens(input.into_iter()) {
 ///     // Format error starting at line 1
 ///     println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::plain()));
 /// }
@@ -459,7 +463,7 @@ impl<C: ParserContext> Parser<C> {
 
     /// Sets the token stream from an existing [`LexLexer`] iterator for inline expression parsing.
     ///
-    /// Resets the context. Use together with [`parse_or_expression_ctx`](Self::parse_or_expression_ctx)
+    /// Resets the context. Use together with [`parse_expression_ctx`](Self::parse_expression_ctx)
     /// and [`take_lex_tokens`](Self::take_lex_tokens) to share a token stream between adam-lang and
     /// [`CELParser`].
     pub fn set_lex_tokens(&mut self, tokens: std::iter::Peekable<lex_lexer::LexLexer>) {
@@ -468,7 +472,7 @@ impl<C: ParserContext> Parser<C> {
         self.last_span = Span::call_site();
     }
 
-    /// Parses one `or_expression` from the current token stream and returns the built context.
+    /// Parses one `expression` from the current token stream and returns the built context.
     ///
     /// Unlike [`parse_str_ctx`](Self::parse_str_ctx), this method does not require
     /// end-of-stream, allowing adam-lang to parse an expression embedded within a larger token
@@ -476,11 +480,11 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the input does not contain a valid `or_expression`.
+    /// Returns an error if the input does not contain a valid `expression`.
     ///
     /// - Complexity: O(n) in the number of tokens in the expression.
-    pub fn parse_or_expression_ctx(&mut self) -> Result<C> {
-        if !self.is_or_expression()? {
+    pub fn parse_expression_ctx(&mut self) -> Result<C> {
+        if !self.is_expression()? {
             return Err(self.error_at("expression expected"));
         }
         Ok(std::mem::replace(&mut self.context, C::new_context()))
@@ -490,7 +494,7 @@ impl<C: ParserContext> Parser<C> {
     /// swapping `self.context` out for a fresh one, running `f` against it, then swapping the
     /// original context back in and returning the finished nested one.
     ///
-    /// Unlike [`parse_or_expression_ctx`](Self::parse_or_expression_ctx), this does not reset
+    /// Unlike [`parse_expression_ctx`](Self::parse_expression_ctx), this does not reset
     /// `self.tokens`/`self.op_lookup`/`self.last_span` — it's for compiling a sub-expression in the
     /// middle of an already-in-progress outer parse, not starting a fresh top-level parse.
     ///
@@ -516,7 +520,7 @@ impl<C: ParserContext> Parser<C> {
 
     /// Returns the remaining token stream after expression parsing.
     ///
-    /// Call after [`parse_or_expression_ctx`](Self::parse_or_expression_ctx) to recover the
+    /// Call after [`parse_expression_ctx`](Self::parse_expression_ctx) to recover the
     /// shared [`LexLexer`] for continued adam-lang parsing.
     pub fn take_lex_tokens(&mut self) -> Option<std::iter::Peekable<lex_lexer::LexLexer>> {
         self.tokens.take()
@@ -533,6 +537,9 @@ impl<C: ParserContext> Parser<C> {
         self.set_tokens(tokens);
         if !self.is_expression()? {
             return Err(self.error_at("expression expected"));
+        }
+        if self.peek_token().is_some() {
+            return Err(self.error_at("unexpected token"));
         }
         Ok(std::mem::replace(&mut self.context, C::new_context()))
     }
@@ -699,15 +706,9 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `expression = range_expression ?eos?.`
+    /// `expression = range_expression.`
     pub fn is_expression(&mut self) -> Result<bool> {
-        if !self.is_range_expression()? {
-            return Ok(false);
-        }
-        if self.peek_token().is_some() {
-            return Err(self.error_at("unexpected token"));
-        }
-        Ok(true)
+        self.is_range_expression()
     }
 
     /// `or_expression = and_expression { "||" and_expression }.`
@@ -1680,18 +1681,18 @@ impl<C: ParserContext> Parser<C> {
 }
 
 impl Parser<DynSegmentContext> {
-    /// Parses one `or_expression` from the current token stream and returns the segment.
+    /// Parses one `expression` from the current token stream and returns the segment.
     ///
     /// Unlike [`parse_str`](Self::parse_str), this method does not require end-of-stream,
     /// allowing adam-lang to parse an expression embedded within a larger token stream.
     ///
     /// # Errors
     ///
-    /// Returns an error if the input does not contain a valid `or_expression`.
+    /// Returns an error if the input does not contain a valid `expression`.
     ///
     /// - Complexity: O(n) in the number of tokens in the expression.
-    pub fn parse_or_expression(&mut self) -> Result<DynSegment> {
-        self.parse_or_expression_ctx()
+    pub fn parse_expression(&mut self) -> Result<DynSegment> {
+        self.parse_expression_ctx()
             .map(DynSegmentContext::into_inner)
     }
 
@@ -1725,7 +1726,7 @@ impl Parser<DynSegmentContext> {
 }
 
 impl Parser<AstContext> {
-    /// Parses one `or_expression` from the current token stream and returns the built [`Expr`].
+    /// Parses one `expression` from the current token stream and returns the built [`Expr`].
     ///
     /// Unlike [`parse_str_ast`](Self::parse_str_ast), this method does not require
     /// end-of-stream, allowing adam-lang to parse an expression embedded within a larger token
@@ -1733,11 +1734,11 @@ impl Parser<AstContext> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the input does not contain a valid `or_expression`.
+    /// Returns an error if the input does not contain a valid `expression`.
     ///
     /// - Complexity: O(n) in the number of tokens in the expression.
-    pub fn parse_or_expression_ast(&mut self) -> Result<Expr> {
-        self.parse_or_expression_ctx().map(AstContext::into_expr)
+    pub fn parse_expression_ast(&mut self) -> Result<Expr> {
+        self.parse_expression_ctx().map(AstContext::into_expr)
     }
 
     /// Parses a token stream into an [`Expr`] tree.
@@ -2951,13 +2952,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_or_expression_stops_before_comma() -> anyhow::Result<()> {
+    fn parse_expression_stops_before_comma() -> anyhow::Result<()> {
         use lex_lexer::LexLexer;
         let stream: proc_macro2::TokenStream = "10i32 + 20i32, 5i32".parse().unwrap();
         let mut parser = CELParser::new(OpLookup::new());
         parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
         let mut seg = parser
-            .parse_or_expression()
+            .parse_expression()
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result: i32 = seg.call0()?;
         assert_eq!(result, 30);
@@ -2972,12 +2973,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_or_expression_on_empty_input_returns_error() {
+    fn parse_expression_on_empty_input_returns_error() {
         use lex_lexer::LexLexer;
         let stream: proc_macro2::TokenStream = "".parse().unwrap();
         let mut parser = CELParser::new(OpLookup::new());
         parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
-        let result = parser.parse_or_expression();
+        let result = parser.parse_expression();
         assert!(result.is_err(), "expected Err for empty input");
     }
 
