@@ -9,7 +9,7 @@
 //! [`cel_parser::Ty::Any`] and are never flagged — matching adam-lang/CEL's extensible type
 //! system. Not a complete type system; see the design doc's "Type checking (v1)" section.
 
-use cel_parser::{ClosureParamTypeExpr, Expr, ExprSpan, Literal, ParseError, Ty, ty::check_expr};
+use cel_parser::{Expr, ExprSpan, Literal, ParseError, Ty, ty::check_expr};
 
 use crate::TypeRegistry;
 use crate::ast::{BindingDecl, CellDecl, OutDecl, Sheet, SheetItem};
@@ -36,7 +36,6 @@ use crate::type_registry::TypeShape;
 pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
     let mut diagnostics = Vec::new();
     let (cell_types, shapes) = declared_cell_types(sheet, registry);
-    let cell_names = declared_cell_names(sheet);
     let resolve = |name: &str| -> Ty { cell_types.get(name).copied().unwrap_or(Ty::Any) };
     for item in &sheet.items {
         match item {
@@ -45,7 +44,6 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                 check_filter(
                     cell,
                     registry,
-                    &cell_names,
                     &cell_types,
                     &shapes,
                     &resolve,
@@ -345,22 +343,6 @@ fn check_cell_initializer(
     }
 }
 
-/// Every declared `cell`'s name (not `out`s) — used to validate a `filter` clause's argument-cell
-/// list, which (mirroring `adam_lang::parser::AdamParser::parse_cell_filter`'s real runtime
-/// restriction) may only reference other `cell`s, not `out`s.
-///
-/// - Complexity: O(n) in the number of sheet items.
-fn declared_cell_names(sheet: &Sheet) -> std::collections::HashSet<String> {
-    sheet
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            SheetItem::Cell(cell) => Some(cell.name.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 /// The expected `TypeShape` for one filter-closure parameter position (the filtered cell itself,
 /// or one of its declared argument cells) — `Some` only when a concrete shape is known: a
 /// tuple-typed annotation (from `shapes`), or a scalar type either annotated or already resolved
@@ -384,57 +366,19 @@ fn expected_shape(
         .map(TypeShape::Named)
 }
 
-/// Converts an unresolved closure-parameter type expression into `adam_lang`'s own `TypeExpr`, so
-/// it can be resolved via the same `TypeRegistry::resolve` every other type annotation in this
-/// crate already uses — `cel_parser::ClosureParamTypeExpr` mirrors `TypeExpr`'s shape exactly (a
-/// bare name, or a recursively-nested tuple) but lives in `cel-parser` since closures are that
-/// crate's own construct.
-///
-/// - Complexity: O(n) in the number of (nested) tuple elements in the type expression.
-fn closure_param_type_expr_to_type_expr(expr: &ClosureParamTypeExpr) -> crate::ast::TypeExpr {
-    match expr {
-        ClosureParamTypeExpr::Named(name, span) => crate::ast::TypeExpr::Named(name.clone(), *span),
-        ClosureParamTypeExpr::Tuple(elements, span) => crate::ast::TypeExpr::Tuple(
-            elements
-                .iter()
-                .map(closure_param_type_expr_to_type_expr)
-                .collect(),
-            *span,
-        ),
-    }
-}
-
-/// Approximates a closure parameter's declared type as a `Ty`, for use as the identifier resolver
-/// when checking a filter closure's own body against its own parameter names: a tuple-shaped
-/// parameter has no `Ty` variant and maps to `Ty::Any`; a scalar parameter maps via
-/// `Ty::from_name`.
-fn closure_param_ty(type_expr: &ClosureParamTypeExpr) -> Ty {
-    match type_expr {
-        ClosureParamTypeExpr::Named(name, _) => Ty::from_name(name).unwrap_or(Ty::Any),
-        ClosureParamTypeExpr::Tuple(..) => Ty::Any,
-    }
-}
-
-/// Checks one `cell`'s `filter` clause, if present, mirroring
-/// `adam_lang::parser::AdamParser::parse_cell_filter`'s runtime validation: each argument-cell
-/// name must name an already-declared `cell` (not an `out`, and — unlike the runtime path — with
-/// no declaration-order constraint, matching every other check in this file); the closure's own
-/// parameter types must line up, in order, with `[this cell's own declared/inferred shape, the
-/// first argument cell's shape, the second's, ...]`; and the closure body's checked type must
-/// unify with this cell's own declared/inferred shape. The parameter-type check and the
-/// return-type check are independent and can both fire for the same root-cause mismatch (e.g. a
-/// closure parameter typed `f64` against an `i32` cell also makes the body's inferred type
-/// disagree) — this is intentional, matching this file's existing precedent of not de-duplicating
-/// diagnostics from genuinely distinct checks (see the
-/// `filter_first_param_type_mismatch_is_two_diagnostics` test). A malformed filter closure (not an
-/// `Expr::Closure`) is silently skipped with no diagnostic at all (tracked as
-/// [#141](https://github.com/stlab/cel-rs/issues/141), out of scope here).
+/// this cell's own declared/inferred shape (`_`'s type, via `body_resolve`'s special case
+/// below), and the body must reference `_` — the value being filtered — at least once. Every
+/// other identifier is resolved exactly as any other deduced expression in this file (a
+/// `relationship` binding, an `out` initializer): via `resolve`, which leaves an unrecognized
+/// name as `Ty::Any` rather than raising a diagnostic — the runtime `Sheet`-building parser
+/// (`adam_lang::parser::AdamParser::parse_cell_filter`) is what raises "undeclared cell" for a
+/// name that isn't actually a declared cell, mirroring how it (not this file) is the one that
+/// raises that error for bindings' deduced expressions too.
 fn check_filter(
     cell: &CellDecl,
-    _registry: &TypeRegistry,
-    _cell_names: &std::collections::HashSet<String>,
+    registry: &TypeRegistry,
     cell_types: &std::collections::HashMap<String, Ty>,
-    _shapes: &std::collections::HashMap<String, TypeShape>,
+    shapes: &std::collections::HashMap<String, TypeShape>,
     resolve: &impl Fn(&str) -> Ty,
     diagnostics: &mut Vec<ParseError>,
 ) {
@@ -442,21 +386,52 @@ fn check_filter(
         return;
     };
 
-    // The filter body is an expression that can reference `_` (the cell's value) and other cells.
-    // For now, we perform basic type checking on the body expression without special handling
-    // for `_` (which would require deeper integration with the expression checker).
-    // TODO: Implement full type checking for filter bodies with proper `_` handling.
+    let underscore_used = std::cell::Cell::new(false);
+    let own_ty = resolve(&cell.name);
     let body_resolve = |name: &str| -> Ty {
         if name == "_" {
-            // `_` represents the cell being filtered; infer its type from the cell itself
-            cell_types.get(&cell.name).copied().unwrap_or(Ty::Any)
+            underscore_used.set(true);
+            own_ty
         } else {
             resolve(name)
         }
     };
 
-    let (_, body_diags) = check_expr(&filter.body, &body_resolve);
-    diagnostics.extend(body_diags);
+    match expected_shape(&cell.name, cell_types, shapes) {
+        Some(shape @ TypeShape::Tuple(_)) => {
+            let (_, body_diags) = check_expr(&filter.body, &body_resolve);
+            diagnostics.extend(body_diags);
+            expr_matches_shape(&filter.body, &shape, registry, &body_resolve, diagnostics);
+        }
+        Some(TypeShape::Named(type_id)) => {
+            let (body_ty, body_diags) = check_expr(&filter.body, &body_resolve);
+            diagnostics.extend(body_diags);
+            let declared = Ty::from_type_id(type_id);
+            if !declared.unifies_with(&body_ty) {
+                diagnostics.push(ParseError::new_range(
+                    format!(
+                        "cell `{}`: filter must produce `{}`",
+                        cell.name,
+                        declared.name()
+                    ),
+                    filter.body.span().start,
+                    filter.body.span().end,
+                ));
+            }
+        }
+        None => {
+            let (_, body_diags) = check_expr(&filter.body, &body_resolve);
+            diagnostics.extend(body_diags);
+        }
+    }
+
+    if !underscore_used.get() {
+        diagnostics.push(ParseError::new_range(
+            "filter must reference `_` (the value being filtered)".to_string(),
+            filter.span.start,
+            filter.span.end,
+        ));
+    }
 }
 
 /// Checks `body`'s multi-output shape against `outputs`, recursively: an `Expr::Tuple` of matching
@@ -883,66 +858,45 @@ mod tests {
 
     #[test]
     fn filter_with_matching_types_has_no_diagnostic() {
-        let sheet = parse("sheet s { cell a: i32 = 1 filter |x: i32| x; }");
+        let sheet = parse("sheet s { cell a: i32 = 1 filter _; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
     }
 
     #[test]
-    fn filter_with_matching_named_arg_cell_has_no_diagnostic() {
-        let sheet =
-            parse("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter(hi) |x: i32, h: i32| x; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
-        assert!(diags.is_empty());
-    }
-
-    #[test]
-    fn filter_undeclared_arg_cell_is_a_diagnostic() {
-        let sheet = parse("sheet s { cell a: i32 = 1 filter(nope) |x: i32, h: i32| x; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
-        assert_eq!(diags.len(), 1);
-    }
-
-    #[test]
-    fn filter_first_param_type_mismatch_is_two_diagnostics() {
-        // Two independent checks both catch the same root mismatch — the parameter-type check
-        // (x: f64 vs. a's declared i32) and the return-type check (body `x` is f64, but `a` is
-        // i32) — mirroring this file's existing precedent of not de-duplicating diagnostics from
-        // genuinely distinct checks (see
-        // `binding_single_tuple_typed_output_if_else_body_element_mismatch_in_each_branch_is_two_diagnostics`).
-        let sheet = parse("sheet s { cell a: i32 = 1 filter |x: f64| x; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
-        assert_eq!(diags.len(), 2);
-    }
-
-    #[test]
-    fn filter_named_arg_type_mismatch_is_a_diagnostic() {
+    fn filter_referencing_a_cell_has_no_diagnostic() {
         let sheet = parse(
-            "sheet s { cell hi: f64 = 100.0; cell a: i32 = 1 filter(hi) |x: i32, h: i32| x; }",
+            "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter if _ > hi { hi } else { _ }; }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn filter_body_type_mismatch_is_a_diagnostic() {
+        // Body is `bool`-typed (a comparison), but `a` is declared `i32`.
+        let sheet = parse("sheet s { cell a: i32 = 1 filter _ > 0; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
-    fn filter_wrong_arity_is_a_diagnostic() {
-        let sheet = parse("sheet s { cell a: i32 = 1 filter |x: i32, extra: i32| x; }");
+    fn filter_without_underscore_is_a_diagnostic() {
+        let sheet = parse("sheet s { cell a: i32 = 1 filter 1; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn filter_tuple_typed_cell_with_matching_shape_has_no_diagnostic() {
-        let sheet =
-            parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter |x: (i32, f64)| (x.0, x.1); }");
+        let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter (_.0, _.1); }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
     }
 
     #[test]
     fn filter_tuple_typed_cell_with_arity_mismatch_is_a_diagnostic() {
-        let sheet =
-            parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter |x: (i32, f64)| (x.0,); }");
+        let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter (_.0,); }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }

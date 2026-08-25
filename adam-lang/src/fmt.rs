@@ -243,9 +243,9 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     out.push_str("}\n");
 }
 
-/// Writes one `cell name[: type][ = initializer][ filter [(args)] closure];` declaration,
-/// delegating its type annotation to [`source_text_or_empty`] via `TypeExpr::span()` and its
-/// initializer/filter closure to [`cel_parser::format_expr`].
+/// Writes one `cell name[: type][ = initializer][ filter body];` declaration, delegating its
+/// type annotation to [`source_text_or_empty`] via `TypeExpr::span()` and its initializer/filter
+/// body to [`cel_parser::format_expr`].
 fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     write_trivia(
         out,
@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_a_cell_with_a_filter_and_no_arg_list() {
+    fn formats_a_cell_with_a_filter() {
         assert_eq!(
             format("sheet s { cell a: i32 = 1 filter _; }"),
             "sheet s {\n    cell a: i32 = 1 filter _;\n}\n"
@@ -734,10 +734,10 @@ mod tests {
     }
 
     #[test]
-    fn formats_a_cell_with_a_filter_and_an_arg_list() {
+    fn formats_a_cell_with_a_filter_referencing_a_cell() {
         assert_eq!(
-            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter _ + hi; }"),
-            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter _ + hi;\n}\n"
+            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter min(_, hi); }"),
+            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter min(_, hi);\n}\n"
         );
     }
 
