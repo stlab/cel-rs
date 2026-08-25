@@ -68,6 +68,83 @@ pub fn add_conditional_from_bool_cells(
     id
 }
 
+/// Creates a new conditional group whose condition is a user-authored CEL
+/// formula over `referenced_cells`, with no branches yet (added via
+/// [`add_branch`]) and an empty default.
+#[must_use]
+pub fn add_conditional_with_formula(
+    doc: &mut Document,
+    referenced_cells: Vec<CellId>,
+    expr: impl Into<String>,
+    position: Point,
+) -> ConditionalGroupId {
+    let display_name = format!("c{}", doc.conditional_group_order.len() + 1);
+    let id = doc.conditional_groups.insert(ConditionalGroup {
+        display_name,
+        position,
+        condition: ConditionExpr::Formula {
+            referenced_cells,
+            expr: expr.into(),
+        },
+        branches: Vec::new(),
+        default: Vec::new(),
+    });
+    doc.conditional_group_order.push(id);
+    id
+}
+
+/// Adds a new branch to `conditional` matching `values`, with no
+/// relationship groups enabled yet.
+///
+/// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
+/// - Precondition: `values.len()` matches `conditional`'s condition arity
+///   (the number of cells in [`ConditionExpr::Cells`] or
+///   [`ConditionExpr::Formula`]'s `referenced_cells`).
+/// - Postcondition: returns the new branch's index within
+///   `conditional.branches`.
+pub fn add_branch(
+    doc: &mut Document,
+    conditional: ConditionalGroupId,
+    values: Vec<CellValueLiteral>,
+) -> usize {
+    let group = &mut doc.conditional_groups[conditional];
+    let arity = match &group.condition {
+        ConditionExpr::Cells(cells) => cells.len(),
+        ConditionExpr::Formula {
+            referenced_cells, ..
+        } => referenced_cells.len(),
+    };
+    debug_assert_eq!(
+        values.len(),
+        arity,
+        "values.len() must match condition arity"
+    );
+    group.branches.push(ConditionalBranch {
+        values,
+        enabled_groups: Vec::new(),
+    });
+    group.branches.len() - 1
+}
+
+/// Toggles whether `group` is active on `conditional`'s branch at
+/// `branch_index` — enables it if absent, disables it if present.
+///
+/// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
+/// - Precondition: `branch_index < conditional.branches.len()`.
+pub fn toggle_enabled_group(
+    doc: &mut Document,
+    conditional: ConditionalGroupId,
+    branch_index: usize,
+    group: RelationshipGroupId,
+) {
+    let branch = &mut doc.conditional_groups[conditional].branches[branch_index];
+    if let Some(pos) = branch.enabled_groups.iter().position(|g| *g == group) {
+        branch.enabled_groups.remove(pos);
+    } else {
+        branch.enabled_groups.push(group);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +247,90 @@ mod tests {
             Point::new(0.0, 0.0),
         );
         assert!(doc.conditional_groups[cond].default.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod formula_tests {
+    use super::*;
+    use crate::model::geometry::Point;
+    use crate::ops::cells::add_cell;
+
+    #[test]
+    fn add_conditional_with_formula_starts_with_no_branches() {
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+        let cond = add_conditional_with_formula(
+            &mut doc,
+            vec![x],
+            "aspect_ratio > 2.0",
+            Point::new(0.0, 0.0),
+        );
+        assert!(doc.conditional_groups[cond].branches.is_empty());
+        assert!(doc.conditional_groups[cond].default.is_empty());
+    }
+
+    #[test]
+    fn add_branch_appends_a_branch_with_no_enabled_groups() {
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+        let cond = add_conditional_with_formula(
+            &mut doc,
+            vec![x],
+            "aspect_ratio > 2.0",
+            Point::new(0.0, 0.0),
+        );
+        add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(true)]);
+        assert_eq!(doc.conditional_groups[cond].branches.len(), 1);
+        assert!(
+            doc.conditional_groups[cond].branches[0]
+                .enabled_groups
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn add_branch_returns_the_new_branchs_index() {
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+        let cond = add_conditional_with_formula(
+            &mut doc,
+            vec![x],
+            "aspect_ratio > 2.0",
+            Point::new(0.0, 0.0),
+        );
+        let i0 = add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(true)]);
+        let i1 = add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(false)]);
+        assert_eq!(i0, 0);
+        assert_eq!(i1, 1);
+    }
+
+    #[test]
+    fn toggle_enabled_group_enables_then_disables() {
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+        let cond = add_conditional_with_formula(
+            &mut doc,
+            vec![x],
+            "aspect_ratio > 2.0",
+            Point::new(0.0, 0.0),
+        );
+        add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(true)]);
+
+        let mut groups: slotmap::SlotMap<RelationshipGroupId, ()> = slotmap::SlotMap::with_key();
+        let group = groups.insert(());
+
+        toggle_enabled_group(&mut doc, cond, 0, group);
+        assert_eq!(
+            doc.conditional_groups[cond].branches[0].enabled_groups,
+            vec![group]
+        );
+
+        toggle_enabled_group(&mut doc, cond, 0, group);
+        assert!(
+            doc.conditional_groups[cond].branches[0]
+                .enabled_groups
+                .is_empty()
+        );
     }
 }
