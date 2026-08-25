@@ -138,6 +138,28 @@ mod tests {
     }
 
     #[test]
+    fn with_two_cells_only_the_all_true_branch_is_enabled() {
+        let mut doc = Document::new("demo");
+        let (condition_cell, group) = setup_group_over_two_bool_cells(&mut doc);
+        let second_cell = add_cell(&mut doc, "lock_aspect", CellType::Bool);
+        let cond = add_conditional_from_bool_cells(
+            &mut doc,
+            vec![condition_cell, second_cell],
+            group,
+            Point::new(0.0, 0.0),
+        );
+        for branch in &doc.conditional_groups[cond].branches {
+            let all_true =
+                branch.values == vec![CellValueLiteral::Bool(true), CellValueLiteral::Bool(true)];
+            if all_true {
+                assert_eq!(branch.enabled_groups, vec![group]);
+            } else {
+                assert!(branch.enabled_groups.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn default_starts_empty() {
         let mut doc = Document::new("demo");
         let (condition_cell, group) = setup_group_over_two_bool_cells(&mut doc);
