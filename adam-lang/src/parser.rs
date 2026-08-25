@@ -308,25 +308,27 @@ impl AdamParser {
             )
         })?;
 
-        let range_entry = self
-            .types
-            .range_entry(output_type_id)
-            .filter(|e| e.element_type_id == value_type_id);
-
-        if range_entry.is_none() && !underscore_used {
-            return Err(ParseError::new(
-                "filter must reference `_` (the value being filtered)",
-                cell_span,
-            ));
-        }
-
         let arg_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
         let arg_type_ids: Vec<TypeId> = inputs
             .iter()
             .map(|(_, _, shape)| cell_type_id(shape))
             .collect();
 
-        if let Some(entry) = range_entry {
+        // A `RangeInclusive<T>`-shaped output is checked and built independently of
+        // `underscore_used`: a genuine range filter body (`lo..=hi`) essentially never references
+        // `_`, so gating this branch on `underscore_used` would make the more specific "range
+        // bounds must be" error unreachable for the primary mistake it exists to catch.
+        if let Some(range_shape) = self.types.range_entry(output_type_id) {
+            if range_shape.element_type_id != value_type_id {
+                return Err(ParseError::new(
+                    format!(
+                        "cell `{cell_name}`: filter range bounds must be `{}`",
+                        self.types.display_name(declared_shape)
+                    ),
+                    cell_span,
+                ));
+            }
+
             let default_fn = self
                 .types
                 .entry_by_type_id(value_type_id)
@@ -337,8 +339,8 @@ impl AdamParser {
             let segment = std::rc::Rc::new(RefCell::new(segment));
             let clamp_segment = std::rc::Rc::clone(&segment);
             let bounds_segment = std::rc::Rc::clone(&segment);
-            let clamp_fn = entry.clamp_fn;
-            let bounds_fn = entry.bounds_fn;
+            let clamp_fn = range_shape.clamp_fn;
+            let bounds_fn = range_shape.bounds_fn;
 
             return Ok(adam_rs::Filter::range(
                 value_type_id,
@@ -352,16 +354,14 @@ impl AdamParser {
             ));
         }
 
+        if !underscore_used {
+            return Err(ParseError::new(
+                "filter must reference `_` (the value being filtered)",
+                cell_span,
+            ));
+        }
+
         if output_type_id != value_type_id {
-            if self.types.range_entry(output_type_id).is_some() {
-                return Err(ParseError::new(
-                    format!(
-                        "cell `{cell_name}`: filter range bounds must be `{}`",
-                        self.types.display_name(declared_shape)
-                    ),
-                    cell_span,
-                ));
-            }
             return Err(ParseError::new(
                 format!(
                     "cell `{cell_name}`: filter must produce `{}`",
@@ -1675,8 +1675,33 @@ mod tests {
     #[test]
     fn cell_filter_range_with_mismatched_element_type_is_a_parse_error() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        let err = parser.parse_str("sheet s { cell a: f64 filter 0..=100; }");
-        assert!(err.is_err());
+        let err = parser
+            .parse_str("sheet s { cell a: f64 filter 0..=100; }")
+            .err()
+            .expect("expected Err");
+        assert!(
+            err.message().contains("filter range bounds must be"),
+            "{}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn cell_filter_range_with_mismatched_element_type_and_underscore_is_still_a_range_error() {
+        // Confirms the "range bounds must be" check fires unconditionally on a recognized
+        // RangeInclusive-shaped output, even though `_` is referenced here (cast to `i32`, the
+        // range's own element type, rather than left at the cell's declared `f64`) — it must not
+        // be swallowed by the opaque `underscore_used` path.
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let err = parser
+            .parse_str("sheet s { cell a: f64 filter (_ as i32)..=100; }")
+            .err()
+            .expect("expected Err");
+        assert!(
+            err.message().contains("filter range bounds must be"),
+            "{}",
+            err.message()
+        );
     }
 
     #[test]
