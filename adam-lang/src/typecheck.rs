@@ -931,8 +931,8 @@ mod tests {
 
     #[test]
     fn filter_references_underscore_nested_inside_a_call_has_no_missing_underscore_diagnostic() {
-        // `_` appears only as a call argument, not as the whole body or a bare operand — exercises
-        // `expr_references_ident`'s `Expr::Apply` arm specifically.
+        // `_` appears only inside an `if`'s then-branch, not as the whole body or a bare
+        // operand — exercises `expr_references_ident`'s `Expr::If` arm specifically.
         let sheet = parse("sheet s { cell a: i32 = 1 filter if true { _ } else { 1 }; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
