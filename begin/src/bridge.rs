@@ -23,12 +23,21 @@ pub struct CellMeta {
     /// `true` if the cell holds a `bool`, so the Inspector can render it as a checkbox
     /// instead of a text field.
     pub is_bool: bool,
+    /// `true` if the cell holds one of the 14 numeric primitive types, so the Inspector can
+    /// render it with [`crate::spectrum::SpNumberfield`] instead of a plain text field.
+    pub is_numeric: bool,
     /// Returns the current cell value as a display string.
     pub display: Box<dyn Fn(&Sheet) -> String>,
     /// Parses `s` and writes the result to the cell; returns `Err` on parse failure or type
     /// mismatch. May also always return `Err` for a cell type with no write support yet (e.g.
     /// tuples — see [`Labels::add_tuple_cell`]).
     pub write_str: WriteStrFn,
+    /// Live slider bounds, present only for a numeric cell whose filter is a
+    /// [`adam_rs::FilterKind::Range`] — recomputed from the filter's current argument values on
+    /// every call, so a range driven by other cells or relationships stays live. Cast to `f64`
+    /// for display, matching [`format_rounded`]'s existing all-numeric-types-as-`f64` convention.
+    #[allow(clippy::type_complexity)]
+    pub range: Option<Box<dyn Fn(&Sheet) -> (f64, f64)>>,
 }
 
 /// Associates human-readable labels and type-erased closures with stable sheet IDs.
@@ -59,6 +68,7 @@ impl Labels {
             CellMeta {
                 label: label.to_owned(),
                 is_bool: TypeId::of::<T>() == TypeId::of::<bool>(),
+                is_numeric: false,
                 display: Box::new(move |sheet| {
                     sheet
                         .read::<T>(id)
@@ -71,6 +81,7 @@ impl Labels {
                         .map_err(|e| Error::MethodFailed(anyhow::anyhow!("parse error: {}", e)))?;
                     sheet.write(id, value)
                 }),
+                range: None,
             },
         );
     }
@@ -90,6 +101,7 @@ impl Labels {
             CellMeta {
                 label: label.to_owned(),
                 is_bool: false,
+                is_numeric: false,
                 display: Box::new(move |sheet| {
                     sheet
                         .read::<cel_runtime::DynamicSequence>(id)
@@ -101,6 +113,7 @@ impl Labels {
                         "editing tuple-typed cells is not yet supported"
                     )))
                 }),
+                range: None,
             },
         );
     }
@@ -139,6 +152,28 @@ pub fn format_rounded(v: f64) -> String {
     }
 }
 
+/// Converts a filter-recognized numeric primitive to `f64` for display — the same "every numeric
+/// type displays as `f64`" convention [`format_rounded`] already documents. Implemented for
+/// exactly the 14 primitives `TypeRegistry::range_entry` recognizes range support for; `i64`,
+/// `u64`, `i128`, `u128`, `usize`, and `isize` lose precision beyond 2^53, identical to
+/// `labels_from_cell_names`'s existing `try_float_ty!`-driven display path for those types.
+trait ToF64Display {
+    fn to_f64_display(&self) -> f64;
+}
+
+macro_rules! impl_to_f64_display {
+    ($($T:ty),*) => {
+        $(impl ToF64Display for $T {
+            fn to_f64_display(&self) -> f64 {
+                *self as f64
+            }
+        })*
+    };
+}
+impl_to_f64_display!(
+    i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64
+);
+
 /// Builds a [`Labels`] from an adam-lang-style declaration-ordered cell name map.
 ///
 /// Matches each scalar cell's `TypeId` against the built-in primitive types
@@ -148,7 +183,10 @@ pub fn format_rounded(v: f64) -> String {
 /// primitives are silently skipped, so they simply won't appear in the sidebar.
 ///
 /// - Complexity: O(n) in the number of cells.
-pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeShape)>) -> Labels {
+pub fn labels_from_cell_names(
+    sheet: &Sheet,
+    cell_names: &IndexMap<String, (CellId, TypeShape)>,
+) -> Labels {
     let mut labels = Labels::new();
     for (name, (id, shape)) in cell_names {
         let id = *id;
@@ -159,28 +197,29 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeShape)>
                 continue;
             }
         };
-        macro_rules! try_ty {
+        macro_rules! try_numeric_ty {
             ($T:ty) => {
                 if type_id == TypeId::of::<$T>() {
                     labels.add_cell::<$T>(id, name);
+                    mark_numeric::<$T>(&mut labels, sheet, id);
                     continue;
                 }
             };
         }
-        try_ty!(i8);
-        try_ty!(i16);
-        try_ty!(i32);
-        try_ty!(i64);
-        try_ty!(i128);
-        try_ty!(isize);
-        try_ty!(u8);
-        try_ty!(u16);
-        try_ty!(u32);
-        try_ty!(u64);
-        try_ty!(u128);
-        try_ty!(usize);
+        try_numeric_ty!(i8);
+        try_numeric_ty!(i16);
+        try_numeric_ty!(i32);
+        try_numeric_ty!(i64);
+        try_numeric_ty!(i128);
+        try_numeric_ty!(isize);
+        try_numeric_ty!(u8);
+        try_numeric_ty!(u16);
+        try_numeric_ty!(u32);
+        try_numeric_ty!(u64);
+        try_numeric_ty!(u128);
+        try_numeric_ty!(usize);
 
-        macro_rules! try_float_ty {
+        macro_rules! try_numeric_float_ty {
             ($T:ty) => {
                 if type_id == TypeId::of::<$T>() {
                     labels.add_cell::<$T>(id, name);
@@ -192,17 +231,50 @@ pub fn labels_from_cell_names(cell_names: &IndexMap<String, (CellId, TypeShape)>
                                 .unwrap_or_else(|_| "?".to_owned())
                         });
                     }
+                    mark_numeric::<$T>(&mut labels, sheet, id);
                     continue;
                 }
             };
         }
-        try_float_ty!(f32);
-        try_float_ty!(f64);
+        try_numeric_float_ty!(f32);
+        try_numeric_float_ty!(f64);
 
+        macro_rules! try_ty {
+            ($T:ty) => {
+                if type_id == TypeId::of::<$T>() {
+                    labels.add_cell::<$T>(id, name);
+                    continue;
+                }
+            };
+        }
         try_ty!(bool);
         try_ty!(String);
     }
     labels
+}
+
+/// Marks `id`'s `CellMeta` as numeric and, if `sheet.filter_kind(id)` is a range clamp,
+/// populates its live-range closure.
+fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
+    labels: &mut Labels,
+    sheet: &Sheet,
+    id: CellId,
+) {
+    let Some(meta) = labels.cells.get_mut(&id) else {
+        return;
+    };
+    meta.is_numeric = true;
+    if matches!(
+        sheet.filter_kind(id),
+        Some(adam_rs::FilterKind::Range { .. })
+    ) {
+        meta.range = Some(Box::new(move |sheet: &Sheet| {
+            sheet
+                .filter_range::<T>(id)
+                .map(|(lo, hi)| (lo.to_f64_display(), hi.to_f64_display()))
+                .unwrap_or((0.0, 0.0))
+        }));
+    }
 }
 
 /// Formats an [`Error`] as a rustc-style diagnostic when possible.
@@ -593,7 +665,7 @@ mod tests {
         let mut cell_names = IndexMap::new();
         cell_names.insert("a".to_string(), (a, TypeShape::Named(TypeId::of::<f64>())));
 
-        let labels = labels_from_cell_names(&cell_names);
+        let labels = labels_from_cell_names(&sheet, &cell_names);
 
         assert_eq!((labels.cells[&a].display)(&sheet), "86.67");
     }
@@ -617,7 +689,7 @@ mod tests {
             (d, TypeShape::Named(TypeId::of::<String>())),
         );
 
-        let labels = labels_from_cell_names(&cell_names);
+        let labels = labels_from_cell_names(&sheet, &cell_names);
 
         assert_eq!(labels.cells.len(), 4);
         assert_eq!((labels.cells[&a].display)(&sheet), "2");
@@ -649,7 +721,7 @@ mod tests {
             ),
         );
 
-        let labels = labels_from_cell_names(&cell_names);
+        let labels = labels_from_cell_names(&sheet, &cell_names);
 
         assert_eq!(labels.cells.len(), 1);
         assert_eq!((labels.cells[&pair].display)(&sheet), "(3, 4.5)");
@@ -668,9 +740,58 @@ mod tests {
         cell_names.insert("z".to_string(), (z, TypeShape::Named(TypeId::of::<i32>())));
         cell_names.insert("a".to_string(), (a, TypeShape::Named(TypeId::of::<i32>())));
 
-        let labels = labels_from_cell_names(&cell_names);
+        let labels = labels_from_cell_names(&sheet, &cell_names);
         let ids: Vec<_> = labels.cells.keys().copied().collect();
         assert_eq!(ids, vec![z, a]);
+    }
+
+    #[test]
+    fn labels_from_cell_names_marks_numeric_cells_and_leaves_range_none_without_a_filter() {
+        use std::any::TypeId;
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(3_i32);
+        let b = sheet.add_cell(true);
+
+        let mut cell_names = IndexMap::new();
+        cell_names.insert("a".to_string(), (a, TypeShape::Named(TypeId::of::<i32>())));
+        cell_names.insert("b".to_string(), (b, TypeShape::Named(TypeId::of::<bool>())));
+
+        let labels = labels_from_cell_names(&sheet, &cell_names);
+
+        assert!(labels.cells[&a].is_numeric);
+        assert!(labels.cells[&a].range.is_none());
+        assert!(!labels.cells[&b].is_numeric);
+    }
+
+    #[test]
+    fn labels_from_cell_names_populates_range_for_a_range_filtered_cell() {
+        use adam_rs::Filter;
+        use std::any::{Any, TypeId};
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(50_i32);
+        let filter = Filter::range(
+            TypeId::of::<i32>(),
+            vec![],
+            vec![],
+            |value, _args| Ok(Box::new(*value.downcast_ref::<i32>().unwrap()) as Box<dyn Any>),
+            |_args| {
+                (
+                    Box::new(0i32) as Box<dyn Any>,
+                    Box::new(100i32) as Box<dyn Any>,
+                )
+            },
+        );
+        sheet.add_filter(a, filter).unwrap();
+
+        let mut cell_names = IndexMap::new();
+        cell_names.insert("a".to_string(), (a, TypeShape::Named(TypeId::of::<i32>())));
+
+        let labels = labels_from_cell_names(&sheet, &cell_names);
+
+        let range_fn = labels.cells[&a].range.as_ref().expect("range populated");
+        assert_eq!(range_fn(&sheet), (0.0, 100.0));
     }
 
     fn demo_sheet() -> (Sheet, Labels) {

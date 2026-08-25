@@ -180,7 +180,7 @@ pub fn build_sheet(source: &str, file_name: &str) -> BuildOutcome {
             };
         }
     };
-    let labels = labels_from_cell_names(&parsed.cell_names);
+    let labels = labels_from_cell_names(&parsed.sheet, &parsed.cell_names);
     match parsed.propagate() {
         Ok(()) => {
             parsed.clear_changed();
