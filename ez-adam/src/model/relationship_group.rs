@@ -21,7 +21,8 @@ new_key_type! {
 /// `generate_adm2`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RelationshipGroup {
-    /// The display name for the relationship group (e.g., `"r1"`).
+    /// The display name for the relationship group (e.g., `"r1"`) — UI
+    /// bookkeeping only, never emitted to `.adm2`.
     pub display_name: String,
     /// The position of the relationship group on the canvas.
     pub position: Point,
