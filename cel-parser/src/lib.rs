@@ -13,7 +13,7 @@
 //! # Grammar
 //!
 //! ```text
-//! expression = range_expression ?eos?.
+//! expression = range_expression.
 //! range_expression = ( or_expression [ ".." [ or_expression ] | "..=" or_expression ] )
 //!                   | ( ".." [ or_expression ] )
 //!                   | ( "..=" or_expression ) .
@@ -38,18 +38,6 @@
 //! closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")".
 //! parameter_list = or_expression { "," or_expression }.
 //! ```
-//!
-//! # Note
-//!
-//! `?eos?` denotes end of stream. `expression` above is the bare grammar production and does
-//! not by itself require end-of-stream — [`Parser::is_expression`] only checks the grammar.
-//! [`Parser::parse_tokens_ctx`] (and the `parse_tokens`/`parse_str`/`parse_tokens_ast`/
-//! `parse_str_ast` convenience wrappers built on it) additionally require end-of-stream, for
-//! parsing a whole, self-contained token stream (e.g. `cel-rs-macros`'s `expression!`
-//! proc-macro, which must reject a macro body with anything left over).
-//! [`Parser::parse_expression_ctx`] (and its `parse_expression`/`parse_expression_ast`
-//! wrappers) do not, for parsing an expression embedded in a larger token stream — this is
-//! what adam-lang's entry points use.
 //!
 //! # Examples
 //!
