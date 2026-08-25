@@ -348,8 +348,7 @@ impl AdamParser {
                 arg_type_ids,
                 move |value, args| clamp_fn(&mut clamp_segment.borrow_mut(), value, args),
                 move |args| {
-                    bounds_fn(&mut bounds_segment.borrow_mut(), placeholder.as_ref(), args)
-                        .expect("range filter body already validated by parse_cell_filter")
+                    bounds_fn(&mut bounds_segment.borrow_mut(), placeholder.as_ref(), args).ok()
                 },
             ));
         }
@@ -1702,6 +1701,36 @@ mod tests {
             "{}",
             err.message()
         );
+    }
+
+    #[test]
+    fn cell_filter_range_returns_none_instead_of_panicking_when_a_bound_expression_fails_to_evaluate()
+     {
+        // `100 / hi` is a registered CEL builtin (`/` on `i32`, see
+        // `cel_parser::op_table::OpLookup`) that returns `Err` at runtime on division by zero
+        // rather than panicking or wrapping — `parse_cell_filter` only validates this range
+        // filter's *type* at parse time, so evaluating the bound expression with `hi == 0` must
+        // still be handled at runtime. Before this fix, `FilterKind::Range::bounds` was
+        // infallible and `parse_cell_filter`'s wrapping closure used `.expect(..)`, which would
+        // panic here instead of degrading to `None`.
+        // `hi` starts at a non-zero value so `add_filter`'s own immediate clamp of `a`'s default
+        // value (0) succeeds during parsing (`0..=(100 / 1)`); the failing evaluation is
+        // triggered afterwards, purely through `filter_range`, by writing `hi` to 0.
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let mut parsed = parser
+            .parse_str("sheet s { cell hi: i32 = 1; cell a: i32 filter 0..=(100 / hi); }")
+            .unwrap();
+        let (a_id, _) = parsed.cell_names["a"];
+        let (hi_id, _) = parsed.cell_names["hi"];
+
+        assert_eq!(parsed.sheet.filter_range::<i32>(a_id), Some((0, 100)));
+
+        // Puts the range expression's own evaluation into a failing state (division by zero)
+        // without going through `add_filter`'s clamp path at all — this is exactly the "some
+        // other write puts an endpoint's dependency into a bad state" scenario from the review
+        // finding, and must degrade to `None` rather than panicking.
+        parsed.sheet.write(hi_id, 0i32).unwrap();
+        assert_eq!(parsed.sheet.filter_range::<i32>(a_id), None);
     }
 
     #[test]

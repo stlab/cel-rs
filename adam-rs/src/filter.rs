@@ -26,11 +26,14 @@ pub enum FilterKind {
     Opaque,
     /// Compiled from a `RangeInclusive<T>`-typed expression (`lo..=hi`). `bounds` re-evaluates
     /// that expression against the filter's current argument values, returning the resulting
-    /// `(lo, hi)` as type-erased values of the filtered cell's own type `T`.
+    /// `(lo, hi)` as type-erased values of the filtered cell's own type `T`, or `None` if the
+    /// underlying expression fails to evaluate (e.g. a fallible arithmetic op in a range
+    /// endpoint, such as a `checked_*` operation overflowing).
     Range {
-        /// Re-evaluates the range expression, returning `(lo, hi)` as type-erased values.
+        /// Re-evaluates the range expression, returning `(lo, hi)` as type-erased values, or
+        /// `None` if evaluation fails.
         #[allow(clippy::type_complexity)]
-        bounds: Box<dyn Fn(&[&dyn Any]) -> (Box<dyn Any>, Box<dyn Any>)>,
+        bounds: Box<dyn Fn(&[&dyn Any]) -> Option<(Box<dyn Any>, Box<dyn Any>)>>,
     },
 }
 
@@ -162,7 +165,8 @@ impl Filter {
     ///
     /// - Precondition: `args.len() == arg_types.len()`.
     /// - Precondition: `clamp` returns a value whose runtime type matches `value_type`.
-    /// - Precondition: `bounds` returns a pair of values whose runtime type matches `value_type`.
+    /// - Precondition: when `bounds` returns `Some`, the pair's values have a runtime type
+    ///   matching `value_type`.
     #[must_use]
     pub fn range<F, B>(
         value_type: TypeId,
@@ -173,7 +177,7 @@ impl Filter {
     ) -> Self
     where
         F: Fn(&dyn Any, &[&dyn Any]) -> Result<Box<dyn Any>, anyhow::Error> + 'static,
-        B: Fn(&[&dyn Any]) -> (Box<dyn Any>, Box<dyn Any>) + 'static,
+        B: Fn(&[&dyn Any]) -> Option<(Box<dyn Any>, Box<dyn Any>)> + 'static,
     {
         debug_assert_eq!(args.len(), arg_types.len());
         Filter(FilterData {
@@ -296,10 +300,10 @@ mod tests {
                 Ok(Box::new(v.clamp(0, 100)) as Box<dyn Any>)
             },
             |_args: &[&dyn Any]| {
-                (
+                Some((
                     Box::new(0i32) as Box<dyn Any>,
                     Box::new(100i32) as Box<dyn Any>,
-                )
+                ))
             },
         );
         assert_eq!(filter.0.value_type, TypeId::of::<i32>());
@@ -309,7 +313,7 @@ mod tests {
         let FilterKind::Range { bounds } = &filter.0.kind else {
             panic!("expected FilterKind::Range");
         };
-        let (lo, hi) = bounds(&[]);
+        let (lo, hi) = bounds(&[]).unwrap();
         assert_eq!(*lo.downcast_ref::<i32>().unwrap(), 0);
         assert_eq!(*hi.downcast_ref::<i32>().unwrap(), 100);
     }

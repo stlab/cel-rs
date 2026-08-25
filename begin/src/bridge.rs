@@ -777,10 +777,10 @@ mod tests {
             vec![],
             |value, _args| Ok(Box::new(*value.downcast_ref::<i32>().unwrap()) as Box<dyn Any>),
             |_args| {
-                (
+                Some((
                     Box::new(0i32) as Box<dyn Any>,
                     Box::new(100i32) as Box<dyn Any>,
-                )
+                ))
             },
         );
         sheet.add_filter(a, filter).unwrap();

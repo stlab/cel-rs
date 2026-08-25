@@ -611,8 +611,11 @@ impl Sheet {
     /// Resolves the filter's argument cells' current effective values via the same path
     /// [`Sheet::add_filter`] already uses, then calls the filter's `bounds` function.
     ///
-    /// Returns `None` if `id` is not a live cell in this sheet, has no filter, or its filter's
-    /// kind isn't [`FilterKind::Range`].
+    /// Returns `None` if `id` is not a live cell in this sheet, has no filter, its filter's
+    /// kind isn't [`FilterKind::Range`], or the range expression fails to evaluate against
+    /// the filter's current argument values (e.g. a fallible arithmetic op in a range
+    /// endpoint) — the same degraded-to-`None` outcome as any other reason no live bounds
+    /// are available right now.
     ///
     /// - Complexity: O(a) where a is the number of the filter's argument cells.
     pub fn filter_range<T: Any + Clone>(&self, id: CellId) -> Option<(T, T)> {
@@ -625,7 +628,7 @@ impl Sheet {
             .iter()
             .map(|&a| self.cells[a].effective())
             .collect();
-        let (lo, hi) = bounds(&args);
+        let (lo, hi) = bounds(&args)?;
         Some((*lo.downcast::<T>().ok()?, *hi.downcast::<T>().ok()?))
     }
 
@@ -3217,10 +3220,10 @@ mod tests {
             vec![],
             |value, _args| Ok(Box::new(*value.downcast_ref::<i32>().unwrap()) as Box<dyn Any>),
             |_args| {
-                (
+                Some((
                     Box::new(0i32) as Box<dyn Any>,
                     Box::new(100i32) as Box<dyn Any>,
-                )
+                ))
             },
         );
         sheet.add_filter(a, filter).unwrap();
@@ -3247,10 +3250,10 @@ mod tests {
                 Ok(Box::new(v.clamp(lo, hi)) as Box<dyn Any>)
             },
             |args| {
-                (
+                Some((
                     Box::new(*args[0].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
                     Box::new(*args[1].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
-                )
+                ))
             },
         );
         sheet.add_filter(a, filter).unwrap();
@@ -3283,10 +3286,10 @@ mod tests {
                 Ok(Box::new(v.clamp(lo, hi)) as Box<dyn Any>)
             },
             |args| {
-                (
+                Some((
                     Box::new(*args[0].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
                     Box::new(*args[1].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
-                )
+                ))
             },
         );
         sheet.add_filter(a, filter).unwrap();
