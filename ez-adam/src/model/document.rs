@@ -98,6 +98,36 @@ impl Document {
     }
 }
 
+/// Manual `PartialEq` implementation for `Document`.
+///
+/// This is implemented manually rather than derived because `SlotMap<K, V>`
+/// does not derive `PartialEq`. The implementation compares the explicit
+/// order vectors directly and compares `SlotMap` fields by iterating their
+/// (key, value) pairs, which works correctly because `slotmap`'s serde impl
+/// preserves key identity and iteration order through serialization.
+///
+/// If new fields are added to `Document`, this impl must be updated to
+/// compare them.
+impl PartialEq for Document {
+    fn eq(&self, other: &Self) -> bool {
+        self.format_version == other.format_version
+            && self.sheet_name == other.sheet_name
+            && self.cell_order == other.cell_order
+            && self.relationship_group_order == other.relationship_group_order
+            && self.conditional_group_order == other.conditional_group_order
+            && self.cells.iter().eq(other.cells.iter())
+            && self.cell_nodes.iter().eq(other.cell_nodes.iter())
+            && self
+                .relationship_groups
+                .iter()
+                .eq(other.relationship_groups.iter())
+            && self
+                .conditional_groups
+                .iter()
+                .eq(other.conditional_groups.iter())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +140,27 @@ mod tests {
         assert_eq!(doc.cells_in_order().count(), 0);
         assert_eq!(doc.relationship_groups_in_order().count(), 0);
         assert_eq!(doc.conditional_groups_in_order().count(), 0);
+    }
+
+    #[test]
+    fn identical_documents_are_equal() {
+        let doc1 = Document::new("sheet1");
+        let doc2 = Document::new("sheet1");
+        assert_eq!(doc1, doc2);
+    }
+
+    #[test]
+    fn different_sheet_names_compare_unequal() {
+        let doc1 = Document::new("sheet1");
+        let doc2 = Document::new("sheet2");
+        assert_ne!(doc1, doc2);
+    }
+
+    #[test]
+    fn different_format_versions_compare_unequal() {
+        let doc1 = Document::new("sheet1");
+        let mut doc2 = Document::new("sheet1");
+        doc2.format_version = 2;
+        assert_ne!(doc1, doc2);
     }
 }
