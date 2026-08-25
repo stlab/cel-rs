@@ -5,6 +5,8 @@
 use crate::model::document::Document;
 
 /// Serializes `doc` to pretty-printed JSON.
+///
+/// - Complexity: O(n) in the total size of `doc`.
 #[must_use]
 pub fn to_json(doc: &Document) -> String {
     serde_json::to_string_pretty(doc).expect("Document always serializes")
@@ -18,6 +20,8 @@ pub fn to_json(doc: &Document) -> String {
 /// [`Document`]'s current shape. Only
 /// [`crate::model::document::CURRENT_FORMAT_VERSION`] is currently
 /// supported — no migration path exists yet for older versions.
+///
+/// - Complexity: O(n) in the length of `text`.
 pub fn from_json(text: &str) -> Result<Document, serde_json::Error> {
     serde_json::from_str(text)
 }
