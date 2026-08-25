@@ -15,6 +15,25 @@ use crate::cell::CellId;
 /// effective values, and returns the conformed value or an error.
 type FilterFn = Box<dyn Fn(&dyn Any, &[&dyn Any]) -> Result<Box<dyn Any>, anyhow::Error>>;
 
+/// What shape of validation/derivation a [`Filter`] performs, beyond its opaque function — set by
+/// `adam-lang`'s compile phase when a filter's expression matches a recognized structural form.
+/// `Opaque` carries no extra information; consumers that don't care about structure treat every
+/// kind identically at write/propagate time — `FilterKind` is purely informational, queried by
+/// consumers like `begin`'s UI that want to render a specialized editor without inspecting the
+/// filter's function.
+pub enum FilterKind {
+    /// The filter's expression wasn't a recognized structural form.
+    Opaque,
+    /// Compiled from a `RangeInclusive<T>`-typed expression (`lo..=hi`). `bounds` re-evaluates
+    /// that expression against the filter's current argument values, returning the resulting
+    /// `(lo, hi)` as type-erased values of the filtered cell's own type `T`.
+    Range {
+        /// Re-evaluates the range expression, returning `(lo, hi)` as type-erased values.
+        #[allow(clippy::type_complexity)]
+        bounds: Box<dyn Fn(&[&dyn Any]) -> (Box<dyn Any>, Box<dyn Any>)>,
+    },
+}
+
 /// An idempotent, per-cell domain constraint with optional dynamic arguments.
 ///
 /// Constructed via [`Filter::from_fn_0`]/[`Filter::from_fn_1`]/[`Filter::from_fn_2`] for
@@ -31,6 +50,10 @@ pub(crate) struct FilterData {
     pub(crate) args: Vec<CellId>,
     pub(crate) arg_types: Vec<TypeId>,
     pub(crate) function: FilterFn,
+    /// What shape of validation/derivation this filter performs, beyond `function` — see
+    /// [`FilterKind`]. Purely informational; never consulted by `write`/`propagate`/`add_filter`.
+    #[allow(dead_code)]
+    pub(crate) kind: FilterKind,
 }
 
 impl Filter {
@@ -50,6 +73,7 @@ impl Filter {
             args,
             arg_types,
             function: Box::new(f),
+            kind: FilterKind::Opaque,
         })
     }
 
@@ -128,6 +152,39 @@ impl Filter {
                 Ok(Box::new(f(value, a, b)?) as Box<dyn Any>)
             },
         )
+    }
+
+    /// Creates a range-clamp filter from an explicit value `TypeId`, argument `TypeId`s, a clamp
+    /// function, and a `bounds` re-evaluator — the tagged counterpart of what [`Filter::new`]
+    /// builds for [`FilterKind::Opaque`]. `clamp` is `Filter`'s actual per-write/per-propagate
+    /// function (called exactly like an opaque filter's); `bounds` is called independently, with
+    /// no candidate value, by [`crate::sheet::Sheet::filter_range`].
+    ///
+    /// - Precondition: `args.len() == arg_types.len()`.
+    /// - Precondition: `clamp` returns a value whose runtime type matches `value_type`.
+    /// - Precondition: `bounds` returns a pair of values whose runtime type matches `value_type`.
+    #[must_use]
+    pub fn range<F, B>(
+        value_type: TypeId,
+        args: Vec<CellId>,
+        arg_types: Vec<TypeId>,
+        clamp: F,
+        bounds: B,
+    ) -> Self
+    where
+        F: Fn(&dyn Any, &[&dyn Any]) -> Result<Box<dyn Any>, anyhow::Error> + 'static,
+        B: Fn(&[&dyn Any]) -> (Box<dyn Any>, Box<dyn Any>) + 'static,
+    {
+        debug_assert_eq!(args.len(), arg_types.len());
+        Filter(FilterData {
+            value_type,
+            args,
+            arg_types,
+            function: Box::new(clamp),
+            kind: FilterKind::Range {
+                bounds: Box::new(bounds),
+            },
+        })
     }
 }
 
@@ -218,5 +275,42 @@ mod tests {
             Ok(Box::new(*v) as Box<dyn std::any::Any>)
         });
         assert_eq!(filter.0.value_type, TypeId::of::<i32>());
+    }
+
+    #[test]
+    fn new_defaults_to_opaque_kind() {
+        let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |value, _args| {
+            Ok(Box::new(*value.downcast_ref::<i32>().unwrap()) as Box<dyn Any>)
+        });
+        assert!(matches!(filter.0.kind, FilterKind::Opaque));
+    }
+
+    #[test]
+    fn range_stores_range_kind_and_clamps_via_function() {
+        let filter = Filter::range(
+            TypeId::of::<i32>(),
+            vec![],
+            vec![],
+            |value: &dyn Any, _args: &[&dyn Any]| {
+                let v = *value.downcast_ref::<i32>().unwrap();
+                Ok(Box::new(v.clamp(0, 100)) as Box<dyn Any>)
+            },
+            |_args: &[&dyn Any]| {
+                (
+                    Box::new(0i32) as Box<dyn Any>,
+                    Box::new(100i32) as Box<dyn Any>,
+                )
+            },
+        );
+        assert_eq!(filter.0.value_type, TypeId::of::<i32>());
+        let x: i32 = 500;
+        let result = (filter.0.function)(&x, &[]).unwrap();
+        assert_eq!(*result.downcast_ref::<i32>().unwrap(), 100);
+        let FilterKind::Range { bounds } = &filter.0.kind else {
+            panic!("expected FilterKind::Range");
+        };
+        let (lo, hi) = bounds(&[]);
+        assert_eq!(*lo.downcast_ref::<i32>().unwrap(), 0);
+        assert_eq!(*hi.downcast_ref::<i32>().unwrap(), 100);
     }
 }
