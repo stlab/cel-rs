@@ -74,6 +74,12 @@ pub struct Sheet {
     /// call. Not recomputed by `propagate_without_replan`, consistent with
     /// `last_violated`.
     last_filter_violations: HashMap<CellId, FilterViolation>,
+    /// Reverse index of `filter_args`: for each cell, the live cells whose filter
+    /// references it as one of its dynamic arguments. Built incrementally in
+    /// `add_filter`; cells and filters are never removed once added, so this needs no
+    /// invalidation, matching `terminal_cells` and every other per-cell set `Sheet`
+    /// already maintains for its own lifetime.
+    filter_dependents: HashMap<CellId, Vec<CellId>>,
 }
 
 /// A conditional's evaluated match value: borrowed (existing cell, no allocation) or owned
@@ -111,6 +117,7 @@ impl Sheet {
             requirements: SlotMap::with_key(),
             last_violated: HashMap::new(),
             last_filter_violations: HashMap::new(),
+            filter_dependents: HashMap::new(),
         }
     }
 
@@ -581,6 +588,10 @@ impl Sheet {
             });
         }
 
+        for &arg in &filter.0.args {
+            self.filter_dependents.entry(arg).or_default().push(cell);
+        }
+
         let cell_data = &mut self.cells[cell];
         cell_data.source = conformed;
         cell_data.derived = None;
@@ -597,6 +608,17 @@ impl Sheet {
             .filter
             .as_ref()
             .map(|f| f.args.as_slice())
+    }
+
+    /// Returns the live cells whose filter references `id` as one of its dynamic
+    /// arguments — the reverse of a filter's own argument list ([`Sheet::filter_args`]).
+    ///
+    /// - Postcondition: empty if no live cell's filter references `id`.
+    pub fn filter_dependents(&self, id: CellId) -> &[CellId] {
+        self.filter_dependents
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Returns the kind of validation/derivation `id`'s filter performs, if it has one.
@@ -3383,6 +3405,61 @@ mod tests {
         // are the upstream root causes, not `b` itself.
         assert!(violation_cells.contains(&a));
         assert!(violation_cells.contains(&bound));
+    }
+
+    #[test]
+    fn filter_dependents_returns_the_cells_whose_filter_references_this_one() {
+        let mut sheet = Sheet::new();
+        let bound = sheet.add_cell(10_i32);
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
+            )
+            .unwrap();
+        assert_eq!(sheet.filter_dependents(bound), &[a]);
+    }
+
+    #[test]
+    fn filter_dependents_is_empty_for_a_cell_no_filter_references() {
+        let mut sheet = Sheet::new();
+        let bound = sheet.add_cell(10_i32);
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|v: &i32| Ok((*v).clamp(0, 100))))
+            .unwrap();
+        assert!(sheet.filter_dependents(bound).is_empty());
+    }
+
+    #[test]
+    fn filter_dependents_is_empty_for_an_invalid_cell() {
+        let sheet = Sheet::new();
+        assert!(sheet.filter_dependents(CellId::default()).is_empty());
+    }
+
+    #[test]
+    fn filter_dependents_aggregates_multiple_dependents_of_the_same_argument() {
+        let mut sheet = Sheet::new();
+        let bound = sheet.add_cell(10_i32);
+        let a = sheet.add_cell(5_i32);
+        let b = sheet.add_cell(5_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |v: &i32, bd: &i32| Ok((*v).min(*bd))),
+            )
+            .unwrap();
+        sheet
+            .add_filter(
+                b,
+                Filter::from_fn_1(bound, |v: &i32, bd: &i32| Ok((*v).min(*bd))),
+            )
+            .unwrap();
+        let dependents = sheet.filter_dependents(bound);
+        assert_eq!(dependents.len(), 2);
+        assert!(dependents.contains(&a));
+        assert!(dependents.contains(&b));
     }
 
     #[test]
