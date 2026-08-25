@@ -4,7 +4,9 @@ use adam_rs::{CellId, FilterViolation, Sheet};
 use dioxus::prelude::*;
 
 use crate::bridge::{Labels, format_adam_error};
-use crate::spectrum::{SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpTextfield};
+use crate::spectrum::{
+    SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpNumberfield, SpSlider, SpTextfield,
+};
 
 use std::collections::HashSet;
 
@@ -205,13 +207,14 @@ fn write_and_propagate(
 }
 
 /// Sidebar panel showing all cells with labels and inputs for writing — a checkbox for
-/// `bool`-typed cells, a text field for everything else.
+/// `bool`-typed cells, a number field (plus a live-range slider when the cell has a range
+/// filter) for numeric cells, and a text field for everything else.
 ///
 /// Editing an input immediately writes the parsed value to the sheet and propagates
 /// constraints. If parsing or propagation fails (for example, non-numeric input or division
-/// by zero), `SpTextfield` renders in its invalid state until the user blurs, and the
-/// formatted diagnostic is printed to stderr. The text field's input is not reset while it is
-/// focused; it syncs back to the computed value on blur, keeping non-edited cells up to date.
+/// by zero), the field renders in its invalid state until the user blurs, and the formatted
+/// diagnostic is printed to stderr. A field's input is not reset while it is focused; it
+/// syncs back to the computed value on blur, keeping non-edited cells up to date.
 #[component]
 pub fn Inspector(
     sheet: Signal<Sheet>,
@@ -268,6 +271,24 @@ fn CellRow(
             .unwrap_or(false)
     });
 
+    let is_numeric = use_memo(move || {
+        labels
+            .read()
+            .cells
+            .get(&id)
+            .map(|m| m.is_numeric)
+            .unwrap_or(false)
+    });
+
+    let range = use_memo(move || {
+        labels
+            .read()
+            .cells
+            .get(&id)
+            .and_then(|m| m.range.as_ref())
+            .map(|f| f(&sheet.read()))
+    });
+
     let forced = use_memo(move || sheet.read().is_forced(id));
 
     let mut input = use_signal(|| value.peek().clone());
@@ -317,6 +338,51 @@ fn CellRow(
                             .await;
                         });
                     },
+                }
+            } else if *is_numeric.read() {
+                SpNumberfield {
+                    id: field_id.clone(),
+                    value: input.read().clone(),
+                    invalid: flags.read().invalid,
+                    warning: flags.read().warning,
+                    disabled: flags.read().disabled,
+                    oninput: move |_: FormEvent| {
+                        spawn(async move {
+                            let mut eval = document::eval(&format!(
+                                r#"dioxus.send(document.getElementById("cell-{id:?}").value.toString())"#
+                            ));
+                            let Ok(val) = eval.recv::<String>().await else { return; };
+                            if !*is_focused.read() {
+                                return;
+                            }
+                            input.set(val.clone());
+                            write_and_propagate(sheet, labels, id, &val, has_error, active_source);
+                        });
+                    },
+                    onfocus: move |_| is_focused.set(true),
+                    onblur: move |_| {
+                        is_focused.set(false);
+                        has_error.set(false);
+                    },
+                }
+                if let Some((lo, hi)) = *range.read() {
+                    SpSlider {
+                        id: format!("cell-{id:?}-slider"),
+                        value: input.read().clone(),
+                        min: format!("{lo}"),
+                        max: format!("{hi}"),
+                        disabled: flags.read().disabled,
+                        oninput: move |_: FormEvent| {
+                            spawn(async move {
+                                let mut eval = document::eval(&format!(
+                                    r#"dioxus.send(document.getElementById("cell-{id:?}-slider").value.toString())"#
+                                ));
+                                let Ok(val) = eval.recv::<String>().await else { return; };
+                                input.set(val.clone());
+                                write_and_propagate(sheet, labels, id, &val, has_error, active_source);
+                            });
+                        },
+                    }
                 }
             } else {
                 SpTextfield {

@@ -65,6 +65,66 @@ pub fn SpTextfield(
     }
 }
 
+/// Single-line numeric input.
+///
+/// Maps to `<sp-number-field>`. Fires standard DOM `input`, `focus`, and `blur` events, exactly
+/// like [`SpTextfield`] — including the same custom-element caveat: Dioxus's event serializer
+/// never populates `event.target.value` for a custom element, so reading the live value off the
+/// DOM (not the synthetic event) is the caller's job. `value` is passed as its string
+/// representation; the element renders and edits it as a number internally.
+#[component]
+pub fn SpNumberfield(
+    id: String,
+    value: String,
+    invalid: bool,
+    warning: bool,
+    disabled: bool,
+    oninput: EventHandler<FormEvent>,
+    onfocus: EventHandler<FocusEvent>,
+    onblur: EventHandler<FocusEvent>,
+) -> Element {
+    rsx! {
+        sp-number-field {
+            "id": "{id}",
+            "value": "{value}",
+            "invalid": if invalid { "true" },
+            "disabled": if disabled { "true" },
+            class: if warning { "warning" },
+            oninput: move |e| oninput.call(e),
+            onfocus: move |e| onfocus.call(e),
+            onblur: move |e| onblur.call(e),
+        }
+    }
+}
+
+/// A draggable range slider for a numeric value with live min/max bounds.
+///
+/// Maps to `<sp-slider>`. `min`/`max` are passed as strings, recomputed by the caller on every
+/// render from the cell's current filter bounds (see `begin/src/bridge.rs`'s `CellMeta::range`),
+/// so a range driven by other cells stays live. Fires a standard DOM `input` event; reading the
+/// live numeric value off the DOM (not the synthetic event) is the caller's job, mirroring
+/// [`SpTextfield`]/[`SpNumberfield`].
+#[component]
+pub fn SpSlider(
+    id: String,
+    value: String,
+    min: String,
+    max: String,
+    disabled: bool,
+    oninput: EventHandler<FormEvent>,
+) -> Element {
+    rsx! {
+        sp-slider {
+            "id": "{id}",
+            "value": "{value}",
+            "min": "{min}",
+            "max": "{max}",
+            "disabled": if disabled { "true" },
+            oninput: move |e| oninput.call(e),
+        }
+    }
+}
+
 /// Label associated with a form control.
 ///
 /// Maps to `<sp-field-label>`. The `for_` prop sets the `for` HTML attribute
