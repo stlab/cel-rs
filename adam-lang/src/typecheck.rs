@@ -343,12 +343,12 @@ fn check_cell_initializer(
     }
 }
 
-/// The expected `TypeShape` for one filter-closure parameter position (the filtered cell itself,
-/// or one of its declared argument cells) — `Some` only when a concrete shape is known: a
-/// tuple-typed annotation (from `shapes`), or a scalar type either annotated or already resolved
-/// to a concrete `Ty` (from `cell_types`, converted via `Ty::type_id`). `None` when nothing is
-/// known (an unannotated cell, or a name neither map has an entry for), mirroring `Ty::Any`'s
-/// existing "never flagged" leniency elsewhere in this file.
+/// The expected `TypeShape` for a filtered cell's own declared/inferred shape (`_`'s type inside
+/// its filter body) — `Some` only when a concrete shape is known: a tuple-typed annotation
+/// (from `shapes`), or a scalar type either annotated or already resolved to a concrete `Ty`
+/// (from `cell_types`, converted via `Ty::type_id`). `None` when nothing is known (an unannotated
+/// cell, or a name neither map has an entry for), mirroring `Ty::Any`'s existing "never flagged"
+/// leniency elsewhere in this file.
 ///
 /// - Complexity: O(1) amortized lookup plus an O(k) clone of a possibly-nested `TypeShape`
 ///   (k = the shape's own element count) when found in `shapes`.
@@ -366,6 +366,44 @@ fn expected_shape(
         .map(TypeShape::Named)
 }
 
+/// Returns whether `expr` contains a reference to the identifier `name` anywhere in its tree.
+/// Used by `check_filter` to check whether a filter's body references `_` — deliberately a plain
+/// structural walk, not built on `check_expr`'s identifier resolution, so checking for `_`'s
+/// presence never runs type-checking a second time over any part of `expr`.
+///
+/// - Complexity: O(n) in the number of sub-expressions in `expr`.
+fn expr_references_ident(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Literal { .. } => false,
+        Expr::Ident { name: ident, .. } => ident == name,
+        Expr::Op { operands, .. } => operands.iter().any(|e| expr_references_ident(e, name)),
+        Expr::Apply { callee, args, .. } => {
+            expr_references_ident(callee, name)
+                || args.iter().any(|e| expr_references_ident(e, name))
+        }
+        Expr::Tuple { elements, .. } => elements.iter().any(|e| expr_references_ident(e, name)),
+        Expr::TupleIndex { base, .. } => expr_references_ident(base, name),
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_references_ident(cond, name)
+                || expr_references_ident(then_branch, name)
+                || else_branch
+                    .as_deref()
+                    .is_some_and(|e| expr_references_ident(e, name))
+        }
+        Expr::Logical { lhs, rhs, .. } => {
+            expr_references_ident(lhs, name) || expr_references_ident(rhs, name)
+        }
+        Expr::Cast { expr, .. } => expr_references_ident(expr, name),
+        Expr::Closure { body, .. } => expr_references_ident(body, name),
+    }
+}
+
+/// Checks one `cell`'s `filter` clause, if present: the body's inferred type must unify with
 /// this cell's own declared/inferred shape (`_`'s type, via `body_resolve`'s special case
 /// below), and the body must reference `_` — the value being filtered — at least once. Every
 /// other identifier is resolved exactly as any other deduced expression in this file (a
@@ -386,21 +424,11 @@ fn check_filter(
         return;
     };
 
-    let underscore_used = std::cell::Cell::new(false);
     let own_ty = resolve(&cell.name);
-    let body_resolve = |name: &str| -> Ty {
-        if name == "_" {
-            underscore_used.set(true);
-            own_ty
-        } else {
-            resolve(name)
-        }
-    };
+    let body_resolve = |name: &str| -> Ty { if name == "_" { own_ty } else { resolve(name) } };
 
     match expected_shape(&cell.name, cell_types, shapes) {
         Some(shape @ TypeShape::Tuple(_)) => {
-            let (_, body_diags) = check_expr(&filter.body, &body_resolve);
-            diagnostics.extend(body_diags);
             expr_matches_shape(&filter.body, &shape, registry, &body_resolve, diagnostics);
         }
         Some(TypeShape::Named(type_id)) => {
@@ -425,7 +453,7 @@ fn check_filter(
         }
     }
 
-    if !underscore_used.get() {
+    if !expr_references_ident(&filter.body, "_") {
         diagnostics.push(ParseError::new_range(
             "filter must reference `_` (the value being filtered)".to_string(),
             filter.span.start,
@@ -899,6 +927,15 @@ mod tests {
         let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter (_.0,); }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn filter_references_underscore_nested_inside_a_call_has_no_missing_underscore_diagnostic() {
+        // `_` appears only as a call argument, not as the whole body or a bare operand — exercises
+        // `expr_references_ident`'s `Expr::Apply` arm specifically.
+        let sheet = parse("sheet s { cell a: i32 = 1 filter if true { _ } else { 1 }; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
     }
 
     #[test]
