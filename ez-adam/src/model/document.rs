@@ -131,6 +131,7 @@ impl PartialEq for Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::cell::{Cell, CellType};
 
     #[test]
     fn new_is_empty() {
@@ -162,5 +163,17 @@ mod tests {
         let mut doc2 = Document::new("sheet1");
         doc2.format_version = 2;
         assert_ne!(doc1, doc2);
+    }
+
+    #[test]
+    fn documents_with_different_cells_are_not_equal() {
+        let mut a = Document::new("demo");
+        let b = Document::new("demo");
+
+        let cell = Cell::new("test_cell", CellType::f64());
+        let cell_id = a.cells.insert(cell);
+        a.cell_order.push(cell_id);
+
+        assert_ne!(a, b);
     }
 }
