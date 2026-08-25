@@ -189,6 +189,8 @@ fn condition_expr_text(doc: &Document, condition: &ConditionExpr) -> String {
 /// Returns `cells`' names joined for use as a conditional's condition
 /// expression: a bare name for a single cell, or a parenthesized
 /// comma-separated tuple for multiple cells.
+///
+/// - Complexity: O(n) in `cells.len()`.
 fn cell_names_text(doc: &Document, cells: &[crate::model::cell::CellId]) -> String {
     let names: Vec<&str> = cells.iter().map(|c| doc.cells[*c].name.as_str()).collect();
     if names.len() == 1 {
@@ -201,6 +203,8 @@ fn cell_names_text(doc: &Document, cells: &[crate::model::cell::CellId]) -> Stri
 /// Returns `values`' `.adm2` spelling for use as a branch's match arm: a
 /// bare literal (see [`literal_text`]) for a single value, or a
 /// parenthesized comma-separated tuple for multiple values.
+///
+/// - Complexity: O(n) in `values.len()`.
 fn branch_literal_text(values: &[CellValueLiteral]) -> String {
     let literals: Vec<String> = values.iter().map(literal_text).collect();
     if literals.len() == 1 {
