@@ -3,5 +3,6 @@
 
 pub mod cell;
 pub mod cell_node;
+pub mod conditional_group;
 pub mod geometry;
 pub mod relationship_group;
