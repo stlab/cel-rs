@@ -25,7 +25,8 @@ pub fn add_cell_node(doc: &mut Document, cell: CellId, position: Point) -> CellN
     doc.cell_nodes.insert(CellNode::new(cell, position))
 }
 
-/// Sets whether `cell` is an output cell (emits `out <name> := <name>;`).
+/// Sets whether `cell` is an output cell. Not currently reflected by
+/// `.adm2` codegen — see <https://github.com/stlab/cel-rs/issues/147>.
 ///
 /// - Precondition: `cell` is a valid key in `doc.cells`.
 pub fn set_output(doc: &mut Document, cell: CellId, output: bool) {

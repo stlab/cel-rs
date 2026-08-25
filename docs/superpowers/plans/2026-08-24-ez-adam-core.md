@@ -1916,6 +1916,13 @@ git add ez-adam/src/codegen/mod.rs
 git commit -m "feat(ez-adam): generate out decls for output cells"
 ```
 
+**Update (during Task 17's execution):** this `out <name> := <name>;` emission
+was removed. `adam-lang`'s `out` declares a *new* identifier — it can't reuse
+an existing `cell`'s own name — and is always a derived/computed value, never
+a flag on a plain writable cell, so the generated text doesn't parse.
+`generate_adm2` does not currently emit anything for `Cell.output`; tracked as
+<https://github.com/stlab/cel-rs/issues/147>.
+
 ---
 
 ### Task 16: `codegen` — clamp filter clauses
@@ -2585,3 +2592,5 @@ git commit -m "test(ez-adam): add end-to-end capstone test for Phase 1"
 ## Deferred pending upstream work
 
 - `Cell.restrict` codegen — blocked on <https://github.com/stlab/cel-rs/issues/146> (adam-lang has no boolean-rejecting cell filter syntax yet).
+- `Cell.output` codegen — blocked on <https://github.com/stlab/cel-rs/issues/147> (adam-lang's `out` can't reuse an existing cell's own name, and always models a derived value, not a flag on a plain writable cell).
+- Formula/restrict-expression type-validation beyond CEL syntax — tracked as <https://github.com/stlab/cel-rs/issues/148> (`validate_cel_expression` checks syntax only; a formula referencing cells with mismatched types, e.g. `f64 * i64` with no cast, is accepted at edit time and only fails when the exported `.adm2` is compiled downstream).

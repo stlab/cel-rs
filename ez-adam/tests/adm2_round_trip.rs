@@ -5,10 +5,13 @@ use adam_lang::{AdamParser, TypeRegistry};
 use cel_parser::OpLookup;
 use ez_adam::codegen::generate_adm2;
 use ez_adam::model::cell::CellType;
+use ez_adam::model::conditional_group::CellValueLiteral;
 use ez_adam::model::document::Document;
 use ez_adam::model::geometry::Point;
 use ez_adam::ops::cells::{add_cell, add_cell_node, set_output};
-use ez_adam::ops::conditionals::add_conditional_from_bool_cells;
+use ez_adam::ops::conditionals::{
+    add_branch, add_conditional_from_bool_cells, add_conditional_with_formula, toggle_enabled_group,
+};
 use ez_adam::ops::relationships::{create_relationship, set_member_formula};
 
 /// Asserts that `adm2_text` parses successfully as `.adm2` source, via
@@ -86,6 +89,55 @@ fn a_document_with_every_construct_generates_valid_adm2() {
 fn a_bare_cell_only_document_generates_valid_adm2() {
     let mut doc = Document::new("empty_ish");
     let _ = add_cell(&mut doc, "a", CellType::f64());
+    let adm2_text = generate_adm2(&doc);
+    assert_parses(&adm2_text);
+}
+
+#[test]
+fn a_multi_cell_cells_mode_conditional_group_generates_valid_adm2() {
+    let mut doc = Document::new("resize");
+
+    let width = add_cell(&mut doc, "width_pixels", CellType::i64());
+    let height = add_cell(&mut doc, "height_pixels", CellType::i64());
+    let width_node = add_cell_node(&mut doc, width, Point::new(0.0, 0.0));
+    let height_node = add_cell_node(&mut doc, height, Point::new(10.0, 0.0));
+
+    let r1 = create_relationship(&mut doc, width_node, height_node, Point::new(5.0, 5.0));
+    set_member_formula(&mut doc, r1, width_node, "height_pixels * 2i64");
+    set_member_formula(&mut doc, r1, height_node, "width_pixels / 2i64");
+
+    let flag_a = add_cell(&mut doc, "constrain_proportions", CellType::Bool);
+    let flag_b = add_cell(&mut doc, "lock_aspect", CellType::Bool);
+    let _ =
+        add_conditional_from_bool_cells(&mut doc, vec![flag_a, flag_b], r1, Point::new(0.0, 40.0));
+
+    let adm2_text = generate_adm2(&doc);
+    assert_parses(&adm2_text);
+}
+
+#[test]
+fn a_formula_mode_conditional_group_generates_valid_adm2() {
+    let mut doc = Document::new("resize");
+
+    let aspect = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+    let width = add_cell(&mut doc, "width_pixels", CellType::i64());
+    let height = add_cell(&mut doc, "height_pixels", CellType::i64());
+    let width_node = add_cell_node(&mut doc, width, Point::new(0.0, 0.0));
+    let height_node = add_cell_node(&mut doc, height, Point::new(10.0, 0.0));
+
+    let r1 = create_relationship(&mut doc, width_node, height_node, Point::new(5.0, 5.0));
+    set_member_formula(&mut doc, r1, width_node, "height_pixels * 2i64");
+    set_member_formula(&mut doc, r1, height_node, "width_pixels / 2i64");
+
+    let cond = add_conditional_with_formula(
+        &mut doc,
+        vec![aspect],
+        "aspect_ratio > 2.0",
+        Point::new(0.0, 40.0),
+    );
+    add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(true)]);
+    toggle_enabled_group(&mut doc, cond, 0, r1);
+
     let adm2_text = generate_adm2(&doc);
     assert_parses(&adm2_text);
 }
