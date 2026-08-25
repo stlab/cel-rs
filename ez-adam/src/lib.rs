@@ -5,4 +5,5 @@
 pub mod codegen;
 pub mod model;
 pub mod ops;
+pub mod persistence;
 pub mod validation;
