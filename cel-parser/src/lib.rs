@@ -14,9 +14,9 @@
 //!
 //! ```text
 //! expression = range_expression.
-//! range_expression = ( or_expression [ ".." [ or_expression ] | "..=" or_expression ] )
-//!                   | ( ".." [ or_expression ] )
-//!                   | ( "..=" or_expression ) .
+//! range_expression = or_expression [ ".." [ or_expression ] | "..=" or_expression ]
+//!                   | ".." [ or_expression ]
+//!                   | "..=" or_expression.
 //! or_expression = and_expression { "||" and_expression }.
 //! and_expression = comparison_expression { "&&" comparison_expression }.
 //! comparison_expression = bitwise_or_expression
@@ -797,9 +797,9 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `range_expression = ( or_expression [ ".." [ or_expression ] | "..=" or_expression ] )
-    ///                   | ( ".." [ or_expression ] )
-    ///                   | ( "..=" or_expression ) .`
+    /// `range_expression = or_expression [ ".." [ or_expression ] | "..=" or_expression ]
+    ///                   | ".." [ or_expression ]
+    ///                   | "..=" or_expression.`
     ///
     /// Left-factored so every alternative is chosen by one concrete leading token rather
     /// than by first deciding whether an optional `or_expression` is present: the three
