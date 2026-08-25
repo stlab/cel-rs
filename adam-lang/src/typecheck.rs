@@ -396,6 +396,17 @@ fn expr_references_ident(expr: &Expr, name: &str) -> bool {
     }
 }
 
+/// Returns `true` if `expr` is itself a top-level `..=` range expression (`Expr::Op { name:
+/// "range_inclusive", .. }`) — the one structural shape `check_filter` exempts from its "must
+/// reference `_`" requirement, mirroring `adam_lang::parser::AdamParser::parse_cell_filter`'s
+/// matching exemption for the same reason: a `lo..=hi` filter body's bounds never depend on the
+/// candidate value, only on its own two endpoints. Deliberately checks only the whole body, not
+/// any nested sub-expression — matches the runtime layer's own recognition, which is keyed on the
+/// *entire compiled expression's* inferred type, not a nested occurrence.
+fn is_range_inclusive_body(expr: &Expr) -> bool {
+    matches!(expr, Expr::Op { name, .. } if name == "range_inclusive")
+}
+
 /// Checks one `cell`'s `filter` clause, if present: a tuple-typed filtered cell is rejected
 /// outright (mirroring the runtime parser's own rejection — not yet supported by either layer);
 /// otherwise, the body's inferred type must unify with this cell's own declared/inferred shape
@@ -460,7 +471,7 @@ fn check_filter(
         }
     }
 
-    if !expr_references_ident(&filter.body, "_") {
+    if !is_range_inclusive_body(&filter.body) && !expr_references_ident(&filter.body, "_") {
         diagnostics.push(ParseError::new_range(
             "filter must reference `_` (the value being filtered)".to_string(),
             filter.span.start,
@@ -1062,5 +1073,12 @@ mod tests {
         let sheet = parse("sheet s { cell a: i32; cell out: i32; relationship { (out,) := a; } }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn filter_range_inclusive_body_does_not_require_underscore() {
+        let sheet = parse("sheet s { cell a: i32 filter 0..=100; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
     }
 }
