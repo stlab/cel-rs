@@ -278,7 +278,9 @@ impl AdamParser {
     /// # Errors
     /// Returns `Err` if `declared_shape` is a tuple (not yet supported by this builder), if an
     /// identifier inside the expression names neither `_` nor an already-declared cell, if `_` is
-    /// never referenced, or if the expression's inferred type doesn't match `declared_shape`.
+    /// never referenced, if the expression's inferred type doesn't match `declared_shape`, or, if
+    /// the expression is `RangeInclusive`-typed, if its element type doesn't match
+    /// `declared_shape`.
     ///
     /// - Complexity: O(m) in the number of distinct cell identifiers the expression references,
     ///   for this method's own bookkeeping (on top of the expression's own parse/compile cost).
@@ -297,12 +299,6 @@ impl AdamParser {
         }
 
         let (segment, inputs, underscore_used) = self.parse_filter_expr(ctx, declared_shape)?;
-        if !underscore_used {
-            return Err(ParseError::new(
-                "filter must reference `_` (the value being filtered)",
-                cell_span,
-            ));
-        }
 
         let value_type_id = cell_type_id(declared_shape);
         let output_type_id = segment.peek_output_type_id().ok_or_else(|| {
@@ -311,7 +307,61 @@ impl AdamParser {
                 cell_span,
             )
         })?;
+
+        let range_entry = self
+            .types
+            .range_entry(output_type_id)
+            .filter(|e| e.element_type_id == value_type_id);
+
+        if range_entry.is_none() && !underscore_used {
+            return Err(ParseError::new(
+                "filter must reference `_` (the value being filtered)",
+                cell_span,
+            ));
+        }
+
+        let arg_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
+        let arg_type_ids: Vec<TypeId> = inputs
+            .iter()
+            .map(|(_, _, shape)| cell_type_id(shape))
+            .collect();
+
+        if let Some(entry) = range_entry {
+            let default_fn = self
+                .types
+                .entry_by_type_id(value_type_id)
+                .expect("declared cell type registered")
+                .default_fn
+                .expect("numeric range-filter cell type has a default");
+            let placeholder = default_fn();
+            let segment = std::rc::Rc::new(RefCell::new(segment));
+            let clamp_segment = std::rc::Rc::clone(&segment);
+            let bounds_segment = std::rc::Rc::clone(&segment);
+            let clamp_fn = entry.clamp_fn;
+            let bounds_fn = entry.bounds_fn;
+
+            return Ok(adam_rs::Filter::range(
+                value_type_id,
+                arg_ids,
+                arg_type_ids,
+                move |value, args| clamp_fn(&mut clamp_segment.borrow_mut(), value, args),
+                move |args| {
+                    bounds_fn(&mut bounds_segment.borrow_mut(), placeholder.as_ref(), args)
+                        .expect("range filter body already validated by parse_cell_filter")
+                },
+            ));
+        }
+
         if output_type_id != value_type_id {
+            if self.types.range_entry(output_type_id).is_some() {
+                return Err(ParseError::new(
+                    format!(
+                        "cell `{cell_name}`: filter range bounds must be `{}`",
+                        self.types.display_name(declared_shape)
+                    ),
+                    cell_span,
+                ));
+            }
             return Err(ParseError::new(
                 format!(
                     "cell `{cell_name}`: filter must produce `{}`",
@@ -328,12 +378,6 @@ impl AdamParser {
             .entry_by_type_id(value_type_id)
             .expect("declared cell type registered")
             .call_dyn_fn;
-
-        let arg_ids: Vec<CellId> = inputs.iter().map(|(_, id, _)| *id).collect();
-        let arg_type_ids: Vec<TypeId> = inputs
-            .iter()
-            .map(|(_, _, shape)| cell_type_id(shape))
-            .collect();
 
         // `RefCell`, not a plain `move` capture: `call_fn` takes `&mut DynSegment`, unlike
         // `DynClosure::call_boxed`'s `&self` the old closure-literal path used.
@@ -1576,6 +1620,76 @@ mod tests {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let err = parser.parse_str("sheet s { cell a: i32 filter _ + nope; }");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn cell_filter_with_a_range_inclusive_body_clamps_on_write() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let mut parsed = parser
+            .parse_str("sheet s { cell a: i32 filter 0..=100; }")
+            .unwrap();
+        let (a_id, _) = parsed.cell_names["a"];
+        assert!(matches!(
+            parsed.sheet.filter_kind(a_id),
+            Some(adam_rs::FilterKind::Range { .. })
+        ));
+        parsed.sheet.write(a_id, 500i32).unwrap();
+        assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 100);
+    }
+
+    #[test]
+    fn cell_filter_range_does_not_require_underscore() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let result = parser.parse_str("sheet s { cell a: i32 filter 0..=100; }");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cell_filter_range_bounds_track_cell_dependencies_live() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let mut parsed = parser
+            .parse_str(
+                "sheet s { cell lo: i32 = 0; cell hi: i32 = 100; cell a: i32 filter lo..=hi; }",
+            )
+            .unwrap();
+        let (a_id, _) = parsed.cell_names["a"];
+        let (hi_id, _) = parsed.cell_names["hi"];
+        assert_eq!(parsed.sheet.filter_range::<i32>(a_id), Some((0, 100)));
+        parsed.sheet.write(hi_id, 10i32).unwrap();
+        assert_eq!(parsed.sheet.filter_range::<i32>(a_id), Some((0, 10)));
+        parsed.sheet.write(a_id, 500i32).unwrap();
+        assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 10);
+    }
+
+    #[test]
+    fn cell_filter_range_with_float_cell_type_works() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let mut parsed = parser
+            .parse_str("sheet s { cell a: f64 filter 0.0..=100.0; }")
+            .unwrap();
+        let (a_id, _) = parsed.cell_names["a"];
+        parsed.sheet.write(a_id, 500.0f64).unwrap();
+        assert_eq!(*parsed.sheet.read::<f64>(a_id).unwrap(), 100.0);
+    }
+
+    #[test]
+    fn cell_filter_range_with_mismatched_element_type_is_a_parse_error() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let err = parser.parse_str("sheet s { cell a: f64 filter 0..=100; }");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn cell_filter_general_expression_still_compiles_to_opaque_kind() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let parsed = parser
+            .parse_str("sheet s { cell a: i32 filter if _ < 0 { 0 } else { _ }; }")
+            .unwrap();
+        let (a_id, _) = parsed.cell_names["a"];
+        assert!(matches!(
+            parsed.sheet.filter_kind(a_id),
+            Some(adam_rs::FilterKind::Opaque)
+        ));
     }
 
     #[test]

@@ -58,7 +58,7 @@ pub type AddConditionalFn = fn(
 /// Per-numeric-type support for a `RangeInclusive<T>`-typed filter expression, keyed by the
 /// range's own `TypeId` — populated in [`TypeRegistry::new`] for exactly the primitives
 /// `cel-parser`'s `..=` operator supports (`cel_parser::op_table`'s `RANGE_INCLUSIVE_SIGNATURES`).
-#[allow(dead_code)] // Used by Task 4 (parser.rs)
+#[allow(clippy::type_complexity)] // `clamp_fn`/`bounds_fn` are inherently multi-argument fn pointers.
 pub(crate) struct RangeEntry {
     /// `T`'s own `TypeId` — compared against a filtered cell's declared type by the caller.
     pub(crate) element_type_id: TypeId,
