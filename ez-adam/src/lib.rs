@@ -3,3 +3,4 @@
 //! full design.
 
 pub mod model;
+pub mod ops;
