@@ -57,9 +57,7 @@ pub fn set_member_formula(
     let g = &mut doc.relationship_groups[group];
     let entry = g.members.iter_mut().find(|(n, _)| *n == node);
     debug_assert!(entry.is_some(), "node is not a member of group");
-    if let Some((_, f)) = entry {
-        *f = formula.into();
-    }
+    entry.unwrap().1 = formula.into();
 }
 
 #[cfg(test)]
