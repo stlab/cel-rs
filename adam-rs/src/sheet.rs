@@ -12,7 +12,7 @@ use crate::{
     cell::{CellData, CellId},
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::Error,
-    filter::{Filter, FilterViolation},
+    filter::{Filter, FilterKind, FilterViolation},
     output::{OutputData, OutputId},
     relationship::{Method, RelationshipData, RelationshipId},
     requirement::{Requirement, RequirementData, RequirementId},
@@ -596,6 +596,37 @@ impl Sheet {
             .filter
             .as_ref()
             .map(|f| f.args.as_slice())
+    }
+
+    /// Returns the kind of validation/derivation `id`'s filter performs, if it has one.
+    ///
+    /// Returns `None` if `id` is not a live cell in this sheet, or has no filter.
+    pub fn filter_kind(&self, id: CellId) -> Option<&FilterKind> {
+        self.cells.get(id)?.filter.as_ref().map(|f| &f.kind)
+    }
+
+    /// Returns `id`'s filter's current `(lo, hi)` bounds, if it has a [`FilterKind::Range`]
+    /// filter.
+    ///
+    /// Resolves the filter's argument cells' current effective values via the same path
+    /// [`Sheet::add_filter`] already uses, then calls the filter's `bounds` function.
+    ///
+    /// Returns `None` if `id` is not a live cell in this sheet, has no filter, or its filter's
+    /// kind isn't [`FilterKind::Range`].
+    ///
+    /// - Complexity: O(a) where a is the number of the filter's argument cells.
+    pub fn filter_range<T: Any + Clone>(&self, id: CellId) -> Option<(T, T)> {
+        let filter = self.cells.get(id)?.filter.as_ref()?;
+        let FilterKind::Range { bounds } = &filter.kind else {
+            return None;
+        };
+        let args: Vec<&dyn Any> = filter
+            .args
+            .iter()
+            .map(|&a| self.cells[a].effective())
+            .collect();
+        let (lo, hi) = bounds(&args);
+        Some((*lo.downcast::<T>().ok()?, *hi.downcast::<T>().ok()?))
     }
 
     /// Returns the filter violation recorded for `id` as of the last full
@@ -1618,7 +1649,7 @@ mod tests {
     use crate::{
         ConditionalId, Error, MatchExpr, Method, Sheet,
         cell::CellId,
-        filter::{Filter, FilterViolation},
+        filter::{Filter, FilterKind, FilterViolation},
         relationship::RelationshipId,
     };
     use std::any::{Any, TypeId};
@@ -3157,5 +3188,120 @@ mod tests {
         // are the upstream root causes, not `b` itself.
         assert!(violation_cells.contains(&a));
         assert!(violation_cells.contains(&bound));
+    }
+
+    #[test]
+    fn filter_kind_returns_none_for_a_cell_with_no_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        assert!(sheet.filter_kind(a).is_none());
+    }
+
+    #[test]
+    fn filter_kind_returns_opaque_for_a_plain_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
+            .unwrap();
+        assert!(matches!(sheet.filter_kind(a), Some(FilterKind::Opaque)));
+    }
+
+    #[test]
+    fn filter_kind_returns_range_for_a_range_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let filter = Filter::range(
+            TypeId::of::<i32>(),
+            vec![],
+            vec![],
+            |value, _args| Ok(Box::new(*value.downcast_ref::<i32>().unwrap()) as Box<dyn Any>),
+            |_args| {
+                (
+                    Box::new(0i32) as Box<dyn Any>,
+                    Box::new(100i32) as Box<dyn Any>,
+                )
+            },
+        );
+        sheet.add_filter(a, filter).unwrap();
+        assert!(matches!(
+            sheet.filter_kind(a),
+            Some(FilterKind::Range { .. })
+        ));
+    }
+
+    #[test]
+    fn filter_range_returns_live_bounds_from_argument_cells() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let lo = sheet.add_cell(0_i32);
+        let hi = sheet.add_cell(100_i32);
+        let filter = Filter::range(
+            TypeId::of::<i32>(),
+            vec![lo, hi],
+            vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+            |value, args| {
+                let v = *value.downcast_ref::<i32>().unwrap();
+                let lo = *args[0].downcast_ref::<i32>().unwrap();
+                let hi = *args[1].downcast_ref::<i32>().unwrap();
+                Ok(Box::new(v.clamp(lo, hi)) as Box<dyn Any>)
+            },
+            |args| {
+                (
+                    Box::new(*args[0].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
+                    Box::new(*args[1].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
+                )
+            },
+        );
+        sheet.add_filter(a, filter).unwrap();
+        assert_eq!(sheet.filter_range::<i32>(a), Some((0, 100)));
+        sheet.write(hi, 10_i32).unwrap();
+        assert_eq!(sheet.filter_range::<i32>(a), Some((0, 10)));
+    }
+
+    #[test]
+    fn filter_range_reflects_a_bound_derived_by_a_relationship_not_just_a_direct_write() {
+        // `hi` isn't itself written — its value is derived from `hi_source` via a relationship —
+        // exercising `filter_range`'s use of `effective()` (which sees a relationship's derived
+        // override), not just `source`.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let lo = sheet.add_cell(0_i32);
+        let hi = sheet.add_cell(100_i32);
+        let hi_source = sheet.add_cell(100_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(hi_source, hi, |v: &i32| Ok(*v))])
+            .unwrap();
+        let filter = Filter::range(
+            TypeId::of::<i32>(),
+            vec![lo, hi],
+            vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+            |value, args| {
+                let v = *value.downcast_ref::<i32>().unwrap();
+                let lo = *args[0].downcast_ref::<i32>().unwrap();
+                let hi = *args[1].downcast_ref::<i32>().unwrap();
+                Ok(Box::new(v.clamp(lo, hi)) as Box<dyn Any>)
+            },
+            |args| {
+                (
+                    Box::new(*args[0].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
+                    Box::new(*args[1].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
+                )
+            },
+        );
+        sheet.add_filter(a, filter).unwrap();
+        sheet.write(hi_source, 20_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(sheet.filter_range::<i32>(a), Some((0, 20)));
+    }
+
+    #[test]
+    fn filter_range_returns_none_for_an_opaque_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
+            .unwrap();
+        assert!(sheet.filter_range::<i32>(a).is_none());
     }
 }
