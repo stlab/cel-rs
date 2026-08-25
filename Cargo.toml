@@ -29,6 +29,7 @@ members = [
     "adam-lang",
     "adam-lsp",
     "begin",
+    "ez-adam",
     "xtask",
 ]
 [lib]
