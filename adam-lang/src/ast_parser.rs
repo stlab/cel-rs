@@ -221,7 +221,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `cell_filter = "filter" [ "(" identifier { "," identifier } ")" ] closure_expression.`
+    /// `cell_filter = "filter" expression.`
     ///
     /// - Precondition: the `filter` keyword has already been consumed by the caller; `filter_start`
     ///   is its span.
@@ -230,27 +230,13 @@ impl AdamAstParser {
         cursor: &mut TokenCursor,
         filter_start: proc_macro2::Span,
     ) -> Result<ast::CellFilter> {
-        let mut arg_cells = Vec::new();
-        if cursor.at_open_paren() {
-            cursor.expect_open_paren()?;
-            loop {
-                let (name, span) = cursor.consume_ident()?;
-                arg_cells.push((name, point(span)));
-                if cursor.consume_punct(",") {
-                    continue;
-                }
-                break;
-            }
-            cursor.expect_close_paren()?;
-        }
-        let closure = self.parse_cel_expression(cursor)?;
-        let closure_end = closure.span().end;
+        let body = self.parse_cel_expression(cursor)?;
+        let body_end = body.span().end;
         Ok(ast::CellFilter {
-            arg_cells,
-            closure,
+            body,
             span: ast::ExprSpan {
                 start: filter_start,
-                end: closure_end,
+                end: body_end,
             },
         })
     }
@@ -1231,31 +1217,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_cell_with_a_filter_and_no_arg_list() {
+    fn parse_cell_with_a_filter() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell a: i32 = 1 filter |x: i32| x; }")
+            .parse_str("sheet s { cell a: i32 = 1 filter _; }")
             .unwrap();
         let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
             panic!("expected Cell");
         };
         let filter = cell.filter.as_ref().expect("filter present");
-        assert!(filter.arg_cells.is_empty());
-        assert!(matches!(filter.closure, Expr::Closure { .. }));
+        assert!(matches!(&filter.body, Expr::Ident { name, .. } if name == "_"));
     }
 
     #[test]
-    fn parse_cell_with_a_filter_and_an_arg_list() {
+    fn parse_cell_with_a_filter_referencing_a_cell() {
         let sheet = AdamAstParser::new()
-            .parse_str(
-                "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter(hi) |x: i32, h: i32| x; }",
-            )
+            .parse_str("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter _ + hi; }")
             .unwrap();
         let ast::SheetItem::Cell(cell) = &sheet.items[1] else {
             panic!("expected Cell");
         };
         let filter = cell.filter.as_ref().expect("filter present");
-        assert_eq!(filter.arg_cells.len(), 1);
-        assert_eq!(filter.arg_cells[0].0, "hi");
+        match &filter.body {
+            Expr::Op { name, operands, .. } => {
+                assert_eq!(name, "+");
+                assert!(matches!(&operands[0], Expr::Ident { name, .. } if name == "_"));
+                assert!(matches!(&operands[1], Expr::Ident { name, .. } if name == "hi"));
+            }
+            other => panic!("expected Op, got {other:?}"),
+        }
     }
 
     #[test]

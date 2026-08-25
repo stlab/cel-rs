@@ -267,17 +267,7 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     }
     if let Some(filter) = &cell.filter {
         out.push_str(" filter ");
-        if !filter.arg_cells.is_empty() {
-            out.push('(');
-            for (i, (name, _)) in filter.arg_cells.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(name);
-            }
-            out.push_str(") ");
-        }
-        out.push_str(&cel_parser::format_expr(&filter.closure));
+        out.push_str(&cel_parser::format_expr(&filter.body));
     }
     out.push_str(";\n");
 }
@@ -738,24 +728,22 @@ mod tests {
     #[test]
     fn formats_a_cell_with_a_filter_and_no_arg_list() {
         assert_eq!(
-            format("sheet s { cell a: i32 = 1 filter |x: i32| x; }"),
-            "sheet s {\n    cell a: i32 = 1 filter |x: i32| x;\n}\n"
+            format("sheet s { cell a: i32 = 1 filter _; }"),
+            "sheet s {\n    cell a: i32 = 1 filter _;\n}\n"
         );
     }
 
     #[test]
     fn formats_a_cell_with_a_filter_and_an_arg_list() {
         assert_eq!(
-            format(
-                "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter(hi) |x: i32, h: i32| x; }"
-            ),
-            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter (hi) |x: i32, h: i32| x;\n}\n"
+            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter _ + hi; }"),
+            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter _ + hi;\n}\n"
         );
     }
 
     #[test]
     fn format_is_idempotent_through_a_reparse_with_a_filter() {
-        let source = "sheet s {\n    cell a: i32 = 1 filter |x: i32| x;\n}";
+        let source = "sheet s {\n    cell a: i32 = 1 filter _;\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);

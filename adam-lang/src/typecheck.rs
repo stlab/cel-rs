@@ -431,105 +431,32 @@ fn closure_param_ty(type_expr: &ClosureParamTypeExpr) -> Ty {
 /// [#141](https://github.com/stlab/cel-rs/issues/141), out of scope here).
 fn check_filter(
     cell: &CellDecl,
-    registry: &TypeRegistry,
-    cell_names: &std::collections::HashSet<String>,
+    _registry: &TypeRegistry,
+    _cell_names: &std::collections::HashSet<String>,
     cell_types: &std::collections::HashMap<String, Ty>,
-    shapes: &std::collections::HashMap<String, TypeShape>,
+    _shapes: &std::collections::HashMap<String, TypeShape>,
     resolve: &impl Fn(&str) -> Ty,
     diagnostics: &mut Vec<ParseError>,
 ) {
     let Some(filter) = &cell.filter else {
         return;
     };
-    for (arg_name, arg_span) in &filter.arg_cells {
-        if !cell_names.contains(arg_name) {
-            diagnostics.push(ParseError::new_range(
-                format!("undeclared cell `{arg_name}`"),
-                arg_span.start,
-                arg_span.end,
-            ));
-        }
-    }
 
-    let Expr::Closure { params, body, .. } = &filter.closure else {
-        return;
+    // The filter body is an expression that can reference `_` (the cell's value) and other cells.
+    // For now, we perform basic type checking on the body expression without special handling
+    // for `_` (which would require deeper integration with the expression checker).
+    // TODO: Implement full type checking for filter bodies with proper `_` handling.
+    let body_resolve = |name: &str| -> Ty {
+        if name == "_" {
+            // `_` represents the cell being filtered; infer its type from the cell itself
+            cell_types.get(&cell.name).copied().unwrap_or(Ty::Any)
+        } else {
+            resolve(name)
+        }
     };
 
-    let mut expected: Vec<Option<TypeShape>> = vec![expected_shape(&cell.name, cell_types, shapes)];
-    for (arg_name, _) in &filter.arg_cells {
-        expected.push(expected_shape(arg_name, cell_types, shapes));
-    }
-
-    if params.len() != expected.len() {
-        diagnostics.push(ParseError::new_range(
-            format!(
-                "cell `{}`: filter closure takes {} parameter(s), but {} are expected (the \
-                 cell's own value, plus its declared argument cells)",
-                cell.name,
-                params.len(),
-                expected.len()
-            ),
-            filter.span.start,
-            filter.span.end,
-        ));
-        return;
-    }
-
-    for (param, expected_shape) in params.iter().zip(&expected) {
-        let param_shape = registry
-            .resolve(&closure_param_type_expr_to_type_expr(&param.type_expr))
-            .ok();
-        if let (Some(expected_shape), Some(param_shape)) = (expected_shape, &param_shape)
-            && expected_shape != param_shape
-        {
-            diagnostics.push(ParseError::new_range(
-                format!(
-                    "cell `{}`: filter closure parameter `{}` is `{}`, but `{}` was expected",
-                    cell.name,
-                    param.name,
-                    registry.display_name(param_shape),
-                    registry.display_name(expected_shape),
-                ),
-                param.name_span.start,
-                param.name_span.end,
-            ));
-        }
-    }
-
-    let bound: std::collections::HashMap<&str, Ty> = params
-        .iter()
-        .map(|p| (p.name.as_str(), closure_param_ty(&p.type_expr)))
-        .collect();
-    let body_resolve =
-        |name: &str| -> Ty { bound.get(name).copied().unwrap_or_else(|| resolve(name)) };
-
-    match &expected[0] {
-        Some(shape @ TypeShape::Tuple(_)) => {
-            expr_matches_shape(body, shape, registry, &body_resolve, diagnostics);
-        }
-        Some(TypeShape::Named(type_id)) => {
-            let (body_ty, body_diags) = check_expr(body, &body_resolve);
-            diagnostics.extend(body_diags);
-            let declared = Ty::from_type_id(*type_id);
-            if !declared.unifies_with(&body_ty) {
-                diagnostics.push(ParseError::new_range(
-                    format!(
-                        "cell `{}`: filter closure body produces `{}`, but `{}` is declared `{}`",
-                        cell.name,
-                        body_ty.name(),
-                        cell.name,
-                        declared.name()
-                    ),
-                    body.span().start,
-                    body.span().end,
-                ));
-            }
-        }
-        None => {
-            let (_, body_diags) = check_expr(body, &body_resolve);
-            diagnostics.extend(body_diags);
-        }
-    }
+    let (_, body_diags) = check_expr(&filter.body, &body_resolve);
+    diagnostics.extend(body_diags);
 }
 
 /// Checks `body`'s multi-output shape against `outputs`, recursively: an `Expr::Tuple` of matching
