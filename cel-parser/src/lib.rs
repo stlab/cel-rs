@@ -3181,7 +3181,7 @@ mod tests {
     }
 
     #[test]
-    fn range_endpoints_are_full_bitwise_or_expressions() {
+    fn range_endpoints_are_full_or_expressions() {
         // `1 + 2..3 * 4` must group as `(1 + 2)..(3 * 4)`, matching Rust's own precedence
         // (range binds looser than every arithmetic/bitwise operator).
         let mut parser = CELParser::new(OpLookup::new());
@@ -3193,8 +3193,8 @@ mod tests {
     fn chained_ranges_are_a_parse_error() {
         // Ranges don't chain, matching Rust (`1..2..3` is also a compile error there). No
         // special "non-chainable" check is needed in `is_range_expression` itself: after
-        // parsing `1..2`, the leftover `..3` fails the top-level `expression = or_expression
-        // <EOF>` check the same way `"10 + 25 25"` already does (see `incomplete_expression`).
+        // parsing `1..2`, the leftover `..3` fails `parse_tokens_ctx`'s end-of-stream check
+        // the same way `"10 + 25 25"` already does (see `incomplete_expression`).
         let mut parser = CELParser::new(OpLookup::new());
         let result = parser.parse_str("1i32..2i32..3i32");
         assert!(result.is_err(), "expected a parse error, got Ok");
