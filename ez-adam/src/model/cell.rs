@@ -72,7 +72,8 @@ pub struct Cell {
     pub name: String,
     /// The type of value this cell holds.
     pub ty: CellType,
-    /// Whether this cell is an output cell.
+    /// Whether this cell is an output cell. Not currently emitted by
+    /// `generate_adm2` — see <https://github.com/stlab/cel-rs/issues/147>.
     pub output: bool,
     /// Raw CEL boolean expression text; `_` refers to this cell's own
     /// value. Not currently emitted by `generate_adm2` — see

@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 
 use crate::model::cell::{Cell, CellType};
+use crate::model::conditional_group::{CellValueLiteral, ConditionExpr, ConditionalGroup};
 use crate::model::document::Document;
 use crate::model::relationship_group::{RelationshipGroup, RelationshipGroupId};
 
@@ -19,16 +20,15 @@ pub fn generate_adm2(doc: &Document) -> String {
     let mut out = String::new();
     out.push_str(&format!("sheet {} {{\n", doc.sheet_name));
 
+    // `Cell.output` is intentionally not reflected here: `adam-lang`'s `out`
+    // declares a *new* identifier (it can't reuse an existing `cell`'s own
+    // name) and is always a derived/computed value, never a flag on a plain
+    // writable cell, so `out <name> := <name>;` doesn't parse. Deferred to
+    // future design work — see <https://github.com/stlab/cel-rs/issues/147>.
     for (_, cell) in doc.cells_in_order() {
         out.push_str("    ");
         out.push_str(&generate_cell_decl(cell));
         out.push('\n');
-    }
-
-    for (_, cell) in doc.cells_in_order() {
-        if cell.output {
-            out.push_str(&format!("    out {name} := {name};\n", name = cell.name));
-        }
     }
 
     let owned = groups_owned_by_conditionals(doc);
@@ -38,6 +38,12 @@ pub fn generate_adm2(doc: &Document) -> String {
         }
         out.push_str("    ");
         out.push_str(&generate_relationship_block(doc, group, "    "));
+        out.push('\n');
+    }
+
+    for (_, cond) in doc.conditional_groups_in_order() {
+        out.push_str("    ");
+        out.push_str(&generate_conditional_block(doc, cond));
         out.push('\n');
     }
 
@@ -131,6 +137,91 @@ fn generate_relationship_block(doc: &Document, group: &RelationshipGroup, indent
     s
 }
 
+/// Renders `cond` as a `conditional <expr> { <literal> => {...} ... _ => {...} }`
+/// block, nesting each branch's (and the default's) enabled relationship
+/// groups via [`generate_relationship_block`].
+///
+/// - Complexity: O(n) in the number of branches and their enabled groups.
+fn generate_conditional_block(doc: &Document, cond: &ConditionalGroup) -> String {
+    let mut s = String::from("conditional ");
+    s.push_str(&condition_expr_text(doc, &cond.condition));
+    s.push_str(" {\n");
+    for branch in &cond.branches {
+        s.push_str("        ");
+        s.push_str(&branch_literal_text(&branch.values));
+        s.push_str(" => {\n");
+        for &group_id in &branch.enabled_groups {
+            s.push_str("            ");
+            s.push_str(&generate_relationship_block(
+                doc,
+                &doc.relationship_groups[group_id],
+                "            ",
+            ));
+            s.push('\n');
+        }
+        s.push_str("        }\n");
+    }
+    s.push_str("        _ => {\n");
+    for &group_id in &cond.default {
+        s.push_str("            ");
+        s.push_str(&generate_relationship_block(
+            doc,
+            &doc.relationship_groups[group_id],
+            "            ",
+        ));
+        s.push('\n');
+    }
+    s.push_str("        }\n");
+    s.push_str("    }");
+    s
+}
+
+/// Returns `condition`'s `.adm2` spelling: the referenced cells' names (see
+/// [`cell_names_text`]) for [`ConditionExpr::Cells`], or the raw CEL
+/// expression text for [`ConditionExpr::Formula`].
+fn condition_expr_text(doc: &Document, condition: &ConditionExpr) -> String {
+    match condition {
+        ConditionExpr::Cells(cells) => cell_names_text(doc, cells),
+        ConditionExpr::Formula { expr, .. } => expr.clone(),
+    }
+}
+
+/// Returns `cells`' names joined for use as a conditional's condition
+/// expression: a bare name for a single cell, or a parenthesized
+/// comma-separated tuple for multiple cells.
+fn cell_names_text(doc: &Document, cells: &[crate::model::cell::CellId]) -> String {
+    let names: Vec<&str> = cells.iter().map(|c| doc.cells[*c].name.as_str()).collect();
+    if names.len() == 1 {
+        names[0].to_string()
+    } else {
+        format!("({})", names.join(", "))
+    }
+}
+
+/// Returns `values`' `.adm2` spelling for use as a branch's match arm: a
+/// bare literal (see [`literal_text`]) for a single value, or a
+/// parenthesized comma-separated tuple for multiple values.
+fn branch_literal_text(values: &[CellValueLiteral]) -> String {
+    let literals: Vec<String> = values.iter().map(literal_text).collect();
+    if literals.len() == 1 {
+        literals[0].clone()
+    } else {
+        format!("({})", literals.join(", "))
+    }
+}
+
+/// Returns `value`'s `.adm2` literal spelling (`true`/`false` for
+/// [`CellValueLiteral::Bool`], an `i64`-suffixed integer for
+/// [`CellValueLiteral::I64`], or a quoted/escaped string for
+/// [`CellValueLiteral::Text`]).
+fn literal_text(value: &CellValueLiteral) -> String {
+    match value {
+        CellValueLiteral::Bool(b) => b.to_string(),
+        CellValueLiteral::I64(n) => format!("{n}i64"),
+        CellValueLiteral::Text(s) => format!("{s:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,7 +260,11 @@ mod tests {
     }
 
     #[test]
-    fn generates_an_out_decl_for_an_output_cell() {
+    fn does_not_emit_an_out_decl_for_an_output_cell_yet() {
+        // `out` codegen for the `output` flag is deferred — see
+        // https://github.com/stlab/cel-rs/issues/147. `out` always declares a
+        // new identifier and can't reuse an existing cell's own name, so
+        // `out <name> := <name>;` (the original approach) doesn't parse.
         use crate::ops::cells::set_output;
 
         let mut doc = Document::new("demo");
@@ -177,10 +272,7 @@ mod tests {
         set_output(&mut doc, cell, true);
 
         let out = generate_adm2(&doc);
-        assert_eq!(
-            out,
-            "sheet demo {\n    cell width_pixels: i64;\n    out width_pixels := width_pixels;\n}\n"
-        );
+        assert_eq!(out, "sheet demo {\n    cell width_pixels: i64;\n}\n");
     }
 
     #[test]
@@ -249,5 +341,88 @@ mod tests {
         let _ = add_cell(&mut doc, "width_pixels", CellType::i64());
         let out = generate_adm2(&doc);
         assert_eq!(out, "sheet demo {\n    cell width_pixels: i64;\n}\n");
+    }
+
+    #[test]
+    fn generates_a_conditional_group_with_bool_condition() {
+        use crate::ops::conditionals::add_conditional_from_bool_cells;
+
+        let mut doc = Document::new("demo");
+        let flag = add_cell(&mut doc, "constrain_proportions", CellType::Bool);
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        set_member_formula(&mut doc, group, a_node, "height_pixels * 2");
+        let _ = add_conditional_from_bool_cells(&mut doc, vec![flag], group, Point::new(0.0, 20.0));
+
+        let out = generate_adm2(&doc);
+        // Branches are generated in the order `add_conditional_from_bool_cells`
+        // enumerated them: `combo` counts up from 0, so the all-`false`
+        // combination (combo == 0) comes first, `true` (combo == 1) second.
+        assert_eq!(
+            out,
+            "sheet demo {\n    cell constrain_proportions: bool;\n    cell width_pixels: i64;\n    cell height_pixels: i64;\n    conditional constrain_proportions {\n        false => {\n        }\n        true => {\n            relationship {\n                width_pixels := height_pixels * 2;\n                height_pixels := ;\n            }\n        }\n        _ => {\n        }\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn generates_a_conditional_group_with_a_multi_cell_tuple_condition() {
+        use crate::ops::conditionals::add_conditional_from_bool_cells;
+
+        let mut doc = Document::new("demo");
+        let flag_a = add_cell(&mut doc, "constrain_proportions", CellType::Bool);
+        let flag_b = add_cell(&mut doc, "lock_aspect", CellType::Bool);
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        let _ = add_conditional_from_bool_cells(
+            &mut doc,
+            vec![flag_a, flag_b],
+            group,
+            Point::new(0.0, 20.0),
+        );
+
+        let out = generate_adm2(&doc);
+        assert!(out.contains("conditional (constrain_proportions, lock_aspect) {\n"));
+        // combo 0..4: (false,false), (true,false), (false,true), (true,true) —
+        // bit i of combo selects cells[i]'s value.
+        assert!(out.contains("        (false, false) => {\n        }\n"));
+        assert!(out.contains("        (true, false) => {\n        }\n"));
+        assert!(out.contains("        (false, true) => {\n        }\n"));
+        assert!(out.contains("        (true, true) => {\n            relationship {\n"));
+    }
+
+    #[test]
+    fn generates_a_conditional_group_with_a_formula_condition() {
+        use crate::model::conditional_group::CellValueLiteral;
+        use crate::ops::conditionals::{
+            add_branch, add_conditional_with_formula, toggle_enabled_group,
+        };
+
+        let mut doc = Document::new("demo");
+        let aspect = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+
+        let cond = add_conditional_with_formula(
+            &mut doc,
+            vec![aspect],
+            "aspect_ratio > 2.0",
+            Point::new(0.0, 20.0),
+        );
+        add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(true)]);
+        toggle_enabled_group(&mut doc, cond, 0, group);
+
+        let out = generate_adm2(&doc);
+        assert!(out.contains("conditional aspect_ratio > 2.0 {\n"));
+        assert!(out.contains("        true => {\n            relationship {\n"));
+        assert!(out.contains("        _ => {\n        }\n"));
     }
 }
