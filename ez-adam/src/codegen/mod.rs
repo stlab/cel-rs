@@ -66,7 +66,38 @@ fn type_name(ty: &CellType) -> &'static str {
 }
 
 fn generate_cell_decl(cell: &Cell) -> String {
-    format!("cell {}: {};", cell.name, type_name(&cell.ty))
+    let ty = type_name(&cell.ty);
+    match clamp_filter_clause(&cell.ty) {
+        Some(filter) => format!("cell {}: {} {};", cell.name, ty, filter),
+        None => format!("cell {}: {};", cell.name, ty),
+    }
+}
+
+fn clamp_filter_clause(ty: &CellType) -> Option<String> {
+    match ty {
+        // `{:?}` (not `{}`) for f64 bounds: `f64::Display` drops the
+        // trailing `.0` for whole numbers (`100.0` prints as `100`), which
+        // risks the literal being lexed as an integer, not a float —
+        // `f64::Debug` always includes a decimal point.
+        CellType::F64 { clamp } => match (clamp.min, clamp.max) {
+            (None, None) => None,
+            (Some(min), None) => Some(format!("filter |_: f64| max(_, {min:?})")),
+            (None, Some(max)) => Some(format!("filter |_: f64| min(_, {max:?})")),
+            (Some(min), Some(max)) => Some(format!("filter |_: f64| clamp(_, {min:?}, {max:?})")),
+        },
+        // Explicit `i64` suffixes: bare integer literals are not
+        // guaranteed to default to `i64` (the one confirmed example in
+        // this codebase, `0i32`/`1i32` in `begin/examples/toy_example.adm2`,
+        // suffixes every typed integer literal), so an unsuffixed `100`
+        // risks a type mismatch against an `i64` filter parameter.
+        CellType::I64 { clamp } => match (clamp.min, clamp.max) {
+            (None, None) => None,
+            (Some(min), None) => Some(format!("filter |_: i64| max(_, {min}i64)")),
+            (None, Some(max)) => Some(format!("filter |_: i64| min(_, {max}i64)")),
+            (Some(min), Some(max)) => Some(format!("filter |_: i64| clamp(_, {min}i64, {max}i64)")),
+        },
+        CellType::Bool | CellType::Text => None,
+    }
 }
 
 /// Renders `group` as a `relationship { ... }` block, with `indent` as the
@@ -137,5 +168,73 @@ mod tests {
             out,
             "sheet demo {\n    cell width_pixels: i64;\n    out width_pixels := width_pixels;\n}\n"
         );
+    }
+
+    #[test]
+    fn generates_a_clamp_filter_with_both_bounds() {
+        let mut doc = Document::new("demo");
+        let _ = add_cell(
+            &mut doc,
+            "width_pixels",
+            CellType::I64 {
+                clamp: crate::model::cell::ClampRange {
+                    min: Some(0),
+                    max: Some(100),
+                },
+            },
+        );
+        let out = generate_adm2(&doc);
+        assert_eq!(
+            out,
+            "sheet demo {\n    cell width_pixels: i64 filter |_: i64| clamp(_, 0i64, 100i64);\n}\n"
+        );
+    }
+
+    #[test]
+    fn generates_a_clamp_filter_with_only_a_minimum() {
+        let mut doc = Document::new("demo");
+        let _ = add_cell(
+            &mut doc,
+            "width_pixels",
+            CellType::I64 {
+                clamp: crate::model::cell::ClampRange {
+                    min: Some(0),
+                    max: None,
+                },
+            },
+        );
+        let out = generate_adm2(&doc);
+        assert_eq!(
+            out,
+            "sheet demo {\n    cell width_pixels: i64 filter |_: i64| max(_, 0i64);\n}\n"
+        );
+    }
+
+    #[test]
+    fn generates_a_clamp_filter_with_only_a_maximum() {
+        let mut doc = Document::new("demo");
+        let _ = add_cell(
+            &mut doc,
+            "width_pixels",
+            CellType::F64 {
+                clamp: crate::model::cell::ClampRange {
+                    min: None,
+                    max: Some(100.0),
+                },
+            },
+        );
+        let out = generate_adm2(&doc);
+        assert_eq!(
+            out,
+            "sheet demo {\n    cell width_pixels: f64 filter |_: f64| min(_, 100.0);\n}\n"
+        );
+    }
+
+    #[test]
+    fn omits_the_filter_clause_when_no_clamp_bounds_are_set() {
+        let mut doc = Document::new("demo");
+        let _ = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let out = generate_adm2(&doc);
+        assert_eq!(out, "sheet demo {\n    cell width_pixels: i64;\n}\n");
     }
 }
