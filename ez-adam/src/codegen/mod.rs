@@ -25,6 +25,12 @@ pub fn generate_adm2(doc: &Document) -> String {
         out.push('\n');
     }
 
+    for (_, cell) in doc.cells_in_order() {
+        if cell.output {
+            out.push_str(&format!("    out {name} := {name};\n", name = cell.name));
+        }
+    }
+
     let owned = groups_owned_by_conditionals(doc);
     for (id, group) in doc.relationship_groups_in_order() {
         if owned.contains(&id) {
@@ -115,6 +121,21 @@ mod tests {
         assert_eq!(
             out,
             "sheet demo {\n    cell width_pixels: i64;\n    cell height_pixels: i64;\n    relationship {\n        width_pixels := height_pixels * 2;\n        height_pixels := ;\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn generates_an_out_decl_for_an_output_cell() {
+        use crate::ops::cells::set_output;
+
+        let mut doc = Document::new("demo");
+        let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
+        set_output(&mut doc, cell, true);
+
+        let out = generate_adm2(&doc);
+        assert_eq!(
+            out,
+            "sheet demo {\n    cell width_pixels: i64;\n    out width_pixels := width_pixels;\n}\n"
         );
     }
 }
