@@ -41,14 +41,7 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
         match item {
             SheetItem::Cell(cell) => {
                 check_cell_initializer(cell, registry, &mut diagnostics);
-                check_filter(
-                    cell,
-                    registry,
-                    &cell_types,
-                    &shapes,
-                    &resolve,
-                    &mut diagnostics,
-                );
+                check_filter(cell, &cell_types, &shapes, &resolve, &mut diagnostics);
             }
             SheetItem::Relationship(rel) => {
                 for binding in &rel.bindings {
@@ -403,18 +396,18 @@ fn expr_references_ident(expr: &Expr, name: &str) -> bool {
     }
 }
 
-/// Checks one `cell`'s `filter` clause, if present: the body's inferred type must unify with
-/// this cell's own declared/inferred shape (`_`'s type, via `body_resolve`'s special case
-/// below), and the body must reference `_` — the value being filtered — at least once. Every
-/// other identifier is resolved exactly as any other deduced expression in this file (a
-/// `relationship` binding, an `out` initializer): via `resolve`, which leaves an unrecognized
-/// name as `Ty::Any` rather than raising a diagnostic — the runtime `Sheet`-building parser
-/// (`adam_lang::parser::AdamParser::parse_cell_filter`) is what raises "undeclared cell" for a
-/// name that isn't actually a declared cell, mirroring how it (not this file) is the one that
-/// raises that error for bindings' deduced expressions too.
+/// Checks one `cell`'s `filter` clause, if present: a tuple-typed filtered cell is rejected
+/// outright (mirroring the runtime parser's own rejection — not yet supported by either layer);
+/// otherwise, the body's inferred type must unify with this cell's own declared/inferred shape
+/// (`_`'s type, via `body_resolve`'s special case below), and the body must reference `_` — the
+/// value being filtered — at least once. Every other identifier is resolved exactly as any other
+/// deduced expression in this file (a `relationship` binding, an `out` initializer): via
+/// `resolve`, which leaves an unrecognized name as `Ty::Any` rather than raising a diagnostic —
+/// the runtime `Sheet`-building parser (`adam_lang::parser::AdamParser::parse_cell_filter`) is
+/// what raises "undeclared cell" for a name that isn't actually a declared cell, mirroring how it
+/// (not this file) is the one that raises that error for bindings' deduced expressions too.
 fn check_filter(
     cell: &CellDecl,
-    registry: &TypeRegistry,
     cell_types: &std::collections::HashMap<String, Ty>,
     shapes: &std::collections::HashMap<String, TypeShape>,
     resolve: &impl Fn(&str) -> Ty,
@@ -424,13 +417,27 @@ fn check_filter(
         return;
     };
 
+    let shape = expected_shape(&cell.name, cell_types, shapes);
+    if matches!(shape, Some(TypeShape::Tuple(_))) {
+        // Mirrors `adam_lang::parser::AdamParser::parse_cell_filter`'s runtime rejection of a
+        // tuple-typed filtered cell — not yet supported by either layer, so both must agree
+        // rather than the CST checker accepting a construct the runtime cannot build.
+        diagnostics.push(ParseError::new_range(
+            format!(
+                "cell `{}`: filter on a tuple-typed cell is not yet supported",
+                cell.name
+            ),
+            filter.span.start,
+            filter.span.end,
+        ));
+        return;
+    }
+
     let own_ty = resolve(&cell.name);
     let body_resolve = |name: &str| -> Ty { if name == "_" { own_ty } else { resolve(name) } };
 
-    match expected_shape(&cell.name, cell_types, shapes) {
-        Some(shape @ TypeShape::Tuple(_)) => {
-            expr_matches_shape(&filter.body, &shape, registry, &body_resolve, diagnostics);
-        }
+    match shape {
+        Some(TypeShape::Tuple(_)) => unreachable!("handled above"),
         Some(TypeShape::Named(type_id)) => {
             let (body_ty, body_diags) = check_expr(&filter.body, &body_resolve);
             diagnostics.extend(body_diags);
@@ -916,15 +923,10 @@ mod tests {
     }
 
     #[test]
-    fn filter_tuple_typed_cell_with_matching_shape_has_no_diagnostic() {
+    fn filter_on_a_tuple_typed_cell_is_a_diagnostic() {
+        // Mirrors the runtime parser's own rejection (`adam_lang::parser::AdamParser::
+        // parse_cell_filter`) — a tuple-typed filtered cell isn't yet supported by either layer.
         let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter (_.0, _.1); }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
-        assert!(diags.is_empty());
-    }
-
-    #[test]
-    fn filter_tuple_typed_cell_with_arity_mismatch_is_a_diagnostic() {
-        let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter (_.0,); }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
