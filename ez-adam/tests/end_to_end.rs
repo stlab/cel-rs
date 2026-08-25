@@ -13,6 +13,8 @@ use ez_adam::ops::conditionals::add_conditional_from_bool_cells;
 use ez_adam::ops::relationships::{add_member, create_relationship, set_member_formula};
 use ez_adam::persistence::{from_json, to_json};
 
+/// Asserts that `adm2_text` parses successfully as `.adm2` source, via
+/// `adam-lang`'s real parser with `cel-std` installed.
 fn parses_as_adm2(adm2_text: &str) {
     let mut lookup = OpLookup::new();
     cel_std::install(&mut lookup);
@@ -25,6 +27,9 @@ fn parses_as_adm2(adm2_text: &str) {
     );
 }
 
+/// Builds the "Property Model Visualization" sketch's own resize example:
+/// `width_pixels`/`height_pixels`/`aspect_ratio` bound by one relationship
+/// group, active only when `constrain_proportions` is `true`.
 fn build_resize_sheet() -> Document {
     let mut doc = Document::new("resize");
 

@@ -11,6 +11,8 @@ use ez_adam::ops::cells::{add_cell, add_cell_node, set_output};
 use ez_adam::ops::conditionals::add_conditional_from_bool_cells;
 use ez_adam::ops::relationships::{create_relationship, set_member_formula};
 
+/// Asserts that `adm2_text` parses successfully as `.adm2` source, via
+/// `adam-lang`'s real parser with `cel-std` installed.
 fn assert_parses(adm2_text: &str) {
     let mut lookup = OpLookup::new();
     cel_std::install(&mut lookup);
