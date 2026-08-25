@@ -2,4 +2,5 @@
 //! groups, and conditional groups (see `crate::model::document::Document`).
 
 pub mod cell;
+pub mod cell_node;
 pub mod geometry;
