@@ -68,6 +68,15 @@ pub enum Error {
     /// `InvalidId`/`TerminalCell`/`TypeMismatch` variants instead, matching
     /// `add_relationship`/`add_conditional`'s existing convention.)
     InvalidFilter,
+
+    /// The combined dependency digraph — relationship edges plus a filtered source
+    /// cell's argument edges (see `Sheet::propagate`'s planning pass) — has a
+    /// non-trivial strongly connected component that is not purely a relationship
+    /// cycle (that case is `Error::Cycle`). `release::resolve` guarantees the
+    /// relationship-only subgraph is acyclic but has no visibility into filter edges,
+    /// so this is sound but incomplete: a different, equally-valid relationship
+    /// assignment might have avoided the cycle. See issue #153.
+    FilterCycle,
 }
 
 impl std::fmt::Display for Error {
@@ -97,6 +106,10 @@ impl std::fmt::Display for Error {
                 "cell belongs to a terminal output and cannot be used as an input or written directly"
             ),
             Error::InvalidFilter => write!(f, "filter is structurally invalid"),
+            Error::FilterCycle => write!(
+                f,
+                "a filter's argument dependency closes a cycle with the selected methods"
+            ),
         }
     }
 }
@@ -255,5 +268,15 @@ mod tests {
     #[test]
     fn invalid_filter_has_no_source() {
         assert!(std::error::Error::source(&Error::InvalidFilter).is_none());
+    }
+
+    #[test]
+    fn filter_cycle_display_contains_cycle() {
+        assert!(Error::FilterCycle.to_string().contains("cycle"));
+    }
+
+    #[test]
+    fn filter_cycle_has_no_source() {
+        assert!(std::error::Error::source(&Error::FilterCycle).is_none());
     }
 }
