@@ -45,6 +45,12 @@ pub fn generate_adm2(doc: &Document) -> String {
     out
 }
 
+/// Returns every relationship group referenced by some conditional group's
+/// `default` or a branch's `enabled_groups`, so [`generate_adm2`] can skip
+/// them when emitting top-level relationship blocks (they're emitted
+/// nested inside their owning `conditional` block instead).
+///
+/// - Complexity: O(n) in the total number of conditional-group branches.
 fn groups_owned_by_conditionals(doc: &Document) -> HashSet<RelationshipGroupId> {
     let mut owned = HashSet::new();
     for (_, cond) in doc.conditional_groups_in_order() {
@@ -56,6 +62,8 @@ fn groups_owned_by_conditionals(doc: &Document) -> HashSet<RelationshipGroupId> 
     owned
 }
 
+/// Returns `ty`'s `.adm2` type-name spelling (`f64`, `i64`, `bool`, or
+/// `String`).
 fn type_name(ty: &CellType) -> &'static str {
     match ty {
         CellType::F64 { .. } => "f64",
@@ -65,6 +73,9 @@ fn type_name(ty: &CellType) -> &'static str {
     }
 }
 
+/// Renders `cell` as a `cell <name>: <type> [filter ...];` declaration,
+/// including a clamp `filter` clause (see [`clamp_filter_clause`]) when
+/// `cell`'s type has clamp bounds set.
 fn generate_cell_decl(cell: &Cell) -> String {
     let ty = type_name(&cell.ty);
     match clamp_filter_clause(&cell.ty) {
@@ -73,6 +84,8 @@ fn generate_cell_decl(cell: &Cell) -> String {
     }
 }
 
+/// Returns a `filter |_: <type>| ...` clause clamping `ty`'s value to its
+/// clamp bounds, or `None` if `ty` is `Bool`/`Text` or has no bounds set.
 fn clamp_filter_clause(ty: &CellType) -> Option<String> {
     match ty {
         // `{:?}` (not `{}`) for f64 bounds: `f64::Display` drops the
