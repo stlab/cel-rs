@@ -284,11 +284,11 @@ mod tests {
 
     #[test]
     fn format_edits_formats_a_cell_with_a_filter() {
-        let edits = format_edits("sheet s { cell a:i32=1 filter |x:i32| x; }");
+        let edits = format_edits("sheet s { cell a:i32=1 filter _; }");
         assert_eq!(edits.len(), 1);
         assert_eq!(
             edits[0].new_text,
-            "sheet s {\n    cell a: i32 = 1 filter |x: i32| x;\n}\n"
+            "sheet s {\n    cell a: i32 = 1 filter _;\n}\n"
         );
     }
 

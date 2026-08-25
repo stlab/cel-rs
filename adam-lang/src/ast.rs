@@ -210,14 +210,12 @@ pub struct CellDecl {
     pub span: ExprSpan,
 }
 
-/// `cell_filter = "filter" [ "(" identifier { "," identifier } ")" ] closure_expression.`
+/// `cell_filter = "filter" expression.`
 #[derive(Debug, Clone)]
 pub struct CellFilter {
-    /// The filter's declared argument-cell names, in source order (empty if the `(...)` list
-    /// was omitted).
-    pub arg_cells: Vec<(String, ExprSpan)>,
-    /// The filter's closure literal.
-    pub closure: cel_parser::Expr,
+    /// The filter's body expression. `_` inside it denotes the candidate value being conformed;
+    /// every other identifier that names an already-declared cell is a deduced dependency.
+    pub body: cel_parser::Expr,
     /// The span of the whole `filter ...` clause.
     pub span: ExprSpan,
 }
@@ -692,9 +690,8 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: Some(CellFilter {
-                arg_cells: vec![("hi".to_string(), span)],
-                closure: cel_parser::Expr::Ident {
-                    name: "x".to_string(),
+                body: cel_parser::Expr::Ident {
+                    name: "_".to_string(),
                     span,
                 },
                 span,
@@ -705,6 +702,9 @@ mod tests {
             span,
         };
         let filter = cell.filter.as_ref().expect("filter present");
-        assert_eq!(filter.arg_cells[0].0, "hi");
+        assert!(matches!(
+            &filter.body,
+            cel_parser::Expr::Ident { name, .. } if name == "_"
+        ));
     }
 }

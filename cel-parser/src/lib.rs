@@ -13,7 +13,10 @@
 //! # Grammar
 //!
 //! ```text
-//! expression = or_expression ?eos?.
+//! expression = range_expression.
+//! range_expression = or_expression [ ".." [ or_expression ] | "..=" or_expression ]
+//!                   | ".." [ or_expression ]
+//!                   | "..=" or_expression.
 //! or_expression = and_expression { "||" and_expression }.
 //! and_expression = comparison_expression { "&&" comparison_expression }.
 //! comparison_expression = bitwise_or_expression
@@ -26,19 +29,15 @@
 //! multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression }.
 //! cast_expression = unary_expression { "as" identifier }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
-//! postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.
+//! postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." unsuffixed_integer }.
 //! primary_expression = literal | identifier | tuple_or_group | if_expression | closure_expression.
 //! tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".
 //! if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].
 //! closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression.
 //! closure_param = identifier ":" closure_type_expression.
 //! closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")".
-//! parameter_list = [ or_expression { "," or_expression } ].
+//! parameter_list = or_expression { "," or_expression }.
 //! ```
-//!
-//! # Note
-//!
-//! `?eos?` denotes end of stream.
 //!
 //! # Examples
 //!
@@ -61,8 +60,7 @@
 //!
 //! let input = TokenStream::from_str("10").unwrap();
 //! let mut parser = CELParser::new(OpLookup::new());
-//! parser.set_tokens(input.into_iter());
-//! let result = parser.is_expression();
+//! let result = parser.parse_tokens(input.into_iter());
 //! assert!(result.is_ok());
 //! ```
 //!
@@ -81,9 +79,8 @@
 //! "#; // Invalid: missing operator
 //! let input = TokenStream::from_str(source).unwrap();
 //! let mut parser = CELParser::new(OpLookup::new());
-//! parser.set_tokens(input.into_iter());
 //!
-//! if let Err(e) = parser.is_expression() {
+//! if let Err(e) = parser.parse_tokens(input.into_iter()) {
 //!     // Format error starting at line 1
 //!     println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::plain()));
 //! }
@@ -385,8 +382,7 @@ fn elements_to_associated(elements: &[ClosureParamType]) -> Vec<cel_runtime::Ass
 ///
 /// let input = TokenStream::from_str("10").unwrap();
 /// let mut parser = CELParser::new(OpLookup::new());
-/// parser.set_tokens(input.into_iter());
-/// let result = parser.is_expression();
+/// let result = parser.parse_tokens(input.into_iter());
 /// assert!(result.is_ok());
 /// ```
 ///
@@ -405,9 +401,8 @@ fn elements_to_associated(elements: &[ClosureParamType]) -> Vec<cel_runtime::Ass
 /// "#; // Invalid: missing operator
 /// let input = TokenStream::from_str(source).unwrap();
 /// let mut parser = CELParser::new(OpLookup::new());
-/// parser.set_tokens(input.into_iter());
 ///
-/// if let Err(e) = parser.is_expression() {
+/// if let Err(e) = parser.parse_tokens(input.into_iter()) {
 ///     // Format error starting at line 1
 ///     println!("{}", e.format_rustc_style(source, file!(), line, &Renderer::plain()));
 /// }
@@ -456,7 +451,7 @@ impl<C: ParserContext> Parser<C> {
 
     /// Sets the token stream from an existing [`LexLexer`] iterator for inline expression parsing.
     ///
-    /// Resets the context. Use together with [`parse_or_expression_ctx`](Self::parse_or_expression_ctx)
+    /// Resets the context. Use together with [`parse_expression_ctx`](Self::parse_expression_ctx)
     /// and [`take_lex_tokens`](Self::take_lex_tokens) to share a token stream between adam-lang and
     /// [`CELParser`].
     pub fn set_lex_tokens(&mut self, tokens: std::iter::Peekable<lex_lexer::LexLexer>) {
@@ -465,7 +460,7 @@ impl<C: ParserContext> Parser<C> {
         self.last_span = Span::call_site();
     }
 
-    /// Parses one `or_expression` from the current token stream and returns the built context.
+    /// Parses one `expression` from the current token stream and returns the built context.
     ///
     /// Unlike [`parse_str_ctx`](Self::parse_str_ctx), this method does not require
     /// end-of-stream, allowing adam-lang to parse an expression embedded within a larger token
@@ -473,11 +468,11 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the input does not contain a valid `or_expression`.
+    /// Returns an error if the input does not contain a valid `expression`.
     ///
     /// - Complexity: O(n) in the number of tokens in the expression.
-    pub fn parse_or_expression_ctx(&mut self) -> Result<C> {
-        if !self.is_or_expression()? {
+    pub fn parse_expression_ctx(&mut self) -> Result<C> {
+        if !self.is_expression()? {
             return Err(self.error_at("expression expected"));
         }
         Ok(std::mem::replace(&mut self.context, C::new_context()))
@@ -487,7 +482,7 @@ impl<C: ParserContext> Parser<C> {
     /// swapping `self.context` out for a fresh one, running `f` against it, then swapping the
     /// original context back in and returning the finished nested one.
     ///
-    /// Unlike [`parse_or_expression_ctx`](Self::parse_or_expression_ctx), this does not reset
+    /// Unlike [`parse_expression_ctx`](Self::parse_expression_ctx), this does not reset
     /// `self.tokens`/`self.op_lookup`/`self.last_span` — it's for compiling a sub-expression in the
     /// middle of an already-in-progress outer parse, not starting a fresh top-level parse.
     ///
@@ -513,7 +508,7 @@ impl<C: ParserContext> Parser<C> {
 
     /// Returns the remaining token stream after expression parsing.
     ///
-    /// Call after [`parse_or_expression_ctx`](Self::parse_or_expression_ctx) to recover the
+    /// Call after [`parse_expression_ctx`](Self::parse_expression_ctx) to recover the
     /// shared [`LexLexer`] for continued adam-lang parsing.
     pub fn take_lex_tokens(&mut self) -> Option<std::iter::Peekable<lex_lexer::LexLexer>> {
         self.tokens.take()
@@ -530,6 +525,9 @@ impl<C: ParserContext> Parser<C> {
         self.set_tokens(tokens);
         if !self.is_expression()? {
             return Err(self.error_at("expression expected"));
+        }
+        if self.peek_token().is_some() {
+            return Err(self.error_at("unexpected token"));
         }
         Ok(std::mem::replace(&mut self.context, C::new_context()))
     }
@@ -696,15 +694,9 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `expression = or_expression <EOF>.`
+    /// `expression = range_expression.`
     pub fn is_expression(&mut self) -> Result<bool> {
-        if !self.is_or_expression()? {
-            return Ok(false);
-        }
-        if self.peek_token().is_some() {
-            return Err(self.error_at("unexpected token"));
-        }
-        Ok(true)
+        self.is_range_expression()
     }
 
     /// `or_expression = and_expression { "||" and_expression }.`
@@ -765,7 +757,8 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `comparison_expression = bitwise_or_expression [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].`
+    /// `comparison_expression = bitwise_or_expression
+    ///     [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ].`
     fn is_comparison_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
         if self.is_bitwise_or_expression()? {
@@ -797,6 +790,104 @@ impl<C: ParserContext> Parser<C> {
                     start_span.expect("production has token at start"),
                     self.last_span,
                 )?;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// `range_expression = or_expression [ ".." [ or_expression ] | "..=" or_expression ]
+    ///                   | ".." [ or_expression ]
+    ///                   | "..=" or_expression.`
+    ///
+    /// Left-factored so every alternative is chosen by one concrete leading token rather
+    /// than by first deciding whether an optional `or_expression` is present: the three
+    /// alternatives start with `or_expression`'s own FIRST set, the literal `".."`, or the
+    /// literal `"..="` respectively — pairwise disjoint (`..`/`..=` can never be the first
+    /// token of an `or_expression`), so picking among them needs exactly one token, and none
+    /// of them opens with a bracketed, possibly-empty non-terminal.
+    ///
+    /// `..`'s right operand is optional wherever it appears (covering, across the three
+    /// alternatives, `Range`/`RangeFrom`/`RangeTo`/`RangeFull`); `..=`'s right operand is
+    /// never optional (covering `RangeInclusive`/`RangeToInclusive`) — there is no
+    /// inclusive-from-only range in Rust, and no such form is registered in the op-table for
+    /// it to dispatch to, so a bare `..=`, or a left operand followed by `..=` and nothing
+    /// after, is a parse error, not a valid empty match.
+    ///
+    /// Operands are `or_expression` — matching Rust's own precedence, where `..`/`..=` bind
+    /// *looser* than `||` (and everything below it: `&&`, comparisons, bitwise ops,
+    /// arithmetic). So `1 + 2..3 * 4` still groups as `(1 + 2)..(3 * 4)` (arithmetic is well
+    /// inside `or_expression`'s own chain), and `a == b..c == d` groups the *whole*
+    /// comparisons as the two endpoints: `(a == b)..(c == d)`, not `a == (b..c) == d`.
+    fn is_range_expression(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
+
+        if self.is_punctuation("..=") {
+            if !self.is_or_expression()? {
+                return Err(self.error_at("expected or_expression"));
+            }
+            self.context.apply_op(
+                &self.op_lookup,
+                "range_to_inclusive",
+                1,
+                start_span.expect("production has token at start"),
+                self.last_span,
+            )?;
+            return Ok(true);
+        }
+
+        if self.is_punctuation("..") {
+            if self.is_or_expression()? {
+                self.context.apply_op(
+                    &self.op_lookup,
+                    "range_to",
+                    1,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
+            } else {
+                self.context.apply_op(
+                    &self.op_lookup,
+                    "range_full",
+                    0,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
+            }
+            return Ok(true);
+        }
+
+        if self.is_or_expression()? {
+            if self.is_punctuation("..=") {
+                if !self.is_or_expression()? {
+                    return Err(self.error_at("expected or_expression"));
+                }
+                self.context.apply_op(
+                    &self.op_lookup,
+                    "range_inclusive",
+                    2,
+                    start_span.expect("production has token at start"),
+                    self.last_span,
+                )?;
+            } else if self.is_punctuation("..") {
+                if self.is_or_expression()? {
+                    self.context.apply_op(
+                        &self.op_lookup,
+                        "range",
+                        2,
+                        start_span.expect("production has token at start"),
+                        self.last_span,
+                    )?;
+                } else {
+                    self.context.apply_op(
+                        &self.op_lookup,
+                        "range_from",
+                        1,
+                        start_span.expect("production has token at start"),
+                        self.last_span,
+                    )?;
+                }
             }
             Ok(true)
         } else {
@@ -1033,7 +1124,7 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `postfix_expression = primary_expression { "(" parameter_list ")" | "." unsuffixed_integer }.`
+    /// `postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." unsuffixed_integer }.`
     ///
     /// The repetition allows chained indices (`t.0.1`): each `"." unsuffixed_integer`
     /// is applied in turn to whatever value the previous step left on top of the
@@ -1055,7 +1146,17 @@ impl<C: ParserContext> Parser<C> {
                 })
             ) {
                 self.advance(); // consume "("
-                let arg_count = self.parameter_list()?;
+                let arg_count = if matches!(
+                    self.peek_token(),
+                    Some(Token::CloseDelim {
+                        delimiter: Delimiter::Parenthesis,
+                        ..
+                    })
+                ) {
+                    0
+                } else {
+                    self.parameter_list()?
+                };
                 match self.peek_token() {
                     Some(Token::CloseDelim {
                         delimiter: Delimiter::Parenthesis,
@@ -1149,19 +1250,27 @@ impl<C: ParserContext> Parser<C> {
         Ok(())
     }
 
-    /// `parameter_list = [ or_expression { "," or_expression } ].`
+    /// `parameter_list = or_expression { "," or_expression }.`
+    ///
+    /// Always parses at least one `or_expression` — callers that need to allow zero
+    /// arguments (`postfix_expression`'s `"(" [ parameter_list ] ")"`) check for that
+    /// possibility themselves before calling, rather than `parameter_list` swallowing it.
     ///
     /// Returns the argument count.
+    ///
+    /// # Errors
+    /// Returns an error if the first token can't start an `or_expression`, or if a comma
+    /// isn't followed by one.
     fn parameter_list(&mut self) -> Result<usize> {
-        let mut count = 0;
-        if self.is_or_expression()? {
-            count += 1;
-            while self.is_punctuation(",") {
-                if !self.is_or_expression()? {
-                    return Err(self.error_at("expected expression after comma"));
-                }
-                count += 1;
+        if !self.is_or_expression()? {
+            return Err(self.error_at("expected expression"));
+        }
+        let mut count = 1;
+        while self.is_punctuation(",") {
+            if !self.is_or_expression()? {
+                return Err(self.error_at("expected expression after comma"));
             }
+            count += 1;
         }
         Ok(count)
     }
@@ -1560,18 +1669,18 @@ impl<C: ParserContext> Parser<C> {
 }
 
 impl Parser<DynSegmentContext> {
-    /// Parses one `or_expression` from the current token stream and returns the segment.
+    /// Parses one `expression` from the current token stream and returns the segment.
     ///
     /// Unlike [`parse_str`](Self::parse_str), this method does not require end-of-stream,
     /// allowing adam-lang to parse an expression embedded within a larger token stream.
     ///
     /// # Errors
     ///
-    /// Returns an error if the input does not contain a valid `or_expression`.
+    /// Returns an error if the input does not contain a valid `expression`.
     ///
     /// - Complexity: O(n) in the number of tokens in the expression.
-    pub fn parse_or_expression(&mut self) -> Result<DynSegment> {
-        self.parse_or_expression_ctx()
+    pub fn parse_expression(&mut self) -> Result<DynSegment> {
+        self.parse_expression_ctx()
             .map(DynSegmentContext::into_inner)
     }
 
@@ -1605,7 +1714,7 @@ impl Parser<DynSegmentContext> {
 }
 
 impl Parser<AstContext> {
-    /// Parses one `or_expression` from the current token stream and returns the built [`Expr`].
+    /// Parses one `expression` from the current token stream and returns the built [`Expr`].
     ///
     /// Unlike [`parse_str_ast`](Self::parse_str_ast), this method does not require
     /// end-of-stream, allowing adam-lang to parse an expression embedded within a larger token
@@ -1613,11 +1722,11 @@ impl Parser<AstContext> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the input does not contain a valid `or_expression`.
+    /// Returns an error if the input does not contain a valid `expression`.
     ///
     /// - Complexity: O(n) in the number of tokens in the expression.
-    pub fn parse_or_expression_ast(&mut self) -> Result<Expr> {
-        self.parse_or_expression_ctx().map(AstContext::into_expr)
+    pub fn parse_expression_ast(&mut self) -> Result<Expr> {
+        self.parse_expression_ctx().map(AstContext::into_expr)
     }
 
     /// Parses a token stream into an [`Expr`] tree.
@@ -2580,6 +2689,26 @@ mod tests {
     }
 
     #[test]
+    fn call_leading_comma_reports_expected_expression_at_the_comma() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
+        let mut parser = CELParser::new(lookup);
+        let err = match parser.parse_str("f(,5)") {
+            Err(e) => e,
+            Ok(_) => panic!("expected parse error for leading comma"),
+        };
+        assert_eq!(err.message(), "expected expression");
+    }
+
+    #[test]
     fn call_chained() -> anyhow::Result<()> {
         let mut lookup = OpLookup::new();
         lookup.push_scope(
@@ -2811,13 +2940,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_or_expression_stops_before_comma() -> anyhow::Result<()> {
+    fn parse_expression_stops_before_comma() -> anyhow::Result<()> {
         use lex_lexer::LexLexer;
         let stream: proc_macro2::TokenStream = "10i32 + 20i32, 5i32".parse().unwrap();
         let mut parser = CELParser::new(OpLookup::new());
         parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
         let mut seg = parser
-            .parse_or_expression()
+            .parse_expression()
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let result: i32 = seg.call0()?;
         assert_eq!(result, 30);
@@ -2832,12 +2961,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_or_expression_on_empty_input_returns_error() {
+    fn parse_expression_on_empty_input_returns_error() {
         use lex_lexer::LexLexer;
         let stream: proc_macro2::TokenStream = "".parse().unwrap();
         let mut parser = CELParser::new(OpLookup::new());
         parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
-        let result = parser.parse_or_expression();
+        let result = parser.parse_expression();
         assert!(result.is_err(), "expected Err for empty input");
     }
 
@@ -2989,6 +3118,107 @@ mod tests {
             ClosureParamTypeExpr::Tuple(elements, _) => assert_eq!(elements.len(), 2),
             other => panic!("expected Tuple, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn range_expression_constructs_a_range() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("1i32..5i32").unwrap();
+        assert_eq!(seg.call0::<std::ops::Range<i32>>().unwrap(), 1i32..5i32);
+    }
+
+    #[test]
+    fn range_inclusive_expression_constructs_a_range_inclusive() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("1i32..=5i32").unwrap();
+        assert_eq!(
+            seg.call0::<std::ops::RangeInclusive<i32>>().unwrap(),
+            1i32..=5i32
+        );
+    }
+
+    #[test]
+    fn range_from_expression_constructs_a_range_from() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("3i32..").unwrap();
+        assert_eq!(seg.call0::<std::ops::RangeFrom<i32>>().unwrap(), 3i32..);
+    }
+
+    #[test]
+    fn range_to_expression_constructs_a_range_to() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("..7i32").unwrap();
+        assert_eq!(seg.call0::<std::ops::RangeTo<i32>>().unwrap(), ..7i32);
+    }
+
+    #[test]
+    fn range_to_inclusive_expression_constructs_a_range_to_inclusive() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("..=7i32").unwrap();
+        assert_eq!(
+            seg.call0::<std::ops::RangeToInclusive<i32>>().unwrap(),
+            ..=7i32
+        );
+    }
+
+    #[test]
+    fn range_full_expression_constructs_a_range_full() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("..").unwrap();
+        seg.call0::<std::ops::RangeFull>().unwrap();
+    }
+
+    #[test]
+    fn range_endpoints_are_full_or_expressions() {
+        // `1 + 2..3 * 4` must group as `(1 + 2)..(3 * 4)`, matching Rust's own precedence
+        // (range binds looser than every arithmetic/bitwise operator).
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("1i32 + 2i32..3i32 * 4i32").unwrap();
+        assert_eq!(seg.call0::<std::ops::Range<i32>>().unwrap(), 3i32..12i32);
+    }
+
+    #[test]
+    fn chained_ranges_are_a_parse_error() {
+        // Ranges don't chain, matching Rust (`1..2..3` is also a compile error there). No
+        // special "non-chainable" check is needed in `is_range_expression` itself: after
+        // parsing `1..2`, the leftover `..3` fails `parse_tokens_ctx`'s end-of-stream check
+        // the same way `"10 + 25 25"` already does (see `incomplete_expression`).
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("1i32..2i32..3i32");
+        assert!(result.is_err(), "expected a parse error, got Ok");
+    }
+
+    #[test]
+    fn range_to_inclusive_without_a_right_operand_is_a_parse_error() {
+        // `..=` always requires a right endpoint — there is no inclusive-from-only range.
+        let mut parser = CELParser::new(OpLookup::new());
+        let result = parser.parse_str("..=");
+        assert!(result.is_err(), "expected a parse error, got Ok");
+    }
+
+    #[test]
+    fn range_endpoint_absorbs_a_trailing_comparison_confirming_or_expression_operands() {
+        // Confirms range operands are `or_expression`, not `bitwise_or_expression`: in
+        // `1i32..5i32 == true`, `5i32 == true` must group together as the range's right
+        // endpoint's own `or_expression` and fail *there* (`i32` vs `bool`) — proving the
+        // endpoint absorbed the whole comparison, rather than `..` grabbing only `5i32` and
+        // `==` applying afterward to an already-built `Range`.
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = match parser.parse_str("1i32..5i32 == true") {
+            Err(e) => e,
+            Ok(_) => panic!("expected a parse error"),
+        };
+        let message = err.message();
+        assert!(
+            message.starts_with("no operation `==`"),
+            "expected a 'no operation `==`' error, got: {message}"
+        );
+        assert!(
+            !message.contains("Range"),
+            "expected the error to be about `i32`/`bool` (the inner endpoint's own comparison), \
+             not `Range<i32>` (which would mean `..` grabbed only `5i32` and `==` applied afterward \
+             to an already-built range) — got: {message}"
+        );
     }
 }
 

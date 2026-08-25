@@ -106,15 +106,12 @@ mod tests {
 
     #[test]
     fn filter_clause_with_matching_types_has_no_diagnostics() {
-        assert!(
-            diagnostics_for_source("sheet s { cell a: i32 = 1 filter |x: i32| x; }").is_empty()
-        );
+        assert!(diagnostics_for_source("sheet s { cell a: i32 = 1 filter _; }").is_empty());
     }
 
     #[test]
-    fn filter_clause_with_an_undeclared_arg_cell_is_a_diagnostic() {
-        let diags =
-            diagnostics_for_source("sheet s { cell a: i32 = 1 filter(nope) |x: i32, h: i32| x; }");
+    fn filter_clause_without_underscore_is_a_diagnostic() {
+        let diags = diagnostics_for_source("sheet s { cell a: i32 = 1 filter 1; }");
         assert_eq!(diags.len(), 1);
     }
 }
