@@ -74,6 +74,17 @@ expected and correct under §1's scope — recognizing a `RangeInclusive`-typed 
 distinct clamp *kind* rather than a type error is explicitly §3's job, not this plan's. The
 rejection is expected to be *replaced*, not merely loosened, when §3 lands (see below).
 
+A tuple-typed filtered cell (e.g. `cell a: (i32, f64) filter (_.0, _.1);`) is rejected by both
+layers with `cell '{name}': filter on a tuple-typed cell is not yet supported` — found by the
+final whole-branch review (the CST type checker had briefly diverged from the runtime parser here:
+the runtime rejected it cleanly while the type checker still structurally accepted it, so the LSP
+would show a clean sheet the runtime couldn't actually build). Both now agree, in
+`adam-lang/src/typecheck.rs`'s `check_filter` and `adam-lang/src/parser.rs`'s `parse_cell_filter`
+(commit `ee763b41`). §3 is expected to touch this exact code path when it teaches the runtime to
+build filters from non-scalar (and `RangeInclusive`) expression shapes — whoever picks that up
+should search both files for "tuple-typed cell" before changing either one, so the two layers stay
+in sync.
+
 ## Left
 
 Per the design spec, two pieces remain, in dependency order:
