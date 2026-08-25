@@ -4,4 +4,5 @@
 //! directly, so UI event handlers stay thin passthroughs.
 
 pub mod cells;
+pub mod conditionals;
 pub mod relationships;
