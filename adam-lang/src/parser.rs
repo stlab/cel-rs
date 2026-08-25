@@ -225,7 +225,7 @@ impl AdamParser {
 
         let has_initializer = ctx.consume_punct("=");
         let (shape, cell_id) = if has_initializer {
-            let segment = self.parse_cel_or_expression(ctx)?;
+            let segment = self.parse_cel_expression(ctx)?;
             let (actual_shape, cell_id) = self.build_cell_from_segment(segment, ctx)?;
             if let Some(declared) = &declared_shape
                 && declared != &actual_shape
@@ -307,7 +307,7 @@ impl AdamParser {
             ctx.expect_close_paren()?;
         }
 
-        let mut segment = self.parse_cel_or_expression(ctx)?;
+        let mut segment = self.parse_cel_expression(ctx)?;
         let closure: DynClosure = segment
             .call0()
             .map_err(|e| ParseError::new(format!("filter: {e}"), cell_span))?;
@@ -678,7 +678,7 @@ impl AdamParser {
                 Ok(true)
             });
 
-        let result = self.parse_cel_or_expression(ctx);
+        let result = self.parse_cel_expression(ctx);
         self.cel.op_lookup_mut().pop_scope();
         let segment = result?;
 
@@ -816,7 +816,7 @@ impl AdamParser {
             // bare literal (`0i32 =>`) and a tuple value (`(0, 0) =>`) via the same grammar cell
             // initializers already use.
             let branch_span = ctx.peek_span();
-            let segment = self.parse_cel_or_expression(ctx)?;
+            let segment = self.parse_cel_expression(ctx)?;
             let (branch_shape, branch_val) = self.eval_segment_boxed(segment)?;
             if branch_shape != match_shape {
                 return Err(ParseError::new(
@@ -1173,11 +1173,11 @@ impl AdamParser {
         }
     }
 
-    /// Delegates one `or_expression` to CELParser, sharing the token stream.
-    fn parse_cel_or_expression(&mut self, ctx: &mut ParseContext) -> Result<DynSegment> {
+    /// Delegates one `expression` to CELParser, sharing the token stream.
+    fn parse_cel_expression(&mut self, ctx: &mut ParseContext) -> Result<DynSegment> {
         let tokens = ctx.cursor.take_tokens().expect("tokens present");
         self.cel.set_lex_tokens(tokens);
-        let result = self.cel.parse_or_expression();
+        let result = self.cel.parse_expression();
         ctx.cursor
             .set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
         result
@@ -2706,5 +2706,21 @@ mod tests {
         let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
         let (a, b): (i32, i32) = value.try_to_tuple().unwrap();
         assert_eq!((a, b), (3, 3));
+    }
+
+    #[test]
+    fn parse_cell_range_initializer_fails_cleanly_at_type_inference_not_grammar() {
+        // `Range<i32>` isn't a registered adam-lang type — this must still fail today, but only
+        // at `eval_segment_boxed`'s existing "cannot infer a type" check, proving the CEL-level
+        // range parsing itself succeeded (rather than failing as "unexpected token" or similar
+        // at the grammar level, which would indicate the entry-point swap didn't take effect).
+        let result = parser().parse_str("sheet s { cell x = 1i32..5i32; }");
+        assert!(result.is_err());
+        let err = result.err().expect("expected Err");
+        assert_eq!(
+            err.message(),
+            "cannot infer a type for this expression; register a type name for it or add an \
+             explicit `: type_expr` annotation"
+        );
     }
 }

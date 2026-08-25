@@ -188,13 +188,13 @@ impl AdamAstParser {
         let (type_name, initializer) = if cursor.consume_punct(":") {
             let type_name = self.parse_type_expr(cursor)?;
             let initializer = if cursor.consume_punct("=") {
-                Some(self.parse_cel_or_expression(cursor)?)
+                Some(self.parse_cel_expression(cursor)?)
             } else {
                 None
             };
             (Some(type_name), initializer)
         } else if cursor.consume_punct("=") {
-            (None, Some(self.parse_cel_or_expression(cursor)?))
+            (None, Some(self.parse_cel_expression(cursor)?))
         } else {
             return Err(cursor.err_at("expected `:` or `=` in cell declaration"));
         };
@@ -243,7 +243,7 @@ impl AdamAstParser {
             }
             cursor.expect_close_paren()?;
         }
-        let closure = self.parse_cel_or_expression(cursor)?;
+        let closure = self.parse_cel_expression(cursor)?;
         let closure_end = closure.span().end;
         Ok(ast::CellFilter {
             arg_cells,
@@ -348,7 +348,7 @@ impl AdamAstParser {
         let decl_start = cursor.peek_span();
         let (outputs, destructure) = parse_binding_target(cursor)?;
         cursor.expect_punct(":=")?;
-        let body = self.parse_cel_or_expression(cursor)?;
+        let body = self.parse_cel_expression(cursor)?;
         let semi_span = cursor.expect_punct(";")?;
         Ok(ast::BindingDecl {
             outputs,
@@ -368,7 +368,7 @@ impl AdamAstParser {
         use cel_parser::lex_lexer::Token;
         let decl_start = cursor.peek_span();
         cursor.is_keyword("conditional");
-        let match_expr = self.parse_cel_or_expression(cursor)?;
+        let match_expr = self.parse_cel_expression(cursor)?;
         let outer_open = cursor.expect_open_brace()?;
         let mut branches = Vec::new();
         let mut default = None;
@@ -461,7 +461,7 @@ impl AdamAstParser {
             None
         };
         cursor.expect_punct(":=")?;
-        let initializer = self.parse_cel_or_expression(cursor)?;
+        let initializer = self.parse_cel_expression(cursor)?;
         let require = if cursor.is_keyword("require") {
             let open_span = cursor.expect_open_brace()?;
             let mut requirements = Vec::new();
@@ -504,7 +504,7 @@ impl AdamAstParser {
         let decl_start = cursor.peek_span();
         let (name, name_span) = cursor.consume_ident()?;
         cursor.expect_punct(":")?;
-        let body = self.parse_cel_or_expression(cursor)?;
+        let body = self.parse_cel_expression(cursor)?;
         let semi_span = cursor.expect_punct(";")?;
         Ok(ast::RequirementDecl {
             name,
@@ -519,13 +519,13 @@ impl AdamAstParser {
         })
     }
 
-    /// Delegates one `or_expression` to `cel_parser::Parser<AstContext>`, sharing the token
+    /// Delegates one `expression` to `cel_parser::Parser<AstContext>`, sharing the token
     /// stream (the same take/set-tokens handoff `crate::AdamParser` uses for the `DynSegment`
     /// path).
-    fn parse_cel_or_expression(&mut self, cursor: &mut TokenCursor) -> Result<cel_parser::Expr> {
+    fn parse_cel_expression(&mut self, cursor: &mut TokenCursor) -> Result<cel_parser::Expr> {
         let tokens = cursor.take_tokens().expect("tokens present");
         self.cel.set_lex_tokens(tokens);
-        let result = self.cel.parse_or_expression_ast();
+        let result = self.cel.parse_expression_ast();
         cursor.set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
         result
     }
@@ -1501,5 +1501,20 @@ mod tests {
             .unwrap();
         assert!(!sheet.errors.is_empty());
         assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
+    }
+
+    #[test]
+    fn range_syntax_is_reachable_from_a_relationship_binding() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { relationship { x := 1..5; } }")
+            .unwrap();
+        let ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected a Relationship item, got {:?}", sheet.items[0]);
+        };
+        assert!(
+            matches!(&rel.bindings[0].body, cel_parser::Expr::Op { name, .. } if name == "range"),
+            "expected the binding body to be a range Expr::Op, got {:?}",
+            rel.bindings[0].body
+        );
     }
 }
