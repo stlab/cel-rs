@@ -343,7 +343,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `binding = binding_target ":=" or_expression ";".`
+    /// `binding = binding_target ":=" expression ";".`
     fn parse_binding(&mut self, cursor: &mut TokenCursor) -> Result<ast::BindingDecl> {
         let decl_start = cursor.peek_span();
         let (outputs, destructure) = parse_binding_target(cursor)?;
@@ -363,7 +363,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".`
+    /// `conditional_decl = "conditional" expression "{" { conditional_branch } "}".`
     fn parse_conditional_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::ConditionalDecl> {
         use cel_parser::lex_lexer::Token;
         let decl_start = cursor.peek_span();
@@ -449,7 +449,7 @@ impl AdamAstParser {
         Ok(relationships)
     }
 
-    /// `out_decl = "out" identifier [ ":" type_name ] ":=" or_expression [ "require" "{" {
+    /// `out_decl = "out" identifier [ ":" type_name ] ":=" expression [ "require" "{" {
     /// requirement } "}" ] ";".`
     fn parse_out_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::OutDecl> {
         let decl_start = cursor.peek_span();
@@ -499,7 +499,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `requirement = identifier ":" or_expression ";".`
+    /// `requirement = identifier ":" expression ";".`
     fn parse_requirement(&mut self, cursor: &mut TokenCursor) -> Result<ast::RequirementDecl> {
         let decl_start = cursor.peek_span();
         let (name, name_span) = cursor.consume_ident()?;

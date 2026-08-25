@@ -201,7 +201,7 @@ impl AdamParser {
 
     /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] ";".`
     ///
-    /// `cell_type_init = (":" type_expr ["=" or_expression]) | ("=" or_expression).`
+    /// `cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).`
     fn parse_cell_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("cell"); // consume
         let (name, name_span) = ctx.consume_ident()?;
@@ -591,7 +591,7 @@ impl AdamParser {
             .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))
     }
 
-    /// `binding = binding_target ":=" or_expression ";".`
+    /// `binding = binding_target ":=" expression ";".`
     fn parse_binding(&mut self, ctx: &mut ParseContext) -> Result<Method> {
         let (names, destructure) = parse_binding_target(ctx)?;
         let mut outputs: NamedCells = Vec::with_capacity(names.len());
@@ -610,7 +610,7 @@ impl AdamParser {
         Ok(build_method(inputs, outputs, segment, compiled))
     }
 
-    /// Parses an `or_expression` whose input cells are deduced from whichever already-declared
+    /// Parses an `expression` whose input cells are deduced from whichever already-declared
     /// cell identifiers it references, rather than an explicit `cell_list` — the mechanism
     /// shared by a conditional's match-subject expression ([`Self::parse_match_expr`]), a
     /// `relationship` binding's right-hand side, an `out` declaration's initializer, and a
@@ -789,7 +789,7 @@ impl AdamParser {
         }
     }
 
-    /// `conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".`
+    /// `conditional_decl = "conditional" expression "{" { conditional_branch } "}".`
     fn parse_conditional_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("conditional"); // consume
         let match_span = ctx.peek_span();
@@ -812,7 +812,7 @@ impl AdamParser {
                 break; // default branch is always last
             }
 
-            // Named branch: `or_expression "=>" "{" ... "}"` — an or_expression covers both a
+            // Named branch: `expression "=>" "{" ... "}"` — an expression covers both a
             // bare literal (`0i32 =>`) and a tuple value (`(0, 0) =>`) via the same grammar cell
             // initializers already use.
             let branch_span = ctx.peek_span();
@@ -890,7 +890,7 @@ impl AdamParser {
         Ok(rel_ids)
     }
 
-    /// `out_decl = "out" identifier [ ":" type_expr ] ":=" or_expression [ "require" "{" {
+    /// `out_decl = "out" identifier [ ":" type_expr ] ":=" expression [ "require" "{" {
     /// requirement } "}" ] ";".`
     fn parse_out_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("out"); // consume
@@ -1005,7 +1005,7 @@ impl AdamParser {
         Ok(())
     }
 
-    /// `requirement = identifier ":" or_expression ";".`
+    /// `requirement = identifier ":" expression ";".`
     fn parse_requirement(&mut self, ctx: &mut ParseContext) -> Result<(String, Requirement)> {
         let (name, _name_span) = ctx.consume_ident()?;
         ctx.expect_punct(":")?;
@@ -1053,7 +1053,7 @@ impl AdamParser {
 
     /// Determines how to split a compiled body segment's result across `outputs`, given their
     /// declared shapes — used by `parse_binding` to dispatch a `relationship` binding's direct-bind vs.
-    /// destructuring cases against a single compiled `or_expression`. Written generically so any
+    /// destructuring cases against a single compiled `expression`. Written generically so any
     /// future N-output construct can reuse it; `out` declarations are always single-output,
     /// never destructuring, and currently use their own simpler, separate dispatch instead.
     ///
@@ -1230,7 +1230,7 @@ fn tuple_shape_matches_associated(
             .all(|(e, a)| element_shape_matches(e, a))
 }
 
-/// How to turn one compiled `or_expression`'s result into per-output values.
+/// How to turn one compiled `expression`'s result into per-output values.
 enum CompiledOutputs {
     /// One output, scalar: the segment's single result, boxed via `call_dyn`.
     Single(CallDynFn),
