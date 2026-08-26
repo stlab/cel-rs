@@ -73,6 +73,9 @@ pub(crate) fn build_digraph(
 /// each reclamp after everything its filter depends on and before everything that depends
 /// on the filtered cell.
 ///
+/// - Postcondition: every filtered, unclaimed cell is a key in `adj` after this call,
+///   even one with zero filter args or no relationship membership.
+///
 /// - Complexity: O(C · a) where C = cells with a filter, a = arguments per filter.
 pub(crate) fn add_filter_edges(
     adj: &mut HashMap<Node, Vec<Node>>,
@@ -86,6 +89,11 @@ pub(crate) fn add_filter_edges(
         if assignment.claimed.contains_key(&cell_id) {
             continue;
         }
+        // Ensures the filtered cell is a node even when it has no args and belongs to
+        // no relationship (a zero-argument filter contributes no edges below), so it
+        // always lands in its own trivial tarjan_scc component and always gets a
+        // PlanStep::FilterReclamp.
+        adj.entry(Node::Cell(cell_id)).or_default();
         for &arg in &filter.args {
             adj.entry(Node::Cell(arg))
                 .or_default()
@@ -214,5 +222,24 @@ mod tests {
         add_filter_edges(&mut adj, &sheet.cells, &assignment);
 
         assert!(adj.is_empty());
+    }
+
+    #[test]
+    fn add_filter_edges_adds_a_node_for_a_zero_argument_filter_with_no_relationship_membership() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(500_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+
+        let assignment =
+            Assignment::solve(&sheet.relationships, &HashSet::new(), &HashSet::new()).unwrap();
+        let mut adj: HashMap<Node, Vec<Node>> = HashMap::new();
+        add_filter_edges(&mut adj, &sheet.cells, &assignment);
+
+        // `a` has no filter args and belongs to no relationship, so nothing would
+        // otherwise ever insert it into the digraph — without this, plan() would
+        // never emit a FilterReclamp step for it.
+        assert!(adj.contains_key(&Node::Cell(a)));
     }
 }
