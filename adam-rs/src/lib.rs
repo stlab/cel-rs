@@ -117,7 +117,7 @@ pub mod sheet;
 pub use cell::CellId;
 pub use conditional::{ConditionalId, MatchExpr};
 pub use error::Error;
-pub use filter::{Filter, FilterViolation};
+pub use filter::{Filter, FilterKind, FilterViolation};
 pub use output::OutputId;
 pub use relationship::{Method, RelationshipId};
 pub use requirement::{Requirement, RequirementId};

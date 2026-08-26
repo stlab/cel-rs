@@ -3,8 +3,10 @@
 use adam_rs::{CellId, FilterViolation, Sheet};
 use dioxus::prelude::*;
 
-use crate::bridge::{Labels, format_adam_error};
-use crate::spectrum::{SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpTextfield};
+use crate::bridge::{Labels, format_adam_error, format_rounded};
+use crate::spectrum::{
+    SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpNumberfield, SpSlider, SpTextfield,
+};
 
 use std::collections::HashSet;
 
@@ -146,11 +148,59 @@ fn toggled_bool_value(current: &str) -> &'static str {
     if current == "true" { "false" } else { "true" }
 }
 
+/// Returns the `min`/`max` bounds to pass to a cell's [`SpNumberfield`]: `range`'s bounds,
+/// widened if necessary so `current` (the field's own displayed text) always falls within them.
+///
+/// `sp-number-field` clamps its displayed value to fit whatever `min`/`max` it's given — not
+/// just in response to user input, but on *any* update to `min`, `max`, or `value` where the
+/// three momentarily disagree — and, worse, resets its displayed value to `0` rather than
+/// restoring the true value if `min`/`max` are later removed entirely rather than merely
+/// changed. A range filter's live bounds (`range`, recomputed from the filter's *current*
+/// argument values) can transiently exclude a cell's actual stored value: the filter only
+/// re-clamps a cell at the moment that cell itself is written, so changing another cell its
+/// bounds depend on (e.g. a shared `max` cell) does not retroactively pull this cell back in
+/// range. Widening `range` to always include `current` guarantees the three never disagree, so
+/// the widget never mis-clamps or resets — at the cost of its stepper arrows not disabling
+/// exactly at the filter's true limit while a cell sits outside it, until the cell's own next
+/// write brings it back in range and the true bounds resume being enforced.
+///
+/// - Postcondition: returns `(None, None)` whenever `range` is `None`.
+fn number_field_bounds(
+    current: &str,
+    range: Option<(f64, f64)>,
+) -> (Option<String>, Option<String>) {
+    let Some((lo, hi)) = range else {
+        return (None, None);
+    };
+    let current = current.parse::<f64>().unwrap_or(lo);
+    (
+        Some(lo.min(current).to_string()),
+        Some(hi.max(current).to_string()),
+    )
+}
+
+/// Returns `true` if `typed`, read as a number, differs from `actual` (a cell's post-write
+/// display string) after applying [`format_rounded`]'s own rounding to both — i.e. a range
+/// filter silently clamped the written value to something other than what was typed. A range
+/// filter's `write_str`/`Sheet::propagate` both return `Ok` in that case (clamping always
+/// produces some valid value), so this is the only place that distinguishes it from an
+/// unmodified write.
+///
+/// - Postcondition: returns `false` whenever `typed` doesn't parse as `f64` — a non-numeric
+///   cell's write is never treated as clamped.
+fn clamped_away(typed: &str, actual: &str) -> bool {
+    match typed.parse::<f64>() {
+        Ok(v) => format_rounded(v) != actual,
+        Err(_) => false,
+    }
+}
+
 /// Parses `val` for `id` via its `Labels` metadata, writes it to `sheet`, and propagates the
 /// sheet's constraints, updating `has_error` and reporting any error — or, on success, any
 /// currently-violated filter — to `crate::diagnostics`.
 ///
-/// - Postcondition: `has_error` is `false` on success, `true` on parse or propagation failure.
+/// - Postcondition: `has_error` is `true` on parse or propagation failure, or when a range
+///   filter clamped `val` away from what was typed (see [`clamped_away`]); `false` otherwise.
 fn write_and_propagate(
     mut sheet: Signal<Sheet>,
     labels: Signal<Labels>,
@@ -178,8 +228,12 @@ fn write_and_propagate(
     };
     match propagate_result {
         Ok(()) => {
-            has_error.set(false);
             let labels_r = labels.read();
+            let clamped = labels_r
+                .cells
+                .get(&id)
+                .is_some_and(|m| clamped_away(val, &(m.display)(&sheet_w)));
+            has_error.set(clamped);
             for violated_id in sheet_w.filter_violated_cells().collect::<Vec<_>>() {
                 let Some(violation) = sheet_w.filter_violation(violated_id) else {
                     continue;
@@ -205,13 +259,14 @@ fn write_and_propagate(
 }
 
 /// Sidebar panel showing all cells with labels and inputs for writing — a checkbox for
-/// `bool`-typed cells, a text field for everything else.
+/// `bool`-typed cells, a number field (plus a live-range slider when the cell has a range
+/// filter) for numeric cells, and a text field for everything else.
 ///
 /// Editing an input immediately writes the parsed value to the sheet and propagates
 /// constraints. If parsing or propagation fails (for example, non-numeric input or division
-/// by zero), `SpTextfield` renders in its invalid state until the user blurs, and the
-/// formatted diagnostic is printed to stderr. The text field's input is not reset while it is
-/// focused; it syncs back to the computed value on blur, keeping non-edited cells up to date.
+/// by zero), the field renders in its invalid state until the user blurs, and the formatted
+/// diagnostic is printed to stderr. A field's input is not reset while it is focused; it
+/// syncs back to the computed value on blur, keeping non-edited cells up to date.
 #[component]
 pub fn Inspector(
     sheet: Signal<Sheet>,
@@ -268,6 +323,24 @@ fn CellRow(
             .unwrap_or(false)
     });
 
+    let is_numeric = use_memo(move || {
+        labels
+            .read()
+            .cells
+            .get(&id)
+            .map(|m| m.is_numeric)
+            .unwrap_or(false)
+    });
+
+    let range = use_memo(move || {
+        labels
+            .read()
+            .cells
+            .get(&id)
+            .and_then(|m| m.range.as_ref())
+            .map(|f| f(&sheet.read()))
+    });
+
     let forced = use_memo(move || sheet.read().is_forced(id));
 
     let mut input = use_signal(|| value.peek().clone());
@@ -317,6 +390,64 @@ fn CellRow(
                             .await;
                         });
                     },
+                }
+            } else if *is_numeric.read() {
+                {
+                    let (min, max) = number_field_bounds(&input.read(), *range.read());
+                    rsx! {
+                        SpNumberfield {
+                            id: field_id.clone(),
+                            value: input.read().clone(),
+                            min,
+                            max,
+                            invalid: flags.read().invalid,
+                            warning: flags.read().warning,
+                            disabled: flags.read().disabled,
+                            oninput: move |_: FormEvent| {
+                                spawn(async move {
+                                    // Reads the shadow-DOM `<input>`'s raw text, not the host's
+                                    // `value` property: once `min`/`max` are set, `sp-number-field`
+                                    // clamps its own `value` to that range on every keystroke,
+                                    // which would hide an out-of-range-for-type entry from
+                                    // `write_and_propagate` below before it ever sees the digits
+                                    // the user actually typed.
+                                    let mut eval = document::eval(&format!(
+                                        r#"dioxus.send(document.getElementById("cell-{id:?}").shadowRoot.querySelector("input").value)"#
+                                    ));
+                                    let Ok(val) = eval.recv::<String>().await else { return; };
+                                    if !*is_focused.read() {
+                                        return;
+                                    }
+                                    input.set(val.clone());
+                                    write_and_propagate(sheet, labels, id, &val, has_error, active_source);
+                                });
+                            },
+                            onfocus: move |_| is_focused.set(true),
+                            onblur: move |_| {
+                                is_focused.set(false);
+                                has_error.set(false);
+                            },
+                        }
+                    }
+                }
+                if let Some((lo, hi)) = *range.read() {
+                    SpSlider {
+                        id: format!("cell-{id:?}-slider"),
+                        value: input.read().clone(),
+                        min: format!("{lo}"),
+                        max: format!("{hi}"),
+                        disabled: flags.read().disabled,
+                        oninput: move |_: FormEvent| {
+                            spawn(async move {
+                                let mut eval = document::eval(&format!(
+                                    r#"dioxus.send(document.getElementById("cell-{id:?}-slider").value.toString())"#
+                                ));
+                                let Ok(val) = eval.recv::<String>().await else { return; };
+                                input.set(val.clone());
+                                write_and_propagate(sheet, labels, id, &val, has_error, active_source);
+                            });
+                        },
+                    }
                 }
             } else {
                 SpTextfield {
@@ -521,6 +652,63 @@ mod tests {
         let flags = cell_flags(id, false, true, &status(true, &[id], &[id], &[]));
         assert!(!flags.warning);
         assert!(flags.invalid);
+    }
+
+    #[test]
+    fn clamped_away_false_when_typed_matches_actual() {
+        assert!(!clamped_away("42", "42"));
+    }
+
+    #[test]
+    fn clamped_away_true_when_a_range_filter_clamped_the_value() {
+        assert!(clamped_away("150", "100"));
+    }
+
+    #[test]
+    fn clamped_away_ignores_display_rounding_differences() {
+        assert!(!clamped_away("1.005", &format_rounded(1.005)));
+    }
+
+    #[test]
+    fn clamped_away_false_for_non_numeric_input() {
+        assert!(!clamped_away("not a number", "0"));
+    }
+
+    #[test]
+    fn number_field_bounds_none_when_no_range() {
+        assert_eq!(number_field_bounds("50", None), (None, None));
+    }
+
+    #[test]
+    fn number_field_bounds_returns_range_unchanged_when_current_is_within_it() {
+        assert_eq!(
+            number_field_bounds("50", Some((0.0, 100.0))),
+            (Some("0".to_string()), Some("100".to_string()))
+        );
+    }
+
+    #[test]
+    fn number_field_bounds_widens_max_to_include_a_current_value_above_it() {
+        assert_eq!(
+            number_field_bounds("150", Some((0.0, 100.0))),
+            (Some("0".to_string()), Some("150".to_string()))
+        );
+    }
+
+    #[test]
+    fn number_field_bounds_widens_min_to_include_a_current_value_below_it() {
+        assert_eq!(
+            number_field_bounds("-50", Some((0.0, 100.0))),
+            (Some("-50".to_string()), Some("100".to_string()))
+        );
+    }
+
+    #[test]
+    fn number_field_bounds_falls_back_to_the_unwidened_range_when_current_does_not_parse() {
+        assert_eq!(
+            number_field_bounds("not a number", Some((0.0, 100.0))),
+            (Some("0".to_string()), Some("100".to_string()))
+        );
     }
 
     #[test]

@@ -85,52 +85,42 @@ build filters from non-scalar (and `RangeInclusive`) expression shapes — whoev
 should search both files for "tuple-typed cell" before changing either one, so the two layers stay
 in sync.
 
-## Left
+## Done (§3/§4)
 
-Per the design spec, two pieces remain, in dependency order:
+Both remaining pieces from the design spec are complete, via
+`docs/superpowers/plans/2026-08-24-filter-kind-range-slider.md`, executed with
+subagent-driven-development (ledger: `.superpowers/sdd/2026-08-24-filter-kind-range-slider/progress.md`).
 
-**§3 — `FilterKind` tag + `Sheet` query API (`adam-rs`).** Add a `FilterKind` enum (`Opaque` |
-`Range { bounds: Box<dyn Fn(&[&dyn Any]) -> (Box<dyn Any>, Box<dyn Any>)> }`) and a `kind` field
-on `FilterData`; a new `Filter::range(...)` constructor built by adam-lang's compile phase when it
-recognizes a `RangeInclusive`-typed filter expression (recognized structurally, by the expression's
-*type*, not by matching a call's callee name — see the spec's "Motivation for a real type, not
-just sugar" and "No name-based special-casing" sections for why); `Sheet::filter_kind(id) ->
-Option<&FilterKind>` and `Sheet::filter_range::<T>(id) -> Option<(T, T)>` for consumers like
-`begin`. This is also where `adam-lang/src/parser.rs`'s `parse_cell_filter` gains the branch that
-turns today's type-check rejection of a `RangeInclusive`-typed filter body into a recognized clamp
-instead — the rejection described above is the exact code path §3 replaces. Per the spec, `_`'s
-"must be referenced" requirement is also expected to gain an exception for the range case (a
-`lo..=hi` filter body doesn't reference `_` at all — it's the two range endpoints, not the
-candidate value, that appear in the expression).
+**§3 — `FilterKind` tag + `Sheet` query API.** `adam-rs::FilterKind` (`Opaque` | `Range { bounds }`)
+and `Filter::range(...)` (`adam-rs/src/filter.rs`), `Sheet::filter_kind`/`Sheet::filter_range::<T>`
+(`adam-rs/src/sheet.rs`), a `RangeEntry` lookup table for the 14 numeric primitives
+(`adam-lang/src/type_registry.rs`), and `parse_cell_filter`'s range-recognition branch
+(`adam-lang/src/parser.rs`) — a `RangeInclusive<T>`-typed filter body now compiles to a tagged
+range-clamp `Filter` instead of failing the old type check, with the "`_` must be referenced"
+check correctly bypassed for any recognized range shape (both at the runtime layer and, via a
+matching exemption in `adam-lang/src/typecheck.rs`, at the CST layer `adam-lsp` uses).
 
-**§4 — `begin` UI: number fields and range sliders.** Depends entirely on §3's query API.
-`CellMeta` (`begin/src/bridge.rs`) gains a live-range field populated via `Sheet::filter_kind`/
-`filter_range`; a new `SpNumberfield` wrapper component (`begin/src/spectrum.rs`) replaces the
-current plain `SpTextfield` for numeric, non-bool cells (`begin/src/inspector.rs`); a new
-`SpSlider` wrapper renders alongside it when a live range is present, recomputing bounds on every
-render so a range driven by other cells/relationships stays live. Per `begin/CLAUDE.md`, this
-group must be verified by actually rendering the UI (`verifying-begin-ui` skill), not just by
-compiling.
+**§4 — `begin` UI: number fields and range sliders.** `CellMeta` gains `is_numeric`/`range`
+(`begin/src/bridge.rs`); `SpNumberfield`/`SpSlider` wrapper components (`begin/src/spectrum.rs`);
+`CellRow` renders checkbox / number-field(+slider) / text-field per cell (`begin/src/inspector.rs`);
+`begin/examples/inequality.adm2` migrated to the `lo..=hi` spelling so it exercises `FilterKind::Range`.
+Verified by actually rendering `begin` (served as a web app, driven via headless Edge + CDP): numeric
+cells get a stepper-equipped number field; a range-filtered cell additionally gets a slider with
+live min/max; editing the number field and dragging the slider both write-and-propagate correctly,
+including clamping out-of-range writes; a six-step simulated slider drag showed no jitter or
+snap-back; non-numeric (bool/String) cells and disabled/forced states are unaffected, confirmed
+across four different examples.
 
-Neither piece is blocked by anything outside this design — §3 only needs `adam-rs::Filter`/
-`FilterData` (already stable) and adam-lang's existing type-checking machinery; §4 only needs §3's
-new `Sheet` methods.
+## Key files for future filter/UI work
 
-## Key files for §3/§4 to build on
-
-- `adam-lang/src/parser.rs` (`parse_cell_filter`, `parse_deduced_expr`) and
-  `adam-lang/src/typecheck.rs` (`check_filter`, `expr_references_ident`) — the deduced-expression
-  compile path §3 extends with the `RangeInclusive` recognition branch.
-- `adam-lang/src/ast.rs` — `CellFilter`'s current (post-§1) shape.
-- `adam-rs/src/filter.rs` — `Filter`/`FilterData`, `Filter::new`/`from_fn_0/1/2` (kept unchanged
-  for direct Rust construction — tests, non-adam-lang sheets); §3 adds `FilterKind` and
-  `Filter::range` here.
-- `adam-rs/src/sheet.rs` — `add_filter` (around `sheet.rs:547-588`, unaffected by §3's `kind`
-  field); §3 adds `filter_kind`/`filter_range` here.
-- `begin/src/bridge.rs` (`CellMeta`, `labels_from_cell_names`), `begin/src/spectrum.rs` (existing
-  `SpTextfield`/`SpCheckbox` wrapper pattern to mirror), `begin/src/inspector.rs` (`CellRow`,
-  around `inspector.rs:321-353` and the `write_and_propagate` path at `inspector.rs:154-205`) —
-  §4's targets.
-- `docs/superpowers/specs/2026-08-22-filter-deduction-range-slider-design.md` — full design,
-  including the Files Changed table, Error Messages table, and the Tests section enumerating
-  exactly what §3/§4 need to cover.
+- `adam-lang/src/parser.rs` (`parse_cell_filter`, `parse_filter_expr`, `parse_deduced_expr`) and
+  `adam-lang/src/typecheck.rs` (`check_filter`, `is_range_inclusive_body`,
+  `expr_references_ident`) — the deduced-expression compile path, including range recognition.
+- `adam-lang/src/type_registry.rs` — `TypeRegistry::range_entry`/`RangeEntry`, the per-numeric-type
+  `RangeInclusive<T>` clamp/bounds dispatch table.
+- `adam-rs/src/filter.rs` — `Filter`/`FilterData`/`FilterKind`, `Filter::new`/`from_fn_0/1/2`/`range`.
+- `adam-rs/src/sheet.rs` — `add_filter`, `filter_kind`, `filter_range`.
+- `begin/src/bridge.rs` (`CellMeta`, `labels_from_cell_names`, `mark_numeric`), `begin/src/spectrum.rs`
+  (`SpTextfield`/`SpCheckbox`/`SpNumberfield`/`SpSlider`), `begin/src/inspector.rs` (`CellRow`,
+  `write_and_propagate`).
+- `docs/superpowers/specs/2026-08-22-filter-deduction-range-slider-design.md` — full design.
