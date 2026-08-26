@@ -1,0 +1,16 @@
+[package]
+name = "adam-lang-book"
+version = "0.1.0"
+edition = "2024"
+description = "A tutorial and reference manual for the adam-lang language"
+publish = false
+
+[dependencies]
+adam-lang = { path = "../adam-lang" }
+adam-rs = { path = "../adam-rs" }
+cel-parser = { path = "../cel-parser" }
+cel-runtime = { path = "../cel-runtime" }
+cel-std = { path = "../cel-std" }
+
+[lints]
+workspace = true

@@ -16,6 +16,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "adam-lang-book"
+version = "0.1.0"
+dependencies = [
+ "adam-lang",
+ "adam-rs",
+ "cel-parser",
+ "cel-runtime",
+ "cel-std",
+]
+
+[[package]]
 name = "adam-lsp"
 version = "0.1.0"
 dependencies = [

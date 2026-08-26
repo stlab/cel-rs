@@ -27,6 +27,7 @@ members = [
     "cel-std",
     "adam-rs",
     "adam-lang",
+    "adam-lang-book",
     "adam-lsp",
     "begin",
     "xtask",

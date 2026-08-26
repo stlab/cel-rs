@@ -9,7 +9,7 @@
 //! sheet              = "sheet" identifier "{" { sheet_item } "}".
 //! sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).
 //! cell_decl          = "cell" identifier cell_type_init [ cell_filter ] ";".
-//! cell_filter        = "filter" [ "(" identifier { "," identifier } ")" ] closure_expression.
+//! cell_filter        = "filter" or_expression.
 //! cell_type_init     = (":" type_expr ["=" or_expression]) | ("=" or_expression).
 //! type_expr          = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 //! relationship_decl  = "relationship" "{" { binding } "}".
@@ -32,6 +32,12 @@
 //! `or_expression` and its descendants (`literal`, `identifier`, and the rest of the
 //! CEL expression grammar) are defined by `cel_parser` — see that crate's own
 //! [`# Grammar`](../cel_parser/index.html#grammar) section.
+//!
+//! A `cell_filter`'s `or_expression` names no explicit parameter list: `_` always refers to the
+//! candidate value being conformed (of the filtered cell's own declared type), and every other
+//! identifier that names an already-declared cell is a dependency, deduced exactly as a
+//! `relationship` binding's/`out` declaration's/`conditional`'s own `or_expression` deduces its
+//! inputs — see [`ast::CellFilter`]. `_` is reserved inside a filter expression only.
 //!
 //! # Example
 //!
