@@ -920,8 +920,6 @@ impl Sheet {
     /// - `Error::InvalidId` — `id` is not a cell in this sheet.
     /// - `Error::TypeMismatch` — `T` does not match the cell's registered `TypeId`.
     /// - `Error::TerminalCell` — `id` already belongs to an existing output.
-    /// - `Error::MethodFailed` — the cell has a filter and it rejected `value`; the
-    ///   cell is left completely unchanged (no strength bump, no `source` change).
     pub fn write<T: Any + 'static>(&mut self, id: CellId, value: T) -> Result<(), Error> {
         if self.terminal_cells.contains(&id) {
             return Err(Error::TerminalCell);
@@ -934,28 +932,10 @@ impl Sheet {
             });
         }
 
-        let boxed: Box<dyn Any> = if let Some(filter) = self.cells[id].filter.as_ref() {
-            let args: Vec<&dyn Any> = filter
-                .args
-                .iter()
-                .map(|&a| self.cells[a].effective())
-                .collect();
-            let conformed = (filter.function)(&value, &args).map_err(Error::MethodFailed)?;
-            if conformed.as_ref().type_id() != cell_type {
-                return Err(Error::TypeMismatch {
-                    expected: cell_type,
-                    found: conformed.as_ref().type_id(),
-                });
-            }
-            conformed
-        } else {
-            Box::new(value)
-        };
-
         self.next_strength += 1;
         let cell = &mut self.cells[id];
         cell.strength = self.next_strength | (1u64 << 63);
-        cell.source = boxed;
+        cell.source = Box::new(value);
         cell.derived = None;
         Ok(())
     }
@@ -2945,7 +2925,7 @@ mod tests {
     #[test]
     fn from_fn_2_conforms_values_through_sheet_using_both_dynamic_arguments() {
         let mut sheet = Sheet::new();
-        let a = sheet.add_cell(50_i32);
+        let a = sheet.add_cell(500_i32);
         let lo = sheet.add_cell(0_i32);
         let hi = sheet.add_cell(100_i32);
         sheet
@@ -2956,12 +2936,11 @@ mod tests {
                 }),
             )
             .unwrap();
-        // Attach-time value (50) already conforms.
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 50);
-        // A later write is conformed against both dynamic argument cells.
-        sheet.write(a, 500_i32).unwrap();
+        sheet.propagate().unwrap();
         assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+
         sheet.write(a, -10_i32).unwrap();
+        sheet.propagate().unwrap();
         assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
     }
 
@@ -2980,60 +2959,6 @@ mod tests {
     }
 
     #[test]
-    fn write_returns_type_mismatch_when_the_filters_function_returns_the_wrong_type() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        // Conforms correctly for the attach-time value (5), so `add_filter` succeeds,
-        // but returns a `f64` for any other input, tripping `write`'s defensive check.
-        let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |value, _args| {
-            let v = *value.downcast_ref::<i32>().unwrap();
-            if v == 5 {
-                Ok(Box::new(v) as Box<dyn Any>)
-            } else {
-                Ok(Box::new(1.5_f64) as Box<dyn Any>)
-            }
-        });
-        sheet.add_filter(a, filter).unwrap();
-        let result = sheet.write(a, 99_i32);
-        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
-        // Rejected write: cell fully untouched.
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
-    }
-
-    #[test]
-    fn write_conforms_a_value_through_the_cells_filter() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        sheet
-            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
-            .unwrap();
-        sheet.write(a, 500_i32).unwrap();
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
-    }
-
-    #[test]
-    fn write_rejects_a_value_the_filter_cannot_conform() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        sheet
-            .add_filter(
-                a,
-                Filter::from_fn_0(|x: &i32| {
-                    if *x > 100 {
-                        Err(anyhow::anyhow!("value exceeds maximum"))
-                    } else {
-                        Ok(*x)
-                    }
-                }),
-            )
-            .unwrap();
-        let result = sheet.write(a, 500_i32);
-        assert!(matches!(result, Err(Error::MethodFailed(_))));
-        // Rejected write: cell fully untouched.
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
-    }
-
-    #[test]
     fn write_without_a_filter_behaves_exactly_as_before() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -3042,18 +2967,17 @@ mod tests {
     }
 
     #[test]
-    fn write_through_a_filter_still_bumps_strength() {
+    fn write_leaves_the_raw_value_in_source_until_propagate_conforms_it() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
         sheet
             .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
-        sheet.write(b, 1_i32).unwrap();
         sheet.write(a, 500_i32).unwrap();
-        // `a` was written after `b`, so its strength must be higher even though its
-        // stored value was conformed away from what was passed in.
-        assert!(sheet.cells[a].strength > sheet.cells[b].strength);
+        // write() no longer runs the filter: the raw value stands until propagate().
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 500);
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
     }
 
     #[test]

@@ -93,13 +93,15 @@
 //!     .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
 //!     .unwrap();
 //!
-//! // An out-of-range external write is silently conformed...
+//! // write() leaves the raw value in source; it is conformed by propagate()...
 //! sheet.write(a, 500_i32).unwrap();
+//! assert_eq!(*sheet.read::<i32>(a).unwrap(), 500);
+//!
+//! sheet.propagate().unwrap();
 //! assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
 //!
-//! // ...but a derived value that would fail the same filter is only diagnosed, never
-//! // corrected: `b` doubles `a`'s already-conformed value, exceeding the filter's range.
-//! sheet.propagate().unwrap();
+//! // A derived value that would fail the same filter is only diagnosed, never
+//! // corrected: `b` doubles `a`'s now-conformed value, still exceeding the filter's range.
 //! assert_eq!(*sheet.read::<i32>(b).unwrap(), 200);
 //! assert!(sheet.filter_violated_cells().any(|id| id == b));
 //! ```
