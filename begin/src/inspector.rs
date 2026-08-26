@@ -124,7 +124,14 @@ fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) 
 /// requirements at all, per its own documented contract — so `output_valid`/
 /// `output_violation_cells` would otherwise go stale after such a write).
 ///
-/// - Complexity: O(number of conditionals + number of output requirements in the sheet).
+/// This also holds for a cell referenced as another cell's filter argument
+/// ([`adam_rs::Sheet::filter_dependents`]): a source-cell filter reclamp is folded into
+/// the planner's own dependency graph (see the adam-rs planner) and is only revalidated
+/// by a full `Sheet::propagate()`'s own diagnostic phase, not by
+/// `propagate_without_replan`.
+///
+/// - Complexity: O(number of conditionals + number of output requirements + number of
+///   filter dependents of `id`).
 fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
     let is_match_cell = sheet.conditionals().any(|cid| {
         sheet
@@ -140,7 +147,8 @@ fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
             })
         })
     });
-    is_match_cell || feeds_requirement
+    let feeds_a_filter = !sheet.filter_dependents(id).is_empty();
+    is_match_cell || feeds_requirement || feeds_a_filter
 }
 
 /// Returns the toggled value ("true"/"false") for a bool cell currently displaying `current`.
@@ -756,6 +764,23 @@ mod tests {
 
         assert!(cell_needs_full_propagate(&sheet, a));
         assert!(cell_needs_full_propagate(&sheet, b));
+    }
+
+    #[test]
+    fn cell_needs_full_propagate_true_for_a_cell_referenced_as_a_filter_argument() {
+        use adam_rs::Filter;
+
+        let mut sheet = Sheet::new();
+        let bound = sheet.add_cell(10_i32);
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
+            )
+            .unwrap();
+
+        assert!(cell_needs_full_propagate(&sheet, bound));
     }
 
     #[test]
