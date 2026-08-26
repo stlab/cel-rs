@@ -52,8 +52,11 @@ use release::ReleaseFailure;
 pub(crate) enum PlanStep {
     /// Execute method `usize` of relationship `RelationshipId`.
     Method(RelationshipId, usize),
-    /// Reapply this cell's filter against its current value and its filter arguments'
-    /// current values, in place — the source-cell analogue of a method execution.
+    /// Reapply this cell's filter against its own current `source` value and its
+    /// filter arguments' current effective values, writing the result into `derived`
+    /// — the source-cell analogue of a self-referencing method execution, never
+    /// mutating `source` itself. See
+    /// `docs/superpowers/specs/2026-08-26-adam-rs-filter-shadow-state-design.md` §2.3.
     FilterReclamp(CellId),
 }
 
