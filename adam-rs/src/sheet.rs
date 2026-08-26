@@ -1300,8 +1300,9 @@ impl Sheet {
 
         // Phase 6b: evaluate every filter against a value derived by a method this
         // round — a non-gating diagnostic. A filter is never re-checked against a
-        // value that came from a plain external write: `write`/`add_filter` already
-        // conformed it, and nothing here ever mutates a cell.
+        // value that came from a plain external write: that case is handled earlier
+        // in this same `propagate()` call, by execute_plan's `PlanStep::FilterReclamp`
+        // step — nothing here ever mutates a cell.
         let mut derived_this_round: HashSet<CellId> = HashSet::new();
         for step in &plan.execution_order {
             if let PlanStep::Method(rel_id, method_idx) = step

@@ -1,9 +1,10 @@
 //! Input filters: idempotent, per-cell domain constraints.
 //!
-//! A [`Filter`] conforms or rejects a value written externally to its cell (see
-//! [`crate::sheet::Sheet::write`]), and is re-evaluated as a non-gating diagnostic
-//! against a value a relationship's method derives for that cell (see
-//! [`crate::sheet::Sheet::propagate`]). See [`crate::sheet::Sheet::add_filter`].
+//! A [`Filter`] conforms or rejects a value written externally to its cell, applied
+//! live by [`crate::sheet::Sheet::propagate`] against a source cell's own current
+//! value (see [`crate::sheet::Sheet::add_filter`]), and is separately re-evaluated as
+//! a non-gating diagnostic against a value a relationship's method derives for that
+//! cell (also in [`crate::sheet::Sheet::propagate`]).
 
 use std::any::{Any, TypeId};
 

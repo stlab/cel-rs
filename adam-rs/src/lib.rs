@@ -73,9 +73,11 @@
 //!
 //! # Filters
 //!
-//! A filter conforms or rejects a value written externally to its cell. It's also
-//! re-checked, as a non-gating diagnostic only, against a value a relationship's
-//! method derives for that cell — a derived value is never corrected, only flagged.
+//! A filter conforms or rejects a value written externally to its cell — applied
+//! live by `propagate()` against the cell's own current value, not synchronously by
+//! `write()`. It's also re-checked, as a non-gating diagnostic only, against a value
+//! a relationship's method derives for that cell — a derived value is never
+//! corrected, only flagged.
 //!
 //! ```rust
 //! use adam_rs::{Filter, Method, Sheet};
