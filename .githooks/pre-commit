@@ -1,4 +1,10 @@
 #!/bin/sh
+branch=$(git rev-parse --abbrev-ref HEAD)
+if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
+    echo "Refusing to commit directly to '$branch'. Create or switch to a feature branch/worktree first."
+    exit 1
+fi
+
 if ! cargo fmt --all --check; then
     echo "Formatting check failed. Run 'cargo fmt --all' and re-stage the changes."
     exit 1
