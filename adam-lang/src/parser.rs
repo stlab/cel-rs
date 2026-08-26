@@ -1562,6 +1562,7 @@ mod tests {
             .unwrap();
         let (cell_id, _) = parsed.cell_names["a"];
         parsed.sheet.write(cell_id, 500i32).unwrap();
+        parsed.sheet.propagate().unwrap();
         assert_eq!(*parsed.sheet.read::<i32>(cell_id).unwrap(), 100);
     }
 
@@ -1580,10 +1581,12 @@ mod tests {
         let (hi_id, _) = parsed.cell_names["hi"];
 
         parsed.sheet.write(a_id, 500i32).unwrap();
+        parsed.sheet.propagate().unwrap();
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 100);
 
         parsed.sheet.write(hi_id, 10i32).unwrap();
         parsed.sheet.write(a_id, 500i32).unwrap();
+        parsed.sheet.propagate().unwrap();
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 10);
     }
 
@@ -1597,6 +1600,7 @@ mod tests {
             .unwrap();
         let (a_id, _) = parsed.cell_names["a"];
         parsed.sheet.write(a_id, 27i32).unwrap();
+        parsed.sheet.propagate().unwrap();
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 20);
     }
 
@@ -1633,6 +1637,7 @@ mod tests {
             Some(adam_rs::FilterKind::Range { .. })
         ));
         parsed.sheet.write(a_id, 500i32).unwrap();
+        parsed.sheet.propagate().unwrap();
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 100);
     }
 
@@ -1657,6 +1662,7 @@ mod tests {
         parsed.sheet.write(hi_id, 10i32).unwrap();
         assert_eq!(parsed.sheet.filter_range::<i32>(a_id), Some((0, 10)));
         parsed.sheet.write(a_id, 500i32).unwrap();
+        parsed.sheet.propagate().unwrap();
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 10);
     }
 
@@ -1668,6 +1674,7 @@ mod tests {
             .unwrap();
         let (a_id, _) = parsed.cell_names["a"];
         parsed.sheet.write(a_id, 500.0f64).unwrap();
+        parsed.sheet.propagate().unwrap();
         assert_eq!(*parsed.sheet.read::<f64>(a_id).unwrap(), 100.0);
     }
 
@@ -1764,11 +1771,13 @@ mod tests {
         let (max_id, _) = parsed.cell_names["max"];
 
         parsed.sheet.write(a_id, 500i32).unwrap();
+        parsed.sheet.propagate().unwrap();
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 100);
 
         parsed.sheet.write(max_id, 10i32).unwrap();
         parsed.sheet.propagate().unwrap();
         parsed.sheet.write(a_id, 500i32).unwrap();
+        parsed.sheet.propagate().unwrap();
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 10);
     }
 

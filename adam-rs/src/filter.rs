@@ -1,9 +1,10 @@
 //! Input filters: idempotent, per-cell domain constraints.
 //!
-//! A [`Filter`] conforms or rejects a value written externally to its cell (see
-//! [`crate::sheet::Sheet::write`]), and is re-evaluated as a non-gating diagnostic
-//! against a value a relationship's method derives for that cell (see
-//! [`crate::sheet::Sheet::propagate`]). See [`crate::sheet::Sheet::add_filter`].
+//! A [`Filter`] conforms or rejects a value written externally to its cell, applied
+//! live by [`crate::sheet::Sheet::propagate`] against a source cell's own current
+//! value (see [`crate::sheet::Sheet::add_filter`]), and is separately re-evaluated as
+//! a non-gating diagnostic against a value a relationship's method derives for that
+//! cell (also in [`crate::sheet::Sheet::propagate`]).
 
 use std::any::{Any, TypeId};
 
@@ -198,12 +199,18 @@ impl Filter {
 /// See [`crate::sheet::Sheet::filter_violation`].
 #[derive(Debug)]
 pub enum FilterViolation {
-    /// The filter succeeded but its output differs from the cell's current value.
+    /// The filter succeeded but its output differs from the cell's current value. Only
+    /// ever recorded for a *derived* cell (`Sheet::propagate`'s post-execution
+    /// diagnostic phase) — a filtered source cell's filter output is unconditionally
+    /// authoritative once computed (see `PlanStep::FilterReclamp`), so this variant
+    /// never applies there.
     NotConformed,
     /// The filter's function itself returned an error, or returned a value of a
     /// different type than the cell — both treated as an equally soft diagnostic (see
     /// the design spec §4 for why a filter's own `Err` is not a propagation-aborting
-    /// failure the way a `Requirement`'s is).
+    /// failure the way a `Requirement`'s is). Can occur on either side: a derived
+    /// cell's read-only diagnostic check, or a source cell's live reclamp, in which
+    /// case the cell's stored value is left unchanged.
     Failed(anyhow::Error),
 }
 

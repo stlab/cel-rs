@@ -5,11 +5,11 @@ sheet inequality {
     cell c = 100 filter 0..=max_v;
 
     relationship {
-        a := min(a, b);
-        b := max(a, b);
+        a := min(a, min(max_v, b));
+        b := max(a, min(max_v, b));
     }
     relationship {
-        b := min(b, c);
-        c := max(b, c);
+        b := min(b, min(max_v, c));
+        c := max(b, min(max_v, c));
     }
 }
