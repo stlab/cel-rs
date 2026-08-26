@@ -544,8 +544,9 @@ impl Sheet {
     /// - `Error::InvalidId` — `cell`, or one of `filter`'s argument cells, is not a
     ///   live cell in this sheet.
     /// - `Error::TerminalCell` — `cell` already belongs to an existing output.
-    /// - `Error::InvalidFilter` — `cell` already has a filter, or `filter`'s own value
-    ///   type does not match `cell`'s registered type.
+    /// - `Error::InvalidFilter` — `cell` already has a filter, `filter`'s own value
+    ///   type does not match `cell`'s registered type, or `filter`'s argument list
+    ///   names `cell` itself.
     /// - `Error::TypeMismatch` — an argument cell's registered type does not match the
     ///   type `filter` declared for it, or (defensively) `filter`'s function returned
     ///   a value of a different type than `cell`'s registered type.
@@ -561,6 +562,9 @@ impl Sheet {
             return Err(Error::InvalidFilter);
         }
         if filter.0.value_type != cell_type {
+            return Err(Error::InvalidFilter);
+        }
+        if filter.0.args.contains(&cell) {
             return Err(Error::InvalidFilter);
         }
         for (&arg_id, &declared) in filter.0.args.iter().zip(filter.0.arg_types.iter()) {
@@ -2881,6 +2885,17 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
         let result = sheet.add_filter(a, Filter::from_fn_0(|x: &f64| Ok(*x)));
+        assert!(matches!(result, Err(Error::InvalidFilter)));
+    }
+
+    #[test]
+    fn add_filter_returns_invalid_filter_when_args_name_the_filtered_cell_itself() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let result = sheet.add_filter(
+            a,
+            Filter::from_fn_1(a, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
+        );
         assert!(matches!(result, Err(Error::InvalidFilter)));
     }
 

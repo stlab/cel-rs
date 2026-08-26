@@ -62,9 +62,10 @@ pub enum Error {
     /// had a relationship or conditional referencing it before becoming an output.
     TerminalCell,
 
-    /// An `add_filter` call is structurally invalid: the cell already has a filter, or
-    /// the filter's own value type does not match the cell's registered type. (An
-    /// unknown cell, a terminal cell, or an argument-cell type mismatch use the shared
+    /// An `add_filter` call is structurally invalid: the cell already has a filter, the
+    /// filter's own value type does not match the cell's registered type, or the
+    /// filter's own argument list names `cell` itself. (An unknown cell, a terminal
+    /// cell, or an argument-cell type mismatch use the shared
     /// `InvalidId`/`TerminalCell`/`TypeMismatch` variants instead, matching
     /// `add_relationship`/`add_conditional`'s existing convention.)
     InvalidFilter,
