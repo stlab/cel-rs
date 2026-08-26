@@ -198,12 +198,18 @@ impl Filter {
 /// See [`crate::sheet::Sheet::filter_violation`].
 #[derive(Debug)]
 pub enum FilterViolation {
-    /// The filter succeeded but its output differs from the cell's current value.
+    /// The filter succeeded but its output differs from the cell's current value. Only
+    /// ever recorded for a *derived* cell (`Sheet::propagate`'s post-execution
+    /// diagnostic phase) — a filtered source cell's filter output is unconditionally
+    /// authoritative once computed (see `PlanStep::FilterReclamp`), so this variant
+    /// never applies there.
     NotConformed,
     /// The filter's function itself returned an error, or returned a value of a
     /// different type than the cell — both treated as an equally soft diagnostic (see
     /// the design spec §4 for why a filter's own `Err` is not a propagation-aborting
-    /// failure the way a `Requirement`'s is).
+    /// failure the way a `Requirement`'s is). Can occur on either side: a derived
+    /// cell's read-only diagnostic check, or a source cell's live reclamp, in which
+    /// case the cell's stored value is left unchanged.
     Failed(anyhow::Error),
 }
 

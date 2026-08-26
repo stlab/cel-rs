@@ -1396,13 +1396,17 @@ impl Sheet {
 
     /// Executes `execution_order` without invoking the planner.
     ///
-    /// A `PlanStep::FilterReclamp(id)` step re-evaluates `id`'s filter against its own
-    /// current effective value and its filter arguments' current effective values, and
-    /// updates `id`'s `source` in place if the result differs. A `PlanStep::Method`
-    /// step's outputs follow the existing shadow/non-shadow rule, unchanged. A reclamp
-    /// whose filter returns `Err`, or a value of the wrong type, is pushed into
-    /// `filter_violations` instead of aborting; the cell's stored value is left
-    /// untouched in that case.
+    /// A `PlanStep::FilterReclamp(id)` step re-evaluates `id`'s filter against `id`'s own
+    /// current `source` value (never a possibly-shadowed `derived` — the same
+    /// self-referencing-input rule a `PlanStep::Method` step's self-referencing inputs
+    /// follow) and its filter arguments' current effective values, writing the result
+    /// into `id`'s `derived` unconditionally — `source` is never touched by this step,
+    /// exactly as it's never touched by any other self-referencing method's output. A
+    /// `PlanStep::Method` step's outputs follow the existing shadow/non-shadow rule,
+    /// unchanged. A reclamp whose filter returns `Err`, or a value of the wrong type, is
+    /// pushed into `filter_violations` instead of aborting; the cell's stored value is
+    /// left untouched in that case (its `derived` stays unset, so `read()` falls back to
+    /// `source`).
     ///
     /// # Errors
     ///
@@ -1479,46 +1483,46 @@ impl Sheet {
                     }
                 }
                 PlanStep::FilterReclamp(id) => {
-                    let outcome = {
-                        let filter = self.cells[id]
-                            .filter
-                            .as_ref()
-                            .expect("plan() only emits FilterReclamp for a filtered cell");
-                        let args: Vec<&dyn Any> = filter
-                            .args
-                            .iter()
-                            .map(|&a| self.cells[a].effective())
-                            .collect();
-                        let current = self.cells[id].effective();
-                        match (filter.function)(current, &args) {
-                            Ok(v) => {
-                                let cell_type = self.cells[id].type_id;
-                                if v.as_ref().type_id() != cell_type {
-                                    Err(FilterViolation::Failed(anyhow::anyhow!(
+                    let filter = self.cells[id]
+                        .filter
+                        .as_ref()
+                        .expect("plan() only emits FilterReclamp for a filtered cell");
+                    let args: Vec<&dyn Any> = filter
+                        .args
+                        .iter()
+                        .map(|&a| self.cells[a].effective())
+                        .collect();
+                    // Self-referencing input: always `source`, never a possibly-shadowed
+                    // `derived` — same rule as any other self-referencing method (see
+                    // the `PlanStep::Method` arm above, and the 2026-08-02 shadow-state
+                    // design). This is what keeps `source` provably untouched by the
+                    // filter across any number of rounds.
+                    let current = self.cells[id].source.as_ref();
+                    match (filter.function)(current, &args) {
+                        Ok(v) => {
+                            let cell_type = self.cells[id].type_id;
+                            if v.as_ref().type_id() != cell_type {
+                                filter_violations.push((
+                                    id,
+                                    FilterViolation::Failed(anyhow::anyhow!(
                                         "filter returned a value of a different type than \
                                          the cell"
-                                    )))
-                                } else if !(self.cells[id].eq_fn)(v.as_ref(), current) {
-                                    Ok(Some(v))
-                                } else {
-                                    Ok(None)
+                                    )),
+                                ));
+                            } else {
+                                // Unconditional write, no equality check — matches every
+                                // other shadowed output's "no equality check" convention
+                                // (2026-08-02 design). The filter's Ok output is
+                                // authoritative the same way any method's output is.
+                                let cell = &mut self.cells[id];
+                                cell.derived = Some(v);
+                                if !cell.changed {
+                                    cell.changed = true;
+                                    self.changed_cells.push(id);
                                 }
                             }
-                            Err(e) => Err(FilterViolation::Failed(e)),
                         }
-                    };
-                    match outcome {
-                        Ok(Some(v)) => {
-                            let cell = &mut self.cells[id];
-                            cell.source = v;
-                            cell.derived = None;
-                            if !cell.changed {
-                                cell.changed = true;
-                                self.changed_cells.push(id);
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(violation) => filter_violations.push((id, violation)),
+                        Err(e) => filter_violations.push((id, FilterViolation::Failed(e))),
                     }
                 }
             }
@@ -3215,6 +3219,66 @@ mod tests {
         // a, not the stale 50.
         assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
         assert_eq!(*sheet.read::<i32>(b).unwrap(), 5);
+    }
+
+    #[test]
+    fn filtered_source_cell_springs_back_to_its_original_value_when_a_bound_loosens() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(50_i32);
+        let bound = sheet.add_cell(100_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
+            )
+            .unwrap();
+
+        sheet.write(bound, 10_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+
+        sheet.write(bound, 100_i32).unwrap();
+        sheet.propagate().unwrap();
+        // a's original 50 must survive in `source` across the whole round-trip: it
+        // springs back once the bound loosens again, rather than staying stuck at the
+        // intermediate clamp.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 50);
+    }
+
+    #[test]
+    fn filter_reclamp_records_failed_violation_when_the_filters_function_returns_the_wrong_type() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let trigger = sheet.add_cell(0_i32);
+        // Conforms correctly for the attach-time values (a's initial 5 and trigger's 0), so
+        // `add_filter` succeeds, but returns an f64 when trigger becomes non-zero —
+        // tripping FilterReclamp's check once `trigger` is updated.
+        let filter = Filter::new(
+            TypeId::of::<i32>(),
+            vec![trigger],
+            vec![TypeId::of::<i32>()],
+            |value, args| {
+                let v = *value.downcast_ref::<i32>().unwrap();
+                let t = *args[0].downcast_ref::<i32>().unwrap();
+                if t == 0 {
+                    Ok(Box::new(v) as Box<dyn Any>)
+                } else {
+                    Ok(Box::new(1.5_f64) as Box<dyn Any>)
+                }
+            },
+        );
+        sheet.add_filter(a, filter).unwrap();
+
+        // trigger changes, causing reclamp where the filter returns wrong type
+        sheet.write(trigger, 1_i32).unwrap();
+        sheet.propagate().unwrap();
+
+        assert!(matches!(
+            sheet.filter_violation(a),
+            Some(FilterViolation::Failed(_))
+        ));
+        // The wrong-type result is discarded: the cell's stored value is unchanged.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
     }
 
     #[test]
