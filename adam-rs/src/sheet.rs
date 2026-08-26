@@ -535,9 +535,11 @@ impl Sheet {
 
     /// Attaches `filter` to `cell`.
     ///
-    /// Immediately applies `filter` to `cell`'s current `source` value, exactly as
-    /// [`Sheet::write`] would, so a filtered cell's value is guaranteed to conform from
-    /// this call onward — not just from the next external write.
+    /// Never evaluates `filter`'s function — attaching a filter is not a fresh
+    /// external input, so it never changes `cell`'s current effective value. The next
+    /// full [`Sheet::propagate`] call conforms `cell` via the planner's
+    /// `PlanStep::FilterReclamp` step; until then, `read()` reflects whatever `cell`
+    /// held before this call.
     ///
     /// # Errors
     ///
@@ -548,9 +550,7 @@ impl Sheet {
     ///   type does not match `cell`'s registered type, or `filter`'s argument list
     ///   names `cell` itself.
     /// - `Error::TypeMismatch` — an argument cell's registered type does not match the
-    ///   type `filter` declared for it, or (defensively) `filter`'s function returned
-    ///   a value of a different type than `cell`'s registered type.
-    /// - `Error::MethodFailed` — `filter` rejected `cell`'s current value.
+    ///   type `filter` declared for it.
     ///
     /// - Complexity: O(a) where a is the number of `filter`'s argument cells.
     pub fn add_filter(&mut self, cell: CellId, filter: Filter) -> Result<(), Error> {
@@ -577,29 +577,10 @@ impl Sheet {
             }
         }
 
-        let args: Vec<&dyn Any> = filter
-            .0
-            .args
-            .iter()
-            .map(|&a| self.cells[a].effective())
-            .collect();
-        let conformed = (filter.0.function)(self.cells[cell].source.as_ref(), &args)
-            .map_err(Error::MethodFailed)?;
-        if conformed.as_ref().type_id() != cell_type {
-            return Err(Error::TypeMismatch {
-                expected: cell_type,
-                found: conformed.as_ref().type_id(),
-            });
-        }
-
         for &arg in &filter.0.args {
             self.filter_dependents.entry(arg).or_default().push(cell);
         }
-
-        let cell_data = &mut self.cells[cell];
-        cell_data.source = conformed;
-        cell_data.derived = None;
-        cell_data.filter = Some(filter.0);
+        self.cells[cell].filter = Some(filter.0);
         Ok(())
     }
 
@@ -2798,43 +2779,36 @@ mod tests {
     }
 
     #[test]
-    fn add_filter_conforms_the_cells_current_value_immediately() {
+    fn add_filter_returns_invalid_id_for_missing_cell() {
+        let mut sheet = Sheet::new();
+        let result = sheet.add_filter(CellId::default(), Filter::from_fn_0(|x: &i32| Ok(*x)));
+        assert!(matches!(result, Err(Error::InvalidId)));
+    }
+
+    #[test]
+    fn add_filter_does_not_change_the_cells_current_value() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
         sheet
             .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+        // add_filter never evaluates the function against the current value: the raw
+        // out-of-range value survives until the next propagate().
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 500);
     }
 
     #[test]
-    fn add_filter_leaves_a_conforming_value_unchanged() {
+    fn propagate_after_add_filter_conforms_the_initial_value() {
         let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
+        let a = sheet.add_cell(500_i32);
         sheet
             .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
-    }
-
-    #[test]
-    fn add_filter_returns_method_failed_when_current_value_cannot_conform() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        let result = sheet.add_filter(
-            a,
-            Filter::from_fn_0(|_x: &i32| Err(anyhow::anyhow!("cannot conform"))),
-        );
-        assert!(matches!(result, Err(Error::MethodFailed(_))));
-        // Rejected: the cell's original value must survive untouched.
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
-    }
-
-    #[test]
-    fn add_filter_returns_invalid_id_for_missing_cell() {
-        let mut sheet = Sheet::new();
-        let result = sheet.add_filter(CellId::default(), Filter::from_fn_0(|x: &i32| Ok(*x)));
-        assert!(matches!(result, Err(Error::InvalidId)));
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 500);
+        sheet.propagate().unwrap();
+        // `a` has no filter args and belongs to no relationship — this is the ordinary
+        // first-round case of Task 1's fix, not a special "cold start" path.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
     }
 
     #[test]
@@ -2909,20 +2883,6 @@ mod tests {
     }
 
     #[test]
-    fn add_filter_resolves_a_dynamic_argument_cells_current_value() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(500_i32);
-        let bound = sheet.add_cell(10_i32);
-        sheet
-            .add_filter(
-                a,
-                Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
-            )
-            .unwrap();
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
-    }
-
-    #[test]
     fn from_fn_2_conforms_values_through_sheet_using_both_dynamic_arguments() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
@@ -2942,20 +2902,6 @@ mod tests {
         sheet.write(a, -10_i32).unwrap();
         sheet.propagate().unwrap();
         assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
-    }
-
-    #[test]
-    fn add_filter_returns_type_mismatch_when_the_filters_function_returns_the_wrong_type() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        // `value_type` matches `a`'s registered type (so add_filter's own value-type
-        // check passes), but the function itself always returns a `f64`, tripping
-        // add_filter's defensive check on the conformed result.
-        let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |_value, _args| {
-            Ok(Box::new(1.5_f64) as Box<dyn Any>)
-        });
-        let result = sheet.add_filter(a, filter);
-        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
     }
 
     #[test]
@@ -3021,11 +2967,10 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(1_i32);
         let b = sheet.add_cell(0_i32);
-        // `add_filter` re-checks the cell's *current* value immediately (see §3.2 of
-        // the design), so a filter that unconditionally errors would reject at
-        // attach time (b's initial value is 0) before propagate() ever runs. Accept
-        // exactly 0 so attach succeeds, and let the relationship's derived value (1,
-        // copied from `a`) be the one that trips the filter.
+        // Accept exactly 0 (b's initial value) so this filter's shape is exercised
+        // only by the relationship's derived value (1, copied from `a`), not by
+        // anything add_filter itself does — add_filter no longer evaluates a filter's
+        // function at all.
         sheet
             .add_filter(
                 b,
@@ -3210,9 +3155,8 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
         let bound = sheet.add_cell(100_i32);
-        // Accept anything up to `bound` so add_filter's own immediate re-check (against
-        // a's current value, 5, and bound's current value, 100) succeeds; the write to
-        // `bound` below is what trips the filter.
+        // Accept anything up to `bound` (a's initial 5 is within bound's initial 100);
+        // the write to `bound` below is what trips the filter's next live reclamp.
         sheet
             .add_filter(
                 a,
