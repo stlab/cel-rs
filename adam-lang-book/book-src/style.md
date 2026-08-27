@@ -35,7 +35,7 @@ before a declaration's closing `;`. Given input that doesn't already follow this
 formatting normalizes it:
 
 ```rust
-{{#include ../tests/style.rs:canonical_formatting}}
+{{#include examples/style/canonical_formatting.adm2}}
 ```
 
 A formatter run is expected to be **idempotent** (formatting already-canonical source

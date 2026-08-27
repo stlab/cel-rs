@@ -3,10 +3,11 @@
 
 #[test]
 fn canonical_formatting() {
-    // ANCHOR: canonical_formatting
     let mut ast_parser = adam_lang::AdamAstParser::new();
     let sheet = ast_parser
-        .parse_str("sheet s{cell x:i32=1;cell y:i32=2;}")
+        .parse_str(include_str!(
+            "../book-src/examples/style/canonical_formatting.adm2"
+        ))
         .unwrap();
     assert!(sheet.errors.is_empty());
 
@@ -15,5 +16,4 @@ fn canonical_formatting() {
         formatted,
         "sheet s {\n    cell x: i32 = 1;\n    cell y: i32 = 2;\n}\n"
     );
-    // ANCHOR_END: canonical_formatting
 }
