@@ -22,7 +22,7 @@ already-declared cells, [deduced](expressions.md#34-deduced-dependencies) exactl
 relationship binding's body:
 
 ```rust
-{{#include ../tests/conditionals.rs:multi_cell_match_subject}}
+{{#include examples/conditionals/multi_cell_match_subject.adm2}}
 ```
 
 Every branch literal's type must match the match subject's own inferred type exactly; a sheet
@@ -43,7 +43,7 @@ relationship's method only ever writes a cell's *derived* shadow, never its *sou
 that stops being claimed springs back to `source` exactly as a deactivated filter's cell would.
 
 ```rust
-{{#include ../tests/conditionals.rs:default_branch_and_spring_back}}
+{{#include examples/conditionals/default_branch_and_spring_back.adm2}}
 ```
 
 ## 5.4 Nested and chained conditionals
