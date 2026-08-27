@@ -34,6 +34,20 @@ jobs:
     - name: Redirect docs root to the cel-rs facade crate
       run: echo '<meta http-equiv="refresh" content="0; url=cel_rs/index.html">' > target/doc/index.html
 
+    - name: Install mdBook
+      uses: peaceiris/actions-mdbook@v2
+      with:
+        mdbook-version: 'latest'
+
+    # The adam-lang tutorial/reference book links into this same rustdoc output (e.g.
+    # `../adam_rs/sheet/struct.Sheet.html`), so it's built and published from target/doc
+    # alongside it, not as a separate site.
+    - name: Build the adam-lang book
+      run: mdbook build adam-lang-book
+
+    - name: Copy the adam-lang book into the docs site
+      run: cp -r adam-lang-book/book-dist target/doc/book
+
     - uses: actions/upload-pages-artifact@v3
       with:
         path: target/doc

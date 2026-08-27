@@ -2,7 +2,7 @@
 name = "adam-lang-book"
 version = "0.1.0"
 edition = "2024"
-description = "A tutorial and reference manual for the adam-lang language"
+description = "Tutorial and reference manual for adam-lang (mdBook source in book-src/, its verified examples in tests/)"
 publish = false
 
 [dependencies]

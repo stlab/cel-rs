@@ -1,0 +1,19 @@
+//! Examples backing `book-src/style.md` (Chapter 8). See `tests/tutorial.rs` for how these are
+//! wired into the book.
+
+#[test]
+fn canonical_formatting() {
+    // ANCHOR: canonical_formatting
+    let mut ast_parser = adam_lang::AdamAstParser::new();
+    let sheet = ast_parser
+        .parse_str("sheet s{cell x:i32=1;cell y:i32=2;}")
+        .unwrap();
+    assert!(sheet.errors.is_empty());
+
+    let formatted = adam_lang::format_sheet(&sheet);
+    assert_eq!(
+        formatted,
+        "sheet s {\n    cell x: i32 = 1;\n    cell y: i32 = 2;\n}\n"
+    );
+    // ANCHOR_END: canonical_formatting
+}

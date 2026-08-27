@@ -6,6 +6,10 @@
 //! - **cel-runtime**: The core stack-based runtime and CEL parser
 //! - **cel-rs-macros**: Procedural macros for CEL expressions
 //!
+//! For **adam-lang** — the property-model DSL built on top of this runtime (`adam-lang`,
+//! `adam-rs`) — see [*The adam-lang Programming Language*](../book/index.html), a tutorial and
+//! reference manual for that language specifically.
+//!
 //! # Examples
 //!
 //! ## Using the Runtime

@@ -40,6 +40,17 @@ jobs:
         RUSTDOCFLAGS: -D warnings
       run: cargo doc --workspace --no-deps --lib
 
+    - name: Install mdBook
+      uses: peaceiris/actions-mdbook@v2
+      with:
+        mdbook-version: 'latest'
+
+    # Catches a broken {{#include}} path/anchor in the adam-lang book (adam-lang-book/book-src)
+    # the moment a chapter or its backing tests/*.rs example drifts out of sync -- mdbook build
+    # fails outright on either, so no separate lint is needed.
+    - name: Build the adam-lang book
+      run: mdbook build adam-lang-book
+
     - name: Check begin app (renderer-agnostic)
       run: cargo check -p begin --no-default-features
 
