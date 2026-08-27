@@ -29,6 +29,7 @@ members = [
     "adam-lang",
     "adam-lang-book",
     "adam-lsp",
+    "adam-web-ui",
     "begin",
     "xtask",
 ]
