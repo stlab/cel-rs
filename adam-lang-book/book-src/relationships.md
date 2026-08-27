@@ -68,7 +68,7 @@ strongest first, to leave each cell a source:
   derived.
 
 ```rust
-{{#include ../tests/relationships.rs:shared_cell_example}}
+{{#include examples/relationships/shared_cell_example.adm2}}
 ```
 
 [`Sheet::is_source`](../adam_rs/sheet/struct.Sheet.html#method.is_source) answers "did the last
@@ -83,7 +83,7 @@ inconsistent. Two relationships that both, unconditionally, insist on writing th
 can never both be satisfied:
 
 ```rust
-{{#include ../tests/relationships.rs:conflict_error}}
+{{#include examples/relationships/conflict_error.adm2}}
 ```
 
 A subtler failure is a **cycle**: an assignment exists, but every valid choice of bindings
@@ -91,7 +91,7 @@ forms a closed loop with no cell left as a source anywhere in the loop; nothing 
 breaks the chain:
 
 ```rust
-{{#include ../tests/relationships.rs:cycle_error}}
+{{#include examples/relationships/cycle_error.adm2}}
 ```
 
 Each relationship above has only one binding, so the solver has no alternative to try: `x`,
@@ -105,7 +105,7 @@ A binding's left-hand side can name more than one output cell by parenthesizing 
 case the right-hand side must be a tuple expression of matching arity, split element-wise:
 
 ```rust
-{{#include ../tests/relationships.rs:destructuring_binding}}
+{{#include examples/relationships/destructuring_binding.adm2}}
 ```
 
 `(a, b) := ...` and the one-element `(a,) := ...` (trailing comma mandatory, matching Rust's
