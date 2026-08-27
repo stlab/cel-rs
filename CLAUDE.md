@@ -46,6 +46,10 @@ cargo clippy --fix --workspace --exclude begin --all-targets
 
 # Docs
 cargo doc --lib --no-deps --open --workspace
+
+# Docs, as CI checks them (rustdoc warnings -- broken/private intra-doc links, bare
+# URLs, etc. -- promoted to errors; plain `cargo doc` above exits 0 on these)
+RUSTDOCFLAGS="-D warnings" cargo doc --lib --no-deps --workspace
 ```
 
 Sanitizer runs require nightly and a target triple (e.g. `x86_64-apple-darwin` or `x86_64-unknown-linux-gnu`):

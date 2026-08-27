@@ -1,0 +1,13 @@
+[book]
+title = "The Adam Programming Language"
+description = "A tutorial and reference manual for the Adam language"
+authors = ["stlab"]
+language = "en"
+src = "book-src"
+
+[build]
+build-dir = "book-dist"
+
+[output.html]
+git-repository-url = "https://github.com/stlab/cel-rs"
+edit-url-template = "https://github.com/stlab/cel-rs/edit/main/adam-lang-book/{path}"
