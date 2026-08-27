@@ -22,7 +22,7 @@ a bare `OpLookup::new()` and no library installed can still parse
 and run every construct in this book except a function call:
 
 ```rust
-{{#include ../tests/expressions.rs:no_standard_library}}
+{{#include examples/expressions/no_standard_library.adm2}}
 ```
 
 ## 3.3 Cell initializers see no cells
@@ -33,7 +33,7 @@ operators, and library functions, but referencing *any* identifier that would ot
 cell is unresolved:
 
 ```rust
-{{#include ../tests/expressions.rs:initializer_sees_no_cells}}
+{{#include examples/expressions/initializer_sees_no_cells.adm2}}
 ```
 
 To compute one cell's value from another's, write a [`relationship`](relationships.md) or an
