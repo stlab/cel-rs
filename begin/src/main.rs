@@ -3,7 +3,6 @@ mod app;
 mod bridge;
 mod example_source;
 mod graph_view;
-mod inspector;
 mod open_file;
 
 use dioxus::prelude::*;

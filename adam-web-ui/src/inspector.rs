@@ -1,12 +1,12 @@
-//! [`Inspector`] — sidebar listing all cells with their current values and a write form.
+//! [`SheetInspector`] — a live, editable list of a sheet's cells with a write form.
 
 use adam_rs::{CellId, FilterViolation, Sheet};
 use dioxus::prelude::*;
 
-use adam_web_ui::spectrum::{
+use crate::labels::{Labels, format_adam_error, format_rounded};
+use crate::spectrum::{
     SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpNumberfield, SpSlider, SpTextfield,
 };
-use adam_web_ui::{Labels, format_adam_error, format_rounded};
 
 use std::collections::HashSet;
 
@@ -76,7 +76,7 @@ fn compute_output_status(sheet: &Sheet) -> OutputStatus {
 }
 
 /// Formats a diagnostic message for `label`'s filter `violation`, for
-/// `adam_web_ui::diagnostics::report_error`.
+/// `crate::diagnostics::report_error`.
 fn format_filter_violation(label: &str, violation: &FilterViolation) -> String {
     match violation {
         FilterViolation::NotConformed => {
@@ -205,7 +205,7 @@ fn clamped_away(typed: &str, actual: &str) -> bool {
 
 /// Parses `val` for `id` via its `Labels` metadata, writes it to `sheet`, and propagates the
 /// sheet's constraints, updating `has_error` and reporting any error — or, on success, any
-/// currently-violated filter — to `adam_web_ui::diagnostics`.
+/// currently-violated filter — to `crate::diagnostics`.
 ///
 /// - Postcondition: `has_error` is `true` on parse or propagation failure, or when a range
 ///   filter clamped `val` away from what was typed (see [`clamped_away`]); `false` otherwise.
@@ -215,7 +215,8 @@ fn write_and_propagate(
     id: CellId,
     val: &str,
     mut has_error: Signal<bool>,
-    active_source: Signal<crate::example_source::ActiveSource>,
+    source_text: Memo<String>,
+    source_name: Memo<String>,
 ) {
     let mut sheet_w = sheet.write();
     let labels_r = labels.read();
@@ -251,16 +252,15 @@ fn write_and_propagate(
                     .get(&violated_id)
                     .map(|m| m.label.as_str())
                     .unwrap_or("<unknown cell>");
-                adam_web_ui::diagnostics::report_error(&format_filter_violation(label, violation));
+                crate::diagnostics::report_error(&format_filter_violation(label, violation));
             }
         }
         Err(e) => {
             has_error.set(true);
-            let active = active_source.read();
-            adam_web_ui::diagnostics::report_error(&format_adam_error(
+            crate::diagnostics::report_error(&format_adam_error(
                 &e,
-                &active.text,
-                &active.file_name(),
+                &source_text.read(),
+                &source_name.read(),
             ));
         }
     }
@@ -276,10 +276,11 @@ fn write_and_propagate(
 /// diagnostic is printed to stderr. A field's input is not reset while it is focused; it
 /// syncs back to the computed value on blur, keeping non-edited cells up to date.
 #[component]
-pub fn Inspector(
+pub fn SheetInspector(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
-    active_source: Signal<crate::example_source::ActiveSource>,
+    source_text: Memo<String>,
+    source_name: Memo<String>,
 ) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
     let output_status = use_memo(move || compute_output_status(&sheet.read()));
@@ -290,7 +291,7 @@ pub fn Inspector(
             SpHeading { "Cells" }
             SpDivider {}
             for id in ids {
-                CellRow { key: "{id:?}", id, sheet, labels, active_source, output_status }
+                CellRow { key: "{id:?}", id, sheet, labels, source_text, source_name, output_status }
             }
         }
     }
@@ -301,7 +302,8 @@ fn CellRow(
     id: CellId,
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
-    active_source: Signal<crate::example_source::ActiveSource>,
+    source_text: Memo<String>,
+    source_name: Memo<String>,
     output_status: Memo<OutputStatus>,
 ) -> Element {
     let label = use_memo(move || {
@@ -382,7 +384,7 @@ fn CellRow(
                     disabled: flags.read().disabled,
                     onclick: move |_| {
                         let next = toggled_bool_value(&value.peek());
-                        write_and_propagate(sheet, labels, id, next, has_error, active_source);
+                        write_and_propagate(sheet, labels, id, next, has_error, source_text, source_name);
                         // `sp-checkbox` toggles its own shadow-DOM `checked` state
                         // natively in response to the click, before this handler runs
                         // and independent of the `checked` prop below. If the write above
@@ -427,7 +429,7 @@ fn CellRow(
                                         return;
                                     }
                                     input.set(val.clone());
-                                    write_and_propagate(sheet, labels, id, &val, has_error, active_source);
+                                    write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
                                 });
                             },
                             onfocus: move |_| is_focused.set(true),
@@ -452,7 +454,7 @@ fn CellRow(
                                 ));
                                 let Ok(val) = eval.recv::<String>().await else { return; };
                                 input.set(val.clone());
-                                write_and_propagate(sheet, labels, id, &val, has_error, active_source);
+                                write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
                             });
                         },
                     }
@@ -480,7 +482,7 @@ fn CellRow(
                                 return;
                             }
                             input.set(val.clone());
-                            write_and_propagate(sheet, labels, id, &val, has_error, active_source);
+                            write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
                         });
                     },
                     onfocus: move |_| is_focused.set(true),

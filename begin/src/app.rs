@@ -6,8 +6,8 @@ use dioxus::prelude::*;
 use crate::bridge::to_graph_data;
 use crate::example_source::{ActiveSource, SourceOrigin, available_examples, load_example_source};
 use crate::graph_view::GraphView;
-use crate::inspector::Inspector;
 use adam_web_ui::Labels;
+use adam_web_ui::SheetInspector;
 use adam_web_ui::build_sheet;
 use adam_web_ui::spectrum::{
     SpActionButton, SpActionGroup, SpDivider, SpHeading, SpIconZoomIn, SpIconZoomOut, SpSideNav,
@@ -189,6 +189,8 @@ pub fn App() -> Element {
     // carry over its stale layout position (and previously, its stale box
     // width — see the graph.js fix this follows).
     let source_id = use_memo(move || active_source.read().file_name());
+    let source_text = use_memo(move || active_source.read().text.clone());
+    let source_name = use_memo(move || active_source.read().file_name());
 
     // Drives graph.js's show/hide-inactive-branches mode via
     // `window.beginGraph.setShowInactive`; lives here (rather than in
@@ -293,7 +295,7 @@ pub fn App() -> Element {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
                     ExamplesPicker { sheet, labels, active_source, example_names, on_select: on_example_selected }
                     GraphView { data: graph_data, source_id }
-                    Inspector { sheet, labels, active_source }
+                    SheetInspector { sheet, labels, source_text, source_name }
                 }
             }
         }
