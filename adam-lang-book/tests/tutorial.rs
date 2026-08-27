@@ -1,5 +1,5 @@
-//! Examples backing `book-src/tutorial.md` (Chapter 1). Each function is pulled into the book
-//! verbatim via mdBook's `{{#include tests/tutorial.rs:name}}`; see `src/lib.rs`.
+//! Examples backing `book-src/tutorial.md` (Chapter 1). See `src/lib.rs` for how these `.adm2`
+//! files are wired into the book.
 
 #[test]
 fn first_sheet() {

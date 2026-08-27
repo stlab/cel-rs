@@ -1,5 +1,5 @@
-//! Examples backing `book-src/relationships.md` (Chapter 4). See `tests/tutorial.rs` for how
-//! these are wired into the book.
+//! Examples backing `book-src/relationships.md` (Chapter 4). See `src/lib.rs` for how these
+//! `.adm2` files are wired into the book.
 
 #[test]
 fn shared_cell_example() {

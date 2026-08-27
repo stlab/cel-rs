@@ -1,5 +1,5 @@
-//! Examples backing `book-src/conditionals.md` (Chapter 5). See `tests/tutorial.rs` for how
-//! these are wired into the book.
+//! Examples backing `book-src/conditionals.md` (Chapter 5). See `src/lib.rs` for how these
+//! `.adm2` files are wired into the book.
 
 #[test]
 fn multi_cell_match_subject() {

@@ -1,5 +1,5 @@
-//! Examples backing `book-src/cells.md` (Chapter 2). See `tests/tutorial.rs` for how these are
-//! wired into the book.
+//! Examples backing `book-src/cells.md` (Chapter 2). See `src/lib.rs` for how these `.adm2`
+//! files are wired into the book.
 
 #[test]
 fn type_mismatch_is_a_parse_error() {

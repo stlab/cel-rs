@@ -1,5 +1,5 @@
-//! Examples backing `book-src/filters.md` (Chapter 6). See `tests/tutorial.rs` for how these
-//! are wired into the book.
+//! Examples backing `book-src/filters.md` (Chapter 6). See `src/lib.rs` for how these `.adm2`
+//! files are wired into the book.
 
 #[test]
 fn write_never_filters() {
