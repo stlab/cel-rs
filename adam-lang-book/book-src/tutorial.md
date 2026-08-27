@@ -37,7 +37,7 @@ To do anything with a sheet, a host program parses it, then reads and writes cel
 exactly like driving `adam_rs::Sheet` directly:
 
 ```rust
-{{#include ../tests/tutorial.rs:first_sheet}}
+{{#include examples/tutorial/first_sheet.adm2}}
 ```
 
 `parser.parse_str` returns a [`ParsedSheet`](../adam_lang/struct.ParsedSheet.html), which derefs
@@ -78,7 +78,7 @@ are treated as "staler" than cells declared later. The solver prefers to leave t
 cells alone and derive the stalest one: here, `c`, declared first:
 
 ```rust
-{{#include ../tests/tutorial.rs:multiplication_triangle}}
+{{#include examples/tutorial/multiplication_triangle.adm2}}
 ```
 
 Nothing here names *which* cell is the "output"; that's the whole point. Whichever cell was
@@ -122,7 +122,7 @@ relationships are as if they weren't declared at all. The `_` branch, if present
 value none of the named branches list, and must be written last:
 
 ```rust
-{{#include ../tests/tutorial.rs:mode_demo}}
+{{#include examples/tutorial/mode_demo.adm2}}
 ```
 
 See [Chapter 5](conditionals.md) for branch types, tuple match subjects, and what happens when
@@ -142,7 +142,7 @@ Write an out-of-range value and the cell keeps it, raw, until the next `propagat
 `write()` never inspects a filter. `propagate()` is what conforms the value:
 
 ```rust
-{{#include ../tests/tutorial.rs:clamp_demo}}
+{{#include examples/tutorial/clamp_demo.adm2}}
 ```
 
 A filter's bounds don't have to be constants: `0..=max` references another cell, and the clamp
@@ -188,7 +188,7 @@ sheet area_demo {
 ```
 
 ```rust
-{{#include ../tests/tutorial.rs:area_with_requirement}}
+{{#include examples/tutorial/area_with_requirement.adm2}}
 ```
 
 See [Chapter 7](outputs.md) for the full rules: an output's cell is terminal (nothing may write
