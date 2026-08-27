@@ -76,7 +76,7 @@ fn compute_output_status(sheet: &Sheet) -> OutputStatus {
 }
 
 /// Formats a diagnostic message for `label`'s filter `violation`, for
-/// `crate::diagnostics::report_error`.
+/// `adam_web_ui::diagnostics::report_error`.
 fn format_filter_violation(label: &str, violation: &FilterViolation) -> String {
     match violation {
         FilterViolation::NotConformed => {
@@ -205,7 +205,7 @@ fn clamped_away(typed: &str, actual: &str) -> bool {
 
 /// Parses `val` for `id` via its `Labels` metadata, writes it to `sheet`, and propagates the
 /// sheet's constraints, updating `has_error` and reporting any error — or, on success, any
-/// currently-violated filter — to `crate::diagnostics`.
+/// currently-violated filter — to `adam_web_ui::diagnostics`.
 ///
 /// - Postcondition: `has_error` is `true` on parse or propagation failure, or when a range
 ///   filter clamped `val` away from what was typed (see [`clamped_away`]); `false` otherwise.
@@ -251,13 +251,13 @@ fn write_and_propagate(
                     .get(&violated_id)
                     .map(|m| m.label.as_str())
                     .unwrap_or("<unknown cell>");
-                crate::diagnostics::report_error(&format_filter_violation(label, violation));
+                adam_web_ui::diagnostics::report_error(&format_filter_violation(label, violation));
             }
         }
         Err(e) => {
             has_error.set(true);
             let active = active_source.read();
-            crate::diagnostics::report_error(&format_adam_error(
+            adam_web_ui::diagnostics::report_error(&format_adam_error(
                 &e,
                 &active.text,
                 &active.file_name(),

@@ -47,6 +47,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "adam-web-ui"
+version = "0.1.0"
+dependencies = [
+ "adam-lang",
+ "adam-rs",
+ "annotate-snippets",
+ "anyhow",
+ "cel-parser",
+ "cel-runtime",
+ "cel-std",
+ "dioxus",
+ "indexmap",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -321,6 +338,7 @@ version = "0.1.0"
 dependencies = [
  "adam-lang",
  "adam-rs",
+ "adam-web-ui",
  "annotate-snippets",
  "anyhow",
  "cel-parser",
@@ -335,8 +353,6 @@ dependencies = [
  "serde",
  "serde_json",
  "slotmap",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]

@@ -318,7 +318,7 @@ fn load_example(name: &str) -> (Sheet, Labels, ActiveSource) {
         Ok(source) => {
             let outcome = build_sheet(&source, &format!("begin/examples/{name}.adm2"));
             if let Some(err) = &outcome.error {
-                crate::diagnostics::report_error(err);
+                adam_web_ui::diagnostics::report_error(err);
             }
             let active_source = ActiveSource {
                 name: name.to_string(),
@@ -331,7 +331,7 @@ fn load_example(name: &str) -> (Sheet, Labels, ActiveSource) {
             }
         }
         Err(err) => {
-            crate::diagnostics::report_error(&err);
+            adam_web_ui::diagnostics::report_error(&err);
             (
                 Sheet::new(),
                 Labels::new(),
@@ -473,7 +473,7 @@ fn load_from_payload(
 ) -> (Option<(Sheet, Labels)>, ActiveSource) {
     let outcome = build_sheet(&payload.text, &payload.name);
     if let Some(err) = &outcome.error {
-        crate::diagnostics::report_error(err);
+        adam_web_ui::diagnostics::report_error(err);
     }
     let active_source = ActiveSource {
         name: payload.name.clone(),
@@ -509,7 +509,7 @@ fn OpenFileControls(
                         let mut eval = document::eval(crate::open_file::OPEN_SCRIPT);
                         let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
                         let Ok(result) = result else {
-                            crate::diagnostics::report_error(&format!(
+                            adam_web_ui::diagnostics::report_error(&format!(
                                 "failed to open file: eval channel error: {result:?}"
                             ));
                             return;
@@ -518,7 +518,7 @@ fn OpenFileControls(
                         let payload = match result {
                             crate::open_file::OpenResult::Payload(payload) => payload,
                             crate::open_file::OpenResult::Failed { error } => {
-                                crate::diagnostics::report_error(&format!(
+                                adam_web_ui::diagnostics::report_error(&format!(
                                     "failed to open file: {error}"
                                 ));
                                 return;
@@ -546,7 +546,7 @@ fn OpenFileControls(
                             let mut eval = document::eval(&script);
                             let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
                             let Ok(result) = result else {
-                                crate::diagnostics::report_error(&format!(
+                                adam_web_ui::diagnostics::report_error(&format!(
                                     "failed to refresh file: eval channel error: {result:?}"
                                 ));
                                 return;
@@ -555,7 +555,7 @@ fn OpenFileControls(
                             let payload = match result {
                                 crate::open_file::OpenResult::Payload(payload) => payload,
                                 crate::open_file::OpenResult::Failed { error } => {
-                                    crate::diagnostics::report_error(&format!(
+                                    adam_web_ui::diagnostics::report_error(&format!(
                                         "failed to refresh file: {error}"
                                     ));
                                     return;
