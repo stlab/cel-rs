@@ -15,7 +15,7 @@ use adam_web_ui::spectrum::{
 };
 
 /// Root component: Spectrum theme wrapper with an examples picker, the graph, and
-/// the Inspector filling the viewport. `begin` ships with several example
+/// the SheetInspector filling the viewport. `begin` ships with several example
 /// property models (`begin/examples/*.adm2` — see
 /// [`crate::example_source::available_examples`]); [`ExamplesPicker`] switches
 /// which one is loaded. On desktop, editing the *currently selected* example's
