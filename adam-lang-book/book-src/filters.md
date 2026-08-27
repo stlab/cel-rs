@@ -30,7 +30,7 @@ value it was given**, filter or no filter. A filter is applied live, by `propaga
 the cell's own current value, never synchronously inside `write()`.
 
 ```rust
-{{#include ../tests/filters.rs:write_never_filters}}
+{{#include examples/filters/write_never_filters.adm2}}
 ```
 
 `write()` cannot fail because of a filter, and never returns an error on a filter's account.
@@ -49,7 +49,7 @@ rounds of clamping. If a dynamic bound loosens back up, the cell springs back to
 was last written, not to some intermediate clamped value:
 
 ```rust
-{{#include ../tests/filters.rs:raw_value_never_lost}}
+{{#include examples/filters/raw_value_never_lost.adm2}}
 ```
 
 This is the same rule [Chapter 5](conditionals.md#53-the-default-branch) already showed for a
@@ -65,7 +65,7 @@ expression as an arbitrary function of `_`, and the sheet can report the range's
 bounds without needing a candidate value at all:
 
 ```rust
-{{#include ../tests/filters.rs:range_filter_kind}}
+{{#include examples/filters/range_filter_kind.adm2}}
 ```
 
 A range filter's body is exempt from the "must reference `_`" rule (6.1): a genuine range
@@ -80,7 +80,7 @@ value: it only *observes*. `propagate()` still succeeds, and the out-of-range va
 what `read()` returns; the sheet simply records that the filter is violated:
 
 ```rust
-{{#include ../tests/filters.rs:derived_cell_diagnosed_not_corrected}}
+{{#include examples/filters/derived_cell_diagnosed_not_corrected.adm2}}
 ```
 
 `propagate()` never fails because of a filter violation, on either side (source or derived): a
@@ -95,11 +95,11 @@ for the query API a host UI uses to surface this.
 Every filter error below is caught while parsing the sheet, before `propagate()` ever runs:
 
 ```rust
-{{#include ../tests/filters.rs:must_reference_underscore}}
+{{#include examples/filters/must_reference_underscore.adm2}}
 ```
 
 ```rust
-{{#include ../tests/filters.rs:tuple_filter_not_supported}}
+{{#include examples/filters/tuple_filter_not_supported.adm2}}
 ```
 
 At most one filter may be attached per cell, and a filter cannot attach to an
