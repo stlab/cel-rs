@@ -28,6 +28,7 @@ members = [
     "adam-rs",
     "adam-lang",
     "adam-lang-book",
+    "adam-lang-book-live",
     "adam-lsp",
     "adam-web-ui",
     "begin",

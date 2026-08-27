@@ -27,6 +27,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "adam-lang-book-live"
+version = "0.1.0"
+dependencies = [
+ "adam-rs",
+ "adam-web-ui",
+ "dioxus",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "adam-lsp"
 version = "0.1.0"
 dependencies = [
