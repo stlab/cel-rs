@@ -1682,7 +1682,7 @@ impl Sheet {
     /// `violated_requirements` continue to reflect the last full `propagate()` call; this
     /// method does not re-evaluate output requirements.
     ///
-    /// A cached [`PlanStep::FilterReclamp`] step is still re-executed on every call,
+    /// A cached `PlanStep::FilterReclamp` step is still re-executed on every call,
     /// using each argument's *current* effective value — only the `last_filter_violations`
     /// diagnostic map stays pinned, not the reclamp's mutation itself.
     ///

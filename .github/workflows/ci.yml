@@ -30,6 +30,16 @@ jobs:
     - name: Build workspace (excluding begin app)
       run: cargo build --workspace --exclude begin --verbose
 
+    # --lib skips `begin`/`xtask` automatically (they have no library target), so this
+    # covers every documentable crate without needing an --exclude list. RUSTDOCFLAGS
+    # promotes rustdoc's own warnings (broken/private intra-doc links, bare URLs, etc.) to
+    # errors -- `cargo doc` alone exits 0 on those, so without this they'd only ever
+    # surface as a human happening to read `cargo doc`'s output locally.
+    - name: Build documentation (deny warnings)
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo doc --workspace --no-deps --lib
+
     - name: Check begin app (renderer-agnostic)
       run: cargo check -p begin --no-default-features
 
