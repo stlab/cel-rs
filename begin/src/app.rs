@@ -3,12 +3,13 @@
 use adam_rs::Sheet;
 use dioxus::prelude::*;
 
-use crate::bridge::{Labels, to_graph_data};
+use crate::bridge::to_graph_data;
 use crate::example_source::{
     ActiveSource, SourceOrigin, available_examples, build_sheet, load_example_source,
 };
 use crate::graph_view::GraphView;
 use crate::inspector::Inspector;
+use adam_web_ui::Labels;
 use adam_web_ui::spectrum::{
     SpActionButton, SpActionGroup, SpDivider, SpHeading, SpIconZoomIn, SpIconZoomOut, SpSideNav,
     SpSideNavItem, SpSwitch, SpTheme,
