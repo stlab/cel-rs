@@ -9,7 +9,7 @@ use crate::example_source::{
 };
 use crate::graph_view::GraphView;
 use crate::inspector::Inspector;
-use crate::spectrum::{
+use adam_web_ui::spectrum::{
     SpActionButton, SpActionGroup, SpDivider, SpHeading, SpIconZoomIn, SpIconZoomOut, SpSideNav,
     SpSideNavItem, SpSwitch, SpTheme,
 };

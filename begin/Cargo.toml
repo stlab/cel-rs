@@ -15,6 +15,7 @@ dioxus = { version = "0.7.10", features = [] }
 futures-channel = "0.3"
 futures-util = "0.3"
 adam-rs = { path = "../adam-rs" }
+adam-web-ui = { path = "../adam-web-ui" }
 cel-runtime = { path = "../cel-runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

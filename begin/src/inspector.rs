@@ -4,7 +4,7 @@ use adam_rs::{CellId, FilterViolation, Sheet};
 use dioxus::prelude::*;
 
 use crate::bridge::{Labels, format_adam_error, format_rounded};
-use crate::spectrum::{
+use adam_web_ui::spectrum::{
     SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpNumberfield, SpSlider, SpTextfield,
 };
 

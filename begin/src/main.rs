@@ -6,7 +6,6 @@ mod example_source;
 mod graph_view;
 mod inspector;
 mod open_file;
-mod spectrum;
 
 use dioxus::prelude::*;
 

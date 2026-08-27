@@ -3,3 +3,5 @@
 //! Components render as DOM whether hosted in a real browser or an embedded webview — not
 //! tied to any one Dioxus renderer feature, so it's usable from a desktop app (`begin`), a
 //! `dioxus/web` app, or a plain `wasm-bindgen` embed with no full app shell around it.
+
+pub mod spectrum;
