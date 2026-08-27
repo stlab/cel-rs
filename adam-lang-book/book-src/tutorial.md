@@ -1,17 +1,22 @@
 # Chapter 1: A Tutorial Introduction
 
+An Adam sheet declares the relationships among a set of properties (invariants in a
+document's structure, constraints between a command's arguments and its result, or values
+useful for constructing a new argument or document state), instead of the event logic that
+would otherwise maintain them by hand.
+
 Let's get started. The best way to learn a new language is to write programs in it, and
-adam-lang programs are called **sheets**. This chapter is a fast, informal tour of every
-construct adam-lang has; later chapters go back over the same ground in more detail, and the
+Adam programs are called **sheets**. This chapter is a fast, informal tour of every
+construct Adam has; later chapters go back over the same ground in more detail, and the
 [reference manual](reference.md) collects the precise rules for looking things up.
 
 You don't need to install anything to follow along: every source fragment below either stands
 on its own as a `.adm2` file, or is a complete, compiled, and tested Rust program showing how a
-host application feeds that source to adam-lang and reads the results back out.
+host application feeds that source to Adam and reads the results back out.
 
 ## 1.1 A first sheet
 
-An adam-lang program is a single `sheet`, named, with a body of declarations between braces.
+An Adam program is a single `sheet`, named, with a body of declarations between braces.
 The simplest useful sheet declares a few cells and nothing else:
 
 ```text
@@ -42,12 +47,13 @@ and the rest) works directly on it, plus a `cell_names` table mapping each decla
 
 ## 1.2 Relationships: multi-way constraints
 
-A sheet with only cells and no relationships is just a struct. What makes adam-lang interesting
+A sheet with only cells and no relationships is just a struct. What makes Adam interesting
 is the **relationship**: a set of alternative ways to keep a group of cells consistent, any one
 of which the solver may pick at any given moment.
 
 The classic example is three numbers related by multiplication (`a * b = c`), where any one of
-the three can be computed from the other two:
+the three can be computed from the other two, the same shape as `pixels == inches * resolution`
+from [the introduction](intro.md#why-adam). As a sheet:
 
 ```text
 sheet triangle {
@@ -209,6 +215,4 @@ See [Chapter 8](style.md) for the formatter's canonical layout.
 
 That's the whole language. [Chapter 2](cells.md) onward covers each construct in the depth this
 chapter skipped past, and the [reference manual](reference.md) gives you the full grammar and
-every built-in type in one place. `begin/examples/*.adm2` in the `cel-rs` workspace has several
-complete, larger sheets; `image_resize.adm2` in particular is a full port of a real-world
-Adobe Photoshop-style resize dialog, worth reading once the constructs above are familiar.
+every built-in type in one place.

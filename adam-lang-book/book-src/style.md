@@ -28,7 +28,7 @@ sheet image_resize {
 
 ## 8.3 Canonical formatting
 
-adam-lang ships its own formatter (`adam fmt`, backed by
+Adam ships its own formatter (`adam fmt`, backed by
 [`format_sheet`](../adam_lang/fn.format_sheet.html)) with one canonical layout: 4-space
 indentation, opening braces on the same line as the keyword that introduces them, and no space
 before a declaration's closing `;`. Given input that doesn't already follow this layout,
@@ -48,4 +48,4 @@ is empty.
 
 A `conditional` branch's trailing `,` (the grammar allows one after each branch's closing `}`)
 is always omitted by the formatter, even though the parser still accepts it on input, so
-canonical adam-lang source never has one.
+canonical Adam source never has one.

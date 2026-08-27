@@ -1,6 +1,6 @@
 [book]
-title = "The adam-lang Programming Language"
-description = "A tutorial and reference manual for the adam-lang language"
+title = "The Adam Programming Language"
+description = "A tutorial and reference manual for the Adam language"
 authors = ["stlab"]
 language = "en"
 src = "book-src"

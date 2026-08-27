@@ -2,7 +2,7 @@
 
 ## 2.1 Sheets
 
-Every adam-lang source file is one sheet:
+Every Adam source file is one sheet:
 
 ```text
 sheet name {
@@ -13,8 +13,8 @@ sheet name {
 ```
 
 The sheet's own name (`name` above) is consumed by the parser and is not otherwise meaningful
-to `adam-rs`; it exists for readability and for host tooling (the language server, `begin`'s
-example picker) to have something to display.
+to `adam-rs`; it exists for readability and for host tooling, such as a language server or an
+example picker, to have something to display.
 
 ## 2.2 Cell declarations
 
@@ -42,7 +42,7 @@ To compute one cell from others, use a [`relationship`](relationships.md) or an
 
 ## 2.3 Built-in types and inference
 
-adam-lang ships with the following types pre-registered, each with a `Default` value used when
+Adam ships with the following types pre-registered, each with a `Default` value used when
 a cell declares a type but no initializer:
 
 | Type name | Rust type | Default |
@@ -63,7 +63,7 @@ must agree exactly, or the sheet fails to parse:
 {{#include ../tests/cells.rs:type_mismatch_is_a_parse_error}}
 ```
 
-A host application can also register additional Rust types under their own adam-lang type
+A host application can also register additional Rust types under their own Adam type
 names; that's a Rust-level embedding concern, not something a sheet author does; see
 [Appendix A.5](reference.md#a5-the-type-registry).
 
@@ -102,7 +102,7 @@ declarations share one namespace, so declaring `cell result: i32 = 0;` and later
 `out result := ...;` in the same sheet is a duplicate-name error, exactly as two `cell result`
 declarations would be.
 
-adam-lang has **no forward references and no hoisting**: a cell must be declared before
+Adam has **no forward references and no hoisting**: a cell must be declared before
 anything else in the sheet mentions its name, whether as a `relationship` binding's output, a
 dependency inside any expression, a `conditional`'s match subject, or a `filter`'s dependency.
 Declaration order matters for more than readability: it determines name resolution and, as

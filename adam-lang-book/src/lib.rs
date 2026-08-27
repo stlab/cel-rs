@@ -1,4 +1,4 @@
-//! Support crate backing *The adam-lang Programming Language* — the tutorial and reference
+//! Support crate backing *The Adam Programming Language* — the tutorial and reference
 //! manual for [`adam_lang`] rendered from `book-src/` via [mdBook](https://rust-lang.github.io/mdBook/).
 //!
 //! This crate holds no prose. Every runnable example in the book lives in `tests/*.rs` as an

@@ -7,7 +7,7 @@ here.
 
 ## A.1 Lexical conventions
 
-An adam-lang source file is a UTF-8 text file, tokenized as Rust/CEL tokens (via
+An Adam source file is a UTF-8 text file, tokenized as Rust/CEL tokens (via
 `proc_macro2`): identifiers, integer and float literals (with optional type suffixes), string
 literals, and punctuation, with `//`/`/* */` comments and `///`/`//!` doc comments stripped or
 captured as trivia before parsing proper begins. See [Chapter 8](style.md) for comments and
@@ -89,7 +89,7 @@ See [Chapter 2](cells.md) and [A.5](#a5-the-type-registry) for the built-in type
 | `bool` | `false` |
 | `String` | `""` |
 
-A host application can register additional Rust types under new adam-lang type names via
+A host application can register additional Rust types under new Adam type names via
 [`TypeRegistry::register`](../adam_lang/type_registry/struct.TypeRegistry.html#method.register) (with a
 `Default`) or
 [`TypeRegistry::register_no_default`](../adam_lang/type_registry/struct.TypeRegistry.html#method.register_no_default)
@@ -171,7 +171,7 @@ See [Chapter 7](outputs.md).
 
 ## A.10 Error messages
 
-adam-lang reports every diagnostic as a [`ParseError`](../cel_parser/struct.ParseError.html)
+Adam reports every diagnostic as a [`ParseError`](../cel_parser/struct.ParseError.html)
 carrying a source span; there is no separate runtime error type for a malformed sheet; if
 `parse_str` returns `Ok`, the sheet is syntactically and structurally valid (though it may
 still fail *at `propagate()`* for the solver reasons in [A.6](#a6-relationships-and-the-solver)).

@@ -51,5 +51,5 @@ that stops being claimed springs back to `source` exactly as a deactivated filte
 Two `conditional`s in the same sheet compose freely at the sheet level: one conditional's
 output cells can be another's match subject or a relationship input, exactly like any other
 cell, even though a branch body itself can only hold `relationship`s, not another
-`conditional`. `begin/examples/image_resize.adm2` has two sibling conditionals this way: one
+`conditional`. A resize dialog, for example, might have two sibling conditionals this way: one
 gated on `resample`, the other on `resample && constrain`.
