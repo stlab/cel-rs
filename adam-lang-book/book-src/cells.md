@@ -60,7 +60,7 @@ see `cel-parser`'s documentation for the full literal grammar). When both are pr
 must agree exactly, or the sheet fails to parse:
 
 ```rust
-{{#include ../tests/cells.rs:type_mismatch_is_a_parse_error}}
+{{#include examples/cells/type_mismatch_is_a_parse_error.adm2}}
 ```
 
 A host application can also register additional Rust types under their own Adam type
@@ -87,7 +87,7 @@ accepted for symmetry with expression grammar); `(T,)` (trailing comma mandatory
 genuine one-element tuple; `(T, U, ...)` is the general case:
 
 ```rust
-{{#include ../tests/cells.rs:tuple_typed_cell}}
+{{#include examples/cells/tuple_typed_cell.adm2}}
 ```
 
 Every tuple shape (regardless of arity or element types) shares the same underlying storage
@@ -110,5 +110,5 @@ Declaration order matters for more than readability: it determines name resoluti
 than others.
 
 ```rust
-{{#include ../tests/cells.rs:no_forward_references}}
+{{#include examples/cells/no_forward_references.adm2}}
 ```
