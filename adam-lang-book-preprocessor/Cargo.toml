@@ -1,0 +1,17 @@
+[package]
+name = "adam-lang-book-preprocessor"
+version = "0.1.0"
+edition = "2024"
+description = "mdBook preprocessor inserting a live-mount div after each .adm2 example include"
+
+[[bin]]
+name = "mdbook-live-examples"
+path = "src/main.rs"
+
+[dependencies]
+mdbook = { version = "0.4", default-features = false }
+regex = "1"
+serde_json = "1"
+
+[lints]
+workspace = true
