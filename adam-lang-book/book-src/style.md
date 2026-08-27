@@ -2,7 +2,7 @@
 
 ## 8.1 Comments
 
-`//` starts a line comment; `/* ... */` a block comment — exactly the same two forms C, Rust,
+`//` starts a line comment; `/* ... */` a block comment, exactly the same two forms C, Rust,
 and CEL all share:
 
 ```text
@@ -14,7 +14,7 @@ cell width: i32 = 1920; // a trailing comment
 ## 8.2 Doc comments
 
 `///` immediately before a `cell`, `relationship`, `conditional`, or `out` declaration, and
-`//!` immediately before the `sheet` keyword itself, are doc comments — recovered by the
+`//!` immediately before the `sheet` keyword itself, are doc comments, recovered by the
 language server and the formatter, and otherwise inert (they carry no meaning to
 `propagate()`):
 
@@ -38,14 +38,14 @@ formatting normalizes it:
 {{#include ../tests/style.rs:canonical_formatting}}
 ```
 
-A formatter run is expected to be **idempotent** — formatting already-canonical source
-reproduces it unchanged — and preserves every comment, doc comment, and blank line exactly
+A formatter run is expected to be **idempotent** (formatting already-canonical source
+reproduces it unchanged) and preserves every comment, doc comment, and blank line exactly
 where it appeared, including a file-header comment before `sheet` itself and a trailing comment
 before a block's own closing `}`. `adam-lsp`'s `textDocument/formatting` handler refuses to
-format a sheet with any recorded syntax error rather than guess at intent —
+format a sheet with any recorded syntax error rather than guess at intent:
 [`format_sheet`](../adam_lang/fn.format_sheet.html)'s own precondition is that `sheet.errors`
 is empty.
 
 A `conditional` branch's trailing `,` (the grammar allows one after each branch's closing `}`)
-is always omitted by the formatter, even though the parser still accepts it on input — so
+is always omitted by the formatter, even though the parser still accepts it on input, so
 canonical adam-lang source never has one.

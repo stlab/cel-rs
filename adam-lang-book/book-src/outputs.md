@@ -8,7 +8,7 @@ out_decl    = "out" identifier [ ":" type_expr ] ":=" expression
 requirement = identifier ":" expression ";".
 ```
 
-An `out` declares a new cell computed by exactly one expression — there's no alternative
+An `out` declares a new cell computed by exactly one expression: there's no alternative
 binding to choose between, unlike a `relationship`. Its dependencies are
 [deduced](expressions.md#34-deduced-dependencies) the same way. The `: type_expr` annotation is
 optional; when absent, the output's type is inferred from the initializer, the same rule
@@ -20,7 +20,7 @@ optional; when absent, the output's type is inferred from the initializer, the s
 
 ## 7.2 An output's cell is terminal
 
-`out` shares one namespace with `cell` — declaring `out result := ...;` after (or before) a
+`out` shares one namespace with `cell`: declaring `out result := ...;` after (or before) a
 `cell result` in the same sheet is a duplicate-name error, exactly like two `cell` declarations
 would be. Unlike a plain cell, though, an output's cell can never be *written*: not by a host
 `write()` call, not by a `relationship` binding, not by a second `out`. It's computed exactly
@@ -37,7 +37,7 @@ any other already-declared cell.
 ## 7.3 Requirements: diagnostics, not gates
 
 A `require { ... }` block trailing an `out`'s initializer names zero or more boolean checks.
-Each `requirement`'s own dependencies are deduced separately from the output's initializer — a
+Each `requirement`'s own dependencies are deduced separately from the output's initializer; a
 requirement commonly reads the output's own value by name, alongside whatever other cells it
 needs:
 
@@ -46,7 +46,7 @@ needs:
 ```
 
 A failed requirement never stops `propagate()` from succeeding, and never stops `area` from
-being computed and readable — `output_valid`/`violated_requirements` exist precisely because
+being computed and readable; `output_valid`/`violated_requirements` exist precisely because
 nothing else in the sheet notices a requirement failing on its own. A requirement's `name` is
 just a label passed through to the query API; it happens to read naturally when it echoes a
 cell name (`not_too_big`, `width_max`), but it isn't a cell reference and doesn't have to match

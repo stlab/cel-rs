@@ -21,10 +21,10 @@ sheet hello {
 }
 ```
 
-A **cell** is a named, typed storage location — the basic unit of state in a property model.
+A **cell** is a named, typed storage location: the basic unit of state in a property model.
 `width` and `height` are `i32`-typed cells, each given an initial value. Semicolons end
 declarations, exactly as in Rust or C; a sheet's body is a sequence of declarations, not a
-sequence of statements — there is no control flow at this level, no loops, and no imperative
+sequence of statements: there is no control flow at this level, no loops, and no imperative
 execution order. A sheet describes a *graph* of cells and the constraints between them, not a
 sequence of steps to run.
 
@@ -36,8 +36,8 @@ exactly like driving `adam_rs::Sheet` directly:
 ```
 
 `parser.parse_str` returns a [`ParsedSheet`](../adam_lang/struct.ParsedSheet.html), which derefs
-to [`Sheet`](../adam_rs/sheet/struct.Sheet.html) — every `Sheet` method (`read`, `write`, `propagate`,
-and the rest) works directly on it — plus a `cell_names` table mapping each declared name to its
+to [`Sheet`](../adam_rs/sheet/struct.Sheet.html); every `Sheet` method (`read`, `write`, `propagate`,
+and the rest) works directly on it, plus a `cell_names` table mapping each declared name to its
 `CellId`, so a host application can look cells up by the name the sheet author gave them.
 
 ## 1.2 Relationships: multi-way constraints
@@ -46,7 +46,7 @@ A sheet with only cells and no relationships is just a struct. What makes adam-l
 is the **relationship**: a set of alternative ways to keep a group of cells consistent, any one
 of which the solver may pick at any given moment.
 
-The classic example is three numbers related by multiplication — `a * b = c` — where any one of
+The classic example is three numbers related by multiplication (`a * b = c`), where any one of
 the three can be computed from the other two:
 
 ```text
@@ -63,19 +63,19 @@ sheet triangle {
 }
 ```
 
-The `relationship` block offers three **bindings** — `c := a * b`, `a := c / b`, and
-`b := c / a` — each an alternative *method* for deriving one cell from the others. Only one
+The `relationship` block offers three **bindings**: `c := a * b`, `a := c / b`, and
+`b := c / a`, each an alternative *method* for deriving one cell from the others. Only one
 binding is active at a time; which one is chosen depends on which cells were written most
 recently (see [Chapter 4](relationships.md) for the full rule). A cell's *declaration* counts as
 a write for this purpose, so before anything is ever explicitly written, cells declared earlier
 are treated as "staler" than cells declared later. The solver prefers to leave the freshest
-cells alone and derive the stalest one — here, `c`, declared first:
+cells alone and derive the stalest one: here, `c`, declared first:
 
 ```rust
 {{#include ../tests/tutorial.rs:multiplication_triangle}}
 ```
 
-Nothing here names *which* cell is the "output" — that's the whole point. Whichever cell was
+Nothing here names *which* cell is the "output"; that's the whole point. Whichever cell was
 written (or, failing that, declared) least recently is the one the solver derives; `write`ing a
 cell is what tells the solver "trust this one; recompute something else instead."
 
@@ -124,7 +124,7 @@ no branch matches and there's no default.
 
 ## 1.4 Filters: self-correcting cells
 
-A `filter` clause attaches a standing domain constraint to a cell — most commonly, a range:
+A `filter` clause attaches a standing domain constraint to a cell, most commonly a range:
 
 ```text
 sheet volume {
@@ -132,14 +132,14 @@ sheet volume {
 }
 ```
 
-Write an out-of-range value and the cell keeps it, raw, until the next `propagate()` —
+Write an out-of-range value and the cell keeps it, raw, until the next `propagate()`;
 `write()` never inspects a filter. `propagate()` is what conforms the value:
 
 ```rust
 {{#include ../tests/tutorial.rs:clamp_demo}}
 ```
 
-A filter's bounds don't have to be constants — `0..=max` references another cell, and the clamp
+A filter's bounds don't have to be constants: `0..=max` references another cell, and the clamp
 tracks it live. [Chapter 6](filters.md) covers filters in full, including the precise
 source/derived model behind "the cell keeps its own raw value forever, and the filter only ever
 corrects what you *read*."
@@ -167,7 +167,7 @@ destructuring-vs-direct-bind distinction.
 ## 1.6 Outputs and requirements
 
 An `out` declaration computes one final, read-only value from the rest of the sheet, and can
-carry named `require`ments — boolean checks reported after every `propagate()`, never enforced
+carry named `require`ments: boolean checks reported after every `propagate()`, never enforced
 by rejecting a write:
 
 ```text
@@ -186,7 +186,7 @@ sheet area_demo {
 ```
 
 See [Chapter 7](outputs.md) for the full rules: an output's cell is terminal (nothing may write
-it directly), and a failed requirement never stops `propagate()` from succeeding — it's a
+it directly), and a failed requirement never stops `propagate()` from succeeding; it's a
 diagnostic, not a gate.
 
 ## 1.7 Comments
@@ -210,5 +210,5 @@ See [Chapter 8](style.md) for the formatter's canonical layout.
 That's the whole language. [Chapter 2](cells.md) onward covers each construct in the depth this
 chapter skipped past, and the [reference manual](reference.md) gives you the full grammar and
 every built-in type in one place. `begin/examples/*.adm2` in the `cel-rs` workspace has several
-complete, larger sheets — `image_resize.adm2` in particular is a full port of a real-world
+complete, larger sheets; `image_resize.adm2` in particular is a full port of a real-world
 Adobe Photoshop-style resize dialog, worth reading once the constructs above are familiar.
