@@ -36,7 +36,7 @@ sequence of steps to run.
 To do anything with a sheet, a host program parses it, then reads and writes cells by `CellId`,
 exactly like driving `adam_rs::Sheet` directly:
 
-```rust
+```
 {{#include examples/tutorial/first_sheet.adm2}}
 ```
 
@@ -77,7 +77,7 @@ a write for this purpose, so before anything is ever explicitly written, cells d
 are treated as "staler" than cells declared later. The solver prefers to leave the freshest
 cells alone and derive the stalest one: here, `c`, declared first:
 
-```rust
+```
 {{#include examples/tutorial/multiplication_triangle.adm2}}
 ```
 
@@ -121,7 +121,7 @@ Only the active branch's relationships participate in that round's solve; every 
 relationships are as if they weren't declared at all. The `_` branch, if present, catches any
 value none of the named branches list, and must be written last:
 
-```rust
+```
 {{#include examples/tutorial/mode_demo.adm2}}
 ```
 
@@ -141,7 +141,7 @@ sheet volume {
 Write an out-of-range value and the cell keeps it, raw, until the next `propagate()`;
 `write()` never inspects a filter. `propagate()` is what conforms the value:
 
-```rust
+```
 {{#include examples/tutorial/clamp_demo.adm2}}
 ```
 
@@ -187,7 +187,7 @@ sheet area_demo {
 }
 ```
 
-```rust
+```
 {{#include examples/tutorial/area_with_requirement.adm2}}
 ```
 

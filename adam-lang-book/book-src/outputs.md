@@ -14,7 +14,7 @@ binding to choose between, unlike a `relationship`. Its dependencies are
 optional; when absent, the output's type is inferred from the initializer, the same rule
 [Chapter 2](cells.md#23-built-in-types-and-inference) gives for a plain `cell`.
 
-```rust
+```
 {{#include examples/outputs/basic_output.adm2}}
 ```
 
@@ -26,7 +26,7 @@ would be. Unlike a plain cell, though, an output's cell can never be *written*: 
 `write()` call, not by a `relationship` binding, not by a second `out`. It's computed exactly
 once per `propagate()`, by its own initializer, and nothing else:
 
-```rust
+```
 {{#include examples/outputs/output_cell_is_terminal.adm2}}
 ```
 
@@ -41,7 +41,7 @@ Each `requirement`'s own dependencies are deduced separately from the output's i
 requirement commonly reads the output's own value by name, alongside whatever other cells it
 needs:
 
-```rust
+```
 {{#include examples/outputs/requirement_diagnostic.adm2}}
 ```
 
@@ -57,6 +57,6 @@ one.
 An output can list any number of requirements; `violated_requirements` reports exactly the ones
 currently failing, by [`RequirementId`](../adam_rs/requirement/struct.RequirementId.html):
 
-```rust
+```
 {{#include examples/outputs/multiple_requirements.adm2}}
 ```

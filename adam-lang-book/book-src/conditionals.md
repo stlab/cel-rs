@@ -21,7 +21,7 @@ cell's current value. The match subject can also be a general expression over se
 already-declared cells, [deduced](expressions.md#34-deduced-dependencies) exactly like a
 relationship binding's body:
 
-```rust
+```
 {{#include examples/conditionals/multi_cell_match_subject.adm2}}
 ```
 
@@ -42,7 +42,7 @@ for it. This is the same source/derived split [Chapter 6](filters.md) covers for
 relationship's method only ever writes a cell's *derived* shadow, never its *source*, so a cell
 that stops being claimed springs back to `source` exactly as a deactivated filter's cell would.
 
-```rust
+```
 {{#include examples/conditionals/default_branch_and_spring_back.adm2}}
 ```
 

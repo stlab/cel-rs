@@ -67,7 +67,7 @@ strongest first, to leave each cell a source:
 - **`a`**: stalest, and the first relationship's remaining choice is `a := c/b`; `a` is
   derived.
 
-```rust
+```
 {{#include examples/relationships/shared_cell_example.adm2}}
 ```
 
@@ -82,7 +82,7 @@ runs: if that's not possible, `propagate()` fails instead of silently picking so
 inconsistent. Two relationships that both, unconditionally, insist on writing the *same* cell
 can never both be satisfied:
 
-```rust
+```
 {{#include examples/relationships/conflict_error.adm2}}
 ```
 
@@ -90,7 +90,7 @@ A subtler failure is a **cycle**: an assignment exists, but every valid choice o
 forms a closed loop with no cell left as a source anywhere in the loop; nothing external ever
 breaks the chain:
 
-```rust
+```
 {{#include examples/relationships/cycle_error.adm2}}
 ```
 
@@ -104,7 +104,7 @@ as `x := y`) would let the solver route around the loop instead.
 A binding's left-hand side can name more than one output cell by parenthesizing it, in which
 case the right-hand side must be a tuple expression of matching arity, split element-wise:
 
-```rust
+```
 {{#include examples/relationships/destructuring_binding.adm2}}
 ```
 

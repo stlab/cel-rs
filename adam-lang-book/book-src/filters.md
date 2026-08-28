@@ -29,7 +29,7 @@ This is the single most important rule in this chapter: **`write()` always store
 value it was given**, filter or no filter. A filter is applied live, by `propagate()`, against
 the cell's own current value, never synchronously inside `write()`.
 
-```rust
+```
 {{#include examples/filters/write_never_filters.adm2}}
 ```
 
@@ -48,7 +48,7 @@ calls this a cell's `source`) and, when something currently claims it, a compute
 rounds of clamping. If a dynamic bound loosens back up, the cell springs back to exactly what
 was last written, not to some intermediate clamped value:
 
-```rust
+```
 {{#include examples/filters/raw_value_never_lost.adm2}}
 ```
 
@@ -64,7 +64,7 @@ structurally as a **range filter**: `propagate()` clamps into `[lo, hi]` instead
 expression as an arbitrary function of `_`, and the sheet can report the range's current live
 bounds without needing a candidate value at all:
 
-```rust
+```
 {{#include examples/filters/range_filter_kind.adm2}}
 ```
 
@@ -79,7 +79,7 @@ it instead (Chapter 4). When that happens, the filter no longer has any authorit
 value: it only *observes*. `propagate()` still succeeds, and the out-of-range value is still
 what `read()` returns; the sheet simply records that the filter is violated:
 
-```rust
+```
 {{#include examples/filters/derived_cell_diagnosed_not_corrected.adm2}}
 ```
 
@@ -94,11 +94,11 @@ for the query API a host UI uses to surface this.
 
 Every filter error below is caught while parsing the sheet, before `propagate()` ever runs:
 
-```rust
+```
 {{#include examples/filters/must_reference_underscore.adm2}}
 ```
 
-```rust
+```
 {{#include examples/filters/tuple_filter_not_supported.adm2}}
 ```
 
