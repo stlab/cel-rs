@@ -6,9 +6,9 @@
 //! Registered in `book.toml` as `[preprocessor.live-examples]`.
 
 use adam_lang_book_live_config::NO_LIVE_MOUNT;
-use mdbook::book::{Book, BookItem};
-use mdbook::errors::Error;
-use mdbook::preprocess::{CmdPreprocessor, Preprocessor, PreprocessorContext};
+use mdbook_preprocessor::book::{Book, BookItem};
+use mdbook_preprocessor::errors::{Error, Result};
+use mdbook_preprocessor::{Preprocessor, PreprocessorContext, parse_input};
 use regex::Regex;
 use std::io;
 
@@ -150,7 +150,7 @@ impl Preprocessor for LiveExamples {
         "live-examples"
     }
 
-    fn run(&self, _ctx: &PreprocessorContext, mut book: Book) -> Result<Book, Error> {
+    fn run(&self, _ctx: &PreprocessorContext, mut book: Book) -> Result<Book> {
         let re = adm2_include_regex();
         book.for_each_mut(|item| {
             if let BookItem::Chapter(chapter) = item {
@@ -160,8 +160,8 @@ impl Preprocessor for LiveExamples {
         Ok(book)
     }
 
-    fn supports_renderer(&self, renderer: &str) -> bool {
-        renderer == "html"
+    fn supports_renderer(&self, renderer: &str) -> Result<bool> {
+        Ok(renderer == "html")
     }
 }
 
@@ -171,14 +171,14 @@ fn main() -> Result<(), Error> {
         // mdBook calls `mdbook-live-examples supports <renderer>` to ask whether this
         // preprocessor applies; exit 0 to say yes, non-zero to say no.
         let renderer = args.get(2).map(String::as_str).unwrap_or_default();
-        std::process::exit(if LiveExamples.supports_renderer(renderer) {
+        std::process::exit(if LiveExamples.supports_renderer(renderer)? {
             0
         } else {
             1
         });
     }
 
-    let (ctx, book) = CmdPreprocessor::parse_input(io::stdin())?;
+    let (ctx, book) = parse_input(io::stdin())?;
     let processed = LiveExamples.run(&ctx, book)?;
     serde_json::to_writer(io::stdout(), &processed)?;
     Ok(())
@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn live_examples_only_supports_html_renderer() {
-        assert!(LiveExamples.supports_renderer("html"));
-        assert!(!LiveExamples.supports_renderer("epub"));
+        assert!(LiveExamples.supports_renderer("html").unwrap());
+        assert!(!LiveExamples.supports_renderer("epub").unwrap());
     }
 }

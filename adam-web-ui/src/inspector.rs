@@ -9,6 +9,7 @@ use crate::spectrum::{
 };
 
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
 /// Aggregate out-cell status for the whole sheet, computed once per render and shared by
 /// every `CellRow` so `Sheet::output_relevant_cells`/`output_violation_cells` run once
@@ -154,6 +155,27 @@ fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
 /// Returns the toggled value ("true"/"false") for a bool cell currently displaying `current`.
 fn toggled_bool_value(current: &str) -> &'static str {
     if current == "true" { "false" } else { "true" }
+}
+
+/// Returns a decimal digit string derived from `source_name`, for namespacing a cell's DOM
+/// `id` so it stays unique across independently-mounted sheets on the same page.
+///
+/// `CellId` numbering restarts from its first value in every independent `Sheet`, so two
+/// different `.adm2` examples mounted on the same book page (each its own `SheetInspector`
+/// instance) can and do produce identical `CellId` debug strings; without this namespace,
+/// `document.getElementById` — used throughout this module's JS bridges instead of
+/// `event.target`, since custom elements never populate that — would silently resolve to
+/// whichever mount's element happens to appear first in the document, corrupting reads and
+/// writes for every other mount. Hashing (rather than embedding `source_name` verbatim) keeps
+/// the result composed only of ASCII digits, safe to interpolate directly into the JS string
+/// literals built via `format!` elsewhere in this module.
+///
+/// - Postcondition: the same `source_name` always yields the same result; only ASCII digits
+///   appear in the result.
+fn dom_id_namespace(source_name: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source_name.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Returns the `min`/`max` bounds to pass to a cell's [`SpNumberfield`]: `range`'s bounds,
@@ -370,7 +392,7 @@ fn CellRow(
         }
     });
 
-    let field_id = format!("cell-{id:?}");
+    let field_id = format!("cell-{}-{id:?}", dom_id_namespace(&source_name.read()));
 
     rsx! {
         div {
@@ -394,9 +416,10 @@ fn CellRow(
                         // leaving the visual checkbox desynced from the sheet. Force the
                         // element back to the actual committed value here.
                         let checked = *value.read() == "true";
+                        let ns = dom_id_namespace(&source_name.read());
                         spawn(async move {
                             let _ = document::eval(&format!(
-                                r#"document.getElementById("cell-{id:?}").checked = {checked};"#
+                                r#"document.getElementById("cell-{ns}-{id:?}").checked = {checked};"#
                             ))
                             .await;
                         });
@@ -415,6 +438,7 @@ fn CellRow(
                             warning: flags.read().warning,
                             disabled: flags.read().disabled,
                             oninput: move |_: FormEvent| {
+                                let ns = dom_id_namespace(&source_name.read());
                                 spawn(async move {
                                     // Reads the shadow-DOM `<input>`'s raw text, not the host's
                                     // `value` property: once `min`/`max` are set, `sp-number-field`
@@ -422,15 +446,59 @@ fn CellRow(
                                     // which would hide an out-of-range-for-type entry from
                                     // `write_and_propagate` below before it ever sees the digits
                                     // the user actually typed.
+                                    //
+                                    // `sp-number-field` displays (and lets the user type) numbers
+                                    // grouped and decimal-marked per the resolved locale — e.g.
+                                    // `"1,920"` in `en`, `"1.920,5"` in `de`. `el.numberFormatter`
+                                    // is the exact `Intl.NumberFormat` the element itself renders
+                                    // with, so reading its group/decimal separators here (rather
+                                    // than assuming `,`/`.`) and normalizing the raw text to a
+                                    // plain `.`-decimal, ungrouped string keeps this locale-aware
+                                    // for any resolved locale. Rust only ever sees that normalized
+                                    // form, both for `write_and_propagate` below and for the
+                                    // `value` this component's `value` prop round-trips back —
+                                    // `sp-number-field`'s host `value` is a plain JS `Number`
+                                    // property, so echoing back ungrouped text is required to
+                                    // avoid the element itself parsing it as `NaN`.
+                                    //
+                                    // The stepper buttons (and scroll-wheel/arrow-key stepping)
+                                    // change `value` and fire this same `input` event without ever
+                                    // focusing the field the way Dioxus's `onfocus` can observe:
+                                    // `sp-number-field::stepBy()` calls the DOM `.focus()` method
+                                    // directly on itself, which moves `document.activeElement` but
+                                    // — unlike focus arriving from an actual pointer/keyboard
+                                    // interaction with the field — never dispatches a `focus` event
+                                    // Dioxus's delegated listener sees, so `is_focused` stays stuck
+                                    // at `false` and every stepper click was silently dropped below.
+                                    // Reading `document.activeElement` fresh here, instead of
+                                    // trusting the `is_focused` signal, sidesteps that gap while
+                                    // still discarding a response that arrives after a genuine
+                                    // blur-while-in-flight (`activeElement` has moved on by then).
                                     let mut eval = document::eval(&format!(
-                                        r#"dioxus.send(document.getElementById("cell-{id:?}").shadowRoot.querySelector("input").value)"#
+                                        r#"
+                                        const el = document.getElementById("cell-{ns}-{id:?}");
+                                        const raw = el.shadowRoot.querySelector("input").value;
+                                        let group = "", decimal = ".";
+                                        try {{
+                                            for (const p of el.numberFormatter.formatToParts(1234.5)) {{
+                                                if (p.type === "group") group = p.value;
+                                                if (p.type === "decimal") decimal = p.value;
+                                            }}
+                                        }} catch (e) {{}}
+                                        let normalized = group ? raw.split(group).join("") : raw;
+                                        if (decimal && decimal !== ".") {{
+                                            normalized = normalized.split(decimal).join(".");
+                                        }}
+                                        dioxus.send((document.activeElement === el ? "1" : "0") + "|" + normalized);
+                                        "#
                                     ));
-                                    let Ok(val) = eval.recv::<String>().await else { return; };
-                                    if !*is_focused.read() {
+                                    let Ok(payload) = eval.recv::<String>().await else { return; };
+                                    let Some((still_focused, val)) = payload.split_once('|') else { return; };
+                                    if still_focused != "1" {
                                         return;
                                     }
-                                    input.set(val.clone());
-                                    write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
+                                    input.set(val.to_string());
+                                    write_and_propagate(sheet, labels, id, val, has_error, source_text, source_name);
                                 });
                             },
                             onfocus: move |_| is_focused.set(true),
@@ -443,15 +511,16 @@ fn CellRow(
                 }
                 if let Some((lo, hi)) = *range.read() {
                     SpSlider {
-                        id: format!("cell-{id:?}-slider"),
+                        id: format!("cell-{}-{id:?}-slider", dom_id_namespace(&source_name.read())),
                         value: input.read().clone(),
                         min: format!("{lo}"),
                         max: format!("{hi}"),
                         disabled: flags.read().disabled,
                         oninput: move |_: FormEvent| {
+                            let ns = dom_id_namespace(&source_name.read());
                             spawn(async move {
                                 let mut eval = document::eval(&format!(
-                                    r#"dioxus.send(document.getElementById("cell-{id:?}-slider").value.toString())"#
+                                    r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}-slider").value.toString())"#
                                 ));
                                 let Ok(val) = eval.recv::<String>().await else { return; };
                                 input.set(val.clone());
@@ -471,9 +540,10 @@ fn CellRow(
                     // HTMLInputElement — custom elements (sp-textfield) always give "".
                     // Use dioxus.send() in JS and eval.recv() to read the live value.
                     oninput: move |_: FormEvent| {
+                        let ns = dom_id_namespace(&source_name.read());
                         spawn(async move {
                             let mut eval = document::eval(&format!(
-                                r#"dioxus.send(document.getElementById("cell-{id:?}").value)"#
+                                r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value)"#
                             ));
                             let Ok(val) = eval.recv::<String>().await else { return; };
                             // Discard the result if the user blurred while the round-trip was
@@ -816,5 +886,27 @@ mod tests {
     #[test]
     fn toggled_bool_value_false_becomes_true() {
         assert_eq!(toggled_bool_value("false"), "true");
+    }
+
+    #[test]
+    fn dom_id_namespace_is_deterministic_for_the_same_name() {
+        assert_eq!(
+            dom_id_namespace("tutorial/first_sheet.adm2"),
+            dom_id_namespace("tutorial/first_sheet.adm2")
+        );
+    }
+
+    #[test]
+    fn dom_id_namespace_differs_for_different_names() {
+        assert_ne!(
+            dom_id_namespace("tutorial/first_sheet.adm2"),
+            dom_id_namespace("tutorial/multiplication_triangle.adm2")
+        );
+    }
+
+    #[test]
+    fn dom_id_namespace_contains_only_ascii_digits() {
+        let ns = dom_id_namespace("tutorial/first_sheet.adm2").to_string();
+        assert!(ns.chars().all(|c| c.is_ascii_digit()));
     }
 }
