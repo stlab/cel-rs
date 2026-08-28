@@ -10,6 +10,11 @@ build-dir = "book-dist"
 
 [preprocessor.live-examples]
 command = "mdbook-live-examples"
+# mdBook's built-in `{{#include}}` substitution runs as a preprocessor literally
+# named "links". Without this ordering constraint, alphabetical tie-breaking in
+# mdBook's topological sort would run "links" before "live-examples", already
+# expanding every include into literal file content before this preprocessor's
+# regex ever sees it -- silently breaking every live example on the site.
 before = ["links"]
 
 [output.html]
