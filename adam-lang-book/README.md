@@ -13,6 +13,13 @@ before `mdbook` runs — a plain `mdbook build` here does not work on a fresh ch
 
 ## Building the book
 
+In VS Code, run the **`book: build (full)`** or **`book: serve (full)`** task (Terminal →
+Run Task…) to do everything below in one step. The commands are broken out as individual
+`book: install preprocessor` / `book: build wasm` / `book: prepare assets` / `book: build` /
+`book: serve` tasks too, in `.vscode/tasks.json`, if you only need to re-run one of them.
+
+From the shell:
+
 ```bash
 # One-time, or after changing adam-lang-book-preprocessor:
 cargo install --path ../adam-lang-book-preprocessor --force
