@@ -72,7 +72,7 @@ fn build_resize_sheet() -> Document {
 #[test]
 fn the_resize_sheet_generates_valid_adm2() {
     let doc = build_resize_sheet();
-    let adm2_text = generate_adm2(&doc);
+    let adm2_text = generate_adm2(&doc).expect("document should export cleanly");
     parses_as_adm2(&adm2_text);
 }
 
@@ -81,5 +81,8 @@ fn the_resize_sheet_survives_a_save_and_load_round_trip() {
     let doc = build_resize_sheet();
     let reloaded = from_json(&to_json(&doc)).unwrap();
     assert_eq!(doc, reloaded);
-    assert_eq!(generate_adm2(&doc), generate_adm2(&reloaded));
+    assert_eq!(
+        generate_adm2(&doc).expect("document should export cleanly"),
+        generate_adm2(&reloaded).expect("document should export cleanly")
+    );
 }

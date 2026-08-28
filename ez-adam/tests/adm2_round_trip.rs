@@ -81,7 +81,7 @@ fn a_document_with_every_construct_generates_valid_adm2() {
     let flag = add_cell(&mut doc, "constrain_proportions", CellType::Bool);
     let _ = add_conditional_from_bool_cells(&mut doc, vec![flag], r1, Point::new(0.0, 40.0));
 
-    let adm2_text = generate_adm2(&doc);
+    let adm2_text = generate_adm2(&doc).expect("document should export cleanly");
     assert_parses(&adm2_text);
 }
 
@@ -89,7 +89,7 @@ fn a_document_with_every_construct_generates_valid_adm2() {
 fn a_bare_cell_only_document_generates_valid_adm2() {
     let mut doc = Document::new("empty_ish");
     let _ = add_cell(&mut doc, "a", CellType::f64());
-    let adm2_text = generate_adm2(&doc);
+    let adm2_text = generate_adm2(&doc).expect("document should export cleanly");
     assert_parses(&adm2_text);
 }
 
@@ -111,7 +111,7 @@ fn a_multi_cell_cells_mode_conditional_group_generates_valid_adm2() {
     let _ =
         add_conditional_from_bool_cells(&mut doc, vec![flag_a, flag_b], r1, Point::new(0.0, 40.0));
 
-    let adm2_text = generate_adm2(&doc);
+    let adm2_text = generate_adm2(&doc).expect("document should export cleanly");
     assert_parses(&adm2_text);
 }
 
@@ -138,6 +138,6 @@ fn a_formula_mode_conditional_group_generates_valid_adm2() {
     add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(true)]);
     toggle_enabled_group(&mut doc, cond, 0, r1);
 
-    let adm2_text = generate_adm2(&doc);
+    let adm2_text = generate_adm2(&doc).expect("document should export cleanly");
     assert_parses(&adm2_text);
 }
