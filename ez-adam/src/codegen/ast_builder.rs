@@ -128,6 +128,8 @@ fn clamp_filter(ty: &CellType) -> Option<CellFilter> {
 ///
 /// Returns [`ExportError::InvalidFormula`] for the first member whose
 /// formula text isn't valid CEL.
+///
+/// - Complexity: O(n) in `group.members.len()`.
 // Not yet called from non-test code — `codegen/mod.rs`'s integration (Task 8
 // in this plan) will call this once it wires together cell/relationship/
 // conditional generation, at which point this attribute should come off.
