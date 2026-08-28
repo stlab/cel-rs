@@ -1,4 +1,4 @@
-//! Loads adam-lang example sources and builds a [`Sheet`]/[`Labels`] pair from
+//! Loads adam-lang example sources and builds a `Sheet`/`Labels` pair from
 //! them. `begin` ships with several example property models (see
 //! `examples/*.adm2`); [`available_examples`] lists them and
 //! [`load_example_source`] loads any one of them by name.
