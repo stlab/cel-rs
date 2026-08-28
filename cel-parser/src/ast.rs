@@ -46,6 +46,15 @@ impl ExprSpan {
     /// text from, the same way `cel-rs-macros` already does internally.
     ///
     /// - Precondition: `text` tokenizes to exactly one token tree.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cel_parser::ExprSpan;
+    ///
+    /// let span = ExprSpan::for_text("i64");
+    /// assert_eq!(span.start.source_text().as_deref(), Some("i64"));
+    /// ```
     #[must_use]
     pub fn for_text(text: &str) -> Self {
         let tokens: proc_macro2::TokenStream = text
