@@ -6,10 +6,36 @@
 
 use std::collections::HashSet;
 
-use crate::model::cell::{Cell, CellType};
-use crate::model::conditional_group::{CellValueLiteral, ConditionExpr, ConditionalGroup};
+use crate::model::cell::{Cell, CellId, CellType};
+use crate::model::conditional_group::{
+    CellValueLiteral, ConditionExpr, ConditionalGroup, ConditionalGroupId,
+};
 use crate::model::document::Document;
 use crate::model::relationship_group::{RelationshipGroup, RelationshipGroupId};
+
+mod ast_builder;
+
+/// A reason [`generate_adm2`] could not produce `.adm2` text for a
+/// [`crate::model::document::Document`].
+#[derive(Debug)]
+pub enum ExportError {
+    /// `group`'s binding for `cell` is not valid CEL (e.g. still empty).
+    InvalidFormula {
+        /// The relationship group containing the invalid formula.
+        group: RelationshipGroupId,
+        /// The cell whose formula is invalid.
+        cell: CellId,
+        /// The parse error that occurred.
+        source: cel_parser::ParseError,
+    },
+    /// `conditional`'s `Formula`-mode condition expression is not valid CEL.
+    InvalidCondition {
+        /// The conditional group with the invalid condition.
+        conditional: ConditionalGroupId,
+        /// The parse error that occurred.
+        source: cel_parser::ParseError,
+    },
+}
 
 /// Returns `.adm2` source text for `doc`.
 ///
