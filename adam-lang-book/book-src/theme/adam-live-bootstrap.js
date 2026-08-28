@@ -62,6 +62,6 @@ function loadSwc() {
     }
     const id = `adam-live-${index}`;
     div.id = id;
-    mount(id, source);
+    mount(id, source, name);
   });
 })();

@@ -57,16 +57,18 @@ fn Root(props: RootProps) -> Element {
     }
 }
 
-/// Mounts a live [`SheetInspector`] for `source` into the DOM element with id `element_id`.
+/// Mounts a live [`SheetInspector`] for `source` into the DOM element with id `element_id`,
+/// using `name` (the example's `data-example` attribute, e.g. `"relationships/conflict_error"`)
+/// as the diagnostic file name shown in any parse/propagate error.
 ///
 /// - Precondition: an element with id `element_id` already exists in the document — the
 ///   mdBook `live-examples` preprocessor is what creates it (see
 ///   `adam-lang-book-preprocessor`).
 #[wasm_bindgen]
-pub fn mount(element_id: &str, source: &str) {
+pub fn mount(element_id: &str, source: &str, name: &str) {
     let props = RootProps {
         source: source.to_string(),
-        name: format!("{element_id}.adm2"),
+        name: format!("{name}.adm2"),
     };
     let vdom = VirtualDom::new_with_props(Root, props);
     let config = dioxus::web::Config::new().rootname(element_id);
