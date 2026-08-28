@@ -49,10 +49,7 @@ fn fence_spans(content: &str) -> Vec<(usize, usize)> {
     let mut open: Option<(usize, char, usize)> = None;
     let mut pos = 0usize;
     for line in content.split_inclusive('\n') {
-        let stripped = line
-            .trim_end_matches('\n')
-            .trim_end_matches('\r')
-            .trim_start();
+        let stripped = line.trim_end_matches('\n').trim_end_matches('\r').trim();
         match open {
             None => {
                 if let Some(delim) = stripped.chars().next().filter(|&c| c == '`' || c == '~') {
@@ -312,6 +309,39 @@ mod tests {
         assert!(
             div_a > fence_close && div_b > fence_close,
             "both divs must land after the shared closing fence, not inside it"
+        );
+    }
+
+    #[test]
+    fn inject_mount_points_treats_unterminated_fence_as_extending_to_end_of_content() {
+        // Regression coverage for the fence_spans postcondition: an opening fence with no
+        // matching closing line must produce a span that extends to the end of `content`, so
+        // the mount div lands after everything that follows the include -- not immediately
+        // after the include itself, which was the pre-fix (buggy) behavior.
+        let re = adm2_include_regex();
+        let content = "prose\n\n```rust\n{{#include examples/cells/tuple_typed_cell.adm2}}\nno closing fence here";
+        let result = inject_mount_points(content, &re);
+
+        let include_pos = result.find("{{#include").unwrap();
+        let div_pos = result
+            .find("adam-live")
+            .expect("mount div must be inserted");
+        let tail_pos = result.find("no closing fence here").unwrap();
+
+        assert!(
+            div_pos > include_pos,
+            "mount div must land after the include itself"
+        );
+        assert!(
+            div_pos > tail_pos,
+            "mount div must land after all trailing content, since the unterminated fence's \
+             span extends to the end of `content`"
+        );
+        assert!(
+            result
+                .trim_end()
+                .ends_with("data-example=\"cells/tuple_typed_cell\"></div>"),
+            "mount div must be the very last thing in the output"
         );
     }
 
