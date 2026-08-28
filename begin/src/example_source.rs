@@ -215,12 +215,12 @@ mod tests {
     use super::*;
     use adam_lang::{AdamParser, TypeRegistry};
     use adam_web_ui::build::op_lookup;
-    use adam_web_ui::build_sheet;
+    use adam_web_ui::{Renderer, build_sheet};
 
     #[test]
     fn every_bundled_example_parses_successfully() {
         for &(name, source) in EXAMPLES_WITH_SOURCE {
-            let outcome = build_sheet(source, &format!("{name}.adm2"));
+            let outcome = build_sheet(source, &format!("{name}.adm2"), &Renderer::styled());
             assert!(
                 outcome.sheet_labels.is_some(),
                 "{name} failed to build: {:?}",

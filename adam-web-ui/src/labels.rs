@@ -7,7 +7,7 @@
 
 use adam_lang::type_registry::TypeShape;
 use adam_rs::{CellId, Error, Sheet};
-use annotate_snippets::Renderer;
+pub use annotate_snippets::Renderer;
 use cel_parser::FormatRustcStyle;
 use indexmap::IndexMap;
 use std::any::TypeId;
@@ -283,15 +283,15 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
 /// `Error::MethodFailed` wraps an `anyhow::Error` raised by a compiled method
 /// body; when that error carries a `SpanContext` (attached automatically by
 /// cel-parser's `span-diagnostics` feature for built-in arithmetic ops) this
-/// renders a full caret diagnostic against `source`, ANSI-colored for a
-/// terminal, with `file_name` (e.g. `"begin/examples/toy_example.adm2"`) shown
-/// in the diagnostic header. All other variants have no source span and fall
-/// back to their `Display` message, ignoring `file_name`.
-pub fn format_adam_error(e: &Error, source: &str, file_name: &str) -> String {
+/// renders a full caret diagnostic against `source` using `renderer` — pass
+/// [`Renderer::styled`] for a real terminal (ANSI colors) or [`Renderer::plain`]
+/// for a context that can't display them (a browser `<pre>` element, a log file) —
+/// with `file_name` (e.g. `"begin/examples/toy_example.adm2"`) shown in the
+/// diagnostic header. All other variants have no source span and fall back to
+/// their `Display` message, ignoring `file_name` and `renderer`.
+pub fn format_adam_error(e: &Error, source: &str, file_name: &str, renderer: &Renderer) -> String {
     match e {
-        Error::MethodFailed(inner) => {
-            inner.format_rustc_style(source, file_name, 1, &Renderer::styled())
-        }
+        Error::MethodFailed(inner) => inner.format_rustc_style(source, file_name, 1, renderer),
         other => other.to_string(),
     }
 }
@@ -303,7 +303,12 @@ mod tests {
 
     #[test]
     fn format_adam_error_invalid_id_falls_back_to_display() {
-        let msg = format_adam_error(&Error::InvalidId, "source text", "test.adm2");
+        let msg = format_adam_error(
+            &Error::InvalidId,
+            "source text",
+            "test.adm2",
+            &Renderer::styled(),
+        );
         assert_eq!(msg, "invalid cell or relationship id");
     }
 
@@ -316,10 +321,28 @@ mod tests {
         let inner = anyhow::anyhow!("division by zero").context(SpanContext::new(span));
         let err = Error::MethodFailed(inner);
 
-        let msg = format_adam_error(&err, source, "test.adm2");
+        let msg = format_adam_error(&err, source, "test.adm2", &Renderer::styled());
 
         assert!(msg.contains("division by zero"), "{msg}");
         assert!(msg.contains(source), "{msg}");
+    }
+
+    #[test]
+    fn format_adam_error_plain_renderer_has_no_ansi_escape_codes() {
+        use cel_parser::{SourceSpan, SpanContext};
+
+        let source = "1i32 / 0i32";
+        let span = SourceSpan::new(1, 0, 1, 11);
+        let inner = anyhow::anyhow!("division by zero").context(SpanContext::new(span));
+        let err = Error::MethodFailed(inner);
+
+        let msg = format_adam_error(&err, source, "test.adm2", &Renderer::plain());
+
+        assert!(msg.contains("division by zero"), "{msg}");
+        assert!(
+            !msg.contains('\u{1b}'),
+            "expected no ANSI escapes, got: {msg}"
+        );
     }
 
     #[test]

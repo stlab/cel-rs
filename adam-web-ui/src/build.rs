@@ -1,10 +1,9 @@
 //! Parses adam-lang source into a live [`adam_rs::Sheet`], formatting any failure as a
 //! diagnostic instead of a bare error.
 
-use crate::labels::{Labels, format_adam_error, labels_from_cell_names};
+use crate::labels::{Labels, Renderer, format_adam_error, labels_from_cell_names};
 use adam_lang::{AdamParser, TypeRegistry};
 use adam_rs::Sheet;
-use annotate_snippets::Renderer;
 
 /// The result of parsing and building a sheet from adam-lang source.
 ///
@@ -35,15 +34,17 @@ pub fn op_lookup() -> cel_parser::OpLookup {
 /// Parses `source` as adam-lang, builds a `Sheet` and `Labels`, and propagates
 /// once so initial derived values are populated. `file_name` is used only to
 /// build diagnostic headers (e.g. `--> begin/examples/toy_example.adm2:8:11`),
-/// not to locate `source` itself.
+/// not to locate `source` itself. `renderer` controls how a diagnostic is
+/// formatted — pass [`Renderer::styled`] for a real terminal or [`Renderer::plain`]
+/// for a context that can't display ANSI colors (e.g. a browser `<pre>` element).
 ///
 /// - Complexity: O(n) in the length of `source` plus the cost of one `propagate()`.
-pub fn build_sheet(source: &str, file_name: &str) -> BuildOutcome {
+pub fn build_sheet(source: &str, file_name: &str, renderer: &Renderer) -> BuildOutcome {
     let mut parser = AdamParser::new(TypeRegistry::new(), op_lookup());
     let mut parsed = match parser.parse_str(source) {
         Ok(p) => p,
         Err(e) => {
-            let msg = e.format_rustc_style(source, file_name, 1, &Renderer::styled());
+            let msg = e.format_rustc_style(source, file_name, 1, renderer);
             return BuildOutcome {
                 sheet_labels: None,
                 error: Some(msg),
@@ -60,7 +61,7 @@ pub fn build_sheet(source: &str, file_name: &str) -> BuildOutcome {
             }
         }
         Err(e) => {
-            let msg = format_adam_error(&e, source, file_name);
+            let msg = format_adam_error(&e, source, file_name, renderer);
             BuildOutcome {
                 sheet_labels: Some((parsed.sheet, labels)),
                 error: Some(msg),
@@ -88,14 +89,14 @@ mod tests {
 
     #[test]
     fn build_sheet_valid_source_succeeds_with_no_error() {
-        let outcome = build_sheet(VALID_SOURCE, "test.adm2");
+        let outcome = build_sheet(VALID_SOURCE, "test.adm2", &Renderer::styled());
         assert!(outcome.sheet_labels.is_some());
         assert!(outcome.error.is_none());
     }
 
     #[test]
     fn build_sheet_parse_error_has_no_sheet_and_formatted_message() {
-        let outcome = build_sheet("sheet s { cell x }", "test.adm2");
+        let outcome = build_sheet("sheet s { cell x }", "test.adm2", &Renderer::styled());
         assert!(outcome.sheet_labels.is_none());
         let msg = outcome.error.expect("expected a parse error message");
         assert!(msg.contains("error"), "{msg}");
@@ -104,11 +105,32 @@ mod tests {
     #[test]
     fn build_sheet_runtime_error_still_returns_sheet_and_message() {
         let source = "sheet s { cell x: i32 = 0; cell y: i32; relationship { y := 10i32 / x; } }";
-        let outcome = build_sheet(source, "test.adm2");
+        let outcome = build_sheet(source, "test.adm2", &Renderer::styled());
         assert!(
             outcome.sheet_labels.is_some(),
             "sheet should still be built after a propagate error"
         );
         assert!(outcome.error.is_some());
+    }
+
+    #[test]
+    fn build_sheet_plain_renderer_parse_error_has_no_ansi_escape_codes() {
+        let outcome = build_sheet("sheet s { cell x }", "test.adm2", &Renderer::plain());
+        let msg = outcome.error.expect("expected a parse error message");
+        assert!(
+            !msg.contains('\u{1b}'),
+            "expected no ANSI escapes, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn build_sheet_plain_renderer_runtime_error_has_no_ansi_escape_codes() {
+        let source = "sheet s { cell x: i32 = 0; cell y: i32; relationship { y := 10i32 / x; } }";
+        let outcome = build_sheet(source, "test.adm2", &Renderer::plain());
+        let msg = outcome.error.expect("expected a propagate error message");
+        assert!(
+            !msg.contains('\u{1b}'),
+            "expected no ANSI escapes, got: {msg}"
+        );
     }
 }

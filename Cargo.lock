@@ -416,7 +416,6 @@ dependencies = [
  "adam-lang",
  "adam-rs",
  "adam-web-ui",
- "annotate-snippets",
  "anyhow",
  "cel-parser",
  "cel-runtime",

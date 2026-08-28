@@ -13,5 +13,6 @@ pub mod spectrum;
 pub use build::{BuildOutcome, build_sheet};
 pub use inspector::SheetInspector;
 pub use labels::{
-    CellMeta, Labels, WriteStrFn, format_adam_error, format_rounded, labels_from_cell_names,
+    CellMeta, Labels, Renderer, WriteStrFn, format_adam_error, format_rounded,
+    labels_from_cell_names,
 };

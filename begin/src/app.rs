@@ -8,11 +8,11 @@ use crate::example_source::{ActiveSource, SourceOrigin, available_examples, load
 use crate::graph_view::GraphView;
 use adam_web_ui::Labels;
 use adam_web_ui::SheetInspector;
-use adam_web_ui::build_sheet;
 use adam_web_ui::spectrum::{
     SpActionButton, SpActionGroup, SpDivider, SpHeading, SpIconZoomIn, SpIconZoomOut, SpSideNav,
     SpSideNavItem, SpSwitch, SpTheme,
 };
+use adam_web_ui::{Renderer, build_sheet};
 
 /// Root component: Spectrum theme wrapper with an examples picker, the graph, and
 /// the SheetInspector filling the viewport. `begin` ships with several example
@@ -115,7 +115,7 @@ pub fn App() -> Element {
                             continue;
                         }
                     };
-                    let outcome = build_sheet(&source, &current.file_name());
+                    let outcome = build_sheet(&source, &current.file_name(), &Renderer::styled());
                     if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
                         sheet.set(new_sheet);
                         labels.set(new_labels);
@@ -318,7 +318,11 @@ pub fn App() -> Element {
 fn load_example(name: &str) -> (Sheet, Labels, ActiveSource) {
     match load_example_source(name) {
         Ok(source) => {
-            let outcome = build_sheet(&source, &format!("begin/examples/{name}.adm2"));
+            let outcome = build_sheet(
+                &source,
+                &format!("begin/examples/{name}.adm2"),
+                &Renderer::styled(),
+            );
             if let Some(err) = &outcome.error {
                 adam_web_ui::diagnostics::report_error(err);
             }
@@ -372,7 +376,7 @@ fn load_opened(path: std::path::PathBuf) -> (Option<(Sheet, Labels)>, ActiveSour
         .unwrap_or_else(|| file_name.clone());
     match crate::open_file::read_opened_file(&path) {
         Ok(source) => {
-            let outcome = build_sheet(&source, &file_name);
+            let outcome = build_sheet(&source, &file_name, &Renderer::styled());
             if let Some(err) = &outcome.error {
                 eprintln!("{err}");
             }
@@ -473,7 +477,7 @@ fn OpenFileControls(
 fn load_from_payload(
     payload: crate::open_file::OpenedFilePayload,
 ) -> (Option<(Sheet, Labels)>, ActiveSource) {
-    let outcome = build_sheet(&payload.text, &payload.name);
+    let outcome = build_sheet(&payload.text, &payload.name, &Renderer::styled());
     if let Some(err) = &outcome.error {
         adam_web_ui::diagnostics::report_error(err);
     }
@@ -654,7 +658,11 @@ mod tests {
 
     #[test]
     fn toy_example_g_not_forced_when_p_is_zero() {
-        let outcome = build_sheet(toy_example_source(), "toy_example.adm2");
+        let outcome = build_sheet(
+            toy_example_source(),
+            "toy_example.adm2",
+            &Renderer::styled(),
+        );
         let (sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
         let g_id = sheet
             .cells()
@@ -665,7 +673,11 @@ mod tests {
 
     #[test]
     fn toy_example_g_forced_when_p_is_one() {
-        let outcome = build_sheet(toy_example_source(), "toy_example.adm2");
+        let outcome = build_sheet(
+            toy_example_source(),
+            "toy_example.adm2",
+            &Renderer::styled(),
+        );
         let (mut sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
         let p_id = sheet
             .cells()
@@ -684,7 +696,11 @@ mod tests {
 
     #[test]
     fn toy_example_g_unforced_again_after_p_returns_to_zero() {
-        let outcome = build_sheet(toy_example_source(), "toy_example.adm2");
+        let outcome = build_sheet(
+            toy_example_source(),
+            "toy_example.adm2",
+            &Renderer::styled(),
+        );
         let (mut sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
         let p_id = sheet
             .cells()

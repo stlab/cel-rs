@@ -3,7 +3,7 @@
 use adam_rs::{CellId, FilterViolation, Sheet};
 use dioxus::prelude::*;
 
-use crate::labels::{Labels, format_adam_error, format_rounded};
+use crate::labels::{Labels, Renderer, format_adam_error, format_rounded};
 use crate::spectrum::{
     SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpNumberfield, SpSlider, SpTextfield,
 };
@@ -261,6 +261,7 @@ fn write_and_propagate(
                 &e,
                 &source_text.read(),
                 &source_name.read(),
+                &Renderer::styled(),
             ));
         }
     }

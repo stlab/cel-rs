@@ -5,7 +5,7 @@
 //! shared state between them.
 
 use adam_web_ui::spectrum::SpTheme;
-use adam_web_ui::{SheetInspector, build_sheet};
+use adam_web_ui::{Renderer, SheetInspector, build_sheet};
 use dioxus::prelude::*;
 use wasm_bindgen::prelude::*;
 
@@ -21,6 +21,9 @@ struct RootProps {
 /// Components render unstyled (correct custom elements, but none of Spectrum's CSS
 /// custom-property design tokens applied) without one — each independently-mounted `Root`
 /// gets its own `<sp-theme>`, exactly as `begin`'s single, app-wide one wraps its whole tree.
+/// Diagnostics render via [`Renderer::plain`], not [`Renderer::styled`]: the rendered `<pre>`
+/// is a browser element, not a terminal, so ANSI escape codes would show as literal garbage
+/// text rather than color.
 ///
 /// `outcome` is a plain call rather than a `use_hook` because `BuildOutcome` holds a `Sheet`,
 /// which cannot be `Clone` (it owns type-erased cell values) and `use_hook` requires its state
@@ -37,7 +40,7 @@ struct RootProps {
 /// `use_signal` unconditionally with an `Option`-shaped initial value instead).
 #[component]
 fn Root(props: RootProps) -> Element {
-    let outcome = build_sheet(&props.source, &props.name);
+    let outcome = build_sheet(&props.source, &props.name, &Renderer::plain());
     let source_text = use_memo({
         let source = props.source.clone();
         move || source.clone()
