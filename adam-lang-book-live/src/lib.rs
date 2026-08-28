@@ -4,6 +4,7 @@
 //! `docs/superpowers/plans/2026-08-27-live-adam-book-examples.md`'s Task 8 spike); there is no
 //! shared state between them.
 
+use adam_web_ui::spectrum::SpTheme;
 use adam_web_ui::{SheetInspector, build_sheet};
 use dioxus::prelude::*;
 use wasm_bindgen::prelude::*;
@@ -16,7 +17,10 @@ struct RootProps {
 
 /// Parses `props.source`, then renders either a live [`SheetInspector`] (on success) or the
 /// formatted diagnostic (on parse failure), matching how a propagate failure alongside a
-/// successfully built sheet renders both.
+/// successfully built sheet renders both. Wrapped in its own [`SpTheme`], since Spectrum Web
+/// Components render unstyled (correct custom elements, but none of Spectrum's CSS
+/// custom-property design tokens applied) without one — each independently-mounted `Root`
+/// gets its own `<sp-theme>`, exactly as `begin`'s single, app-wide one wraps its whole tree.
 ///
 /// `outcome` is a plain call rather than a `use_hook` because `BuildOutcome` holds a `Sheet`,
 /// which cannot be `Clone` (it owns type-erased cell values) and `use_hook` requires its state
@@ -43,7 +47,7 @@ fn Root(props: RootProps) -> Element {
         move || name.clone()
     });
 
-    match outcome.sheet_labels {
+    let inner = match outcome.sheet_labels {
         Some((sheet, labels)) => {
             let sheet = use_signal(|| sheet);
             let labels = use_signal(|| labels);
@@ -60,6 +64,15 @@ fn Root(props: RootProps) -> Element {
             rsx! {
                 pre { class: "adam-live-error", "{error}" }
             }
+        }
+    };
+
+    rsx! {
+        SpTheme {
+            color: "light".to_string(),
+            scale: "medium".to_string(),
+            system: "spectrum-two".to_string(),
+            {inner}
         }
     }
 }
