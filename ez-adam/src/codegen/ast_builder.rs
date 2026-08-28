@@ -266,6 +266,8 @@ fn build_conditional_decl(
 ///   identifier, or a parenthesized comma-list of them) — a parse failure
 ///   here indicates a bug in this function, not bad user data, so it
 ///   panics rather than returning a `Result`.
+///
+/// - Complexity: O(n) in `cells.len()`.
 fn cells_tuple_expr(doc: &Document, cells: &[CellId]) -> Expr {
     let text = if cells.len() == 1 {
         doc.cells[cells[0]].name.clone()
@@ -293,6 +295,8 @@ fn literal_text(value: &CellValueLiteral) -> String {
 
 /// Converts a branch's `CellValueLiteral`s into a `MatchLiteral` — a bare
 /// scalar for a single value, or a `Tuple` for multiple.
+///
+/// - Complexity: O(n) in `values.len()`.
 fn match_literal_for(values: &[CellValueLiteral]) -> MatchLiteral {
     if values.len() == 1 {
         MatchLiteral::Scalar(literal_for(&values[0]))
@@ -314,6 +318,8 @@ fn match_literal_for(values: &[CellValueLiteral]) -> MatchLiteral {
 /// the `MatchLiteral` value itself.
 ///
 /// - Precondition: `values` is non-empty.
+///
+/// - Complexity: O(n) in `values.len()`.
 fn match_literal_span(values: &[CellValueLiteral]) -> ExprSpan {
     debug_assert!(!values.is_empty(), "values must be non-empty");
     if values.len() == 1 {
