@@ -393,15 +393,15 @@ impl AdamAstParser {
                 });
                 break; // default branch is always last
             }
-            let (lit, lit_span) = cursor.consume_literal()?;
+            let (literal, literal_span) = parse_match_literal(cursor)?;
             cursor.expect_punct("=>")?;
             let branch_open = cursor.expect_open_brace()?;
             let relationships = self.parse_branch_relationships(cursor)?;
             let close = cursor.expect_close_brace()?;
             cursor.consume_punct(",");
             branches.push(ast::ConditionalBranch {
-                literal: lit,
-                literal_span: point(lit_span),
+                literal,
+                literal_span,
                 relationships,
                 leading_comment: None,
                 blank_line_before: false,
@@ -409,7 +409,7 @@ impl AdamAstParser {
                 blank_line_before_close: false,
                 open_brace_span: point(branch_open),
                 span: ast::ExprSpan {
-                    start: lit_span,
+                    start: literal_span.start,
                     end: close,
                 },
             });
@@ -579,6 +579,42 @@ fn parse_binding_target(cursor: &mut TokenCursor) -> Result<(Vec<(String, ast::E
     }
     cursor.expect_close_paren()?;
     Ok((outputs, true))
+}
+
+/// `match_literal = literal | "(" match_literal { "," match_literal } [ "," ] ")".`
+///
+/// Mirrors [`parse_binding_target`]'s `"(" X { "," X } ")"` handling above (the same shape
+/// `AdamAstParser::parse_type_expr` also parses for tuple types), since a tuple match literal is
+/// structurally identical — but unlike `parse_binding_target`, a lone parenthesized literal with
+/// no comma (e.g. `(0i32)`) still becomes a 1-element `MatchLiteral::Tuple`, not a transparent
+/// grouping: `adam-lang/src/parser.rs`'s direct parser distinguishes a bare literal from a
+/// parenthesized one the same way (a tuple match key is always written with its own parens), so
+/// there's no scalar/tuple ambiguity to collapse here.
+///
+/// Returns the parsed literal alongside its span: a single token's span for a scalar, or the span
+/// of the whole `(` ... `)` group for a tuple.
+fn parse_match_literal(cursor: &mut TokenCursor) -> Result<(ast::MatchLiteral, ast::ExprSpan)> {
+    if !cursor.at_open_paren() {
+        let (lit, span) = cursor.consume_literal()?;
+        return Ok((ast::MatchLiteral::Scalar(lit), point(span)));
+    }
+    let open_span = cursor.expect_open_paren()?;
+    let mut elements = Vec::new();
+    while !cursor.at_close_paren() {
+        let (element, _) = parse_match_literal(cursor)?;
+        elements.push(element);
+        if !cursor.consume_punct(",") {
+            break;
+        }
+    }
+    let close_span = cursor.expect_close_paren()?;
+    Ok((
+        ast::MatchLiteral::Tuple(elements),
+        ast::ExprSpan {
+            start: open_span,
+            end: close_span,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -802,6 +838,24 @@ mod tests {
             panic!("expected Conditional");
         };
         assert_eq!(cond.branches[0].relationships.len(), 2);
+    }
+
+    #[test]
+    fn parses_a_multi_cell_tuple_conditional_branch() {
+        let mut parser = AdamAstParser::new();
+        let sheet = parser
+            .parse_str(
+                "sheet s { cell a: bool; cell b: bool; conditional (a, b) { (true, false) => { relationship { a := b; } } _ => { } } }",
+            )
+            .unwrap();
+        let ast::SheetItem::Conditional(cond) = &sheet.items[2] else {
+            panic!("expected a Conditional item");
+        };
+        assert_eq!(cond.branches.len(), 1);
+        match &cond.branches[0].literal {
+            ast::MatchLiteral::Tuple(elements) => assert_eq!(elements.len(), 2),
+            ast::MatchLiteral::Scalar(_) => panic!("expected a Tuple match literal"),
+        }
     }
 
     #[test]

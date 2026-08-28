@@ -404,12 +404,26 @@ pub struct DefaultBranch {
     pub span: ExprSpan,
 }
 
-/// `conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].`
+/// A conditional branch's match key: a single literal, or a parenthesized tuple of them
+/// (mirroring a multi-cell condition's tuple value, e.g. `(false, true) => { ... }`). The direct
+/// parser (`adam-lang/src/parser.rs`) already accepts this via a general `or_expression`; this
+/// type brings the AST-only side (used by `format_sheet`/`adam-fmt`) up to the same capability
+/// for conditional branch keys specifically.
+#[derive(Debug, Clone)]
+pub enum MatchLiteral {
+    /// A single literal match key, e.g. `0i32` or `true`.
+    Scalar(Literal),
+    /// A parenthesized tuple of match keys, e.g. `(true, false)`, in source order.
+    Tuple(Vec<MatchLiteral>),
+}
+
+/// `conditional_branch = match_literal "=>" "{" { relationship_decl } "}" [ "," ].`
 #[derive(Debug, Clone)]
 pub struct ConditionalBranch {
     /// The branch's unresolved match literal.
-    pub literal: Literal,
-    /// The literal token's span.
+    pub literal: MatchLiteral,
+    /// The span of the whole match literal: a single token for `MatchLiteral::Scalar`, or the
+    /// whole parenthesized group (from `(` through `)`) for `MatchLiteral::Tuple`.
     pub literal_span: ExprSpan,
     /// The branch's relationships, in declaration order.
     pub relationships: Vec<RelationshipDecl>,
@@ -442,6 +456,22 @@ mod tests {
             start: span,
             end: span,
         }
+    }
+
+    #[test]
+    fn match_literal_scalar_and_tuple_are_distinct() {
+        // `cel_parser::lex_lexer::Literal` is `syn::Lit`; `Literal::Bool` wraps a `syn::LitBool`,
+        // not a plain `bool`.
+        fn bool_literal(value: bool) -> Literal {
+            Literal::Bool(syn::LitBool::new(value, Span::call_site()))
+        }
+
+        let a = MatchLiteral::Scalar(bool_literal(true));
+        let b = MatchLiteral::Tuple(vec![
+            MatchLiteral::Scalar(bool_literal(true)),
+            MatchLiteral::Scalar(bool_literal(false)),
+        ]);
+        assert_ne!(format!("{a:?}"), format!("{b:?}"));
     }
 
     #[test]

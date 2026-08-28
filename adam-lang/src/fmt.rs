@@ -184,8 +184,19 @@ fn write_branch_relationships(
     out.push_str("}\n");
 }
 
+/// Renders `literal`'s `.adm2` spelling by re-emitting `span`'s original source text — for a
+/// `MatchLiteral::Scalar`, `span` covers just that one literal token; for a `MatchLiteral::Tuple`,
+/// `span` covers the whole parenthesized group (see `ConditionalBranch::literal_span`), so
+/// re-emitting it directly reproduces the tuple's `(a, b)` spelling without needing a separate
+/// span per element.
+fn write_match_literal(literal: &ast::MatchLiteral, span: ast::ExprSpan) -> String {
+    match literal {
+        ast::MatchLiteral::Scalar(_) | ast::MatchLiteral::Tuple(_) => source_text_or_empty(span),
+    }
+}
+
 /// Writes one `literal => { ... }` conditional branch, re-emitting the match literal via its
-/// span rather than the (unused) `Literal` value.
+/// span rather than the (unused) `Literal`/`MatchLiteral` value.
 fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize) {
     write_trivia(
         out,
@@ -194,7 +205,7 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
         depth,
     );
     out.push_str(&indent(depth));
-    out.push_str(&source_text_or_empty(branch.literal_span));
+    out.push_str(&write_match_literal(&branch.literal, branch.literal_span));
     out.push_str(" => ");
     write_branch_relationships(
         out,
@@ -527,6 +538,12 @@ mod tests {
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_a_tuple_conditional_branch() {
+        let source = "sheet s { cell a: bool; cell b: bool; conditional (a, b) { (true, false) => { relationship { a := b; } } _ => { } } }";
+        assert!(format(source).contains("(true, false) => {"));
     }
 
     #[test]
