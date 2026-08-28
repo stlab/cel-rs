@@ -24,6 +24,13 @@ struct RootProps {
 /// closure only ever fires on this component's first render, and props never change after
 /// [`mount`] constructs them, so no later render (should one ever occur; this component holds
 /// no subscriptions of its own that would trigger one) can replace already-mounted state.
+///
+/// Caution: the `use_signal` calls below live inside a `match` arm on `outcome.sheet_labels`,
+/// which is only sound because `build_sheet` is deterministic over an unchanging `props` — the
+/// arm taken can never differ across re-renders of the same component instance. If `Root` ever
+/// gains a reason to re-render with different props, or `build_sheet` ever becomes
+/// non-deterministic, this conditional-hook-call pattern would need reworking (e.g. calling
+/// `use_signal` unconditionally with an `Option`-shaped initial value instead).
 #[component]
 fn Root(props: RootProps) -> Element {
     let outcome = build_sheet(&props.source, &props.name);
