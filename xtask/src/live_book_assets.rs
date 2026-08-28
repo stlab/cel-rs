@@ -79,6 +79,10 @@ fn build_manifest(
 ///
 /// - Postcondition: an existing file at a destination path is overwritten.
 /// - Complexity: O(n) in the total size of every file under `src`.
+///
+/// # Errors
+/// Returns `Err` if `src` cannot be read, or if `dst` (or any nested destination directory or
+/// file) cannot be created or written to.
 fn copy_dir_contents(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
