@@ -1,0 +1,12 @@
+.adam-live {
+  margin: 0.5em 0 1.5em 0;
+  padding: 12px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.adam-live-error {
+  color: #a4262c;
+  white-space: pre-wrap;
+  font-family: monospace;
+}

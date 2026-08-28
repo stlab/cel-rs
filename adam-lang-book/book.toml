@@ -8,6 +8,12 @@ src = "book-src"
 [build]
 build-dir = "book-dist"
 
+[preprocessor.live-examples]
+command = "mdbook-live-examples"
+before = ["links"]
+
 [output.html]
 git-repository-url = "https://github.com/stlab/cel-rs"
 edit-url-template = "https://github.com/stlab/cel-rs/edit/main/adam-lang-book/{path}"
+additional-css = ["book-src/theme/adam-live.css"]
+additional-js = ["book-src/theme/adam-live-bootstrap.js"]
