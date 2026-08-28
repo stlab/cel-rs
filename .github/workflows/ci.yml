@@ -45,9 +45,21 @@ jobs:
       with:
         mdbook-version: 'latest'
 
+    - name: Install the live-examples mdBook preprocessor
+      run: cargo install --path adam-lang-book-preprocessor
+
+    - name: Build the adam-lang-book-live wasm bundle
+      run: |
+        cargo install wasm-pack --locked
+        cd adam-lang-book-live && wasm-pack build --target web --release
+
+    - name: Prepare live-book assets (manifest + Spectrum bundle + wasm/js output)
+      run: cargo run -p xtask -- prepare-live-book-assets
+
     # Catches a broken {{#include}} path/anchor in the adam-lang book (adam-lang-book/book-src)
     # the moment a chapter or its backing tests/*.rs example drifts out of sync -- mdbook build
-    # fails outright on either, so no separate lint is needed.
+    # fails outright on either, so no separate lint is needed. A missing mdbook-live-examples
+    # binary or wasm bundle from the steps above would fail this the same way.
     - name: Build the adam-lang book
       run: mdbook build adam-lang-book
 

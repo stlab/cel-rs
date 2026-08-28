@@ -39,6 +39,17 @@ jobs:
       with:
         mdbook-version: 'latest'
 
+    - name: Install the live-examples mdBook preprocessor
+      run: cargo install --path adam-lang-book-preprocessor
+
+    - name: Build the adam-lang-book-live wasm bundle
+      run: |
+        cargo install wasm-pack --locked
+        cd adam-lang-book-live && wasm-pack build --target web --release
+
+    - name: Prepare live-book assets (manifest + Spectrum bundle + wasm/js output)
+      run: cargo run -p xtask -- prepare-live-book-assets
+
     # The adam-lang tutorial/reference book links into this same rustdoc output (e.g.
     # `../adam_rs/sheet/struct.Sheet.html`), so it's built and published from target/doc
     # alongside it, not as a separate site.
