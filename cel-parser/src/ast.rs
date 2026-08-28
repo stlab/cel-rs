@@ -38,6 +38,33 @@ impl ExprSpan {
             end: span,
         }
     }
+
+    /// Creates a span whose `source_text()` returns exactly `text`, by
+    /// tokenizing it and taking the resulting token's span. For hand-built
+    /// AST nodes (not produced by parsing real source), this gives leaves
+    /// like a type name or literal a span the formatter can read back
+    /// text from, the same way `cel-rs-macros` already does internally.
+    ///
+    /// - Precondition: `text` tokenizes to exactly one token tree.
+    #[must_use]
+    pub fn for_text(text: &str) -> Self {
+        let tokens: proc_macro2::TokenStream = text
+            .parse()
+            .expect("ExprSpan::for_text: text must be valid tokens");
+        let mut iter = tokens.into_iter();
+        let first = iter
+            .next()
+            .expect("ExprSpan::for_text: text must be non-empty");
+        debug_assert!(
+            iter.next().is_none(),
+            "ExprSpan::for_text: text must tokenize to exactly one token"
+        );
+        let span = first.span();
+        ExprSpan {
+            start: span,
+            end: span,
+        }
+    }
 }
 
 /// A CEL literal, one variant per concrete Rust type [`crate::ParserContext::push_literal`] can
@@ -1020,5 +1047,18 @@ mod tests {
         assert_eq!(op, LogicalOp::And);
         assert!(matches!(*lhs, Expr::Op { ref name, .. } if name == "=="));
         assert!(matches!(*rhs, Expr::Op { ref name, .. } if name == "=="));
+    }
+
+    #[test]
+    fn for_text_produces_a_span_whose_source_text_matches() {
+        let span = ExprSpan::for_text("i64");
+        assert_eq!(span.start.source_text().as_deref(), Some("i64"));
+        assert_eq!(span.end.source_text().as_deref(), Some("i64"));
+    }
+
+    #[test]
+    fn for_text_works_for_a_string_literal() {
+        let span = ExprSpan::for_text("\"hello\"");
+        assert_eq!(span.start.source_text().as_deref(), Some("\"hello\""));
     }
 }
