@@ -13,6 +13,9 @@ use cel_parser::{AstContext, OpLookup, Parser};
 ///
 /// Returns the underlying [`cel_parser::ParseError`] if `text` is not
 /// syntactically valid CEL.
+// Not yet called from non-test code — `build_cell_decl`/`build_relationship_decl`/
+// `build_conditional_decl` (later tasks in this same plan) will call this.
+#[allow(dead_code)]
 fn parse_expr_text(text: &str) -> Result<cel_parser::Expr, cel_parser::ParseError> {
     let mut lookup = OpLookup::new();
     cel_std::install(&mut lookup);
@@ -24,6 +27,9 @@ fn parse_expr_text(text: &str) -> Result<cel_parser::Expr, cel_parser::ParseErro
 /// with a span whose source text is genuinely that name (see
 /// [`cel_parser::ExprSpan::for_text`]) so `format_sheet` renders it
 /// correctly.
+// Not yet called from non-test code — `build_cell_decl` (a later task in
+// this same plan) will call this.
+#[allow(dead_code)]
 fn type_expr_for(ty: &CellType) -> adam_lang::ast::TypeExpr {
     let name = match ty {
         CellType::F64 { .. } => "f64",
