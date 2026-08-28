@@ -10,20 +10,17 @@ Adam programs are called **sheets**. This chapter is a fast, informal tour of ev
 construct Adam has; later chapters go back over the same ground in more detail, and the
 [reference manual](reference.md) collects the precise rules for looking things up.
 
-You don't need to install anything to follow along: every source fragment below either stands
-on its own as a `.adm2` file, or is a complete, compiled, and tested Rust program showing how a
-host application feeds that source to Adam and reads the results back out.
+You don't need to install anything to follow along: every source fragment below stands on its
+own as a `.adm2` file, included directly from a test that also exercises it, so a chapter's
+prose can never drift from code that actually parses and runs.
 
 ## 1.1 A first sheet
 
 An Adam program is a single `sheet`, named, with a body of declarations between braces.
 The simplest useful sheet declares a few cells and nothing else:
 
-```text
-sheet hello {
-    cell width: i32 = 1920;
-    cell height: i32 = 1080;
-}
+```
+{{#include examples/tutorial/first_sheet.adm2}}
 ```
 
 A **cell** is a named, typed storage location: the basic unit of state in a property model.
@@ -33,17 +30,9 @@ sequence of statements: there is no control flow at this level, no loops, and no
 execution order. A sheet describes a *graph* of cells and the constraints between them, not a
 sequence of steps to run.
 
-To do anything with a sheet, a host program parses it, then reads and writes cells by `CellId`,
-exactly like driving `adam_rs::Sheet` directly:
-
-```
-{{#include examples/tutorial/first_sheet.adm2}}
-```
-
-`parser.parse_str` returns a [`ParsedSheet`](../adam_lang/struct.ParsedSheet.html), which derefs
-to [`Sheet`](../adam_rs/sheet/struct.Sheet.html); every `Sheet` method (`read`, `write`, `propagate`,
-and the rest) works directly on it, plus a `cell_names` table mapping each declared name to its
-`CellId`, so a host application can look cells up by the name the sheet author gave them.
+Parsing this text and reading or writing its cells is a Rust-level embedding concern, not
+something a sheet author does; see [Appendix A.11](reference.md#a11-the-host-embedding-api)
+for how a host application actually drives a parsed sheet.
 
 ## 1.2 Relationships: multi-way constraints
 
@@ -55,18 +44,8 @@ The classic example is three numbers related by multiplication (`a * b = c`), wh
 the three can be computed from the other two, the same shape as `pixels == inches * resolution`
 from [the introduction](intro.md#why-adam). As a sheet:
 
-```text
-sheet triangle {
-    cell c = 0.0;
-    cell a = 2.0;
-    cell b = 3.0;
-
-    relationship {
-        c := a * b;
-        a := c / b;
-        b := c / a;
-    }
-}
+```
+{{#include examples/tutorial/multiplication_triangle.adm2}}
 ```
 
 The `relationship` block offers three **bindings**: `c := a * b`, `a := c / b`, and
@@ -75,11 +54,7 @@ binding is active at a time; which one is chosen depends on which cells were wri
 recently (see [Chapter 4](relationships.md) for the full rule). A cell's *declaration* counts as
 a write for this purpose, so before anything is ever explicitly written, cells declared earlier
 are treated as "staler" than cells declared later. The solver prefers to leave the freshest
-cells alone and derive the stalest one: here, `c`, declared first:
-
-```
-{{#include examples/tutorial/multiplication_triangle.adm2}}
-```
+cells alone and derive the stalest one: here, `c`, declared first.
 
 Nothing here names *which* cell is the "output"; that's the whole point. Whichever cell was
 written (or, failing that, declared) least recently is the one the solver derives; `write`ing a
@@ -91,39 +66,13 @@ A `conditional` groups relationships that are only active under a matching condi
 evaluates a **match subject**, then activates whichever branch's literal equals the current
 match value:
 
-```text
-sheet mode_demo {
-    cell p: i32 = 0;
-    cell x: f64 = 1.0;
-    cell y: f64 = 2.0;
-
-    conditional p {
-        0i32 => {
-            relationship {
-                x := y;
-            }
-        }
-        1i32 => {
-            relationship {
-                y := x;
-            }
-        }
-        _ => {
-            relationship {
-                x := 0.0;
-            }
-        }
-    }
-}
+```
+{{#include examples/tutorial/mode_demo.adm2}}
 ```
 
 Only the active branch's relationships participate in that round's solve; every other branch's
 relationships are as if they weren't declared at all. The `_` branch, if present, catches any
-value none of the named branches list, and must be written last:
-
-```
-{{#include examples/tutorial/mode_demo.adm2}}
-```
+value none of the named branches list, and must be written last.
 
 See [Chapter 5](conditionals.md) for branch types, tuple match subjects, and what happens when
 no branch matches and there's no default.
@@ -132,18 +81,12 @@ no branch matches and there's no default.
 
 A `filter` clause attaches a standing domain constraint to a cell, most commonly a range:
 
-```text
-sheet volume {
-    cell level: i32 = 50 filter 0..=100;
-}
-```
-
-Write an out-of-range value and the cell keeps it, raw, until the next `propagate()`;
-`write()` never inspects a filter. `propagate()` is what conforms the value:
-
 ```
 {{#include examples/tutorial/clamp_demo.adm2}}
 ```
+
+Write an out-of-range value and the cell keeps it, raw, until the next `propagate()`;
+`write()` never inspects a filter. `propagate()` is what conforms the value.
 
 A filter's bounds don't have to be constants: `0..=max` references another cell, and the clamp
 tracks it live. [Chapter 6](filters.md) covers filters in full, including the precise
@@ -175,17 +118,6 @@ destructuring-vs-direct-bind distinction.
 An `out` declaration computes one final, read-only value from the rest of the sheet, and can
 carry named `require`ments: boolean checks reported after every `propagate()`, never enforced
 by rejecting a write:
-
-```text
-sheet area_demo {
-    cell width: i32 = 10;
-    cell height: i32 = 20;
-
-    out area: i32 := width * height require {
-        not_too_big: area <= 300;
-    };
-}
-```
 
 ```
 {{#include examples/tutorial/area_with_requirement.adm2}}
