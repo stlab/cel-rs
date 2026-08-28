@@ -18,6 +18,27 @@
 const themeBase = new URL("theme/", document.baseURI);
 const moduleUrl = new URL("adam_lang_book_live.js", themeBase).href;
 const manifestUrl = new URL("adam-live-examples.json", themeBase).href;
+const swcUrl = new URL("swc.js", themeBase).href;
+
+// `SheetInspector` renders `sp-*` elements (see `adam-web-ui/src/spectrum.rs`), but each
+// mounted `VirtualDom` is rooted at its own `.adam-live` div — none of them ever renders a
+// `<script>` tag of their own the way `begin/src/app.rs`'s top-level `App` component does for
+// its single, page-wide desktop/web window. Left unloaded, every `sp-*` tag on the page stays
+// an undefined custom element: no shadow DOM, so `SheetInspector`'s own `shadowRoot.querySelector`
+// reads come back null and the number-field/slider write paths never fire, and no visible input
+// box at all (an undefined custom element renders only its — here, absent — light-DOM children).
+// Load `swc.js` once at the page level, in parallel with the wasm/manifest fetches below, so it
+// defines every `sp-*` element exactly once regardless of how many examples the page mounts.
+function loadSwc() {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.type = "module";
+    script.src = swcUrl;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`adam-live: failed to load ${swcUrl}`));
+    document.head.appendChild(script);
+  });
+}
 
 (async () => {
   const mounts = document.querySelectorAll(".adam-live");
@@ -28,6 +49,7 @@ const manifestUrl = new URL("adam-live-examples.json", themeBase).href;
   const [{ default: init, mount }, manifest] = await Promise.all([
     import(moduleUrl),
     fetch(manifestUrl).then((r) => r.json()),
+    loadSwc(),
   ]);
   await init();
 
