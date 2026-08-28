@@ -52,13 +52,7 @@ fn type_expr_for(ty: &CellType) -> adam_lang::ast::TypeExpr {
 ///
 /// - Postcondition: `filter` is `None` iff `cell.ty` is `Bool`/`Text` or
 ///   has no clamp bounds.
-// Not yet called from non-test code — `codegen/mod.rs`'s `generate_cell_decl`
-// (Task 8 in this same plan) will call this once `build_relationship_decl`/
-// `build_conditional_decl` (Tasks 6/7) exist too, at which point this and its
-// callees (`clamp_filter`, `type_expr_for`, `parse_expr_text`) become reachable
-// from a live, non-test call path and this attribute should come off.
-#[allow(dead_code)]
-fn build_cell_decl(cell: &Cell) -> CellDecl {
+pub(crate) fn build_cell_decl(cell: &Cell) -> CellDecl {
     CellDecl {
         name: cell.name.clone(),
         name_span: ExprSpan::for_text(&cell.name),
@@ -136,11 +130,7 @@ fn clamp_filter(ty: &CellType) -> Option<CellFilter> {
 /// formula text isn't valid CEL.
 ///
 /// - Complexity: O(n) in `group.members.len()`.
-// Not yet called from non-test code — `codegen/mod.rs`'s integration (Task 8
-// in this plan) will call this once it wires together cell/relationship/
-// conditional generation, at which point this attribute should come off.
-#[allow(dead_code)]
-fn build_relationship_decl(
+pub(crate) fn build_relationship_decl(
     doc: &Document,
     group: &RelationshipGroup,
     group_id: RelationshipGroupId,
@@ -187,11 +177,7 @@ fn build_relationship_decl(
 ///
 /// - Complexity: O(n) in the total number of branches, their enabled
 ///   groups' members, and the default's members.
-// Not yet called from non-test code — `codegen/mod.rs`'s integration (Task 8
-// in this plan) will call this once it wires together cell/relationship/
-// conditional generation, at which point this attribute should come off.
-#[allow(dead_code)]
-fn build_conditional_decl(
+pub(crate) fn build_conditional_decl(
     doc: &Document,
     conditional_id: ConditionalGroupId,
     cond: &ConditionalGroup,
