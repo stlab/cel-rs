@@ -4,10 +4,14 @@
 //! Code extension already use, rather than a second, independent one.
 
 use crate::model::cell::{Cell, CellType};
-use adam_lang::ast::{CellDecl, CellFilter};
+use crate::model::document::Document;
+use crate::model::relationship_group::{RelationshipGroup, RelationshipGroupId};
+use adam_lang::ast::{BindingDecl, CellDecl, CellFilter, RelationshipDecl};
 use cel_parser::{
     AstContext, ClosureParam, ClosureParamTypeExpr, Expr, ExprSpan, OpLookup, Parser,
 };
+
+use super::ExportError;
 
 /// Parses `text` as a standalone CEL expression, for use as a formula's or
 /// filter's `Expr` body when hand-building an AST node.
@@ -116,6 +120,53 @@ fn clamp_filter(ty: &CellType) -> Option<CellFilter> {
     })
 }
 
+/// Builds a `relationship { ... }` block for `group` (identified by
+/// `group_id`, used only to label a formula error, not part of the
+/// rendered output), one binding per member.
+///
+/// # Errors
+///
+/// Returns [`ExportError::InvalidFormula`] for the first member whose
+/// formula text isn't valid CEL.
+// Not yet called from non-test code — `codegen/mod.rs`'s integration (Task 8
+// in this plan) will call this once it wires together cell/relationship/
+// conditional generation, at which point this attribute should come off.
+#[allow(dead_code)]
+fn build_relationship_decl(
+    doc: &Document,
+    group: &RelationshipGroup,
+    group_id: RelationshipGroupId,
+) -> Result<RelationshipDecl, ExportError> {
+    let mut bindings = Vec::with_capacity(group.members.len());
+    for (node, formula) in &group.members {
+        let cell_id = doc.cell_nodes[*node].cell;
+        let cell = &doc.cells[cell_id];
+        let body = parse_expr_text(formula).map_err(|source| ExportError::InvalidFormula {
+            group: group_id,
+            cell: cell_id,
+            source,
+        })?;
+        bindings.push(BindingDecl {
+            outputs: vec![(cell.name.clone(), ExprSpan::for_text(&cell.name))],
+            destructure: false,
+            body,
+            leading_comment: None,
+            blank_line_before: false,
+            span: ExprSpan::for_text(&cell.name),
+        });
+    }
+    Ok(RelationshipDecl {
+        bindings,
+        leading_comment: None,
+        doc_comment: None,
+        blank_line_before: false,
+        trailing_comment: None,
+        blank_line_before_close: false,
+        open_brace_span: ExprSpan::for_text("relationship"),
+        span: ExprSpan::for_text("relationship"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +216,50 @@ mod tests {
             }
             adam_lang::ast::TypeExpr::Tuple(..) => panic!("expected Named"),
         }
+    }
+
+    #[test]
+    fn build_relationship_decl_produces_one_binding_per_member() {
+        use crate::model::document::Document;
+        use crate::model::geometry::Point;
+        use crate::ops::cells::{add_cell, add_cell_node};
+        use crate::ops::relationships::{create_relationship, set_member_formula};
+
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group_id = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        set_member_formula(&mut doc, group_id, a_node, "height_pixels * 2i64");
+        set_member_formula(&mut doc, group_id, b_node, "width_pixels / 2i64");
+
+        let group = &doc.relationship_groups[group_id];
+        let decl = build_relationship_decl(&doc, group, group_id).unwrap();
+        assert_eq!(decl.bindings.len(), 2);
+        assert_eq!(decl.bindings[0].outputs[0].0, "width_pixels");
+    }
+
+    #[test]
+    fn build_relationship_decl_reports_an_invalid_formula() {
+        use crate::model::document::Document;
+        use crate::model::geometry::Point;
+        use crate::ops::cells::{add_cell, add_cell_node};
+        use crate::ops::relationships::create_relationship;
+
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group_id = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        // Leave both formulas empty (the sketch's "[ ]" placeholder state).
+
+        let group = &doc.relationship_groups[group_id];
+        let result = build_relationship_decl(&doc, group, group_id);
+        assert!(matches!(
+            result,
+            Err(ExportError::InvalidFormula { group, .. }) if group == group_id
+        ));
     }
 }
