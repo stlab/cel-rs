@@ -14,20 +14,15 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::project_root;
+use adam_lang_book_live_config::NO_LIVE_MOUNT;
 
-/// Example names deliberately excluded from the live-mount manifest, matching the
-/// `mdbook-live-examples` preprocessor's own `NO_LIVE_MOUNT` list
-/// (`adam-lang-book-preprocessor/src/main.rs`) — a source excluded there is never referenced
-/// by a mount `<div>`'s `data-example`, so embedding it here would only bloat the manifest.
-/// Keep this in sync with that list; adding a second excluded name is a one-line change here.
-const EXCLUDED_EXAMPLES: &[&str] = &["expressions/no_standard_library"];
+use crate::project_root;
 
 /// Walks `adam-lang-book/book-src/examples/<chapter>/<name>.adm2`, building the
 /// `{"<chapter>/<name>": "<source>"}` map the live-mount bootstrap script looks each example
 /// up in by its mount div's `data-example` attribute.
 ///
-/// - Postcondition: no key in the returned map is present in [`EXCLUDED_EXAMPLES`].
+/// - Postcondition: no key in the returned map is present in [`NO_LIVE_MOUNT`].
 /// - Complexity: O(n) in the total size of every `.adm2` file under `examples_dir`.
 ///
 /// # Errors
@@ -58,7 +53,7 @@ fn build_manifest(
                 .ok_or("example file has no stem")?
                 .to_string_lossy();
             let key = format!("{chapter_name}/{stem}");
-            if EXCLUDED_EXAMPLES.contains(&key.as_str()) {
+            if NO_LIVE_MOUNT.contains(&key.as_str()) {
                 continue;
             }
             let source = fs::read_to_string(&file_path)?;

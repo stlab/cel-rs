@@ -9,6 +9,7 @@ name = "xtask"
 path = "src/main.rs"
 
 [dependencies]
+adam-lang-book-live-config = { path = "../adam-lang-book-live-config" }
 ureq = "3"
 toml = "1"
 serde = { version = "1", features = ["derive"] }

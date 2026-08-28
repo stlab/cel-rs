@@ -5,17 +5,12 @@
 //!
 //! Registered in `book.toml` as `[preprocessor.live-examples]`.
 
+use adam_lang_book_live_config::NO_LIVE_MOUNT;
 use mdbook::book::{Book, BookItem};
 use mdbook::errors::Error;
 use mdbook::preprocess::{CmdPreprocessor, Preprocessor, PreprocessorContext};
 use regex::Regex;
 use std::io;
-
-/// Examples deliberately excluded from live mounting: sources whose whole point depends on a
-/// parser configuration `adam_web_ui::build_sheet` doesn't use (here, the *absence* of
-/// `cel-std`), so mounting them live would silently show different behavior than the
-/// surrounding prose describes. See this plan's Global Constraints for why.
-const NO_LIVE_MOUNT: &[&str] = &["expressions/no_standard_library"];
 
 /// Matches an `.adm2` include directive, capturing `<chapter>/<name>` (without the
 /// `.adm2` extension) for use as both the mount div's `data-example` value and the

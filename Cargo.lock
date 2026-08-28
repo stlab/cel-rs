@@ -37,9 +37,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "adam-lang-book-live-config"
+version = "0.1.0"
+
+[[package]]
 name = "adam-lang-book-preprocessor"
 version = "0.1.0"
 dependencies = [
+ "adam-lang-book-live-config",
  "mdbook",
  "regex",
  "serde_json",
@@ -7350,6 +7355,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "adam-lang-book-live-config",
  "serde",
  "serde_json",
  "toml 1.1.4+spec-1.1.0",

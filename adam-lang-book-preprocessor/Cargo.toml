@@ -9,6 +9,7 @@ name = "mdbook-live-examples"
 path = "src/main.rs"
 
 [dependencies]
+adam-lang-book-live-config = { path = "../adam-lang-book-live-config" }
 mdbook = { version = "0.4", default-features = false }
 regex = "1"
 serde_json = "1"
