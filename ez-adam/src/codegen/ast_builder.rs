@@ -3,10 +3,16 @@
 //! shared `adam_lang::format_sheet` — the same formatter `adam-fmt`/the VS
 //! Code extension already use, rather than a second, independent one.
 
-use crate::model::cell::{Cell, CellType};
+use crate::model::cell::{Cell, CellId, CellType};
+use crate::model::conditional_group::{
+    CellValueLiteral, ConditionExpr, ConditionalGroup, ConditionalGroupId,
+};
 use crate::model::document::Document;
 use crate::model::relationship_group::{RelationshipGroup, RelationshipGroupId};
-use adam_lang::ast::{BindingDecl, CellDecl, CellFilter, RelationshipDecl};
+use adam_lang::ast::{
+    BindingDecl, CellDecl, CellFilter, ConditionalBranch, ConditionalDecl, DefaultBranch,
+    MatchLiteral, RelationshipDecl,
+};
 use cel_parser::{
     AstContext, ClosureParam, ClosureParamTypeExpr, Expr, ExprSpan, OpLookup, Parser,
 };
@@ -169,6 +175,190 @@ fn build_relationship_decl(
     })
 }
 
+/// Builds a `conditional <expr> { <literal> => {...} ... _ => {...} }`
+/// declaration for `cond` (identified by `conditional_id`, used only to
+/// label a condition-parse error, not part of the rendered output).
+///
+/// # Errors
+///
+/// Propagates [`ExportError::InvalidFormula`] from any nested relationship
+/// group's members, or returns [`ExportError::InvalidCondition`] if a
+/// `Formula`-mode condition expression isn't valid CEL.
+///
+/// - Complexity: O(n) in the total number of branches, their enabled
+///   groups' members, and the default's members.
+// Not yet called from non-test code — `codegen/mod.rs`'s integration (Task 8
+// in this plan) will call this once it wires together cell/relationship/
+// conditional generation, at which point this attribute should come off.
+#[allow(dead_code)]
+fn build_conditional_decl(
+    doc: &Document,
+    conditional_id: ConditionalGroupId,
+    cond: &ConditionalGroup,
+) -> Result<ConditionalDecl, ExportError> {
+    let match_expr = match &cond.condition {
+        ConditionExpr::Cells(cells) => cells_tuple_expr(doc, cells),
+        ConditionExpr::Formula { expr, .. } => {
+            parse_expr_text(expr).map_err(|source| ExportError::InvalidCondition {
+                conditional: conditional_id,
+                source,
+            })?
+        }
+    };
+
+    let mut branches = Vec::with_capacity(cond.branches.len());
+    for branch in &cond.branches {
+        let mut relationships = Vec::with_capacity(branch.enabled_groups.len());
+        for &group_id in &branch.enabled_groups {
+            relationships.push(build_relationship_decl(
+                doc,
+                &doc.relationship_groups[group_id],
+                group_id,
+            )?);
+        }
+        branches.push(ConditionalBranch {
+            literal: match_literal_for(&branch.values),
+            literal_span: match_literal_span(&branch.values),
+            relationships,
+            leading_comment: None,
+            blank_line_before: false,
+            trailing_comment: None,
+            blank_line_before_close: false,
+            open_brace_span: ExprSpan::for_text("_"),
+            span: ExprSpan::for_text("_"),
+        });
+    }
+
+    let mut default_relationships = Vec::with_capacity(cond.default.len());
+    for &group_id in &cond.default {
+        default_relationships.push(build_relationship_decl(
+            doc,
+            &doc.relationship_groups[group_id],
+            group_id,
+        )?);
+    }
+
+    Ok(ConditionalDecl {
+        match_expr,
+        branches,
+        default: Some(DefaultBranch {
+            relationships: default_relationships,
+            trailing_comment: None,
+            blank_line_before_close: false,
+            open_brace_span: ExprSpan::for_text("_"),
+            span: ExprSpan::for_text("_"),
+        }),
+        leading_comment: None,
+        doc_comment: None,
+        blank_line_before: false,
+        trailing_comment: None,
+        blank_line_before_close: false,
+        open_brace_span: ExprSpan::for_text("conditional"),
+        span: ExprSpan::for_text("conditional"),
+    })
+}
+
+/// Builds the `(a, b, ...)` tuple expression naming `cells`, for a
+/// `Cells`-mode condition — a single cell renders as a bare identifier
+/// reference instead of a one-element tuple.
+///
+/// - Precondition: the synthesized text is always valid CEL (a bare
+///   identifier, or a parenthesized comma-list of them) — a parse failure
+///   here indicates a bug in this function, not bad user data, so it
+///   panics rather than returning a `Result`.
+fn cells_tuple_expr(doc: &Document, cells: &[CellId]) -> Expr {
+    let text = if cells.len() == 1 {
+        doc.cells[cells[0]].name.clone()
+    } else {
+        let names: Vec<&str> = cells.iter().map(|c| doc.cells[*c].name.as_str()).collect();
+        format!("({})", names.join(", "))
+    };
+    parse_expr_text(&text).unwrap_or_else(|e| {
+        panic!("synthesized condition expression {text:?} failed to parse: {e:?}")
+    })
+}
+
+/// Returns `value`'s `.adm2` literal spelling (`i64` suffixes,
+/// `Debug`-quoted/escaped strings), the shared text synthesis used by both
+/// [`literal_for`] (to re-lex it into a [`cel_parser::lex_lexer::Literal`])
+/// and [`match_literal_span`] (to widen a `Tuple` branch's span over the
+/// joined text of every element).
+fn literal_text(value: &CellValueLiteral) -> String {
+    match value {
+        CellValueLiteral::Bool(b) => b.to_string(),
+        CellValueLiteral::I64(n) => format!("{n}i64"),
+        CellValueLiteral::Text(s) => format!("{s:?}"),
+    }
+}
+
+/// Converts a branch's `CellValueLiteral`s into a `MatchLiteral` — a bare
+/// scalar for a single value, or a `Tuple` for multiple.
+fn match_literal_for(values: &[CellValueLiteral]) -> MatchLiteral {
+    if values.len() == 1 {
+        MatchLiteral::Scalar(literal_for(&values[0]))
+    } else {
+        MatchLiteral::Tuple(
+            values
+                .iter()
+                .map(|v| MatchLiteral::Scalar(literal_for(v)))
+                .collect(),
+        )
+    }
+}
+
+/// Returns the span [`adam_lang::fmt`]'s `write_match_literal` re-emits as
+/// `values`' `.adm2` spelling: a single literal's own text for one value,
+/// or the whole parenthesized, comma-joined text (e.g. `"(true, false)"`)
+/// for multiple — never a placeholder, since `write_match_literal` reads
+/// the *entire* rendered literal back from this one span rather than from
+/// the `MatchLiteral` value itself.
+///
+/// - Precondition: `values` is non-empty.
+fn match_literal_span(values: &[CellValueLiteral]) -> ExprSpan {
+    debug_assert!(!values.is_empty(), "values must be non-empty");
+    if values.len() == 1 {
+        ExprSpan::for_text(&literal_text(&values[0]))
+    } else {
+        let joined = values
+            .iter()
+            .map(literal_text)
+            .collect::<Vec<_>>()
+            .join(", ");
+        ExprSpan::for_text(&format!("({joined})"))
+    }
+}
+
+/// Converts one `CellValueLiteral` into `cel_parser`'s lexer-level
+/// `Literal` (`= syn::Lit`), by re-lexing its `.adm2` text spelling with
+/// [`cel_parser::lex_lexer::LexLexer`] — reusing the same literal-formatting
+/// convention (`i64` suffixes, quoted/escaped strings) `ez-adam` already
+/// relies on elsewhere.
+///
+/// This deliberately does not route through [`parse_expr_text`]/`Expr`:
+/// `Expr::Literal`'s payload is `cel_parser::ast::Literal` (a distinct enum
+/// of concrete Rust values, e.g. `I64(i64)`/`Bool(bool)`), not
+/// `cel_parser::lex_lexer::Literal` (`syn::Lit`, the type
+/// `adam_lang::ast::MatchLiteral::Scalar` actually wraps — see
+/// `adam-lang/src/ast_parser.rs`'s `parse_match_literal`), so extracting one
+/// from the other would mean hand-mapping every variant rather than
+/// re-lexing the same text once.
+///
+/// - Precondition: `value`'s synthesized text always lexes to exactly one
+///   literal token — a lex failure or non-literal token here indicates a
+///   bug in this function, not bad user data, so it panics rather than
+///   returning a `Result`.
+fn literal_for(value: &CellValueLiteral) -> cel_parser::lex_lexer::Literal {
+    let text = literal_text(value);
+    let tokens: proc_macro2::TokenStream = text
+        .parse()
+        .unwrap_or_else(|e| panic!("synthesized literal text {text:?} failed to tokenize: {e}"));
+    let mut lexer = cel_parser::lex_lexer::LexLexer::new(tokens.into_iter());
+    match lexer.next() {
+        Some(cel_parser::lex_lexer::Token::Literal(lit)) => lit,
+        other => panic!("expected a literal token for {text:?}, got {other:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +453,71 @@ mod tests {
             result,
             Err(ExportError::InvalidFormula { group, .. }) if group == group_id
         ));
+    }
+
+    #[test]
+    fn build_conditional_decl_for_a_single_bool_condition_has_two_branches() {
+        use crate::model::geometry::Point;
+        use crate::ops::cells::{add_cell, add_cell_node};
+        use crate::ops::conditionals::add_conditional_from_bool_cells;
+        use crate::ops::relationships::{create_relationship, set_member_formula};
+
+        let mut doc = Document::new("demo");
+        let flag = add_cell(&mut doc, "constrain_proportions", CellType::Bool);
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group_id = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        set_member_formula(&mut doc, group_id, a_node, "height_pixels * 2i64");
+        set_member_formula(&mut doc, group_id, b_node, "width_pixels / 2i64");
+        let cond_id =
+            add_conditional_from_bool_cells(&mut doc, vec![flag], group_id, Point::new(0.0, 40.0));
+
+        let cond = &doc.conditional_groups[cond_id];
+        let decl = build_conditional_decl(&doc, cond_id, cond).unwrap();
+        assert_eq!(decl.branches.len(), 2);
+        assert!(decl.default.is_some());
+    }
+
+    #[test]
+    fn build_conditional_decl_for_a_multi_cell_condition_uses_tuple_match_literals() {
+        use crate::model::geometry::Point;
+        use crate::ops::cells::{add_cell, add_cell_node};
+        use crate::ops::conditionals::add_conditional_from_bool_cells;
+        use crate::ops::relationships::{create_relationship, set_member_formula};
+
+        let mut doc = Document::new("demo");
+        let flag_a = add_cell(&mut doc, "constrain_proportions", CellType::Bool);
+        let flag_b = add_cell(&mut doc, "lock_aspect", CellType::Bool);
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group_id = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        set_member_formula(&mut doc, group_id, a_node, "height_pixels * 2i64");
+        set_member_formula(&mut doc, group_id, b_node, "width_pixels / 2i64");
+        let cond_id = add_conditional_from_bool_cells(
+            &mut doc,
+            vec![flag_a, flag_b],
+            group_id,
+            Point::new(0.0, 40.0),
+        );
+
+        let cond = &doc.conditional_groups[cond_id];
+        let decl = build_conditional_decl(&doc, cond_id, cond).unwrap();
+        assert_eq!(decl.branches.len(), 4);
+        assert!(matches!(
+            decl.branches[0].literal,
+            adam_lang::ast::MatchLiteral::Tuple(_)
+        ));
+        // The bug this task's brief flags explicitly: `fmt.rs`'s
+        // `write_match_literal` re-emits a `Tuple` branch's *whole* source
+        // text from `literal_span` alone (see its doc comment), so the span
+        // must cover the synthesized `(v0, v1)` text, not a placeholder.
+        assert_eq!(
+            decl.branches[0].literal_span.start.source_text().as_deref(),
+            Some("(false, false)")
+        );
     }
 }

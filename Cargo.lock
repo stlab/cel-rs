@@ -1748,6 +1748,7 @@ dependencies = [
  "adam-lang",
  "cel-parser",
  "cel-std",
+ "proc-macro2",
  "serde",
  "serde_json",
  "slotmap",
