@@ -328,30 +328,35 @@ the attachment outright, per §2's confirmed decision.
 
 ### 4.5 `add_relationship` / `add_conditional`: new `Source` check
 
-Every place `add_relationship` and `add_conditional` currently check
-`terminal_cells.contains(&cell_id)` for a method's *output* cells, add a check that
-the cell's `kind != CellKind::Source`. Input-side checks lose their `Out`-kind
-check entirely (an `out` cell is a legal input everywhere now); they gain no new
-`Source`-side check (a `source` cell is a legal input everywhere, exactly like
-today's plain cell).
+In `add_relationship`, the two `terminal_cells.contains(&cell_id)` checks over a
+method's *output* cells become a check that the cell's `kind != CellKind::Source`.
+Its two input-side checks are deleted outright (no replacement) — an `out` cell is
+a legal input everywhere now, and a `source` cell always was.
+
+`add_conditional` has no output-side check of its own to repoint (its own two
+`terminal_cells.contains` checks, both on match-subject cells, are input-like reads)
+— both are deleted outright, for the same reason: a match subject is free to be an
+`out` cell now, exactly like any other input reference, and was never restricted
+for `source`.
 
 `write()` keeps exactly one kind check: reject if `kind == CellKind::Out`.
 
 `cell_has_prior_use` (used by `add_out`, private) narrows from "any adjacency at
-all" to "already claimed as some existing method's output, or already a
-conditional's match cell":
+all, or already a conditional's match cell" to just "already claimed as some
+existing method's output": a match-subject reference is a read, exactly like any
+other input reference this design already legalizes for a not-yet-`out` cell (§4.2),
+so it no longer disqualifies a cell from becoming `out`, for the same reason a
+prior relationship-input reference doesn't. Only a prior *output* claim — the one
+thing that stays permanently exclusive to `out`'s own fixed writer — still
+disqualifies:
 
 ```rust
 fn cell_has_prior_use(&self, id: CellId) -> bool {
-    self.relationships.values().any(|rel| {
-        rel.methods.iter().any(|m| m.outputs.contains(&id))
-    }) || self.conditionals.values().any(|c| c.match_cells().contains(&id))
+    self.relationships
+        .values()
+        .any(|rel| rel.methods.iter().any(|m| m.outputs.contains(&id)))
 }
 ```
-
-(Match-cell exclusion is unchanged from today — unrelated to the terminal
-relaxation, kept as-is since nothing about this design touches conditional match
-semantics.)
 
 ### 4.6 `Error` changes
 
