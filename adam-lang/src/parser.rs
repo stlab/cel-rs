@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 
-use adam_rs::{CellId, MatchExpr, Method, OutputId, RelationshipId, Requirement, Sheet};
+use adam_rs::{CellId, MatchExpr, Method, RelationshipId, Requirement, Sheet};
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
 use cel_runtime::DynSegment;
@@ -40,9 +40,10 @@ pub struct ParsedSheet {
     pub sheet: Sheet,
     /// Cell name → `(CellId, TypeShape)`, in declaration order.
     pub cell_names: IndexMap<String, (CellId, TypeShape)>,
-    /// Output name → `OutputId`, in declaration order — parity with `cell_names`, for callers
-    /// that need to look up `Sheet::output_valid`/`Sheet::violated_requirements` by name.
-    pub output_names: IndexMap<String, OutputId>,
+    /// Output name → `CellId`, in declaration order — parity with `cell_names`, for callers
+    /// that need to look up `Sheet::cell_requirements_valid`/`Sheet::violated_requirements` by
+    /// name.
+    pub output_names: IndexMap<String, CellId>,
 }
 
 impl std::ops::Deref for ParsedSheet {
@@ -69,9 +70,9 @@ struct ParseContext {
     /// Maps cell name → (CellId, TypeShape), in declaration order, for method and
     /// conditional compilation and for exposing to callers via `ParsedSheet`.
     cell_names: IndexMap<String, (CellId, TypeShape)>,
-    /// Maps output name → `OutputId`, in declaration order, for exposing to callers via
+    /// Maps output name → `CellId`, in declaration order, for exposing to callers via
     /// `ParsedSheet`.
-    output_names: IndexMap<String, OutputId>,
+    output_names: IndexMap<String, CellId>,
 }
 
 impl std::ops::Deref for ParseContext {
@@ -1118,7 +1119,7 @@ impl AdamParser {
 
         let output_id = ctx
             .sheet
-            .add_output(writer, named_requirements)
+            .add_out(writer, named_requirements)
             .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
         ctx.output_names.insert(name, output_id);
 
@@ -2000,8 +2001,7 @@ mod tests {
             )
             .unwrap();
         sheet.propagate().unwrap();
-        let output_id = sheet.output_names["area"];
-        let cell_id = sheet.sheet.output_cell(output_id).unwrap();
+        let cell_id = sheet.output_names["area"];
         assert_eq!(*sheet.sheet.read::<i32>(cell_id).unwrap(), 12);
     }
 
@@ -2042,7 +2042,7 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         let output_id = sheet.output_names["area"];
-        assert!(sheet.sheet.output_requirements(output_id).unwrap().len() == 2);
+        assert!(sheet.sheet.cell_requirements(output_id).unwrap().len() == 2);
         assert!(
             sheet
                 .sheet
@@ -2727,8 +2727,7 @@ mod tests {
             )
             .unwrap();
         sheet.propagate().unwrap();
-        let output_id = *sheet.output_names.get("area").expect("area registered");
-        let cell_id = sheet.output_cell(output_id).expect("output has a cell");
+        let cell_id = *sheet.output_names.get("area").expect("area registered");
         assert_eq!(*sheet.read::<f64>(cell_id).unwrap(), 12.0);
     }
 
@@ -2745,8 +2744,7 @@ mod tests {
             )
             .unwrap();
         sheet.propagate().unwrap();
-        let output_id = *sheet.output_names.get("pair").unwrap();
-        let cell_id = sheet.output_cell(output_id).unwrap();
+        let cell_id = *sheet.output_names.get("pair").unwrap();
         let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
         assert_eq!(format!("{value:?}"), "(3, 3)");
     }
@@ -2801,7 +2799,7 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         let output_id = *sheet.output_names.get("area").unwrap();
-        assert!(sheet.output_valid(output_id));
+        assert!(sheet.cell_requirements_valid(output_id));
         assert_eq!(sheet.violated_requirements(output_id).count(), 0);
     }
 
@@ -2823,7 +2821,7 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         let output_id = *sheet.output_names.get("area").unwrap();
-        assert!(!sheet.output_valid(output_id));
+        assert!(!sheet.cell_requirements_valid(output_id));
         assert_eq!(sheet.violated_requirements(output_id).count(), 1);
     }
 
@@ -2972,8 +2970,7 @@ mod tests {
             )
             .unwrap();
         sheet.propagate().unwrap();
-        let output_id = *sheet.output_names.get("pair").unwrap();
-        let cell_id = sheet.output_cell(output_id).unwrap();
+        let cell_id = *sheet.output_names.get("pair").unwrap();
         let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
         let (a, b): (i32, i32) = value.try_to_tuple().unwrap();
         assert_eq!((a, b), (3, 3));
