@@ -89,10 +89,21 @@ gated to the wrong subset of cells.
   abort a caller's operation" (2026-08-26 §4) and would reintroduce exactly that
   order-dependence. `require` is a pure post-`propagate()` diagnostic, uniformly,
   regardless of the checked cell's kind or its source/derived status this round.
-- **Attaching a requirement whose current value already fails it is a hard error.**
-  Unlike a filter (which can silently conform a non-matching value), a requirement is
-  a pure boolean with nothing to repair — `add_requirement` rejects outright rather
-  than attaching a requirement already known to be violated.
+- **Attaching a requirement whose current value already fails it is a hard error —
+  for `Cell`/`Source` kind cells only.** Unlike a filter (which can silently conform
+  a non-matching value), a requirement is a pure boolean with nothing to repair, so
+  `add_requirement` rejects outright rather than attaching a requirement already
+  known to be violated. This check is meaningful only when the checked cell already
+  has an authoritative value: true immediately for `Cell`/`Source` kind (their
+  `source` value is live the moment it's set). It is never true for an `Out`-kind
+  cell — an out cell's value only becomes real once its writer executes in a
+  `propagate()` call, which never happens synchronously inside `add_out` or
+  `add_requirement` — so for `Out`-kind cells the check is skipped unconditionally
+  and the attachment always succeeds structurally, deferring entirely to the
+  ordinary post-`propagate()` diagnostic (§5). This is a property of the target
+  cell's kind, not of whether the sheet has propagated before, so it applies
+  uniformly whether a requirement reaches an `out` cell through `add_out`'s own
+  loop or a later, separate `add_requirement` call on that same cell.
 
 ---
 
@@ -300,7 +311,12 @@ first), for every cell, not only former `out` cells.)
 
 ```rust
 /// Attaches a named requirement to `cell`. `requirement.inputs` may be any cells in
-/// the sheet, not only `cell` itself.
+/// the sheet, not only `cell` itself. For a `Cell`/`Source` kind `cell`, also
+/// evaluates `requirement` immediately against current effective values — its
+/// value is already authoritative. Skipped for an `Out`-kind `cell`: its value
+/// isn't authoritative until its writer next executes, so attachment always
+/// succeeds structurally there, deferring to the first post-`propagate()`
+/// diagnostic (§5) to report an initial violation if there is one.
 ///
 /// # Errors
 ///
@@ -309,10 +325,11 @@ first), for every cell, not only former `out` cells.)
 /// - `Error::TypeMismatch` — an input's declared type does not match its cell's
 ///   registered type.
 /// - `Error::InvalidRequirement` — `name` is empty, `cell` already has a
-///   same-named requirement, or evaluating `requirement` against the referenced
-///   cells' current effective values returns `Ok(false)`.
-/// - `Error::MethodFailed` — evaluating `requirement` against current values
-///   returns `Err`.
+///   same-named requirement, or (`Cell`/`Source` kind only) evaluating
+///   `requirement` against the referenced cells' current effective values
+///   returns `Ok(false)`.
+/// - `Error::MethodFailed` — (`Cell`/`Source` kind only) evaluating `requirement`
+///   against current values returns `Err`.
 pub fn add_requirement(
     &mut self,
     cell: CellId,
@@ -324,7 +341,11 @@ pub fn add_requirement(
 The current-value check at attach time mirrors `add_filter`'s existing retroactive
 check in spirit, not in outcome: a filter can conform a non-matching value in place,
 a requirement cannot, so the only sound response to "already violated" is rejecting
-the attachment outright, per §2's confirmed decision.
+the attachment outright, per §2's confirmed decision — with the `Out`-kind
+exception above, found while tracing `add_out`'s exact flow: at the point `add_out`
+attaches its own requirements, the writer relationship has only just been
+registered and has never executed, so the cell's current value is still whatever
+placeholder `add_cell` gave it, not a real one to validate against.
 
 ### 4.5 `add_relationship` / `add_conditional`: new `Source` check
 
@@ -578,9 +599,13 @@ Derived from the contracts in §4–§6 only:
   cell's filter always reclamps via `PlanStep::FilterReclamp`; an `Out`-kind cell's
   filter only ever produces the read-only diagnostic, never a reclamp.
 - `add_requirement` succeeds on every cell kind; returns `Error::InvalidRequirement`
-  when the name is empty, is a duplicate on that cell, or the requirement evaluates
-  `Ok(false)` against current values; returns `Error::MethodFailed` when it evaluates
-  `Err`.
+  when the name is empty or is a duplicate on that cell, on any cell kind; on a
+  `Cell`/`Source` kind cell only, also returns `Error::InvalidRequirement` when the
+  requirement evaluates `Ok(false)` against current values and `Error::MethodFailed`
+  when it evaluates `Err`.
+- `add_out` with a requirement that would fail against the out cell's not-yet-real
+  placeholder value still succeeds (the `Out`-kind skip applies), and the first
+  `propagate()` afterward correctly reports it via `violated_requirements`.
 - After `propagate()`, `cell_requirements_valid`/`violated_requirements` reflect
   requirement results for a plain `cell` and a `source` cell exactly as they
   already do for an `out` cell today, including the case where the checked cell is a
