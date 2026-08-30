@@ -591,8 +591,11 @@ Derived from the contracts in §4–§6 only:
 
 ## 10. Non-goals for this phase
 
-- Any `begin` UI work surfacing `source`/generalized-`require` violations visually —
-  tracked as a follow-up once this lands, per §8.
+- Any *new* `adam-web-ui`/`begin` visual affordance specifically for `source`-kind
+  cells (e.g. a distinct badge or styling beyond what already falls out of existing
+  `invalid`/`readonly` mechanics). Updating `compute_output_status` so existing
+  mechanics keep working against the renamed API (§8) is in scope; inventing new UI
+  is not.
 - Revisiting the `release::resolve` filter-blind boundary (2026-08-25 §3,
   `Error::FilterCycle`) — untouched by this design; a `Source`-kind cell's
   output-claim rejection happens at `add_relationship` time, not during planning, so
