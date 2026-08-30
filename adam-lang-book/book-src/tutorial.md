@@ -85,8 +85,9 @@ A `filter` clause attaches a standing domain constraint to a cell, most commonly
 {{#include examples/tutorial/clamp_demo.adm2}}
 ```
 
-Write an out-of-range value and the cell keeps it, raw, until the next `propagate()`;
-`write()` never inspects a filter. `propagate()` is what conforms the value.
+Write an out-of-range value and the cell keeps it, raw: a filter never inspects or blocks the
+value at the moment it's written. The clamp only takes effect the next time the sheet resolves,
+and it's that corrected value every read of the cell sees from then on.
 
 A filter's bounds don't have to be constants: `0..=max` references another cell, and the clamp
 tracks it live. [Chapter 6](filters.md) covers filters in full, including the precise
@@ -116,16 +117,16 @@ destructuring-vs-direct-bind distinction.
 ## 1.6 Outputs and requirements
 
 An `out` declaration computes one final, read-only value from the rest of the sheet, and can
-carry named `require`ments: boolean checks reported after every `propagate()`, never enforced
-by rejecting a write:
+carry named `require`ments: boolean checks re-evaluated and reported each time the sheet
+resolves, never enforced by rejecting a write:
 
 ```
 {{#include examples/tutorial/area_with_requirement.adm2}}
 ```
 
 See [Chapter 7](outputs.md) for the full rules: an output's cell is terminal (nothing may write
-it directly), and a failed requirement never stops `propagate()` from succeeding; it's a
-diagnostic, not a gate.
+it directly), and a failed requirement never stops the sheet from resolving; it's a diagnostic,
+not a gate.
 
 ## 1.7 Comments
 

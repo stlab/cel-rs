@@ -15,8 +15,8 @@ cell width: i32 = 1920; // a trailing comment
 
 `///` immediately before a `cell`, `relationship`, `conditional`, or `out` declaration, and
 `//!` immediately before the `sheet` keyword itself, are doc comments, recovered by the
-language server and the formatter, and otherwise inert (they carry no meaning to
-`propagate()`):
+language server and the formatter, and otherwise inert (they carry no meaning when the sheet
+resolves):
 
 ```text
 //! Describes a simple resize dialog.
