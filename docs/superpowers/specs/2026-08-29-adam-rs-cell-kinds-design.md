@@ -285,10 +285,16 @@ CellId) -> Option<&str>` is a new query, mirroring `requirement_name`.
 | `output_conditions`/`output_requirements(OutputId) -> Option<&[RequirementId]>` | `cell_requirements(CellId) -> Option<&[RequirementId]>` — any cell |
 | `condition_output`/`requirement_output(RequirementId) -> OutputId` | `requirement_cell(RequirementId) -> CellId` |
 | `condition_name`/`requirement_name`, `condition_inputs`/`requirement_inputs`, `condition_contributing_cells`/`requirement_contributing_cells` | unchanged in shape, just no longer implicitly `out`-only |
+| `outputs() -> impl Iterator<Item = OutputId>` | `out_cells() -> impl Iterator<Item = CellId>`, filters `self.cells` by `kind == CellKind::Out` |
+| `output_relevant_cells() -> HashSet<CellId>` | `requirement_relevant_cells() -> HashSet<CellId>` — union of `contributing_cells` over every cell with a non-empty `requirements` list, not only `out_cells()` |
+| `output_violation_cells() -> HashSet<CellId>` | `requirement_violation_cells() -> HashSet<CellId>` — same generalization: iterates every cell with requirements, not only `out_cells()` |
 
-`cell_requirements_valid`/`violated_requirements`/`cell_requirements` follow
-`output_valid`'s existing "not yet propagated → not valid / empty" convention
-(check `last_plan.is_none()` first), for every cell, not only former `out` cells.
+(`outputs()`/`output_relevant_cells()`/`output_violation_cells()` were missed in
+this spec's first two drafts — found only once the `adam-web-ui` downstream check
+in §8 below actually traced every call site. `cell_requirements_valid`/
+`violated_requirements`/`cell_requirements` follow `output_valid`'s existing "not
+yet propagated → not valid / empty" convention (check `last_plan.is_none()`
+first), for every cell, not only former `out` cells.)
 
 ### 4.4 `add_requirement` (new; `add_out` calls it internally)
 
@@ -461,9 +467,12 @@ declaration kind it's attached to.
 | `Sheet::violated_requirements(OutputId)` | `Sheet::violated_requirements(CellId)`, any cell |
 | `Sheet::output_requirements` | `Sheet::cell_requirements`, any cell |
 | `Sheet::requirement_output` | `Sheet::requirement_cell` |
+| `Sheet::outputs` | `Sheet::out_cells`, yields `CellId` not `OutputId` |
+| `Sheet::output_relevant_cells` | `Sheet::requirement_relevant_cells`, any cell with requirements |
+| `Sheet::output_violation_cells` | `Sheet::requirement_violation_cells`, any cell with requirements |
 | `RequirementData::output: OutputId` | `RequirementData::cell: CellId` |
 | `FilterData` (no name) | `FilterData::name: String` |
-| — | `Sheet::add_source`, `Sheet::add_requirement`, `Sheet::cell_kind` (new) |
+| — | `Sheet::add_source`, `Sheet::add_requirement`, `Sheet::cell_kind`, `Sheet::filter_name` (new) |
 
 Untouched: `Requirement`/`RequirementId` themselves, `Filter`'s constructors,
 `Conditional`/`ConditionalId`/`add_conditional`, everything in §5's propagation
@@ -473,13 +482,24 @@ phases beyond the precondition relaxations already described.
 
 ## 8. Downstream impact
 
-- **`begin`** (`begin/src/inspector.rs`): consumes the query surface (`OutputStatus`,
-  `cell_flags`, `filter_violated_cells`, etc.) generically, not `OutputId` directly —
-  a quick check found no direct `OutputId` usage in `begin`. Its `compute_output_status`
-  and related helpers will need to call the renamed queries (§4.3, §7) and should
-  naturally start covering `source`/plain-`cell` requirement violations for free once
-  they do, but this is a mechanical follow-up, not a design question — left to its own
-  implementation pass rather than folded into this spec.
+- **`adam-web-ui`** (`adam-web-ui/src/inspector.rs`; this spec's earlier drafts pointed
+  at `begin/src/inspector.rs`, which no longer exists — the `worktree-live-book` merge
+  extracted the Inspector into this new crate, shared by both `begin` (desktop) and
+  `adam-lang-book-live` (the live book), so it now has two consumers instead of one).
+  Unlike the "no direct usage found" conclusion of this spec's earlier draft, this file
+  **directly calls the exact API this spec renames**: `Sheet::outputs()`,
+  `output_relevant_cells()`, `output_valid(id)`, `output_cell(id)`,
+  `output_violation_cells()`, `violated_requirements(id: OutputId)`, and
+  `requirement_name(rid)`, all inside `compute_output_status` (`inspector.rs:65-113`).
+  This is a real, in-scope code task (§ below), not a deferred follow-up: every one of
+  those calls needs updating to the §4.3/§7 renames, and `compute_output_status` should
+  naturally start covering `source`/plain-`cell` requirement violations once it iterates
+  `requirement_relevant_cells()`/`requirement_violation_cells()` instead of
+  `out_cells()`-derived sets — `OutputStatus`'s `output_cells: HashSet<CellId>` field
+  (used to force `readonly` rendering, `inspector.rs:46-52`) keeps its current meaning
+  unchanged, since it should still track only `CellKind::Out` cells specifically (the
+  "always derived, never writable" rendering rule doesn't apply to a `source`/plain
+  cell just because it now happens to carry a requirement).
 - **`adam-lsp`**: no direct references to `OutputId`/`output_cell`/`add_output` found;
   it works through `ast.rs`/`typecheck.rs` generically, so the `SourceDecl`/`CellFilter`
   name field/`CellDecl.require` additions in §6 should reach it through the existing
