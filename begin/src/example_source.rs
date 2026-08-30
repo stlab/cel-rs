@@ -229,6 +229,30 @@ mod tests {
         }
     }
 
+    /// Returns the union of `Sheet::contributing_cells(id)` over every `id` in
+    /// `Sheet::out_cells()`, `Sheet::requirement_relevant_cells()`, and every
+    /// conditional's match cell.
+    ///
+    /// Mirrors `adam_web_ui::inspector`'s private `compute_output_status`'s `relevant`
+    /// computation (not itself exported, since `OutputStatus` is Inspector-internal) —
+    /// the direct replacement for the removed `Sheet::output_relevant_cells()`, now that
+    /// out cells/requirements are generalized beyond a single dedicated "output" concept.
+    fn relevant_cells(sheet: &adam_rs::Sheet) -> std::collections::HashSet<adam_rs::CellId> {
+        let out_cells: Vec<adam_rs::CellId> = sheet.out_cells().collect();
+        out_cells
+            .iter()
+            .flat_map(|&id| sheet.contributing_cells(id))
+            .chain(sheet.requirement_relevant_cells())
+            .chain(
+                sheet
+                    .conditionals()
+                    .filter_map(|id| sheet.conditional_match_cells(id))
+                    .flatten()
+                    .copied(),
+            )
+            .collect()
+    }
+
     #[test]
     fn image_resize_constrain_is_relevant_despite_only_being_a_conditional_expression_input() {
         // Regression test: `constrain` is never itself a relationship output or a plain
@@ -244,7 +268,7 @@ mod tests {
         let mut parsed = parser.parse_str(&source).unwrap();
         parsed.propagate().unwrap();
         let (constrain_id, _) = *parsed.cell_names.get("constrain").unwrap();
-        assert!(parsed.output_relevant_cells().contains(&constrain_id));
+        assert!(relevant_cells(&parsed).contains(&constrain_id));
     }
 
     #[test]
@@ -263,7 +287,7 @@ mod tests {
         let mut parser = AdamParser::new(TypeRegistry::new(), op_lookup());
         let mut parsed = parser.parse_str(&source).unwrap();
         parsed.propagate().unwrap();
-        let relevant = parsed.output_relevant_cells();
+        let relevant = relevant_cells(&parsed);
         for name in [
             "width_pixels",
             "width_pixels_percent",

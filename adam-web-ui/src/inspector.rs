@@ -19,12 +19,20 @@ use std::hash::{Hash, Hasher};
 struct OutputStatus {
     /// `true` if the sheet has at least one output.
     has_outputs: bool,
-    /// `Sheet::requirement_relevant_cells()`, plus every conditional's match cell.
+    /// Union of `Sheet::contributing_cells(id)` for every `id` in `Sheet::out_cells()`,
+    /// `Sheet::requirement_relevant_cells()`, and every conditional's match cell.
+    ///
+    /// The `contributing_cells` term restores the pre-generalization guarantee that an
+    /// out cell's contributors are always relevant, regardless of whether that out cell
+    /// has any requirements attached — `requirement_relevant_cells()` alone only covers
+    /// cells feeding a requirement, so an out cell with zero requirements would otherwise
+    /// silently drop out of "relevant" even though it's still an out cell whose inputs
+    /// the user should see as meaningful.
     ///
     /// `Sheet::contributing_cells` never traces back through a conditional's match
-    /// cell (it only follows relationship method inputs), so without this addition a
-    /// conditional's own switch could be marked "don't care" and disabled once the
-    /// sheet has any output — blocking the toggle that controls which branch is
+    /// cell (it only follows relationship method inputs), so without the match-cell
+    /// addition a conditional's own switch could be marked "don't care" and disabled
+    /// once the sheet has any output — blocking the toggle that controls which branch is
     /// active. Match cells are therefore always treated as relevant, independent of
     /// which branch is currently active.
     relevant: HashSet<CellId>,
@@ -60,16 +68,18 @@ struct OutputStatus {
 
 /// Computes `sheet`'s current out-cell status for the Inspector.
 ///
-/// - Complexity: O(`Sheet::requirement_relevant_cells` + `Sheet::requirement_violation_cells`
-///   + `Sheet::filter_violation_cells` + the number of conditionals in the sheet).
+/// - Complexity: O(sum of `Sheet::contributing_cells` cost over every out cell +
+///   `Sheet::requirement_relevant_cells` + `Sheet::requirement_violation_cells` +
+///   `Sheet::filter_violation_cells` + the number of conditionals in the sheet).
 fn compute_output_status(sheet: &Sheet) -> OutputStatus {
     // `Sheet::out_cells()` now returns each out cell's own `CellId` directly — the
     // `OutputId` → `CellId` lookup this function used to do via `Sheet::output_cell` is
     // gone because there's no longer a separate handle to look up.
-    let outputs: Vec<CellId> = sheet.out_cells().collect();
-    let relevant = sheet
-        .requirement_relevant_cells()
-        .into_iter()
+    let out_cells: Vec<CellId> = sheet.out_cells().collect();
+    let relevant = out_cells
+        .iter()
+        .flat_map(|&id| sheet.contributing_cells(id))
+        .chain(sheet.requirement_relevant_cells())
         .chain(
             sheet
                 .conditionals()
@@ -78,7 +88,7 @@ fn compute_output_status(sheet: &Sheet) -> OutputStatus {
                 .copied(),
         )
         .collect();
-    let invalid_outputs = outputs
+    let invalid_outputs = out_cells
         .iter()
         .copied()
         .filter(|&id| !sheet.cell_requirements_valid(id))
@@ -89,19 +99,19 @@ fn compute_output_status(sheet: &Sheet) -> OutputStatus {
         .chain(sheet.filter_violation_cells())
         .collect();
     let filter_violated = sheet.filter_violated_cells().collect();
-    let output_cells = outputs.iter().copied().collect();
-    let invalid_output_requirement_names = outputs
+    let output_cells = out_cells.iter().copied().collect();
+    let invalid_output_requirement_names = out_cells
         .iter()
-        .filter_map(|&id| {
+        .filter_map(|&cell| {
             let names: Vec<&str> = sheet
-                .violated_requirements(id)
+                .violated_requirements(cell)
                 .filter_map(|rid| sheet.requirement_name(rid))
                 .collect();
-            (!names.is_empty()).then(|| (id, names.join(", ")))
+            (!names.is_empty()).then(|| (cell, names.join(", ")))
         })
         .collect();
     OutputStatus {
-        has_outputs: !outputs.is_empty(),
+        has_outputs: !out_cells.is_empty(),
         relevant,
         invalid_contributors,
         invalid_outputs,
@@ -726,7 +736,11 @@ mod tests {
         let a = sheet.add_cell(0.0_f64);
         let b = sheet.add_cell(0.0_f64);
         sheet
-            .add_filter(a, Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))))
+            .add_filter(
+                a,
+                "clamp_0_100",
+                Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))),
+            )
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(b, a, |v: &f64| Ok(*v))])
@@ -747,7 +761,11 @@ mod tests {
         let a = sheet.add_cell(0.0_f64);
         let b = sheet.add_cell(0.0_f64);
         sheet
-            .add_filter(a, Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))))
+            .add_filter(
+                a,
+                "clamp_0_100",
+                Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))),
+            )
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(b, a, |v: &f64| Ok(*v))])
@@ -768,7 +786,7 @@ mod tests {
         let a = sheet.add_cell(0_i32);
         let result = sheet.add_cell(0_i32);
         sheet
-            .add_output(Method::from_fn_1_1(a, result, |x: &i32| Ok(*x)), vec![])
+            .add_out(Method::from_fn_1_1(a, result, |x: &i32| Ok(*x)), vec![])
             .unwrap();
 
         let status = compute_output_status(&sheet);
@@ -792,7 +810,7 @@ mod tests {
         let height = sheet.add_cell(20_i32);
         let area = sheet.add_cell(0_i32);
         sheet
-            .add_output(
+            .add_out(
                 Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
                 vec![(
                     "not_too_big",
@@ -818,7 +836,7 @@ mod tests {
         let height = sheet.add_cell(20_i32);
         let area = sheet.add_cell(0_i32);
         sheet
-            .add_output(
+            .add_out(
                 Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
                 vec![(
                     "not_too_big",
@@ -840,7 +858,7 @@ mod tests {
         let a = sheet.add_cell(101_i32);
         let result = sheet.add_cell(0_i32);
         sheet
-            .add_output(
+            .add_out(
                 Method::from_fn_1_1(a, result, |x: &i32| Ok(*x)),
                 vec![
                     (
@@ -863,6 +881,51 @@ mod tests {
             .expect("result should have violated requirements");
         assert!(names.contains("too_big"));
         assert!(names.contains("not_even"));
+    }
+
+    #[test]
+    fn compute_output_status_covers_a_plain_cells_requirement_violation() {
+        use adam_rs::Requirement;
+
+        // `add_requirement` hard-fails immediately if a plain/source cell's *current*
+        // value already violates it, so the requirement is attached while it still
+        // holds (200 > 100), then a later `write` — not the initial value — is what
+        // drives it into violation.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(200_i32);
+        sheet
+            .add_requirement(
+                a,
+                "too_big",
+                Requirement::from_fn_1(a, |x: &i32| Ok(*x > 100)),
+            )
+            .unwrap();
+        sheet.write(a, 5_i32).unwrap();
+        sheet.propagate().unwrap();
+
+        let status = compute_output_status(&sheet);
+        assert!(status.invalid_contributors.contains(&a));
+    }
+
+    #[test]
+    fn compute_output_status_relevant_includes_an_out_cells_contributor_even_without_requirements()
+    {
+        // Regression test for the `relevant`-set narrowing: `requirement_relevant_cells()`
+        // alone only covers cells feeding a requirement, so an out cell with zero
+        // requirements would otherwise silently drop out of "relevant" even though it's
+        // still an out cell whose inputs the user should see as meaningful.
+        use adam_rs::Method;
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let result = sheet.add_cell(0_i32);
+        sheet
+            .add_out(Method::from_fn_1_1(a, result, |x: &i32| Ok(*x)), vec![])
+            .unwrap();
+        sheet.propagate().unwrap();
+
+        let status = compute_output_status(&sheet);
+        assert!(status.relevant.contains(&a));
     }
 
     #[test]
@@ -1079,7 +1142,7 @@ mod tests {
         let b = sheet.add_cell(0_i32);
         let result = sheet.add_cell(0_i32);
         sheet
-            .add_output(
+            .add_out(
                 Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
                 vec![(
                     "min_a",
@@ -1106,7 +1169,7 @@ mod tests {
         let height = sheet.add_cell(20_i32);
         let area = sheet.add_cell(0_i32);
         sheet
-            .add_output(
+            .add_out(
                 Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
                 vec![(
                     "not_too_big",
@@ -1135,6 +1198,7 @@ mod tests {
         sheet
             .add_filter(
                 a,
+                "clamp_to_bound",
                 Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
             )
             .unwrap();
@@ -1152,7 +1216,7 @@ mod tests {
         let result = sheet.add_cell(0_i32);
         let unrelated = sheet.add_cell(0_i32);
         sheet
-            .add_output(
+            .add_out(
                 Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
                 vec![(
                     "min_a",
