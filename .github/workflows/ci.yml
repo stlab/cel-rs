@@ -30,15 +30,22 @@ jobs:
     - name: Build workspace (excluding begin app)
       run: cargo build --workspace --exclude begin --verbose
 
-    # --lib skips `begin`/`xtask` automatically (they have no library target), so this
-    # covers every documentable crate without needing an --exclude list. RUSTDOCFLAGS
+    # --lib skips `xtask` automatically (it has no library target). `begin` is excluded
+    # explicitly, not just left to `--lib`: `--lib` only filters which *targets* get
+    # documented, not which packages are selected for feature resolution, so `begin`
+    # staying selected via `--workspace` still unifies its `default = ["desktop"]`
+    # feature (-> `dioxus/desktop` -> wry/tao -> WebKitGTK/GTK) into the build even
+    # though nothing of `begin`'s ever gets documented -- and those system libraries
+    # aren't installed until the later "Install Linux dependencies" step, so this failed
+    # on the ubuntu-latest runner despite building fine locally on Windows/macOS,
+    # neither of which route dioxus's desktop feature through GTK at all. RUSTDOCFLAGS
     # promotes rustdoc's own warnings (broken/private intra-doc links, bare URLs, etc.) to
     # errors -- `cargo doc` alone exits 0 on those, so without this they'd only ever
     # surface as a human happening to read `cargo doc`'s output locally.
     - name: Build documentation (deny warnings)
       env:
         RUSTDOCFLAGS: -D warnings
-      run: cargo doc --workspace --no-deps --lib
+      run: cargo doc --workspace --exclude begin --no-deps --lib
 
     - name: Install mdBook
       uses: peaceiris/actions-mdbook@v2
