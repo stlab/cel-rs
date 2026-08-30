@@ -22,8 +22,7 @@ fn output_cell_is_terminal() {
             "../book-src/examples/outputs/output_cell_is_terminal.adm2"
         ))
         .unwrap();
-    let output = parsed.output_names["area"];
-    let area_cell = parsed.output_cell(output).unwrap();
+    let area_cell = parsed.output_names["area"];
     let err = parsed.write(area_cell, 999_i32).unwrap_err();
     assert!(matches!(err, adam_rs::Error::InvalidCellKind));
 }
@@ -38,12 +37,12 @@ fn requirement_diagnostic() {
         .unwrap();
     parsed.propagate().unwrap();
     let output = parsed.output_names["area"];
-    assert!(parsed.output_valid(output));
+    assert!(parsed.cell_requirements_valid(output));
 
     let width = parsed.cell_names["width"].0;
     parsed.write(width, 50_i32).unwrap();
     parsed.propagate().unwrap();
-    assert!(!parsed.output_valid(output));
+    assert!(!parsed.cell_requirements_valid(output));
 }
 
 #[test]
@@ -60,5 +59,5 @@ fn multiple_requirements() {
     parsed.write(x, -10_i32).unwrap();
     parsed.propagate().unwrap();
     assert_eq!(parsed.violated_requirements(output).count(), 1);
-    assert!(!parsed.output_valid(output));
+    assert!(!parsed.cell_requirements_valid(output));
 }

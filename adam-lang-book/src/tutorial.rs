@@ -297,12 +297,12 @@
 //! parsed.propagate().unwrap();
 //!
 //! let output = parsed.output_names["area"];
-//! assert!(parsed.output_valid(output)); // 10 * 20 == 200 <= 300
+//! assert!(parsed.cell_requirements_valid(output)); // 10 * 20 == 200 <= 300
 //!
 //! let width = parsed.cell_names["width"].0;
 //! parsed.write(width, 50_i32).unwrap();
 //! parsed.propagate().unwrap();
-//! assert!(!parsed.output_valid(output)); // 50 * 20 == 1000 > 300
+//! assert!(!parsed.cell_requirements_valid(output)); // 50 * 20 == 1000 > 300
 //! ```
 //!
 //! See [Chapter 7](crate::outputs) for the full rules: an output's cell is terminal (nothing
