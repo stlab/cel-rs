@@ -25,7 +25,7 @@ fn output_cell_is_terminal() {
     let output = parsed.output_names["area"];
     let area_cell = parsed.output_cell(output).unwrap();
     let err = parsed.write(area_cell, 999_i32).unwrap_err();
-    assert!(matches!(err, adam_rs::Error::TerminalCell));
+    assert!(matches!(err, adam_rs::Error::InvalidCellKind));
 }
 
 #[test]

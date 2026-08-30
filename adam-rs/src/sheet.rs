@@ -186,7 +186,7 @@ impl Sheet {
     /// - `Error::InvalidId` — a `CellId` in any method is not found in this sheet.
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
-    /// - `Error::TerminalCell` — a method input or output cell already belongs to
+    /// - `Error::InvalidCellKind` — a method input or output cell already belongs to
     ///   an existing output.
     ///
     /// - Complexity: O(m² × c) where m is the total number of methods and c is the
@@ -210,7 +210,7 @@ impl Sheet {
 
             for (&cell_id, &declared) in method.inputs.iter().zip(method.input_types.iter()) {
                 if self.terminal_cells.contains(&cell_id) {
-                    return Err(Error::TerminalCell);
+                    return Err(Error::InvalidCellKind);
                 }
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                 if cell.type_id != declared {
@@ -223,7 +223,7 @@ impl Sheet {
 
             for (&cell_id, &declared) in method.outputs.iter().zip(method.output_types.iter()) {
                 if self.terminal_cells.contains(&cell_id) {
-                    return Err(Error::TerminalCell);
+                    return Err(Error::InvalidCellKind);
                 }
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                 if cell.type_id != declared {
@@ -301,7 +301,7 @@ impl Sheet {
     /// # Errors
     ///
     /// - `Error::InvalidId` — the match subject references a cell not in this sheet.
-    /// - `Error::TerminalCell` — the match subject references a cell that already belongs
+    /// - `Error::InvalidCellKind` — the match subject references a cell that already belongs
     ///   to an existing output.
     /// - `Error::TypeMismatch` — (expression match subject only) an input cell's registered
     ///   type doesn't match the expression's declared type for that input.
@@ -323,7 +323,7 @@ impl Sheet {
             MatchSource::Cell(cell) => {
                 let cell_data = self.cells.get(*cell).ok_or(Error::InvalidId)?;
                 if self.terminal_cells.contains(cell) {
-                    return Err(Error::TerminalCell);
+                    return Err(Error::InvalidCellKind);
                 }
                 if cell_data.type_id != TypeId::of::<T>() {
                     return Err(Error::InvalidConditional);
@@ -336,7 +336,7 @@ impl Sheet {
                 }
                 for (&cell_id, &declared) in expr.inputs.iter().zip(expr.input_types.iter()) {
                     if self.terminal_cells.contains(&cell_id) {
-                        return Err(Error::TerminalCell);
+                        return Err(Error::InvalidCellKind);
                     }
                     let cell_data = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                     if cell_data.type_id != declared {
@@ -473,7 +473,7 @@ impl Sheet {
     ///
     /// - `Error::InvalidOutput` — `writer` does not have exactly one output cell, a
     ///   requirement name is empty, or two requirements share a name.
-    /// - `Error::TerminalCell` — a requirement input is already another output's cell, or
+    /// - `Error::InvalidCellKind` — a requirement input is already another output's cell, or
     ///   the writer's output cell already has prior use (see `cell_has_prior_use`)
     ///   and so cannot become terminal.
     /// - `Error::InvalidId` — a cell referenced by `writer` or a requirement is not in this
@@ -512,7 +512,7 @@ impl Sheet {
                 .zip(requirement.input_types.iter())
             {
                 if self.terminal_cells.contains(&cell_id) {
-                    return Err(Error::TerminalCell);
+                    return Err(Error::InvalidCellKind);
                 }
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                 if cell.type_id != declared {
@@ -525,7 +525,7 @@ impl Sheet {
         }
 
         if self.cell_has_prior_use(output_cell) {
-            return Err(Error::TerminalCell);
+            return Err(Error::InvalidCellKind);
         }
 
         self.add_relationship(vec![writer])?;
@@ -564,7 +564,7 @@ impl Sheet {
     ///
     /// - `Error::InvalidId` — `cell`, or one of `filter`'s argument cells, is not a
     ///   live cell in this sheet.
-    /// - `Error::TerminalCell` — `cell` already belongs to an existing output.
+    /// - `Error::InvalidCellKind` — `cell` already belongs to an existing output.
     /// - `Error::InvalidFilter` — `cell` already has a filter, `filter`'s own value
     ///   type does not match `cell`'s registered type, or `filter`'s argument list
     ///   names `cell` itself.
@@ -575,7 +575,7 @@ impl Sheet {
     pub fn add_filter(&mut self, cell: CellId, filter: Filter) -> Result<(), Error> {
         let cell_type = self.cells.get(cell).ok_or(Error::InvalidId)?.type_id;
         if self.terminal_cells.contains(&cell) {
-            return Err(Error::TerminalCell);
+            return Err(Error::InvalidCellKind);
         }
         if self.cells[cell].filter.is_some() {
             return Err(Error::InvalidFilter);
@@ -919,10 +919,10 @@ impl Sheet {
     ///
     /// - `Error::InvalidId` — `id` is not a cell in this sheet.
     /// - `Error::TypeMismatch` — `T` does not match the cell's registered `TypeId`.
-    /// - `Error::TerminalCell` — `id` already belongs to an existing output.
+    /// - `Error::InvalidCellKind` — `id` already belongs to an existing output.
     pub fn write<T: Any + 'static>(&mut self, id: CellId, value: T) -> Result<(), Error> {
         if self.terminal_cells.contains(&id) {
-            return Err(Error::TerminalCell);
+            return Err(Error::InvalidCellKind);
         }
         let cell_type = self.cells.get(id).ok_or(Error::InvalidId)?.type_id;
         if cell_type != TypeId::of::<T>() {
@@ -2009,40 +2009,52 @@ mod tests {
     }
 
     #[test]
-    fn write_returns_terminal_cell_for_terminal_cell() {
+    fn write_returns_invalid_cell_kind_for_terminal_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         sheet.terminal_cells.insert(a);
-        assert!(matches!(sheet.write(a, 1_i32), Err(Error::TerminalCell)));
+        assert!(matches!(sheet.write(a, 1_i32), Err(Error::InvalidCellKind)));
     }
 
     #[test]
-    fn add_relationship_returns_terminal_cell_for_terminal_input() {
+    fn add_relationship_returns_invalid_cell_kind_for_terminal_input() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
         sheet.terminal_cells.insert(a);
         let result = sheet.add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))]);
-        assert!(matches!(result, Err(Error::TerminalCell)));
+        assert!(matches!(result, Err(Error::InvalidCellKind)));
     }
 
     #[test]
-    fn add_relationship_returns_terminal_cell_for_terminal_output() {
+    fn add_relationship_returns_invalid_cell_kind_for_terminal_output() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
         sheet.terminal_cells.insert(b);
         let result = sheet.add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))]);
-        assert!(matches!(result, Err(Error::TerminalCell)));
+        assert!(matches!(result, Err(Error::InvalidCellKind)));
     }
 
     #[test]
-    fn add_conditional_returns_terminal_cell_for_terminal_match_cell() {
+    fn add_conditional_returns_invalid_cell_kind_for_terminal_match_cell() {
         let mut sheet = Sheet::new();
         let p = sheet.add_cell(0_i32);
         sheet.terminal_cells.insert(p);
         let result = sheet.add_conditional::<i32>(MatchExpr::cell(p), vec![], vec![]);
-        assert!(matches!(result, Err(Error::TerminalCell)));
+        assert!(matches!(result, Err(Error::InvalidCellKind)));
+    }
+
+    #[test]
+    fn error_variant_is_invalid_cell_kind_not_terminal_cell() {
+        // Compile-time check that the rename landed; exercised for real once Task 3
+        // wires up the CellKind-based checks that actually return this variant.
+        let _err = Error::InvalidCellKind;
+    }
+
+    #[test]
+    fn error_has_invalid_requirement_variant() {
+        let _err = Error::InvalidRequirement;
     }
 
     #[test]
@@ -2860,7 +2872,7 @@ mod tests {
     }
 
     #[test]
-    fn add_filter_returns_terminal_cell_for_an_output_cell() {
+    fn add_filter_returns_invalid_cell_kind_for_an_output_cell() {
         let mut sheet = Sheet::new();
         let writer_input = sheet.add_cell(1_i32);
         let out_cell = sheet.add_cell(0_i32);
@@ -2872,7 +2884,7 @@ mod tests {
             .unwrap();
         let terminal = sheet.output_cell(out).unwrap();
         let result = sheet.add_filter(terminal, Filter::from_fn_0(|x: &i32| Ok(*x)));
-        assert!(matches!(result, Err(Error::TerminalCell)));
+        assert!(matches!(result, Err(Error::InvalidCellKind)));
     }
 
     #[test]

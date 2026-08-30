@@ -1366,7 +1366,7 @@ fn add_output_returns_invalid_output_for_empty_requirement_name() {
 }
 
 #[test]
-fn add_output_returns_terminal_cell_when_output_cell_already_has_a_relationship() {
+fn add_output_returns_invalid_cell_kind_when_output_cell_already_has_a_relationship() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -1377,11 +1377,11 @@ fn add_output_returns_terminal_cell_when_output_cell_already_has_a_relationship(
     let c = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(c, b, |x: &i32| Ok(*x));
     let result = sheet.add_output(writer, Vec::<(&str, Requirement)>::new());
-    assert!(matches!(result, Err(Error::TerminalCell)));
+    assert!(matches!(result, Err(Error::InvalidCellKind)));
 }
 
 #[test]
-fn add_output_returns_terminal_cell_when_output_cell_is_a_conditional_match_cell() {
+fn add_output_returns_invalid_cell_kind_when_output_cell_is_a_conditional_match_cell() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(0_i32);
     sheet
@@ -1390,11 +1390,11 @@ fn add_output_returns_terminal_cell_when_output_cell_is_a_conditional_match_cell
     let a = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(a, mode, |x: &i32| Ok(*x));
     let result = sheet.add_output(writer, Vec::<(&str, Requirement)>::new());
-    assert!(matches!(result, Err(Error::TerminalCell)));
+    assert!(matches!(result, Err(Error::InvalidCellKind)));
 }
 
 #[test]
-fn add_output_returns_terminal_cell_when_writer_input_is_already_an_output_cell() {
+fn add_output_returns_invalid_cell_kind_when_writer_input_is_already_an_output_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -1410,11 +1410,11 @@ fn add_output_returns_terminal_cell_when_writer_input_is_already_an_output_cell(
         Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)),
         Vec::<(&str, Requirement)>::new(),
     );
-    assert!(matches!(result, Err(Error::TerminalCell)));
+    assert!(matches!(result, Err(Error::InvalidCellKind)));
 }
 
 #[test]
-fn add_output_returns_terminal_cell_when_requirement_input_is_already_an_output_cell() {
+fn add_output_returns_invalid_cell_kind_when_requirement_input_is_already_an_output_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -1431,7 +1431,7 @@ fn add_output_returns_terminal_cell_when_requirement_input_is_already_an_output_
         Method::from_fn_1_1(c, d, |x: &i32| Ok(*x)),
         vec![("uses_b", Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0)))],
     );
-    assert!(matches!(result, Err(Error::TerminalCell)));
+    assert!(matches!(result, Err(Error::InvalidCellKind)));
 }
 
 #[test]
@@ -1447,7 +1447,7 @@ fn add_output_allows_a_requirement_to_reference_the_outputs_own_cell() {
 }
 
 #[test]
-fn write_returns_terminal_cell_for_an_output_cell() {
+fn write_returns_invalid_cell_kind_for_an_output_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -1457,11 +1457,11 @@ fn write_returns_terminal_cell_for_an_output_cell() {
             Vec::<(&str, Requirement)>::new(),
         )
         .unwrap();
-    assert!(matches!(sheet.write(b, 5_i32), Err(Error::TerminalCell)));
+    assert!(matches!(sheet.write(b, 5_i32), Err(Error::InvalidCellKind)));
 }
 
 #[test]
-fn add_relationship_returns_terminal_cell_for_an_output_cell() {
+fn add_relationship_returns_invalid_cell_kind_for_an_output_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -1473,7 +1473,7 @@ fn add_relationship_returns_terminal_cell_for_an_output_cell() {
         .unwrap();
     let c = sheet.add_cell(0_i32);
     let result = sheet.add_relationship(vec![Method::from_fn_1_1(b, c, |x: &i32| Ok(*x))]);
-    assert!(matches!(result, Err(Error::TerminalCell)));
+    assert!(matches!(result, Err(Error::InvalidCellKind)));
 }
 
 #[test]
