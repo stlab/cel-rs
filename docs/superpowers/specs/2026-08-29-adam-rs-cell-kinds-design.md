@@ -488,6 +488,49 @@ phases beyond the precondition relaxations already described.
 - **`editors/vscode-adam-lang`**: gains one new keyword, `source`, for syntax
   highlighting, matching the existing `cell`/`out`/`relationship`/`conditional`/
   `filter`/`require` keyword list.
+- **`adam-lang-book`** (merged since this spec's first draft, via the `worktree-live-book`
+  PR): its `.adm2` examples are live-mounted and actually parsed/resolved by the real
+  parser at doc-build time (`xtask prepare-live-book-assets`), so this is a real,
+  build-checked consumer, not just prose. Several chapters currently document exactly
+  the restrictions this design lifts:
+  - [`filters.md`](../../../adam-lang-book/book-src/filters.md) §6.1's grammar
+    (`cell_filter = "filter" expression.`, anonymous) and every example under
+    `examples/filters/` use the pre-naming syntax; all need the `filter name: expr`
+    form. §6.6's closing line ("a filter cannot attach to an output cell") states the
+    exact precondition §4.2a removes and needs to go, replaced with an example showing
+    a filter on an `out` or `source` cell.
+  - [`outputs.md`](../../../adam-lang-book/book-src/outputs.md) §7.2, "An output's
+    cell is terminal," needs reframing: it currently asserts the input-reference
+    restriction this design removes, but its own closing paragraph ("An output cell is
+    nonetheless an ordinary cell for *reading*...") already describes this design's
+    target behavior, not today's actual behavior — `parser.rs`'s
+    `parse_out_cell_referenced_elsewhere_is_terminal_cell_error` and
+    `..._in_conditional_is_terminal_cell_error` tests confirm today's parser still
+    rejects it. That's a pre-existing doc/code mismatch worth noting regardless of
+    this design; shipping this design makes that paragraph true instead of aspirational.
+    §7.3/7.4 need a lead-in noting `require` is no longer `out`-only.
+  - [`cells.md`](../../../adam-lang-book/book-src/cells.md) and
+    [`reference.md`](../../../adam-lang-book/book-src/reference.md) (Appendix A) both
+    state the current grammar directly (`cell_decl`, `cell_filter`, the keyword list,
+    the `A.8`/`A.9` bullet lists) and need the same grammar update as §6 of this spec.
+    Reference.md's `A.8` bullet "a filter cannot attach to an output cell" is the same
+    stale claim as `filters.md` §6.6.
+  - [`SUMMARY.md`](../../../adam-lang-book/book-src/SUMMARY.md) needs a new chapter for
+    `source` cells. Chapters are cross-referenced by number in prose (e.g. "Chapter 6",
+    "6.1", "A.11") throughout every `.md` file in the book, so inserting a chapter
+    renumbers everything after it — a mechanical but book-wide edit, not a single-file
+    change.
+  - Not yet checked in detail: `tutorial.md`, `relationships.md`, `conditionals.md`,
+    `expressions.md`, `style.md` — likely lower-impact (they don't center on
+    filter/require/out grammar) but should be swept for stale cross-references once
+    the chapter renumbering above happens.
+  This is real, in-scope follow-up work, not optional polish — a stale example under
+  the new grammar renders as a parse-error diagnostic in the live book instead of the
+  working example it's supposed to demonstrate, which `xtask prepare-live-book-assets`
+  would surface as a build problem, not a silent doc rot. Scoped as its own
+  implementation-plan phase (§ below), after the `adam-rs`/`adam-lang` code changes
+  land, so the book is updated against real, working syntax rather than against this
+  spec's prose.
 - No migration/back-compat path needed, per root `CLAUDE.md` (no clients yet).
 
 ---
