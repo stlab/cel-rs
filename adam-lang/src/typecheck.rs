@@ -904,7 +904,7 @@ mod tests {
 
     #[test]
     fn filter_with_matching_types_has_no_diagnostic() {
-        let sheet = parse("sheet s { cell a: i32 = 1 filter _; }");
+        let sheet = parse("sheet s { cell a: i32 = 1 filter clamp: _; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
     }
@@ -912,7 +912,7 @@ mod tests {
     #[test]
     fn filter_referencing_a_cell_has_no_diagnostic() {
         let sheet = parse(
-            "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter if _ > hi { hi } else { _ }; }",
+            "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter clamp: if _ > hi { hi } else { _ }; }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
@@ -921,14 +921,14 @@ mod tests {
     #[test]
     fn filter_body_type_mismatch_is_a_diagnostic() {
         // Body is `bool`-typed (a comparison), but `a` is declared `i32`.
-        let sheet = parse("sheet s { cell a: i32 = 1 filter _ > 0; }");
+        let sheet = parse("sheet s { cell a: i32 = 1 filter f: _ > 0; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn filter_without_underscore_is_a_diagnostic() {
-        let sheet = parse("sheet s { cell a: i32 = 1 filter 1; }");
+        let sheet = parse("sheet s { cell a: i32 = 1 filter f: 1; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
@@ -937,7 +937,7 @@ mod tests {
     fn filter_on_a_tuple_typed_cell_is_a_diagnostic() {
         // Mirrors the runtime parser's own rejection (`adam_lang::parser::AdamParser::
         // parse_cell_filter`) — a tuple-typed filtered cell isn't yet supported by either layer.
-        let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter (_.0, _.1); }");
+        let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter f: (_.0, _.1); }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
@@ -946,7 +946,7 @@ mod tests {
     fn filter_references_underscore_nested_inside_a_call_has_no_missing_underscore_diagnostic() {
         // `_` appears only inside an `if`'s then-branch, not as the whole body or a bare
         // operand — exercises `expr_references_ident`'s `Expr::If` arm specifically.
-        let sheet = parse("sheet s { cell a: i32 = 1 filter if true { _ } else { 1 }; }");
+        let sheet = parse("sheet s { cell a: i32 = 1 filter f: if true { _ } else { 1 }; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
     }
@@ -1077,7 +1077,7 @@ mod tests {
 
     #[test]
     fn filter_range_inclusive_body_does_not_require_underscore() {
-        let sheet = parse("sheet s { cell a: i32 filter 0..=100; }");
+        let sheet = parse("sheet s { cell a: i32 filter clamp: 0..=100; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
     }

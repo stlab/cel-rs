@@ -221,7 +221,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `cell_filter = "filter" expression.`
+    /// `cell_filter = "filter" identifier ":" expression.`
     ///
     /// - Precondition: the `filter` keyword has already been consumed by the caller; `filter_start`
     ///   is its span.
@@ -230,9 +230,13 @@ impl AdamAstParser {
         cursor: &mut TokenCursor,
         filter_start: proc_macro2::Span,
     ) -> Result<ast::CellFilter> {
+        let (name, name_span) = cursor.consume_ident()?;
+        cursor.expect_punct(":")?;
         let body = self.parse_cel_expression(cursor)?;
         let body_end = body.span().end;
         Ok(ast::CellFilter {
+            name,
+            name_span: point(name_span),
             body,
             span: ast::ExprSpan {
                 start: filter_start,
@@ -1219,7 +1223,7 @@ mod tests {
     #[test]
     fn parse_cell_with_a_filter() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell a: i32 = 1 filter _; }")
+            .parse_str("sheet s { cell a: i32 = 1 filter clamp: _; }")
             .unwrap();
         let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
             panic!("expected Cell");
@@ -1229,9 +1233,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_cell_filter_records_its_name() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { cell x: i32 = 0 filter clamp: 0..=10; }")
+            .unwrap();
+        let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
+            panic!("expected a cell decl");
+        };
+        assert_eq!(cell.filter.as_ref().unwrap().name, "clamp");
+    }
+
+    #[test]
     fn parse_cell_with_a_filter_referencing_a_cell() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter _ + hi; }")
+            .parse_str("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter sum: _ + hi; }")
             .unwrap();
         let ast::SheetItem::Cell(cell) = &sheet.items[1] else {
             panic!("expected Cell");

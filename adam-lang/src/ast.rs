@@ -210,9 +210,13 @@ pub struct CellDecl {
     pub span: ExprSpan,
 }
 
-/// `cell_filter = "filter" expression.`
+/// `cell_filter = "filter" identifier ":" expression.`
 #[derive(Debug, Clone)]
 pub struct CellFilter {
+    /// The filter's declared name.
+    pub name: String,
+    /// The name token's span.
+    pub name_span: ExprSpan,
     /// The filter's body expression. `_` inside it denotes the candidate value being conformed;
     /// every other identifier that names an already-declared cell is a deduced dependency.
     pub body: cel_parser::Expr,
@@ -690,6 +694,8 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: Some(CellFilter {
+                name: "clamp".to_string(),
+                name_span: span,
                 body: cel_parser::Expr::Ident {
                     name: "_".to_string(),
                     span,

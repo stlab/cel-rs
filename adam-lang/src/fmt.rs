@@ -267,6 +267,8 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     }
     if let Some(filter) = &cell.filter {
         out.push_str(" filter ");
+        out.push_str(&filter.name);
+        out.push_str(": ");
         out.push_str(&cel_parser::format_expr(&filter.body));
     }
     out.push_str(";\n");
@@ -728,24 +730,35 @@ mod tests {
     #[test]
     fn formats_a_cell_with_a_filter() {
         assert_eq!(
-            format("sheet s { cell a: i32 = 1 filter _; }"),
-            "sheet s {\n    cell a: i32 = 1 filter _;\n}\n"
+            format("sheet s { cell a: i32 = 1 filter clamp: _; }"),
+            "sheet s {\n    cell a: i32 = 1 filter clamp: _;\n}\n"
         );
     }
 
     #[test]
     fn formats_a_cell_with_a_filter_referencing_a_cell() {
         assert_eq!(
-            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter min(_, hi); }"),
-            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter min(_, hi);\n}\n"
+            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter clamp: min(_, hi); }"),
+            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter clamp: min(_, hi);\n}\n"
         );
     }
 
     #[test]
     fn format_is_idempotent_through_a_reparse_with_a_filter() {
-        let source = "sheet s {\n    cell a: i32 = 1 filter _;\n}";
+        let source = "sheet s {\n    cell a: i32 = 1 filter clamp: _;\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_a_named_filter() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { cell x: i32 = 0 filter clamp: 0..=10; }")
+            .unwrap();
+        assert_eq!(
+            format_sheet(&sheet),
+            "sheet s {\n    cell x: i32 = 0 filter clamp: 0..=10;\n}\n"
+        );
     }
 }
