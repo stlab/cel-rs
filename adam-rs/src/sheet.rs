@@ -444,11 +444,10 @@ impl Sheet {
     /// Registers an output: a cell written by exactly one method, together with zero or
     /// more named requirements checked after every `propagate()`.
     ///
-    /// `writer` must have exactly one output cell — that cell becomes terminal: it can
-    /// never afterward be referenced as an input to a relationship, conditional,
-    /// requirement, or another output, nor be the target of `write`. A requirement's
-    /// inputs may be any cells in the sheet, including the output's own cell, but not a
-    /// cell that already belongs to a different output.
+    /// `writer` must have exactly one output cell — that cell becomes `Out`-kind: it can
+    /// never again be the target of `write`, nor be claimed as another output's terminal
+    /// cell. A requirement's inputs may be any cells in the sheet, including the output's
+    /// own cell, but not a cell that already belongs to a different output.
     ///
     /// # Errors
     ///
