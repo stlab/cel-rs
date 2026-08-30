@@ -1,10 +1,11 @@
 //! A best-effort static type checker over [`crate::ast::Sheet`] trees, built on
 //! [`cel_parser::ty::check_expr`]. Checks each `cell`'s literal initializer against its `:
 //! type_name` annotation (a `source`'s initializer is checked identically — a `source` shares
-//! `cell`'s exact shape, minus `filter`/`require`), each `relationship`/`conditional` binding's
+//! `cell`'s exact shape, minus `filter`), each `relationship`/`conditional` binding's
 //! body against its declared outputs (arity: does the body actually produce as many values as
 //! declared; and per-output type), and each `out`'s initializer body against its optional `:
-//! type_name` annotation, with each `requirement` body checked to produce `bool` type. An absent
+//! type_name` annotation. Any `cell`, `source`, or `out`'s optional `require { ... }` block has
+//! each of its `requirement` bodies checked to produce `bool` type. An absent
 //! annotation, an annotation
 //! naming a type [`crate::TypeRegistry`] doesn't recognize, or an operator
 //! [`cel_parser::op_table::builtin_operand_types`] doesn't recognize all resolve to
@@ -14,7 +15,7 @@
 use cel_parser::{Expr, ExprSpan, Literal, ParseError, Ty, ty::check_expr};
 
 use crate::TypeRegistry;
-use crate::ast::{BindingDecl, CellDecl, OutDecl, Sheet, SheetItem, TypeExpr};
+use crate::ast::{BindingDecl, CellDecl, OutDecl, RequireBlock, Sheet, SheetItem, TypeExpr};
 use crate::type_registry::TypeShape;
 
 /// Checks `sheet` against `registry`'s registered types, returning every type diagnostic found.
@@ -49,6 +50,7 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                     &mut diagnostics,
                 );
                 check_filter(cell, &cell_types, &shapes, &resolve, &mut diagnostics);
+                check_requirements(cell.require.as_ref(), &resolve, &mut diagnostics);
             }
             SheetItem::Source(source) => {
                 check_cell_initializer(
@@ -57,6 +59,7 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                     registry,
                     &mut diagnostics,
                 );
+                check_requirements(source.require.as_ref(), &resolve, &mut diagnostics);
             }
             SheetItem::Relationship(rel) => {
                 for binding in &rel.bindings {
@@ -662,7 +665,20 @@ fn check_out(
             }
         }
     }
-    let Some(require) = &out_decl.require else {
+    check_requirements(out_decl.require.as_ref(), resolve, diagnostics);
+}
+
+/// Checks every requirement in `require`'s body against `resolve`, appending a diagnostic for
+/// each one that doesn't type-check as `bool`. A no-op if `require` is absent (a plain `cell`,
+/// `source`, or `out` with no `require { ... }` block). Shared by [`check_out`] and by the
+/// `SheetItem::Cell`/`SheetItem::Source` arms of [`check_sheet`]'s match, since `require` has the
+/// same shape and rules regardless of which cell kind it's attached to.
+fn check_requirements(
+    require: Option<&RequireBlock>,
+    resolve: &impl Fn(&str) -> Ty,
+    diagnostics: &mut Vec<ParseError>,
+) {
+    let Some(require) = require else {
         return;
     };
     for requirement in &require.requirements {
@@ -710,6 +726,13 @@ mod tests {
     fn source_initializer_mismatched_with_its_annotation_is_a_diagnostic() {
         // Unsuffixed float literal defaults to f64, not i32.
         let sheet = parse("sheet s { source x: i32 = 1.0; }");
+        let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn cell_requirement_non_bool_body_is_a_diagnostic() {
+        let sheet = parse("sheet s { cell x: i32 = 5 require { positive: x; }; }");
         let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diagnostics.len(), 1);
     }

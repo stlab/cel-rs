@@ -186,7 +186,8 @@ impl TypeExpr {
     }
 }
 
-/// `cell_decl = "cell" identifier cell_type_init ";".`
+/// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] [ "require" "{" { requirement }
+/// "}" ] ";".`
 ///
 /// `type_name`/`initializer` are unresolved — no `TypeRegistry` lookup, no literal validation.
 /// Exactly one of `type_name`, `initializer` may be absent, per the grammar's two
@@ -206,6 +207,8 @@ pub struct CellDecl {
     pub initializer: Option<cel_parser::Expr>,
     /// The `filter` clause, if present.
     pub filter: Option<CellFilter>,
+    /// The `require { ... }` validation block, if present.
+    pub require: Option<RequireBlock>,
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
@@ -219,10 +222,11 @@ pub struct CellDecl {
     pub span: ExprSpan,
 }
 
-/// `source_decl = "source" identifier cell_type_init ";".`
+/// `source_decl = "source" identifier cell_type_init [ "require" "{" { requirement } "}" ] ";".`
 ///
-/// Same shape as [`CellDecl`] minus `filter`/`require` (added in a later pass) — a
-/// `source` cell's initializer is a one-time literal exactly like a plain `cell`'s.
+/// Same shape as [`CellDecl`] minus `filter` (a `source` cell can't be filtered — its value comes
+/// directly from outside the sheet) — a `source` cell's initializer is a one-time literal exactly
+/// like a plain `cell`'s, and it supports the same `require` block.
 #[derive(Debug, Clone)]
 pub struct SourceDecl {
     /// The source cell's declared name.
@@ -235,6 +239,8 @@ pub struct SourceDecl {
     /// `crate::parser::AdamParser` for the compile-to-`Sheet` phase, which parses this with no
     /// cell scope pushed and evaluates it eagerly, once, at parse time.
     pub initializer: Option<cel_parser::Expr>,
+    /// The `require { ... }` validation block, if present.
+    pub require: Option<RequireBlock>,
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
@@ -324,8 +330,8 @@ pub struct BindingDecl {
     pub span: ExprSpan,
 }
 
-/// `out_decl = "out" identifier [ ":" type_expr ] ":=" or_expression [ "require" "{" {
-/// requirement } "}" ] ";".`
+/// `out_decl = "out" identifier [ ":" type_expr ] ":=" or_expression [ cell_filter ] [ "require"
+/// "{" { requirement } "}" ] ";".`
 ///
 /// `type_expr` is unresolved here (no `TypeRegistry` lookup), matching `CellDecl`. When
 /// absent, the cell's type is inferred from `initializer`'s result type by the compile phase
@@ -340,6 +346,8 @@ pub struct OutDecl {
     pub type_name: Option<TypeExpr>,
     /// The parsed initializer expression that computes this cell's value.
     pub initializer: cel_parser::Expr,
+    /// The `filter` clause, if present.
+    pub filter: Option<CellFilter>,
     /// The `require { ... }` validation block, if present.
     pub require: Option<RequireBlock>,
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
@@ -493,6 +501,7 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: None,
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -559,6 +568,7 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: None,
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -602,6 +612,7 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: None,
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -625,6 +636,7 @@ mod tests {
                 name: "x".to_string(),
                 span,
             },
+            filter: None,
             require: None,
             leading_comment: None,
             doc_comment: None,
@@ -645,6 +657,7 @@ mod tests {
                 name: "x".to_string(),
                 span,
             },
+            filter: None,
             require: None,
             leading_comment: None,
             doc_comment: None,
@@ -689,6 +702,7 @@ mod tests {
             )),
             initializer: None,
             filter: None,
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -712,6 +726,7 @@ mod tests {
                 span,
             }),
             filter: None,
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -740,6 +755,7 @@ mod tests {
                 },
                 span,
             }),
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,

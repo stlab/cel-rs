@@ -183,7 +183,8 @@ impl AdamAstParser {
         }
     }
 
-    /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] ";".`
+    /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] [ "require" "{" {
+    /// requirement } "}" ] ";".`
     fn parse_cell_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::CellDecl> {
         let decl_start = cursor.peek_span();
         cursor.is_keyword("cell");
@@ -207,6 +208,11 @@ impl AdamAstParser {
         } else {
             None
         };
+        let require = if cursor.is_keyword("require") {
+            Some(self.parse_require_block(cursor)?)
+        } else {
+            None
+        };
         let semi_span = cursor.expect_punct(";")?;
         Ok(ast::CellDecl {
             name,
@@ -214,6 +220,7 @@ impl AdamAstParser {
             type_name,
             initializer,
             filter,
+            require,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -224,7 +231,8 @@ impl AdamAstParser {
         })
     }
 
-    /// `source_decl = "source" identifier cell_type_init ";".`
+    /// `source_decl = "source" identifier cell_type_init [ "require" "{" { requirement } "}" ]
+    /// ";".`
     ///
     /// Mirrors [`Self::parse_cell_decl`] exactly, minus the `filter` clause (not part of the
     /// `source_decl` grammar).
@@ -245,12 +253,18 @@ impl AdamAstParser {
         } else {
             return Err(cursor.err_at("expected `:` or `=` in source declaration"));
         };
+        let require = if cursor.is_keyword("require") {
+            Some(self.parse_require_block(cursor)?)
+        } else {
+            None
+        };
         let semi_span = cursor.expect_punct(";")?;
         Ok(ast::SourceDecl {
             name,
             name_span: point(name_span),
             type_name,
             initializer,
+            require,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -479,8 +493,8 @@ impl AdamAstParser {
         Ok(relationships)
     }
 
-    /// `out_decl = "out" identifier [ ":" type_name ] ":=" expression [ "require" "{" {
-    /// requirement } "}" ] ";".`
+    /// `out_decl = "out" identifier [ ":" type_name ] ":=" expression [ cell_filter ] [ "require"
+    /// "{" { requirement } "}" ] ";".`
     fn parse_out_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::OutDecl> {
         let decl_start = cursor.peek_span();
         cursor.is_keyword("out");
@@ -492,23 +506,14 @@ impl AdamAstParser {
         };
         cursor.expect_punct(":=")?;
         let initializer = self.parse_cel_expression(cursor)?;
+        let filter = if cursor.is_keyword("filter") {
+            let filter_start = cursor.last_span();
+            Some(self.parse_cell_filter(cursor, filter_start)?)
+        } else {
+            None
+        };
         let require = if cursor.is_keyword("require") {
-            let open_span = cursor.expect_open_brace()?;
-            let mut requirements = Vec::new();
-            while !cursor.at_close_brace() {
-                requirements.push(self.parse_requirement(cursor)?);
-            }
-            let close_span = cursor.expect_close_brace()?;
-            Some(ast::RequireBlock {
-                requirements,
-                trailing_comment: None,
-                blank_line_before_close: false,
-                open_brace_span: point(open_span),
-                span: ast::ExprSpan {
-                    start: open_span,
-                    end: close_span,
-                },
-            })
+            Some(self.parse_require_block(cursor)?)
         } else {
             None
         };
@@ -518,6 +523,7 @@ impl AdamAstParser {
             name_span: point(name_span),
             type_name,
             initializer,
+            filter,
             require,
             leading_comment: None,
             doc_comment: None,
@@ -525,6 +531,28 @@ impl AdamAstParser {
             span: ast::ExprSpan {
                 start: decl_start,
                 end: semi_span,
+            },
+        })
+    }
+
+    /// `require_block = "require" "{" { requirement } "}".`
+    ///
+    /// - Precondition: the `require` keyword has already been consumed by the caller.
+    fn parse_require_block(&mut self, cursor: &mut TokenCursor) -> Result<ast::RequireBlock> {
+        let open_span = cursor.expect_open_brace()?;
+        let mut requirements = Vec::new();
+        while !cursor.at_close_brace() {
+            requirements.push(self.parse_requirement(cursor)?);
+        }
+        let close_span = cursor.expect_close_brace()?;
+        Ok(ast::RequireBlock {
+            requirements,
+            trailing_comment: None,
+            blank_line_before_close: false,
+            open_brace_span: point(open_span),
+            span: ast::ExprSpan {
+                start: open_span,
+                end: close_span,
             },
         })
     }

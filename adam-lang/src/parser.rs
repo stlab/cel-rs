@@ -202,7 +202,8 @@ impl AdamParser {
         }
     }
 
-    /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] ";".`
+    /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] [ "require" "{" {
+    /// requirement } "}" ] ";".`
     ///
     /// `cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).`
     fn parse_cell_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
@@ -257,17 +258,40 @@ impl AdamParser {
             None
         };
 
+        // Inserted before the `require` block is parsed (unlike `filter`, parsed just above with
+        // `name` not yet in `ctx.cell_names`) so a requirement can reference the cell's own name
+        // — e.g. `require { positive: x > 0; }` — exactly as `parse_out_decl`'s `require` block
+        // can already reference its own out cell's name.
+        ctx.cell_names.insert(name.clone(), (cell_id, shape));
+
+        let require_names_and_reqs: Vec<(String, Requirement)> = if ctx.is_keyword("require") {
+            ctx.expect_open_brace()?;
+            let mut reqs = Vec::new();
+            while !ctx.at_close_brace() {
+                reqs.push(self.parse_requirement(ctx)?);
+            }
+            ctx.expect_close_brace()?;
+            reqs
+        } else {
+            Vec::new()
+        };
+
         ctx.expect_punct(";")?;
-        ctx.cell_names.insert(name, (cell_id, shape));
         if let Some((filter_name, filter)) = filter {
             ctx.sheet
                 .add_filter(cell_id, filter_name, filter)
                 .map_err(|e| ParseError::new(e.to_string(), name_span))?;
         }
+        for (req_name, requirement) in require_names_and_reqs {
+            ctx.sheet
+                .add_requirement(cell_id, req_name, requirement)
+                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+        }
         Ok(())
     }
 
-    /// `source_decl = "source" identifier cell_type_init ";".`
+    /// `source_decl = "source" identifier cell_type_init [ "require" "{" { requirement } "}" ]
+    /// ";".`
     ///
     /// `cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).`
     ///
@@ -321,8 +345,28 @@ impl AdamParser {
             (declared, cell_id)
         };
 
+        // Inserted before the `require` block is parsed so a requirement can reference the
+        // cell's own name — e.g. `require { positive: x > 0; }` — exactly as `parse_cell_decl`.
+        ctx.cell_names.insert(name.clone(), (cell_id, shape));
+
+        let require_names_and_reqs: Vec<(String, Requirement)> = if ctx.is_keyword("require") {
+            ctx.expect_open_brace()?;
+            let mut reqs = Vec::new();
+            while !ctx.at_close_brace() {
+                reqs.push(self.parse_requirement(ctx)?);
+            }
+            ctx.expect_close_brace()?;
+            reqs
+        } else {
+            Vec::new()
+        };
+
         ctx.expect_punct(";")?;
-        ctx.cell_names.insert(name, (cell_id, shape));
+        for (req_name, requirement) in require_names_and_reqs {
+            ctx.sheet
+                .add_requirement(cell_id, req_name, requirement)
+                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+        }
         Ok(())
     }
 
@@ -1146,8 +1190,8 @@ impl AdamParser {
         Ok(rel_ids)
     }
 
-    /// `out_decl = "out" identifier [ ":" type_expr ] ":=" expression [ "require" "{" {
-    /// requirement } "}" ] ";".`
+    /// `out_decl = "out" identifier [ ":" type_expr ] ":=" expression [ cell_filter ] [ "require"
+    /// "{" { requirement } "}" ] ";".`
     fn parse_out_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("out"); // consume
         let (name, name_span) = ctx.consume_ident()?;
@@ -1209,6 +1253,13 @@ impl AdamParser {
         };
 
         let cell_id = self.build_default_cell(&out_shape, name_span, ctx)?;
+
+        let filter = if ctx.is_keyword("filter") {
+            Some(self.parse_cell_filter(ctx, &name, name_span, &out_shape)?)
+        } else {
+            None
+        };
+
         ctx.cell_names
             .insert(name.clone(), (cell_id, out_shape.clone()));
 
@@ -1252,11 +1303,16 @@ impl AdamParser {
             .zip(requirements)
             .collect();
 
-        let output_id = ctx
+        let out_cell = ctx
             .sheet
             .add_out(writer, named_requirements)
             .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
-        ctx.output_names.insert(name, output_id);
+        if let Some((filter_name, filter)) = filter {
+            ctx.sheet
+                .add_filter(out_cell, filter_name, filter)
+                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+        }
+        ctx.output_names.insert(name, out_cell);
 
         Ok(())
     }
@@ -1701,6 +1757,33 @@ mod tests {
     fn parse_source_decl_requires_colon_or_equals() {
         let result = parser().parse_str("sheet s { source width; }");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_cell_decl_with_a_require_block_attaches_requirements() {
+        let sheet = parser()
+            .parse_str("sheet s { cell x: i32 = 5 require { positive: x > 0; }; }")
+            .unwrap();
+        let (x, _) = sheet.cell_names["x"];
+        assert_eq!(sheet.cell_requirements(x).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_source_decl_with_a_require_block_attaches_requirements() {
+        let sheet = parser()
+            .parse_str("sheet s { source x: i32 = 5 require { positive: x > 0; }; }")
+            .unwrap();
+        let (x, _) = sheet.cell_names["x"];
+        assert_eq!(sheet.cell_requirements(x).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_out_decl_with_a_filter_clause_attaches_a_named_filter() {
+        let sheet = parser()
+            .parse_str("sheet s { cell width: i32 = 4; out area := width filter clamp: 0..=100; }")
+            .unwrap();
+        let area = sheet.output_names["area"];
+        assert_eq!(sheet.filter_name(area), Some("clamp"));
     }
 
     #[test]
