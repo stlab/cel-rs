@@ -1,46 +1,26 @@
-//! Examples backing `book-src/tutorial.md` (Chapter 1). Each function is pulled into the book
-//! verbatim via mdBook's `{{#include tests/tutorial.rs:name}}`; see `src/lib.rs`.
+//! Examples backing `book-src/tutorial.md` (Chapter 1). See `src/lib.rs` for how these `.adm2`
+//! files are wired into the book.
 
 #[test]
 fn first_sheet() {
-    // ANCHOR: first_sheet
     let mut parser = adam_lang_book::support::parser();
     let parsed = parser
-        .parse_str(
-            r#"
-            sheet hello {
-                cell width: i32 = 1920;
-                cell height: i32 = 1080;
-            }
-            "#,
-        )
+        .parse_str(include_str!(
+            "../book-src/examples/tutorial/first_sheet.adm2"
+        ))
         .unwrap();
 
     let width = parsed.cell_names["width"].0;
     assert_eq!(*parsed.read::<i32>(width).unwrap(), 1920);
-    // ANCHOR_END: first_sheet
 }
 
 #[test]
 fn multiplication_triangle() {
-    // ANCHOR: multiplication_triangle
     let mut parser = adam_lang_book::support::parser();
     let mut parsed = parser
-        .parse_str(
-            r#"
-            sheet triangle {
-                cell c = 0.0;
-                cell a = 2.0;
-                cell b = 3.0;
-
-                relationship {
-                    c := a * b;
-                    a := c / b;
-                    b := c / a;
-                }
-            }
-            "#,
-        )
+        .parse_str(include_str!(
+            "../book-src/examples/tutorial/multiplication_triangle.adm2"
+        ))
         .unwrap();
     parsed.propagate().unwrap();
 
@@ -58,41 +38,13 @@ fn multiplication_triangle() {
     assert_eq!(*parsed.read::<f64>(a).unwrap(), 2.0); // untouched
     assert_eq!(*parsed.read::<f64>(b).unwrap(), 5.0); // just written
     assert_eq!(*parsed.read::<f64>(c).unwrap(), 10.0); // 2.0 * 5.0, re-derived
-    // ANCHOR_END: multiplication_triangle
 }
 
 #[test]
 fn mode_demo() {
-    // ANCHOR: mode_demo
     let mut parser = adam_lang_book::support::parser();
     let mut parsed = parser
-        .parse_str(
-            r#"
-            sheet mode_demo {
-                cell p: i32 = 0;
-                cell x: f64 = 1.0;
-                cell y: f64 = 2.0;
-
-                conditional p {
-                    0i32 => {
-                        relationship {
-                            x := y;
-                        }
-                    }
-                    1i32 => {
-                        relationship {
-                            y := x;
-                        }
-                    }
-                    _ => {
-                        relationship {
-                            x := 0.0;
-                        }
-                    }
-                }
-            }
-            "#,
-        )
+        .parse_str(include_str!("../book-src/examples/tutorial/mode_demo.adm2"))
         .unwrap();
 
     let p = parsed.cell_names["p"].0;
@@ -104,15 +56,15 @@ fn mode_demo() {
     parsed.write(p, 2_i32).unwrap();
     parsed.propagate().unwrap();
     assert_eq!(*parsed.read::<f64>(x).unwrap(), 0.0); // p matches no named branch: default
-    // ANCHOR_END: mode_demo
 }
 
 #[test]
 fn clamp_demo() {
-    // ANCHOR: clamp_demo
     let mut parser = adam_lang_book::support::parser();
     let mut parsed = parser
-        .parse_str("sheet volume { cell level: i32 = 50 filter 0..=100; }")
+        .parse_str(include_str!(
+            "../book-src/examples/tutorial/clamp_demo.adm2"
+        ))
         .unwrap();
     let level = parsed.cell_names["level"].0;
 
@@ -121,26 +73,15 @@ fn clamp_demo() {
 
     parsed.propagate().unwrap();
     assert_eq!(*parsed.read::<i32>(level).unwrap(), 100); // now clamped
-    // ANCHOR_END: clamp_demo
 }
 
 #[test]
 fn area_with_requirement() {
-    // ANCHOR: area_with_requirement
     let mut parser = adam_lang_book::support::parser();
     let mut parsed = parser
-        .parse_str(
-            r#"
-            sheet area_demo {
-                cell width: i32 = 10;
-                cell height: i32 = 20;
-
-                out area: i32 := width * height require {
-                    not_too_big: area <= 300;
-                };
-            }
-            "#,
-        )
+        .parse_str(include_str!(
+            "../book-src/examples/tutorial/area_with_requirement.adm2"
+        ))
         .unwrap();
     parsed.propagate().unwrap();
 
@@ -151,5 +92,4 @@ fn area_with_requirement() {
     parsed.write(width, 50_i32).unwrap();
     parsed.propagate().unwrap();
     assert!(!parsed.output_valid(output)); // 50 * 20 == 1000 > 300
-    // ANCHOR_END: area_with_requirement
 }

@@ -1,0 +1,18 @@
+sheet diamond {
+    cell a = 0.0;
+    cell b = 0.0;
+    cell c = 2.0;
+    cell d = 3.0;
+
+    relationship {
+        c := a * b;
+        b := c / a;
+        a := c / b;
+    }
+
+    relationship {
+        d := b * c;
+        c := d / b;
+        b := d / c;
+    }
+}

@@ -1,0 +1,8 @@
+sheet diagnose_only {
+    cell bound: i32 = 100 filter 0..=100;
+    cell driver: i32 = 500;
+
+    relationship {
+        bound := driver;
+    }
+}

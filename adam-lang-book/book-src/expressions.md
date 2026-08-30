@@ -21,8 +21,8 @@ install `cel-std` (see `support::parser` in `adam-lang-book`'s own source). A pa
 a bare `OpLookup::new()` and no library installed can still parse
 and run every construct in this book except a function call:
 
-```rust
-{{#include ../tests/expressions.rs:no_standard_library}}
+```
+{{#include examples/expressions/no_standard_library.adm2}}
 ```
 
 ## 3.3 Cell initializers see no cells
@@ -32,8 +32,8 @@ A `cell`'s `= expression` initializer is evaluated exactly once, eagerly, at the
 operators, and library functions, but referencing *any* identifier that would otherwise name a
 cell is unresolved:
 
-```rust
-{{#include ../tests/expressions.rs:initializer_sees_no_cells}}
+```
+{{#include examples/expressions/initializer_sees_no_cells.adm2}}
 ```
 
 To compute one cell's value from another's, write a [`relationship`](relationships.md) or an
