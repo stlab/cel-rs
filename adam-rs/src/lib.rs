@@ -118,7 +118,7 @@ pub mod relationship;
 pub mod requirement;
 pub mod sheet;
 
-pub use cell::CellId;
+pub use cell::{CellId, CellKind};
 pub use conditional::{ConditionalId, MatchExpr};
 pub use error::Error;
 pub use filter::{Filter, FilterKind, FilterViolation};

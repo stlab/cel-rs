@@ -8,10 +8,22 @@ use slotmap::new_key_type;
 
 use crate::filter::FilterData;
 use crate::relationship::RelationshipId;
+use crate::requirement::RequirementId;
 
 new_key_type! {
     /// A stable handle to a cell in a [`crate::sheet::Sheet`].
     pub struct CellId;
+}
+
+/// A cell's fixed role in the planner's per-round source/derived assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellKind {
+    /// May be a source or derived, chosen per round by the planner. Default kind.
+    Cell,
+    /// Always a source: never claimable as any method's output.
+    Source,
+    /// Always derived by exactly one fixed writer method; never `write()`-able.
+    Out,
 }
 
 /// Internal storage for a single value cell.
@@ -44,6 +56,11 @@ pub(crate) struct CellData {
     /// This cell's filter, if one is attached via `Sheet::add_filter`. At most one per
     /// cell.
     pub(crate) filter: Option<FilterData>,
+    /// This cell's fixed role in the planner's per-round source/derived assignment.
+    pub(crate) kind: CellKind,
+    /// This cell's requirements, in attachment order. Empty for most cells.
+    #[allow(dead_code)]
+    pub(crate) requirements: Vec<RequirementId>,
 }
 
 impl CellData {
@@ -68,6 +85,8 @@ mod tests {
             adj: vec![],
             eq_fn: |a, b| a.downcast_ref::<i32>() == b.downcast_ref::<i32>(),
             filter: None,
+            kind: CellKind::Cell,
+            requirements: Vec::new(),
         };
         assert_eq!(data.type_id, TypeId::of::<i32>());
         assert_eq!(data.strength, 0);
@@ -76,6 +95,8 @@ mod tests {
         assert!(data.derived.is_none());
         assert_eq!(*data.source.downcast_ref::<i32>().unwrap(), 42);
         assert_eq!(*data.effective().downcast_ref::<i32>().unwrap(), 42);
+        assert_eq!(data.kind, CellKind::Cell);
+        assert!(data.requirements.is_empty());
         let x: i32 = 42;
         let y: i32 = 99;
         assert!((data.eq_fn)(&x, &x));

@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use slotmap::SlotMap;
 
 use crate::{
-    cell::{CellData, CellId},
+    cell::{CellData, CellId, CellKind},
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::Error,
     filter::{Filter, FilterKind, FilterViolation},
@@ -142,7 +142,26 @@ impl Sheet {
             adj: Vec::new(),
             eq_fn: |a, b| a.downcast_ref::<T>() == b.downcast_ref::<T>(),
             filter: None,
+            kind: CellKind::Cell,
+            requirements: Vec::new(),
         })
+    }
+
+    /// Registers a cell that can never be claimed as any method's output — always a
+    /// planner source, forever.
+    ///
+    /// - Complexity: O(1).
+    pub fn add_source<T: Any + PartialEq + 'static>(&mut self, value: T) -> CellId {
+        let id = self.add_cell(value);
+        self.cells[id].kind = CellKind::Source;
+        id
+    }
+
+    /// Returns `id`'s fixed cell kind.
+    ///
+    /// Returns `None` if `id` is not a live cell in this sheet.
+    pub fn cell_kind(&self, id: CellId) -> Option<CellKind> {
+        self.cells.get(id).map(|c| c.kind)
     }
 
     /// Registers a relationship defined by a non-empty list of methods.
@@ -1721,12 +1740,40 @@ impl Default for Sheet {
 #[cfg(test)]
 mod tests {
     use crate::{
-        ConditionalId, Error, MatchExpr, Method, Sheet,
+        CellKind, ConditionalId, Error, MatchExpr, Method, Sheet,
         cell::CellId,
         filter::{Filter, FilterKind, FilterViolation},
         relationship::RelationshipId,
     };
     use std::any::{Any, TypeId};
+
+    #[test]
+    fn add_cell_has_cell_kind() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        assert_eq!(sheet.cell_kind(a), Some(CellKind::Cell));
+    }
+
+    #[test]
+    fn add_source_has_source_kind() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_source(0_i32);
+        assert_eq!(sheet.cell_kind(a), Some(CellKind::Source));
+    }
+
+    #[test]
+    fn cell_kind_returns_none_for_invalid_id() {
+        let mut sheet = Sheet::new();
+        sheet.add_cell(0_i32); // occupies slotmap index 0 in `sheet`
+        let mut other = Sheet::new();
+        other.add_cell(0_i32); // index 0 in `other`
+        let bogus = other.add_cell(0_i32); // index 1 in `other` -- out of range for `sheet`,
+        // which only ever allocated index 0, so this is
+        // guaranteed invalid regardless of generation
+        // (a same-index key from a second fresh SlotMap
+        // would otherwise collide with `sheet`'s own key)
+        assert_eq!(sheet.cell_kind(bogus), None);
+    }
 
     #[test]
     fn add_conditional_returns_error_for_invalid_cell() {
