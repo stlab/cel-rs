@@ -324,6 +324,30 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     out.push_str(";\n");
 }
 
+/// Writes one `source name[: type][ = initializer];` declaration. Mirrors [`write_cell`] exactly,
+/// minus the `filter` clause (not part of the `source_decl` grammar).
+fn write_source(out: &mut String, decl: &ast::SourceDecl, depth: usize) {
+    write_trivia(
+        out,
+        decl.blank_line_before,
+        decl.leading_comment.as_ref(),
+        depth,
+    );
+    write_doc_comment(out, "///", decl.doc_comment.as_deref(), depth);
+    out.push_str(&indent(depth));
+    out.push_str("source ");
+    out.push_str(&decl.name);
+    if let Some(type_expr) = &decl.type_name {
+        out.push_str(": ");
+        out.push_str(&source_text_or_empty(type_expr.span()));
+    }
+    if let Some(expr) = &decl.initializer {
+        out.push_str(" = ");
+        out.push_str(&cel_parser::format_expr(expr));
+    }
+    out.push_str(";\n");
+}
+
 /// Dispatches to the writer for one top-level sheet item.
 ///
 /// - Precondition: `item` is not `SheetItem::Error` — [`format_sheet`]'s own precondition
@@ -334,6 +358,7 @@ fn write_sheet_item(out: &mut String, item: &ast::SheetItem, depth: usize) {
         ast::SheetItem::Relationship(rel) => write_relationship(out, rel, depth),
         ast::SheetItem::Conditional(cond) => write_conditional(out, cond, depth),
         ast::SheetItem::Out(out_decl) => write_out(out, out_decl, depth),
+        ast::SheetItem::Source(decl) => write_source(out, decl, depth),
         ast::SheetItem::Error { .. } => {
             unreachable!("format_sheet is only called on a sheet with no recorded syntax errors")
         }
@@ -415,6 +440,14 @@ mod tests {
         assert_eq!(
             format("sheet s { cell width: f64 = 1920.0; }"),
             "sheet s {\n    cell width: f64 = 1920.0;\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_source_decl() {
+        assert_eq!(
+            format("sheet s { source width: i32 = 4; }"),
+            "sheet s {\n    source width: i32 = 4;\n}\n"
         );
     }
 

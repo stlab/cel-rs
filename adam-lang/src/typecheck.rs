@@ -12,7 +12,7 @@
 use cel_parser::{Expr, ExprSpan, Literal, ParseError, Ty, ty::check_expr};
 
 use crate::TypeRegistry;
-use crate::ast::{BindingDecl, CellDecl, OutDecl, Sheet, SheetItem};
+use crate::ast::{BindingDecl, CellDecl, OutDecl, Sheet, SheetItem, TypeExpr};
 use crate::type_registry::TypeShape;
 
 /// Checks `sheet` against `registry`'s registered types, returning every type diagnostic found.
@@ -40,8 +40,21 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
     for item in &sheet.items {
         match item {
             SheetItem::Cell(cell) => {
-                check_cell_initializer(cell, registry, &mut diagnostics);
+                check_cell_initializer(
+                    cell.type_name.as_ref(),
+                    cell.initializer.as_ref(),
+                    registry,
+                    &mut diagnostics,
+                );
                 check_filter(cell, &cell_types, &shapes, &resolve, &mut diagnostics);
+            }
+            SheetItem::Source(source) => {
+                check_cell_initializer(
+                    source.type_name.as_ref(),
+                    source.initializer.as_ref(),
+                    registry,
+                    &mut diagnostics,
+                );
             }
             SheetItem::Relationship(rel) => {
                 for binding in &rel.bindings {
@@ -73,12 +86,14 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
     diagnostics
 }
 
-/// Maps every declared cell name — from a `cell` or an `out` — to both its scalar `Ty` (unaware
-/// of tuple structure, for use as the identifier resolver method/condition bodies are checked
-/// against) and its full recursive `TypeShape` (for `expr_matches_shape`'s tuple-aware checks). A
-/// `cell`/`out` with no annotation, or one naming a type `registry` doesn't resolve, is absent
-/// from the `TypeShape` map and maps to `Ty::Any` in the `Ty` map; a tuple-typed annotation also
-/// maps to `Ty::Any` in the `Ty` map (`Ty` has no tuple variant), but *is* present in the
+/// Maps every declared cell name — from a `cell`, a `source`, or an `out` — to both its scalar
+/// `Ty` (unaware of tuple structure, for use as the identifier resolver method/condition bodies
+/// are checked against) and its full recursive `TypeShape` (for `expr_matches_shape`'s tuple-aware
+/// checks). A `source` is resolved exactly like a `cell` (same shape, no `filter`/`require`) so
+/// its name is referenceable by other cells'/sources'/outs' expressions exactly like a `cell`'s.
+/// A `cell`/`source`/`out` with no annotation, or one naming a type `registry` doesn't resolve, is
+/// absent from the `TypeShape` map and maps to `Ty::Any` in the `Ty` map; a tuple-typed annotation
+/// also maps to `Ty::Any` in the `Ty` map (`Ty` has no tuple variant), but *is* present in the
 /// `TypeShape` map. An `out` with an annotation resolves the same way as a `cell`; one without is
 /// inferred from its initializer body's checked type, using only `cell`-declared types as context (not
 /// other `out`s' inferred types — see this function's own note above), and is never present in
@@ -113,13 +128,24 @@ fn declared_cell_types(
     let mut map = std::collections::HashMap::new();
     let mut shapes = std::collections::HashMap::new();
     for item in &sheet.items {
-        if let SheetItem::Cell(cell) = item {
-            let shape = resolve_annotation_shape(cell.type_name.as_ref(), registry);
-            let ty = shape.as_ref().map(shape_to_ty).unwrap_or(Ty::Any);
-            if let Some(shape) = shape {
-                shapes.insert(cell.name.clone(), shape);
+        match item {
+            SheetItem::Cell(cell) => {
+                let shape = resolve_annotation_shape(cell.type_name.as_ref(), registry);
+                let ty = shape.as_ref().map(shape_to_ty).unwrap_or(Ty::Any);
+                if let Some(shape) = shape {
+                    shapes.insert(cell.name.clone(), shape);
+                }
+                map.insert(cell.name.clone(), ty);
             }
-            map.insert(cell.name.clone(), ty);
+            SheetItem::Source(source) => {
+                let shape = resolve_annotation_shape(source.type_name.as_ref(), registry);
+                let ty = shape.as_ref().map(shape_to_ty).unwrap_or(Ty::Any);
+                if let Some(shape) = shape {
+                    shapes.insert(source.name.clone(), shape);
+                }
+                map.insert(source.name.clone(), ty);
+            }
+            _ => {}
         }
     }
     let resolve_cells = |name: &str| -> Ty { map.get(name).copied().unwrap_or(Ty::Any) };
@@ -287,17 +313,22 @@ fn expr_matches_shape(
     }
 }
 
-/// Checks one `cell`'s initializer against its `: type_expr` annotation. A no-op if either half
-/// is absent, or if the annotation names a type `registry` doesn't recognize. Dispatches to
-/// [`expr_matches_shape`] for a tuple-shaped annotation (recursively, element-wise); otherwise
-/// falls back to the original literal/scalar check, since a non-tuple initializer that isn't a
-/// bare literal fails to constant-fold in the real parser anyway.
+/// Checks one `cell`'s or `source`'s initializer against its `: type_expr` annotation. A no-op if
+/// either half is absent, or if the annotation names a type `registry` doesn't recognize.
+/// Dispatches to [`expr_matches_shape`] for a tuple-shaped annotation (recursively,
+/// element-wise); otherwise falls back to the original literal/scalar check, since a non-tuple
+/// initializer that isn't a bare literal fails to constant-fold in the real parser anyway.
+///
+/// Takes `type_name`/`initializer` directly (rather than a whole `&CellDecl`) so both
+/// `SheetItem::Cell` and `SheetItem::Source` — which share this same shape but aren't the same
+/// Rust type — can share one check.
 fn check_cell_initializer(
-    cell: &CellDecl,
+    type_name: Option<&TypeExpr>,
+    initializer: Option<&Expr>,
     registry: &TypeRegistry,
     diagnostics: &mut Vec<ParseError>,
 ) {
-    let (Some(type_expr), Some(expr)) = (&cell.type_name, &cell.initializer) else {
+    let (Some(type_expr), Some(expr)) = (type_name, initializer) else {
         return;
     };
     let Ok(shape) = registry.resolve(type_expr) else {
@@ -671,6 +702,14 @@ mod tests {
         let sheet = parse("sheet s { cell x: i32 = 1.0; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn source_initializer_mismatched_with_its_annotation_is_a_diagnostic() {
+        // Unsuffixed float literal defaults to f64, not i32.
+        let sheet = parse("sheet s { source x: i32 = 1.0; }");
+        let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diagnostics.len(), 1);
     }
 
     #[test]

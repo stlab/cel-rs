@@ -153,7 +153,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `sheet_item = cell_decl | relationship_decl | conditional_decl | out_decl.`
+    /// `sheet_item = cell_decl | relationship_decl | conditional_decl | out_decl | source_decl.`
     fn parse_sheet_item(&mut self, cursor: &mut TokenCursor) -> Result<ast::SheetItem> {
         use cel_parser::lex_lexer::{HasSpan, Token};
         match cursor.peek_token() {
@@ -169,8 +169,11 @@ impl AdamAstParser {
             Some(Token::Identifier(id)) if id == "out" => {
                 self.parse_out_decl(cursor).map(ast::SheetItem::Out)
             }
+            Some(Token::Identifier(id)) if id == "source" => {
+                self.parse_source_decl(cursor).map(ast::SheetItem::Source)
+            }
             Some(tok) => Err(cel_parser::ParseError::new(
-                "expected `cell`, `relationship`, `conditional`, or `out`",
+                "expected `cell`, `relationship`, `conditional`, `out`, or `source`",
                 tok.span(),
             )),
             None => Err(cel_parser::ParseError::new(
@@ -211,6 +214,43 @@ impl AdamAstParser {
             type_name,
             initializer,
             filter,
+            leading_comment: None,
+            doc_comment: None,
+            blank_line_before: false,
+            span: ast::ExprSpan {
+                start: decl_start,
+                end: semi_span,
+            },
+        })
+    }
+
+    /// `source_decl = "source" identifier cell_type_init ";".`
+    ///
+    /// Mirrors [`Self::parse_cell_decl`] exactly, minus the `filter` clause (not part of the
+    /// `source_decl` grammar).
+    fn parse_source_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::SourceDecl> {
+        let decl_start = cursor.peek_span();
+        cursor.is_keyword("source");
+        let (name, name_span) = cursor.consume_ident()?;
+        let (type_name, initializer) = if cursor.consume_punct(":") {
+            let type_name = self.parse_type_expr(cursor)?;
+            let initializer = if cursor.consume_punct("=") {
+                Some(self.parse_cel_expression(cursor)?)
+            } else {
+                None
+            };
+            (Some(type_name), initializer)
+        } else if cursor.consume_punct("=") {
+            (None, Some(self.parse_cel_expression(cursor)?))
+        } else {
+            return Err(cursor.err_at("expected `:` or `=` in source declaration"));
+        };
+        let semi_span = cursor.expect_punct(";")?;
+        Ok(ast::SourceDecl {
+            name,
+            name_span: point(name_span),
+            type_name,
+            initializer,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -623,6 +663,14 @@ mod tests {
         };
         assert!(cell.type_name.is_none());
         assert!(cell.initializer.is_some());
+    }
+
+    #[test]
+    fn parse_source_decl_produces_a_source_decl_sheet_item() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { source width: i32 = 4; }")
+            .unwrap();
+        assert!(matches!(sheet.items[0], ast::SheetItem::Source(_)));
     }
 
     #[test]

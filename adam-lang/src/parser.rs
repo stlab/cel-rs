@@ -179,7 +179,8 @@ impl AdamParser {
         Ok(())
     }
 
-    /// `sheet_item = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).`
+    /// `sheet_item = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl
+    /// | source_decl).`
     fn parse_sheet_item(&mut self, ctx: &mut ParseContext) -> Result<()> {
         let _ = ctx.consume_doc_comment_run(false); // outer `///` docs (ignored at runtime)
         match ctx.peek_token() {
@@ -189,8 +190,9 @@ impl AdamParser {
             }
             Some(Token::Identifier(id)) if id == "conditional" => self.parse_conditional_decl(ctx),
             Some(Token::Identifier(id)) if id == "out" => self.parse_out_decl(ctx),
+            Some(Token::Identifier(id)) if id == "source" => self.parse_source_decl(ctx),
             Some(tok) => Err(ParseError::new(
-                "expected `cell`, `relationship`, `conditional`, or `out`",
+                "expected `cell`, `relationship`, `conditional`, `out`, or `source`",
                 tok.span(),
             )),
             None => Err(ParseError::new(
@@ -262,6 +264,65 @@ impl AdamParser {
                 .add_filter(cell_id, filter_name, filter)
                 .map_err(|e| ParseError::new(e.to_string(), name_span))?;
         }
+        Ok(())
+    }
+
+    /// `source_decl = "source" identifier cell_type_init ";".`
+    ///
+    /// `cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).`
+    ///
+    /// Mirrors [`Self::parse_cell_decl`] exactly, minus the `filter` clause (not part of the
+    /// `source_decl` grammar) — the declared cell is added via [`Sheet::add_source`] instead of
+    /// [`Sheet::add_cell`], so it is fixed as a planner source and can never be claimed as a
+    /// relationship's output.
+    fn parse_source_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
+        ctx.is_keyword("source"); // consume
+        let (name, name_span) = ctx.consume_ident()?;
+        if ctx.cell_names.contains_key(&name) {
+            return Err(ParseError::new(
+                format!("duplicate cell `{name}`"),
+                name_span,
+            ));
+        }
+
+        let declared_shape: Option<TypeShape> = if ctx.consume_punct(":") {
+            let type_expr = self.parse_type_expr(ctx)?;
+            Some(
+                self.types
+                    .resolve(&type_expr)
+                    .map_err(|(msg, span)| ParseError::new(msg, span))?,
+            )
+        } else {
+            None
+        };
+
+        let has_initializer = ctx.consume_punct("=");
+        let (shape, cell_id) = if has_initializer {
+            let segment = self.parse_cel_expression(ctx)?;
+            let (actual_shape, cell_id) = self.build_source_cell_from_segment(segment, ctx)?;
+            if let Some(declared) = &declared_shape
+                && declared != &actual_shape
+            {
+                return Err(ParseError::new(
+                    format!(
+                        "source `{name}`: type mismatch: expected `{}`, got `{}`",
+                        self.types.display_name(declared),
+                        self.types.display_name(&actual_shape)
+                    ),
+                    name_span,
+                ));
+            }
+            (actual_shape, cell_id)
+        } else {
+            let declared = declared_shape.ok_or_else(|| {
+                ParseError::new("expected `:` or `=` in source declaration", name_span)
+            })?;
+            let cell_id = self.build_default_source_cell(&declared, name_span, ctx)?;
+            (declared, cell_id)
+        };
+
+        ctx.expect_punct(";")?;
+        ctx.cell_names.insert(name, (cell_id, shape));
         Ok(())
     }
 
@@ -532,6 +593,74 @@ impl AdamParser {
                     .default_dynamic_sequence(shape)
                     .map_err(|msg| ParseError::new(msg, span))?;
                 Ok(ctx.sheet.add_cell(seq))
+            }
+        }
+    }
+
+    /// Evaluates `segment` via [`eval_segment_boxed`](Self::eval_segment_boxed) and adds a
+    /// matching *source* cell to `ctx.sheet` (see [`Sheet::add_source`]), using the registered
+    /// `add_source_fn` for a `TypeShape::Named` result, or `Sheet::add_source::<DynamicSequence>`
+    /// directly for a `TypeShape::Tuple` result. Mirrors
+    /// [`build_cell_from_segment`](Self::build_cell_from_segment) exactly, routed through
+    /// `Sheet::add_source` instead of `Sheet::add_cell`.
+    ///
+    /// - Precondition: see [`eval_segment_boxed`](Self::eval_segment_boxed).
+    ///
+    /// # Errors
+    /// See [`eval_segment_boxed`](Self::eval_segment_boxed).
+    fn build_source_cell_from_segment(
+        &self,
+        segment: DynSegment,
+        ctx: &mut ParseContext,
+    ) -> Result<(TypeShape, CellId)> {
+        let (shape, boxed) = self.eval_segment_boxed(segment)?;
+        let cell_id = match &shape {
+            TypeShape::Named(type_id) => {
+                let entry = self.types.entry_by_type_id(*type_id).expect("registered");
+                (entry.add_source_fn)(&mut ctx.sheet, boxed)
+            }
+            TypeShape::Tuple(_) => {
+                let seq = *boxed
+                    .downcast::<cel_runtime::DynamicSequence>()
+                    .expect("eval_segment_boxed: a Tuple shape always boxes a DynamicSequence");
+                ctx.sheet.add_source(seq)
+            }
+        };
+        Ok((shape, cell_id))
+    }
+
+    /// Builds a default-valued *source* cell for `shape` (scalar or tuple, recursively), adding
+    /// it to `ctx.sheet` (see [`Sheet::add_source`]). Mirrors
+    /// [`build_default_cell`](Self::build_default_cell) exactly, routed through
+    /// `Sheet::add_source` instead of `Sheet::add_cell`.
+    ///
+    /// # Errors
+    /// Returns `Err` naming the type/leaf that has no registered default.
+    fn build_default_source_cell(
+        &self,
+        shape: &TypeShape,
+        span: Span,
+        ctx: &mut ParseContext,
+    ) -> Result<CellId> {
+        match shape {
+            TypeShape::Named(type_id) => {
+                let entry = self.types.entry_by_type_id(*type_id).expect(
+                    "build_default_source_cell: type registered (resolved via TypeRegistry)",
+                );
+                let default_fn = entry.default_fn.ok_or_else(|| {
+                    ParseError::new(
+                        format!("type `{}` has no default; provide `= ...`", entry.type_name),
+                        span,
+                    )
+                })?;
+                Ok((entry.add_source_fn)(&mut ctx.sheet, default_fn()))
+            }
+            TypeShape::Tuple(_) => {
+                let seq = self
+                    .types
+                    .default_dynamic_sequence(shape)
+                    .map_err(|msg| ParseError::new(msg, span))?;
+                Ok(ctx.sheet.add_source(seq))
             }
         }
     }
@@ -1556,6 +1685,21 @@ mod tests {
         reg.register_no_default::<NoDef>("NoDef");
         let mut p = AdamParser::new(reg, OpLookup::new());
         let result = p.parse_str("sheet s { cell x: NoDef; }");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_source_decl_registers_a_source_kind_cell() {
+        let sheet = parser()
+            .parse_str("sheet s { source width: i32 = 4; }")
+            .unwrap();
+        let (width, _) = sheet.cell_names["width"];
+        assert_eq!(sheet.cell_kind(width), Some(adam_rs::CellKind::Source));
+    }
+
+    #[test]
+    fn parse_source_decl_requires_colon_or_equals() {
+        let result = parser().parse_str("sheet s { source width; }");
         assert!(result.is_err());
     }
 
@@ -2866,7 +3010,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_out_cell_referenced_elsewhere_is_terminal_cell_error() {
+    fn parse_out_cell_referenced_elsewhere_succeeds() {
+        // `out` cells are no longer terminal (see `adam_rs::CellKind`): referencing an `out`
+        // cell as another relationship's input is legal.
         let result = parser().parse_str(
             r#"
             sheet s {
@@ -2878,8 +3024,8 @@ mod tests {
         "#,
         );
         assert!(
-            result.is_err(),
-            "referencing an out cell as another relationship's input must be an error"
+            result.is_ok(),
+            "referencing an out cell as another relationship's input must not be an error"
         );
     }
 
@@ -2900,7 +3046,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_out_cell_referenced_in_conditional_is_terminal_cell_error() {
+    fn parse_out_cell_referenced_in_conditional_succeeds() {
+        // `out` cells are no longer terminal (see `adam_rs::CellKind`): referencing an `out`
+        // cell as a relationship input inside a conditional branch is legal.
         let result = parser().parse_str(
             r#"
             sheet s {
@@ -2915,8 +3063,8 @@ mod tests {
         "#,
         );
         assert!(
-            result.is_err(),
-            "referencing an out cell as a conditional branch relationship's input must be an error"
+            result.is_ok(),
+            "referencing an out cell as a conditional branch relationship's input must not be an error"
         );
     }
 

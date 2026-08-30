@@ -286,7 +286,9 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
                 attach_conditional(source, &line_starts, cond)
             }
             crate::ast::SheetItem::Out(out_decl) => attach_out(source, &line_starts, out_decl),
-            crate::ast::SheetItem::Cell(_) | crate::ast::SheetItem::Error { .. } => {}
+            crate::ast::SheetItem::Cell(_)
+            | crate::ast::SheetItem::Source(_)
+            | crate::ast::SheetItem::Error { .. } => {}
         }
     }
 }

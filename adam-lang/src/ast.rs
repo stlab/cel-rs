@@ -68,6 +68,8 @@ pub enum SheetItem {
     Conditional(ConditionalDecl),
     /// An `out` declaration.
     Out(OutDecl),
+    /// A `source` declaration.
+    Source(SourceDecl),
     /// A syntax error recovered at declaration granularity; `span` covers the skipped tokens.
     Error {
         /// The span of the skipped, malformed item.
@@ -94,6 +96,7 @@ impl SheetItem {
             SheetItem::Relationship(r) => r.span,
             SheetItem::Conditional(c) => c.span,
             SheetItem::Out(o) => o.span,
+            SheetItem::Source(s) => s.span,
             SheetItem::Error { span, .. } => *span,
         }
     }
@@ -105,6 +108,7 @@ impl SheetItem {
             SheetItem::Relationship(r) => r.leading_comment = Some(comment),
             SheetItem::Conditional(c) => c.leading_comment = Some(comment),
             SheetItem::Out(o) => o.leading_comment = Some(comment),
+            SheetItem::Source(s) => s.leading_comment = Some(comment),
             SheetItem::Error {
                 leading_comment, ..
             } => *leading_comment = Some(comment),
@@ -118,6 +122,7 @@ impl SheetItem {
             SheetItem::Relationship(r) => r.blank_line_before = value,
             SheetItem::Conditional(c) => c.blank_line_before = value,
             SheetItem::Out(o) => o.blank_line_before = value,
+            SheetItem::Source(s) => s.blank_line_before = value,
             SheetItem::Error {
                 blank_line_before, ..
             } => *blank_line_before = value,
@@ -144,6 +149,10 @@ impl SheetItem {
             SheetItem::Out(o) => {
                 o.doc_comment = Some(text);
                 o.span.start = start;
+            }
+            SheetItem::Source(s) => {
+                s.doc_comment = Some(text);
+                s.span.start = start;
             }
             SheetItem::Error {
                 doc_comment, span, ..
@@ -207,6 +216,35 @@ pub struct CellDecl {
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
     /// The span of the whole `cell ...;` declaration.
+    pub span: ExprSpan,
+}
+
+/// `source_decl = "source" identifier cell_type_init ";".`
+///
+/// Same shape as [`CellDecl`] minus `filter`/`require` (added in a later pass) — a
+/// `source` cell's initializer is a one-time literal exactly like a plain `cell`'s.
+#[derive(Debug, Clone)]
+pub struct SourceDecl {
+    /// The source cell's declared name.
+    pub name: String,
+    /// The name token's span.
+    pub name_span: ExprSpan,
+    /// The `: type_expr` annotation, if present.
+    pub type_name: Option<TypeExpr>,
+    /// The `= or_expression` initializer, if present. Unresolved and unevaluated here — see
+    /// `crate::parser::AdamParser` for the compile-to-`Sheet` phase, which parses this with no
+    /// cell scope pushed and evaluates it eagerly, once, at parse time.
+    pub initializer: Option<cel_parser::Expr>,
+    /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub leading_comment: Option<Comment>,
+    /// A leading `///` doc comment immediately preceding this declaration, if recovered by
+    /// [`crate::AdamAstParser`].
+    pub doc_comment: Option<String>,
+    /// Whether a blank line preceded this declaration, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub blank_line_before: bool,
+    /// The span of the whole `source ...;` declaration.
     pub span: ExprSpan,
 }
 
