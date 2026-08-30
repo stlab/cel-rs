@@ -47,6 +47,9 @@ pub struct Filter(pub(crate) FilterData);
 
 /// Internal storage for a single filter.
 pub(crate) struct FilterData {
+    /// This filter's name, supplied at `Sheet::add_filter` (empty here; overwritten
+    /// before storage).
+    pub(crate) name: String,
     /// The `TypeId` of the value this filter operates on, validated against its cell's
     /// registered type by `add_filter`.
     pub(crate) value_type: TypeId,
@@ -73,6 +76,7 @@ impl Filter {
     {
         debug_assert_eq!(args.len(), arg_types.len());
         Filter(FilterData {
+            name: String::new(),
             value_type,
             args,
             arg_types,
@@ -182,6 +186,7 @@ impl Filter {
     {
         debug_assert_eq!(args.len(), arg_types.len());
         Filter(FilterData {
+            name: String::new(),
             value_type,
             args,
             arg_types,

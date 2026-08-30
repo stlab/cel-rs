@@ -86,10 +86,10 @@
 //! let a = sheet.add_cell(0_i32);
 //! let b = sheet.add_cell(0_i32);
 //! sheet
-//!     .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+//!     .add_filter(a, "clamp", Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
 //!     .unwrap();
 //! sheet
-//!     .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+//!     .add_filter(b, "clamp", Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
 //!     .unwrap();
 //! sheet
 //!     .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
