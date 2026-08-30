@@ -224,7 +224,7 @@ Add a new variant alongside `InvalidOutput`/`InvalidFilter`:
 InvalidRequirement,
 ```
 
-In `adam-rs/src/sheet.rs`, do a project-wide rename of every `Error::TerminalCell` construction to `Error::InvalidCellKind`, and every `self.terminal_cells.contains(...)` guard's error return likewise (there are 5 call sites in non-test code: `add_relationship`'s two checks at what are currently lines ~194/207, `add_conditional`'s two checks at ~307/320, and `write`'s check at ~906 — the checks themselves are reworked to use `CellKind` in Task 3, so for this step, only rename the error variant each returns; leave the `terminal_cells.contains` checks as-is for now). Also rename every test function/assertion referencing `Error::TerminalCell` (e.g. `add_relationship_returns_terminal_cell_for_terminal_input`, `add_relationship_returns_terminal_cell_for_terminal_output`, `add_conditional_returns_terminal_cell_for_terminal_match_cell`) to construct/assert `Error::InvalidCellKind` instead — their bodies still use `sheet.terminal_cells.insert(...)` at this step; Task 3 rewrites those bodies to use `CellKind` instead and may delete some of them per the spec's §4.5 (the `add_conditional` match-cell checks are deleted outright, so `add_conditional_returns_terminal_cell_for_terminal_match_cell` is deleted, not renamed, in Task 3 — leave it renamed-but-passing for now).
+In `adam-rs/src/sheet.rs`, grep the whole file for `Error::TerminalCell` and rename **every** occurrence to `Error::InvalidCellKind` — do not rely on a fixed count. Known call sites include `add_relationship`'s two checks (currently ~lines 194/207), `add_conditional`'s two checks (~307/320), `write`'s check (~906), and `add_output`'s `cell_has_prior_use` rejection (~508) — but grep to find all of them rather than trusting this list, since a missed occurrence won't compile once this rename lands (`TerminalCell` won't exist as a variant anymore). The checks' *logic* (what they test, e.g. `self.terminal_cells.contains(...)`) is reworked to use `CellKind` in Task 3 — for this step, only rename the error variant each site returns; leave every check's condition exactly as it is today, including inside `add_filter` and `add_output`, which Tasks 3/4/6 rework later. Also rename every test function/assertion referencing `Error::TerminalCell` (e.g. `add_relationship_returns_terminal_cell_for_terminal_input`, `add_relationship_returns_terminal_cell_for_terminal_output`, `add_conditional_returns_terminal_cell_for_terminal_match_cell`) to construct/assert `Error::InvalidCellKind` instead — their bodies still use `sheet.terminal_cells.insert(...)` at this step; Task 3 rewrites those bodies to use `CellKind` instead and may delete some of them per the spec's §4.5 (the `add_conditional` match-cell checks are deleted outright, so `add_conditional_returns_terminal_cell_for_terminal_match_cell` is deleted, not renamed, in Task 3 — leave it renamed-but-passing for now).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -381,12 +381,16 @@ fn cell_has_prior_use(&self, id: CellId) -> bool {
 }
 ```
 
-(This function isn't called anywhere yet in this task's code — it becomes load-bearing again in Task 6's `add_out`. Leave its existing doc comment; Task 6 updates it to match the new semantics.)
+`cell_has_prior_use` is already called today by the existing, untouched `add_output` (not rewritten until Task 6) — leave that call site alone; it now runs the narrower check automatically. Leave `cell_has_prior_use`'s existing doc comment as-is for this task; Task 6 updates it to match the new semantics when it rewrites `add_output` into `add_out`.
+
+Because `add_output` isn't rewritten until Task 6, this narrowing can change its observable behavior today: any existing `add_output`-related test in `adam-rs/src/sheet.rs`'s `mod tests` that currently relies on "any prior use, including as a plain relationship *input* or a conditional match cell, blocks becoming an output" will now fail, since only a prior *output* claim blocks it after this step. If Step 4 below turns up such a failure, update that test's expectation to match the new, narrower behavior (e.g. assert `add_output` now *succeeds* for a cell previously used only as an input) rather than reverting `cell_has_prior_use`'s new body — the narrowing is intentional (spec §4.5), the existing test encoded the old, wider restriction this design removes.
+
+The `terminal_cells` field is also read by `add_filter`'s current body (`if self.terminal_cells.contains(&cell) { return Err(Error::TerminalCell); }`, not otherwise touched until Task 4) — deleting the field without also deleting this check would leave `add_filter` referencing a field that no longer exists, breaking the build. Delete that one `if` block from `add_filter` now, with no replacement (Task 4 confirms this precondition is gone for good; it doesn't need to re-delete it, only add the `name` parameter and `filter_name` query on top of what Task 3 leaves behind).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test -p adam-rs --lib`
-Expected: full suite passes, including the three new tests and the surviving renamed ones from Task 2.
+Expected: full suite passes, including the three new tests and the surviving renamed ones from Task 2. If an existing `add_output`-related test fails because of the `cell_has_prior_use` narrowing described above, fix that test's expectation rather than treating the failure as a regression to revert.
 
 - [ ] **Step 5: Commit**
 
@@ -993,6 +997,8 @@ Replace `add_output` entirely with:
         Ok(out_cell)
     }
 ```
+
+Note a deliberate behavior change from today's `add_output`: today, every requirement's name is validated (non-empty, no duplicates) in a single pre-pass *before* `add_relationship` runs, so a bad requirement list fails atomically with nothing mutated. This rewrite instead validates each requirement one at a time, via `add_requirement`, *after* the relationship is already registered and the cell already flipped to `Out`-kind — so a bad requirement partway through the list now leaves the writer relationship registered, the cell `Out`-kind, and any earlier requirements in the list already attached, with `add_out` returning `Err`. This is intentional: `add_requirement` is the single validation path for every cell kind now (spec §4.4), and duplicating its checks in a separate pre-pass would be exactly the kind of redundant logic this design is trying to collapse. Flagging it here so it reads as a recorded decision, not an oversight, if a reviewer notices the atomicity difference.
 
 Replace the old `output_cell` (delete outright — no replacement), `output_requirements`, `requirement_output`, `output_valid`, `violated_requirements`, `output_relevant_cells`, `output_violation_cells`, and the old `outputs()` iterator with:
 
@@ -1755,7 +1761,7 @@ fn check_requirements(
 }
 ```
 
-Call it from `check_out` (replacing its inline loop) and from new `SheetItem::Cell`/`SheetItem::Source` handling in `check_sheet`'s match, passing each decl's own `require` field and `resolve`.
+Call it from `check_out` (replacing its inline loop), and add a call to it from the *existing* `SheetItem::Cell` arm in `check_sheet`'s match (the one that already calls `check_cell_initializer`/`check_filter`) and from the `SheetItem::Source` arm Task 7 already added — extend both arms with `check_requirements(decl.require.as_ref(), &resolve, &mut diagnostics)`, don't create new match arms.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
