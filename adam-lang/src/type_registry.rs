@@ -4,6 +4,8 @@
 //! stores type-erased function pointers covering:
 //! - `push_arg_fn` — registers a [`cel_runtime::DynSegment::push_arg`] op
 //! - `add_cell_fn` — creates a sheet cell from a `Box<dyn Any>` value
+//! - `add_source_fn` — creates a source-kind sheet cell (via [`Sheet::add_source`]) from a
+//!   `Box<dyn Any>` value
 //! - `call_dyn_fn` — executes a compiled segment and boxes the result
 //! - `default_fn`  — constructs a default `Box<dyn Any>` (when `Default` is available)
 //!
