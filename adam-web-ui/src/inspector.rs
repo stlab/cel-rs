@@ -5,10 +5,11 @@ use dioxus::prelude::*;
 
 use crate::labels::{Labels, Renderer, format_adam_error, format_rounded};
 use crate::spectrum::{
-    SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpNumberfield, SpSlider, SpTextfield,
+    SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpHelpText, SpNumberfield, SpSlider,
+    SpTextfield,
 };
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 /// Aggregate out-cell status for the whole sheet, computed once per render and shared by
@@ -28,15 +29,33 @@ struct OutputStatus {
     /// which branch is currently active.
     relevant: HashSet<CellId>,
     /// Union of `Sheet::output_violation_cells()` and `Sheet::filter_violation_cells()` —
-    /// the root cells that produced a violating value, shown less severely than the cell
-    /// actually carrying the violation (see `invalid_outputs`/`filter_violated`).
-    warning: HashSet<CellId>,
+    /// the root cells that produced a violating value. Rendered with the same `invalid`
+    /// state as the cell actually carrying the violation (see `invalid_outputs`/
+    /// `filter_violated`): Spectrum has no notion of "implicated but not itself invalid",
+    /// and inventing one (a past version of this code used a CSS class literally named
+    /// `warning`) collided with `mdbook`'s own book-wide `.warning` admonition styles —
+    /// an unrelated `ⓘ` callout icon rendered wherever this class landed, since class
+    /// names aren't scoped to a component the way shadow-DOM parts are.
+    invalid_contributors: HashSet<CellId>,
     /// Cells backing an output whose `Sheet::output_valid` is currently `false`.
     invalid_outputs: HashSet<CellId>,
     /// `Sheet::filter_violated_cells()` — cells whose own filter didn't hold, shown the
     /// same way a parse error is: this is the cell's own value that's out of domain, not
     /// just a contributor to someone else's.
     filter_violated: HashSet<CellId>,
+    /// Cells backing any live `out` declaration, via `Sheet::output_cell`, regardless of
+    /// whether its requirements currently hold. An output's cell is always `forced` (see
+    /// [`cell_flags`]), so without this it would render as `disabled` like any other
+    /// non-writable cell — hiding a failed `require`'s `invalid` treatment, since a
+    /// disabled `sp-number-field` suppresses `invalid` styling entirely. This set lets a
+    /// numeric out cell render `readonly` instead, which keeps `invalid` visible.
+    output_cells: HashSet<CellId>,
+    /// Violated requirement names for each currently-invalid output, joined for display and
+    /// keyed by the output's own cell — via `Sheet::violated_requirements`/
+    /// `Sheet::requirement_name`. A cell absent from this map has no currently-failing
+    /// requirement (either it isn't an output cell, or all of its requirements currently
+    /// hold).
+    invalid_output_requirement_names: HashMap<CellId, String>,
 }
 
 /// Computes `sheet`'s current out-cell status for the Inspector.
@@ -61,18 +80,35 @@ fn compute_output_status(sheet: &Sheet) -> OutputStatus {
         .filter(|&&id| !sheet.output_valid(id))
         .filter_map(|&id| sheet.output_cell(id))
         .collect();
-    let warning = sheet
+    let invalid_contributors = sheet
         .output_violation_cells()
         .into_iter()
         .chain(sheet.filter_violation_cells())
         .collect();
     let filter_violated = sheet.filter_violated_cells().collect();
+    let output_cells = outputs
+        .iter()
+        .filter_map(|&id| sheet.output_cell(id))
+        .collect();
+    let invalid_output_requirement_names = outputs
+        .iter()
+        .filter_map(|&id| {
+            let cell = sheet.output_cell(id)?;
+            let names: Vec<&str> = sheet
+                .violated_requirements(id)
+                .filter_map(|rid| sheet.requirement_name(rid))
+                .collect();
+            (!names.is_empty()).then(|| (cell, names.join(", ")))
+        })
+        .collect();
     OutputStatus {
         has_outputs: !outputs.is_empty(),
         relevant,
-        warning,
+        invalid_contributors,
         invalid_outputs,
         filter_violated,
+        output_cells,
+        invalid_output_requirement_names,
     }
 }
 
@@ -95,23 +131,25 @@ fn format_filter_violation(label: &str, violation: &FilterViolation) -> String {
 struct CellFlags {
     disabled: bool,
     invalid: bool,
-    warning: bool,
+    /// `true` when `id` backs a live `out` declaration. A numeric field uses this to
+    /// render `readonly` instead of `disabled` — see [`OutputStatus::output_cells`] for
+    /// why `disabled` alone would hide a failed `require`'s `invalid` treatment.
+    readonly: bool,
 }
 
 /// Derives `id`'s Inspector display flags from its own `forced`/`has_error` state and the
 /// sheet-wide `status`.
-///
-/// - Postcondition: `warning` is `false` whenever `invalid` is `true` — a field never
-///   shows both states at once.
 fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) -> CellFlags {
     let disabled = forced || (status.has_outputs && !status.relevant.contains(&id));
-    let invalid =
-        has_error || status.invalid_outputs.contains(&id) || status.filter_violated.contains(&id);
-    let warning = !invalid && status.warning.contains(&id);
+    let invalid = has_error
+        || status.invalid_outputs.contains(&id)
+        || status.filter_violated.contains(&id)
+        || status.invalid_contributors.contains(&id);
+    let readonly = status.output_cells.contains(&id);
     CellFlags {
         disabled,
         invalid,
-        warning,
+        readonly,
     }
 }
 
@@ -120,10 +158,15 @@ fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) 
 /// `Sheet::propagate_without_replan()`.
 ///
 /// This holds for a conditional's match cell (writing it can switch the active branch,
-/// which `propagate_without_replan` never re-evaluates) and for any cell that feeds an
-/// output requirement's inputs (`propagate_without_replan` does not re-evaluate output
-/// requirements at all, per its own documented contract — so `output_valid`/
-/// `output_violation_cells` would otherwise go stale after such a write).
+/// which `propagate_without_replan` never re-evaluates) and for any cell that can move
+/// an output requirement's own true/false result (`propagate_without_replan` does not
+/// re-evaluate output requirements at all, per its own documented contract — so
+/// `output_valid`/`output_violation_cells` would otherwise go stale after such a
+/// write): either a cell a requirement's own expression names directly (transitively,
+/// via `Sheet::requirement_contributing_cells`), or — since a requirement commonly reads
+/// its own output's value by name alongside whatever else it needs (outputs.md §7.3) —
+/// any cell contributing to that requirement's output's own value, even when the
+/// requirement's expression never names that cell directly.
 ///
 /// This also holds for a cell referenced as another cell's filter argument
 /// ([`adam_rs::Sheet::filter_dependents`]): a source-cell filter reclamp is folded into
@@ -131,7 +174,8 @@ fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) 
 /// by a full `Sheet::propagate()`'s own diagnostic phase, not by
 /// `propagate_without_replan`.
 ///
-/// - Complexity: O(number of conditionals + number of output requirements + number of
+/// - Complexity: O(number of conditionals + sum of `contributing_cells`/
+///   `requirement_contributing_cells` cost over every output requirement + number of
 ///   filter dependents of `id`).
 fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
     let is_match_cell = sheet.conditionals().any(|cid| {
@@ -140,13 +184,19 @@ fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
             .is_some_and(|c| c.contains(&id))
     });
     let feeds_requirement = sheet.outputs().any(|oid| {
-        sheet.output_requirements(oid).is_some_and(|requirements| {
-            requirements.iter().any(|&rid| {
-                sheet
-                    .requirement_inputs(rid)
-                    .is_some_and(|inputs| inputs.contains(&id))
-            })
-        })
+        let Some(requirements) = sheet.output_requirements(oid) else {
+            return false;
+        };
+        if requirements.is_empty() {
+            return false;
+        }
+        let feeds_the_outputs_own_value = sheet
+            .output_cell(oid)
+            .is_some_and(|cell| sheet.contributing_cells(cell).contains(&id));
+        let feeds_a_requirement_directly = requirements
+            .iter()
+            .any(|&rid| sheet.requirement_contributing_cells(rid).contains(&id));
+        feeds_the_outputs_own_value || feeds_a_requirement_directly
     });
     let feeds_a_filter = !sheet.filter_dependents(id).is_empty();
     is_match_cell || feeds_requirement || feeds_a_filter
@@ -374,6 +424,15 @@ fn CellRow(
             .map(|f| f(&sheet.read()))
     });
 
+    let is_integer = use_memo(move || {
+        labels
+            .read()
+            .cells
+            .get(&id)
+            .map(|m| m.is_integer)
+            .unwrap_or(false)
+    });
+
     let forced = use_memo(move || sheet.read().is_forced(id));
 
     let mut input = use_signal(|| value.peek().clone());
@@ -382,6 +441,17 @@ fn CellRow(
 
     let flags =
         use_memo(move || cell_flags(id, *forced.read(), *has_error.read(), &output_status.read()));
+
+    // `None` for a cell with no currently-failing `require`, including every non-output
+    // cell — set from `OutputStatus::invalid_output_requirement_names`, itself keyed by
+    // `Sheet::violated_requirements`/`Sheet::requirement_name`.
+    let violated_requirement_names = use_memo(move || {
+        output_status
+            .read()
+            .invalid_output_requirement_names
+            .get(&id)
+            .cloned()
+    });
 
     // Sync input to the computed value whenever it changes, but not while the user
     // is actively editing — that would interrupt mid-value typing (e.g. "1." → "1").
@@ -403,7 +473,6 @@ fn CellRow(
                     id: field_id,
                     checked: *value.read() == "true",
                     invalid: flags.read().invalid,
-                    warning: flags.read().warning,
                     disabled: flags.read().disabled,
                     onclick: move |_| {
                         let next = toggled_bool_value(&value.peek());
@@ -428,15 +497,22 @@ fn CellRow(
             } else if *is_numeric.read() {
                 {
                     let (min, max) = number_field_bounds(&input.read(), *range.read());
+                    let step = is_integer.read().then(|| "1".to_string());
                     rsx! {
                         SpNumberfield {
                             id: field_id.clone(),
                             value: input.read().clone(),
                             min,
                             max,
+                            step,
                             invalid: flags.read().invalid,
-                            warning: flags.read().warning,
-                            disabled: flags.read().disabled,
+                            // An out cell's field is always `disabled` too (its cell is
+                            // always `forced`, never a candidate write target), but
+                            // `readonly` is what actually renders here — a disabled
+                            // `sp-number-field` suppresses `invalid` styling, which would
+                            // hide a failed `require`.
+                            disabled: flags.read().disabled && !flags.read().readonly,
+                            readonly: flags.read().readonly,
                             oninput: move |_: FormEvent| {
                                 let ns = dom_id_namespace(&source_name.read());
                                 spawn(async move {
@@ -506,6 +582,22 @@ fn CellRow(
                                 is_focused.set(false);
                                 has_error.set(false);
                             },
+                            // `sp-number-field` only exposes its `negative-help-text` slot
+                            // while its own `invalid` prop is `true` (SWC's `HelpTextManager`
+                            // renders `<slot name="negative-help-text">` vs. a discarded
+                            // pass-through slot based on exactly that), so this always mounts
+                            // when there's a name to show — never independently gated on
+                            // `invalid` here, since `violated_requirement_names` is already
+                            // empty whenever `invalid` is false for an output cell (see
+                            // `OutputStatus::invalid_output_requirement_names`). Names the
+                            // `require` currently failing on this out cell — a stopgap: a real
+                            // message (see `Requirement::from_fn_*`'s own
+                            // `require { name: expression; }` source) would need the sheet to
+                            // carry more than just a name, so this just surfaces the name a
+                            // sheet author already chose.
+                            if let Some(names) = violated_requirement_names.read().clone() {
+                                SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{names}" }
+                            }
                         }
                     }
                 }
@@ -534,7 +626,6 @@ fn CellRow(
                     id: field_id,
                     value: input.read().clone(),
                     invalid: flags.read().invalid,
-                    warning: flags.read().warning,
                     disabled: flags.read().disabled,
                     // Dioxus's event serializer only reads event.target.value for
                     // HTMLInputElement — custom elements (sp-textfield) always give "".
@@ -575,25 +666,56 @@ mod tests {
     fn status(
         has_outputs: bool,
         relevant: &[CellId],
-        warning: &[CellId],
+        invalid_contributors: &[CellId],
         invalid_outputs: &[CellId],
     ) -> OutputStatus {
-        status_with_filter_violated(has_outputs, relevant, warning, invalid_outputs, &[])
+        status_with_filter_violated(
+            has_outputs,
+            relevant,
+            invalid_contributors,
+            invalid_outputs,
+            &[],
+        )
     }
 
     fn status_with_filter_violated(
         has_outputs: bool,
         relevant: &[CellId],
-        warning: &[CellId],
+        invalid_contributors: &[CellId],
         invalid_outputs: &[CellId],
         filter_violated: &[CellId],
+    ) -> OutputStatus {
+        status_full(
+            has_outputs,
+            relevant,
+            invalid_contributors,
+            invalid_outputs,
+            filter_violated,
+            &[],
+            &[],
+        )
+    }
+
+    fn status_full(
+        has_outputs: bool,
+        relevant: &[CellId],
+        invalid_contributors: &[CellId],
+        invalid_outputs: &[CellId],
+        filter_violated: &[CellId],
+        output_cells: &[CellId],
+        invalid_output_requirement_names: &[(CellId, &str)],
     ) -> OutputStatus {
         OutputStatus {
             has_outputs,
             relevant: relevant.iter().copied().collect(),
-            warning: warning.iter().copied().collect(),
+            invalid_contributors: invalid_contributors.iter().copied().collect(),
             invalid_outputs: invalid_outputs.iter().copied().collect(),
             filter_violated: filter_violated.iter().copied().collect(),
+            output_cells: output_cells.iter().copied().collect(),
+            invalid_output_requirement_names: invalid_output_requirement_names
+                .iter()
+                .map(|&(id, name)| (id, name.to_string()))
+                .collect(),
         }
     }
 
@@ -615,7 +737,7 @@ mod tests {
 
         let status = compute_output_status(&sheet);
         assert!(status.filter_violated.contains(&a));
-        assert!(status.warning.contains(&b));
+        assert!(status.invalid_contributors.contains(&b));
     }
 
     #[test]
@@ -636,7 +758,112 @@ mod tests {
 
         let status = compute_output_status(&sheet);
         assert!(status.filter_violated.is_empty());
-        assert!(status.warning.is_empty());
+        assert!(status.invalid_contributors.is_empty());
+    }
+
+    #[test]
+    fn compute_output_status_output_cells_contains_the_outputs_own_cell() {
+        use adam_rs::Method;
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let result = sheet.add_cell(0_i32);
+        sheet
+            .add_output(Method::from_fn_1_1(a, result, |x: &i32| Ok(*x)), vec![])
+            .unwrap();
+
+        let status = compute_output_status(&sheet);
+        assert!(status.output_cells.contains(&result));
+        assert!(!status.output_cells.contains(&a));
+    }
+
+    #[test]
+    fn compute_output_status_output_cells_empty_when_no_outputs() {
+        let sheet = Sheet::new();
+        let status = compute_output_status(&sheet);
+        assert!(status.output_cells.is_empty());
+    }
+
+    #[test]
+    fn compute_output_status_invalid_output_requirement_names_names_the_failing_requirement() {
+        use adam_rs::{Method, Requirement};
+
+        let mut sheet = Sheet::new();
+        let width = sheet.add_cell(100_i32);
+        let height = sheet.add_cell(20_i32);
+        let area = sheet.add_cell(0_i32);
+        sheet
+            .add_output(
+                Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
+                vec![(
+                    "not_too_big",
+                    Requirement::from_fn_1(area, |a: &i32| Ok(*a <= 300)),
+                )],
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+
+        let status = compute_output_status(&sheet);
+        assert_eq!(
+            status.invalid_output_requirement_names.get(&area),
+            Some(&"not_too_big".to_string())
+        );
+    }
+
+    #[test]
+    fn compute_output_status_invalid_output_requirement_names_empty_when_requirement_holds() {
+        use adam_rs::{Method, Requirement};
+
+        let mut sheet = Sheet::new();
+        let width = sheet.add_cell(10_i32);
+        let height = sheet.add_cell(20_i32);
+        let area = sheet.add_cell(0_i32);
+        sheet
+            .add_output(
+                Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
+                vec![(
+                    "not_too_big",
+                    Requirement::from_fn_1(area, |a: &i32| Ok(*a <= 300)),
+                )],
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+
+        let status = compute_output_status(&sheet);
+        assert!(status.invalid_output_requirement_names.is_empty());
+    }
+
+    #[test]
+    fn compute_output_status_invalid_output_requirement_names_joins_multiple_violated_names() {
+        use adam_rs::{Method, Requirement};
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(101_i32);
+        let result = sheet.add_cell(0_i32);
+        sheet
+            .add_output(
+                Method::from_fn_1_1(a, result, |x: &i32| Ok(*x)),
+                vec![
+                    (
+                        "too_big",
+                        Requirement::from_fn_1(result, |r: &i32| Ok(*r <= 10)),
+                    ),
+                    (
+                        "not_even",
+                        Requirement::from_fn_1(result, |r: &i32| Ok(r % 2 == 0)),
+                    ),
+                ],
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+
+        let status = compute_output_status(&sheet);
+        let names = status
+            .invalid_output_requirement_names
+            .get(&result)
+            .expect("result should have violated requirements");
+        assert!(names.contains("too_big"));
+        assert!(names.contains("not_even"));
     }
 
     #[test]
@@ -721,17 +948,44 @@ mod tests {
     }
 
     #[test]
-    fn cell_flags_warning_when_in_warning_set_and_not_invalid() {
+    fn cell_flags_readonly_when_cell_is_an_output_cell() {
         let id = dummy_cell();
-        let flags = cell_flags(id, false, false, &status(true, &[id], &[id], &[]));
-        assert!(flags.warning);
+        let flags = cell_flags(
+            id,
+            true,
+            false,
+            &status_full(true, &[], &[], &[], &[], &[id], &[]),
+        );
+        assert!(flags.readonly);
     }
 
     #[test]
-    fn cell_flags_warning_suppressed_when_also_invalid() {
+    fn cell_flags_not_readonly_when_cell_is_not_an_output_cell() {
         let id = dummy_cell();
-        let flags = cell_flags(id, false, true, &status(true, &[id], &[id], &[]));
-        assert!(!flags.warning);
+        let flags = cell_flags(id, false, false, &status(false, &[], &[], &[]));
+        assert!(!flags.readonly);
+    }
+
+    #[test]
+    fn cell_flags_readonly_and_invalid_together_when_an_output_cell_fails_its_requirement() {
+        let id = dummy_cell();
+        let flags = cell_flags(
+            id,
+            true,
+            false,
+            &status_full(true, &[], &[], &[id], &[], &[id], &[]),
+        );
+        assert!(flags.readonly);
+        assert!(flags.invalid);
+    }
+
+    #[test]
+    fn cell_flags_invalid_when_cell_is_an_invalid_contributor() {
+        // A cell that merely contributes to a failing out-cell condition renders
+        // `invalid` too — Spectrum has no softer "implicated but not itself invalid"
+        // state to reach for instead.
+        let id = dummy_cell();
+        let flags = cell_flags(id, false, false, &status(true, &[id], &[id], &[]));
         assert!(flags.invalid);
     }
 
@@ -837,6 +1091,39 @@ mod tests {
 
         assert!(cell_needs_full_propagate(&sheet, a));
         assert!(cell_needs_full_propagate(&sheet, b));
+    }
+
+    #[test]
+    fn cell_needs_full_propagate_true_for_a_cell_feeding_the_output_when_its_requirement_only_names_the_output_itself()
+     {
+        // Mirrors `tutorial/area_with_requirement.adm2`: `out area := width * height
+        // require { not_too_big: area <= 300; }` — the requirement's own expression
+        // names only `area`, never `width`/`height` directly, so `requirement_inputs`
+        // alone would miss that writing `width` can flip `not_too_big`.
+        use adam_rs::{Method, Requirement};
+
+        let mut sheet = Sheet::new();
+        let width = sheet.add_cell(10_i32);
+        let height = sheet.add_cell(20_i32);
+        let area = sheet.add_cell(0_i32);
+        sheet
+            .add_output(
+                Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
+                vec![(
+                    "not_too_big",
+                    Requirement::from_fn_1(area, |a: &i32| Ok(*a <= 300)),
+                )],
+            )
+            .unwrap();
+        // `contributing_cells` (and so this fix) only resolves past the output cell
+        // itself once a plan has been computed — its own documented pre-propagate
+        // postcondition returns just `{cell}` — so establish one first, mirroring how
+        // `build_sheet` always runs an initial `propagate()` before the Inspector ever
+        // lets a user write anything.
+        sheet.propagate().unwrap();
+
+        assert!(cell_needs_full_propagate(&sheet, width));
+        assert!(cell_needs_full_propagate(&sheet, height));
     }
 
     #[test]

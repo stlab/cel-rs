@@ -26,6 +26,10 @@ pub struct CellMeta {
     /// [`crate::SheetInspector`] can render it with [`crate::spectrum::SpNumberfield`]
     /// instead of a plain text field.
     pub is_numeric: bool,
+    /// `true` if the cell holds one of the 12 integer primitive types (as opposed to
+    /// `f32`/`f64`), so [`crate::SheetInspector`] can set [`crate::spectrum::SpNumberfield`]'s
+    /// `step` to `1` — an integer cell has no fractional steps to land on.
+    pub is_integer: bool,
     /// Returns the current cell value as a display string.
     pub display: Box<dyn Fn(&Sheet) -> String>,
     /// Parses `s` and writes the result to the cell; returns `Err` on parse failure or type
@@ -69,6 +73,7 @@ impl Labels {
                 label: label.to_owned(),
                 is_bool: TypeId::of::<T>() == TypeId::of::<bool>(),
                 is_numeric: false,
+                is_integer: false,
                 display: Box::new(move |sheet| {
                     sheet
                         .read::<T>(id)
@@ -103,6 +108,7 @@ impl Labels {
                 label: label.to_owned(),
                 is_bool: false,
                 is_numeric: false,
+                is_integer: false,
                 display: Box::new(move |sheet| {
                     sheet
                         .read::<cel_runtime::DynamicSequence>(id)
@@ -202,7 +208,7 @@ pub fn labels_from_cell_names(
             ($T:ty) => {
                 if type_id == TypeId::of::<$T>() {
                     labels.add_cell::<$T>(id, name);
-                    mark_numeric::<$T>(&mut labels, sheet, id);
+                    mark_numeric::<$T>(&mut labels, sheet, id, true);
                     continue;
                 }
             };
@@ -232,7 +238,7 @@ pub fn labels_from_cell_names(
                                 .unwrap_or_else(|_| "?".to_owned())
                         });
                     }
-                    mark_numeric::<$T>(&mut labels, sheet, id);
+                    mark_numeric::<$T>(&mut labels, sheet, id, false);
                     continue;
                 }
             };
@@ -254,17 +260,19 @@ pub fn labels_from_cell_names(
     labels
 }
 
-/// Marks `id`'s `CellMeta` as numeric and, if `sheet.filter_kind(id)` is a range clamp,
-/// populates its live-range closure.
+/// Marks `id`'s `CellMeta` as numeric (and, per `is_integer`, as an integer type) and, if
+/// `sheet.filter_kind(id)` is a range clamp, populates its live-range closure.
 fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
     labels: &mut Labels,
     sheet: &Sheet,
     id: CellId,
+    is_integer: bool,
 ) {
     let Some(meta) = labels.cells.get_mut(&id) else {
         return;
     };
     meta.is_numeric = true;
+    meta.is_integer = is_integer;
     if matches!(
         sheet.filter_kind(id),
         Some(adam_rs::FilterKind::Range { .. })
@@ -357,6 +365,20 @@ mod tests {
     fn format_rounded_negative_zero_has_no_minus_sign() {
         assert_eq!(format_rounded(-0.0), "0");
         assert_eq!(format_rounded(-0.001), "0");
+    }
+
+    #[test]
+    fn labels_from_cell_names_marks_float_cells_as_numeric_but_not_integer() {
+        let mut sheet = AdamSheet::new();
+        let a = sheet.add_cell(2.0_f64);
+
+        let mut cell_names = IndexMap::new();
+        cell_names.insert("a".to_string(), (a, TypeShape::Named(TypeId::of::<f64>())));
+
+        let labels = labels_from_cell_names(&sheet, &cell_names);
+
+        assert!(labels.cells[&a].is_numeric);
+        assert!(!labels.cells[&a].is_integer);
     }
 
     #[test]
@@ -454,6 +476,7 @@ mod tests {
         let labels = labels_from_cell_names(&sheet, &cell_names);
 
         assert!(labels.cells[&a].is_numeric);
+        assert!(labels.cells[&a].is_integer);
         assert!(labels.cells[&a].range.is_none());
         assert!(!labels.cells[&b].is_numeric);
     }
