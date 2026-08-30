@@ -13,7 +13,6 @@ use crate::{
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::Error,
     filter::{Filter, FilterKind, FilterViolation},
-    output::{OutputData, OutputId},
     planner::PlanStep,
     relationship::{Method, RelationshipData, RelationshipId},
     requirement::{Requirement, RequirementData, RequirementId},
@@ -58,17 +57,15 @@ pub struct Sheet {
     /// Union of all RelationshipIds assigned to any conditional branch or default.
     /// Used to exclude them from the unconditional active set.
     pub(crate) conditional_relationships: HashSet<RelationshipId>,
-    /// All outputs registered on this sheet.
-    outputs: SlotMap<OutputId, OutputData>,
-    /// All requirements registered on this sheet, across all outputs.
+    /// All requirements registered on this sheet, across all cells.
     requirements: SlotMap<RequirementId, RequirementData>,
-    /// Requirements that evaluated `false` as of the last `propagate()` call, grouped by
-    /// output. Sparse: an output with no entry had all its requirements hold. Not
+    /// Requirements that evaluated `false` as of the last `propagate()` call, grouped
+    /// by cell. Sparse: a cell with no entry had all its requirements hold. Not
     /// recomputed by `propagate_without_replan`.
-    last_violated: HashMap<OutputId, Vec<RequirementId>>,
+    last_requirement_violations: HashMap<CellId, Vec<RequirementId>>,
     /// Filter violations recorded against a derived value as of the last `propagate()`
     /// call. Not recomputed by `propagate_without_replan`, consistent with
-    /// `last_violated`.
+    /// `last_requirement_violations`.
     last_filter_violations: HashMap<CellId, FilterViolation>,
     /// Reverse index of `filter_args`: for each cell, the live cells whose filter
     /// references it as one of its dynamic arguments. Built incrementally in
@@ -108,9 +105,8 @@ impl Sheet {
             last_forced_relationships: None,
             conditionals: SlotMap::with_key(),
             conditional_relationships: HashSet::new(),
-            outputs: SlotMap::with_key(),
             requirements: SlotMap::with_key(),
-            last_violated: HashMap::new(),
+            last_requirement_violations: HashMap::new(),
             last_filter_violations: HashMap::new(),
             filter_dependents: HashMap::new(),
         }
@@ -431,105 +427,133 @@ impl Sheet {
         }))
     }
 
-    /// Returns `true` if `id` already has adjacency (a relationship referencing it, or
-    /// use as some conditional's match cell) — i.e. it cannot legally become an output's
-    /// terminal cell, since that would retroactively violate the terminal invariant for
-    /// whatever already references it.
+    /// Returns `true` if `id` is already claimed as some existing method's output —
+    /// i.e. it cannot legally become an `out` cell's writer target, since that would
+    /// leave two producers claiming the same cell.
     fn cell_has_prior_use(&self, id: CellId) -> bool {
         self.relationships
             .values()
             .any(|rel| rel.methods.iter().any(|m| m.outputs.contains(&id)))
     }
 
-    /// Registers an output: a cell written by exactly one method, together with zero or
-    /// more named requirements checked after every `propagate()`.
-    ///
-    /// `writer` must have exactly one output cell — that cell becomes `Out`-kind: it can
-    /// never again be the target of `write`, nor be claimed as another output's terminal
-    /// cell. A requirement's inputs may be any cells in the sheet, including the output's
-    /// own cell, but not a cell that already belongs to a different output.
+    /// Attaches a named requirement to `cell`. `requirement.inputs` may be any cells in
+    /// the sheet, not only `cell` itself. For a `Cell`/`Source` kind `cell`, also
+    /// evaluates `requirement` immediately against current effective values — its
+    /// value is already authoritative. Skipped for an `Out`-kind `cell`: its value
+    /// isn't authoritative until its writer next executes, so attachment always
+    /// succeeds structurally there, deferring to the first post-`propagate()`
+    /// diagnostic to report an initial violation if there is one.
     ///
     /// # Errors
     ///
-    /// - `Error::InvalidOutput` — `writer` does not have exactly one output cell, a
-    ///   requirement name is empty, or two requirements share a name.
-    /// - `Error::InvalidCellKind` — a requirement input is already another output's cell, or
-    ///   the writer's output cell already has prior use (see `cell_has_prior_use`)
-    ///   and so cannot become terminal.
-    /// - `Error::InvalidId` — a cell referenced by `writer` or a requirement is not in this
-    ///   sheet.
-    /// - `Error::TypeMismatch` — a requirement input's declared type does not match the
-    ///   cell's registered type.
-    /// - Any error `add_relationship` can return, for `writer`'s own validation.
+    /// - `Error::InvalidId` — `cell`, or one of `requirement`'s input cells, is not a
+    ///   live cell in this sheet.
+    /// - `Error::TypeMismatch` — an input's declared type does not match its cell's
+    ///   registered type.
+    /// - `Error::InvalidRequirement` — `name` is empty, `cell` already has a
+    ///   same-named requirement, or (`Cell`/`Source` kind only) evaluating
+    ///   `requirement` against the referenced cells' current effective values
+    ///   returns `Ok(false)`.
+    /// - `Error::MethodFailed` — (`Cell`/`Source` kind only) evaluating `requirement`
+    ///   against current values returns `Err`.
     ///
-    /// - Complexity: O(k + m²×c) where k is the number of requirements (each validated
-    ///   in a single pass over its inputs), plus the cost of `add_relationship` for
-    ///   `writer` alone (m = 1 method, c = cells in that method).
-    pub fn add_output(
+    /// - Complexity: O(k) where k is `requirement`'s input count.
+    pub fn add_requirement(
+        &mut self,
+        cell: CellId,
+        name: impl Into<String>,
+        requirement: Requirement,
+    ) -> Result<RequirementId, Error> {
+        let name = name.into();
+        if name.is_empty() {
+            return Err(Error::InvalidRequirement);
+        }
+        let cell_data = self.cells.get(cell).ok_or(Error::InvalidId)?;
+        if cell_data
+            .requirements
+            .iter()
+            .any(|&rid| self.requirements[rid].name == name)
+        {
+            return Err(Error::InvalidRequirement);
+        }
+        if requirement.inputs.len() != requirement.input_types.len() {
+            return Err(Error::InvalidRequirement);
+        }
+        for (&input_id, &declared) in requirement
+            .inputs
+            .iter()
+            .zip(requirement.input_types.iter())
+        {
+            let input_cell = self.cells.get(input_id).ok_or(Error::InvalidId)?;
+            if input_cell.type_id != declared {
+                return Err(Error::TypeMismatch {
+                    expected: input_cell.type_id,
+                    found: declared,
+                });
+            }
+        }
+
+        if self.cells[cell].kind != CellKind::Out {
+            let inputs: Vec<&dyn Any> = requirement
+                .inputs
+                .iter()
+                .map(|&id| self.cells[id].effective())
+                .collect();
+            let holds = (requirement.function)(&inputs).map_err(Error::MethodFailed)?;
+            if !holds {
+                return Err(Error::InvalidRequirement);
+            }
+        }
+
+        let rid = self.requirements.insert(RequirementData {
+            name,
+            cell,
+            inputs: requirement.inputs,
+            function: requirement.function,
+        });
+        self.cells[cell].requirements.push(rid);
+        Ok(rid)
+    }
+
+    /// Registers `writer` as the sole producer of its one output cell, which becomes
+    /// an `out` cell: always derived by `writer`, never `write()`-able, but otherwise
+    /// an ordinary, freely-referenceable cell. `requirements` are attached to that
+    /// cell one at a time, in order, via [`Sheet::add_requirement`].
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidOutput` — `writer` does not have exactly one output cell.
+    /// - `Error::InvalidCellKind` — the writer's output cell is already `Source` or
+    ///   `Out` kind, or already claimed as some existing method's output.
+    /// - Any error [`Sheet::add_relationship`] or [`Sheet::add_requirement`] can
+    ///   return.
+    ///
+    /// - Complexity: O(k + m²×c) where k is the number of requirements, plus the
+    ///   cost of `add_relationship` for `writer` alone (m = 1 method, c = cells in
+    ///   that method).
+    pub fn add_out(
         &mut self,
         writer: Method,
         requirements: Vec<(&str, Requirement)>,
-    ) -> Result<OutputId, Error> {
+    ) -> Result<CellId, Error> {
         if writer.outputs.len() != 1 {
             return Err(Error::InvalidOutput);
         }
-        let output_cell = writer.outputs[0];
+        let out_cell = writer.outputs[0];
 
-        let mut seen_names: HashSet<&str> = HashSet::new();
-        for &(name, _) in &requirements {
-            if name.is_empty() || !seen_names.insert(name) {
-                return Err(Error::InvalidOutput);
-            }
-        }
-
-        for (_, requirement) in &requirements {
-            if requirement.inputs.len() != requirement.input_types.len() {
-                return Err(Error::InvalidOutput);
-            }
-            for (&cell_id, &declared) in requirement
-                .inputs
-                .iter()
-                .zip(requirement.input_types.iter())
-            {
-                let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
-                if cell.kind == CellKind::Out {
-                    return Err(Error::InvalidCellKind);
-                }
-                if cell.type_id != declared {
-                    return Err(Error::TypeMismatch {
-                        expected: cell.type_id,
-                        found: declared,
-                    });
-                }
-            }
-        }
-
-        if self.cell_has_prior_use(output_cell) {
+        let kind = self.cells.get(out_cell).ok_or(Error::InvalidId)?.kind;
+        if kind != CellKind::Cell || self.cell_has_prior_use(out_cell) {
             return Err(Error::InvalidCellKind);
         }
 
         self.add_relationship(vec![writer])?;
-        self.cells[output_cell].kind = CellKind::Out;
+        self.cells[out_cell].kind = CellKind::Out;
 
-        let output_id = self.outputs.insert(OutputData {
-            cell: output_cell,
-            requirements: Vec::new(),
-        });
+        for (name, requirement) in requirements {
+            self.add_requirement(out_cell, name, requirement)?;
+        }
 
-        let requirement_ids: Vec<RequirementId> = requirements
-            .into_iter()
-            .map(|(name, requirement)| {
-                self.requirements.insert(RequirementData {
-                    name: name.to_string(),
-                    output: output_id,
-                    inputs: requirement.inputs,
-                    function: requirement.function,
-                })
-            })
-            .collect();
-        self.outputs[output_id].requirements = requirement_ids;
-
-        Ok(output_id)
+        Ok(out_cell)
     }
 
     /// Attaches `filter` to `cell` under `name`.
@@ -673,8 +697,8 @@ impl Sheet {
     /// Returns the set of root cells currently determining a violated filter's own
     /// value or any of its argument values, as of the last full `propagate()` call —
     /// the same "which upstream cells caused this" query
-    /// `requirement_contributing_cells`/`output_violation_cells` already provide for
-    /// `Requirement`.
+    /// `requirement_contributing_cells`/`requirement_violation_cells` already provide
+    /// for `Requirement`.
     ///
     /// - Postcondition: empty if no filter is currently violated.
     /// - Complexity: O(sum of `contributing_cells` cost over every violated filter and
@@ -692,18 +716,11 @@ impl Sheet {
         result
     }
 
-    /// Returns the terminal cell backing output `id`. Read its value with [`Sheet::read`].
+    /// Returns the requirements attached to `id`, in attachment order.
     ///
-    /// Returns `None` if `id` is not a live output in this sheet.
-    pub fn output_cell(&self, id: OutputId) -> Option<CellId> {
-        self.outputs.get(id).map(|o| o.cell)
-    }
-
-    /// Returns the requirements registered on output `id`, in declaration order.
-    ///
-    /// Returns `None` if `id` is not a live output in this sheet.
-    pub fn output_requirements(&self, id: OutputId) -> Option<&[RequirementId]> {
-        self.outputs.get(id).map(|o| o.requirements.as_slice())
+    /// Returns `None` if `id` is not a live cell in this sheet.
+    pub fn cell_requirements(&self, id: CellId) -> Option<&[RequirementId]> {
+        self.cells.get(id).map(|c| c.requirements.as_slice())
     }
 
     /// Returns the name of requirement `id`.
@@ -713,11 +730,11 @@ impl Sheet {
         self.requirements.get(id).map(|c| c.name.as_str())
     }
 
-    /// Returns the output that requirement `id` belongs to.
+    /// Returns the cell requirement `id` is attached to.
     ///
     /// Returns `None` if `id` is not a live requirement in this sheet.
-    pub fn requirement_output(&self, id: RequirementId) -> Option<OutputId> {
-        self.requirements.get(id).map(|c| c.output)
+    pub fn requirement_cell(&self, id: RequirementId) -> Option<CellId> {
+        self.requirements.get(id).map(|c| c.cell)
     }
 
     /// Returns the cells requirement `id` reads.
@@ -727,25 +744,30 @@ impl Sheet {
         self.requirements.get(id).map(|c| c.inputs.as_slice())
     }
 
-    /// Returns `true` if every requirement on `id` held as of the last `propagate()` call.
+    /// Returns `true` if every requirement on `id` held as of the last `propagate()`
+    /// call.
     ///
-    /// Returns `false` if no propagation has run yet. Also returns `true` for an `id`
-    /// that is not a live output in this sheet, since no requirement can have failed
-    /// for an output that doesn't exist.
-    pub fn output_valid(&self, id: OutputId) -> bool {
+    /// Returns `false` if no propagation has run yet. Also returns `true` for an
+    /// `id` that is not a live cell in this sheet, since no requirement can have
+    /// failed for a cell that doesn't exist.
+    pub fn cell_requirements_valid(&self, id: CellId) -> bool {
         if self.last_plan.is_none() {
             return false;
         }
-        !self.last_violated.contains_key(&id)
+        !self.last_requirement_violations.contains_key(&id)
     }
 
     /// Iterates the requirements on `id` that evaluated to `false` as of the last
     /// `propagate()` call.
     ///
     /// - Postcondition: empty if `id`'s requirements all held, `id` is not a live
-    ///   output in this sheet, or no propagation has run yet.
-    pub fn violated_requirements(&self, id: OutputId) -> impl Iterator<Item = RequirementId> + '_ {
-        self.last_violated.get(&id).into_iter().flatten().copied()
+    ///   cell in this sheet, or no propagation has run yet.
+    pub fn violated_requirements(&self, id: CellId) -> impl Iterator<Item = RequirementId> + '_ {
+        self.last_requirement_violations
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .copied()
     }
 
     /// Returns the set of root cells that could determine `id`'s value for *some* choice of
@@ -872,31 +894,34 @@ impl Sheet {
             .collect()
     }
 
-    /// Returns the union of `contributing_cells` over every live output's cell — the set
-    /// of cells currently determining at least one output's value, as of the last
-    /// `propagate()` call.
+    /// Returns the union of `contributing_cells` over every cell with at least one
+    /// requirement — the set of cells currently determining at least one
+    /// requirement-checked value, as of the last `propagate()` call.
     ///
-    /// - Postcondition: empty if the sheet has no outputs.
-    /// - Complexity: O(sum of `contributing_cells` cost over every output).
-    pub fn output_relevant_cells(&self) -> HashSet<CellId> {
-        self.outputs()
-            .filter_map(|id| self.output_cell(id))
-            .flat_map(|cell| self.contributing_cells(cell))
+    /// - Postcondition: empty if no cell in the sheet has any requirements.
+    /// - Complexity: O(sum of `contributing_cells` cost over every cell with
+    ///   requirements).
+    pub fn requirement_relevant_cells(&self) -> HashSet<CellId> {
+        self.cells
+            .iter()
+            .filter(|(_, c)| !c.requirements.is_empty())
+            .flat_map(|(id, _)| self.contributing_cells(id))
             .collect()
     }
 
-    /// Returns the union of `requirement_contributing_cells` over every requirement that
-    /// evaluated `false` as of the last `propagate()` call, across every output in the
-    /// sheet.
+    /// Returns the union of `requirement_contributing_cells` over every requirement
+    /// that evaluated `false` as of the last `propagate()` call, across every cell
+    /// in the sheet.
     ///
-    /// - Postcondition: empty if the sheet has no outputs, or if every requirement on
-    ///   every output currently holds.
-    /// - Complexity: O(sum of `requirement_contributing_cells` cost over every violated
-    ///   requirement).
-    pub fn output_violation_cells(&self) -> HashSet<CellId> {
-        self.outputs()
+    /// - Postcondition: empty if no requirement anywhere in the sheet currently
+    ///   fails.
+    /// - Complexity: O(sum of `requirement_contributing_cells` cost over every
+    ///   violated requirement).
+    pub fn requirement_violation_cells(&self) -> HashSet<CellId> {
+        self.cells
+            .keys()
             .flat_map(|id| self.violated_requirements(id))
-            .flat_map(|cid| self.requirement_contributing_cells(cid))
+            .flat_map(|rid| self.requirement_contributing_cells(rid))
             .collect()
     }
 
@@ -1229,8 +1254,9 @@ impl Sheet {
     /// marked changed even though no method wrote to it this round.
     ///
     /// **Phase 6 — Requirement evaluation:** every registered requirement is evaluated
-    /// against current cell values, rebuilding `last_violated` from scratch, so
-    /// [`Sheet::output_valid`] and [`Sheet::violated_requirements`] reflect this round.
+    /// against current cell values, rebuilding `last_requirement_violations` from
+    /// scratch, so [`Sheet::cell_requirements_valid`] and [`Sheet::violated_requirements`]
+    /// reflect this round.
     ///
     /// # Errors
     ///
@@ -1293,7 +1319,7 @@ impl Sheet {
         }
 
         // Phase 6: evaluate every registered requirement against current cell values.
-        let mut last_violated: HashMap<OutputId, Vec<RequirementId>> = HashMap::new();
+        let mut last_requirement_violations: HashMap<CellId, Vec<RequirementId>> = HashMap::new();
         for (requirement_id, requirement) in self.requirements.iter() {
             let inputs: Vec<&dyn Any> = requirement
                 .inputs
@@ -1302,13 +1328,13 @@ impl Sheet {
                 .collect();
             let holds = (requirement.function)(&inputs).map_err(Error::MethodFailed)?;
             if !holds {
-                last_violated
-                    .entry(requirement.output)
+                last_requirement_violations
+                    .entry(requirement.cell)
                     .or_default()
                     .push(requirement_id);
             }
         }
-        self.last_violated = last_violated;
+        self.last_requirement_violations = last_requirement_violations;
 
         // Phase 6b: evaluate every filter against a value derived by a method this
         // round — a non-gating diagnostic. A filter is never re-checked against a
@@ -1605,11 +1631,14 @@ impl Sheet {
         self.conditionals.keys()
     }
 
-    /// Iterates all live output IDs in the sheet.
+    /// Iterates all live `Out`-kind cells in the sheet.
     ///
-    /// - Complexity: O(n) where n is the number of outputs.
-    pub fn outputs(&self) -> impl Iterator<Item = OutputId> + '_ {
-        self.outputs.keys()
+    /// - Complexity: O(n) where n is the number of cells.
+    pub fn out_cells(&self) -> impl Iterator<Item = CellId> + '_ {
+        self.cells
+            .iter()
+            .filter(|(_, c)| c.kind == CellKind::Out)
+            .map(|(id, _)| id)
     }
 
     /// Returns the match cells for conditional `id`: a single cell for a plain match
@@ -1690,9 +1719,9 @@ impl Sheet {
     ///   since the last `propagate()`. Violation produces incorrect branch activation.
     ///
     /// `is_forced` and `forced_cells` continue to reflect the last full `propagate()`
-    /// call; this method does not recompute them. Likewise, `output_valid` and
+    /// call; this method does not recompute them. Likewise, `cell_requirements_valid` and
     /// `violated_requirements` continue to reflect the last full `propagate()` call; this
-    /// method does not re-evaluate output requirements.
+    /// method does not re-evaluate requirements.
     ///
     /// A cached `PlanStep::FilterReclamp` step is still re-executed on every call,
     /// using each argument's *current* effective value — only the `last_filter_violations`
@@ -1733,7 +1762,7 @@ impl Default for Sheet {
 #[cfg(test)]
 mod tests {
     use crate::{
-        CellKind, ConditionalId, Error, MatchExpr, Method, Sheet,
+        CellKind, ConditionalId, Error, MatchExpr, Method, Requirement, Sheet,
         cell::CellId,
         filter::{Filter, FilterKind, FilterViolation},
         relationship::RelationshipId,
@@ -2007,14 +2036,13 @@ mod tests {
         let writer_input = sheet.add_cell(1_i32);
         let out_cell = sheet.add_cell(0_i32);
         let out = sheet
-            .add_output(
+            .add_out(
                 Method::from_fn_1_1(writer_input, out_cell, |x: &i32| Ok(*x)),
                 vec![],
             )
             .unwrap();
-        let terminal = sheet.output_cell(out).unwrap();
         assert!(matches!(
-            sheet.write(terminal, 5_i32),
+            sheet.write(out, 5_i32),
             Err(Error::InvalidCellKind)
         ));
     }
@@ -3355,7 +3383,7 @@ mod tests {
         sheet.propagate_without_replan().unwrap();
         assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
         // Still reports the *old* violation: propagate_without_replan doesn't
-        // recompute it, matching last_violated's existing behavior.
+        // recompute it, matching last_requirement_violations's existing behavior.
         assert!(sheet.last_filter_violations.contains_key(&b));
     }
 
@@ -3669,5 +3697,274 @@ mod tests {
             .add_filter(a, "test_filter", Filter::from_fn_0(|x: &i32| Ok(*x)))
             .unwrap();
         assert!(sheet.filter_range::<i32>(a).is_none());
+    }
+
+    #[test]
+    fn add_requirement_succeeds_on_a_plain_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let result = sheet.add_requirement(
+            a,
+            "positive",
+            Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn add_requirement_returns_invalid_requirement_for_empty_name() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let result = sheet.add_requirement(a, "", Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)));
+        assert!(matches!(result, Err(Error::InvalidRequirement)));
+    }
+
+    #[test]
+    fn add_requirement_returns_invalid_requirement_for_duplicate_name_on_same_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_requirement(
+                a,
+                "positive",
+                Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
+            )
+            .unwrap();
+        let result = sheet.add_requirement(
+            a,
+            "positive",
+            Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)),
+        );
+        assert!(matches!(result, Err(Error::InvalidRequirement)));
+    }
+
+    #[test]
+    fn add_requirement_hard_fails_when_current_value_already_violates_it_on_a_plain_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(-5_i32);
+        let result = sheet.add_requirement(
+            a,
+            "positive",
+            Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
+        );
+        assert!(matches!(result, Err(Error::InvalidRequirement)));
+    }
+
+    #[test]
+    fn add_requirement_hard_fails_when_current_value_already_violates_it_on_a_source_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_source(-5_i32);
+        let result = sheet.add_requirement(
+            a,
+            "positive",
+            Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
+        );
+        assert!(matches!(result, Err(Error::InvalidRequirement)));
+    }
+
+    #[test]
+    fn add_requirement_propagates_method_failed_when_evaluation_errors() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let result = sheet.add_requirement(
+            a,
+            "always_errors",
+            Requirement::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("boom"))),
+        );
+        assert!(matches!(result, Err(Error::MethodFailed(_))));
+    }
+
+    #[test]
+    fn cell_has_the_requirement_it_was_given() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let rid = sheet
+            .add_requirement(
+                a,
+                "positive",
+                Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
+            )
+            .unwrap();
+        assert_eq!(sheet.cells[a].requirements, vec![rid]);
+    }
+
+    #[test]
+    fn add_out_returns_the_cell_id_directly() {
+        let mut sheet = Sheet::new();
+        let width = sheet.add_cell(4_i32);
+        let height = sheet.add_cell(5_i32);
+        let area = sheet.add_cell(0_i32);
+        let cell = sheet
+            .add_out(
+                Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
+                vec![],
+            )
+            .unwrap();
+        assert_eq!(cell, area);
+        assert_eq!(sheet.cell_kind(area), Some(CellKind::Out));
+    }
+
+    #[test]
+    fn out_cell_is_referenceable_as_another_relationships_input() {
+        let mut sheet = Sheet::new();
+        let width = sheet.add_cell(4_i32);
+        let height = sheet.add_cell(5_i32);
+        let area = sheet.add_cell(0_i32);
+        let doubled = sheet.add_cell(0_i32);
+        sheet
+            .add_out(
+                Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
+                vec![],
+            )
+            .unwrap();
+        let result =
+            sheet.add_relationship(vec![Method::from_fn_1_1(
+                area,
+                doubled,
+                |a: &i32| Ok(a * 2),
+            )]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn out_cell_is_referenceable_as_a_conditional_match_subject() {
+        let mut sheet = Sheet::new();
+        let flag = sheet.add_cell(0_i32);
+        let derived_flag = sheet.add_cell(0_i32);
+        sheet
+            .add_out(
+                Method::from_fn_1_1(flag, derived_flag, |f: &i32| Ok(*f)),
+                vec![],
+            )
+            .unwrap();
+        let result = sheet.add_conditional(
+            MatchExpr::cell(derived_flag),
+            Vec::<(Vec<i32>, Vec<RelationshipId>)>::new(),
+            vec![],
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn add_out_returns_invalid_cell_kind_for_a_write() {
+        let mut sheet = Sheet::new();
+        let width = sheet.add_cell(4_i32);
+        let area = sheet.add_cell(0_i32);
+        sheet
+            .add_out(Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)), vec![])
+            .unwrap();
+        assert!(matches!(
+            sheet.write(area, 99_i32),
+            Err(Error::InvalidCellKind)
+        ));
+    }
+
+    #[test]
+    fn add_out_returns_invalid_cell_kind_for_a_second_writer() {
+        let mut sheet = Sheet::new();
+        let width = sheet.add_cell(4_i32);
+        let height = sheet.add_cell(5_i32);
+        let area = sheet.add_cell(0_i32);
+        sheet
+            .add_out(Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)), vec![])
+            .unwrap();
+        let result = sheet.add_out(Method::from_fn_1_1(height, area, |h: &i32| Ok(*h)), vec![]);
+        assert!(matches!(result, Err(Error::InvalidCellKind)));
+    }
+
+    #[test]
+    fn add_out_succeeds_when_target_cell_was_previously_used_only_as_an_input() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(2_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        let c = sheet.add_cell(0_i32);
+        let result = sheet.add_out(Method::from_fn_1_1(a, c, |x: &i32| Ok(*x * 2)), vec![]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn add_out_with_a_requirement_that_would_fail_still_succeeds_and_propagate_reports_it() {
+        let mut sheet = Sheet::new();
+        let width = sheet.add_cell(4_i32);
+        let area = sheet.add_cell(0_i32);
+        let area_cell = sheet
+            .add_out(
+                Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)),
+                vec![(
+                    "too_small",
+                    Requirement::from_fn_1(area, |a: &i32| Ok(*a > 100)),
+                )],
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        assert!(!sheet.cell_requirements_valid(area_cell));
+        assert_eq!(sheet.violated_requirements(area_cell).count(), 1);
+    }
+
+    #[test]
+    fn out_cells_iterates_only_out_kind_cells() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(0_i32);
+        let out_id = sheet
+            .add_out(Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)), vec![])
+            .unwrap();
+        let ids: Vec<CellId> = sheet.out_cells().collect();
+        assert_eq!(ids, vec![out_id]);
+    }
+
+    #[test]
+    fn add_filter_succeeds_on_a_real_out_kind_cell() {
+        let mut sheet = Sheet::new();
+        let width = sheet.add_cell(4_i32);
+        let area = sheet.add_cell(0_i32);
+        let out_cell = sheet
+            .add_out(Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)), vec![])
+            .unwrap();
+        let result = sheet.add_filter(
+            out_cell,
+            "clamp",
+            Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 10))),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn requirement_relevant_cells_covers_a_plain_cells_requirement_too() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_requirement(
+                a,
+                "positive",
+                Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        assert!(sheet.requirement_relevant_cells().contains(&a));
+    }
+
+    #[test]
+    fn requirement_violation_cells_covers_a_plain_cells_violation_too() {
+        // `add_requirement` hard-fails immediately if a `Cell`/`Source` kind cell's
+        // *current* value already violates it (see
+        // `add_requirement_hard_fails_when_current_value_already_violates_it_on_a_plain_cell`),
+        // so the requirement is attached while it still holds (200 > 100), then a
+        // later `write` — not the initial value — is what drives it into violation.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(200_i32);
+        sheet
+            .add_requirement(
+                a,
+                "too_big",
+                Requirement::from_fn_1(a, |x: &i32| Ok(*x > 100)),
+            )
+            .unwrap();
+        sheet.write(a, 5_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert!(sheet.requirement_violation_cells().contains(&a));
     }
 }

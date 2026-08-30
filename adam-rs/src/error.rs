@@ -51,9 +51,8 @@ pub enum Error {
     /// not match the cell's registered type, or a branch has no keys.
     InvalidConditional,
 
-    /// An `add_output` call is structurally invalid: the writer method does not have
-    /// exactly one output cell, a requirement has an empty name, two requirements in the same
-    /// call share a name, or a requirement's `inputs` and `input_types` lengths differ.
+    /// An `add_out` call is structurally invalid: the writer method does not have
+    /// exactly one output cell.
     InvalidOutput,
 
     /// A relationship or conditional attempted to claim a `Source`-kind cell as a

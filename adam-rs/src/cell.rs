@@ -59,7 +59,6 @@ pub(crate) struct CellData {
     /// This cell's fixed role in the planner's per-round source/derived assignment.
     pub(crate) kind: CellKind,
     /// This cell's requirements, in attachment order. Empty for most cells.
-    #[allow(dead_code)]
     pub(crate) requirements: Vec<RequirementId>,
 }
 
