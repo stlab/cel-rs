@@ -26,10 +26,18 @@ jobs:
     - name: Cache dependencies
       uses: Swatinem/rust-cache@v2
 
-    # --lib skips `begin`/`xtask` automatically (they have no library target),
-    # so this covers every documentable crate without needing an --exclude list.
+    # --lib skips `xtask` automatically (it has no library target). `begin` is excluded
+    # explicitly, not just left to `--lib`: `--lib` only filters which *targets* get
+    # documented, not which packages are selected for feature resolution, so `begin`
+    # staying selected via `--workspace` still unifies its `default = ["desktop"]`
+    # feature (-> `dioxus/desktop` -> wry/tao -> WebKitGTK/GTK) into the build even
+    # though nothing of `begin`'s ever gets documented -- and this workflow never
+    # installs those system libraries at all, so it fails outright on the
+    # ubuntu-latest runner despite building fine locally on Windows/macOS, neither of
+    # which route dioxus's desktop feature through GTK at all (confirmed against the
+    # `ci.yml` build job hitting the identical failure).
     - name: Build documentation
-      run: cargo doc --workspace --no-deps --lib
+      run: cargo doc --workspace --exclude begin --no-deps --lib
 
     - name: Redirect docs root to the cel-rs facade crate
       run: echo '<meta http-equiv="refresh" content="0; url=cel_rs/index.html">' > target/doc/index.html
@@ -38,6 +46,17 @@ jobs:
       uses: peaceiris/actions-mdbook@v2
       with:
         mdbook-version: 'latest'
+
+    - name: Install the live-examples mdBook preprocessor
+      run: cargo install --path adam-lang-book-preprocessor
+
+    - name: Build the adam-lang-book-live wasm bundle
+      run: |
+        cargo install wasm-pack --locked
+        cd adam-lang-book-live && wasm-pack build --target web --release
+
+    - name: Prepare live-book assets (manifest + Spectrum bundle + wasm/js output)
+      run: cargo run -p xtask -- prepare-live-book-assets
 
     # The adam-lang tutorial/reference book links into this same rustdoc output (e.g.
     # `../adam_rs/sheet/struct.Sheet.html`), so it's built and published from target/doc

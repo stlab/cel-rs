@@ -15,8 +15,8 @@ cell width: i32 = 1920; // a trailing comment
 
 `///` immediately before a `cell`, `relationship`, `conditional`, or `out` declaration, and
 `//!` immediately before the `sheet` keyword itself, are doc comments, recovered by the
-language server and the formatter, and otherwise inert (they carry no meaning to
-`propagate()`):
+language server and the formatter, and otherwise inert (they carry no meaning when the sheet
+resolves):
 
 ```text
 //! Describes a simple resize dialog.
@@ -34,8 +34,8 @@ indentation, opening braces on the same line as the keyword that introduces them
 before a declaration's closing `;`. Given input that doesn't already follow this layout,
 formatting normalizes it:
 
-```rust
-{{#include ../tests/style.rs:canonical_formatting}}
+```
+{{#include examples/style/canonical_formatting.adm2}}
 ```
 
 A formatter run is expected to be **idempotent** (formatting already-canonical source

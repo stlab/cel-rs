@@ -8,6 +8,17 @@ src = "book-src"
 [build]
 build-dir = "book-dist"
 
+[preprocessor.live-examples]
+command = "mdbook-live-examples"
+# mdBook's built-in `{{#include}}` substitution runs as a preprocessor literally
+# named "links". Without this ordering constraint, alphabetical tie-breaking in
+# mdBook's topological sort would run "links" before "live-examples", already
+# expanding every include into literal file content before this preprocessor's
+# regex ever sees it -- silently breaking every live example on the site.
+before = ["links"]
+
 [output.html]
 git-repository-url = "https://github.com/stlab/cel-rs"
 edit-url-template = "https://github.com/stlab/cel-rs/edit/main/adam-lang-book/{path}"
+additional-css = ["book-src/theme/adam-live.css", "book-src/theme/inspector.css"]
+additional-js = ["book-src/theme/adam-live-bootstrap.js"]

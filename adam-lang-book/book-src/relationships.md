@@ -12,18 +12,18 @@ Each `binding` inside a `relationship` block is a candidate **method**: an expre
 dependencies are [deduced](expressions.md#34-deduced-dependencies) from whichever
 already-declared cells it references, paired with the cell(s) named on its left of `:=`. A
 relationship's bindings are alternatives, not a sequence: at any moment, exactly one of them
-is *selected*, and only the selected one's output cell(s) are written by `propagate()`. The
-other bindings simply aren't evaluated that round.
+is *selected*, and only the selected one's output cell(s) are actually written when the sheet
+resolves. The other bindings simply aren't evaluated that round.
 
 ## 4.2 Strength: who gets to stay a source
 
-Every cell carries a **strength**, a write-recency counter: `propagate()` re-derives the
+Every cell carries a **strength**, a write-recency counter: resolving the sheet re-derives the
 *stalest* cells it safely can and leaves the *freshest* cells alone. Two things bump a cell's
-strength: an explicit host `write()`, and, once only, the cell's own declaration. Before
-any `write()` has happened, declaration order alone orders every cell's freshness, earliest
-declared being stalest. Chapter 1's [§1.2](tutorial.md#12-relationships-multi-way-constraints)
-walks through the simplest case of this rule. `write()` never touches strength itself except to
-promote the written cell to "freshest of all"; reading a cell never changes it.
+strength: an explicit write, and, once only, the cell's own declaration. Before any explicit
+write has happened, declaration order alone orders every cell's freshness, earliest declared
+being stalest. Chapter 1's [§1.2](tutorial.md#12-relationships-multi-way-constraints) walks
+through the simplest case of this rule. A write never touches strength itself except to promote
+the written cell to "freshest of all"; reading a cell never changes it.
 
 ## 4.3 A shared-cell example
 
@@ -67,31 +67,30 @@ strongest first, to leave each cell a source:
 - **`a`**: stalest, and the first relationship's remaining choice is `a := c/b`; `a` is
   derived.
 
-```rust
-{{#include ../tests/relationships.rs:shared_cell_example}}
+```
+{{#include examples/relationships/shared_cell_example.adm2}}
 ```
 
-[`Sheet::is_source`](../adam_rs/sheet/struct.Sheet.html#method.is_source) answers "did the last
-`propagate()` leave this cell alone"; useful for a host UI deciding whether a field should be
-editable.
+Whether a cell came out of the last resolution as a source, left alone rather than derived, is
+useful for a host UI deciding whether a field should be editable.
 
 ## 4.4 When no assignment exists
 
-Every relationship in a sheet must end up with exactly one selected binding once `propagate()`
-runs: if that's not possible, `propagate()` fails instead of silently picking something
+Every relationship in a sheet must end up with exactly one selected binding once the sheet
+resolves: if that's not possible, resolution fails instead of silently picking something
 inconsistent. Two relationships that both, unconditionally, insist on writing the *same* cell
 can never both be satisfied:
 
-```rust
-{{#include ../tests/relationships.rs:conflict_error}}
+```
+{{#include examples/relationships/conflict_error.adm2}}
 ```
 
 A subtler failure is a **cycle**: an assignment exists, but every valid choice of bindings
 forms a closed loop with no cell left as a source anywhere in the loop; nothing external ever
 breaks the chain:
 
-```rust
-{{#include ../tests/relationships.rs:cycle_error}}
+```
+{{#include examples/relationships/cycle_error.adm2}}
 ```
 
 Each relationship above has only one binding, so the solver has no alternative to try: `x`,
@@ -104,8 +103,8 @@ as `x := y`) would let the solver route around the loop instead.
 A binding's left-hand side can name more than one output cell by parenthesizing it, in which
 case the right-hand side must be a tuple expression of matching arity, split element-wise:
 
-```rust
-{{#include ../tests/relationships.rs:destructuring_binding}}
+```
+{{#include examples/relationships/destructuring_binding.adm2}}
 ```
 
 `(a, b) := ...` and the one-element `(a,) := ...` (trailing comma mandatory, matching Rust's

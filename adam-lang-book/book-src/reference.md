@@ -103,24 +103,23 @@ type in the current design.
 
 ## A.6 Relationships and the solver
 
-- A `relationship` names one or more `binding`s; exactly one is selected each `propagate()`.
-- Selection is driven by cell **strength**, a write-recency counter: `add_cell` (i.e. a cell's
-  own declaration) and `write()` both bump it, so before any explicit `write()`, declaration
-  order alone ranks every cell: later declared is "fresher." The solver tries, freshest
-  first, to leave each cell a source (unclaimed by any binding), keeping the attempt only if a
-  valid, acyclic assignment still exists across every active relationship. See
+- A `relationship` names one or more `binding`s; exactly one is selected each time the sheet
+  resolves.
+- Selection is driven by cell **strength**, a write-recency counter: a cell's own declaration
+  and any explicit write both bump it, so before any explicit write, declaration order alone
+  ranks every cell: later declared is "fresher." The solver tries, freshest first, to leave
+  each cell a source (unclaimed by any binding), keeping the attempt only if a valid, acyclic
+  assignment still exists across every active relationship. See
   [Chapter 4](relationships.md#42-strength-who-gets-to-stay-a-source).
-- `propagate()` fails with [`Error::Conflict`](../adam_rs/error/enum.Error.html#variant.Conflict) if
-  no valid assignment exists at all, or
-  [`Error::Cycle`](../adam_rs/error/enum.Error.html#variant.Cycle) if every valid assignment forms a
-  closed dependency loop with no source anywhere in it. See
-  [4.4](relationships.md#44-when-no-assignment-exists).
+- Resolving the sheet fails with a **conflict** if no valid assignment exists at all, or a
+  **cycle** if every valid assignment forms a closed dependency loop with no source anywhere in
+  it. See [4.4](relationships.md#44-when-no-assignment-exists).
 - A binding's left-hand side destructures a tuple result element-wise when parenthesized with
   more than one name, or exactly one name plus a trailing comma; a bare name or a single
   parenthesized name with no comma binds the whole result directly. See
   [4.5](relationships.md#45-destructuring-bindings).
-- [`Sheet::is_source`](../adam_rs/sheet/struct.Sheet.html#method.is_source) reports whether the last
-  `propagate()` left a given cell unclaimed.
+- Whether a cell was left unclaimed (a source) by the last resolution is queryable by a host;
+  see [Appendix A.11](#a11-the-host-embedding-api).
 
 ## A.7 Conditionals
 
@@ -142,15 +141,15 @@ See [Chapter 5](conditionals.md).
   candidate value (of the cell's own declared type); every other identifier is a deduced
   dependency. The expression must reference `_` at least once (unless it's a range expression,
   `lo..=hi`, which is exempt) and must produce the filtered cell's own type.
-- **`write()` never applies a filter.** A filter is applied live, by `propagate()`, against the
-  cell's current value.
-- Internally, a filtered cell keeps a raw `source` (last written, untouched by any filter
-  forever) and a computed `derived` (the filter's live output, recomputed every `propagate()`);
-  `read()` returns `derived` when present, `source` otherwise.
+- **Writing a cell never applies a filter.** A filter is applied live, each time the sheet
+  resolves, against the cell's current value.
+- A filtered cell keeps a raw **source** value (last written, untouched by any filter forever)
+  and a computed **derived** value (the filter's live output, recomputed every time the sheet
+  resolves); reading the cell returns the derived value when present, the source value
+  otherwise.
 - A filter attached to a cell a relationship currently claims (a *derived* cell that round) is
-  diagnostic-only: it never corrects the value, only flags a mismatch via
-  [`Sheet::filter_violation`](../adam_rs/sheet/struct.Sheet.html#method.filter_violation) /
-  [`Sheet::filter_violated_cells`](../adam_rs/sheet/struct.Sheet.html#method.filter_violated_cells).
+  diagnostic-only: it never corrects the value, only flags a mismatch, queryable by a host; see
+  [Appendix A.11](#a11-the-host-embedding-api).
 - At most one filter per cell; a filter cannot attach to an output cell; a filter cannot (yet)
   attach to a tuple-typed cell.
 
@@ -159,13 +158,11 @@ See [Chapter 6](filters.md) for the full model and worked examples.
 ## A.9 Outputs and requirements
 
 - `out name := expr;` declares a new, terminal cell: nothing may ever write it directly, not
-  a host `write()`, not a `relationship`, not another `out`.
+  a host write, not a `relationship`, not another `out`.
 - `require { name: expr; ... }` attaches named boolean checks, each with its own deduced
-  dependencies. A failing requirement never stops `propagate()` or the output's own value from
-  being computed: it's reported via
-  [`Sheet::output_valid`](../adam_rs/sheet/struct.Sheet.html#method.output_valid) /
-  [`Sheet::violated_requirements`](../adam_rs/sheet/struct.Sheet.html#method.violated_requirements),
-  nothing more.
+  dependencies. A failing requirement never stops the sheet from resolving, or the output's own
+  value from being computed: it's reported as a diagnostic, nothing more, queryable by a host
+  (see [Appendix A.11](#a11-the-host-embedding-api)).
 
 See [Chapter 7](outputs.md).
 
@@ -174,7 +171,7 @@ See [Chapter 7](outputs.md).
 Adam reports every diagnostic as a [`ParseError`](../cel_parser/struct.ParseError.html)
 carrying a source span; there is no separate runtime error type for a malformed sheet; if
 `parse_str` returns `Ok`, the sheet is syntactically and structurally valid (though it may
-still fail *at `propagate()`* for the solver reasons in [A.6](#a6-relationships-and-the-solver)).
+still fail *when resolved* for the solver reasons in [A.6](#a6-relationships-and-the-solver)).
 Selected messages, verbatim:
 
 | Message (abbreviated) | Cause |
