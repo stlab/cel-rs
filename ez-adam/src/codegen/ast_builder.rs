@@ -13,9 +13,7 @@ use adam_lang::ast::{
     BindingDecl, CellDecl, CellFilter, ConditionalBranch, ConditionalDecl, DefaultBranch,
     MatchLiteral, RelationshipDecl,
 };
-use cel_parser::{
-    AstContext, ClosureParam, ClosureParamTypeExpr, Expr, ExprSpan, OpLookup, Parser,
-};
+use cel_parser::{AstContext, Expr, ExprSpan, OpLookup, Parser};
 
 use super::ExportError;
 
@@ -66,56 +64,43 @@ pub(crate) fn build_cell_decl(cell: &Cell) -> CellDecl {
     }
 }
 
-/// Returns a hand-built `filter |_: <type>| <clamp-call>` clause clamping
-/// `ty`'s value to its clamp bounds, or `None` if `ty` is `Bool`/`Text` or
-/// has no bounds set. The clamp-call text is generated the same way as
-/// before this revision (explicit `i64` suffixes / `f64` `Debug`
+/// Returns a hand-built `filter <clamp-call>` clause clamping `ty`'s value
+/// to its clamp bounds, or `None` if `ty` is `Bool`/`Text` or has no bounds
+/// set. `adam-lang`'s current `cell_filter` grammar (`"filter" or_expression`)
+/// takes a bare expression with no explicit closure/parameter list — `_`
+/// implicitly refers to the candidate value being conformed, deduced
+/// automatically by `adam-lang` itself, so no `ClosureParam`/type
+/// annotation needs to be built here (unlike prior revisions of this
+/// function, from before `adam-lang` simplified `cell_filter`'s grammar).
+/// The clamp-call text still uses explicit `i64` suffixes / `f64` `Debug`
 /// formatting to avoid literal-type-inference ambiguity — see this
-/// function's own body) and then parsed into an `Expr`, rather than the
-/// whole `filter |_: ...| ...` clause being formatted as one string.
+/// function's own body — and is parsed into an `Expr` to become the
+/// filter's `body` directly.
 ///
 /// - Precondition: the synthesized clamp-call text is always valid CEL —
 ///   a parse failure here indicates a bug in this function, not bad user
 ///   data, so it panics rather than returning a `Result`.
 fn clamp_filter(ty: &CellType) -> Option<CellFilter> {
-    let (ty_name, body_text) = match ty {
-        CellType::F64 { clamp } => (
-            "f64",
-            match (clamp.min, clamp.max) {
-                (None, None) => return None,
-                (Some(min), None) => format!("max(_, {min:?})"),
-                (None, Some(max)) => format!("min(_, {max:?})"),
-                (Some(min), Some(max)) => format!("clamp(_, {min:?}, {max:?})"),
-            },
-        ),
-        CellType::I64 { clamp } => (
-            "i64",
-            match (clamp.min, clamp.max) {
-                (None, None) => return None,
-                (Some(min), None) => format!("max(_, {min}i64)"),
-                (None, Some(max)) => format!("min(_, {max}i64)"),
-                (Some(min), Some(max)) => format!("clamp(_, {min}i64, {max}i64)"),
-            },
-        ),
+    let body_text = match ty {
+        CellType::F64 { clamp } => match (clamp.min, clamp.max) {
+            (None, None) => return None,
+            (Some(min), None) => format!("max(_, {min:?})"),
+            (None, Some(max)) => format!("min(_, {max:?})"),
+            (Some(min), Some(max)) => format!("clamp(_, {min:?}, {max:?})"),
+        },
+        CellType::I64 { clamp } => match (clamp.min, clamp.max) {
+            (None, None) => return None,
+            (Some(min), None) => format!("max(_, {min}i64)"),
+            (None, Some(max)) => format!("min(_, {max}i64)"),
+            (Some(min), Some(max)) => format!("clamp(_, {min}i64, {max}i64)"),
+        },
         CellType::Bool | CellType::Text => return None,
     };
     let body = parse_expr_text(&body_text).unwrap_or_else(|e| {
         panic!("synthesized clamp expression {body_text:?} failed to parse: {e:?}")
     });
     Some(CellFilter {
-        arg_cells: vec![],
-        closure: Expr::Closure {
-            params: vec![ClosureParam {
-                name: "_".to_string(),
-                name_span: ExprSpan::for_text("_"),
-                type_expr: ClosureParamTypeExpr::Named(
-                    ty_name.to_string(),
-                    ExprSpan::for_text(ty_name),
-                ),
-            }],
-            body: Box::new(body),
-            span: ExprSpan::for_text("_"),
-        },
+        body,
         span: ExprSpan::for_text("_"),
     })
 }
@@ -377,7 +362,11 @@ mod tests {
         );
         let decl = build_cell_decl(&cell);
         let filter = decl.filter.expect("expected a filter clause");
-        assert!(matches!(filter.closure, cel_parser::Expr::Closure { .. }));
+        assert!(matches!(filter.body, cel_parser::Expr::Apply { .. }));
+        assert_eq!(
+            cel_parser::format_expr(&filter.body),
+            "clamp(_, 0i64, 100i64)"
+        );
     }
 
     #[test]

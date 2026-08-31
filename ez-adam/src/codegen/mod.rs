@@ -193,7 +193,7 @@ mod tests {
         let out = generate_adm2(&doc).expect("valid document should export cleanly");
         assert_eq!(
             out,
-            "sheet demo {\n    cell width_pixels: i64 filter |_: i64| clamp(_, 0i64, 100i64);\n}\n"
+            "sheet demo {\n    cell width_pixels: i64 filter clamp(_, 0i64, 100i64);\n}\n"
         );
     }
 
@@ -213,7 +213,7 @@ mod tests {
         let out = generate_adm2(&doc).expect("valid document should export cleanly");
         assert_eq!(
             out,
-            "sheet demo {\n    cell width_pixels: i64 filter |_: i64| max(_, 0i64);\n}\n"
+            "sheet demo {\n    cell width_pixels: i64 filter max(_, 0i64);\n}\n"
         );
     }
 
@@ -233,7 +233,7 @@ mod tests {
         let out = generate_adm2(&doc).expect("valid document should export cleanly");
         assert_eq!(
             out,
-            "sheet demo {\n    cell width_pixels: f64 filter |_: f64| min(_, 100.0);\n}\n"
+            "sheet demo {\n    cell width_pixels: f64 filter min(_, 100.0);\n}\n"
         );
     }
 
