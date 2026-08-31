@@ -1,0 +1,17 @@
+[package]
+name = "adam-lang-book-live"
+version = "0.1.0"
+edition = "2024"
+description = "wasm-bindgen entry point mounting a live SheetInspector for one adam-lang-book example"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+adam-web-ui = { path = "../adam-web-ui" }
+adam-rs = { path = "../adam-rs" }
+dioxus = { version = "0.7.10", features = ["web"] }
+wasm-bindgen = "0.2"
+
+[lints]
+workspace = true

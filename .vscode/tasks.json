@@ -119,6 +119,125 @@
                 "panel": "dedicated"
             }
         },
+        // ============ Adam Book Tasks ============
+        {
+            "label": "book: install preprocessor",
+            "type": "cargo",
+            "command": "install",
+            "args": [
+                "--path",
+                "adam-lang-book-preprocessor",
+                "--force"
+            ],
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "book: build wasm",
+            "type": "shell",
+            "command": "wasm-pack",
+            "args": [
+                "build",
+                "--target",
+                "web",
+                "--release"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/adam-lang-book-live"
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "book: prepare assets",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "xtask",
+                "prepare-live-book-assets"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$rustc"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "book: build",
+            "type": "shell",
+            "command": "mdbook",
+            "args": [
+                "build",
+                "."
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/adam-lang-book"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "book: build (full)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "book: install preprocessor",
+                "book: build wasm",
+                "book: prepare assets",
+                "book: build"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "book: serve",
+            "type": "shell",
+            "command": "mdbook",
+            "args": [
+                "serve",
+                "."
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}/adam-lang-book"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "isBackground": true
+        },
+        {
+            "label": "book: serve (full)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "book: install preprocessor",
+                "book: build wasm",
+                "book: prepare assets",
+                "book: serve"
+            ],
+            "problemMatcher": []
+        },
         // ============ adam-lang VS Code Extension Tasks ============
         {
             "label": "cargo: install adam-lsp",

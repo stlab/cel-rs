@@ -1,0 +1,4 @@
+sheet spring_back {
+    cell max: i32 = 100 filter 0..=200;
+    cell level: i32 = 50 filter 0..=max;
+}

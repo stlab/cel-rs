@@ -34,17 +34,13 @@ pub fn SpTheme(color: String, scale: String, system: String, children: Element) 
 ///
 /// Maps to `<sp-textfield>`. Fires standard DOM `input`, `focus`, and `blur`
 /// events. Setting `invalid` to `true` renders the SWC error state (red ring
-/// and `aria-invalid`). Setting `warning` to `true` (and `invalid` to `false`)
-/// renders a softer amber treatment via the `warning` CSS class, styled in
-/// `begin/assets/inspector.css` — not a native SWC state. Setting `disabled`
-/// to `true` renders the SWC disabled state and blocks focus/input at the DOM
-/// level.
+/// and `aria-invalid`). Setting `disabled` to `true` renders the SWC disabled
+/// state and blocks focus/input at the DOM level.
 #[component]
 pub fn SpTextfield(
     id: String,
     value: String,
     invalid: bool,
-    warning: bool,
     disabled: bool,
     oninput: EventHandler<FormEvent>,
     onfocus: EventHandler<FocusEvent>,
@@ -57,10 +53,94 @@ pub fn SpTextfield(
             // Boolean attribute: omit entirely when false; presence = invalid.
             "invalid": if invalid { "true" },
             "disabled": if disabled { "true" },
-            class: if warning { "warning" },
             oninput: move |e| oninput.call(e),
             onfocus: move |e| onfocus.call(e),
             onblur: move |e| onblur.call(e),
+        }
+    }
+}
+
+/// Single-line numeric input.
+///
+/// Maps to `<sp-number-field>`. Fires standard DOM `input`, `focus`, and `blur` events, exactly
+/// like [`SpTextfield`] — including the same custom-element caveat: Dioxus's event serializer
+/// never populates `event.target.value` for a custom element, so reading the live value off the
+/// DOM (not the synthetic event) is the caller's job. `value` is passed as its string
+/// representation; the element renders and edits it as a number internally. `min`/`max`, when
+/// present, are passed through to the underlying SWC element, which natively disables its
+/// increment/decrement stepper buttons once the value reaches the corresponding bound. Setting
+/// `readonly` to `true` renders the SWC read-only state — the value stays visible and
+/// selectable, but not editable — distinct from `disabled`, which additionally grays the field
+/// out and suppresses the `invalid` treatment (the input's border) entirely; `readonly` leaves
+/// `invalid`'s border alone but SWC's own `:host([readonly]) .input` rule pins the border color
+/// to transparent regardless, so on a `readonly` field the border itself never visibly reflects
+/// `invalid` either — confirmed against the rendered shadow-DOM stylesheet via the
+/// verifying-begin-ui skill; there is no documented or supported `readonly`+`invalid` border
+/// treatment in Spectrum. `invalid` still matters on a `readonly` field for two reasons that
+/// don't depend on the border: it sets `aria-invalid` for assistive tech, and it's exactly what
+/// gates whether SWC exposes the `negative-help-text` slot at all (see `children`) — so pass a
+/// slotted [`SpHelpText`] there rather than inventing a non-standard visual override to
+/// compensate for the missing border. `step`, when present, sets the amount the stepper
+/// buttons/arrow keys/scroll wheel move the value by — pass `"1"` for an integer-typed cell so
+/// the stepper can never land it on a fractional value. `children` slots into the element's
+/// light DOM, e.g. an [`SpHelpText`] with `slot: "negative-help-text"` or `slot: "help-text"`.
+#[component]
+pub fn SpNumberfield(
+    id: String,
+    value: String,
+    min: Option<String>,
+    max: Option<String>,
+    step: Option<String>,
+    invalid: bool,
+    disabled: bool,
+    readonly: bool,
+    oninput: EventHandler<FormEvent>,
+    onfocus: EventHandler<FocusEvent>,
+    onblur: EventHandler<FocusEvent>,
+    #[props(default)] children: Element,
+) -> Element {
+    rsx! {
+        sp-number-field {
+            "id": "{id}",
+            "value": "{value}",
+            "min": min.as_deref(),
+            "max": max.as_deref(),
+            "step": step.as_deref(),
+            "invalid": if invalid { "true" },
+            "disabled": if disabled { "true" },
+            "readonly": if readonly { "true" },
+            oninput: move |e| oninput.call(e),
+            onfocus: move |e| onfocus.call(e),
+            onblur: move |e| onblur.call(e),
+            {children}
+        }
+    }
+}
+
+/// A draggable range slider for a numeric value with live min/max bounds.
+///
+/// Maps to `<sp-slider>`. `min`/`max` are passed as strings, recomputed by the caller on every
+/// render from the cell's current filter bounds (see `begin/src/bridge.rs`'s `CellMeta::range`),
+/// so a range driven by other cells stays live. Fires a standard DOM `input` event; reading the
+/// live numeric value off the DOM (not the synthetic event) is the caller's job, mirroring
+/// [`SpTextfield`]/[`SpNumberfield`].
+#[component]
+pub fn SpSlider(
+    id: String,
+    value: String,
+    min: String,
+    max: String,
+    disabled: bool,
+    oninput: EventHandler<FormEvent>,
+) -> Element {
+    rsx! {
+        sp-slider {
+            "id": "{id}",
+            "value": "{value}",
+            "min": "{min}",
+            "max": "{max}",
+            "disabled": if disabled { "true" },
+            oninput: move |e| oninput.call(e),
         }
     }
 }
@@ -74,6 +154,31 @@ pub fn SpFieldLabel(for_: String, children: Element) -> Element {
     rsx! {
         sp-field-label {
             "for": "{for_}",
+            {children}
+        }
+    }
+}
+
+/// Descriptive or validation text associated with a form control.
+///
+/// Maps to `<sp-help-text>`. Meaningless on its own — a form control like
+/// [`SpNumberfield`] renders it only when passed as that control's `children`, with
+/// `slot` set to one of the two slot names the control's own shadow DOM exposes:
+/// `"help-text"` for default/non-negative text, always rendered when present, or
+/// `"negative-help-text"` for text shown only while the control's own `invalid` prop is
+/// `true` (confirmed against the bundled SWC source's `HelpTextManager.render`, which
+/// switches which slot it exposes based on exactly that prop — the control ignores an
+/// `sp-help-text` slotted into `"negative-help-text"` whenever `invalid` is `false`).
+/// `variant` mirrors the element's own `variant` property (`"negative"` renders the
+/// error/red treatment); note that slotting into `"negative-help-text"` sets this to
+/// `"negative"` automatically on the control's own side, so passing it here is
+/// belt-and-suspenders, not load-bearing.
+#[component]
+pub fn SpHelpText(slot: String, variant: String, children: Element) -> Element {
+    rsx! {
+        sp-help-text {
+            "slot": "{slot}",
+            "variant": "{variant}",
             {children}
         }
     }
@@ -162,19 +267,15 @@ pub fn SpSwitch(checked: bool, onclick: EventHandler<MouseEvent>, children: Elem
 /// A togglable checkbox for a `bool`-typed value.
 ///
 /// Maps to `<sp-checkbox>`. Setting `invalid` to `true` renders the SWC error state.
-/// Setting `warning` to `true` (and `invalid` to `false`) renders a softer amber
-/// treatment via the `warning` CSS class, styled in `begin/assets/inspector.css` — not a
-/// native SWC state, mirroring `SpTextfield`'s `warning` prop. Setting `disabled` to
-/// `true` renders the SWC disabled state. `onclick` fires on every toggle press,
-/// mirroring `SpSwitch`'s `checked`/`onclick` pattern — the caller owns the boolean
-/// state and re-renders `checked` from it rather than reading the new state off a
-/// native `change` event.
+/// Setting `disabled` to `true` renders the SWC disabled state. `onclick` fires on
+/// every toggle press, mirroring `SpSwitch`'s `checked`/`onclick` pattern — the caller
+/// owns the boolean state and re-renders `checked` from it rather than reading the new
+/// state off a native `change` event.
 #[component]
 pub fn SpCheckbox(
     id: String,
     checked: bool,
     invalid: bool,
-    warning: bool,
     disabled: bool,
     onclick: EventHandler<MouseEvent>,
 ) -> Element {
@@ -186,7 +287,6 @@ pub fn SpCheckbox(
             "checked": if checked { "true" },
             "invalid": if invalid { "true" },
             "disabled": if disabled { "true" },
-            class: if warning { "warning" },
         }
     }
 }

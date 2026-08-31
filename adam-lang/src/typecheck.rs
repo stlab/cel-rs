@@ -9,7 +9,7 @@
 //! [`cel_parser::Ty::Any`] and are never flagged — matching adam-lang/CEL's extensible type
 //! system. Not a complete type system; see the design doc's "Type checking (v1)" section.
 
-use cel_parser::{ClosureParamTypeExpr, Expr, ExprSpan, Literal, ParseError, Ty, ty::check_expr};
+use cel_parser::{Expr, ExprSpan, Literal, ParseError, Ty, ty::check_expr};
 
 use crate::TypeRegistry;
 use crate::ast::{BindingDecl, CellDecl, OutDecl, Sheet, SheetItem};
@@ -36,21 +36,12 @@ use crate::type_registry::TypeShape;
 pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
     let mut diagnostics = Vec::new();
     let (cell_types, shapes) = declared_cell_types(sheet, registry);
-    let cell_names = declared_cell_names(sheet);
     let resolve = |name: &str| -> Ty { cell_types.get(name).copied().unwrap_or(Ty::Any) };
     for item in &sheet.items {
         match item {
             SheetItem::Cell(cell) => {
                 check_cell_initializer(cell, registry, &mut diagnostics);
-                check_filter(
-                    cell,
-                    registry,
-                    &cell_names,
-                    &cell_types,
-                    &shapes,
-                    &resolve,
-                    &mut diagnostics,
-                );
+                check_filter(cell, &cell_types, &shapes, &resolve, &mut diagnostics);
             }
             SheetItem::Relationship(rel) => {
                 for binding in &rel.bindings {
@@ -345,28 +336,12 @@ fn check_cell_initializer(
     }
 }
 
-/// Every declared `cell`'s name (not `out`s) — used to validate a `filter` clause's argument-cell
-/// list, which (mirroring `adam_lang::parser::AdamParser::parse_cell_filter`'s real runtime
-/// restriction) may only reference other `cell`s, not `out`s.
-///
-/// - Complexity: O(n) in the number of sheet items.
-fn declared_cell_names(sheet: &Sheet) -> std::collections::HashSet<String> {
-    sheet
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            SheetItem::Cell(cell) => Some(cell.name.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The expected `TypeShape` for one filter-closure parameter position (the filtered cell itself,
-/// or one of its declared argument cells) — `Some` only when a concrete shape is known: a
-/// tuple-typed annotation (from `shapes`), or a scalar type either annotated or already resolved
-/// to a concrete `Ty` (from `cell_types`, converted via `Ty::type_id`). `None` when nothing is
-/// known (an unannotated cell, or a name neither map has an entry for), mirroring `Ty::Any`'s
-/// existing "never flagged" leniency elsewhere in this file.
+/// The expected `TypeShape` for a filtered cell's own declared/inferred shape (`_`'s type inside
+/// its filter body) — `Some` only when a concrete shape is known: a tuple-typed annotation
+/// (from `shapes`), or a scalar type either annotated or already resolved to a concrete `Ty`
+/// (from `cell_types`, converted via `Ty::type_id`). `None` when nothing is known (an unannotated
+/// cell, or a name neither map has an entry for), mirroring `Ty::Any`'s existing "never flagged"
+/// leniency elsewhere in this file.
 ///
 /// - Complexity: O(1) amortized lookup plus an O(k) clone of a possibly-nested `TypeShape`
 ///   (k = the shape's own element count) when found in `shapes`.
@@ -384,55 +359,66 @@ fn expected_shape(
         .map(TypeShape::Named)
 }
 
-/// Converts an unresolved closure-parameter type expression into `adam_lang`'s own `TypeExpr`, so
-/// it can be resolved via the same `TypeRegistry::resolve` every other type annotation in this
-/// crate already uses — `cel_parser::ClosureParamTypeExpr` mirrors `TypeExpr`'s shape exactly (a
-/// bare name, or a recursively-nested tuple) but lives in `cel-parser` since closures are that
-/// crate's own construct.
+/// Returns whether `expr` contains a reference to the identifier `name` anywhere in its tree.
+/// Used by `check_filter` to check whether a filter's body references `_` — deliberately a plain
+/// structural walk, not built on `check_expr`'s identifier resolution, so checking for `_`'s
+/// presence never runs type-checking a second time over any part of `expr`.
 ///
-/// - Complexity: O(n) in the number of (nested) tuple elements in the type expression.
-fn closure_param_type_expr_to_type_expr(expr: &ClosureParamTypeExpr) -> crate::ast::TypeExpr {
+/// - Complexity: O(n) in the number of sub-expressions in `expr`.
+fn expr_references_ident(expr: &Expr, name: &str) -> bool {
     match expr {
-        ClosureParamTypeExpr::Named(name, span) => crate::ast::TypeExpr::Named(name.clone(), *span),
-        ClosureParamTypeExpr::Tuple(elements, span) => crate::ast::TypeExpr::Tuple(
-            elements
-                .iter()
-                .map(closure_param_type_expr_to_type_expr)
-                .collect(),
-            *span,
-        ),
+        Expr::Literal { .. } => false,
+        Expr::Ident { name: ident, .. } => ident == name,
+        Expr::Op { operands, .. } => operands.iter().any(|e| expr_references_ident(e, name)),
+        Expr::Apply { callee, args, .. } => {
+            expr_references_ident(callee, name)
+                || args.iter().any(|e| expr_references_ident(e, name))
+        }
+        Expr::Tuple { elements, .. } => elements.iter().any(|e| expr_references_ident(e, name)),
+        Expr::TupleIndex { base, .. } => expr_references_ident(base, name),
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_references_ident(cond, name)
+                || expr_references_ident(then_branch, name)
+                || else_branch
+                    .as_deref()
+                    .is_some_and(|e| expr_references_ident(e, name))
+        }
+        Expr::Logical { lhs, rhs, .. } => {
+            expr_references_ident(lhs, name) || expr_references_ident(rhs, name)
+        }
+        Expr::Cast { expr, .. } => expr_references_ident(expr, name),
+        Expr::Closure { body, .. } => expr_references_ident(body, name),
     }
 }
 
-/// Approximates a closure parameter's declared type as a `Ty`, for use as the identifier resolver
-/// when checking a filter closure's own body against its own parameter names: a tuple-shaped
-/// parameter has no `Ty` variant and maps to `Ty::Any`; a scalar parameter maps via
-/// `Ty::from_name`.
-fn closure_param_ty(type_expr: &ClosureParamTypeExpr) -> Ty {
-    match type_expr {
-        ClosureParamTypeExpr::Named(name, _) => Ty::from_name(name).unwrap_or(Ty::Any),
-        ClosureParamTypeExpr::Tuple(..) => Ty::Any,
-    }
+/// Returns `true` if `expr` is itself a top-level `..=` range expression (`Expr::Op { name:
+/// "range_inclusive", .. }`) — the one structural shape `check_filter` exempts from its "must
+/// reference `_`" requirement, mirroring `adam_lang::parser::AdamParser::parse_cell_filter`'s
+/// matching exemption for the same reason: a `lo..=hi` filter body's bounds never depend on the
+/// candidate value, only on its own two endpoints. Deliberately checks only the whole body, not
+/// any nested sub-expression — matches the runtime layer's own recognition, which is keyed on the
+/// *entire compiled expression's* inferred type, not a nested occurrence.
+fn is_range_inclusive_body(expr: &Expr) -> bool {
+    matches!(expr, Expr::Op { name, .. } if name == "range_inclusive")
 }
 
-/// Checks one `cell`'s `filter` clause, if present, mirroring
-/// `adam_lang::parser::AdamParser::parse_cell_filter`'s runtime validation: each argument-cell
-/// name must name an already-declared `cell` (not an `out`, and — unlike the runtime path — with
-/// no declaration-order constraint, matching every other check in this file); the closure's own
-/// parameter types must line up, in order, with `[this cell's own declared/inferred shape, the
-/// first argument cell's shape, the second's, ...]`; and the closure body's checked type must
-/// unify with this cell's own declared/inferred shape. The parameter-type check and the
-/// return-type check are independent and can both fire for the same root-cause mismatch (e.g. a
-/// closure parameter typed `f64` against an `i32` cell also makes the body's inferred type
-/// disagree) — this is intentional, matching this file's existing precedent of not de-duplicating
-/// diagnostics from genuinely distinct checks (see the
-/// `filter_first_param_type_mismatch_is_two_diagnostics` test). A malformed filter closure (not an
-/// `Expr::Closure`) is silently skipped with no diagnostic at all (tracked as
-/// [#141](https://github.com/stlab/cel-rs/issues/141), out of scope here).
+/// Checks one `cell`'s `filter` clause, if present: a tuple-typed filtered cell is rejected
+/// outright (mirroring the runtime parser's own rejection — not yet supported by either layer);
+/// otherwise, the body's inferred type must unify with this cell's own declared/inferred shape
+/// (`_`'s type, via `body_resolve`'s special case below), and the body must reference `_` — the
+/// value being filtered — at least once. Every other identifier is resolved exactly as any other
+/// deduced expression in this file (a `relationship` binding, an `out` initializer): via
+/// `resolve`, which leaves an unrecognized name as `Ty::Any` rather than raising a diagnostic —
+/// the runtime `Sheet`-building parser (`adam_lang::parser::AdamParser::parse_cell_filter`) is
+/// what raises "undeclared cell" for a name that isn't actually a declared cell, mirroring how it
+/// (not this file) is the one that raises that error for bindings' deduced expressions too.
 fn check_filter(
     cell: &CellDecl,
-    registry: &TypeRegistry,
-    cell_names: &std::collections::HashSet<String>,
     cell_types: &std::collections::HashMap<String, Ty>,
     shapes: &std::collections::HashMap<String, TypeShape>,
     resolve: &impl Fn(&str) -> Ty,
@@ -441,33 +427,16 @@ fn check_filter(
     let Some(filter) = &cell.filter else {
         return;
     };
-    for (arg_name, arg_span) in &filter.arg_cells {
-        if !cell_names.contains(arg_name) {
-            diagnostics.push(ParseError::new_range(
-                format!("undeclared cell `{arg_name}`"),
-                arg_span.start,
-                arg_span.end,
-            ));
-        }
-    }
 
-    let Expr::Closure { params, body, .. } = &filter.closure else {
-        return;
-    };
-
-    let mut expected: Vec<Option<TypeShape>> = vec![expected_shape(&cell.name, cell_types, shapes)];
-    for (arg_name, _) in &filter.arg_cells {
-        expected.push(expected_shape(arg_name, cell_types, shapes));
-    }
-
-    if params.len() != expected.len() {
+    let shape = expected_shape(&cell.name, cell_types, shapes);
+    if matches!(shape, Some(TypeShape::Tuple(_))) {
+        // Mirrors `adam_lang::parser::AdamParser::parse_cell_filter`'s runtime rejection of a
+        // tuple-typed filtered cell — not yet supported by either layer, so both must agree
+        // rather than the CST checker accepting a construct the runtime cannot build.
         diagnostics.push(ParseError::new_range(
             format!(
-                "cell `{}`: filter closure takes {} parameter(s), but {} are expected (the \
-                 cell's own value, plus its declared argument cells)",
-                cell.name,
-                params.len(),
-                expected.len()
+                "cell `{}`: filter on a tuple-typed cell is not yet supported",
+                cell.name
             ),
             filter.span.start,
             filter.span.end,
@@ -475,60 +444,39 @@ fn check_filter(
         return;
     }
 
-    for (param, expected_shape) in params.iter().zip(&expected) {
-        let param_shape = registry
-            .resolve(&closure_param_type_expr_to_type_expr(&param.type_expr))
-            .ok();
-        if let (Some(expected_shape), Some(param_shape)) = (expected_shape, &param_shape)
-            && expected_shape != param_shape
-        {
-            diagnostics.push(ParseError::new_range(
-                format!(
-                    "cell `{}`: filter closure parameter `{}` is `{}`, but `{}` was expected",
-                    cell.name,
-                    param.name,
-                    registry.display_name(param_shape),
-                    registry.display_name(expected_shape),
-                ),
-                param.name_span.start,
-                param.name_span.end,
-            ));
-        }
-    }
+    let own_ty = resolve(&cell.name);
+    let body_resolve = |name: &str| -> Ty { if name == "_" { own_ty } else { resolve(name) } };
 
-    let bound: std::collections::HashMap<&str, Ty> = params
-        .iter()
-        .map(|p| (p.name.as_str(), closure_param_ty(&p.type_expr)))
-        .collect();
-    let body_resolve =
-        |name: &str| -> Ty { bound.get(name).copied().unwrap_or_else(|| resolve(name)) };
-
-    match &expected[0] {
-        Some(shape @ TypeShape::Tuple(_)) => {
-            expr_matches_shape(body, shape, registry, &body_resolve, diagnostics);
-        }
+    match shape {
+        Some(TypeShape::Tuple(_)) => unreachable!("handled above"),
         Some(TypeShape::Named(type_id)) => {
-            let (body_ty, body_diags) = check_expr(body, &body_resolve);
+            let (body_ty, body_diags) = check_expr(&filter.body, &body_resolve);
             diagnostics.extend(body_diags);
-            let declared = Ty::from_type_id(*type_id);
+            let declared = Ty::from_type_id(type_id);
             if !declared.unifies_with(&body_ty) {
                 diagnostics.push(ParseError::new_range(
                     format!(
-                        "cell `{}`: filter closure body produces `{}`, but `{}` is declared `{}`",
-                        cell.name,
-                        body_ty.name(),
+                        "cell `{}`: filter must produce `{}`",
                         cell.name,
                         declared.name()
                     ),
-                    body.span().start,
-                    body.span().end,
+                    filter.body.span().start,
+                    filter.body.span().end,
                 ));
             }
         }
         None => {
-            let (_, body_diags) = check_expr(body, &body_resolve);
+            let (_, body_diags) = check_expr(&filter.body, &body_resolve);
             diagnostics.extend(body_diags);
         }
+    }
+
+    if !is_range_inclusive_body(&filter.body) && !expr_references_ident(&filter.body, "_") {
+        diagnostics.push(ParseError::new_range(
+            "filter must reference `_` (the value being filtered)".to_string(),
+            filter.span.start,
+            filter.span.end,
+        ));
     }
 }
 
@@ -956,68 +904,51 @@ mod tests {
 
     #[test]
     fn filter_with_matching_types_has_no_diagnostic() {
-        let sheet = parse("sheet s { cell a: i32 = 1 filter |x: i32| x; }");
+        let sheet = parse("sheet s { cell a: i32 = 1 filter _; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
     }
 
     #[test]
-    fn filter_with_matching_named_arg_cell_has_no_diagnostic() {
-        let sheet =
-            parse("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter(hi) |x: i32, h: i32| x; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
-        assert!(diags.is_empty());
-    }
-
-    #[test]
-    fn filter_undeclared_arg_cell_is_a_diagnostic() {
-        let sheet = parse("sheet s { cell a: i32 = 1 filter(nope) |x: i32, h: i32| x; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
-        assert_eq!(diags.len(), 1);
-    }
-
-    #[test]
-    fn filter_first_param_type_mismatch_is_two_diagnostics() {
-        // Two independent checks both catch the same root mismatch — the parameter-type check
-        // (x: f64 vs. a's declared i32) and the return-type check (body `x` is f64, but `a` is
-        // i32) — mirroring this file's existing precedent of not de-duplicating diagnostics from
-        // genuinely distinct checks (see
-        // `binding_single_tuple_typed_output_if_else_body_element_mismatch_in_each_branch_is_two_diagnostics`).
-        let sheet = parse("sheet s { cell a: i32 = 1 filter |x: f64| x; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
-        assert_eq!(diags.len(), 2);
-    }
-
-    #[test]
-    fn filter_named_arg_type_mismatch_is_a_diagnostic() {
+    fn filter_referencing_a_cell_has_no_diagnostic() {
         let sheet = parse(
-            "sheet s { cell hi: f64 = 100.0; cell a: i32 = 1 filter(hi) |x: i32, h: i32| x; }",
+            "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter if _ > hi { hi } else { _ }; }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
-        assert_eq!(diags.len(), 1);
-    }
-
-    #[test]
-    fn filter_wrong_arity_is_a_diagnostic() {
-        let sheet = parse("sheet s { cell a: i32 = 1 filter |x: i32, extra: i32| x; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
-        assert_eq!(diags.len(), 1);
-    }
-
-    #[test]
-    fn filter_tuple_typed_cell_with_matching_shape_has_no_diagnostic() {
-        let sheet =
-            parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter |x: (i32, f64)| (x.0, x.1); }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
     }
 
     #[test]
-    fn filter_tuple_typed_cell_with_arity_mismatch_is_a_diagnostic() {
-        let sheet =
-            parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter |x: (i32, f64)| (x.0,); }");
+    fn filter_body_type_mismatch_is_a_diagnostic() {
+        // Body is `bool`-typed (a comparison), but `a` is declared `i32`.
+        let sheet = parse("sheet s { cell a: i32 = 1 filter _ > 0; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn filter_without_underscore_is_a_diagnostic() {
+        let sheet = parse("sheet s { cell a: i32 = 1 filter 1; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn filter_on_a_tuple_typed_cell_is_a_diagnostic() {
+        // Mirrors the runtime parser's own rejection (`adam_lang::parser::AdamParser::
+        // parse_cell_filter`) — a tuple-typed filtered cell isn't yet supported by either layer.
+        let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter (_.0, _.1); }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn filter_references_underscore_nested_inside_a_call_has_no_missing_underscore_diagnostic() {
+        // `_` appears only inside an `if`'s then-branch, not as the whole body or a bare
+        // operand — exercises `expr_references_ident`'s `Expr::If` arm specifically.
+        let sheet = parse("sheet s { cell a: i32 = 1 filter if true { _ } else { 1 }; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
     }
 
     #[test]
@@ -1142,5 +1073,12 @@ mod tests {
         let sheet = parse("sheet s { cell a: i32; cell out: i32; relationship { (out,) := a; } }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn filter_range_inclusive_body_does_not_require_underscore() {
+        let sheet = parse("sheet s { cell a: i32 filter 0..=100; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
     }
 }

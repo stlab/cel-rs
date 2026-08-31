@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use slotmap::SlotMap;
 
-use crate::cell::CellId;
+use crate::cell::{CellData, CellId};
 use crate::relationship::{RelationshipData, RelationshipId};
 
 use super::matching::Assignment;
@@ -62,6 +62,46 @@ pub(crate) fn build_digraph(
     adj
 }
 
+/// Adds one edge `Cell(arg) → Cell(filtered)` for every dynamic argument `arg` of every
+/// filtered cell `filtered` that is a **source** under `assignment` — not claimed as an
+/// output by any of `assignment`'s chosen methods. A filtered cell that *is* claimed
+/// (derived this round) contributes no edges: `Sheet::propagate`'s existing derived-value
+/// diagnostic already covers it, as a read-only check with no ordering requirement.
+///
+/// Mutates `adj` in place. Called by [`super::plan`] once, after [`build_digraph`] has
+/// already produced the base relationship-only graph, so the same topological sort places
+/// each reclamp after everything its filter depends on and before everything that depends
+/// on the filtered cell.
+///
+/// - Postcondition: every filtered, unclaimed cell is a key in `adj` after this call,
+///   even one with zero filter args or no relationship membership.
+///
+/// - Complexity: O(C · a) where C = cells with a filter, a = arguments per filter.
+pub(crate) fn add_filter_edges(
+    adj: &mut HashMap<Node, Vec<Node>>,
+    cells: &SlotMap<CellId, CellData>,
+    assignment: &Assignment,
+) {
+    for (cell_id, cell) in cells.iter() {
+        let Some(filter) = cell.filter.as_ref() else {
+            continue;
+        };
+        if assignment.claimed.contains_key(&cell_id) {
+            continue;
+        }
+        // Ensures the filtered cell is a node even when it has no args and belongs to
+        // no relationship (a zero-argument filter contributes no edges below), so it
+        // always lands in its own trivial tarjan_scc component and always gets a
+        // PlanStep::FilterReclamp.
+        adj.entry(Node::Cell(cell_id)).or_default();
+        for &arg in &filter.args {
+            adj.entry(Node::Cell(arg))
+                .or_default()
+                .push(Node::Cell(cell_id));
+        }
+    }
+}
+
 /// Returns `true` if `assignment`'s induced digraph has no non-trivial strongly
 /// connected component (every relationship can be executed in some valid order).
 ///
@@ -80,8 +120,8 @@ pub(crate) fn is_acyclic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Method, Sheet};
-    use std::collections::HashSet;
+    use crate::{Filter, Method, Sheet};
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn acyclic_assignment_reports_acyclic() {
@@ -138,5 +178,68 @@ mod tests {
         assert!(adj.contains_key(&Node::Relationship(rel)));
         assert_eq!(adj[&Node::Relationship(rel)], vec![Node::Cell(a)]);
         assert!(is_acyclic(&assignment, &sheet.relationships));
+    }
+
+    #[test]
+    fn add_filter_edges_adds_edge_from_argument_to_filtered_source_cell() {
+        let mut sheet = Sheet::new();
+        let bound = sheet.add_cell(10_i32);
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |x: &i32, b: &i32| Ok((*x).min(*b))),
+            )
+            .unwrap();
+
+        let assignment =
+            Assignment::solve(&sheet.relationships, &HashSet::new(), &HashSet::new()).unwrap();
+        let mut adj: HashMap<Node, Vec<Node>> = HashMap::new();
+        add_filter_edges(&mut adj, &sheet.cells, &assignment);
+
+        assert_eq!(adj.get(&Node::Cell(bound)), Some(&vec![Node::Cell(a)]));
+    }
+
+    #[test]
+    fn add_filter_edges_skips_a_filtered_cell_claimed_by_the_assignment() {
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(5_i32);
+        let bound = sheet.add_cell(10_i32);
+        let y = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v))])
+            .unwrap();
+        sheet
+            .add_filter(
+                y,
+                Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
+            )
+            .unwrap();
+
+        let active: HashSet<_> = [rel].into_iter().collect();
+        let assignment = Assignment::solve(&sheet.relationships, &active, &HashSet::new()).unwrap();
+        let mut adj: HashMap<Node, Vec<Node>> = HashMap::new();
+        add_filter_edges(&mut adj, &sheet.cells, &assignment);
+
+        assert!(adj.is_empty());
+    }
+
+    #[test]
+    fn add_filter_edges_adds_a_node_for_a_zero_argument_filter_with_no_relationship_membership() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(500_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .unwrap();
+
+        let assignment =
+            Assignment::solve(&sheet.relationships, &HashSet::new(), &HashSet::new()).unwrap();
+        let mut adj: HashMap<Node, Vec<Node>> = HashMap::new();
+        add_filter_edges(&mut adj, &sheet.cells, &assignment);
+
+        // `a` has no filter args and belongs to no relationship, so nothing would
+        // otherwise ever insert it into the digraph — without this, plan() would
+        // never emit a FilterReclamp step for it.
+        assert!(adj.contains_key(&Node::Cell(a)));
     }
 }

@@ -1,0 +1,1 @@
+sheet s { cell point: (f64, f64) = (0.0, 0.0); }

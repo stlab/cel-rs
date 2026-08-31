@@ -55,6 +55,25 @@ pub type AddConditionalFn = fn(
     Vec<RelationshipId>,
 ) -> Result<ConditionalId, adam_rs::Error>;
 
+/// Per-numeric-type support for a `RangeInclusive<T>`-typed filter expression, keyed by the
+/// range's own `TypeId` — populated in [`TypeRegistry::new`] for exactly the primitives
+/// `cel-parser`'s `..=` operator supports (`cel_parser::op_table`'s `RANGE_INCLUSIVE_SIGNATURES`).
+#[allow(clippy::type_complexity)] // `clamp_fn`/`bounds_fn` are inherently multi-argument fn pointers.
+pub(crate) struct RangeEntry {
+    /// `T`'s own `TypeId` — compared against a filtered cell's declared type by the caller.
+    pub(crate) element_type_id: TypeId,
+    /// Evaluates a compiled segment producing a `RangeInclusive<T>` against `value` (the
+    /// candidate being conformed — read only if the segment's expression actually references
+    /// `_`) and `args` (the filter's deduced cell dependencies, in declaration order), clamping
+    /// `value` into the resulting bounds.
+    pub(crate) clamp_fn: fn(&mut DynSegment, &dyn Any, &[&dyn Any]) -> anyhow::Result<Box<dyn Any>>,
+    /// Evaluates the same kind of segment against `placeholder` (substituted for `_`, which a
+    /// recognized range expression's bounds never actually depend on) and `args`, returning the
+    /// resulting `(lo, hi)` bounds.
+    pub(crate) bounds_fn:
+        fn(&mut DynSegment, &dyn Any, &[&dyn Any]) -> anyhow::Result<(Box<dyn Any>, Box<dyn Any>)>,
+}
+
 /// Metadata for a single type registered in a [`TypeRegistry`].
 pub struct TypeEntry {
     /// Runtime type identity.
@@ -109,6 +128,7 @@ pub struct TypeEntry {
 pub struct TypeRegistry {
     by_name: HashMap<String, TypeEntry>,
     by_type_id: HashMap<TypeId, String>,
+    range_inclusive: HashMap<TypeId, RangeEntry>,
 }
 
 fn push_arg_impl<T: 'static + Clone>(segment: &mut DynSegment, index: usize) {
@@ -160,6 +180,47 @@ fn call_dyn_impl<T: 'static + Clone>(
     Ok(Box::new(seg.call_dyn::<T>(inputs)?))
 }
 
+/// Evaluates `seg` (producing a `RangeInclusive<T>`) against `value` prepended to `args`, then
+/// clamps `value` into the resulting bounds. For [`RangeEntry::clamp_fn`].
+fn range_clamp_impl<T: Clone + PartialOrd + 'static>(
+    seg: &mut DynSegment,
+    value: &dyn Any,
+    args: &[&dyn Any],
+) -> anyhow::Result<Box<dyn Any>> {
+    let mut call_args: Vec<&dyn Any> = Vec::with_capacity(1 + args.len());
+    call_args.push(value);
+    call_args.extend_from_slice(args);
+    let range = seg.call_dyn::<std::ops::RangeInclusive<T>>(&call_args)?;
+    let v = value
+        .downcast_ref::<T>()
+        .expect("type checked at add_filter");
+    let clamped = if v < range.start() {
+        range.start().clone()
+    } else if v > range.end() {
+        range.end().clone()
+    } else {
+        v.clone()
+    };
+    Ok(Box::new(clamped) as Box<dyn Any>)
+}
+
+/// Evaluates `seg` (producing a `RangeInclusive<T>`) against `placeholder` prepended to `args`,
+/// returning the resulting `(lo, hi)` bounds. For [`RangeEntry::bounds_fn`].
+fn range_bounds_impl<T: Clone + 'static>(
+    seg: &mut DynSegment,
+    placeholder: &dyn Any,
+    args: &[&dyn Any],
+) -> anyhow::Result<(Box<dyn Any>, Box<dyn Any>)> {
+    let mut call_args: Vec<&dyn Any> = Vec::with_capacity(1 + args.len());
+    call_args.push(placeholder);
+    call_args.extend_from_slice(args);
+    let range = seg.call_dyn::<std::ops::RangeInclusive<T>>(&call_args)?;
+    Ok((
+        Box::new(range.start().clone()) as Box<dyn Any>,
+        Box::new(range.end().clone()) as Box<dyn Any>,
+    ))
+}
+
 /// Reads and clones a `T` from `ptr`, boxing it as `Box<dyn Any>`.
 ///
 /// # Safety
@@ -178,6 +239,7 @@ impl TypeRegistry {
         let mut r = TypeRegistry {
             by_name: HashMap::new(),
             by_type_id: HashMap::new(),
+            range_inclusive: HashMap::new(),
         };
         r.register::<i8>("i8");
         r.register::<i16>("i16");
@@ -195,6 +257,20 @@ impl TypeRegistry {
         r.register::<f64>("f64");
         r.register::<bool>("bool");
         r.register::<String>("String");
+        r.register_range_inclusive::<i8>();
+        r.register_range_inclusive::<i16>();
+        r.register_range_inclusive::<i32>();
+        r.register_range_inclusive::<i64>();
+        r.register_range_inclusive::<i128>();
+        r.register_range_inclusive::<isize>();
+        r.register_range_inclusive::<u8>();
+        r.register_range_inclusive::<u16>();
+        r.register_range_inclusive::<u32>();
+        r.register_range_inclusive::<u64>();
+        r.register_range_inclusive::<u128>();
+        r.register_range_inclusive::<usize>();
+        r.register_range_inclusive::<f32>();
+        r.register_range_inclusive::<f64>();
         r
     }
 
@@ -327,6 +403,32 @@ impl TypeRegistry {
     pub fn entry_by_type_id(&self, type_id: TypeId) -> Option<&TypeEntry> {
         let name = self.by_type_id.get(&type_id)?;
         self.by_name.get(name)
+    }
+
+    /// Registers `RangeInclusive<T>` support for `T`, keyed by `RangeInclusive<T>`'s own
+    /// `TypeId`. Private — only called from [`TypeRegistry::new`] for the fixed set of numeric
+    /// primitives `cel-parser`'s `..=` operator supports; unlike [`TypeRegistry::register`], this
+    /// is not part of the public API a host binary extends for its own custom types, since
+    /// `RangeInclusive<T>` recognition is not extensible per-type in this codebase's current
+    /// design.
+    fn register_range_inclusive<T: Clone + PartialOrd + 'static>(&mut self) {
+        self.range_inclusive.insert(
+            TypeId::of::<std::ops::RangeInclusive<T>>(),
+            RangeEntry {
+                element_type_id: TypeId::of::<T>(),
+                clamp_fn: range_clamp_impl::<T>,
+                bounds_fn: range_bounds_impl::<T>,
+            },
+        );
+    }
+
+    /// Looks up `RangeInclusive<T>` support by the range's own `TypeId`.
+    ///
+    /// Returns `None` if `range_type_id` is not `RangeInclusive<T>` for any `T` this registry
+    /// recognizes range support for (see [`TypeRegistry::new`]).
+    #[allow(dead_code)] // Used by Task 4 (parser.rs)
+    pub(crate) fn range_entry(&self, range_type_id: TypeId) -> Option<&RangeEntry> {
+        self.range_inclusive.get(&range_type_id)
     }
 
     /// Resolves a parsed `type_expr` against this registry, recursively.
@@ -1008,5 +1110,55 @@ mod tests {
         let c = NoDefault(2);
         assert!((entry.eq_dyn_fn)(&a, &b));
         assert!(!(entry.eq_dyn_fn)(&a, &c));
+    }
+
+    #[test]
+    fn range_entry_recognizes_a_registered_numeric_range_inclusive_type() {
+        let reg = TypeRegistry::new();
+        let entry = reg
+            .range_entry(TypeId::of::<std::ops::RangeInclusive<i32>>())
+            .expect("i32 range recognized");
+        assert_eq!(entry.element_type_id, TypeId::of::<i32>());
+    }
+
+    #[test]
+    fn range_entry_returns_none_for_a_non_range_type() {
+        let reg = TypeRegistry::new();
+        assert!(reg.range_entry(TypeId::of::<i32>()).is_none());
+    }
+
+    #[test]
+    fn range_entry_clamp_fn_clamps_a_value_into_the_evaluated_bounds() {
+        let reg = TypeRegistry::new();
+        let entry = reg
+            .range_entry(TypeId::of::<std::ops::RangeInclusive<i32>>())
+            .unwrap();
+        let mut segment = DynSegment::new::<()>();
+        segment.push_arg::<i32>(1);
+        segment.push_arg::<i32>(2);
+        segment.op2(|a: i32, b: i32| a..=b).unwrap();
+        let value = 500i32;
+        let lo = 0i32;
+        let hi = 100i32;
+        let result = (entry.clamp_fn)(&mut segment, &value, &[&lo, &hi]).unwrap();
+        assert_eq!(*result.downcast_ref::<i32>().unwrap(), 100);
+    }
+
+    #[test]
+    fn range_entry_bounds_fn_returns_the_evaluated_bounds() {
+        let reg = TypeRegistry::new();
+        let entry = reg
+            .range_entry(TypeId::of::<std::ops::RangeInclusive<i32>>())
+            .unwrap();
+        let mut segment = DynSegment::new::<()>();
+        segment.push_arg::<i32>(1);
+        segment.push_arg::<i32>(2);
+        segment.op2(|a: i32, b: i32| a..=b).unwrap();
+        let placeholder = 0i32;
+        let lo = 0i32;
+        let hi = 100i32;
+        let (lo_out, hi_out) = (entry.bounds_fn)(&mut segment, &placeholder, &[&lo, &hi]).unwrap();
+        assert_eq!(*lo_out.downcast_ref::<i32>().unwrap(), 0);
+        assert_eq!(*hi_out.downcast_ref::<i32>().unwrap(), 100);
     }
 }
