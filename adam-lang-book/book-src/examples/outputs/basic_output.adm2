@@ -1,0 +1,6 @@
+sheet area_demo {
+    cell width: i32 = 10;
+    cell height: i32 = 20;
+
+    out area := width * height;
+}

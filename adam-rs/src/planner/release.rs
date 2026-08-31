@@ -1,6 +1,16 @@
 //! Chooses which cells are sources by greedily releasing cells in descending strength
 //! order, checking at each step whether a matching + acyclic assignment still exists
 //! with that cell (and every previously released cell) forbidden from being claimed.
+//!
+//! This module has no visibility into a filter's dynamic-argument dependencies —
+//! `digraph::add_filter_edges` adds those edges to the digraph only *after*
+//! `resolve` has already finished searching (see
+//! `docs/superpowers/specs/2026-08-25-adam-rs-filter-revalidation-design.md` §3).
+//! `resolve`'s acyclicity guarantee therefore holds only for the relationship-only
+//! subgraph; `plan()` re-checks acyclicity once more after filter edges are added,
+//! returning `Error::FilterCycle` (distinct from this module's own `Error::Cycle`)
+//! if that combined graph turns out cyclic. Generalizing `resolve` itself to search
+//! around filter edges is tracked as issue #153.
 
 use std::cmp::Reverse;
 use std::collections::HashSet;

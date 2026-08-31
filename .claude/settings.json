@@ -11,5 +11,8 @@
       "Bash(git log*)",
       "Bash(cargo *)"
     ]
+  },
+  "worktree": {
+    "bgIsolation": "worktree"
   }
 }

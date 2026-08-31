@@ -1,0 +1,1 @@
+sheet s { cell width: i32 = 10; out area := width * 2; }

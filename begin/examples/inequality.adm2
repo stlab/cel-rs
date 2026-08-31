@@ -1,15 +1,15 @@
 sheet inequality {
-    cell range = (0.0, 100.0);
-    cell a = 0.0 filter (range) |x: f64, r: (f64, f64)| clamp(x, 0.0, 100.0);
-    cell b = 0.0 filter (range) |x: f64, r: (f64, f64)| clamp(x, 0.0, 100.0);
-    cell c = 2.0 filter (range) |x: f64, r: (f64, f64)| clamp(x, 0.0, 100.0);
+    cell max_v = 100 filter 0..=200;
+    cell a = 0 filter 0..=max_v;
+    cell b = 42 filter 0..=max_v;
+    cell c = 100 filter 0..=max_v;
 
     relationship {
-        a := min(a, b);
-        b := max(a, b);
+        a := min(a, min(max_v, b));
+        b := max(a, min(max_v, b));
     }
     relationship {
-        b := min(b, c);
-        c := max(b, c);
+        b := min(b, min(max_v, c));
+        c := max(b, min(max_v, c));
     }
 }

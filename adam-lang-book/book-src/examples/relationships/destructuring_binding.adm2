@@ -1,0 +1,8 @@
+sheet swap_demo {
+    cell a: i32 = 1;
+    cell b: i32 = 2;
+
+    relationship {
+        (a, b) := (b, a);
+    }
+}

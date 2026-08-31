@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+mod live_book_assets;
+
 /// A single vendored asset entry from `begin/assets/versions.toml`.
 #[derive(Deserialize)]
 struct Asset {
@@ -101,8 +103,14 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("prepare-live-book-assets") => {
+            if let Err(e) = live_book_assets::prepare_live_book_assets() {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         _ => {
-            eprintln!("Usage: cargo xtask <fetch-assets|build-js>");
+            eprintln!("Usage: cargo xtask <fetch-assets|build-js|prepare-live-book-assets>");
             std::process::exit(1);
         }
     }

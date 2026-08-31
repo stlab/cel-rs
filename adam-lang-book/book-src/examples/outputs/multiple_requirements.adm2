@@ -1,0 +1,8 @@
+sheet bounds_demo {
+    cell x: i32 = 50;
+
+    out clamped: i32 := x require {
+        not_negative: clamped >= 0;
+        not_too_big: clamped <= 100;
+    };
+}

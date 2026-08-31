@@ -1,0 +1,14 @@
+sheet resample_demo {
+    cell resample: bool = true;
+    cell constrain: bool = true;
+    cell locked: bool = false;
+
+    conditional resample && constrain {
+        true => {
+            relationship { locked := true; }
+        }
+        false => {
+            relationship { locked := false; }
+        }
+    }
+}

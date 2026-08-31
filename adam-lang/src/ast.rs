@@ -210,14 +210,12 @@ pub struct CellDecl {
     pub span: ExprSpan,
 }
 
-/// `cell_filter = "filter" [ "(" identifier { "," identifier } ")" ] closure_expression.`
+/// `cell_filter = "filter" expression.`
 #[derive(Debug, Clone)]
 pub struct CellFilter {
-    /// The filter's declared argument-cell names, in source order (empty if the `(...)` list
-    /// was omitted).
-    pub arg_cells: Vec<(String, ExprSpan)>,
-    /// The filter's closure literal.
-    pub closure: cel_parser::Expr,
+    /// The filter's body expression. `_` inside it denotes the candidate value being conformed;
+    /// every other identifier that names an already-declared cell is a deduced dependency.
+    pub body: cel_parser::Expr,
     /// The span of the whole `filter ...` clause.
     pub span: ExprSpan,
 }
@@ -404,12 +402,26 @@ pub struct DefaultBranch {
     pub span: ExprSpan,
 }
 
-/// `conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].`
+/// A conditional branch's match key: a single literal, or a parenthesized tuple of them
+/// (mirroring a multi-cell condition's tuple value, e.g. `(false, true) => { ... }`). The direct
+/// parser (`adam-lang/src/parser.rs`) already accepts this via a general `or_expression`; this
+/// type brings the AST-only side (used by `format_sheet`/`adam-fmt`) up to the same capability
+/// for conditional branch keys specifically.
+#[derive(Debug, Clone)]
+pub enum MatchLiteral {
+    /// A single literal match key, e.g. `0i32` or `true`.
+    Scalar(Literal),
+    /// A parenthesized tuple of match keys, e.g. `(true, false)`, in source order.
+    Tuple(Vec<MatchLiteral>),
+}
+
+/// `conditional_branch = match_literal "=>" "{" { relationship_decl } "}" [ "," ].`
 #[derive(Debug, Clone)]
 pub struct ConditionalBranch {
     /// The branch's unresolved match literal.
-    pub literal: Literal,
-    /// The literal token's span.
+    pub literal: MatchLiteral,
+    /// The span of the whole match literal: a single token for `MatchLiteral::Scalar`, or the
+    /// whole parenthesized group (from `(` through `)`) for `MatchLiteral::Tuple`.
     pub literal_span: ExprSpan,
     /// The branch's relationships, in declaration order.
     pub relationships: Vec<RelationshipDecl>,
@@ -442,6 +454,22 @@ mod tests {
             start: span,
             end: span,
         }
+    }
+
+    #[test]
+    fn match_literal_scalar_and_tuple_are_distinct() {
+        // `cel_parser::lex_lexer::Literal` is `syn::Lit`; `Literal::Bool` wraps a `syn::LitBool`,
+        // not a plain `bool`.
+        fn bool_literal(value: bool) -> Literal {
+            Literal::Bool(syn::LitBool::new(value, Span::call_site()))
+        }
+
+        let a = MatchLiteral::Scalar(bool_literal(true));
+        let b = MatchLiteral::Tuple(vec![
+            MatchLiteral::Scalar(bool_literal(true)),
+            MatchLiteral::Scalar(bool_literal(false)),
+        ]);
+        assert_ne!(format!("{a:?}"), format!("{b:?}"));
     }
 
     #[test]
@@ -692,9 +720,8 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: Some(CellFilter {
-                arg_cells: vec![("hi".to_string(), span)],
-                closure: cel_parser::Expr::Ident {
-                    name: "x".to_string(),
+                body: cel_parser::Expr::Ident {
+                    name: "_".to_string(),
                     span,
                 },
                 span,
@@ -705,6 +732,9 @@ mod tests {
             span,
         };
         let filter = cell.filter.as_ref().expect("filter present");
-        assert_eq!(filter.arg_cells[0].0, "hi");
+        assert!(matches!(
+            &filter.body,
+            cel_parser::Expr::Ident { name, .. } if name == "_"
+        ));
     }
 }

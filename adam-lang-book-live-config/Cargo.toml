@@ -1,0 +1,9 @@
+[package]
+name = "adam-lang-book-live-config"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Shared config between the mdbook-live-examples preprocessor and xtask's live-book asset preparation"
+
+[lints]
+workspace = true

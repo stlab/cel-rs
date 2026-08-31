@@ -8,24 +8,25 @@
 use crate::ast::{Expr, LogicalOp};
 
 /// Binding-strength level, loosest first, mirroring `lib.rs`'s grammar chain from
-/// `or_expression` through `primary_expression`.
+/// `range_expression` (via `expression = range_expression`) through `primary_expression`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct Level(u8);
 
 impl Level {
-    const OR: Level = Level(0);
-    const AND: Level = Level(1);
-    const COMPARISON: Level = Level(2);
-    const BIT_OR: Level = Level(3);
-    const BIT_XOR: Level = Level(4);
-    const BIT_AND: Level = Level(5);
-    const SHIFT: Level = Level(6);
-    const ADDITIVE: Level = Level(7);
-    const MULTIPLICATIVE: Level = Level(8);
-    const CAST: Level = Level(9);
-    const UNARY: Level = Level(10);
-    const POSTFIX: Level = Level(11);
-    const PRIMARY: Level = Level(12);
+    const RANGE: Level = Level(0);
+    const OR: Level = Level(1);
+    const AND: Level = Level(2);
+    const COMPARISON: Level = Level(3);
+    const BIT_OR: Level = Level(4);
+    const BIT_XOR: Level = Level(5);
+    const BIT_AND: Level = Level(6);
+    const SHIFT: Level = Level(7);
+    const ADDITIVE: Level = Level(8);
+    const MULTIPLICATIVE: Level = Level(9);
+    const CAST: Level = Level(10);
+    const UNARY: Level = Level(11);
+    const POSTFIX: Level = Level(12);
+    const PRIMARY: Level = Level(13);
 
     /// The next level up (strictly tighter-binding than `self`).
     fn tighter(self) -> Level {
@@ -35,7 +36,12 @@ impl Level {
 
 /// Returns the binding-strength level of a binary (two-operand) operator.
 ///
-/// - Precondition: `name` is one of the binary operator tokens `lib.rs`'s grammar recognizes.
+/// - Precondition: `name` is one of the binary operator tokens `lib.rs`'s grammar recognizes,
+///   excluding `"range"`/`"range_inclusive"` — those, and every other range-family operator
+///   (`"range_from"`/`"range_to"`/`"range_to_inclusive"`/`"range_full"`), are rendered by their
+///   own dedicated [`render`] match arms before any operator ever reaches this function, since
+///   their printed form (`x..y`, no surrounding spaces) doesn't fit this function's shared
+///   `"{lhs} {name} {rhs}"` shape the way every other binary operator here does.
 fn binary_op_level(name: &str) -> Level {
     match name {
         "|" => Level::BIT_OR,
@@ -78,6 +84,19 @@ fn render_closure_param_type(type_expr: &crate::ClosureParamTypeExpr) -> String 
 fn render(expr: &Expr) -> (String, Level) {
     match expr {
         Expr::Literal { span, .. } => (render_literal(*span), Level::PRIMARY),
+        // `AstContext::apply_op` records every arity-0 operator as a plain `Expr::Ident` (see
+        // its own test `apply_op_with_arity_zero_records_an_ident_node`) — `"range_full"` (`..`)
+        // is the only one this grammar has, so it's intercepted here rather than in the
+        // `Expr::Op` arms below, which a real parse never produces it as.
+        //
+        // Known gap (tracked as issue #155): this is indistinguishable from a genuine bare
+        // identifier reference literally named `range_full`, since `AstContext` deliberately
+        // does no scope resolution during parsing (unlike the runtime path, where
+        // `OpLookup::lookup` checks user scopes before builtins and so correctly lets a real
+        // variable named `range_full` shadow this operator). Narrow in practice — the other
+        // five range-family operators have no such collision, since a real function call is
+        // never represented as `Expr::Op`.
+        Expr::Ident { name, .. } if name == "range_full" => ("..".to_string(), Level::RANGE),
         Expr::Ident { name, .. } => (name.clone(), Level::PRIMARY),
         Expr::Logical { op, lhs, rhs, .. } => {
             let level = match op {
@@ -92,6 +111,34 @@ fn render(expr: &Expr) -> (String, Level) {
             let rhs_s = format_at(rhs, level.tighter());
             (format!("{lhs_s} {op_str} {rhs_s}"), level)
         }
+        Expr::Op { operands, .. } if operands.is_empty() => {
+            // Defensive only: a real parse never produces an arity-0 `Expr::Op` (see the
+            // `Expr::Ident` arm above for how `"range_full"` actually arrives), but a hand-built
+            // tree using this representation still round-trips correctly, matching this file's
+            // existing convention of also handling non-parser-producible tree shapes (e.g.
+            // `nested_comparison_needs_parens_on_both_sides`).
+            ("..".to_string(), Level::RANGE)
+        }
+        Expr::Op { name, operands, .. }
+            if operands.len() == 1
+                && matches!(
+                    name.as_str(),
+                    "range_from" | "range_to" | "range_to_inclusive"
+                ) =>
+        {
+            // Range's own endpoints are always `or_expression`s (never chained further range
+            // expressions — see `is_range_expression`'s doc comment), so an operand only needs
+            // rendering strictly tighter than Range itself, the same non-chaining treatment
+            // `Level::COMPARISON` gets below.
+            let operand_s = format_at(&operands[0], Level::RANGE.tighter());
+            let text = match name.as_str() {
+                "range_from" => format!("{operand_s}.."),
+                "range_to" => format!("..{operand_s}"),
+                "range_to_inclusive" => format!("..={operand_s}"),
+                _ => unreachable!("guarded by the outer match arm"),
+            };
+            (text, Level::RANGE)
+        }
         Expr::Op { name, operands, .. } if operands.len() == 1 => {
             let operand_s = format_at(&operands[0], Level::UNARY);
             // A bare "-"/"!" glued directly onto an operand that itself starts with "-"/"!"
@@ -102,6 +149,18 @@ fn render(expr: &Expr) -> (String, Level) {
                 ""
             };
             (format!("{name}{sep}{operand_s}"), Level::UNARY)
+        }
+        Expr::Op { name, operands, .. } if name == "range" || name == "range_inclusive" => {
+            // Same non-chaining reasoning as the arity-1 range arm above: both endpoints render
+            // strictly tighter than Range.
+            let lhs_s = format_at(&operands[0], Level::RANGE.tighter());
+            let rhs_s = format_at(&operands[1], Level::RANGE.tighter());
+            let op_str = if name == "range_inclusive" {
+                "..="
+            } else {
+                ".."
+            };
+            (format!("{lhs_s}{op_str}{rhs_s}"), Level::RANGE)
         }
         Expr::Op { name, operands, .. } => {
             let level = binary_op_level(name);
@@ -211,7 +270,7 @@ fn format_at(expr: &Expr, min_level: Level) -> String {
 /// assert_eq!(format_expr(&expr), "(1i32 + 2i32) * 3i32");
 /// ```
 pub fn format_expr(expr: &Expr) -> String {
-    format_at(expr, Level::OR)
+    format_at(expr, Level::RANGE)
 }
 
 #[cfg(test)]
@@ -428,6 +487,54 @@ mod tests {
         assert_eq!(
             format_expr(&parse("|x: (i32, f64)| x.0")),
             "|x: (i32, f64)| x.0"
+        );
+    }
+
+    #[test]
+    fn range_inclusive_reprints_without_spaces() {
+        assert_eq!(format_expr(&parse("1i32..=5i32")), "1i32..=5i32");
+    }
+
+    #[test]
+    fn range_reprints_without_spaces() {
+        assert_eq!(format_expr(&parse("1i32..5i32")), "1i32..5i32");
+    }
+
+    #[test]
+    fn range_from_reprints_without_spaces() {
+        assert_eq!(format_expr(&parse("1i32..")), "1i32..");
+    }
+
+    #[test]
+    fn range_to_reprints_without_spaces() {
+        assert_eq!(format_expr(&parse("..5i32")), "..5i32");
+    }
+
+    #[test]
+    fn range_to_inclusive_reprints_without_spaces() {
+        assert_eq!(format_expr(&parse("..=5i32")), "..=5i32");
+    }
+
+    #[test]
+    fn range_full_reprints_as_two_dots() {
+        assert_eq!(format_expr(&parse("..")), "..");
+    }
+
+    #[test]
+    fn range_endpoints_that_are_comparisons_need_no_parens() {
+        // From `is_range_expression`'s own doc comment: `a == b..c == d` parses as
+        // `(a == b)..(c == d)` -- comparison already binds tighter than range, so the printer
+        // doesn't need parens to preserve that grouping.
+        assert_eq!(format_expr(&parse("a == b..c == d")), "a == b..c == d");
+    }
+
+    #[test]
+    fn range_endpoints_that_are_arithmetic_need_no_parens() {
+        // From the same doc comment: `1 + 2..3 * 4` parses as `(1 + 2)..(3 * 4)` -- arithmetic
+        // binds well inside range's own endpoints, so no parens are needed on reprint either.
+        assert_eq!(
+            format_expr(&parse("1i32 + 2i32..3i32 * 4i32")),
+            "1i32 + 2i32..3i32 * 4i32"
         );
     }
 }

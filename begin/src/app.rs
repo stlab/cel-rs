@@ -3,19 +3,19 @@
 use adam_rs::Sheet;
 use dioxus::prelude::*;
 
-use crate::bridge::{Labels, to_graph_data};
-use crate::example_source::{
-    ActiveSource, SourceOrigin, available_examples, build_sheet, load_example_source,
-};
+use crate::bridge::to_graph_data;
+use crate::example_source::{ActiveSource, SourceOrigin, available_examples, load_example_source};
 use crate::graph_view::GraphView;
-use crate::inspector::Inspector;
-use crate::spectrum::{
+use adam_web_ui::Labels;
+use adam_web_ui::SheetInspector;
+use adam_web_ui::spectrum::{
     SpActionButton, SpActionGroup, SpDivider, SpHeading, SpIconZoomIn, SpIconZoomOut, SpSideNav,
     SpSideNavItem, SpSwitch, SpTheme,
 };
+use adam_web_ui::{Renderer, build_sheet};
 
 /// Root component: Spectrum theme wrapper with an examples picker, the graph, and
-/// the Inspector filling the viewport. `begin` ships with several example
+/// the SheetInspector filling the viewport. `begin` ships with several example
 /// property models (`begin/examples/*.adm2` — see
 /// [`crate::example_source::available_examples`]); [`ExamplesPicker`] switches
 /// which one is loaded. On desktop, editing the *currently selected* example's
@@ -115,7 +115,7 @@ pub fn App() -> Element {
                             continue;
                         }
                     };
-                    let outcome = build_sheet(&source, &current.file_name());
+                    let outcome = build_sheet(&source, &current.file_name(), &Renderer::styled());
                     if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
                         sheet.set(new_sheet);
                         labels.set(new_labels);
@@ -189,6 +189,8 @@ pub fn App() -> Element {
     // carry over its stale layout position (and previously, its stale box
     // width — see the graph.js fix this follows).
     let source_id = use_memo(move || active_source.read().file_name());
+    let source_text = use_memo(move || active_source.read().text.clone());
+    let source_name = use_memo(move || active_source.read().file_name());
 
     // Drives graph.js's show/hide-inactive-branches mode via
     // `window.beginGraph.setShowInactive`; lives here (rather than in
@@ -293,7 +295,7 @@ pub fn App() -> Element {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
                     ExamplesPicker { sheet, labels, active_source, example_names, on_select: on_example_selected }
                     GraphView { data: graph_data, source_id }
-                    Inspector { sheet, labels, active_source }
+                    SheetInspector { sheet, labels, source_text, source_name }
                 }
             }
         }
@@ -316,9 +318,13 @@ pub fn App() -> Element {
 fn load_example(name: &str) -> (Sheet, Labels, ActiveSource) {
     match load_example_source(name) {
         Ok(source) => {
-            let outcome = build_sheet(&source, &format!("begin/examples/{name}.adm2"));
+            let outcome = build_sheet(
+                &source,
+                &format!("begin/examples/{name}.adm2"),
+                &Renderer::styled(),
+            );
             if let Some(err) = &outcome.error {
-                crate::diagnostics::report_error(err);
+                adam_web_ui::diagnostics::report_error(err);
             }
             let active_source = ActiveSource {
                 name: name.to_string(),
@@ -331,7 +337,7 @@ fn load_example(name: &str) -> (Sheet, Labels, ActiveSource) {
             }
         }
         Err(err) => {
-            crate::diagnostics::report_error(&err);
+            adam_web_ui::diagnostics::report_error(&err);
             (
                 Sheet::new(),
                 Labels::new(),
@@ -370,7 +376,7 @@ fn load_opened(path: std::path::PathBuf) -> (Option<(Sheet, Labels)>, ActiveSour
         .unwrap_or_else(|| file_name.clone());
     match crate::open_file::read_opened_file(&path) {
         Ok(source) => {
-            let outcome = build_sheet(&source, &file_name);
+            let outcome = build_sheet(&source, &file_name, &Renderer::styled());
             if let Some(err) = &outcome.error {
                 eprintln!("{err}");
             }
@@ -471,9 +477,9 @@ fn OpenFileControls(
 fn load_from_payload(
     payload: crate::open_file::OpenedFilePayload,
 ) -> (Option<(Sheet, Labels)>, ActiveSource) {
-    let outcome = build_sheet(&payload.text, &payload.name);
+    let outcome = build_sheet(&payload.text, &payload.name, &Renderer::styled());
     if let Some(err) = &outcome.error {
-        crate::diagnostics::report_error(err);
+        adam_web_ui::diagnostics::report_error(err);
     }
     let active_source = ActiveSource {
         name: payload.name.clone(),
@@ -509,7 +515,7 @@ fn OpenFileControls(
                         let mut eval = document::eval(crate::open_file::OPEN_SCRIPT);
                         let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
                         let Ok(result) = result else {
-                            crate::diagnostics::report_error(&format!(
+                            adam_web_ui::diagnostics::report_error(&format!(
                                 "failed to open file: eval channel error: {result:?}"
                             ));
                             return;
@@ -518,7 +524,7 @@ fn OpenFileControls(
                         let payload = match result {
                             crate::open_file::OpenResult::Payload(payload) => payload,
                             crate::open_file::OpenResult::Failed { error } => {
-                                crate::diagnostics::report_error(&format!(
+                                adam_web_ui::diagnostics::report_error(&format!(
                                     "failed to open file: {error}"
                                 ));
                                 return;
@@ -546,7 +552,7 @@ fn OpenFileControls(
                             let mut eval = document::eval(&script);
                             let result = eval.recv::<Option<crate::open_file::OpenResult>>().await;
                             let Ok(result) = result else {
-                                crate::diagnostics::report_error(&format!(
+                                adam_web_ui::diagnostics::report_error(&format!(
                                     "failed to refresh file: eval channel error: {result:?}"
                                 ));
                                 return;
@@ -555,7 +561,7 @@ fn OpenFileControls(
                             let payload = match result {
                                 crate::open_file::OpenResult::Payload(payload) => payload,
                                 crate::open_file::OpenResult::Failed { error } => {
-                                    crate::diagnostics::report_error(&format!(
+                                    adam_web_ui::diagnostics::report_error(&format!(
                                         "failed to refresh file: {error}"
                                     ));
                                     return;
@@ -652,7 +658,11 @@ mod tests {
 
     #[test]
     fn toy_example_g_not_forced_when_p_is_zero() {
-        let outcome = build_sheet(toy_example_source(), "toy_example.adm2");
+        let outcome = build_sheet(
+            toy_example_source(),
+            "toy_example.adm2",
+            &Renderer::styled(),
+        );
         let (sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
         let g_id = sheet
             .cells()
@@ -663,7 +673,11 @@ mod tests {
 
     #[test]
     fn toy_example_g_forced_when_p_is_one() {
-        let outcome = build_sheet(toy_example_source(), "toy_example.adm2");
+        let outcome = build_sheet(
+            toy_example_source(),
+            "toy_example.adm2",
+            &Renderer::styled(),
+        );
         let (mut sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
         let p_id = sheet
             .cells()
@@ -682,7 +696,11 @@ mod tests {
 
     #[test]
     fn toy_example_g_unforced_again_after_p_returns_to_zero() {
-        let outcome = build_sheet(toy_example_source(), "toy_example.adm2");
+        let outcome = build_sheet(
+            toy_example_source(),
+            "toy_example.adm2",
+            &Renderer::styled(),
+        );
         let (mut sheet, labels) = outcome.sheet_labels.expect("toy_example.adm2 must build");
         let p_id = sheet
             .cells()

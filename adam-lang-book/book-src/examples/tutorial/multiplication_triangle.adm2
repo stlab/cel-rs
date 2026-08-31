@@ -1,0 +1,11 @@
+sheet triangle {
+    cell c = 0.0;
+    cell a = 2.0;
+    cell b = 3.0;
+
+    relationship {
+        c := a * b;
+        a := c / b;
+        b := c / a;
+    }
+}

@@ -184,8 +184,19 @@ fn write_branch_relationships(
     out.push_str("}\n");
 }
 
+/// Renders `literal`'s `.adm2` spelling by re-emitting `span`'s original source text — for a
+/// `MatchLiteral::Scalar`, `span` covers just that one literal token; for a `MatchLiteral::Tuple`,
+/// `span` covers the whole parenthesized group (see `ConditionalBranch::literal_span`), so
+/// re-emitting it directly reproduces the tuple's `(a, b)` spelling without needing a separate
+/// span per element.
+fn write_match_literal(literal: &ast::MatchLiteral, span: ast::ExprSpan) -> String {
+    match literal {
+        ast::MatchLiteral::Scalar(_) | ast::MatchLiteral::Tuple(_) => source_text_or_empty(span),
+    }
+}
+
 /// Writes one `literal => { ... }` conditional branch, re-emitting the match literal via its
-/// span rather than the (unused) `Literal` value.
+/// span rather than the (unused) `Literal`/`MatchLiteral` value.
 fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize) {
     write_trivia(
         out,
@@ -194,7 +205,7 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
         depth,
     );
     out.push_str(&indent(depth));
-    out.push_str(&source_text_or_empty(branch.literal_span));
+    out.push_str(&write_match_literal(&branch.literal, branch.literal_span));
     out.push_str(" => ");
     write_branch_relationships(
         out,
@@ -243,9 +254,9 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     out.push_str("}\n");
 }
 
-/// Writes one `cell name[: type][ = initializer][ filter [(args)] closure];` declaration,
-/// delegating its type annotation to [`source_text_or_empty`] via `TypeExpr::span()` and its
-/// initializer/filter closure to [`cel_parser::format_expr`].
+/// Writes one `cell name[: type][ = initializer][ filter body];` declaration, delegating its
+/// type annotation to [`source_text_or_empty`] via `TypeExpr::span()` and its initializer/filter
+/// body to [`cel_parser::format_expr`].
 fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     write_trivia(
         out,
@@ -267,17 +278,7 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     }
     if let Some(filter) = &cell.filter {
         out.push_str(" filter ");
-        if !filter.arg_cells.is_empty() {
-            out.push('(');
-            for (i, (name, _)) in filter.arg_cells.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(name);
-            }
-            out.push_str(") ");
-        }
-        out.push_str(&cel_parser::format_expr(&filter.closure));
+        out.push_str(&cel_parser::format_expr(&filter.body));
     }
     out.push_str(";\n");
 }
@@ -530,6 +531,12 @@ mod tests {
     }
 
     #[test]
+    fn formats_a_tuple_conditional_branch() {
+        let source = "sheet s { cell a: bool; cell b: bool; conditional (a, b) { (true, false) => { relationship { a := b; } } _ => { } } }";
+        assert!(format(source).contains("(true, false) => {"));
+    }
+
+    #[test]
     fn format_is_idempotent_through_a_reparse_with_a_conditional() {
         let source = "sheet demo {\n    cell p: i32 = 0;\n    cell c: f64;\n\n    conditional p {\n        0i32 => {\n            relationship {\n                c := c;\n            }\n        }\n        _ => {\n            relationship {\n                c := c;\n            }\n        }\n    }\n}";
         let once = format(source);
@@ -736,26 +743,24 @@ mod tests {
     }
 
     #[test]
-    fn formats_a_cell_with_a_filter_and_no_arg_list() {
+    fn formats_a_cell_with_a_filter() {
         assert_eq!(
-            format("sheet s { cell a: i32 = 1 filter |x: i32| x; }"),
-            "sheet s {\n    cell a: i32 = 1 filter |x: i32| x;\n}\n"
+            format("sheet s { cell a: i32 = 1 filter _; }"),
+            "sheet s {\n    cell a: i32 = 1 filter _;\n}\n"
         );
     }
 
     #[test]
-    fn formats_a_cell_with_a_filter_and_an_arg_list() {
+    fn formats_a_cell_with_a_filter_referencing_a_cell() {
         assert_eq!(
-            format(
-                "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter(hi) |x: i32, h: i32| x; }"
-            ),
-            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter (hi) |x: i32, h: i32| x;\n}\n"
+            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter min(_, hi); }"),
+            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter min(_, hi);\n}\n"
         );
     }
 
     #[test]
     fn format_is_idempotent_through_a_reparse_with_a_filter() {
-        let source = "sheet s {\n    cell a: i32 = 1 filter |x: i32| x;\n}";
+        let source = "sheet s {\n    cell a: i32 = 1 filter _;\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);

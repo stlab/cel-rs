@@ -1,4 +1,5 @@
 /target
+/adam-lang-book/book-dist
 .tokensave
 .claude/worktrees/
 /begin/node_modules

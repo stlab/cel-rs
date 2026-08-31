@@ -46,6 +46,10 @@ cargo clippy --fix --workspace --exclude begin --all-targets
 
 # Docs
 cargo doc --lib --no-deps --open --workspace
+
+# Docs, as CI checks them (rustdoc warnings -- broken/private intra-doc links, bare
+# URLs, etc. -- promoted to errors; plain `cargo doc` above exits 0 on these)
+RUSTDOCFLAGS="-D warnings" cargo doc --lib --no-deps --workspace
 ```
 
 Sanitizer runs require nightly and a target triple (e.g. `x86_64-apple-darwin` or `x86_64-unknown-linux-gnu`):
@@ -96,6 +100,22 @@ This project has not been released yet and has no clients. The API is not stable
 any time. The project is in **active development** and is not yet feature-complete. Prefer
 redesigning any components rather than patching them or layering on top of them. The goal is to have a
 **clean, correct, and efficient** implementation.
+
+## Library-First Design
+
+`cel-runtime`, `cel-parser`, `cel-rs-macros`, `adam-rs`, and `adam-lang` are general-purpose
+components meant to be consumed by other, future projects — not just this repository's own `begin`
+UI. `begin` and its bundled `examples/*.adm2` files exist to exercise and demonstrate these
+libraries; they are a test harness, not the target audience.
+
+When designing or implementing a feature in these library crates, solve the general problem the
+feature actually describes — not just whatever narrower case a specific `begin` example happens to
+exercise. Reaching for words like "the practical case" or "the case that matters here" to scope a
+design down to what one example needs is a signal to stop and generalize instead. Where a fully
+general solution genuinely isn't feasible in one pass, delineate the boundary explicitly (a
+documented precondition, a clear error or diagnostic when it's crossed — never silent wrong
+behavior) and track the remaining generalization as a GitHub issue, rather than quietly special-casing
+behavior around whatever example is currently at hand.
 
 ## Architecture
 

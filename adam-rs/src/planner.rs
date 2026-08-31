@@ -40,14 +40,30 @@ mod matching;
 mod release;
 mod scc;
 
-use digraph::{Node, build_digraph};
+use digraph::{Node, add_filter_edges, build_digraph};
 use matching::pure_outputs;
 use release::ReleaseFailure;
 
+/// One step of a [`Plan`]'s `execution_order`: either a selected method, or reapplying a
+/// source cell's filter against its (now-settled) current argument values.
+///
+/// See `docs/superpowers/specs/2026-08-25-adam-rs-filter-revalidation-design.md` §2.2.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PlanStep {
+    /// Execute method `usize` of relationship `RelationshipId`.
+    Method(RelationshipId, usize),
+    /// Reapply this cell's filter against its own current `source` value and its
+    /// filter arguments' current effective values, writing the result into `derived`
+    /// — the source-cell analogue of a self-referencing method execution, never
+    /// mutating `source` itself. See
+    /// `docs/superpowers/specs/2026-08-26-adam-rs-filter-shadow-state-design.md` §2.3.
+    FilterReclamp(CellId),
+}
+
 /// The output of the planning pass.
 pub(crate) struct Plan {
-    /// Selected `(RelationshipId, method_index)` pairs in execution order.
-    pub(crate) execution_order: Vec<(RelationshipId, usize)>,
+    /// Selected steps (methods and filter reclamps) in execution order.
+    pub(crate) execution_order: Vec<PlanStep>,
     /// Cells that can never be a source under the relationships this plan considered.
     /// See [`forced_output_cells`].
     pub(crate) forced_outputs: HashSet<CellId>,
@@ -83,24 +99,39 @@ pub(crate) fn plan(
         ReleaseFailure::NoAcyclicAssignment => Error::Cycle,
     })?;
 
-    let adj = build_digraph(&assignment, relationships);
+    let mut adj = build_digraph(&assignment, relationships);
+    add_filter_edges(&mut adj, cells, &assignment);
+
+    let filtered_source_cells: HashSet<CellId> = cells
+        .iter()
+        .filter(|&(id, cell)| cell.filter.is_some() && !assignment.claimed.contains_key(&id))
+        .map(|(id, _)| id)
+        .collect();
 
     let mut components = scc::tarjan_scc(&adj);
     components.reverse();
 
-    let mut execution_order: Vec<(RelationshipId, usize)> = Vec::new();
+    let mut execution_order: Vec<PlanStep> = Vec::new();
     for component in components {
-        debug_assert_eq!(
-            component.len(),
-            1,
-            "release::resolve guarantees an acyclic digraph"
-        );
-        if let Node::Relationship(rel_id) = component[0] {
-            execution_order.push((rel_id, assignment.chosen[&rel_id]));
+        if component.len() != 1 {
+            return Err(Error::FilterCycle);
+        }
+        match component[0] {
+            Node::Relationship(rel_id) => {
+                execution_order.push(PlanStep::Method(rel_id, assignment.chosen[&rel_id]));
+            }
+            Node::Cell(id) if filtered_source_cells.contains(&id) => {
+                execution_order.push(PlanStep::FilterReclamp(id));
+            }
+            Node::Cell(_) => {}
         }
     }
 
-    if execution_order.len() != active.len() {
+    let method_count = execution_order
+        .iter()
+        .filter(|step| matches!(step, PlanStep::Method(..)))
+        .count();
+    if method_count != active.len() {
         return Err(Error::Conflict);
     }
 
@@ -194,7 +225,8 @@ fn forced_output_cells(
 
 #[cfg(test)]
 mod tests {
-    use crate::{Error, Method, Sheet};
+    use crate::planner::PlanStep;
+    use crate::{Error, Filter, Method, Sheet};
     use std::collections::HashSet;
 
     // Propagation-behavior tests live in the integration tests.
@@ -223,7 +255,7 @@ mod tests {
 
         let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
         assert_eq!(plan.execution_order.len(), 1);
-        assert_eq!(plan.execution_order[0].0, r1);
+        assert!(matches!(plan.execution_order[0], PlanStep::Method(r, _) if r == r1));
     }
 
     #[test]
@@ -446,5 +478,127 @@ mod tests {
 
         assert!(sheet.propagate().is_ok());
         assert_eq!(*sheet.read::<i32>(d).unwrap(), 5); // p(2) + q(3)
+    }
+
+    #[test]
+    fn plan_with_no_filters_produces_only_method_steps_matching_relationship_selection() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        assert_eq!(plan.execution_order, vec![PlanStep::Method(rel, 0)]);
+    }
+
+    #[test]
+    fn no_filter_reclamp_step_for_a_filtered_cell_that_is_derived_this_round() {
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(5_i32);
+        let y = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v))])
+            .unwrap();
+        sheet
+            .add_filter(y, Filter::from_fn_0(|v: &i32| Ok((*v).clamp(0, 100))))
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        assert!(
+            !plan
+                .execution_order
+                .iter()
+                .any(|s| matches!(s, PlanStep::FilterReclamp(id) if *id == y))
+        );
+    }
+
+    #[test]
+    fn filter_reclamp_positioned_before_consuming_relationship_when_argument_is_a_plain_source() {
+        let mut sheet = Sheet::new();
+        let bound = sheet.add_cell(10_i32);
+        let a = sheet.add_cell(500_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |x: &i32, b: &i32| Ok((*x).min(*b))),
+            )
+            .unwrap();
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        let reclamp_pos = plan
+            .execution_order
+            .iter()
+            .position(|s| matches!(s, PlanStep::FilterReclamp(id) if *id == a))
+            .expect("a is a filtered source cell, so it must get a FilterReclamp step");
+        let method_pos = plan
+            .execution_order
+            .iter()
+            .position(|s| matches!(s, PlanStep::Method(r, _) if *r == rel))
+            .expect("rel must be in the execution order");
+        assert!(reclamp_pos < method_pos);
+    }
+
+    #[test]
+    fn filter_reclamp_positioned_after_relationship_that_produces_its_argument() {
+        let mut sheet = Sheet::new();
+        let q = sheet.add_cell(10_i32);
+        let bound = sheet.add_cell(0_i32);
+        let bound_rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(q, bound, |x: &i32| Ok(*x))])
+            .unwrap();
+        let a = sheet.add_cell(500_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |x: &i32, b: &i32| Ok((*x).min(*b))),
+            )
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        let reclamp_pos = plan
+            .execution_order
+            .iter()
+            .position(|s| matches!(s, PlanStep::FilterReclamp(id) if *id == a))
+            .expect("a is a filtered source cell, so it must get a FilterReclamp step");
+        let method_pos = plan
+            .execution_order
+            .iter()
+            .position(|s| matches!(s, PlanStep::Method(r, _) if *r == bound_rel))
+            .expect("bound_rel must be in the execution order");
+        assert!(method_pos < reclamp_pos);
+    }
+
+    #[test]
+    fn a_filter_argument_cycle_returns_filter_cycle_error() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(b, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
+            )
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
+        assert!(matches!(result, Err(Error::FilterCycle)));
     }
 }

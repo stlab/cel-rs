@@ -44,13 +44,15 @@ struct GroupLevel {
 /// Iterator type used for token streams (from `TokenStream::into_iter()`).
 pub type TokenStreamIter = proc_macro2::token_stream::IntoIter;
 
-/// Punctuation operator (1 or 2 chars) without heap allocation.
+/// Punctuation operator (1, 2, or 3 chars) without heap allocation.
 #[derive(Clone, Debug)]
 pub enum PunctOp {
     /// Single character (e.g. `+`, `-`).
     One(char),
-    /// Two characters (e.g. `&&`, `<=`).
+    /// Two characters (e.g. `&&`, `<=`, `..`).
     Two([char; 2]),
+    /// Three characters (e.g. `..=`).
+    Three([char; 3]),
 }
 
 impl PartialEq<str> for PunctOp {
@@ -60,6 +62,13 @@ impl PartialEq<str> for PunctOp {
             PunctOp::Two([a, b]) => {
                 let mut it = other.chars();
                 it.next() == Some(*a) && it.next() == Some(*b) && it.next().is_none()
+            }
+            PunctOp::Three([a, b, c]) => {
+                let mut it = other.chars();
+                it.next() == Some(*a)
+                    && it.next() == Some(*b)
+                    && it.next() == Some(*c)
+                    && it.next().is_none()
             }
         }
     }
@@ -158,7 +167,13 @@ impl LexLexer {
                 | ('-', '>')
                 | ('=', '>')
                 | (':', '=')
+                | ('.', '.')
         )
+    }
+
+    /// Check if three characters form a known triple-character operator. Currently only `..=`.
+    fn is_triple_compound_operator(first: char, second: char, third: char) -> bool {
+        matches!((first, second, third), ('.', '.', '='))
     }
 
     /// Get the next TokenTree from the current iterator (top of stack or main input).
@@ -439,6 +454,41 @@ impl Iterator for LexLexer {
 
                         // Check if they form a compound operator
                         if Self::is_compound_operator(ch, next_ch) {
+                            // Try to extend to a known 3-char op (currently only ".." + "=" -> "..=").
+                            // Only attempt this if the second punct is itself immediately followed by
+                            // something (Joint spacing) — otherwise there's nothing to peek.
+                            if next_punct.spacing() == Spacing::Joint {
+                                match self.next_token_tree() {
+                                    Some(TokenTree::Punct(third_punct)) => {
+                                        let third_ch = third_punct.as_char();
+                                        if Self::is_triple_compound_operator(ch, next_ch, third_ch)
+                                        {
+                                            return Some(Token::Punct {
+                                                op: PunctOp::Three([ch, next_ch, third_ch]),
+                                                span,
+                                            });
+                                        }
+                                        self.pending_token = Some(TokenTree::Punct(third_punct));
+                                        return Some(Token::Punct {
+                                            op: PunctOp::Two([ch, next_ch]),
+                                            span,
+                                        });
+                                    }
+                                    Some(other) => {
+                                        self.pending_token = Some(other);
+                                        return Some(Token::Punct {
+                                            op: PunctOp::Two([ch, next_ch]),
+                                            span,
+                                        });
+                                    }
+                                    None => {
+                                        return Some(Token::Punct {
+                                            op: PunctOp::Two([ch, next_ch]),
+                                            span,
+                                        });
+                                    }
+                                }
+                            }
                             return Some(Token::Punct {
                                 op: PunctOp::Two([ch, next_ch]),
                                 span,
@@ -833,5 +883,99 @@ mod tests {
         let mut lexer = LexLexer::new(stream.into_iter());
         let first = lexer.next().expect("colon token");
         assert!(matches!(first, Token::Punct { ref op, .. } if op == ":"));
+    }
+
+    #[test]
+    fn digit_followed_by_double_dot_does_not_lex_as_a_float_literal() {
+        let input = TokenStream::from_str("5..10").unwrap();
+        let mut lexer = LexLexer::new(input.into_iter());
+        match lexer.next() {
+            Some(Token::Literal(Lit::Int(lit))) => {
+                assert_eq!(lit.base10_parse::<i32>().unwrap(), 5)
+            }
+            other => panic!("expected an integer literal, got {other:?}"),
+        }
+        // The next two tokens must each be a lone `.` Punct at this pre-combining stage —
+        // asserted directly on proc_macro2's TokenStream, before any of this file's own
+        // combining logic runs, so this test fails for the right reason if the assumption
+        // about proc_macro2's tokenization is wrong, not because of code we haven't written yet.
+    }
+
+    #[test]
+    fn double_dot_combines_into_two_char_punct() {
+        let stream: TokenStream = "..".parse().unwrap();
+        let mut lexer = LexLexer::new(stream.into_iter());
+        let tok = lexer.next().expect("one token");
+        assert!(
+            matches!(
+                tok,
+                Token::Punct {
+                    op: PunctOp::Two(['.', '.']),
+                    ..
+                }
+            ),
+            "expected PunctOp::Two(['.', '.']), got {tok:?}"
+        );
+        assert!(lexer.next().is_none(), "expected no more tokens");
+    }
+
+    #[test]
+    fn double_dot_equals_combines_into_three_char_punct() {
+        let stream: TokenStream = "..=".parse().unwrap();
+        let mut lexer = LexLexer::new(stream.into_iter());
+        let tok = lexer.next().expect("one token");
+        assert!(
+            matches!(
+                tok,
+                Token::Punct {
+                    op: PunctOp::Three(['.', '.', '=']),
+                    ..
+                }
+            ),
+            "expected PunctOp::Three(['.', '.', '=']), got {tok:?}"
+        );
+        assert!(lexer.next().is_none(), "expected no more tokens");
+    }
+
+    #[test]
+    fn double_dot_not_followed_by_equals_stays_two_char_and_does_not_consume_the_next_token() {
+        let stream: TokenStream = "..5".parse().unwrap();
+        let mut lexer = LexLexer::new(stream.into_iter());
+        let first = lexer.next().expect("dot-dot token");
+        assert!(
+            matches!(
+                first,
+                Token::Punct {
+                    op: PunctOp::Two(['.', '.']),
+                    ..
+                }
+            ),
+            "expected PunctOp::Two(['.', '.']), got {first:?}"
+        );
+        match lexer.next() {
+            Some(Token::Literal(Lit::Int(lit))) => {
+                assert_eq!(lit.base10_parse::<i32>().unwrap(), 5)
+            }
+            other => panic!("expected integer literal 5, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn single_dot_before_a_digit_is_unaffected_by_range_combining() {
+        // Regression guard: tuple field access (`x.0`) must still lex as a lone `.` Punct
+        // followed by an integer literal, not get swept into the new `..`/`..=` combining.
+        let stream: TokenStream = ".0".parse().unwrap();
+        let mut lexer = LexLexer::new(stream.into_iter());
+        let first = lexer.next().expect("dot token");
+        assert!(
+            matches!(
+                first,
+                Token::Punct {
+                    op: PunctOp::One('.'),
+                    ..
+                }
+            ),
+            "expected PunctOp::One('.'), got {first:?}"
+        );
     }
 }

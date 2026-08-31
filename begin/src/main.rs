@@ -1,12 +1,9 @@
 //! Entry point for the `begin` property model development environment.
 mod app;
 mod bridge;
-mod diagnostics;
 mod example_source;
 mod graph_view;
-mod inspector;
 mod open_file;
-mod spectrum;
 
 use dioxus::prelude::*;
 

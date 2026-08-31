@@ -1,0 +1,24 @@
+[package]
+name = "adam-web-ui"
+version = "0.1.0"
+edition = "2024"
+description = "Reusable Dioxus + Spectrum Web Components UI for browsing and editing a live adam-rs Sheet"
+
+[features]
+desktop = []
+
+[dependencies]
+dioxus = { version = "0.7.10", features = [] }
+adam-rs = { path = "../adam-rs" }
+adam-lang = { path = "../adam-lang" }
+cel-parser = { path = "../cel-parser" }
+cel-runtime = { path = "../cel-runtime" }
+cel-std = { path = "../cel-std" }
+annotate-snippets = "0.12"
+anyhow = "1"
+indexmap = "2"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["console"] }
+
+[lints]
+workspace = true

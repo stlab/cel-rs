@@ -12,8 +12,9 @@ use crate::{
     cell::{CellData, CellId},
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::Error,
-    filter::{Filter, FilterViolation},
+    filter::{Filter, FilterKind, FilterViolation},
     output::{OutputData, OutputId},
+    planner::PlanStep,
     relationship::{Method, RelationshipData, RelationshipId},
     requirement::{Requirement, RequirementData, RequirementId},
 };
@@ -45,7 +46,7 @@ pub struct Sheet {
     /// later and cells written later have strictly higher strength, making the
     /// default method-selection direction deterministic.
     next_strength: u64,
-    last_plan: Option<Vec<(RelationshipId, usize)>>,
+    last_plan: Option<Vec<PlanStep>>,
     /// Cells reported forced (see [`Sheet::is_forced`]) by the last full `propagate()`
     /// call. Not recomputed by `propagate_without_replan`.
     last_forced: Option<HashSet<CellId>>,
@@ -73,6 +74,12 @@ pub struct Sheet {
     /// call. Not recomputed by `propagate_without_replan`, consistent with
     /// `last_violated`.
     last_filter_violations: HashMap<CellId, FilterViolation>,
+    /// Reverse index of `filter_args`: for each cell, the live cells whose filter
+    /// references it as one of its dynamic arguments. Built incrementally in
+    /// `add_filter`; cells and filters are never removed once added, so this needs no
+    /// invalidation, matching `terminal_cells` and every other per-cell set `Sheet`
+    /// already maintains for its own lifetime.
+    filter_dependents: HashMap<CellId, Vec<CellId>>,
 }
 
 /// A conditional's evaluated match value: borrowed (existing cell, no allocation) or owned
@@ -110,6 +117,7 @@ impl Sheet {
             requirements: SlotMap::with_key(),
             last_violated: HashMap::new(),
             last_filter_violations: HashMap::new(),
+            filter_dependents: HashMap::new(),
         }
     }
 
@@ -527,21 +535,22 @@ impl Sheet {
 
     /// Attaches `filter` to `cell`.
     ///
-    /// Immediately applies `filter` to `cell`'s current `source` value, exactly as
-    /// [`Sheet::write`] would, so a filtered cell's value is guaranteed to conform from
-    /// this call onward — not just from the next external write.
+    /// Never evaluates `filter`'s function — attaching a filter is not a fresh
+    /// external input, so it never changes `cell`'s current effective value. The next
+    /// full [`Sheet::propagate`] call conforms `cell` via the planner's
+    /// `PlanStep::FilterReclamp` step; until then, `read()` reflects whatever `cell`
+    /// held before this call.
     ///
     /// # Errors
     ///
     /// - `Error::InvalidId` — `cell`, or one of `filter`'s argument cells, is not a
     ///   live cell in this sheet.
     /// - `Error::TerminalCell` — `cell` already belongs to an existing output.
-    /// - `Error::InvalidFilter` — `cell` already has a filter, or `filter`'s own value
-    ///   type does not match `cell`'s registered type.
+    /// - `Error::InvalidFilter` — `cell` already has a filter, `filter`'s own value
+    ///   type does not match `cell`'s registered type, or `filter`'s argument list
+    ///   names `cell` itself.
     /// - `Error::TypeMismatch` — an argument cell's registered type does not match the
-    ///   type `filter` declared for it, or (defensively) `filter`'s function returned
-    ///   a value of a different type than `cell`'s registered type.
-    /// - `Error::MethodFailed` — `filter` rejected `cell`'s current value.
+    ///   type `filter` declared for it.
     ///
     /// - Complexity: O(a) where a is the number of `filter`'s argument cells.
     pub fn add_filter(&mut self, cell: CellId, filter: Filter) -> Result<(), Error> {
@@ -555,6 +564,9 @@ impl Sheet {
         if filter.0.value_type != cell_type {
             return Err(Error::InvalidFilter);
         }
+        if filter.0.args.contains(&cell) {
+            return Err(Error::InvalidFilter);
+        }
         for (&arg_id, &declared) in filter.0.args.iter().zip(filter.0.arg_types.iter()) {
             let arg_cell = self.cells.get(arg_id).ok_or(Error::InvalidId)?;
             if arg_cell.type_id != declared {
@@ -565,25 +577,10 @@ impl Sheet {
             }
         }
 
-        let args: Vec<&dyn Any> = filter
-            .0
-            .args
-            .iter()
-            .map(|&a| self.cells[a].effective())
-            .collect();
-        let conformed = (filter.0.function)(self.cells[cell].source.as_ref(), &args)
-            .map_err(Error::MethodFailed)?;
-        if conformed.as_ref().type_id() != cell_type {
-            return Err(Error::TypeMismatch {
-                expected: cell_type,
-                found: conformed.as_ref().type_id(),
-            });
+        for &arg in &filter.0.args {
+            self.filter_dependents.entry(arg).or_default().push(cell);
         }
-
-        let cell_data = &mut self.cells[cell];
-        cell_data.source = conformed;
-        cell_data.derived = None;
-        cell_data.filter = Some(filter.0);
+        self.cells[cell].filter = Some(filter.0);
         Ok(())
     }
 
@@ -596,6 +593,51 @@ impl Sheet {
             .filter
             .as_ref()
             .map(|f| f.args.as_slice())
+    }
+
+    /// Returns the live cells whose filter references `id` as one of its dynamic
+    /// arguments — the reverse of a filter's own argument list ([`Sheet::filter_args`]).
+    ///
+    /// - Postcondition: empty if no live cell's filter references `id`.
+    pub fn filter_dependents(&self, id: CellId) -> &[CellId] {
+        self.filter_dependents
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Returns the kind of validation/derivation `id`'s filter performs, if it has one.
+    ///
+    /// Returns `None` if `id` is not a live cell in this sheet, or has no filter.
+    pub fn filter_kind(&self, id: CellId) -> Option<&FilterKind> {
+        self.cells.get(id)?.filter.as_ref().map(|f| &f.kind)
+    }
+
+    /// Returns `id`'s filter's current `(lo, hi)` bounds, if it has a [`FilterKind::Range`]
+    /// filter.
+    ///
+    /// Resolves the filter's argument cells' current effective values via the same path
+    /// [`Sheet::add_filter`] already uses, then calls the filter's `bounds` function.
+    ///
+    /// Returns `None` if `id` is not a live cell in this sheet, has no filter, its filter's
+    /// kind isn't [`FilterKind::Range`], or the range expression fails to evaluate against
+    /// the filter's current argument values (e.g. a fallible arithmetic op in a range
+    /// endpoint) — the same degraded-to-`None` outcome as any other reason no live bounds
+    /// are available right now.
+    ///
+    /// - Complexity: O(a) where a is the number of the filter's argument cells.
+    pub fn filter_range<T: Any + Clone>(&self, id: CellId) -> Option<(T, T)> {
+        let filter = self.cells.get(id)?.filter.as_ref()?;
+        let FilterKind::Range { bounds } = &filter.kind else {
+            return None;
+        };
+        let args: Vec<&dyn Any> = filter
+            .args
+            .iter()
+            .map(|&a| self.cells[a].effective())
+            .collect();
+        let (lo, hi) = bounds(&args)?;
+        Some((*lo.downcast::<T>().ok()?, *hi.downcast::<T>().ok()?))
     }
 
     /// Returns the filter violation recorded for `id` as of the last full
@@ -773,9 +815,10 @@ impl Sheet {
     ///
     /// Returns `false` if no propagation has run yet.
     fn is_relationship_active(&self, rel_id: RelationshipId) -> bool {
-        self.last_plan
-            .as_ref()
-            .is_some_and(|plan| plan.iter().any(|&(r, _)| r == rel_id))
+        self.last_plan.as_ref().is_some_and(|plan| {
+            plan.iter()
+                .any(|step| matches!(step, PlanStep::Method(r, _) if *r == rel_id))
+        })
     }
 
     /// Returns the match cells of every conditional with at least one branch (or default)
@@ -858,8 +901,6 @@ impl Sheet {
     /// - `Error::InvalidId` — `id` is not a cell in this sheet.
     /// - `Error::TypeMismatch` — `T` does not match the cell's registered `TypeId`.
     /// - `Error::TerminalCell` — `id` already belongs to an existing output.
-    /// - `Error::MethodFailed` — the cell has a filter and it rejected `value`; the
-    ///   cell is left completely unchanged (no strength bump, no `source` change).
     pub fn write<T: Any + 'static>(&mut self, id: CellId, value: T) -> Result<(), Error> {
         if self.terminal_cells.contains(&id) {
             return Err(Error::TerminalCell);
@@ -872,28 +913,10 @@ impl Sheet {
             });
         }
 
-        let boxed: Box<dyn Any> = if let Some(filter) = self.cells[id].filter.as_ref() {
-            let args: Vec<&dyn Any> = filter
-                .args
-                .iter()
-                .map(|&a| self.cells[a].effective())
-                .collect();
-            let conformed = (filter.function)(&value, &args).map_err(Error::MethodFailed)?;
-            if conformed.as_ref().type_id() != cell_type {
-                return Err(Error::TypeMismatch {
-                    expected: cell_type,
-                    found: conformed.as_ref().type_id(),
-                });
-            }
-            conformed
-        } else {
-            Box::new(value)
-        };
-
         self.next_strength += 1;
         let cell = &mut self.cells[id];
         cell.strength = self.next_strength | (1u64 << 63);
-        cell.source = boxed;
+        cell.source = Box::new(value);
         cell.derived = None;
         Ok(())
     }
@@ -1143,12 +1166,15 @@ impl Sheet {
     ///
     /// - Complexity: O(R·K) where R is the number of entries and K is the maximum
     ///   outputs per method.
-    fn post_process_strengths(&mut self, execution_order: &[(RelationshipId, usize)]) {
+    fn post_process_strengths(&mut self, execution_order: &[PlanStep]) {
         let mut derived_strength = u64::MAX >> 1; // 0x7FFF_FFFF_FFFF_FFFF
         let mut seen: std::collections::HashSet<CellId> = std::collections::HashSet::new();
-        for &(rel_id, method_idx) in execution_order {
-            if let Some(rel) = self.relationships.get(rel_id)
-                && let Some(method) = rel.methods.get(method_idx)
+        for step in execution_order {
+            let PlanStep::Method(rel_id, method_idx) = step else {
+                continue;
+            };
+            if let Some(rel) = self.relationships.get(*rel_id)
+                && let Some(method) = rel.methods.get(*method_idx)
             {
                 for &output in &method.outputs {
                     if seen.insert(output)
@@ -1227,7 +1253,7 @@ impl Sheet {
             let pre_active = self.match_cell_subgraph(&match_cells);
             if !pre_active.is_empty() {
                 let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
-                self.execute_plan(&pre_plan.execution_order)?;
+                self.execute_plan(&pre_plan.execution_order, &mut Vec::new())?;
             }
         }
 
@@ -1236,7 +1262,8 @@ impl Sheet {
 
         // Phase 3: general plan on the active set.
         let plan = crate::planner::plan(&self.cells, &self.relationships, &active)?;
-        self.execute_plan(&plan.execution_order)?;
+        let mut source_filter_violations: Vec<(CellId, FilterViolation)> = Vec::new();
+        self.execute_plan(&plan.execution_order, &mut source_filter_violations)?;
 
         // Phase 4: assign derived-cell strengths in evaluation order.
         self.post_process_strengths(&plan.execution_order);
@@ -1273,19 +1300,25 @@ impl Sheet {
 
         // Phase 6b: evaluate every filter against a value derived by a method this
         // round — a non-gating diagnostic. A filter is never re-checked against a
-        // value that came from a plain external write: `write`/`add_filter` already
-        // conformed it, and nothing here ever mutates a cell.
+        // value that came from a plain external write: that case is handled earlier
+        // in this same `propagate()` call, by execute_plan's `PlanStep::FilterReclamp`
+        // step — nothing here ever mutates a cell.
         let mut derived_this_round: HashSet<CellId> = HashSet::new();
-        for &(rel_id, method_idx) in &plan.execution_order {
-            if let Some(method) = self
-                .relationships
-                .get(rel_id)
-                .and_then(|r| r.methods.get(method_idx))
+        for step in &plan.execution_order {
+            if let PlanStep::Method(rel_id, method_idx) = step
+                && let Some(method) = self
+                    .relationships
+                    .get(*rel_id)
+                    .and_then(|r| r.methods.get(*method_idx))
             {
                 derived_this_round.extend(method.outputs.iter().copied());
             }
         }
-        let mut last_filter_violations: HashMap<CellId, FilterViolation> = HashMap::new();
+        // Seeded from execute_plan's source-cell reclamp failures above; disjoint keys
+        // from the derived-cell loop below (a cell is a source or derived this round,
+        // never both), so there's no merge conflict.
+        let mut last_filter_violations: HashMap<CellId, FilterViolation> =
+            source_filter_violations.into_iter().collect();
         for &cell_id in &derived_this_round {
             let Some(filter) = self.cells[cell_id].filter.as_ref() else {
                 continue;
@@ -1325,70 +1358,134 @@ impl Sheet {
 
     /// Executes `execution_order` without invoking the planner.
     ///
+    /// A `PlanStep::FilterReclamp(id)` step re-evaluates `id`'s filter against `id`'s own
+    /// current `source` value (never a possibly-shadowed `derived` — the same
+    /// self-referencing-input rule a `PlanStep::Method` step's self-referencing inputs
+    /// follow) and its filter arguments' current effective values, writing the result
+    /// into `id`'s `derived` unconditionally — `source` is never touched by this step,
+    /// exactly as it's never touched by any other self-referencing method's output. A
+    /// `PlanStep::Method` step's outputs follow the existing shadow/non-shadow rule,
+    /// unchanged. A reclamp whose filter returns `Err`, or a value of the wrong type, is
+    /// pushed into `filter_violations` instead of aborting; the cell's stored value is
+    /// left untouched in that case (its `derived` stays unset, so `read()` falls back to
+    /// `source`).
+    ///
     /// # Errors
     ///
-    /// - `Error::MethodFailed` — the method's function returned an error, or the method
-    ///   produced a different number of outputs than declared.
-    /// - `Error::TypeMismatch` — a method output's runtime type does not match the cell's
-    ///   registered type.
+    /// - `Error::MethodFailed` — a `PlanStep::Method` step's function returned an error,
+    ///   or the method produced a different number of outputs than declared.
+    /// - `Error::TypeMismatch` — a `PlanStep::Method` step's output runtime type does
+    ///   not match the cell's registered type.
     ///
     /// - Complexity: O(R·K) where R is the number of entries and K is the max cells per method,
     ///   plus per-method execution cost.
-    fn execute_plan(&mut self, execution_order: &[(RelationshipId, usize)]) -> Result<(), Error> {
-        for &(rel_id, method_idx) in execution_order {
-            let is_conditional = self.conditional_relationships.contains(&rel_id);
-            let (outputs, output_ids, shadow_outputs) = {
-                let method = &self.relationships[rel_id].methods[method_idx];
-                let inputs: Vec<&dyn Any> = method
-                    .inputs
-                    .iter()
-                    .map(|&id| {
-                        if method.outputs.contains(&id) {
-                            // Self-referencing input: always the pre-execution source,
-                            // never a derived override from a previous execution.
-                            self.cells[id].source.as_ref()
-                        } else {
-                            self.cells[id].effective()
+    fn execute_plan(
+        &mut self,
+        execution_order: &[PlanStep],
+        filter_violations: &mut Vec<(CellId, FilterViolation)>,
+    ) -> Result<(), Error> {
+        for step in execution_order {
+            match *step {
+                PlanStep::Method(rel_id, method_idx) => {
+                    let is_conditional = self.conditional_relationships.contains(&rel_id);
+                    let (outputs, output_ids, shadow_outputs) = {
+                        let method = &self.relationships[rel_id].methods[method_idx];
+                        let inputs: Vec<&dyn Any> = method
+                            .inputs
+                            .iter()
+                            .map(|&id| {
+                                if method.outputs.contains(&id) {
+                                    // Self-referencing input: always the pre-execution
+                                    // source, never a derived override from a previous
+                                    // execution.
+                                    self.cells[id].source.as_ref()
+                                } else {
+                                    self.cells[id].effective()
+                                }
+                            })
+                            .collect();
+                        let outputs = (method.function)(&inputs).map_err(Error::MethodFailed)?;
+                        let output_ids = method.outputs.clone();
+                        let shadow_outputs: Vec<bool> = method
+                            .outputs
+                            .iter()
+                            .map(|o| method.inputs.contains(o) || is_conditional)
+                            .collect();
+                        (outputs, output_ids, shadow_outputs)
+                    };
+
+                    if outputs.len() != output_ids.len() {
+                        return Err(Error::MethodFailed(anyhow::anyhow!(
+                            "method produced {} outputs but relationship expects {}",
+                            outputs.len(),
+                            output_ids.len()
+                        )));
+                    }
+
+                    for ((cell_id, new_value), shadow) in
+                        output_ids.into_iter().zip(outputs).zip(shadow_outputs)
+                    {
+                        let cell = &mut self.cells[cell_id];
+                        let found = new_value.as_ref().type_id();
+                        if found != cell.type_id {
+                            return Err(Error::TypeMismatch {
+                                expected: cell.type_id,
+                                found,
+                            });
                         }
-                    })
-                    .collect();
-                let outputs = (method.function)(&inputs).map_err(Error::MethodFailed)?;
-                let output_ids = method.outputs.clone();
-                let shadow_outputs: Vec<bool> = method
-                    .outputs
-                    .iter()
-                    .map(|o| method.inputs.contains(o) || is_conditional)
-                    .collect();
-                (outputs, output_ids, shadow_outputs)
-            };
-
-            if outputs.len() != output_ids.len() {
-                return Err(Error::MethodFailed(anyhow::anyhow!(
-                    "method produced {} outputs but relationship expects {}",
-                    outputs.len(),
-                    output_ids.len()
-                )));
-            }
-
-            for ((cell_id, new_value), shadow) in
-                output_ids.into_iter().zip(outputs).zip(shadow_outputs)
-            {
-                let cell = &mut self.cells[cell_id];
-                let found = new_value.as_ref().type_id();
-                if found != cell.type_id {
-                    return Err(Error::TypeMismatch {
-                        expected: cell.type_id,
-                        found,
-                    });
+                        if shadow {
+                            cell.derived = Some(new_value);
+                        } else {
+                            cell.source = new_value;
+                        }
+                        if !cell.changed {
+                            cell.changed = true;
+                            self.changed_cells.push(cell_id);
+                        }
+                    }
                 }
-                if shadow {
-                    cell.derived = Some(new_value);
-                } else {
-                    cell.source = new_value;
-                }
-                if !cell.changed {
-                    cell.changed = true;
-                    self.changed_cells.push(cell_id);
+                PlanStep::FilterReclamp(id) => {
+                    let filter = self.cells[id]
+                        .filter
+                        .as_ref()
+                        .expect("plan() only emits FilterReclamp for a filtered cell");
+                    let args: Vec<&dyn Any> = filter
+                        .args
+                        .iter()
+                        .map(|&a| self.cells[a].effective())
+                        .collect();
+                    // Self-referencing input: always `source`, never a possibly-shadowed
+                    // `derived` — same rule as any other self-referencing method (see
+                    // the `PlanStep::Method` arm above, and the 2026-08-02 shadow-state
+                    // design). This is what keeps `source` provably untouched by the
+                    // filter across any number of rounds.
+                    let current = self.cells[id].source.as_ref();
+                    match (filter.function)(current, &args) {
+                        Ok(v) => {
+                            let cell_type = self.cells[id].type_id;
+                            if v.as_ref().type_id() != cell_type {
+                                filter_violations.push((
+                                    id,
+                                    FilterViolation::Failed(anyhow::anyhow!(
+                                        "filter returned a value of a different type than \
+                                         the cell"
+                                    )),
+                                ));
+                            } else {
+                                // Unconditional write, no equality check — matches every
+                                // other shadowed output's "no equality check" convention
+                                // (2026-08-02 design). The filter's Ok output is
+                                // authoritative the same way any method's output is.
+                                let cell = &mut self.cells[id];
+                                cell.derived = Some(v);
+                                if !cell.changed {
+                                    cell.changed = true;
+                                    self.changed_cells.push(id);
+                                }
+                            }
+                        }
+                        Err(e) => filter_violations.push((id, FilterViolation::Failed(e))),
+                    }
                 }
             }
         }
@@ -1400,11 +1497,10 @@ impl Sheet {
     /// Returns `None` if no propagation has run yet, `rel` is not in the cached plan,
     /// or `rel` was added after the last `propagate()` call.
     pub fn selected_method(&self, rel: RelationshipId) -> Option<usize> {
-        self.last_plan
-            .as_ref()?
-            .iter()
-            .find(|&&(r, _)| r == rel)
-            .map(|&(_, idx)| idx)
+        self.last_plan.as_ref()?.iter().find_map(|step| match step {
+            PlanStep::Method(r, idx) if *r == rel => Some(*idx),
+            _ => None,
+        })
     }
 
     /// Returns the input cells of method `idx` in relationship `rel`.
@@ -1438,12 +1534,14 @@ impl Sheet {
         let Some(plan) = &self.last_plan else {
             return false;
         };
-        !plan.iter().any(|&(rel_id, method_idx)| {
-            self.relationships
-                .get(rel_id)
-                .and_then(|r| r.methods.get(method_idx))
+        !plan.iter().any(|step| match step {
+            PlanStep::Method(rel_id, method_idx) => self
+                .relationships
+                .get(*rel_id)
+                .and_then(|r| r.methods.get(*method_idx))
                 .map(|m| m.outputs.contains(&id))
-                .unwrap_or(false)
+                .unwrap_or(false),
+            PlanStep::FilterReclamp(_) => false,
         })
     }
 
@@ -1584,6 +1682,10 @@ impl Sheet {
     /// `violated_requirements` continue to reflect the last full `propagate()` call; this
     /// method does not re-evaluate output requirements.
     ///
+    /// A cached `PlanStep::FilterReclamp` step is still re-executed on every call,
+    /// using each argument's *current* effective value — only the `last_filter_violations`
+    /// diagnostic map stays pinned, not the reclamp's mutation itself.
+    ///
     /// # Errors
     ///
     /// - `Error::Conflict` — `propagate()` has not yet been called; no plan is cached.
@@ -1597,7 +1699,10 @@ impl Sheet {
             return Err(Error::Conflict);
         };
         self.clear_changed();
-        let result = self.execute_plan(&execution_order);
+        // Discarded: this replays any cached FilterReclamp step's mutation
+        // unconditionally, but last_filter_violations stays pinned to the last full
+        // propagate()'s result, per this method's documented contract.
+        let result = self.execute_plan(&execution_order, &mut Vec::new());
         if result.is_ok() {
             self.post_process_strengths(&execution_order);
         }
@@ -1618,7 +1723,7 @@ mod tests {
     use crate::{
         ConditionalId, Error, MatchExpr, Method, Sheet,
         cell::CellId,
-        filter::{Filter, FilterViolation},
+        filter::{Filter, FilterKind, FilterViolation},
         relationship::RelationshipId,
     };
     use std::any::{Any, TypeId};
@@ -2675,43 +2780,36 @@ mod tests {
     }
 
     #[test]
-    fn add_filter_conforms_the_cells_current_value_immediately() {
+    fn add_filter_returns_invalid_id_for_missing_cell() {
+        let mut sheet = Sheet::new();
+        let result = sheet.add_filter(CellId::default(), Filter::from_fn_0(|x: &i32| Ok(*x)));
+        assert!(matches!(result, Err(Error::InvalidId)));
+    }
+
+    #[test]
+    fn add_filter_does_not_change_the_cells_current_value() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
         sheet
             .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+        // add_filter never evaluates the function against the current value: the raw
+        // out-of-range value survives until the next propagate().
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 500);
     }
 
     #[test]
-    fn add_filter_leaves_a_conforming_value_unchanged() {
+    fn propagate_after_add_filter_conforms_the_initial_value() {
         let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
+        let a = sheet.add_cell(500_i32);
         sheet
             .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
-    }
-
-    #[test]
-    fn add_filter_returns_method_failed_when_current_value_cannot_conform() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        let result = sheet.add_filter(
-            a,
-            Filter::from_fn_0(|_x: &i32| Err(anyhow::anyhow!("cannot conform"))),
-        );
-        assert!(matches!(result, Err(Error::MethodFailed(_))));
-        // Rejected: the cell's original value must survive untouched.
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
-    }
-
-    #[test]
-    fn add_filter_returns_invalid_id_for_missing_cell() {
-        let mut sheet = Sheet::new();
-        let result = sheet.add_filter(CellId::default(), Filter::from_fn_0(|x: &i32| Ok(*x)));
-        assert!(matches!(result, Err(Error::InvalidId)));
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 500);
+        sheet.propagate().unwrap();
+        // `a` has no filter args and belongs to no relationship — this is the ordinary
+        // first-round case of Task 1's fix, not a special "cold start" path.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
     }
 
     #[test]
@@ -2750,6 +2848,17 @@ mod tests {
     }
 
     #[test]
+    fn add_filter_returns_invalid_filter_when_args_name_the_filtered_cell_itself() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let result = sheet.add_filter(
+            a,
+            Filter::from_fn_1(a, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
+        );
+        assert!(matches!(result, Err(Error::InvalidFilter)));
+    }
+
+    #[test]
     fn add_filter_returns_invalid_id_for_missing_arg_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -2775,23 +2884,9 @@ mod tests {
     }
 
     #[test]
-    fn add_filter_resolves_a_dynamic_argument_cells_current_value() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(500_i32);
-        let bound = sheet.add_cell(10_i32);
-        sheet
-            .add_filter(
-                a,
-                Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
-            )
-            .unwrap();
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
-    }
-
-    #[test]
     fn from_fn_2_conforms_values_through_sheet_using_both_dynamic_arguments() {
         let mut sheet = Sheet::new();
-        let a = sheet.add_cell(50_i32);
+        let a = sheet.add_cell(500_i32);
         let lo = sheet.add_cell(0_i32);
         let hi = sheet.add_cell(100_i32);
         sheet
@@ -2802,81 +2897,12 @@ mod tests {
                 }),
             )
             .unwrap();
-        // Attach-time value (50) already conforms.
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 50);
-        // A later write is conformed against both dynamic argument cells.
-        sheet.write(a, 500_i32).unwrap();
+        sheet.propagate().unwrap();
         assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+
         sheet.write(a, -10_i32).unwrap();
+        sheet.propagate().unwrap();
         assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
-    }
-
-    #[test]
-    fn add_filter_returns_type_mismatch_when_the_filters_function_returns_the_wrong_type() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        // `value_type` matches `a`'s registered type (so add_filter's own value-type
-        // check passes), but the function itself always returns a `f64`, tripping
-        // add_filter's defensive check on the conformed result.
-        let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |_value, _args| {
-            Ok(Box::new(1.5_f64) as Box<dyn Any>)
-        });
-        let result = sheet.add_filter(a, filter);
-        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
-    }
-
-    #[test]
-    fn write_returns_type_mismatch_when_the_filters_function_returns_the_wrong_type() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        // Conforms correctly for the attach-time value (5), so `add_filter` succeeds,
-        // but returns a `f64` for any other input, tripping `write`'s defensive check.
-        let filter = Filter::new(TypeId::of::<i32>(), vec![], vec![], |value, _args| {
-            let v = *value.downcast_ref::<i32>().unwrap();
-            if v == 5 {
-                Ok(Box::new(v) as Box<dyn Any>)
-            } else {
-                Ok(Box::new(1.5_f64) as Box<dyn Any>)
-            }
-        });
-        sheet.add_filter(a, filter).unwrap();
-        let result = sheet.write(a, 99_i32);
-        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
-        // Rejected write: cell fully untouched.
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
-    }
-
-    #[test]
-    fn write_conforms_a_value_through_the_cells_filter() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        sheet
-            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
-            .unwrap();
-        sheet.write(a, 500_i32).unwrap();
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
-    }
-
-    #[test]
-    fn write_rejects_a_value_the_filter_cannot_conform() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        sheet
-            .add_filter(
-                a,
-                Filter::from_fn_0(|x: &i32| {
-                    if *x > 100 {
-                        Err(anyhow::anyhow!("value exceeds maximum"))
-                    } else {
-                        Ok(*x)
-                    }
-                }),
-            )
-            .unwrap();
-        let result = sheet.write(a, 500_i32);
-        assert!(matches!(result, Err(Error::MethodFailed(_))));
-        // Rejected write: cell fully untouched.
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
     }
 
     #[test]
@@ -2888,18 +2914,17 @@ mod tests {
     }
 
     #[test]
-    fn write_through_a_filter_still_bumps_strength() {
+    fn write_leaves_the_raw_value_in_source_until_propagate_conforms_it() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
         sheet
             .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
-        sheet.write(b, 1_i32).unwrap();
         sheet.write(a, 500_i32).unwrap();
-        // `a` was written after `b`, so its strength must be higher even though its
-        // stored value was conformed away from what was passed in.
-        assert!(sheet.cells[a].strength > sheet.cells[b].strength);
+        // write() no longer runs the filter: the raw value stands until propagate().
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 500);
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
     }
 
     #[test]
@@ -2943,11 +2968,10 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(1_i32);
         let b = sheet.add_cell(0_i32);
-        // `add_filter` re-checks the cell's *current* value immediately (see §3.2 of
-        // the design), so a filter that unconditionally errors would reject at
-        // attach time (b's initial value is 0) before propagate() ever runs. Accept
-        // exactly 0 so attach succeeds, and let the relationship's derived value (1,
-        // copied from `a`) be the one that trips the filter.
+        // Accept exactly 0 (b's initial value) so this filter's shape is exercised
+        // only by the relationship's derived value (1, copied from `a`), not by
+        // anything add_filter itself does — add_filter no longer evaluates a filter's
+        // function at all.
         sheet
             .add_filter(
                 b,
@@ -3010,6 +3034,178 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         assert!(sheet.last_filter_violations.is_empty());
+    }
+
+    #[test]
+    fn propagate_reclamps_a_filtered_source_cell_when_its_argument_changes() {
+        // Issue #132's exact repro.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(50_i32);
+        let bound = sheet.add_cell(100_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
+            )
+            .unwrap();
+        sheet.write(bound, 10_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+    }
+
+    #[test]
+    fn propagate_reclamps_before_a_relationship_consumes_the_reclamped_value() {
+        // The inequality.adm2-shaped case: a and b are linked by a two-method mutual
+        // relationship (b := min(a, b); a := max(a, b)); a is the currently-source cell
+        // of the pair and is filtered against a bound that just shrank. b (derived) must
+        // reflect the corrected a, not the pre-reclamp one, within a single propagate().
+        //
+        // b is created before a so that a (created later) outranks b in strength —
+        // release::resolve keeps the higher-strength cell a source (see
+        // release::tests::strength_prefers_the_higher_strength_cell_as_source) — making a
+        // the source and b the derived cell of the pair, as this test needs.
+        let mut sheet = Sheet::new();
+        let b = sheet.add_cell(20_i32);
+        let a = sheet.add_cell(50_i32);
+        let bound = sheet.add_cell(100_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |v: &i32, bnd: &i32| Ok((*v).min(*bnd))),
+            )
+            .unwrap();
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+                Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).max(*y))),
+            ])
+            .unwrap();
+        sheet.propagate().unwrap();
+
+        sheet.write(bound, 5_i32).unwrap();
+        sheet.propagate().unwrap();
+
+        // a reclamps to min(50, 5) = 5; b's method (a.min(b)) then reads the reclamped
+        // a, not the stale 50.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), 5);
+    }
+
+    #[test]
+    fn filtered_source_cell_springs_back_to_its_original_value_when_a_bound_loosens() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(50_i32);
+        let bound = sheet.add_cell(100_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
+            )
+            .unwrap();
+
+        sheet.write(bound, 10_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+
+        sheet.write(bound, 100_i32).unwrap();
+        sheet.propagate().unwrap();
+        // a's original 50 must survive in `source` across the whole round-trip: it
+        // springs back once the bound loosens again, rather than staying stuck at the
+        // intermediate clamp.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 50);
+    }
+
+    #[test]
+    fn filter_reclamp_records_failed_violation_when_the_filters_function_returns_the_wrong_type() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let trigger = sheet.add_cell(0_i32);
+        // Conforms correctly for the attach-time values (a's initial 5 and trigger's 0), so
+        // `add_filter` succeeds, but returns an f64 when trigger becomes non-zero —
+        // tripping FilterReclamp's check once `trigger` is updated.
+        let filter = Filter::new(
+            TypeId::of::<i32>(),
+            vec![trigger],
+            vec![TypeId::of::<i32>()],
+            |value, args| {
+                let v = *value.downcast_ref::<i32>().unwrap();
+                let t = *args[0].downcast_ref::<i32>().unwrap();
+                if t == 0 {
+                    Ok(Box::new(v) as Box<dyn Any>)
+                } else {
+                    Ok(Box::new(1.5_f64) as Box<dyn Any>)
+                }
+            },
+        );
+        sheet.add_filter(a, filter).unwrap();
+
+        // trigger changes, causing reclamp where the filter returns wrong type
+        sheet.write(trigger, 1_i32).unwrap();
+        sheet.propagate().unwrap();
+
+        assert!(matches!(
+            sheet.filter_violation(a),
+            Some(FilterViolation::Failed(_))
+        ));
+        // The wrong-type result is discarded: the cell's stored value is unchanged.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    }
+
+    #[test]
+    fn filter_reclamp_failure_is_recorded_without_aborting_propagate_or_changing_the_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let bound = sheet.add_cell(100_i32);
+        // Accept anything up to `bound` (a's initial 5 is within bound's initial 100);
+        // the write to `bound` below is what trips the filter's next live reclamp.
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |v: &i32, b: &i32| {
+                    if *v <= *b {
+                        Ok(*v)
+                    } else {
+                        Err(anyhow::anyhow!("cannot conform"))
+                    }
+                }),
+            )
+            .unwrap();
+        sheet.write(bound, 0_i32).unwrap();
+
+        sheet.propagate().unwrap();
+
+        assert!(matches!(
+            sheet.filter_violation(a),
+            Some(FilterViolation::Failed(_))
+        ));
+        // Rejected reclamp: the cell's stored value is left completely unchanged.
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    }
+
+    #[test]
+    fn propagate_without_replan_reapplies_a_cached_filter_reclamp_but_does_not_touch_last_filter_violations()
+     {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(50_i32);
+        let bound = sheet.add_cell(100_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        assert!(sheet.filter_violation(a).is_none());
+
+        // bound is itself a plain source (is_source(bound) holds), so rewriting it and
+        // re-running only the cached plan is exactly propagate_without_replan's
+        // documented precondition.
+        sheet.write(bound, 10_i32).unwrap();
+        sheet.propagate_without_replan().unwrap();
+
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+        // last_filter_violations is not recomputed by propagate_without_replan.
+        assert!(sheet.filter_violation(a).is_none());
     }
 
     #[test]
@@ -3157,5 +3353,175 @@ mod tests {
         // are the upstream root causes, not `b` itself.
         assert!(violation_cells.contains(&a));
         assert!(violation_cells.contains(&bound));
+    }
+
+    #[test]
+    fn filter_dependents_returns_the_cells_whose_filter_references_this_one() {
+        let mut sheet = Sheet::new();
+        let bound = sheet.add_cell(10_i32);
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
+            )
+            .unwrap();
+        assert_eq!(sheet.filter_dependents(bound), &[a]);
+    }
+
+    #[test]
+    fn filter_dependents_is_empty_for_a_cell_no_filter_references() {
+        let mut sheet = Sheet::new();
+        let bound = sheet.add_cell(10_i32);
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|v: &i32| Ok((*v).clamp(0, 100))))
+            .unwrap();
+        assert!(sheet.filter_dependents(bound).is_empty());
+    }
+
+    #[test]
+    fn filter_dependents_is_empty_for_an_invalid_cell() {
+        let sheet = Sheet::new();
+        assert!(sheet.filter_dependents(CellId::default()).is_empty());
+    }
+
+    #[test]
+    fn filter_dependents_aggregates_multiple_dependents_of_the_same_argument() {
+        let mut sheet = Sheet::new();
+        let bound = sheet.add_cell(10_i32);
+        let a = sheet.add_cell(5_i32);
+        let b = sheet.add_cell(5_i32);
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(bound, |v: &i32, bd: &i32| Ok((*v).min(*bd))),
+            )
+            .unwrap();
+        sheet
+            .add_filter(
+                b,
+                Filter::from_fn_1(bound, |v: &i32, bd: &i32| Ok((*v).min(*bd))),
+            )
+            .unwrap();
+        let dependents = sheet.filter_dependents(bound);
+        assert_eq!(dependents.len(), 2);
+        assert!(dependents.contains(&a));
+        assert!(dependents.contains(&b));
+    }
+
+    #[test]
+    fn filter_kind_returns_none_for_a_cell_with_no_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        assert!(sheet.filter_kind(a).is_none());
+    }
+
+    #[test]
+    fn filter_kind_returns_opaque_for_a_plain_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
+            .unwrap();
+        assert!(matches!(sheet.filter_kind(a), Some(FilterKind::Opaque)));
+    }
+
+    #[test]
+    fn filter_kind_returns_range_for_a_range_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let filter = Filter::range(
+            TypeId::of::<i32>(),
+            vec![],
+            vec![],
+            |value, _args| Ok(Box::new(*value.downcast_ref::<i32>().unwrap()) as Box<dyn Any>),
+            |_args| {
+                Some((
+                    Box::new(0i32) as Box<dyn Any>,
+                    Box::new(100i32) as Box<dyn Any>,
+                ))
+            },
+        );
+        sheet.add_filter(a, filter).unwrap();
+        assert!(matches!(
+            sheet.filter_kind(a),
+            Some(FilterKind::Range { .. })
+        ));
+    }
+
+    #[test]
+    fn filter_range_returns_live_bounds_from_argument_cells() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let lo = sheet.add_cell(0_i32);
+        let hi = sheet.add_cell(100_i32);
+        let filter = Filter::range(
+            TypeId::of::<i32>(),
+            vec![lo, hi],
+            vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+            |value, args| {
+                let v = *value.downcast_ref::<i32>().unwrap();
+                let lo = *args[0].downcast_ref::<i32>().unwrap();
+                let hi = *args[1].downcast_ref::<i32>().unwrap();
+                Ok(Box::new(v.clamp(lo, hi)) as Box<dyn Any>)
+            },
+            |args| {
+                Some((
+                    Box::new(*args[0].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
+                    Box::new(*args[1].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
+                ))
+            },
+        );
+        sheet.add_filter(a, filter).unwrap();
+        assert_eq!(sheet.filter_range::<i32>(a), Some((0, 100)));
+        sheet.write(hi, 10_i32).unwrap();
+        assert_eq!(sheet.filter_range::<i32>(a), Some((0, 10)));
+    }
+
+    #[test]
+    fn filter_range_reflects_a_bound_derived_by_a_relationship_not_just_a_direct_write() {
+        // `hi` isn't itself written — its value is derived from `hi_source` via a relationship —
+        // exercising `filter_range`'s use of `effective()` (which sees a relationship's derived
+        // override), not just `source`.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let lo = sheet.add_cell(0_i32);
+        let hi = sheet.add_cell(100_i32);
+        let hi_source = sheet.add_cell(100_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(hi_source, hi, |v: &i32| Ok(*v))])
+            .unwrap();
+        let filter = Filter::range(
+            TypeId::of::<i32>(),
+            vec![lo, hi],
+            vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+            |value, args| {
+                let v = *value.downcast_ref::<i32>().unwrap();
+                let lo = *args[0].downcast_ref::<i32>().unwrap();
+                let hi = *args[1].downcast_ref::<i32>().unwrap();
+                Ok(Box::new(v.clamp(lo, hi)) as Box<dyn Any>)
+            },
+            |args| {
+                Some((
+                    Box::new(*args[0].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
+                    Box::new(*args[1].downcast_ref::<i32>().unwrap()) as Box<dyn Any>,
+                ))
+            },
+        );
+        sheet.add_filter(a, filter).unwrap();
+        sheet.write(hi_source, 20_i32).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(sheet.filter_range::<i32>(a), Some((0, 20)));
+    }
+
+    #[test]
+    fn filter_range_returns_none_for_an_opaque_filter() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
+            .unwrap();
+        assert!(sheet.filter_range::<i32>(a).is_none());
     }
 }

@@ -1,0 +1,10 @@
+sheet no_default {
+    cell mode: i32 = 0;
+    cell x: f64 = 1.0;
+
+    conditional mode {
+        0i32 => {
+            relationship { x := 100.0; }
+        }
+    }
+}
