@@ -65,13 +65,16 @@ Phase 1's crate structure to exist.
   practice (Figma, tldraw) — see §4 below for the full interaction table.
 - **File I/O follows `begin/src/open_file.rs`'s exact pattern**: async via
   `rfd::AsyncFileDialog` driven through Dioxus's `spawn()`, not blocking.
-- **Testing follows `begin/src/inspector.rs`'s exact pattern**: non-trivial
-  logic inside components (branching, combining, or suppressing multiple
+- **Testing follows `adam-web-ui/src/inspector.rs`'s exact pattern**
+  (this code originated as `begin/src/inspector.rs`, since extracted into
+  the separate `adam-web-ui` crate by unrelated upstream work — the
+  pattern itself is unchanged, only its file moved): non-trivial logic
+  inside components (branching, combining, or suppressing multiple
   conditions) is extracted into a pure function with its own contract doc
   comment and unit tests; components stay thin `rsx!` wrappers that call
   those functions. This is not a new convention — it is already this
-  workspace's documented rule (CLAUDE.md) and `begin`'s established
-  practice; Phase 2 simply follows it.
+  workspace's documented rule (CLAUDE.md), unrelated to whether `ez-adam`
+  depends on `adam-web-ui` itself (it doesn't — see above).
 
 ---
 
@@ -186,8 +189,12 @@ Unchanged from Phase 1 design §4: context-sensitive on `selection`.
 - A **relationship group**: its editable `name := expr` formula list
   (drag-reorderable), each formula's CEL syntax validated live via
   `validation::validate_cel_expression` with rustc-style diagnostics
-  rendered the same way `begin`'s `SourcePanel` does via
-  `annotate-snippets`.
+  rendered the same way `adam-web-ui/src/labels.rs` does via
+  `annotate-snippets` (`begin`'s own `SourcePanel`, cited in an earlier
+  draft of this design, has since been retired — see
+  `docs/VISION.md`'s note that it was scaffolding pending VSCode interop;
+  `adam-web-ui` is the current precedent for this exact rendering
+  technique, independent of whether `ez-adam` depends on that crate).
 - A **conditional group**: the enable-table (rows = branches, columns =
   relationship groups, checkboxes = `enabled_groups`) plus the condition
   editor (cell list for `ConditionExpr::Cells`, formula text for
@@ -216,8 +223,9 @@ Three actions, each following `begin/src/open_file.rs`'s async
 - Every non-trivial piece of logic inside a component (tool dispatch,
   hit-testing, `screen_to_canvas`, rubber-band containment, zoom-centering
   math, drag-delta application) is a pure function with a contract-style
-  doc comment and unit tests, per `begin/src/inspector.rs`'s established
-  pattern — never left inline in an `rsx!` event handler closure.
+  doc comment and unit tests, per `adam-web-ui/src/inspector.rs`'s
+  established pattern (see §1's note on this file's provenance) — never
+  left inline in an `rsx!` event handler closure.
 - Visual/rendering verification uses a `web`-feature headless build,
   screenshotted the same way `begin`'s `verifying-begin-ui` skill does,
   since desktop WebView2 isn't drivable by standard tooling.
