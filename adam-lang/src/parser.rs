@@ -290,15 +290,14 @@ impl AdamParser {
         Ok(())
     }
 
-    /// `source_decl = "source" identifier cell_type_init [ "require" "{" { requirement } "}" ]
-    /// ";".`
+    /// `source_decl = "source" identifier cell_type_init [ cell_filter ] [ "require" "{" {
+    /// requirement } "}" ] ";".`
     ///
     /// `cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).`
     ///
-    /// Mirrors [`Self::parse_cell_decl`] exactly, minus the `filter` clause (not part of the
-    /// `source_decl` grammar) — the declared cell is added via [`Sheet::add_source`] instead of
-    /// [`Sheet::add_cell`], so it is fixed as a planner source and can never be claimed as a
-    /// relationship's output.
+    /// Mirrors [`Self::parse_cell_decl`] exactly — the declared cell is added via
+    /// [`Sheet::add_source`] instead of [`Sheet::add_cell`], so it is fixed as a planner source
+    /// and can never be claimed as a relationship's output.
     fn parse_source_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("source"); // consume
         let (name, name_span) = ctx.consume_ident()?;
@@ -345,6 +344,12 @@ impl AdamParser {
             (declared, cell_id)
         };
 
+        let filter = if ctx.is_keyword("filter") {
+            Some(self.parse_cell_filter(ctx, &name, name_span, &shape)?)
+        } else {
+            None
+        };
+
         // Inserted before the `require` block is parsed so a requirement can reference the
         // cell's own name — e.g. `require { positive: x > 0; }` — exactly as `parse_cell_decl`.
         ctx.cell_names.insert(name.clone(), (cell_id, shape));
@@ -362,6 +367,11 @@ impl AdamParser {
         };
 
         ctx.expect_punct(";")?;
+        if let Some((filter_name, filter)) = filter {
+            ctx.sheet
+                .add_filter(cell_id, filter_name, filter)
+                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+        }
         for (req_name, requirement) in require_names_and_reqs {
             ctx.sheet
                 .add_requirement(cell_id, req_name, requirement)
@@ -378,8 +388,9 @@ impl AdamParser {
     /// resolves them for a `relationship` binding or `out` declaration — see
     /// [`Self::parse_filter_expr`]. `cell_name`/`cell_span`/`declared_shape` describe the
     /// *filtered cell* (for error-message context and the candidate value's type), already
-    /// resolved by the caller in [`parse_cell_decl`] — unrelated to the filter's own name, which
-    /// is consumed here (as `identifier ":"`, immediately after the `filter` keyword) and
+    /// resolved by the caller — [`Self::parse_cell_decl`], [`Self::parse_source_decl`], or
+    /// [`Self::parse_out_decl`] — unrelated to the filter's own name, which is consumed here (as
+    /// `identifier ":"`, immediately after the `filter` keyword) and
     /// returned alongside the built `Filter`. The filtered cell's own `CellId` is not needed
     /// here: the caller attaches the returned `Filter` to it afterwards, via `Sheet::add_filter`.
     ///
@@ -1775,6 +1786,15 @@ mod tests {
             .unwrap();
         let (x, _) = sheet.cell_names["x"];
         assert_eq!(sheet.cell_requirements(x).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_source_decl_with_a_filter_clause_attaches_a_named_filter() {
+        let sheet = parser()
+            .parse_str("sheet s { source x: i32 = 5 filter clamp: 0..=10; }")
+            .unwrap();
+        let (x, _) = sheet.cell_names["x"];
+        assert_eq!(sheet.filter_name(x), Some("clamp"));
     }
 
     #[test]

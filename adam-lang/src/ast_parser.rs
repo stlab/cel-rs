@@ -231,11 +231,10 @@ impl AdamAstParser {
         })
     }
 
-    /// `source_decl = "source" identifier cell_type_init [ "require" "{" { requirement } "}" ]
-    /// ";".`
+    /// `source_decl = "source" identifier cell_type_init [ cell_filter ] [ "require" "{" {
+    /// requirement } "}" ] ";".`
     ///
-    /// Mirrors [`Self::parse_cell_decl`] exactly, minus the `filter` clause (not part of the
-    /// `source_decl` grammar).
+    /// Mirrors [`Self::parse_cell_decl`] exactly.
     fn parse_source_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::SourceDecl> {
         let decl_start = cursor.peek_span();
         cursor.is_keyword("source");
@@ -253,6 +252,12 @@ impl AdamAstParser {
         } else {
             return Err(cursor.err_at("expected `:` or `=` in source declaration"));
         };
+        let filter = if cursor.is_keyword("filter") {
+            let filter_start = cursor.last_span();
+            Some(self.parse_cell_filter(cursor, filter_start)?)
+        } else {
+            None
+        };
         let require = if cursor.is_keyword("require") {
             Some(self.parse_require_block(cursor)?)
         } else {
@@ -264,6 +269,7 @@ impl AdamAstParser {
             name_span: point(name_span),
             type_name,
             initializer,
+            filter,
             require,
             leading_comment: None,
             doc_comment: None,
@@ -699,6 +705,30 @@ mod tests {
             .parse_str("sheet s { source width: i32 = 4; }")
             .unwrap();
         assert!(matches!(sheet.items[0], ast::SheetItem::Source(_)));
+    }
+
+    #[test]
+    fn parse_source_with_a_filter() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { source a: i32 = 1 filter clamp: _; }")
+            .unwrap();
+        let ast::SheetItem::Source(source) = &sheet.items[0] else {
+            panic!("expected Source");
+        };
+        let filter = source.filter.as_ref().expect("filter present");
+        assert_eq!(filter.name, "clamp");
+        assert!(matches!(&filter.body, Expr::Ident { name, .. } if name == "_"));
+    }
+
+    #[test]
+    fn parse_source_without_a_filter_leaves_it_none() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { source a: i32 = 1; }")
+            .unwrap();
+        let ast::SheetItem::Source(source) = &sheet.items[0] else {
+            panic!("expected Source");
+        };
+        assert!(source.filter.is_none());
     }
 
     #[test]

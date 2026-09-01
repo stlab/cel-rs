@@ -1,10 +1,10 @@
 //! A best-effort static type checker over [`crate::ast::Sheet`] trees, built on
 //! [`cel_parser::ty::check_expr`]. Checks each `cell`'s literal initializer against its `:
 //! type_name` annotation (a `source`'s initializer is checked identically — a `source` shares
-//! `cell`'s exact shape, minus `filter`), each `relationship`/`conditional` binding's
-//! body against its declared outputs (arity: does the body actually produce as many values as
-//! declared; and per-output type), and each `out`'s initializer body against its optional `:
-//! type_name` annotation. Any `cell`, `source`, or `out`'s optional `require { ... }` block has
+//! `cell`'s exact shape, including its optional `filter` clause), each `relationship`/`conditional`
+//! binding's body against its declared outputs (arity: does the body actually produce as many
+//! values as declared; and per-output type), and each `out`'s initializer body against its optional
+//! `: type_name` annotation. Any `cell`, `source`, or `out`'s optional `require { ... }` block has
 //! each of its `requirement` bodies checked to produce `bool` type. An absent
 //! annotation, an annotation
 //! naming a type [`crate::TypeRegistry`] doesn't recognize, or an operator
@@ -66,6 +66,14 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                     registry,
                     &mut diagnostics,
                 );
+                check_filter(
+                    &source.name,
+                    source.filter.as_ref(),
+                    &cell_types,
+                    &shapes,
+                    &resolve,
+                    &mut diagnostics,
+                );
                 check_requirements(source.require.as_ref(), &resolve, &mut diagnostics);
             }
             SheetItem::Relationship(rel) => {
@@ -106,8 +114,8 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
 /// Maps every declared cell name — from a `cell`, a `source`, or an `out` — to both its scalar
 /// `Ty` (unaware of tuple structure, for use as the identifier resolver method/condition bodies
 /// are checked against) and its full recursive `TypeShape` (for `expr_matches_shape`'s tuple-aware
-/// checks). A `source` is resolved exactly like a `cell` (same shape, no `filter`/`require`) so
-/// its name is referenceable by other cells'/sources'/outs' expressions exactly like a `cell`'s.
+/// checks). A `source` is resolved exactly like a `cell` (same shape) so its name is referenceable
+/// by other cells'/sources'/outs' expressions exactly like a `cell`'s.
 /// A `cell`/`source`/`out` with no annotation, or one naming a type `registry` doesn't resolve, is
 /// absent from the `TypeShape` map and maps to `Ty::Any` in the `Ty` map; a tuple-typed annotation
 /// also maps to `Ty::Any` in the `Ty` map (`Ty` has no tuple variant), but *is* present in the
@@ -466,10 +474,11 @@ fn is_range_inclusive_body(expr: &Expr) -> bool {
 /// what raises "undeclared cell" for a name that isn't actually a declared cell, mirroring how it
 /// (not this file) is the one that raises that error for bindings' deduced expressions too.
 ///
-/// Takes `name`/`filter` directly (rather than a whole `&CellDecl`) so both a `cell`/`source`'s
-/// [`SheetItem::Cell`] arm and an `out`'s [`check_out`] can share this one check — `filter` is
-/// `Option<&CellFilter>` (not an owned/whole-decl reference) since `OutDecl` and `CellDecl` each
-/// declare their own `filter: Option<CellFilter>` field independently.
+/// Takes `name`/`filter` directly (rather than a whole `&CellDecl`) so a `cell`'s
+/// [`SheetItem::Cell`] arm, a `source`'s [`SheetItem::Source`] arm, and an `out`'s [`check_out`]
+/// can all share this one check — `filter` is `Option<&CellFilter>` (not an owned/whole-decl
+/// reference) since `OutDecl`, `CellDecl`, and `SourceDecl` each declare their own `filter:
+/// Option<CellFilter>` field independently.
 fn check_filter(
     name: &str,
     filter: Option<&CellFilter>,
@@ -645,10 +654,10 @@ fn check_binding(
 /// `check_binding`'s single-output branch, since an out's initializer is structurally a binding
 /// with one implicit output (the out cell itself), including the same tuple-shaped dispatch to
 /// [`expr_matches_shape`] via `shapes` — its optional `filter` clause, via the same [`check_filter`]
-/// shared with a `cell`/`source`'s [`SheetItem::Cell`] arm — and, if a `require { ... }` block is
-/// present, each of its requirements' bodies against `Ty::Bool`. Operator-level diagnostics from
-/// inside any body (via `check_expr`) are always included, regardless of whether a mismatch
-/// diagnostic is also added.
+/// shared with a `cell`'s [`SheetItem::Cell`] arm and a `source`'s [`SheetItem::Source`] arm — and,
+/// if a `require { ... }` block is present, each of its requirements' bodies against `Ty::Bool`.
+/// Operator-level diagnostics from inside any body (via `check_expr`) are always included,
+/// regardless of whether a mismatch diagnostic is also added.
 fn check_out(
     out_decl: &OutDecl,
     registry: &TypeRegistry,
@@ -995,6 +1004,13 @@ mod tests {
     }
 
     #[test]
+    fn filter_with_matching_types_on_a_source_has_no_diagnostic() {
+        let sheet = parse("sheet s { source a: i32 = 1 filter clamp: _; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
     fn filter_referencing_a_cell_has_no_diagnostic() {
         let sheet = parse(
             "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter clamp: if _ > hi { hi } else { _ }; }",
@@ -1032,6 +1048,24 @@ mod tests {
     fn filter_without_underscore_on_an_out_is_a_diagnostic() {
         // Mirrors `filter_without_underscore_is_a_diagnostic`, but for an `out`'s filter clause.
         let sheet = parse("sheet s { cell width: i32 = 1; out area: i32 := width filter f: 1; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn filter_body_type_mismatch_on_a_source_is_a_diagnostic() {
+        // Mirrors `filter_body_type_mismatch_is_a_diagnostic`, but for a `source`'s filter
+        // clause: body is `bool`-typed (a comparison), but `a` is declared `i32`.
+        let sheet = parse("sheet s { source a: i32 = 1 filter f: _ > 0; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn filter_without_underscore_on_a_source_is_a_diagnostic() {
+        // Mirrors `filter_without_underscore_is_a_diagnostic`, but for a `source`'s filter
+        // clause.
+        let sheet = parse("sheet s { source a: i32 = 1 filter f: 1; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }

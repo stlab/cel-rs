@@ -222,11 +222,11 @@ pub struct CellDecl {
     pub span: ExprSpan,
 }
 
-/// `source_decl = "source" identifier cell_type_init [ "require" "{" { requirement } "}" ] ";".`
+/// `source_decl = "source" identifier cell_type_init [ cell_filter ] [ "require" "{" {
+/// requirement } "}" ] ";".`
 ///
-/// Same shape as [`CellDecl`] minus `filter` (a `source` cell can't be filtered — its value comes
-/// directly from outside the sheet) — a `source` cell's initializer is a one-time literal exactly
-/// like a plain `cell`'s, and it supports the same `require` block.
+/// Same shape as [`CellDecl`]: a `source` cell's initializer is a one-time literal exactly like a
+/// plain `cell`'s, and it supports the same `filter` clause and `require` block.
 #[derive(Debug, Clone)]
 pub struct SourceDecl {
     /// The source cell's declared name.
@@ -239,6 +239,8 @@ pub struct SourceDecl {
     /// `crate::parser::AdamParser` for the compile-to-`Sheet` phase, which parses this with no
     /// cell scope pushed and evaluates it eagerly, once, at parse time.
     pub initializer: Option<cel_parser::Expr>,
+    /// The `filter` clause, if present.
+    pub filter: Option<CellFilter>,
     /// The `require { ... }` validation block, if present.
     pub require: Option<RequireBlock>,
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by

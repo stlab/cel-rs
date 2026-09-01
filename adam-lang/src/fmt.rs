@@ -339,8 +339,8 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     out.push_str(";\n");
 }
 
-/// Writes one `source name[: type][ = initializer][ require { ... }];` declaration. Mirrors
-/// [`write_cell`] exactly, minus the `filter` clause (not part of the `source_decl` grammar).
+/// Writes one `source name[: type][ = initializer][ filter body][ require { ... }];` declaration.
+/// Mirrors [`write_cell`] exactly.
 fn write_source(out: &mut String, decl: &ast::SourceDecl, depth: usize) {
     write_trivia(
         out,
@@ -359,6 +359,12 @@ fn write_source(out: &mut String, decl: &ast::SourceDecl, depth: usize) {
     if let Some(expr) = &decl.initializer {
         out.push_str(" = ");
         out.push_str(&cel_parser::format_expr(expr));
+    }
+    if let Some(filter) = &decl.filter {
+        out.push_str(" filter ");
+        out.push_str(&filter.name);
+        out.push_str(": ");
+        out.push_str(&cel_parser::format_expr(&filter.body));
     }
     if let Some(require) = &decl.require {
         write_require_clause(out, require, depth);
@@ -612,6 +618,12 @@ mod tests {
     fn formats_a_source_with_a_require_block() {
         let source =
             "sheet s {\n    source x: i32 = 5 require {\n        positive: x > 0;\n    };\n}";
+        assert_eq!(format(source), format!("{source}\n"));
+    }
+
+    #[test]
+    fn formats_a_source_with_a_filter_clause() {
+        let source = "sheet s {\n    source x: i32 = 5 filter clamp: 0..=10;\n}";
         assert_eq!(format(source), format!("{source}\n"));
     }
 
