@@ -1,1 +1,1 @@
-sheet volume { cell level: i32 = 50 filter 0..=100; }
+sheet volume { cell level: i32 = 50 filter clamp: 0..=100; }

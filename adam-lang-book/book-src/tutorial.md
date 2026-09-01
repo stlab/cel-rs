@@ -38,7 +38,9 @@ for how a host application actually drives a parsed sheet.
 
 A sheet with only cells and no relationships is just a struct. What makes Adam interesting
 is the **relationship**: a set of alternative ways to keep a group of cells consistent, any one
-of which the solver may pick at any given moment.
+of which the solver may pick at any given moment. (A `relationship` binding can never derive a
+[`source`](source.md) cell — that's the one kind of cell always left alone as a source; more on
+that in [Chapter 3](source.md).)
 
 The classic example is three numbers related by multiplication (`a * b = c`), where any one of
 the three can be computed from the other two, the same shape as `pixels == inches * resolution`
@@ -51,7 +53,7 @@ from [the introduction](intro.md#why-adam). As a sheet:
 The `relationship` block offers three **bindings**: `c := a * b`, `a := c / b`, and
 `b := c / a`, each an alternative *method* for deriving one cell from the others. Only one
 binding is active at a time; which one is chosen depends on which cells were written most
-recently (see [Chapter 4](relationships.md) for the full rule). A cell's *declaration* counts as
+recently (see [Chapter 5](relationships.md) for the full rule). A cell's *declaration* counts as
 a write for this purpose, so before anything is ever explicitly written, cells declared earlier
 are treated as "staler" than cells declared later. The solver prefers to leave the freshest
 cells alone and derive the stalest one: here, `c`, declared first.
@@ -74,7 +76,7 @@ Only the active branch's relationships participate in that round's solve; every 
 relationships are as if they weren't declared at all. The `_` branch, if present, catches any
 value none of the named branches list, and must be written last.
 
-See [Chapter 5](conditionals.md) for branch types, tuple match subjects, and what happens when
+See [Chapter 6](conditionals.md) for branch types, tuple match subjects, and what happens when
 no branch matches and there's no default.
 
 ## 1.4 Filters: self-correcting cells
@@ -90,9 +92,10 @@ value at the moment it's written. The clamp only takes effect the next time the 
 and it's that corrected value every read of the cell sees from then on.
 
 A filter's bounds don't have to be constants: `0..=max` references another cell, and the clamp
-tracks it live. [Chapter 6](filters.md) covers filters in full, including the precise
+tracks it live. [Chapter 7](filters.md) covers filters in full, including the precise
 source/derived model behind "the cell keeps its own raw value forever, and the filter only ever
-corrects what you *read*."
+corrects what you *read*," and how the same `filter` clause also attaches to an `out`
+declaration.
 
 ## 1.5 Tuples
 
@@ -111,7 +114,7 @@ sheet swap_demo {
 ```
 
 Cells themselves can be tuple-typed too (`cell point: (f64, f64) = (0.0, 0.0);`); see
-[Chapter 2](cells.md) for tuple type syntax and [Chapter 4](relationships.md) for the
+[Chapter 2](cells.md) for tuple type syntax and [Chapter 5](relationships.md) for the
 destructuring-vs-direct-bind distinction.
 
 ## 1.6 Outputs and requirements
@@ -124,9 +127,10 @@ resolves, never enforced by rejecting a write:
 {{#include examples/tutorial/area_with_requirement.adm2}}
 ```
 
-See [Chapter 7](outputs.md) for the full rules: an output's cell is terminal (nothing may write
-it directly), and a failed requirement never stops the sheet from resolving; it's a diagnostic,
-not a gate.
+See [Chapter 8](outputs.md) for the full rules: an output's cell can be read anywhere a plain
+cell can, but nothing may ever write it directly, and a failed requirement never stops the
+sheet from resolving; it's a diagnostic, not a gate. `require` isn't limited to `out`, either —
+see [Chapter 2](cells.md#22-cell-declarations) and [Chapter 3](source.md).
 
 ## 1.7 Comments
 
@@ -142,7 +146,7 @@ sheet image_resize {
 }
 ```
 
-See [Chapter 8](style.md) for the formatter's canonical layout.
+See [Chapter 9](style.md) for the formatter's canonical layout.
 
 ## 1.8 Where to go next
 
