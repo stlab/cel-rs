@@ -19,7 +19,7 @@ new_key_type! {
 /// Type-erased predicate stored inside a [`Requirement`].
 type RequirementFn = Box<dyn Fn(&[&dyn Any]) -> Result<bool, anyhow::Error>>;
 
-/// A single named boolean check over some set of cells, attached to an output.
+/// A single named boolean check over some set of cells, attached to a cell.
 pub struct Requirement {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) input_types: Vec<TypeId>,

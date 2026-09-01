@@ -528,6 +528,11 @@ impl Sheet {
     /// - Any error [`Sheet::add_relationship`] or [`Sheet::add_requirement`] can
     ///   return.
     ///
+    /// - Postcondition: not atomic — if `add_requirement` fails partway through
+    ///   `requirements`, the output cell is left `Out`-kind, `writer` is already
+    ///   registered as its producer, and every requirement before the failing one is
+    ///   already attached; none of this is rolled back on error.
+    ///
     /// - Complexity: O(k + m²×c) where k is the number of requirements, plus the
     ///   cost of `add_relationship` for `writer` alone (m = 1 method, c = cells in
     ///   that method).

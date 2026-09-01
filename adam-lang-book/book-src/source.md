@@ -49,9 +49,11 @@ domain diagnostics, exactly like a `cell` or `out`:
 {{#include examples/source/source_with_a_requirement.adm2}}
 ```
 
-The one thing a `source` cell cannot carry is a `filter` clause: `source_decl`'s grammar (3.1)
-has no `cell_filter` slot at all, unlike `cell_decl` and `out_decl`. A filter's job is to
-correct a value the sheet is willing to treat as *its own* domain constraint; a `source`
-cell's value is definitionally supplied from outside the sheet, so there's nothing for a
-filter to conform it against. See [Chapter 7](filters.md) for `filter` as it applies to `cell`
-and `out`.
+The one thing a `source` cell cannot carry today is a `filter` clause: `source_decl`'s grammar
+(3.1) has no `cell_filter` slot at all, unlike `cell_decl` and `out_decl`. This is a current
+limitation of the DSL grammar, not an inherent property of what a `source` cell is: the
+underlying `adam-rs` runtime's `Sheet::add_filter` already accepts a `Source`-kind cell and
+conforms its value exactly like any other filtered cell. Adding a `filter` clause to
+`source_decl`'s grammar is tracked as
+[issue #167](https://github.com/stlab/cel-rs/issues/167). See [Chapter 7](filters.md) for
+`filter` as it applies to `cell` and `out`.

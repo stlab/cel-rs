@@ -383,7 +383,7 @@ pub struct RequireBlock {
 
 /// `requirement = identifier ":" or_expression ";".`
 ///
-/// `name` is a plain string label passed to `adam_rs::Sheet::add_output`, not a cell
+/// `name` is a plain string label passed to `adam_rs::Sheet::add_requirement`, not a cell
 /// reference — it may coincide with a cell name declared elsewhere in the sheet but doesn't
 /// have to.
 #[derive(Debug, Clone)]
