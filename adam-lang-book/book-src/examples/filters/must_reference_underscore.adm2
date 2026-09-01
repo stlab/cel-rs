@@ -1,1 +1,1 @@
-sheet s { cell x: i32 = 0 filter 5; }
+sheet s { cell x: i32 = 0 filter always_five: 5; }
