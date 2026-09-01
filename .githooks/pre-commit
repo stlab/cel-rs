@@ -2,6 +2,8 @@
 branch=$(git rev-parse --abbrev-ref HEAD)
 if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
     echo "Refusing to commit directly to '$branch'. Create or switch to a feature branch/worktree first."
+    git restore --staged .
+    echo "Unstaged the pending changes so '$branch' doesn't carry them forward; your edits are still on disk."
     exit 1
 fi
 
