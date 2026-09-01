@@ -2,12 +2,7 @@
 branch=$(git rev-parse --abbrev-ref HEAD)
 if [ "$branch" = "main" ] || [ "$branch" = "master" ]; then
     echo "Refusing to commit directly to '$branch'. Create or switch to a feature branch/worktree first."
-    repo_root=$(git rev-parse --show-toplevel)
-    if git rev-parse --verify HEAD >/dev/null 2>&1; then
-        git -C "$repo_root" restore --staged --quiet -- . || echo "Warning: failed to unstage changes."
-    else
-        git -C "$repo_root" read-tree --empty || echo "Warning: failed to clear the index."
-    fi
+    git restore --staged .
     echo "Unstaged the pending changes so '$branch' doesn't carry them forward; your edits are still on disk."
     exit 1
 fi
