@@ -1127,7 +1127,7 @@ impl AdamParser {
             // negated by a leading `-`, matching Rust's own `LiteralPattern` rule. CEL has no
             // constant-expression syntax in pattern position (see
             // https://doc.rust-lang.org/reference/patterns.html), so `0i32 + 1 =>` is rejected
-            // here exactly as it already is by the CST parser's `consume_literal`.
+            // here exactly as it already is by the CST parser's `consume_literal_pattern`.
             let branch_span = ctx.peek_span();
             let segment = self.parse_literal_pattern(ctx)?;
             let (branch_shape, branch_val) = self.eval_segment_boxed(segment)?;

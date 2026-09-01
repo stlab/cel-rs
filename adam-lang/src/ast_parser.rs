@@ -893,6 +893,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_conditional_branch_negating_an_unsigned_literal_is_error() {
+        // `-1u32` has no `cel_parser` unary `-` overload — must be rejected here exactly as the
+        // runtime parser rejects it, not silently accepted into the CST.
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        -1u32 => { relationship { height := width; } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
+    }
+
+    #[test]
     fn parse_conditional_records_an_expression_match_subject() {
         let sheet = AdamAstParser::new()
             .parse_str(

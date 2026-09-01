@@ -3043,9 +3043,12 @@ mod tests {
 
     #[test]
     fn parse_literal_pattern_accepts_a_bare_literal() -> anyhow::Result<()> {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "5i32".parse().unwrap();
         let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
         let mut seg = parser
-            .parse_str("5i32")
+            .parse_literal_pattern()
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         assert_eq!(seg.call0::<i32>()?, 5);
         Ok(())
