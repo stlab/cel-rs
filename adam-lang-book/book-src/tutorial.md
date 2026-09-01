@@ -97,24 +97,20 @@ source/derived model behind "the cell keeps its own raw value forever, and the f
 corrects what you *read*," and how the same `filter` clause also attaches to an `out`
 declaration.
 
-## 1.5 Tuples
+## 1.5 Destructuring
 
-A binding's left-hand side can destructure a tuple-valued expression into several cells at
-once, using the same `(a, b)` syntax Rust uses for tuple patterns:
+A binding's left-hand side can name more than one output cell by parenthesizing it, splitting a
+tuple-valued expression on the right into its parts, one cell per element, using the same
+`(a, b)` syntax Rust uses for tuple patterns:
 
-```text
-sheet swap_demo {
-    cell a: i32 = 1;
-    cell b: i32 = 2;
-
-    relationship {
-        (a, b) := (b, a);
-    }
-}
+```
+{{#include examples/tutorial/destructuring_demo.adm2}}
 ```
 
-Cells themselves can be tuple-typed too (`cell point: (f64, f64) = (0.0, 0.0);`); see
-[Chapter 2](cells.md) for tuple type syntax and [Chapter 5](relationships.md) for the
+Tuple *types* (`cell point: (f64, f64) = (0.0, 0.0);`) are a CEL feature, documented in
+[Chapter 2](cells.md); destructuring is the relationship-binding syntax built on top of them,
+and could one day extend to struct patterns too. See
+[Chapter 5](relationships.md#55-destructuring-bindings) for the full
 destructuring-vs-direct-bind distinction.
 
 ## 1.6 Outputs and requirements
