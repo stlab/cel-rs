@@ -12,7 +12,7 @@
 //! cell_decl          = "cell" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 //! cell_filter        = "filter" identifier ":" or_expression.
 //! cell_type_init     = (":" type_expr ["=" or_expression]) | ("=" or_expression).
-//! source_decl        = "source" identifier cell_type_init [ require_block ] ";".
+//! source_decl        = "source" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 //! type_expr          = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 //! relationship_decl  = "relationship" "{" { binding } "}".
 //! binding            = binding_target ":=" or_expression ";".
