@@ -284,11 +284,11 @@ mod tests {
 
     #[test]
     fn format_edits_formats_a_cell_with_a_filter() {
-        let edits = format_edits("sheet s { cell a:i32=1 filter _; }");
+        let edits = format_edits("sheet s { cell a:i32=1 filter clamp:_; }");
         assert_eq!(edits.len(), 1);
         assert_eq!(
             edits[0].new_text,
-            "sheet s {\n    cell a: i32 = 1 filter _;\n}\n"
+            "sheet s {\n    cell a: i32 = 1 filter clamp: _;\n}\n"
         );
     }
 
@@ -299,11 +299,11 @@ mod tests {
         // cel_parser::fmt::binary_op_level ("unknown operator `range_inclusive`"), crashing
         // adam-lsp's single-threaded server mid-request — which VS Code's format-on-save then
         // waited on forever, indistinguishable from a hang.
-        let edits = format_edits("sheet s { cell a:i32=0 filter 0..=200; }");
+        let edits = format_edits("sheet s { cell a:i32=0 filter clamp:0..=200; }");
         assert_eq!(edits.len(), 1);
         assert_eq!(
             edits[0].new_text,
-            "sheet s {\n    cell a: i32 = 0 filter 0..=200;\n}\n"
+            "sheet s {\n    cell a: i32 = 0 filter clamp: 0..=200;\n}\n"
         );
     }
 
