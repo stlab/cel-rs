@@ -34,9 +34,10 @@ fn source_cannot_be_derived() {
         ))
         .err()
         .unwrap();
-    // The exact wording of this diagnostic is under review (see the crate's own tracking
-    // issue for `Error::InvalidCellKind`'s stale "terminal output" phrasing); this test only
-    // asserts that the sheet is rejected at parse time, not the message text.
+    // `Error::InvalidCellKind`'s Display text is stale for this case (still says "terminal
+    // output", which predates `out` becoming non-terminal and never mentions `source` at all —
+    // see https://github.com/stlab/cel-rs/issues/166), so this test only asserts that the sheet
+    // is rejected at parse time, not the message text.
     let _ = err;
 }
 
