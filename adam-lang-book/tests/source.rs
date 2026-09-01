@@ -42,6 +42,24 @@ fn source_cannot_be_derived() {
 }
 
 #[test]
+fn source_with_a_filter() {
+    let mut parser = adam_lang_book::support::parser();
+    let mut parsed = parser
+        .parse_str(include_str!(
+            "../book-src/examples/source/source_with_a_filter.adm2"
+        ))
+        .unwrap();
+    let level = parsed.cell_names["level"].0;
+    assert_eq!(parsed.filter_name(level), Some("clamp"));
+
+    parsed.write(level, 500_i32).unwrap();
+    assert_eq!(*parsed.read::<i32>(level).unwrap(), 500); // the raw value, unfiltered
+
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<i32>(level).unwrap(), 100); // now conformed
+}
+
+#[test]
 fn source_with_a_requirement() {
     let mut parser = adam_lang_book::support::parser();
     let mut parsed = parser

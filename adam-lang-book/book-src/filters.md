@@ -6,8 +6,8 @@
 cell_filter = "filter" identifier ":" expression.
 ```
 
-A `filter` clause is optional and trails a `cell` or [`out`](outputs.md) declaration's
-type/initializer. Its `expression` is
+A `filter` clause is optional and trails a `cell`, [`source`](source.md), or
+[`out`](outputs.md) declaration's type/initializer. Its `expression` is
 [deduced](expressions.md#44-deduced-dependencies) exactly like a relationship binding's, plus
 one reserved identifier: `_` always refers to the *candidate value being conformed* (of the
 filtered cell's own declared type), never a cell. `_` is reserved inside a filter expression
@@ -106,9 +106,10 @@ claims:
 {{#include examples/filters/filter_on_an_out_cell.adm2}}
 ```
 
-A [`source`](source.md) cell is the one kind a filter cannot attach to: `source_decl`'s grammar
-has no `cell_filter` slot at all, since a source cell's whole purpose is to hold exactly what
-was last supplied from outside the sheet, unmodified — see [Chapter 3](source.md#33-what-source-cells-cant-do).
+A [`source`](source.md) declaration's grammar carries the same optional `cell_filter` clause
+too — see [Chapter 3](source.md#33-a-source-cell-can-be-filtered-too). A `filter` attaches to
+any cell kind (`cell`, `source`, or `out`) exactly the same way; the grammar has no
+per-kind restriction.
 
 ## 7.7 Errors
 

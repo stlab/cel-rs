@@ -33,7 +33,7 @@ sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditiona
 cell_decl          = "cell" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 cell_type_init     = (":" type_expr ["=" expression]) | ("=" expression).
 cell_filter        = "filter" identifier ":" expression.
-source_decl        = "source" identifier cell_type_init [ require_block ] ";".
+source_decl        = "source" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 
 type_expr          = identifier
                     | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
@@ -55,10 +55,9 @@ requirement        = identifier ":" expression ";".
 `as` casts, ranges, closures, function calls) is CEL grammar, defined by `cel-parser`; see
 [Chapter 4](expressions.md#41-expressions-are-cel).
 
-`source_decl` is the one place `cell_filter` doesn't appear: a `source` cell can never carry a
-filter (see [Chapter 3](source.md#33-what-source-cells-cant-do)). `require_block` attaches
-identically to all three of `cell_decl`, `source_decl`, and `out_decl` — `require` has no
-cell-kind restriction.
+`cell_filter` and `require_block` both attach identically to all three of `cell_decl`,
+`source_decl`, and `out_decl` — neither has a cell-kind restriction (see
+[Chapter 3](source.md#33-a-source-cell-can-be-filtered-too)).
 
 A `cell_decl`'s grammar also has a design-level provision for an optional trailing
 `":=" expression` clause (making a `cell` double as a relationship-bound output in one
@@ -86,8 +85,7 @@ initializer and the `cell_filter`/`require_block` clauses shown above exist toda
   element types.
 - `source name: T;` / `source name = expr;` / `source name: T = expr;`: identical rules to the
   three `cell` forms above, evaluated the same way — a `source` declaration is a `cell`
-  declaration in every respect except its fixed `CellKind` (below) and the absence of a
-  `cell_filter` clause.
+  declaration in every respect except its fixed `CellKind` (below).
 - Every cell has a fixed **kind**, assigned once at declaration and never reassigned: a plain
   `cell` may be a planner source or claimed as a method's output, chosen per round; a `source`
   cell is always a source, never claimable as any method's output; an `out` cell is always
@@ -156,8 +154,9 @@ See [Chapter 6](conditionals.md).
 
 ## A.8 Filters
 
-- `cell_filter = "filter" identifier ":" expression`, trailing a `cell_decl` or `out_decl`
-  (never a `source_decl` — see [Chapter 3](source.md#33-what-source-cells-cant-do)). The
+- `cell_filter = "filter" identifier ":" expression`, trailing a `cell_decl`, `source_decl`, or
+  `out_decl` — a filter attaches to any cell kind, with no per-kind restriction (see
+  [Chapter 3](source.md#33-a-source-cell-can-be-filtered-too)). The
   identifier names the filter, surfaced through the host embedding API
   ([A.11](#a11-the-host-embedding-api)); it is not a cell reference. `_` inside the expression
   denotes the candidate value (of the cell's own declared type); every other identifier is a

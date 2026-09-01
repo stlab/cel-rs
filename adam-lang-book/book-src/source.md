@@ -3,15 +3,15 @@
 ## 3.1 Grammar
 
 ```text
-source_decl = "source" identifier cell_type_init [ require_block ] ";".
+source_decl = "source" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 ```
 
 A `source` declaration looks exactly like a [`cell`](cells.md#22-cell-declarations)
-declaration minus the optional `filter` clause: the same `cell_type_init` (a type, an
-initializer, or both), evaluated the same way, at parse time, with no cell scope; the same
-optional trailing `require` block. `source` and `cell` even share one namespace with `out`, so
-declaring `source width` and `cell width` in the same sheet is the same "duplicate cell" error
-two `cell width` declarations would be.
+declaration: the same `cell_type_init` (a type, an initializer, or both), evaluated the same
+way, at parse time, with no cell scope; the same optional trailing `filter` clause and `require`
+block. `source` and `cell` even share one namespace with `out`, so declaring `source width` and
+`cell width` in the same sheet is the same "duplicate cell" error two `cell width` declarations
+would be.
 
 ```
 {{#include examples/source/basic_source.adm2}}
@@ -38,22 +38,24 @@ source in one round and derived in the next, depending on what's been written re
 `source` cell opts out of that entirely: whatever a host last wrote to it (or its own declared
 initializer, before any write) is always its value, unconditionally.
 
-## 3.3 What source cells can't do
+## 3.3 A source cell can be filtered too
 
 A `source` cell is ordinary in every other respect: it can be read anywhere a plain `cell`
 can, written directly at any time (that's the whole point — a `source` cell always reflects
-whatever was last supplied from outside the sheet), and can carry a `require` block for
-domain diagnostics, exactly like a `cell` or `out`:
+whatever was last supplied from outside the sheet), can carry a `require` block for domain
+diagnostics, exactly like a `cell` or `out`:
 
 ```
 {{#include examples/source/source_with_a_requirement.adm2}}
 ```
 
-The one thing a `source` cell cannot carry today is a `filter` clause: `source_decl`'s grammar
-(3.1) has no `cell_filter` slot at all, unlike `cell_decl` and `out_decl`. This is a current
-limitation of the DSL grammar, not an inherent property of what a `source` cell is: the
-underlying `adam-rs` runtime's `Sheet::add_filter` already accepts a `Source`-kind cell and
-conforms its value exactly like any other filtered cell. Adding a `filter` clause to
-`source_decl`'s grammar is tracked as
-[issue #167](https://github.com/stlab/cel-rs/issues/167). See [Chapter 7](filters.md) for
-`filter` as it applies to `cell` and `out`.
+and can carry a [`filter`](filters.md) clause, exactly like a `cell` or `out`: whatever a host
+writes to a filtered `source` cell is conformed the same way a filtered plain `cell`'s value
+is, live, whenever the sheet resolves:
+
+```
+{{#include examples/source/source_with_a_filter.adm2}}
+```
+
+See [Chapter 7](filters.md) for `filter`'s full rules — everything there applies to a `source`
+cell unchanged.
