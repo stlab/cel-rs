@@ -34,7 +34,7 @@ Every Adam source fragment shown in a fenced `text` block is exactly what you'd 
 
 ## Expressions and the standard library
 
-Adam adds a declarative shell (`sheet`, `cell`, `relationship`, `conditional`, `out`,
+Adam adds a declarative shell (`sheet`, `cell`, `source`, `relationship`, `conditional`, `out`,
 `require`, and `filter`) around expressions written in the
 [Common Expression Language](https://github.com/google/cel-spec) (CEL), turning a set of CEL
 expressions into a live, bidirectional constraint graph. See

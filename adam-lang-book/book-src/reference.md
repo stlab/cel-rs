@@ -1,7 +1,7 @@
 # Appendix A: Reference Manual
 
 This appendix is for looking things up, not reading start to finish: it restates the rules
-from Chapters 1–8 in one terse pass, plus the grammar and error messages in full. Where a rule
+from Chapters 1–9 in one terse pass, plus the grammar and error messages in full. Where a rule
 needs justification or an example, the appropriate chapter is linked instead of repeating it
 here.
 
@@ -10,14 +10,14 @@ here.
 An Adam source file is a UTF-8 text file, tokenized as Rust/CEL tokens (via
 `proc_macro2`): identifiers, integer and float literals (with optional type suffixes), string
 literals, and punctuation, with `//`/`/* */` comments and `///`/`//!` doc comments stripped or
-captured as trivia before parsing proper begins. See [Chapter 8](style.md) for comments and
+captured as trivia before parsing proper begins. See [Chapter 9](style.md) for comments and
 [cel-parser's own lexical grammar](../cel_parser/index.html) for literals.
 
-**Keywords**: `sheet`, `cell`, `relationship`, `conditional`, `out`, `require`, `filter`. None
-of these can be used as a cell or sheet name. `_` is not a keyword but is reserved in two
-specific positions: a `conditional`'s default branch (`_ => { ... }`,
-[5.3](conditionals.md#53-the-default-branch)), and inside a `filter` expression (the candidate
-value, [6.1](filters.md#61-grammar)); elsewhere it is an ordinary identifier.
+**Keywords**: `sheet`, `cell`, `source`, `relationship`, `conditional`, `out`, `require`,
+`filter`. None of these can be used as a cell or sheet name. `_` is not a keyword but is
+reserved in two specific positions: a `conditional`'s default branch (`_ => { ... }`,
+[6.3](conditionals.md#63-the-default-branch)), and inside a `filter` expression (the candidate
+value, [7.1](filters.md#71-grammar)); elsewhere it is an ordinary identifier.
 
 **Punctuation**: `:` (type annotation), `=` (cell initializer), `:=` (binding/output body),
 `=>` (conditional branch), `;` (declaration terminator), `,` (list separator), `{ }` (block
@@ -27,11 +27,13 @@ delimiters), `( )` (tuple/grouping delimiters).
 
 ```text
 sheet              = "sheet" identifier "{" { sheet_item } "}".
-sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).
+sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl
+                       | source_decl).
 
-cell_decl          = "cell" identifier cell_type_init [ cell_filter ] ";".
+cell_decl          = "cell" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 cell_type_init     = (":" type_expr ["=" expression]) | ("=" expression).
-cell_filter        = "filter" expression.
+cell_filter        = "filter" identifier ":" expression.
+source_decl        = "source" identifier cell_type_init [ require_block ] ";".
 
 type_expr          = identifier
                     | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
@@ -44,29 +46,35 @@ conditional_decl   = "conditional" expression "{" { conditional_branch } "}".
 conditional_branch = (expression | "_") "=>" "{" { relationship_decl } "}" [ "," ].
 
 out_decl           = "out" identifier [ ":" type_expr ] ":=" expression
-                       [ "require" "{" { requirement } "}" ] ";".
+                       [ cell_filter ] [ require_block ] ";".
+require_block      = "require" "{" { requirement } "}".
 requirement        = identifier ":" expression ";".
 ```
 
 `expression` and everything it expands to (`literal`, `identifier`, operators, `if`/`else`,
 `as` casts, ranges, closures, function calls) is CEL grammar, defined by `cel-parser`; see
-[Chapter 3](expressions.md#31-expressions-are-cel).
+[Chapter 4](expressions.md#41-expressions-are-cel).
+
+`source_decl` is the one place `cell_filter` doesn't appear: a `source` cell can never carry a
+filter (see [Chapter 3](source.md#33-what-source-cells-cant-do)). `require_block` attaches
+identically to all three of `cell_decl`, `source_decl`, and `out_decl` — `require` has no
+cell-kind restriction.
 
 A `cell_decl`'s grammar also has a design-level provision for an optional trailing
 `":=" expression` clause (making a `cell` double as a relationship-bound output in one
 declaration), **not implemented** as of this writing; only the `"=" expression` one-time
-initializer and the `cell_filter` clause shown above exist today.
+initializer and the `cell_filter`/`require_block` clauses shown above exist today.
 
 ## A.3 Sheets and namespaces
 
 - A sheet's own name has no runtime meaning; it is not otherwise referenceable.
-- `cell` and `out` declarations share one namespace. Declaring the same name twice, in any
-  combination of the two, is a "duplicate cell" error.
+- `cell`, `source`, and `out` declarations share one namespace. Declaring the same name twice,
+  in any combination of the three, is a "duplicate cell" error.
 - **No forward references.** An identifier is only recognized as a cell dependency if that
   cell was declared earlier in the same sheet's token order. Referencing an undeclared name is
   an "undeclared cell" error. See [2.6](cells.md#26-names-and-declaration-order).
 
-## A.4 Cells
+## A.4 Cells and source cells
 
 - `cell name: T;`: requires `T` to have a registered default; the cell starts at that default.
 - `cell name = expr;`: `expr` is evaluated once, eagerly, with **no cell scope**: it may not
@@ -76,6 +84,15 @@ initializer and the `cell_filter` clause shown above exist today.
 - A tuple-typed cell (`T` a parenthesized list, [2.5](cells.md#25-tuple-types)) is stored as a
   [`DynamicSequence`](../cel_runtime/dynamic_sequence/struct.DynamicSequence.html) regardless of arity or
   element types.
+- `source name: T;` / `source name = expr;` / `source name: T = expr;`: identical rules to the
+  three `cell` forms above, evaluated the same way — a `source` declaration is a `cell`
+  declaration in every respect except its fixed `CellKind` (below) and the absence of a
+  `cell_filter` clause.
+- Every cell has a fixed **kind**, assigned once at declaration and never reassigned: a plain
+  `cell` may be a planner source or claimed as a method's output, chosen per round; a `source`
+  cell is always a source, never claimable as any method's output; an `out` cell is always
+  derived by its own fixed writer, never `write()`-able. See [Chapter 3](source.md) for
+  `source` and [Chapter 8](outputs.md) for `out`.
 
 See [Chapter 2](cells.md) and [A.5](#a5-the-type-registry) for the built-in type table.
 
@@ -97,7 +114,7 @@ A host application can register additional Rust types under new Adam type names 
 declaration). This is a Rust-level embedding decision made before parsing a sheet, not
 something sheet source itself can do.
 
-`RangeInclusive<T>` recognition for [range filters](filters.md#64-range-filters) is
+`RangeInclusive<T>` recognition for [range filters](filters.md#74-range-filters) is
 pre-registered for exactly the built-in numeric types above and is not extensible per custom
 type in the current design.
 
@@ -110,14 +127,16 @@ type in the current design.
   ranks every cell: later declared is "fresher." The solver tries, freshest first, to leave
   each cell a source (unclaimed by any binding), keeping the attempt only if a valid, acyclic
   assignment still exists across every active relationship. See
-  [Chapter 4](relationships.md#42-strength-who-gets-to-stay-a-source).
+  [Chapter 5](relationships.md#52-strength-who-gets-to-stay-a-source).
 - Resolving the sheet fails with a **conflict** if no valid assignment exists at all, or a
   **cycle** if every valid assignment forms a closed dependency loop with no source anywhere in
-  it. See [4.4](relationships.md#44-when-no-assignment-exists).
+  it. See [5.4](relationships.md#54-when-no-assignment-exists).
 - A binding's left-hand side destructures a tuple result element-wise when parenthesized with
   more than one name, or exactly one name plus a trailing comma; a bare name or a single
   parenthesized name with no comma binds the whole result directly. See
-  [4.5](relationships.md#45-destructuring-bindings).
+  [5.5](relationships.md#55-destructuring-bindings).
+- A `source` cell can never be a binding's output: a `relationship` (or `conditional` branch)
+  naming one as an output is a parse-time error. See [Chapter 3](source.md).
 - Whether a cell was left unclaimed (a source) by the last resolution is queryable by a host;
   see [Appendix A.11](#a11-the-host-embedding-api).
 
@@ -133,14 +152,17 @@ type in the current design.
 - A branch body holds only `relationship` declarations: no `cell` declarations, no nested
   `conditional`.
 
-See [Chapter 5](conditionals.md).
+See [Chapter 6](conditionals.md).
 
 ## A.8 Filters
 
-- `cell_filter = "filter" expression`, trailing a `cell_decl`. `_` inside it denotes the
-  candidate value (of the cell's own declared type); every other identifier is a deduced
-  dependency. The expression must reference `_` at least once (unless it's a range expression,
-  `lo..=hi`, which is exempt) and must produce the filtered cell's own type.
+- `cell_filter = "filter" identifier ":" expression`, trailing a `cell_decl` or `out_decl`
+  (never a `source_decl` — see [Chapter 3](source.md#33-what-source-cells-cant-do)). The
+  identifier names the filter, surfaced through the host embedding API
+  ([A.11](#a11-the-host-embedding-api)); it is not a cell reference. `_` inside the expression
+  denotes the candidate value (of the cell's own declared type); every other identifier is a
+  deduced dependency. The expression must reference `_` at least once (unless it's a range
+  expression, `lo..=hi`, which is exempt) and must produce the filtered cell's own type.
 - **Writing a cell never applies a filter.** A filter is applied live, each time the sheet
   resolves, against the cell's current value.
 - A filtered cell keeps a raw **source** value (last written, untouched by any filter forever)
@@ -149,22 +171,28 @@ See [Chapter 5](conditionals.md).
   otherwise.
 - A filter attached to a cell a relationship currently claims (a *derived* cell that round) is
   diagnostic-only: it never corrects the value, only flags a mismatch, queryable by a host; see
-  [Appendix A.11](#a11-the-host-embedding-api).
-- At most one filter per cell; a filter cannot attach to an output cell; a filter cannot (yet)
-  attach to a tuple-typed cell.
+  [Appendix A.11](#a11-the-host-embedding-api). The same is true, unconditionally, of a filter
+  on an `out` cell, since an `out` cell is always derived.
+- At most one filter per cell; a filter cannot (yet) attach to a tuple-typed cell.
 
-See [Chapter 6](filters.md) for the full model and worked examples.
+See [Chapter 7](filters.md) for the full model and worked examples.
 
 ## A.9 Outputs and requirements
 
-- `out name := expr;` declares a new, terminal cell: nothing may ever write it directly, not
-  a host write, not a `relationship`, not another `out`.
-- `require { name: expr; ... }` attaches named boolean checks, each with its own deduced
-  dependencies. A failing requirement never stops the sheet from resolving, or the output's own
-  value from being computed: it's reported as a diagnostic, nothing more, queryable by a host
-  (see [Appendix A.11](#a11-the-host-embedding-api)).
+- `out name := expr;` declares a new cell, always derived by `expr` and never writable
+  directly — not by a host write, not a `relationship`, not another `out` — but otherwise an
+  ordinary, freely-referenceable cell: any later declaration may read it by name exactly like
+  any other already-declared cell. See [Chapter 8](outputs.md).
+- `require { name: expr; ... }` attaches named boolean checks. Unlike `filter`, `require` is
+  not tied to `out`: a `require` block may trail a `cell`, `source`, or `out` declaration's
+  initializer, with the same meaning in every case. Each `requirement`'s own dependencies are
+  deduced separately from its declaration's own expression. A failing requirement never stops
+  the sheet from resolving, or its cell's own value from being computed: it's reported as a
+  diagnostic, nothing more, queryable by a host (see
+  [Appendix A.11](#a11-the-host-embedding-api)).
 
-See [Chapter 7](outputs.md).
+See [Chapter 8](outputs.md#83-requirements-diagnostics-not-gates) and [Chapter 2](cells.md#22-cell-declarations)
+for `require` on a plain `cell`, and [Chapter 3](source.md) for `require` on a `source` cell.
 
 ## A.10 Error messages
 
@@ -176,9 +204,10 @@ Selected messages, verbatim:
 
 | Message (abbreviated) | Cause |
 |---|---|
-| `duplicate cell \`name\`` | a `cell`/`out` name reused |
+| `duplicate cell \`name\`` | a `cell`/`source`/`out` name reused |
 | `undeclared cell \`name\`` | a name referenced before its declaration |
 | `expected \`:\` or \`=\` in cell declaration` | a `cell` with neither a type nor an initializer |
+| `expected \`:\` or \`=\` in source declaration` | a `source` with neither a type nor an initializer |
 | `type \`T\` has no default; provide \`= ...\`` | a bare `: T` cell where `T` has no `Default` |
 | `type mismatch: expected \`T\`, got \`U\`` | a declared type disagreeing with an inferred one |
 | `expression produced no value` | a body expression that isn't a value-producing CEL expression |
@@ -207,9 +236,10 @@ sheet is documented by the crates themselves:
   built with; this book's own examples install `cel-std` via `support::parser` (see
   `adam-lang-book`'s own crate source).
 - [`Sheet`](../adam_rs/sheet/struct.Sheet.html): `read`, `write`, `propagate`, `is_source`,
-  `filter_*`, `output_*`, and every other runtime operation this book has used throughout.
+  `cell_kind`, `filter_*`, `cell_requirements`, `cell_requirements_valid`,
+  `violated_requirements`, and every other runtime operation this book has used throughout.
 - [`AdamAstParser`](../adam_lang/struct.AdamAstParser.html) /
   [`format_sheet`](../adam_lang/fn.format_sheet.html) /
   [`check_sheet`](../adam_lang/fn.check_sheet.html): the span-carrying CST, formatter, and
-  static type checker behind the language server and `adam fmt` ([Chapter 8](style.md)),
+  static type checker behind the language server and `adam fmt` ([Chapter 9](style.md)),
   distinct from `AdamParser`'s eager compile-to-`Sheet` path.
