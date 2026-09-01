@@ -454,12 +454,19 @@ pub struct DefaultBranch {
     pub span: ExprSpan,
 }
 
-/// `conditional_branch = literal "=>" "{" { relationship_decl } "}" [ "," ].`
+/// `conditional_branch = literal_pattern "=>" "{" { relationship_decl } "}" [ "," ].`
+/// `literal_pattern = ["-"] literal.`
 #[derive(Debug, Clone)]
 pub struct ConditionalBranch {
-    /// The branch's unresolved match literal.
+    /// The branch's unresolved match literal, always stored unsigned; see [`Self::negated`]
+    /// for whether a leading `-` applies to it.
     pub literal: Literal,
-    /// The literal token's span.
+    /// Whether the branch key is negated by a leading `-` (Rust's own `LiteralPattern` rule —
+    /// see <https://doc.rust-lang.org/reference/patterns.html#literal-patterns>). A `-`, if
+    /// present, precedes [`Self::literal_span`] and is covered by [`Self::span`]'s start, but
+    /// not by `literal_span` itself.
+    pub negated: bool,
+    /// The literal token's own span (never includes a leading `-`; see [`Self::negated`]).
     pub literal_span: ExprSpan,
     /// The branch's relationships, in declaration order.
     pub relationships: Vec<RelationshipDecl>,

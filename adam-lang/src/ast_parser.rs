@@ -443,7 +443,7 @@ impl AdamAstParser {
                 });
                 break; // default branch is always last
             }
-            let (lit, lit_span) = cursor.consume_literal()?;
+            let (negated, lit, pattern_start, lit_span) = cursor.consume_literal_pattern()?;
             cursor.expect_punct("=>")?;
             let branch_open = cursor.expect_open_brace()?;
             let relationships = self.parse_branch_relationships(cursor)?;
@@ -451,6 +451,7 @@ impl AdamAstParser {
             cursor.consume_punct(",");
             branches.push(ast::ConditionalBranch {
                 literal: lit,
+                negated,
                 literal_span: point(lit_span),
                 relationships,
                 leading_comment: None,
@@ -459,7 +460,7 @@ impl AdamAstParser {
                 blank_line_before_close: false,
                 open_brace_span: point(branch_open),
                 span: ast::ExprSpan {
-                    start: lit_span,
+                    start: pattern_start,
                     end: close,
                 },
             });
@@ -850,7 +851,82 @@ mod tests {
         };
         assert!(matches!(&cond.match_expr, Expr::Ident { name, .. } if name == "mode"));
         assert_eq!(cond.branches.len(), 1);
+        assert!(!cond.branches[0].negated);
         assert!(cond.default.is_some());
+    }
+
+    #[test]
+    fn parse_conditional_records_a_negated_literal_branch_key() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        -1i32 => { relationship { height := width; } },
+                        _ => { relationship { height := width; } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        let ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        assert_eq!(cond.branches.len(), 1);
+        assert!(cond.branches[0].negated);
+    }
+
+    #[test]
+    fn parse_conditional_branch_dash_not_followed_by_a_literal_is_error() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        -width => { relationship { height := width; } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
+    }
+
+    #[test]
+    fn parse_conditional_branch_literal_with_invalid_suffix_is_error() {
+        // `10xyz` isn't a `cel_parser`-recognized literal (unrecognized integer suffix) — must
+        // be rejected here exactly as the runtime parser rejects it, not silently accepted into
+        // the CST and later round-tripped by `fmt`.
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        10xyz => { relationship { height := width; } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
+    }
+
+    #[test]
+    fn parse_conditional_branch_negating_an_unsigned_literal_is_error() {
+        // `-1u32` has no `cel_parser` unary `-` overload — must be rejected here exactly as the
+        // runtime parser rejects it, not silently accepted into the CST.
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        -1u32 => { relationship { height := width; } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
     }
 
     #[test]

@@ -320,6 +320,43 @@ impl TokenCursor {
         unreachable!("peeked literal, advance must return it")
     }
 
+    /// Consumes a `literal_pattern = ["-"] literal.` — Rust's own `LiteralPattern` grammar rule
+    /// (a bare literal, or one directly negated by a leading `-`; see
+    /// <https://doc.rust-lang.org/reference/patterns.html#literal-patterns>). The literal
+    /// itself is returned unsigned; the leading `-`, if any, is reported separately since a
+    /// `Literal` token never carries a sign.
+    ///
+    /// Returns `(negated, literal, pattern_span, literal_span)`: `pattern_span` is the span of
+    /// the leading `-` when `negated`, otherwise equal to `literal_span`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if a leading `-` is not followed by a literal, if there is no literal at
+    /// all, if the literal itself isn't one `cel_parser` can represent (unrecognized numeric
+    /// suffix, or a value out of range for its width), or if a leading `-` negates a literal
+    /// `cel_parser` has no unary `-` overload for (any non-numeric literal, or an integer
+    /// literal with an unsigned suffix) — mirroring the runtime parser's
+    /// `cel_parser::Parser::parse_literal_pattern`, which rejects the same cases via
+    /// `push_literal_token`/its operator table.
+    pub(crate) fn consume_literal_pattern(&mut self) -> Result<(bool, Literal, Span, Span)> {
+        let minus_span = self.peek_span();
+        let negated = self.consume_punct("-");
+        let (lit, lit_span) = self.consume_literal()?;
+        cel_parser::validate_literal(&lit)?;
+        if negated && !literal_can_be_negated(&lit) {
+            return Err(ParseError::new(
+                "literal pattern: `-` can only negate a signed integer or float literal",
+                minus_span,
+            ));
+        }
+        Ok((
+            negated,
+            lit,
+            if negated { minus_span } else { lit_span },
+            lit_span,
+        ))
+    }
+
     /// Consumes a leading run of consecutive `Token::DocComment` tokens matching `inner`,
     /// returning their joined text (`\n`-separated) and the first token's span, or `None` if the
     /// next token isn't a matching doc comment.
@@ -474,6 +511,24 @@ impl TokenCursor {
     }
 }
 
+/// Returns whether `cel_parser` registers a unary `-` overload for `lit`'s type — the same
+/// numeric-only, signed-only rule `cel_parser::Parser::parse_literal_pattern` enforces via its
+/// operator table (see
+/// `builtin_operand_types_includes_unary_negation_but_only_for_signed_and_float_types` in
+/// `cel_parser::op_table`): any float literal, or an integer literal with no suffix (defaults to
+/// `i32`) or an explicitly signed suffix. An integer literal with an unsigned suffix, and every
+/// non-numeric literal (bool, string, char, byte), has no such overload.
+fn literal_can_be_negated(lit: &Literal) -> bool {
+    match lit {
+        Literal::Int(int) => !matches!(
+            int.suffix(),
+            "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+        ),
+        Literal::Float(_) => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +585,50 @@ mod tests {
         let stream = proc_macro2::TokenStream::from_str("").unwrap();
         let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
         assert!(cursor.at_close_paren());
+    }
+
+    #[test]
+    fn consume_literal_pattern_accepts_a_bare_literal() {
+        let stream = proc_macro2::TokenStream::from_str("5i32").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        let (negated, ..) = cursor.consume_literal_pattern().unwrap();
+        assert!(!negated);
+    }
+
+    #[test]
+    fn consume_literal_pattern_accepts_a_negated_signed_integer() {
+        let stream = proc_macro2::TokenStream::from_str("-5i32").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        let (negated, ..) = cursor.consume_literal_pattern().unwrap();
+        assert!(negated);
+    }
+
+    #[test]
+    fn consume_literal_pattern_accepts_a_negated_unsuffixed_integer() {
+        let stream = proc_macro2::TokenStream::from_str("-5").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        assert!(cursor.consume_literal_pattern().is_ok());
+    }
+
+    #[test]
+    fn consume_literal_pattern_accepts_a_negated_float() {
+        let stream = proc_macro2::TokenStream::from_str("-1.5f64").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        assert!(cursor.consume_literal_pattern().is_ok());
+    }
+
+    #[test]
+    fn consume_literal_pattern_rejects_a_negated_unsigned_integer() {
+        let stream = proc_macro2::TokenStream::from_str("-5u32").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        assert!(cursor.consume_literal_pattern().is_err());
+    }
+
+    #[test]
+    fn consume_literal_pattern_rejects_a_negated_bool() {
+        let stream = proc_macro2::TokenStream::from_str("-true").unwrap();
+        let mut cursor = TokenCursor::new(LexLexer::new(stream.into_iter()).peekable());
+        assert!(cursor.consume_literal_pattern().is_err());
     }
 
     #[test]
