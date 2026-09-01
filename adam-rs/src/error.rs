@@ -106,10 +106,7 @@ impl std::fmt::Display for Error {
             ),
             Error::InvalidConditional => write!(f, "conditional is structurally invalid"),
             Error::InvalidOutput => write!(f, "output is structurally invalid"),
-            Error::InvalidCellKind => write!(
-                f,
-                "cell belongs to a terminal output and cannot be used as an input or written directly"
-            ),
+            Error::InvalidCellKind => write!(f, "cell's kind does not permit this operation"),
             Error::InvalidFilter => write!(f, "filter is structurally invalid"),
             Error::InvalidRequirement => write!(f, "requirement is structurally invalid"),
             Error::FilterCycle => write!(
@@ -257,8 +254,16 @@ mod tests {
     }
 
     #[test]
-    fn invalid_cell_kind_display_contains_terminal() {
-        assert!(Error::InvalidCellKind.to_string().contains("terminal"));
+    fn invalid_cell_kind_display_contains_kind() {
+        assert!(Error::InvalidCellKind.to_string().contains("kind"));
+    }
+
+    // Regression guard for https://github.com/stlab/cel-rs/issues/166: the message used to
+    // claim the cell "belongs to a terminal output", which stopped being true once `out` cells
+    // became usable as inputs, and never covered the `Source`-kind case at all.
+    #[test]
+    fn invalid_cell_kind_display_does_not_mention_terminal() {
+        assert!(!Error::InvalidCellKind.to_string().contains("terminal"));
     }
 
     #[test]

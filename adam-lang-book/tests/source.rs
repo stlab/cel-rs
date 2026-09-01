@@ -34,10 +34,10 @@ fn source_cannot_be_derived() {
         ))
         .err()
         .unwrap();
-    // `Error::InvalidCellKind`'s Display text is stale for this case (still says "terminal
-    // output", which predates `out` becoming non-terminal and never mentions `source` at all —
-    // see https://github.com/stlab/cel-rs/issues/166), so this test only asserts that the sheet
-    // is rejected at parse time, not the message text.
+    // `Error::InvalidCellKind`'s Display text was fixed in
+    // https://github.com/stlab/cel-rs/issues/166 to a single kind-agnostic message, so it no
+    // longer carries case-specific detail worth asserting here; this test only checks that the
+    // sheet is rejected at parse time.
     let _ = err;
 }
 
