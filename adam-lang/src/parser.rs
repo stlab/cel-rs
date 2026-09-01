@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 
-use adam_rs::{CellId, MatchExpr, Method, OutputId, RelationshipId, Requirement, Sheet};
+use adam_rs::{CellId, MatchExpr, Method, RelationshipId, Requirement, Sheet};
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Token};
 use cel_parser::{CELParser, OpLookup, ParseError};
 use cel_runtime::DynSegment;
@@ -40,9 +40,10 @@ pub struct ParsedSheet {
     pub sheet: Sheet,
     /// Cell name → `(CellId, TypeShape)`, in declaration order.
     pub cell_names: IndexMap<String, (CellId, TypeShape)>,
-    /// Output name → `OutputId`, in declaration order — parity with `cell_names`, for callers
-    /// that need to look up `Sheet::output_valid`/`Sheet::violated_requirements` by name.
-    pub output_names: IndexMap<String, OutputId>,
+    /// Output name → `CellId`, in declaration order — parity with `cell_names`, for callers
+    /// that need to look up `Sheet::cell_requirements_valid`/`Sheet::violated_requirements` by
+    /// name.
+    pub output_names: IndexMap<String, CellId>,
 }
 
 impl std::ops::Deref for ParsedSheet {
@@ -69,9 +70,9 @@ struct ParseContext {
     /// Maps cell name → (CellId, TypeShape), in declaration order, for method and
     /// conditional compilation and for exposing to callers via `ParsedSheet`.
     cell_names: IndexMap<String, (CellId, TypeShape)>,
-    /// Maps output name → `OutputId`, in declaration order, for exposing to callers via
+    /// Maps output name → `CellId`, in declaration order, for exposing to callers via
     /// `ParsedSheet`.
-    output_names: IndexMap<String, OutputId>,
+    output_names: IndexMap<String, CellId>,
 }
 
 impl std::ops::Deref for ParseContext {
@@ -178,7 +179,8 @@ impl AdamParser {
         Ok(())
     }
 
-    /// `sheet_item = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).`
+    /// `sheet_item = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl
+    /// | source_decl).`
     fn parse_sheet_item(&mut self, ctx: &mut ParseContext) -> Result<()> {
         let _ = ctx.consume_doc_comment_run(false); // outer `///` docs (ignored at runtime)
         match ctx.peek_token() {
@@ -188,8 +190,9 @@ impl AdamParser {
             }
             Some(Token::Identifier(id)) if id == "conditional" => self.parse_conditional_decl(ctx),
             Some(Token::Identifier(id)) if id == "out" => self.parse_out_decl(ctx),
+            Some(Token::Identifier(id)) if id == "source" => self.parse_source_decl(ctx),
             Some(tok) => Err(ParseError::new(
-                "expected `cell`, `relationship`, `conditional`, or `out`",
+                "expected `cell`, `relationship`, `conditional`, `out`, or `source`",
                 tok.span(),
             )),
             None => Err(ParseError::new(
@@ -199,7 +202,8 @@ impl AdamParser {
         }
     }
 
-    /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] ";".`
+    /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] [ "require" "{" {
+    /// requirement } "}" ] ";".`
     ///
     /// `cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).`
     fn parse_cell_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
@@ -254,33 +258,148 @@ impl AdamParser {
             None
         };
 
+        // Inserted before the `require` block is parsed (unlike `filter`, parsed just above with
+        // `name` not yet in `ctx.cell_names`) so a requirement can reference the cell's own name
+        // — e.g. `require { positive: x > 0; }` — exactly as `parse_out_decl`'s `require` block
+        // can already reference its own out cell's name.
+        ctx.cell_names.insert(name.clone(), (cell_id, shape));
+
+        let require_names_and_reqs: Vec<(String, Requirement)> = if ctx.is_keyword("require") {
+            ctx.expect_open_brace()?;
+            let mut reqs = Vec::new();
+            while !ctx.at_close_brace() {
+                reqs.push(self.parse_requirement(ctx)?);
+            }
+            ctx.expect_close_brace()?;
+            reqs
+        } else {
+            Vec::new()
+        };
+
         ctx.expect_punct(";")?;
-        ctx.cell_names.insert(name, (cell_id, shape));
-        if let Some(filter) = filter {
+        if let Some((filter_name, filter)) = filter {
             ctx.sheet
-                .add_filter(cell_id, filter)
+                .add_filter(cell_id, filter_name, filter)
+                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+        }
+        for (req_name, requirement) in require_names_and_reqs {
+            ctx.sheet
+                .add_requirement(cell_id, req_name, requirement)
                 .map_err(|e| ParseError::new(e.to_string(), name_span))?;
         }
         Ok(())
     }
 
-    /// `cell_filter = "filter" expression.`
+    /// `source_decl = "source" identifier cell_type_init [ cell_filter ] [ "require" "{" {
+    /// requirement } "}" ] ";".`
+    ///
+    /// `cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).`
+    ///
+    /// Mirrors [`Self::parse_cell_decl`] exactly — the declared cell is added via
+    /// [`Sheet::add_source`] instead of [`Sheet::add_cell`], so it is fixed as a planner source
+    /// and can never be claimed as a relationship's output.
+    fn parse_source_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
+        ctx.is_keyword("source"); // consume
+        let (name, name_span) = ctx.consume_ident()?;
+        if ctx.cell_names.contains_key(&name) {
+            return Err(ParseError::new(
+                format!("duplicate cell `{name}`"),
+                name_span,
+            ));
+        }
+
+        let declared_shape: Option<TypeShape> = if ctx.consume_punct(":") {
+            let type_expr = self.parse_type_expr(ctx)?;
+            Some(
+                self.types
+                    .resolve(&type_expr)
+                    .map_err(|(msg, span)| ParseError::new(msg, span))?,
+            )
+        } else {
+            None
+        };
+
+        let has_initializer = ctx.consume_punct("=");
+        let (shape, cell_id) = if has_initializer {
+            let segment = self.parse_cel_expression(ctx)?;
+            let (actual_shape, cell_id) = self.build_source_cell_from_segment(segment, ctx)?;
+            if let Some(declared) = &declared_shape
+                && declared != &actual_shape
+            {
+                return Err(ParseError::new(
+                    format!(
+                        "source `{name}`: type mismatch: expected `{}`, got `{}`",
+                        self.types.display_name(declared),
+                        self.types.display_name(&actual_shape)
+                    ),
+                    name_span,
+                ));
+            }
+            (actual_shape, cell_id)
+        } else {
+            let declared = declared_shape.ok_or_else(|| {
+                ParseError::new("expected `:` or `=` in source declaration", name_span)
+            })?;
+            let cell_id = self.build_default_source_cell(&declared, name_span, ctx)?;
+            (declared, cell_id)
+        };
+
+        let filter = if ctx.is_keyword("filter") {
+            Some(self.parse_cell_filter(ctx, &name, name_span, &shape)?)
+        } else {
+            None
+        };
+
+        // Inserted before the `require` block is parsed so a requirement can reference the
+        // cell's own name — e.g. `require { positive: x > 0; }` — exactly as `parse_cell_decl`.
+        ctx.cell_names.insert(name.clone(), (cell_id, shape));
+
+        let require_names_and_reqs: Vec<(String, Requirement)> = if ctx.is_keyword("require") {
+            ctx.expect_open_brace()?;
+            let mut reqs = Vec::new();
+            while !ctx.at_close_brace() {
+                reqs.push(self.parse_requirement(ctx)?);
+            }
+            ctx.expect_close_brace()?;
+            reqs
+        } else {
+            Vec::new()
+        };
+
+        ctx.expect_punct(";")?;
+        if let Some((filter_name, filter)) = filter {
+            ctx.sheet
+                .add_filter(cell_id, filter_name, filter)
+                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+        }
+        for (req_name, requirement) in require_names_and_reqs {
+            ctx.sheet
+                .add_requirement(cell_id, req_name, requirement)
+                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+        }
+        Ok(())
+    }
+
+    /// `cell_filter = "filter" identifier ":" expression.`
     ///
     /// Builds an [`adam_rs::Filter`] from a single deduced expression: `_` denotes the candidate
     /// value being conformed (of `declared_shape`'s type); every other identifier that names an
     /// already-declared cell is a deduced dependency, exactly as [`Self::parse_deduced_expr`]
     /// resolves them for a `relationship` binding or `out` declaration — see
-    /// [`Self::parse_filter_expr`]. `declared_shape` is the filtered cell's own declared type,
-    /// already resolved by the caller in [`parse_cell_decl`]. The filtered cell's own `CellId` is
-    /// not needed here: the caller attaches the returned `Filter` to it afterwards, via
-    /// `Sheet::add_filter`.
+    /// [`Self::parse_filter_expr`]. `cell_name`/`cell_span`/`declared_shape` describe the
+    /// *filtered cell* (for error-message context and the candidate value's type), already
+    /// resolved by the caller — [`Self::parse_cell_decl`], [`Self::parse_source_decl`], or
+    /// [`Self::parse_out_decl`] — unrelated to the filter's own name, which is consumed here (as
+    /// `identifier ":"`, immediately after the `filter` keyword) and
+    /// returned alongside the built `Filter`. The filtered cell's own `CellId` is not needed
+    /// here: the caller attaches the returned `Filter` to it afterwards, via `Sheet::add_filter`.
     ///
     /// # Errors
-    /// Returns `Err` if `declared_shape` is a tuple (not yet supported by this builder), if an
-    /// identifier inside the expression names neither `_` nor an already-declared cell, if `_` is
-    /// never referenced, if the expression's inferred type doesn't match `declared_shape`, or, if
-    /// the expression is `RangeInclusive`-typed, if its element type doesn't match
-    /// `declared_shape`.
+    /// Returns `Err` if no `identifier ":"` follows the `filter` keyword, if `declared_shape` is
+    /// a tuple (not yet supported by this builder), if an identifier inside the expression names
+    /// neither `_` nor an already-declared cell, if `_` is never referenced, if the expression's
+    /// inferred type doesn't match `declared_shape`, or, if the expression is
+    /// `RangeInclusive`-typed, if its element type doesn't match `declared_shape`.
     ///
     /// - Complexity: O(m) in the number of distinct cell identifiers the expression references,
     ///   for this method's own bookkeeping (on top of the expression's own parse/compile cost).
@@ -290,7 +409,10 @@ impl AdamParser {
         cell_name: &str,
         cell_span: Span,
         declared_shape: &TypeShape,
-    ) -> Result<adam_rs::Filter> {
+    ) -> Result<(String, adam_rs::Filter)> {
+        let (filter_name, _filter_name_span) = ctx.consume_ident()?;
+        ctx.expect_punct(":")?;
+
         if matches!(declared_shape, TypeShape::Tuple(_)) {
             return Err(ParseError::new(
                 format!("cell `{cell_name}`: filter on a tuple-typed cell is not yet supported"),
@@ -342,14 +464,17 @@ impl AdamParser {
             let clamp_fn = range_shape.clamp_fn;
             let bounds_fn = range_shape.bounds_fn;
 
-            return Ok(adam_rs::Filter::range(
-                value_type_id,
-                arg_ids,
-                arg_type_ids,
-                move |value, args| clamp_fn(&mut clamp_segment.borrow_mut(), value, args),
-                move |args| {
-                    bounds_fn(&mut bounds_segment.borrow_mut(), placeholder.as_ref(), args).ok()
-                },
+            return Ok((
+                filter_name,
+                adam_rs::Filter::range(
+                    value_type_id,
+                    arg_ids,
+                    arg_type_ids,
+                    move |value, args| clamp_fn(&mut clamp_segment.borrow_mut(), value, args),
+                    move |args| {
+                        bounds_fn(&mut bounds_segment.borrow_mut(), placeholder.as_ref(), args).ok()
+                    },
+                ),
             ));
         }
 
@@ -382,16 +507,14 @@ impl AdamParser {
         // `DynClosure::call_boxed`'s `&self` the old closure-literal path used.
         let segment = RefCell::new(segment);
 
-        Ok(adam_rs::Filter::new(
-            value_type_id,
-            arg_ids,
-            arg_type_ids,
-            move |value, args| {
+        Ok((
+            filter_name,
+            adam_rs::Filter::new(value_type_id, arg_ids, arg_type_ids, move |value, args| {
                 let mut call_args: Vec<&dyn Any> = Vec::with_capacity(1 + args.len());
                 call_args.push(value);
                 call_args.extend_from_slice(args);
                 call_fn(&mut segment.borrow_mut(), &call_args)
-            },
+            }),
         ))
     }
 
@@ -525,6 +648,74 @@ impl AdamParser {
                     .default_dynamic_sequence(shape)
                     .map_err(|msg| ParseError::new(msg, span))?;
                 Ok(ctx.sheet.add_cell(seq))
+            }
+        }
+    }
+
+    /// Evaluates `segment` via [`eval_segment_boxed`](Self::eval_segment_boxed) and adds a
+    /// matching *source* cell to `ctx.sheet` (see [`Sheet::add_source`]), using the registered
+    /// `add_source_fn` for a `TypeShape::Named` result, or `Sheet::add_source::<DynamicSequence>`
+    /// directly for a `TypeShape::Tuple` result. Mirrors
+    /// [`build_cell_from_segment`](Self::build_cell_from_segment) exactly, routed through
+    /// `Sheet::add_source` instead of `Sheet::add_cell`.
+    ///
+    /// - Precondition: see [`eval_segment_boxed`](Self::eval_segment_boxed).
+    ///
+    /// # Errors
+    /// See [`eval_segment_boxed`](Self::eval_segment_boxed).
+    fn build_source_cell_from_segment(
+        &self,
+        segment: DynSegment,
+        ctx: &mut ParseContext,
+    ) -> Result<(TypeShape, CellId)> {
+        let (shape, boxed) = self.eval_segment_boxed(segment)?;
+        let cell_id = match &shape {
+            TypeShape::Named(type_id) => {
+                let entry = self.types.entry_by_type_id(*type_id).expect("registered");
+                (entry.add_source_fn)(&mut ctx.sheet, boxed)
+            }
+            TypeShape::Tuple(_) => {
+                let seq = *boxed
+                    .downcast::<cel_runtime::DynamicSequence>()
+                    .expect("eval_segment_boxed: a Tuple shape always boxes a DynamicSequence");
+                ctx.sheet.add_source(seq)
+            }
+        };
+        Ok((shape, cell_id))
+    }
+
+    /// Builds a default-valued *source* cell for `shape` (scalar or tuple, recursively), adding
+    /// it to `ctx.sheet` (see [`Sheet::add_source`]). Mirrors
+    /// [`build_default_cell`](Self::build_default_cell) exactly, routed through
+    /// `Sheet::add_source` instead of `Sheet::add_cell`.
+    ///
+    /// # Errors
+    /// Returns `Err` naming the type/leaf that has no registered default.
+    fn build_default_source_cell(
+        &self,
+        shape: &TypeShape,
+        span: Span,
+        ctx: &mut ParseContext,
+    ) -> Result<CellId> {
+        match shape {
+            TypeShape::Named(type_id) => {
+                let entry = self.types.entry_by_type_id(*type_id).expect(
+                    "build_default_source_cell: type registered (resolved via TypeRegistry)",
+                );
+                let default_fn = entry.default_fn.ok_or_else(|| {
+                    ParseError::new(
+                        format!("type `{}` has no default; provide `= ...`", entry.type_name),
+                        span,
+                    )
+                })?;
+                Ok((entry.add_source_fn)(&mut ctx.sheet, default_fn()))
+            }
+            TypeShape::Tuple(_) => {
+                let seq = self
+                    .types
+                    .default_dynamic_sequence(shape)
+                    .map_err(|msg| ParseError::new(msg, span))?;
+                Ok(ctx.sheet.add_source(seq))
             }
         }
     }
@@ -1010,8 +1201,8 @@ impl AdamParser {
         Ok(rel_ids)
     }
 
-    /// `out_decl = "out" identifier [ ":" type_expr ] ":=" expression [ "require" "{" {
-    /// requirement } "}" ] ";".`
+    /// `out_decl = "out" identifier [ ":" type_expr ] ":=" expression [ cell_filter ] [ "require"
+    /// "{" { requirement } "}" ] ";".`
     fn parse_out_decl(&mut self, ctx: &mut ParseContext) -> Result<()> {
         ctx.is_keyword("out"); // consume
         let (name, name_span) = ctx.consume_ident()?;
@@ -1073,6 +1264,13 @@ impl AdamParser {
         };
 
         let cell_id = self.build_default_cell(&out_shape, name_span, ctx)?;
+
+        let filter = if ctx.is_keyword("filter") {
+            Some(self.parse_cell_filter(ctx, &name, name_span, &out_shape)?)
+        } else {
+            None
+        };
+
         ctx.cell_names
             .insert(name.clone(), (cell_id, out_shape.clone()));
 
@@ -1116,11 +1314,16 @@ impl AdamParser {
             .zip(requirements)
             .collect();
 
-        let output_id = ctx
+        let out_cell = ctx
             .sheet
-            .add_output(writer, named_requirements)
+            .add_out(writer, named_requirements)
             .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
-        ctx.output_names.insert(name, output_id);
+        if let Some((filter_name, filter)) = filter {
+            ctx.sheet
+                .add_filter(out_cell, filter_name, filter)
+                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+        }
+        ctx.output_names.insert(name, out_cell);
 
         Ok(())
     }
@@ -1553,11 +1756,62 @@ mod tests {
     }
 
     #[test]
+    fn parse_source_decl_registers_a_source_kind_cell() {
+        let sheet = parser()
+            .parse_str("sheet s { source width: i32 = 4; }")
+            .unwrap();
+        let (width, _) = sheet.cell_names["width"];
+        assert_eq!(sheet.cell_kind(width), Some(adam_rs::CellKind::Source));
+    }
+
+    #[test]
+    fn parse_source_decl_requires_colon_or_equals() {
+        let result = parser().parse_str("sheet s { source width; }");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_cell_decl_with_a_require_block_attaches_requirements() {
+        let sheet = parser()
+            .parse_str("sheet s { cell x: i32 = 5 require { positive: x > 0; }; }")
+            .unwrap();
+        let (x, _) = sheet.cell_names["x"];
+        assert_eq!(sheet.cell_requirements(x).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_source_decl_with_a_require_block_attaches_requirements() {
+        let sheet = parser()
+            .parse_str("sheet s { source x: i32 = 5 require { positive: x > 0; }; }")
+            .unwrap();
+        let (x, _) = sheet.cell_names["x"];
+        assert_eq!(sheet.cell_requirements(x).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parse_source_decl_with_a_filter_clause_attaches_a_named_filter() {
+        let sheet = parser()
+            .parse_str("sheet s { source x: i32 = 5 filter clamp: 0..=10; }")
+            .unwrap();
+        let (x, _) = sheet.cell_names["x"];
+        assert_eq!(sheet.filter_name(x), Some("clamp"));
+    }
+
+    #[test]
+    fn parse_out_decl_with_a_filter_clause_attaches_a_named_filter() {
+        let sheet = parser()
+            .parse_str("sheet s { cell width: i32 = 4; out area := width filter clamp: 0..=100; }")
+            .unwrap();
+        let area = sheet.output_names["area"];
+        assert_eq!(sheet.filter_name(area), Some("clamp"));
+    }
+
+    #[test]
     fn cell_filter_with_no_named_dependency_clamps_on_write() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let mut parsed = parser
             .parse_str(
-                "sheet s { cell a: i32 filter if _ < 1 { 1 } else if _ > 100 { 100 } else { _ }; }",
+                "sheet s { cell a: i32 filter clamp: if _ < 1 { 1 } else if _ > 100 { 100 } else { _ }; }",
             )
             .unwrap();
         let (cell_id, _) = parsed.cell_names["a"];
@@ -1573,7 +1827,7 @@ mod tests {
             .parse_str(
                 "sheet s { \
                      cell hi: i32 = 100; \
-                     cell a: i32 filter if _ < 1 { 1 } else if _ > hi { hi } else { _ }; \
+                     cell a: i32 filter clamp: if _ < 1 { 1 } else if _ > hi { hi } else { _ }; \
                  }",
             )
             .unwrap();
@@ -1596,7 +1850,7 @@ mod tests {
         // times, not two independent parameters.
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let mut parsed = parser
-            .parse_str("sheet s { cell step: i32 = 10; cell a: i32 filter _ - (_ % step); }")
+            .parse_str("sheet s { cell step: i32 = 10; cell a: i32 filter snap: _ - (_ % step); }")
             .unwrap();
         let (a_id, _) = parsed.cell_names["a"];
         parsed.sheet.write(a_id, 27i32).unwrap();
@@ -1607,21 +1861,21 @@ mod tests {
     #[test]
     fn cell_filter_without_underscore_is_a_parse_error() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        let err = parser.parse_str("sheet s { cell a: i32 filter 1; }");
+        let err = parser.parse_str("sheet s { cell a: i32 filter f: 1; }");
         assert!(err.is_err());
     }
 
     #[test]
     fn cell_filter_body_type_mismatch_is_a_parse_error() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        let err = parser.parse_str("sheet s { cell a: i32 filter _ > 0; }");
+        let err = parser.parse_str("sheet s { cell a: i32 filter f: _ > 0; }");
         assert!(err.is_err());
     }
 
     #[test]
     fn cell_filter_undeclared_identifier_is_a_parse_error() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        let err = parser.parse_str("sheet s { cell a: i32 filter _ + nope; }");
+        let err = parser.parse_str("sheet s { cell a: i32 filter f: _ + nope; }");
         assert!(err.is_err());
     }
 
@@ -1629,7 +1883,7 @@ mod tests {
     fn cell_filter_with_a_range_inclusive_body_clamps_on_write() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let mut parsed = parser
-            .parse_str("sheet s { cell a: i32 filter 0..=100; }")
+            .parse_str("sheet s { cell a: i32 filter clamp: 0..=100; }")
             .unwrap();
         let (a_id, _) = parsed.cell_names["a"];
         assert!(matches!(
@@ -1644,7 +1898,7 @@ mod tests {
     #[test]
     fn cell_filter_range_does_not_require_underscore() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        let result = parser.parse_str("sheet s { cell a: i32 filter 0..=100; }");
+        let result = parser.parse_str("sheet s { cell a: i32 filter clamp: 0..=100; }");
         assert!(result.is_ok());
     }
 
@@ -1653,7 +1907,7 @@ mod tests {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let mut parsed = parser
             .parse_str(
-                "sheet s { cell lo: i32 = 0; cell hi: i32 = 100; cell a: i32 filter lo..=hi; }",
+                "sheet s { cell lo: i32 = 0; cell hi: i32 = 100; cell a: i32 filter clamp: lo..=hi; }",
             )
             .unwrap();
         let (a_id, _) = parsed.cell_names["a"];
@@ -1670,7 +1924,7 @@ mod tests {
     fn cell_filter_range_with_float_cell_type_works() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let mut parsed = parser
-            .parse_str("sheet s { cell a: f64 filter 0.0..=100.0; }")
+            .parse_str("sheet s { cell a: f64 filter clamp: 0.0..=100.0; }")
             .unwrap();
         let (a_id, _) = parsed.cell_names["a"];
         parsed.sheet.write(a_id, 500.0f64).unwrap();
@@ -1682,7 +1936,7 @@ mod tests {
     fn cell_filter_range_with_mismatched_element_type_is_a_parse_error() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let err = parser
-            .parse_str("sheet s { cell a: f64 filter 0..=100; }")
+            .parse_str("sheet s { cell a: f64 filter clamp: 0..=100; }")
             .err()
             .expect("expected Err");
         assert!(
@@ -1700,7 +1954,7 @@ mod tests {
         // be swallowed by the opaque `underscore_used` path.
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let err = parser
-            .parse_str("sheet s { cell a: f64 filter (_ as i32)..=100; }")
+            .parse_str("sheet s { cell a: f64 filter clamp: (_ as i32)..=100; }")
             .err()
             .expect("expected Err");
         assert!(
@@ -1725,7 +1979,7 @@ mod tests {
         // triggered afterwards, purely through `filter_range`, by writing `hi` to 0.
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let mut parsed = parser
-            .parse_str("sheet s { cell hi: i32 = 1; cell a: i32 filter 0..=(100 / hi); }")
+            .parse_str("sheet s { cell hi: i32 = 1; cell a: i32 filter clamp: 0..=(100 / hi); }")
             .unwrap();
         let (a_id, _) = parsed.cell_names["a"];
         let (hi_id, _) = parsed.cell_names["hi"];
@@ -1744,7 +1998,7 @@ mod tests {
     fn cell_filter_general_expression_still_compiles_to_opaque_kind() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let parsed = parser
-            .parse_str("sheet s { cell a: i32 filter if _ < 0 { 0 } else { _ }; }")
+            .parse_str("sheet s { cell a: i32 filter f: if _ < 0 { 0 } else { _ }; }")
             .unwrap();
         let (a_id, _) = parsed.cell_names["a"];
         assert!(matches!(
@@ -1762,7 +2016,7 @@ mod tests {
                      cell a_range: (i32, i32) = (1, 100); \
                      cell max: i32 = 100; \
                      relationship { a_range := (1, max); } \
-                     cell a: i32 filter if _ < a_range.0 { a_range.0 } \
+                     cell a: i32 filter clamp: if _ < a_range.0 { a_range.0 } \
                          else if _ > a_range.1 { a_range.1 } else { _ }; \
                  }",
             )
@@ -1784,8 +2038,23 @@ mod tests {
     #[test]
     fn cell_filter_on_a_tuple_typed_cell_is_a_parse_error() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        let err = parser.parse_str("sheet s { cell a: (i32, i32) filter (_.0, _.1); }");
+        let err = parser.parse_str("sheet s { cell a: (i32, i32) filter name: (_.0, _.1); }");
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn parse_named_filter_attaches_it_under_its_name() {
+        let sheet = parser()
+            .parse_str("sheet s { cell x: i32 = 0 filter clamp: 0..=10; }")
+            .unwrap();
+        let (x, _) = sheet.cell_names["x"];
+        assert_eq!(sheet.filter_name(x), Some("clamp"));
+    }
+
+    #[test]
+    fn parse_filter_without_a_name_is_a_syntax_error() {
+        let result = parser().parse_str("sheet s { cell x: i32 = 0 filter 0..=10; }");
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2000,8 +2269,7 @@ mod tests {
             )
             .unwrap();
         sheet.propagate().unwrap();
-        let output_id = sheet.output_names["area"];
-        let cell_id = sheet.sheet.output_cell(output_id).unwrap();
+        let cell_id = sheet.output_names["area"];
         assert_eq!(*sheet.sheet.read::<i32>(cell_id).unwrap(), 12);
     }
 
@@ -2042,7 +2310,7 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         let output_id = sheet.output_names["area"];
-        assert!(sheet.sheet.output_requirements(output_id).unwrap().len() == 2);
+        assert!(sheet.sheet.cell_requirements(output_id).unwrap().len() == 2);
         assert!(
             sheet
                 .sheet
@@ -2727,8 +2995,7 @@ mod tests {
             )
             .unwrap();
         sheet.propagate().unwrap();
-        let output_id = *sheet.output_names.get("area").expect("area registered");
-        let cell_id = sheet.output_cell(output_id).expect("output has a cell");
+        let cell_id = *sheet.output_names.get("area").expect("area registered");
         assert_eq!(*sheet.read::<f64>(cell_id).unwrap(), 12.0);
     }
 
@@ -2745,8 +3012,7 @@ mod tests {
             )
             .unwrap();
         sheet.propagate().unwrap();
-        let output_id = *sheet.output_names.get("pair").unwrap();
-        let cell_id = sheet.output_cell(output_id).unwrap();
+        let cell_id = *sheet.output_names.get("pair").unwrap();
         let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
         assert_eq!(format!("{value:?}"), "(3, 3)");
     }
@@ -2801,7 +3067,7 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         let output_id = *sheet.output_names.get("area").unwrap();
-        assert!(sheet.output_valid(output_id));
+        assert!(sheet.cell_requirements_valid(output_id));
         assert_eq!(sheet.violated_requirements(output_id).count(), 0);
     }
 
@@ -2823,7 +3089,7 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         let output_id = *sheet.output_names.get("area").unwrap();
-        assert!(!sheet.output_valid(output_id));
+        assert!(!sheet.cell_requirements_valid(output_id));
         assert_eq!(sheet.violated_requirements(output_id).count(), 1);
     }
 
@@ -2847,7 +3113,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_out_cell_referenced_elsewhere_is_terminal_cell_error() {
+    fn parse_out_cell_referenced_elsewhere_succeeds() {
+        // `out` cells are no longer terminal (see `adam_rs::CellKind`): referencing an `out`
+        // cell as another relationship's input is legal.
         let result = parser().parse_str(
             r#"
             sheet s {
@@ -2859,8 +3127,8 @@ mod tests {
         "#,
         );
         assert!(
-            result.is_err(),
-            "referencing an out cell as another relationship's input must be an error"
+            result.is_ok(),
+            "referencing an out cell as another relationship's input must not be an error"
         );
     }
 
@@ -2881,7 +3149,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_out_cell_referenced_in_conditional_is_terminal_cell_error() {
+    fn parse_out_cell_referenced_in_conditional_succeeds() {
+        // `out` cells are no longer terminal (see `adam_rs::CellKind`): referencing an `out`
+        // cell as a relationship input inside a conditional branch is legal.
         let result = parser().parse_str(
             r#"
             sheet s {
@@ -2896,8 +3166,8 @@ mod tests {
         "#,
         );
         assert!(
-            result.is_err(),
-            "referencing an out cell as a conditional branch relationship's input must be an error"
+            result.is_ok(),
+            "referencing an out cell as a conditional branch relationship's input must not be an error"
         );
     }
 
@@ -2972,8 +3242,7 @@ mod tests {
             )
             .unwrap();
         sheet.propagate().unwrap();
-        let output_id = *sheet.output_names.get("pair").unwrap();
-        let cell_id = sheet.output_cell(output_id).unwrap();
+        let cell_id = *sheet.output_names.get("pair").unwrap();
         let value = sheet.read::<cel_runtime::DynamicSequence>(cell_id).unwrap();
         let (a, b): (i32, i32) = value.try_to_tuple().unwrap();
         assert_eq!((a, b), (3, 3));

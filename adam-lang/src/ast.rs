@@ -68,6 +68,8 @@ pub enum SheetItem {
     Conditional(ConditionalDecl),
     /// An `out` declaration.
     Out(OutDecl),
+    /// A `source` declaration.
+    Source(SourceDecl),
     /// A syntax error recovered at declaration granularity; `span` covers the skipped tokens.
     Error {
         /// The span of the skipped, malformed item.
@@ -94,6 +96,7 @@ impl SheetItem {
             SheetItem::Relationship(r) => r.span,
             SheetItem::Conditional(c) => c.span,
             SheetItem::Out(o) => o.span,
+            SheetItem::Source(s) => s.span,
             SheetItem::Error { span, .. } => *span,
         }
     }
@@ -105,6 +108,7 @@ impl SheetItem {
             SheetItem::Relationship(r) => r.leading_comment = Some(comment),
             SheetItem::Conditional(c) => c.leading_comment = Some(comment),
             SheetItem::Out(o) => o.leading_comment = Some(comment),
+            SheetItem::Source(s) => s.leading_comment = Some(comment),
             SheetItem::Error {
                 leading_comment, ..
             } => *leading_comment = Some(comment),
@@ -118,6 +122,7 @@ impl SheetItem {
             SheetItem::Relationship(r) => r.blank_line_before = value,
             SheetItem::Conditional(c) => c.blank_line_before = value,
             SheetItem::Out(o) => o.blank_line_before = value,
+            SheetItem::Source(s) => s.blank_line_before = value,
             SheetItem::Error {
                 blank_line_before, ..
             } => *blank_line_before = value,
@@ -144,6 +149,10 @@ impl SheetItem {
             SheetItem::Out(o) => {
                 o.doc_comment = Some(text);
                 o.span.start = start;
+            }
+            SheetItem::Source(s) => {
+                s.doc_comment = Some(text);
+                s.span.start = start;
             }
             SheetItem::Error {
                 doc_comment, span, ..
@@ -177,7 +186,8 @@ impl TypeExpr {
     }
 }
 
-/// `cell_decl = "cell" identifier cell_type_init ";".`
+/// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] [ "require" "{" { requirement }
+/// "}" ] ";".`
 ///
 /// `type_name`/`initializer` are unresolved — no `TypeRegistry` lookup, no literal validation.
 /// Exactly one of `type_name`, `initializer` may be absent, per the grammar's two
@@ -197,6 +207,8 @@ pub struct CellDecl {
     pub initializer: Option<cel_parser::Expr>,
     /// The `filter` clause, if present.
     pub filter: Option<CellFilter>,
+    /// The `require { ... }` validation block, if present.
+    pub require: Option<RequireBlock>,
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
@@ -210,9 +222,47 @@ pub struct CellDecl {
     pub span: ExprSpan,
 }
 
-/// `cell_filter = "filter" expression.`
+/// `source_decl = "source" identifier cell_type_init [ cell_filter ] [ "require" "{" {
+/// requirement } "}" ] ";".`
+///
+/// Same shape as [`CellDecl`]: a `source` cell's initializer is a one-time literal exactly like a
+/// plain `cell`'s, and it supports the same `filter` clause and `require` block.
+#[derive(Debug, Clone)]
+pub struct SourceDecl {
+    /// The source cell's declared name.
+    pub name: String,
+    /// The name token's span.
+    pub name_span: ExprSpan,
+    /// The `: type_expr` annotation, if present.
+    pub type_name: Option<TypeExpr>,
+    /// The `= or_expression` initializer, if present. Unresolved and unevaluated here — see
+    /// `crate::parser::AdamParser` for the compile-to-`Sheet` phase, which parses this with no
+    /// cell scope pushed and evaluates it eagerly, once, at parse time.
+    pub initializer: Option<cel_parser::Expr>,
+    /// The `filter` clause, if present.
+    pub filter: Option<CellFilter>,
+    /// The `require { ... }` validation block, if present.
+    pub require: Option<RequireBlock>,
+    /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub leading_comment: Option<Comment>,
+    /// A leading `///` doc comment immediately preceding this declaration, if recovered by
+    /// [`crate::AdamAstParser`].
+    pub doc_comment: Option<String>,
+    /// Whether a blank line preceded this declaration, if recovered by
+    /// [`crate::trivia::attach_trivia`].
+    pub blank_line_before: bool,
+    /// The span of the whole `source ...;` declaration.
+    pub span: ExprSpan,
+}
+
+/// `cell_filter = "filter" identifier ":" expression.`
 #[derive(Debug, Clone)]
 pub struct CellFilter {
+    /// The filter's declared name.
+    pub name: String,
+    /// The name token's span.
+    pub name_span: ExprSpan,
     /// The filter's body expression. `_` inside it denotes the candidate value being conformed;
     /// every other identifier that names an already-declared cell is a deduced dependency.
     pub body: cel_parser::Expr,
@@ -282,8 +332,8 @@ pub struct BindingDecl {
     pub span: ExprSpan,
 }
 
-/// `out_decl = "out" identifier [ ":" type_expr ] ":=" or_expression [ "require" "{" {
-/// requirement } "}" ] ";".`
+/// `out_decl = "out" identifier [ ":" type_expr ] ":=" or_expression [ cell_filter ] [ "require"
+/// "{" { requirement } "}" ] ";".`
 ///
 /// `type_expr` is unresolved here (no `TypeRegistry` lookup), matching `CellDecl`. When
 /// absent, the cell's type is inferred from `initializer`'s result type by the compile phase
@@ -298,6 +348,8 @@ pub struct OutDecl {
     pub type_name: Option<TypeExpr>,
     /// The parsed initializer expression that computes this cell's value.
     pub initializer: cel_parser::Expr,
+    /// The `filter` clause, if present.
+    pub filter: Option<CellFilter>,
     /// The `require { ... }` validation block, if present.
     pub require: Option<RequireBlock>,
     /// A leading `//`/`/* */` comment immediately preceding this declaration, if recovered by
@@ -333,7 +385,7 @@ pub struct RequireBlock {
 
 /// `requirement = identifier ":" or_expression ";".`
 ///
-/// `name` is a plain string label passed to `adam_rs::Sheet::add_output`, not a cell
+/// `name` is a plain string label passed to `adam_rs::Sheet::add_requirement`, not a cell
 /// reference — it may coincide with a cell name declared elsewhere in the sheet but doesn't
 /// have to.
 #[derive(Debug, Clone)]
@@ -451,6 +503,7 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: None,
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -517,6 +570,7 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: None,
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -560,6 +614,7 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: None,
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -583,6 +638,7 @@ mod tests {
                 name: "x".to_string(),
                 span,
             },
+            filter: None,
             require: None,
             leading_comment: None,
             doc_comment: None,
@@ -603,6 +659,7 @@ mod tests {
                 name: "x".to_string(),
                 span,
             },
+            filter: None,
             require: None,
             leading_comment: None,
             doc_comment: None,
@@ -647,6 +704,7 @@ mod tests {
             )),
             initializer: None,
             filter: None,
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -670,6 +728,7 @@ mod tests {
                 span,
             }),
             filter: None,
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -690,12 +749,15 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: Some(CellFilter {
+                name: "clamp".to_string(),
+                name_span: span,
                 body: cel_parser::Expr::Ident {
                     name: "_".to_string(),
                     span,
                 },
                 span,
             }),
+            require: None,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,

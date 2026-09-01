@@ -1,4 +1,4 @@
-//! Examples backing `book-src/style.md` (Chapter 8). See `src/lib.rs` for how these `.adm2`
+//! Examples backing `book-src/style.md` (Chapter 9). See `src/lib.rs` for how these `.adm2`
 //! files are wired into the book.
 
 #[test]

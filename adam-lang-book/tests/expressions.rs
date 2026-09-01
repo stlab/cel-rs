@@ -1,4 +1,4 @@
-//! Examples backing `book-src/expressions.md` (Chapter 3). See `src/lib.rs` for how these
+//! Examples backing `book-src/expressions.md` (Chapter 4). See `src/lib.rs` for how these
 //! `.adm2` files are wired into the book.
 
 #[test]

@@ -1,8 +1,8 @@
 sheet inequality {
-    cell max_v = 100 filter 0..=200;
-    cell a = 0 filter 0..=max_v;
-    cell b = 42 filter 0..=max_v;
-    cell c = 100 filter 0..=max_v;
+    cell max_v = 100 filter valid_range: 0..=200;
+    cell a = 0 filter clamp_to_max_v: 0..=max_v;
+    cell b = 42 filter clamp_to_max_v: 0..=max_v;
+    cell c = 100 filter clamp_to_max_v: 0..=max_v;
 
     relationship {
         a := min(a, min(max_v, b));

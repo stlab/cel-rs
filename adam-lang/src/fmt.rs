@@ -243,9 +243,9 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     out.push_str("}\n");
 }
 
-/// Writes one `cell name[: type][ = initializer][ filter body];` declaration, delegating its
-/// type annotation to [`source_text_or_empty`] via `TypeExpr::span()` and its initializer/filter
-/// body to [`cel_parser::format_expr`].
+/// Writes one `cell name[: type][ = initializer][ filter body][ require { ... }];` declaration,
+/// delegating its type annotation to [`source_text_or_empty`] via `TypeExpr::span()` and its
+/// initializer/filter body to [`cel_parser::format_expr`].
 fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     write_trivia(
         out,
@@ -267,7 +267,12 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     }
     if let Some(filter) = &cell.filter {
         out.push_str(" filter ");
+        out.push_str(&filter.name);
+        out.push_str(": ");
         out.push_str(&cel_parser::format_expr(&filter.body));
+    }
+    if let Some(require) = &cell.require {
+        write_require_clause(out, require, depth);
     }
     out.push_str(";\n");
 }
@@ -287,7 +292,24 @@ fn write_requirement(out: &mut String, req: &ast::RequirementDecl, depth: usize)
     out.push_str(";\n");
 }
 
-/// Writes one `out name[: type] := ...[ require { ... } ];` declaration.
+/// Writes one ` require { ... }` clause (no trailing `;`) — shared by [`write_cell`],
+/// [`write_source`], and [`write_out`].
+fn write_require_clause(out: &mut String, require: &ast::RequireBlock, depth: usize) {
+    out.push_str(" require {\n");
+    for req in &require.requirements {
+        write_requirement(out, req, depth + 1);
+    }
+    write_trailing_trivia(
+        out,
+        require.blank_line_before_close,
+        require.trailing_comment.as_ref(),
+        depth + 1,
+    );
+    out.push_str(&indent(depth));
+    out.push('}');
+}
+
+/// Writes one `out name[: type] := ...[ filter body][ require { ... } ];` declaration.
 fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     write_trivia(
         out,
@@ -305,19 +327,47 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     }
     out.push_str(" := ");
     out.push_str(&cel_parser::format_expr(&decl.initializer));
+    if let Some(filter) = &decl.filter {
+        out.push_str(" filter ");
+        out.push_str(&filter.name);
+        out.push_str(": ");
+        out.push_str(&cel_parser::format_expr(&filter.body));
+    }
     if let Some(require) = &decl.require {
-        out.push_str(" require {\n");
-        for req in &require.requirements {
-            write_requirement(out, req, depth + 1);
-        }
-        write_trailing_trivia(
-            out,
-            require.blank_line_before_close,
-            require.trailing_comment.as_ref(),
-            depth + 1,
-        );
-        out.push_str(&indent(depth));
-        out.push('}');
+        write_require_clause(out, require, depth);
+    }
+    out.push_str(";\n");
+}
+
+/// Writes one `source name[: type][ = initializer][ filter body][ require { ... }];` declaration.
+/// Mirrors [`write_cell`] exactly.
+fn write_source(out: &mut String, decl: &ast::SourceDecl, depth: usize) {
+    write_trivia(
+        out,
+        decl.blank_line_before,
+        decl.leading_comment.as_ref(),
+        depth,
+    );
+    write_doc_comment(out, "///", decl.doc_comment.as_deref(), depth);
+    out.push_str(&indent(depth));
+    out.push_str("source ");
+    out.push_str(&decl.name);
+    if let Some(type_expr) = &decl.type_name {
+        out.push_str(": ");
+        out.push_str(&source_text_or_empty(type_expr.span()));
+    }
+    if let Some(expr) = &decl.initializer {
+        out.push_str(" = ");
+        out.push_str(&cel_parser::format_expr(expr));
+    }
+    if let Some(filter) = &decl.filter {
+        out.push_str(" filter ");
+        out.push_str(&filter.name);
+        out.push_str(": ");
+        out.push_str(&cel_parser::format_expr(&filter.body));
+    }
+    if let Some(require) = &decl.require {
+        write_require_clause(out, require, depth);
     }
     out.push_str(";\n");
 }
@@ -332,6 +382,7 @@ fn write_sheet_item(out: &mut String, item: &ast::SheetItem, depth: usize) {
         ast::SheetItem::Relationship(rel) => write_relationship(out, rel, depth),
         ast::SheetItem::Conditional(cond) => write_conditional(out, cond, depth),
         ast::SheetItem::Out(out_decl) => write_out(out, out_decl, depth),
+        ast::SheetItem::Source(decl) => write_source(out, decl, depth),
         ast::SheetItem::Error { .. } => {
             unreachable!("format_sheet is only called on a sheet with no recorded syntax errors")
         }
@@ -413,6 +464,14 @@ mod tests {
         assert_eq!(
             format("sheet s { cell width: f64 = 1920.0; }"),
             "sheet s {\n    cell width: f64 = 1920.0;\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_source_decl() {
+        assert_eq!(
+            format("sheet s { source width: i32 = 4; }"),
+            "sheet s {\n    source width: i32 = 4;\n}\n"
         );
     }
 
@@ -546,6 +605,33 @@ mod tests {
         let source = "sheet s {\n    out area: f64 := width * height require {\n        max_area: width * height <= max_area;\n    };\n}";
         let expected = "sheet s {\n    out area: f64 := width * height require {\n        max_area: width * height <= max_area;\n    };\n}\n";
         assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_cell_with_a_require_block() {
+        let source =
+            "sheet s {\n    cell x: i32 = 5 require {\n        positive: x > 0;\n    };\n}";
+        assert_eq!(format(source), format!("{source}\n"));
+    }
+
+    #[test]
+    fn formats_a_source_with_a_require_block() {
+        let source =
+            "sheet s {\n    source x: i32 = 5 require {\n        positive: x > 0;\n    };\n}";
+        assert_eq!(format(source), format!("{source}\n"));
+    }
+
+    #[test]
+    fn formats_a_source_with_a_filter_clause() {
+        let source = "sheet s {\n    source x: i32 = 5 filter clamp: 0..=10;\n}";
+        assert_eq!(format(source), format!("{source}\n"));
+    }
+
+    #[test]
+    fn formats_an_out_with_a_filter_clause() {
+        let source =
+            "sheet s {\n    cell width: i32 = 4;\n    out area := width filter clamp: 0..=100;\n}";
+        assert_eq!(format(source), format!("{source}\n"));
     }
 
     #[test]
@@ -718,6 +804,26 @@ mod tests {
     }
 
     #[test]
+    fn formats_a_trailing_comment_before_a_cells_requires_closing_brace() {
+        // Mirrors `formats_a_trailing_comment_before_a_requires_closing_brace`, but for a
+        // `cell`'s own `require` block — regression test for the comment being silently dropped
+        // (never attached, so never written back out) because `attach_trivia` only recovered
+        // require-block trivia for `SheetItem::Out`, not `SheetItem::Cell`/`SheetItem::Source`.
+        let source = "sheet s {\n    cell a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
+        let expected = "sheet s {\n    cell a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_before_a_sources_requires_closing_brace() {
+        // Mirrors `formats_a_trailing_comment_before_a_requires_closing_brace`, but for a
+        // `source`'s own `require` block.
+        let source = "sheet s {\n    source a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
+        let expected = "sheet s {\n    source a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
     fn trailing_trivia_formatting_is_idempotent_through_a_reparse() {
         let source = "sheet s {\n    cell a: i32 = 1;\n    // trailing\n}";
         let once = format(source);
@@ -728,24 +834,35 @@ mod tests {
     #[test]
     fn formats_a_cell_with_a_filter() {
         assert_eq!(
-            format("sheet s { cell a: i32 = 1 filter _; }"),
-            "sheet s {\n    cell a: i32 = 1 filter _;\n}\n"
+            format("sheet s { cell a: i32 = 1 filter clamp: _; }"),
+            "sheet s {\n    cell a: i32 = 1 filter clamp: _;\n}\n"
         );
     }
 
     #[test]
     fn formats_a_cell_with_a_filter_referencing_a_cell() {
         assert_eq!(
-            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter min(_, hi); }"),
-            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter min(_, hi);\n}\n"
+            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter clamp: min(_, hi); }"),
+            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter clamp: min(_, hi);\n}\n"
         );
     }
 
     #[test]
     fn format_is_idempotent_through_a_reparse_with_a_filter() {
-        let source = "sheet s {\n    cell a: i32 = 1 filter _;\n}";
+        let source = "sheet s {\n    cell a: i32 = 1 filter clamp: _;\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn formats_a_named_filter() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { cell x: i32 = 0 filter clamp: 0..=10; }")
+            .unwrap();
+        assert_eq!(
+            format_sheet(&sheet),
+            "sheet s {\n    cell x: i32 = 0 filter clamp: 0..=10;\n}\n"
+        );
     }
 }

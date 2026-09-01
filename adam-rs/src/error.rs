@@ -51,24 +51,28 @@ pub enum Error {
     /// not match the cell's registered type, or a branch has no keys.
     InvalidConditional,
 
-    /// An `add_output` call is structurally invalid: the writer method does not have
-    /// exactly one output cell, a requirement has an empty name, two requirements in the same
-    /// call share a name, or a requirement's `inputs` and `input_types` lengths differ.
+    /// An `add_out` call is structurally invalid: the writer method does not have
+    /// exactly one output cell.
     InvalidOutput,
 
-    /// A cell belonging to an existing output (see `Sheet::add_output`) was referenced as
-    /// an input to a relationship, conditional, requirement, or a second output; was the
-    /// target of `Sheet::write`; or an `add_output` call tried to reuse a cell that already
-    /// had a relationship or conditional referencing it before becoming an output.
-    TerminalCell,
+    /// A relationship or conditional attempted to claim a `Source`-kind cell as a
+    /// method's output, `write()` targeted an `Out`-kind cell, or `add_out` targeted a
+    /// cell that is already `Source`/`Out` kind or already claimed as another method's
+    /// output.
+    InvalidCellKind,
 
-    /// An `add_filter` call is structurally invalid: the cell already has a filter, the
-    /// filter's own value type does not match the cell's registered type, or the
-    /// filter's own argument list names `cell` itself. (An unknown cell, a terminal
-    /// cell, or an argument-cell type mismatch use the shared
-    /// `InvalidId`/`TerminalCell`/`TypeMismatch` variants instead, matching
-    /// `add_relationship`/`add_conditional`'s existing convention.)
+    /// An `add_filter` call is structurally invalid: `name` is empty, the cell already
+    /// has a filter, the filter's own value type does not match the cell's registered
+    /// type, or the filter's own argument list names `cell` itself. (An unknown cell or
+    /// an argument-cell type mismatch use the shared `InvalidId`/`TypeMismatch` variants
+    /// instead — `add_filter` has no cell-kind restriction, so it never returns
+    /// `InvalidCellKind`.)
     InvalidFilter,
+
+    /// An `add_requirement` call is structurally invalid: the name is empty, `cell`
+    /// already has a same-named requirement, or (on a `Cell`/`Source` kind cell)
+    /// evaluating the requirement against current values returns `Ok(false)`.
+    InvalidRequirement,
 
     /// The combined dependency digraph — relationship edges plus a filtered source
     /// cell's argument edges (see `Sheet::propagate`'s planning pass) — has a
@@ -102,11 +106,9 @@ impl std::fmt::Display for Error {
             ),
             Error::InvalidConditional => write!(f, "conditional is structurally invalid"),
             Error::InvalidOutput => write!(f, "output is structurally invalid"),
-            Error::TerminalCell => write!(
-                f,
-                "cell belongs to a terminal output and cannot be used as an input or written directly"
-            ),
+            Error::InvalidCellKind => write!(f, "cell's kind does not permit this operation"),
             Error::InvalidFilter => write!(f, "filter is structurally invalid"),
+            Error::InvalidRequirement => write!(f, "requirement is structurally invalid"),
             Error::FilterCycle => write!(
                 f,
                 "a filter's argument dependency closes a cycle with the selected methods"
@@ -252,13 +254,21 @@ mod tests {
     }
 
     #[test]
-    fn terminal_cell_display_contains_terminal() {
-        assert!(Error::TerminalCell.to_string().contains("terminal"));
+    fn invalid_cell_kind_display_contains_kind() {
+        assert!(Error::InvalidCellKind.to_string().contains("kind"));
+    }
+
+    // Regression guard for https://github.com/stlab/cel-rs/issues/166: the message used to
+    // claim the cell "belongs to a terminal output", which stopped being true once `out` cells
+    // became usable as inputs, and never covered the `Source`-kind case at all.
+    #[test]
+    fn invalid_cell_kind_display_does_not_mention_terminal() {
+        assert!(!Error::InvalidCellKind.to_string().contains("terminal"));
     }
 
     #[test]
-    fn terminal_cell_has_no_source() {
-        assert!(std::error::Error::source(&Error::TerminalCell).is_none());
+    fn invalid_cell_kind_has_no_source() {
+        assert!(std::error::Error::source(&Error::InvalidCellKind).is_none());
     }
 
     #[test]
@@ -269,6 +279,20 @@ mod tests {
     #[test]
     fn invalid_filter_has_no_source() {
         assert!(std::error::Error::source(&Error::InvalidFilter).is_none());
+    }
+
+    #[test]
+    fn invalid_requirement_display_contains_requirement() {
+        assert!(
+            Error::InvalidRequirement
+                .to_string()
+                .contains("requirement")
+        );
+    }
+
+    #[test]
+    fn invalid_requirement_has_no_source() {
+        assert!(std::error::Error::source(&Error::InvalidRequirement).is_none());
     }
 
     #[test]
