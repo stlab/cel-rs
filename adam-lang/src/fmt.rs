@@ -792,6 +792,26 @@ mod tests {
     }
 
     #[test]
+    fn formats_a_trailing_comment_before_a_cells_requires_closing_brace() {
+        // Mirrors `formats_a_trailing_comment_before_a_requires_closing_brace`, but for a
+        // `cell`'s own `require` block — regression test for the comment being silently dropped
+        // (never attached, so never written back out) because `attach_trivia` only recovered
+        // require-block trivia for `SheetItem::Out`, not `SheetItem::Cell`/`SheetItem::Source`.
+        let source = "sheet s {\n    cell a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
+        let expected = "sheet s {\n    cell a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_trailing_comment_before_a_sources_requires_closing_brace() {
+        // Mirrors `formats_a_trailing_comment_before_a_requires_closing_brace`, but for a
+        // `source`'s own `require` block.
+        let source = "sheet s {\n    source a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
+        let expected = "sheet s {\n    source a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
     fn trailing_trivia_formatting_is_idempotent_through_a_reparse() {
         let source = "sheet s {\n    cell a: i32 = 1;\n    // trailing\n}";
         let once = format(source);

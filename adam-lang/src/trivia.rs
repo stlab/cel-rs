@@ -3,8 +3,8 @@
 //! for the identical problem — see `cel-parser/src/lex_lexer.rs`'s `test_span_preservation`), and
 //! attaches each to the nearest following node. Applied recursively to every sibling list in the
 //! tree — `Sheet.items`, a `RelationshipDecl`'s `bindings`, a `ConditionalDecl`'s `branches` and
-//! `default`, each `ConditionalBranch`'s `relationships`, and an `OutDecl`'s `require` block's
-//! `requirements` — not just the top level. Also
+//! `default`, each `ConditionalBranch`'s `relationships`, and a `CellDecl`/`SourceDecl`/`OutDecl`'s
+//! `require` block's `requirements` — not just the top level. Also
 //! recovers a comment preceding the `sheet` keyword itself (e.g. a file header) into
 //! `Sheet.leading_comment` — the one gap with no enclosing sibling list to attach via, so it's
 //! handled directly against the start of `source` rather than through [`attach_gaps`].
@@ -21,15 +21,16 @@
 //! `}` (or, for a child-empty block, between its opening `{` and closing `}`) has nothing
 //! following it for the above machinery to attach to, so it is recovered separately, into each
 //! container's own `trailing_comment`/`blank_line_before_close` fields, by [`attach_trailing`]
-//! and its special-cased sibling [`attach_conditional_trailing`] (an `OutDecl`'s `require` block,
-//! when present, uses the standard [`attach_trailing`] path directly, like any other container).
+//! and its special-cased sibling [`attach_conditional_trailing`] (a `CellDecl`/`SourceDecl`/
+//! `OutDecl`'s `require` block, when present, uses the standard [`attach_trailing`] path
+//! directly, like any other container).
 //! See <https://github.com/stlab/cel-rs/issues/52>.
 
 use proc_macro2::LineColumn;
 
 use crate::ast::{
-    BindingDecl, ConditionalBranch, ConditionalDecl, ExprSpan, OutDecl, RelationshipDecl,
-    RequireBlock, RequirementDecl, Sheet,
+    BindingDecl, CellDecl, ConditionalBranch, ConditionalDecl, ExprSpan, OutDecl, RelationshipDecl,
+    RequireBlock, RequirementDecl, Sheet, SourceDecl,
 };
 
 /// An AST node that can carry recovered leading trivia, attached by [`attach_gaps`].
@@ -286,9 +287,11 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
                 attach_conditional(source, &line_starts, cond)
             }
             crate::ast::SheetItem::Out(out_decl) => attach_out(source, &line_starts, out_decl),
-            crate::ast::SheetItem::Cell(_)
-            | crate::ast::SheetItem::Source(_)
-            | crate::ast::SheetItem::Error { .. } => {}
+            crate::ast::SheetItem::Cell(cell) => attach_cell(source, &line_starts, cell),
+            crate::ast::SheetItem::Source(source_decl) => {
+                attach_source(source, &line_starts, source_decl)
+            }
+            crate::ast::SheetItem::Error { .. } => {}
         }
     }
 }
@@ -322,17 +325,37 @@ fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut Conditiona
     attach_conditional_trailing(source, line_starts, cond);
 }
 
-/// Recovers trivia for an `out` declaration's `require` block, if present — the gap before its
-/// own closing `}`, and gaps between its requirements. An `out` with no `require` block has
-/// nothing further to recover here: its `initializer` expression carries no trivia of its own,
-/// matching `CellDecl.initializer`.
-fn attach_out(source: &str, line_starts: &[usize], out_decl: &mut OutDecl) {
-    let Some(require) = &mut out_decl.require else {
+/// Recovers trivia for a `require { ... }` block, if present — the gap before its own closing
+/// `}`, and gaps between its requirements. A `None` require block (a `cell`/`source`/`out` with
+/// no `require { ... }` clause) has nothing further to recover here: its `initializer`/`filter`
+/// expressions carry no trivia of their own. Shared by [`attach_cell`], [`attach_source`], and
+/// [`attach_out`], since a `require` block has the same trivia-recovery rules regardless of which
+/// cell kind it's attached to.
+fn attach_require_block(source: &str, line_starts: &[usize], require: Option<&mut RequireBlock>) {
+    let Some(require) = require else {
         return;
     };
     attach_gaps(source, line_starts, &mut require.requirements);
     let last_child_end = require.requirements.last().map(|r| r.span().end.end());
     attach_trailing(source, line_starts, last_child_end, require);
+}
+
+/// Recovers trivia for an `out` declaration's `require` block, if present, via
+/// [`attach_require_block`].
+fn attach_out(source: &str, line_starts: &[usize], out_decl: &mut OutDecl) {
+    attach_require_block(source, line_starts, out_decl.require.as_mut());
+}
+
+/// Recovers trivia for a `cell` declaration's `require` block, if present, via
+/// [`attach_require_block`].
+fn attach_cell(source: &str, line_starts: &[usize], cell: &mut CellDecl) {
+    attach_require_block(source, line_starts, cell.require.as_mut());
+}
+
+/// Recovers trivia for a `source` declaration's `require` block, if present, via
+/// [`attach_require_block`].
+fn attach_source(source: &str, line_starts: &[usize], source_decl: &mut SourceDecl) {
+    attach_require_block(source, line_starts, source_decl.require.as_mut());
 }
 
 /// Recovers comments/blank-lines from the gaps between consecutive `items`, attaching each to the
@@ -899,6 +922,75 @@ mod tests {
             panic!("expected Out");
         };
         let require = out.require.as_ref().expect("require block present");
+        assert_eq!(
+            require.trailing_comment,
+            Some(crate::ast::Comment::Line("trailing".to_string()))
+        );
+    }
+
+    #[test]
+    fn attaches_a_comment_to_a_requirement_inside_a_cell_declaration() {
+        // Mirrors `attaches_a_comment_to_a_requirement_inside_an_out_declaration`, but for a
+        // `cell`'s own `require` block — `CellDecl` gained `require` alongside `out`'s, and its
+        // trivia recovery must not be dropped on the floor the way it was before this fix.
+        let source = "sheet s {\n    cell a: i32 = 1 require {\n        r1: a > 0;\n        // second\n        r2: a < 10;\n    };\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Cell(cell) = &sheet.items[0] else {
+            panic!("expected Cell");
+        };
+        let require = cell.require.as_ref().expect("require block present");
+        assert_eq!(
+            require.requirements[1].leading_comment,
+            Some(crate::ast::Comment::Line("second".to_string()))
+        );
+    }
+
+    #[test]
+    fn recovers_a_trailing_comment_before_a_cells_requires_closing_brace() {
+        // Mirrors `recovers_a_trailing_comment_before_a_requires_closing_brace`, but for a
+        // `cell`'s own `require` block.
+        let source = "sheet s {\n    cell a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Cell(cell) = &sheet.items[0] else {
+            panic!("expected Cell");
+        };
+        let require = cell.require.as_ref().expect("require block present");
+        assert_eq!(
+            require.trailing_comment,
+            Some(crate::ast::Comment::Line("trailing".to_string()))
+        );
+    }
+
+    #[test]
+    fn attaches_a_comment_to_a_requirement_inside_a_source_declaration() {
+        // Mirrors `attaches_a_comment_to_a_requirement_inside_an_out_declaration`, but for a
+        // `source`'s own `require` block.
+        let source = "sheet s {\n    source a: i32 = 1 require {\n        r1: a > 0;\n        // second\n        r2: a < 10;\n    };\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Source(source_decl) = &sheet.items[0] else {
+            panic!("expected Source");
+        };
+        let require = source_decl.require.as_ref().expect("require block present");
+        assert_eq!(
+            require.requirements[1].leading_comment,
+            Some(crate::ast::Comment::Line("second".to_string()))
+        );
+    }
+
+    #[test]
+    fn recovers_a_trailing_comment_before_a_sources_requires_closing_brace() {
+        // Mirrors `recovers_a_trailing_comment_before_a_requires_closing_brace`, but for a
+        // `source`'s own `require` block.
+        let source = "sheet s {\n    source a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Source(source_decl) = &sheet.items[0] else {
+            panic!("expected Source");
+        };
+        let require = source_decl.require.as_ref().expect("require block present");
         assert_eq!(
             require.trailing_comment,
             Some(crate::ast::Comment::Line("trailing".to_string()))
