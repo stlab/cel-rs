@@ -332,14 +332,17 @@ impl TokenCursor {
     /// # Errors
     ///
     /// Returns `Err` if a leading `-` is not followed by a literal, if there is no literal at
-    /// all, or if a leading `-` negates a literal `cel_parser` has no unary `-` overload for
-    /// (any non-numeric literal, or an integer literal with an unsigned suffix) — mirroring the
-    /// runtime parser's `cel_parser::Parser::parse_literal_pattern`, which rejects the same
-    /// cases via its operator table.
+    /// all, if the literal itself isn't one `cel_parser` can represent (unrecognized numeric
+    /// suffix, or a value out of range for its width), or if a leading `-` negates a literal
+    /// `cel_parser` has no unary `-` overload for (any non-numeric literal, or an integer
+    /// literal with an unsigned suffix) — mirroring the runtime parser's
+    /// `cel_parser::Parser::parse_literal_pattern`, which rejects the same cases via
+    /// `push_literal_token`/its operator table.
     pub(crate) fn consume_literal_pattern(&mut self) -> Result<(bool, Literal, Span, Span)> {
         let minus_span = self.peek_span();
         let negated = self.consume_punct("-");
         let (lit, lit_span) = self.consume_literal()?;
+        cel_parser::validate_literal(&lit)?;
         if negated && !literal_can_be_negated(&lit) {
             return Err(ParseError::new(
                 "literal pattern: `-` can only negate a signed integer or float literal",

@@ -893,6 +893,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_conditional_branch_literal_with_invalid_suffix_is_error() {
+        // `10xyz` isn't a `cel_parser`-recognized literal (unrecognized integer suffix) — must
+        // be rejected here exactly as the runtime parser rejects it, not silently accepted into
+        // the CST and later round-tripped by `fmt`.
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        10xyz => { relationship { height := width; } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
+    }
+
+    #[test]
     fn parse_conditional_branch_negating_an_unsigned_literal_is_error() {
         // `-1u32` has no `cel_parser` unary `-` overload — must be rejected here exactly as the
         // runtime parser rejects it, not silently accepted into the CST.

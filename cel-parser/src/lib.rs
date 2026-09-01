@@ -306,6 +306,21 @@ fn push_literal_token<C: ParserContext>(output: &mut C, lit: CelLiteral) -> Resu
     Ok(())
 }
 
+/// Validates that `lit` is a literal `cel_parser` can represent as a value: a recognized numeric
+/// suffix, and (for a suffixed or unsuffixed integer/float) a value in range for its width.
+/// Reuses the same literal-compiling checks the grammar itself applies to a literal token,
+/// against a throwaway context, for a caller (e.g. adam-lang's CST parser, which records a
+/// literal token without compiling it into a value) that needs to reject the same literals the
+/// runtime parser would, without needing a [`ParserContext`] of its own to push into.
+///
+/// # Errors
+///
+/// Returns `Err` for an unrecognized numeric suffix, or a numeric value out of range for its
+/// width.
+pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
+    push_literal_token(&mut DynSegmentContext::new_context(), lit.clone())
+}
+
 /// One resolved closure parameter type: a built-in scalar, or a (possibly nested) tuple of them
 /// — the result of resolving a `closure_type_expression` production (see
 /// [`Parser::parse_closure_type_expression`]).
@@ -1889,6 +1904,32 @@ mod tests {
         };
         assert!(err.message().contains("invalid integer literal suffix"));
         assert!(err.message().contains("xyz"));
+    }
+
+    #[test]
+    fn validate_literal_accepts_a_well_formed_integer() {
+        let lit: lex_lexer::Literal = syn::parse_str("5i32").unwrap();
+        assert!(validate_literal(&lit).is_ok());
+    }
+
+    #[test]
+    fn validate_literal_accepts_a_well_formed_float() {
+        let lit: lex_lexer::Literal = syn::parse_str("1.5f64").unwrap();
+        assert!(validate_literal(&lit).is_ok());
+    }
+
+    #[test]
+    fn validate_literal_rejects_an_unrecognized_integer_suffix() {
+        let lit: lex_lexer::Literal = syn::parse_str("10xyz").unwrap();
+        let err = validate_literal(&lit).expect_err("unrecognized suffix must be rejected");
+        assert!(err.message().contains("invalid integer literal suffix"));
+    }
+
+    #[test]
+    fn validate_literal_rejects_an_out_of_range_integer() {
+        let lit: lex_lexer::Literal = syn::parse_str("999i8").unwrap();
+        let err = validate_literal(&lit).expect_err("out-of-range literal must be rejected");
+        assert!(err.message().contains("invalid i8 literal"));
     }
 
     #[test]
