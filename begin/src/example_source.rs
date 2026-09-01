@@ -229,9 +229,10 @@ mod tests {
         }
     }
 
-    /// Returns the union of `Sheet::contributing_cells(id)` over every `id` in
-    /// `Sheet::out_cells()`, `Sheet::requirement_relevant_cells()`, and every
-    /// conditional's match cell.
+    /// Returns the union of three sets: `Sheet::contributing_cells(id)` for every `id` in
+    /// `Sheet::out_cells()`; `Sheet::requirement_relevant_cells()`, taken as-is (it already
+    /// returns contributing cells internally, so it is not run through `contributing_cells`
+    /// again here); and every conditional's match cell, added directly, not traced.
     ///
     /// Mirrors `adam_web_ui::inspector`'s private `compute_output_status`'s `relevant`
     /// computation (not itself exported, since `OutputStatus` is Inspector-internal) —

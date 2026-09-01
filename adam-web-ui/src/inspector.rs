@@ -19,8 +19,10 @@ use std::hash::{Hash, Hasher};
 struct OutputStatus {
     /// `true` if the sheet has at least one output.
     has_outputs: bool,
-    /// Union of `Sheet::contributing_cells(id)` for every `id` in `Sheet::out_cells()`,
-    /// `Sheet::requirement_relevant_cells()`, and every conditional's match cell.
+    /// Union of three sets: `Sheet::contributing_cells(id)` for every `id` in
+    /// `Sheet::out_cells()`; `Sheet::requirement_relevant_cells()`, taken as-is (it already
+    /// returns contributing cells internally, so it is not run through `contributing_cells`
+    /// again here); and every conditional's match cell, added directly, not traced.
     ///
     /// The `contributing_cells` term restores the pre-generalization guarantee that an
     /// out cell's contributors are always relevant, regardless of whether that out cell
