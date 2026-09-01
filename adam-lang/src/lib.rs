@@ -18,7 +18,7 @@
 //! binding            = binding_target ":=" or_expression ";".
 //! binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
 //! conditional_decl   = "conditional" or_expression "{" { conditional_branch } "}".
-//! conditional_branch = (literal | "_") "=>" "{" { relationship_decl } "}" [ "," ].
+//! conditional_branch = (literal_pattern | "_") "=>" "{" { relationship_decl } "}" [ "," ].
 //! out_decl           = "out" identifier [":" type_expr] ":=" or_expression
 //!                        [ cell_filter ] [ require_block ] ";".
 //! require_block      = "require" "{" { requirement } "}".
@@ -33,7 +33,9 @@
 //! clauses are implemented today.
 //!
 //! `or_expression` and its descendants (`literal`, `identifier`, and the rest of the
-//! CEL expression grammar) are defined by `cel_parser` — see that crate's own
+//! CEL expression grammar), as well as `literal_pattern` (a bare literal, optionally negated by
+//! a leading `-`, matching Rust's own `LiteralPattern` rule — CEL has no constant-expression
+//! syntax in pattern position), are defined by `cel_parser` — see that crate's own
 //! [`# Grammar`](../cel_parser/index.html#grammar) section.
 //!
 //! A `cell_filter`'s `or_expression` names no explicit parameter list: `_` always refers to the

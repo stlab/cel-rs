@@ -37,7 +37,15 @@
 //! closure_param = identifier ":" closure_type_expression.
 //! closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")".
 //! parameter_list = or_expression { "," or_expression }.
+//!
+//! literal_pattern = ["-"] literal.
 //! ```
+//!
+//! `literal_pattern` is a separate entry point, not reachable from `expression` — it exists for
+//! grammars that embed CEL literals in pattern position (e.g. adam-lang's `conditional_branch`)
+//! and need Rust's own `LiteralPattern` rule: a bare literal, or one directly negated by a
+//! leading `-` (no `!`, no chained `--`, no arbitrary unary/postfix operand) — see
+//! <https://doc.rust-lang.org/reference/patterns.html#literal-patterns>.
 //!
 //! # Examples
 //!
@@ -474,6 +482,22 @@ impl<C: ParserContext> Parser<C> {
     pub fn parse_expression_ctx(&mut self) -> Result<C> {
         if !self.is_expression()? {
             return Err(self.error_at("expression expected"));
+        }
+        Ok(std::mem::replace(&mut self.context, C::new_context()))
+    }
+
+    /// Parses one `literal_pattern` from the current token stream and returns the built context.
+    ///
+    /// Like [`parse_expression_ctx`](Self::parse_expression_ctx), this does not require
+    /// end-of-stream, letting a caller (e.g. adam-lang's `conditional_branch`) parse just the
+    /// pattern before continuing with its own grammar.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input does not contain a valid `literal_pattern`.
+    pub fn parse_literal_pattern_ctx(&mut self) -> Result<C> {
+        if !self.is_literal_pattern()? {
+            return Err(self.error_at("literal pattern expected"));
         }
         Ok(std::mem::replace(&mut self.context, C::new_context()))
     }
@@ -1124,6 +1148,41 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
+    /// `literal_pattern = ["-"] literal.`
+    ///
+    /// A deliberately narrower relative of [`is_unary_expression`](Self::is_unary_expression):
+    /// Rust's own pattern grammar allows a leading unary `-` only directly on a literal (no
+    /// `!`, no chained `--`, and the operand must be a bare literal token, not an arbitrary
+    /// `postfix_expression`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a leading `-` is not followed by a literal, or if the literal or its
+    /// negation fails (e.g. an out-of-range suffixed integer, or negating an unsigned literal).
+    fn is_literal_pattern(&mut self) -> Result<bool> {
+        let start_span = self.peek_span();
+        let negated = self.is_punctuation("-");
+        match self.peek_token() {
+            Some(Token::Literal(lit)) => {
+                let lit_clone = lit.clone();
+                self.advance();
+                push_literal_token(&mut self.context, lit_clone)?;
+                if negated {
+                    self.context.apply_op(
+                        &self.op_lookup,
+                        "-",
+                        1,
+                        start_span.expect("production has token at start"),
+                        self.last_span,
+                    )?;
+                }
+                Ok(true)
+            }
+            _ if negated => Err(self.error_at("expected literal after `-`")),
+            _ => Ok(false),
+        }
+    }
+
     /// `postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." unsuffixed_integer }.`
     ///
     /// The repetition allows chained indices (`t.0.1`): each `"." unsuffixed_integer`
@@ -1681,6 +1740,18 @@ impl Parser<DynSegmentContext> {
     /// - Complexity: O(n) in the number of tokens in the expression.
     pub fn parse_expression(&mut self) -> Result<DynSegment> {
         self.parse_expression_ctx()
+            .map(DynSegmentContext::into_inner)
+    }
+
+    /// Parses one `literal_pattern` from the current token stream and returns the segment.
+    ///
+    /// Unlike [`parse_str`](Self::parse_str), this method does not require end-of-stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input does not contain a valid `literal_pattern`.
+    pub fn parse_literal_pattern(&mut self) -> Result<DynSegment> {
+        self.parse_literal_pattern_ctx()
             .map(DynSegmentContext::into_inner)
     }
 
@@ -2968,6 +3039,97 @@ mod tests {
         parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
         let result = parser.parse_expression();
         assert!(result.is_err(), "expected Err for empty input");
+    }
+
+    #[test]
+    fn parse_literal_pattern_accepts_a_bare_literal() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("5i32")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(seg.call0::<i32>()?, 5);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_literal_pattern_accepts_a_negated_integer_literal() -> anyhow::Result<()> {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "-5i32".parse().unwrap();
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
+        let mut seg = parser
+            .parse_literal_pattern()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(seg.call0::<i32>()?, -5);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_literal_pattern_accepts_a_negated_float_literal() -> anyhow::Result<()> {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "-1.5f64".parse().unwrap();
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
+        let mut seg = parser
+            .parse_literal_pattern()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(seg.call0::<f64>()?, -1.5);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_literal_pattern_stops_before_a_trailing_operator() -> anyhow::Result<()> {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "1i32 + 2i32".parse().unwrap();
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
+        let mut seg = parser
+            .parse_literal_pattern()
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(seg.call0::<i32>()?, 1);
+        let remaining: Vec<_> = parser.take_lex_tokens().expect("tokens present").collect();
+        assert_eq!(
+            remaining.len(),
+            2,
+            "expected 2 remaining tokens (+ and 2i32)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_literal_pattern_rejects_a_dash_not_followed_by_a_literal() {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "-mode".parse().unwrap();
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
+        assert!(parser.parse_literal_pattern().is_err());
+    }
+
+    #[test]
+    fn parse_literal_pattern_rejects_negating_an_unsigned_literal() {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "-1u32".parse().unwrap();
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
+        assert!(parser.parse_literal_pattern().is_err());
+    }
+
+    #[test]
+    fn parse_literal_pattern_rejects_a_bare_identifier() {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "mode".parse().unwrap();
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
+        assert!(parser.parse_literal_pattern().is_err());
+    }
+
+    #[test]
+    fn parse_literal_pattern_rejects_a_tuple() {
+        use lex_lexer::LexLexer;
+        let stream: proc_macro2::TokenStream = "(1i32, 2i32)".parse().unwrap();
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.set_lex_tokens(LexLexer::new(stream.into_iter()).peekable());
+        assert!(parser.parse_literal_pattern().is_err());
     }
 
     #[test]

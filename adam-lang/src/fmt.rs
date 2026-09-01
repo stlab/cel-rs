@@ -184,8 +184,9 @@ fn write_branch_relationships(
     out.push_str("}\n");
 }
 
-/// Writes one `literal => { ... }` conditional branch, re-emitting the match literal via its
-/// span rather than the (unused) `Literal` value.
+/// Writes one `literal_pattern => { ... }` conditional branch, re-emitting the match literal via
+/// its span rather than the (unused) `Literal` value, with a leading `-` when
+/// [`ast::ConditionalBranch::negated`].
 fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize) {
     write_trivia(
         out,
@@ -194,6 +195,9 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
         depth,
     );
     out.push_str(&indent(depth));
+    if branch.negated {
+        out.push('-');
+    }
     out.push_str(&source_text_or_empty(branch.literal_span));
     out.push_str(" => ");
     write_branch_relationships(
@@ -546,6 +550,13 @@ mod tests {
     fn formats_a_conditional_with_branches_and_a_default_and_no_trailing_commas() {
         let source = "sheet s {\n    conditional p {\n        0i32 => { relationship { b := a; } },\n        _ => { relationship { a := b; } },\n    }\n}";
         let expected = "sheet s {\n    conditional p {\n        0i32 => {\n            relationship {\n                b := a;\n            }\n        }\n        _ => {\n            relationship {\n                a := b;\n            }\n        }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_conditional_branch_with_a_negated_literal_key() {
+        let source = "sheet s {\n    conditional p {\n        -1i32 => { relationship { b := a; } },\n        _ => { relationship { a := b; } },\n    }\n}";
+        let expected = "sheet s {\n    conditional p {\n        -1i32 => {\n            relationship {\n                b := a;\n            }\n        }\n        _ => {\n            relationship {\n                a := b;\n            }\n        }\n    }\n}\n";
         assert_eq!(format(source), expected);
     }
 

@@ -1123,11 +1123,13 @@ impl AdamParser {
                 break; // default branch is always last
             }
 
-            // Named branch: `expression "=>" "{" ... "}"` — an expression covers both a
-            // bare literal (`0i32 =>`) and a tuple value (`(0, 0) =>`) via the same grammar cell
-            // initializers already use.
+            // Named branch: `literal_pattern "=>" "{" ... "}"` — a bare literal, optionally
+            // negated by a leading `-`, matching Rust's own `LiteralPattern` rule. CEL has no
+            // constant-expression syntax in pattern position (see
+            // https://doc.rust-lang.org/reference/patterns.html), so `0i32 + 1 =>` is rejected
+            // here exactly as it already is by the CST parser's `consume_literal`.
             let branch_span = ctx.peek_span();
-            let segment = self.parse_cel_expression(ctx)?;
+            let segment = self.parse_literal_pattern(ctx)?;
             let (branch_shape, branch_val) = self.eval_segment_boxed(segment)?;
             if branch_shape != match_shape {
                 return Err(ParseError::new(
@@ -1501,6 +1503,17 @@ impl AdamParser {
         let tokens = ctx.cursor.take_tokens().expect("tokens present");
         self.cel.set_lex_tokens(tokens);
         let result = self.cel.parse_expression();
+        ctx.cursor
+            .set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
+        result
+    }
+
+    /// Delegates one `literal_pattern` (a bare literal, optionally negated by a leading `-`) to
+    /// CELParser, sharing the token stream.
+    fn parse_literal_pattern(&mut self, ctx: &mut ParseContext) -> Result<DynSegment> {
+        let tokens = ctx.cursor.take_tokens().expect("tokens present");
+        self.cel.set_lex_tokens(tokens);
+        let result = self.cel.parse_literal_pattern();
         ctx.cursor
             .set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
         result
@@ -2721,7 +2734,50 @@ mod tests {
     }
 
     #[test]
-    fn parse_conditional_with_tuple_typed_match_cell() {
+    fn conditional_branch_negative_literal_key_matches() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell mode: i32 = -1;
+                    cell x: i32 = 1;
+                    cell y: i32 = 0;
+                    conditional mode {
+                        -1i32 => { relationship { y := x; } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let (y_id, _) = sheet.cell_names["y"].clone();
+        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn conditional_branch_negating_unsigned_literal_key_is_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell mode: u32 = 0;
+                cell x: i32 = 1;
+                cell y: i32 = 0;
+                conditional mode {
+                    -1u32 => { relationship { y := x; } },
+                }
+            }
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "negating an unsigned literal must be a parse error"
+        );
+    }
+
+    #[test]
+    fn conditional_with_tuple_typed_match_cell_and_default_only_still_works() {
+        // A tuple isn't a `literal_pattern`, so a tuple-typed match cell can no longer pair with
+        // a named branch key — only the `_` default branch remains reachable.
         let mut sheet = parser()
             .parse_str(
                 r#"
@@ -2730,7 +2786,6 @@ mod tests {
                     cell x: f64 = 1.0;
                     cell y: f64;
                     conditional mode {
-                        (0, 0) => { relationship { y := x; } },
                         _ => { relationship { y := x * 2.0; } },
                     }
                 }
@@ -2739,7 +2794,25 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
         let (y_id, _) = sheet.cell_names["y"].clone();
-        assert_eq!(*sheet.read::<f64>(y_id).unwrap(), 1.0);
+        assert_eq!(*sheet.read::<f64>(y_id).unwrap(), 2.0);
+    }
+
+    #[test]
+    fn conditional_branch_tuple_literal_key_is_error() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell mode: (i32, i32) = (0, 0);
+                cell x: f64 = 1.0;
+                cell y: f64;
+                conditional mode {
+                    (0, 0) => { relationship { y := x; } },
+                    _ => { relationship { y := x * 2.0; } },
+                }
+            }
+        "#,
+        );
+        assert!(result.is_err(), "tuple branch key must be a parse error");
     }
 
     #[test]
@@ -2822,79 +2895,25 @@ mod tests {
     }
 
     #[test]
-    fn conditional_tuple_expression_match_subject_drives_branch_selection() {
-        let mut sheet = parser()
-            .parse_str(
-                r#"
-                sheet s {
-                    cell a: i32 = 0;
-                    cell b: i32 = 0;
-                    cell x: i32 = 1;
-                    cell y: i32 = 0;
-                    conditional (a, b) {
-                        (1i32, 2i32) => { relationship { y := x; } },
-                    }
+    fn conditional_branch_bare_identifier_key_is_error() {
+        // A bare identifier isn't a `literal_pattern` either, even when it resolves (as a
+        // client-registered constant would) to a value of the match subject's own type.
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell mode: i32 = 0;
+                cell x: i32 = 1;
+                cell y: i32 = 0;
+                conditional mode {
+                    mode => { relationship { y := x; } },
                 }
-            "#,
-            )
-            .unwrap();
-        let (a_id, _) = sheet.cell_names["a"].clone();
-        let (b_id, _) = sheet.cell_names["b"].clone();
-        let (y_id, _) = sheet.cell_names["y"].clone();
-
-        sheet.propagate().unwrap();
-        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 0);
-
-        sheet.write(a_id, 1_i32).unwrap();
-        sheet.write(b_id, 2_i32).unwrap();
-        sheet.propagate().unwrap();
-        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
-    }
-
-    #[test]
-    fn conditional_client_registered_type_match_expression_dispatches_correctly() {
-        // `Mode(1)` isn't valid CEL syntax here: adam-lang has no literal-construction syntax
-        // for a client-registered (non-built-in) type, so a bare "TypeName(args)" call parses
-        // as an unresolved 1-arity identifier lookup, not a constructor. Instead, register a
-        // stand-in 0-arity identifier `mode_one` directly on the CEL op lookup (the same
-        // mechanism `parse_deduced_expr`'s grow-on-demand scope uses for resolving bare
-        // identifiers) that pushes a `Mode(1)` constant via
-        // `DynSegment::just`. This lets the DSL source below produce a `Mode` value for both
-        // the cell initializer and the branch key, exercising `TypeRegistry`'s
-        // `entry_by_type_id`/`eq_dyn_fn`/`call_dyn_fn` dispatch for a client-registered type —
-        // the actual point of this test, independent of how the value is spelled.
-        #[derive(PartialEq, Clone, Debug, Default)]
-        struct Mode(i32);
-
-        let mut reg = TypeRegistry::new();
-        reg.register::<Mode>("Mode");
-        let mut parser = AdamParser::new(reg, OpLookup::new());
-        parser
-            .op_lookup_mut()
-            .push_scope(|name, segment, arity, _span| {
-                if name == "mode_one" && arity == 0 {
-                    segment.just(Mode(1));
-                    return Ok(true);
-                }
-                Ok(false)
-            });
-        let mut sheet = parser
-            .parse_str(
-                r#"
-                sheet s {
-                    cell m: Mode = mode_one;
-                    cell x: i32 = 1;
-                    cell y: i32 = 0;
-                    conditional m {
-                        mode_one => { relationship { y := x; } },
-                    }
-                }
-            "#,
-            )
-            .unwrap();
-        sheet.propagate().unwrap();
-        let (y_id, _) = sheet.cell_names["y"].clone();
-        assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
+            }
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "bare identifier branch key must be a parse error"
+        );
     }
 
     #[test]

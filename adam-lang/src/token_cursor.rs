@@ -320,6 +320,31 @@ impl TokenCursor {
         unreachable!("peeked literal, advance must return it")
     }
 
+    /// Consumes a `literal_pattern = ["-"] literal.` — Rust's own `LiteralPattern` grammar rule
+    /// (a bare literal, or one directly negated by a leading `-`; see
+    /// <https://doc.rust-lang.org/reference/patterns.html#literal-patterns>). The literal
+    /// itself is returned unsigned; the leading `-`, if any, is reported separately since a
+    /// `Literal` token never carries a sign.
+    ///
+    /// Returns `(negated, literal, pattern_span, literal_span)`: `pattern_span` is the span of
+    /// the leading `-` when `negated`, otherwise equal to `literal_span`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if a leading `-` is not followed by a literal, or if there is no literal at
+    /// all.
+    pub(crate) fn consume_literal_pattern(&mut self) -> Result<(bool, Literal, Span, Span)> {
+        let minus_span = self.peek_span();
+        let negated = self.consume_punct("-");
+        let (lit, lit_span) = self.consume_literal()?;
+        Ok((
+            negated,
+            lit,
+            if negated { minus_span } else { lit_span },
+            lit_span,
+        ))
+    }
+
     /// Consumes a leading run of consecutive `Token::DocComment` tokens matching `inner`,
     /// returning their joined text (`\n`-separated) and the first token's span, or `None` if the
     /// next token isn't a matching doc comment.
