@@ -61,12 +61,12 @@ pub enum Error {
     /// output.
     InvalidCellKind,
 
-    /// An `add_filter` call is structurally invalid: the cell already has a filter, the
-    /// filter's own value type does not match the cell's registered type, or the
-    /// filter's own argument list names `cell` itself. (An unknown cell, a terminal
-    /// cell, or an argument-cell type mismatch use the shared
-    /// `InvalidId`/`InvalidCellKind`/`TypeMismatch` variants instead, matching
-    /// `add_relationship`/`add_conditional`'s existing convention.)
+    /// An `add_filter` call is structurally invalid: `name` is empty, the cell already
+    /// has a filter, the filter's own value type does not match the cell's registered
+    /// type, or the filter's own argument list names `cell` itself. (An unknown cell or
+    /// an argument-cell type mismatch use the shared `InvalidId`/`TypeMismatch` variants
+    /// instead — `add_filter` has no cell-kind restriction, so it never returns
+    /// `InvalidCellKind`.)
     InvalidFilter,
 
     /// An `add_requirement` call is structurally invalid: the name is empty, `cell`
