@@ -1,1 +1,4 @@
-sheet s { cell width: i32 = 4; out area := width filter clamp: 0..=100; }
+sheet s {
+    cell width: i32 = 4;
+    out area := width filter clamp: 0..=100;
+}

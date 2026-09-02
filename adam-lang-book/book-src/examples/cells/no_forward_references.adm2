@@ -1,1 +1,7 @@
-sheet s { relationship { y := x; } cell x = 0; cell y = 0; } 
+sheet s {
+    relationship {
+        y := x;
+    }
+    cell x = 0;
+    cell y = 0;
+}

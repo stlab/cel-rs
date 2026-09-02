@@ -1,6 +1,10 @@
 sheet conflict {
     cell x = 1.0;
 
-    relationship { x := 1.0; }
-    relationship { x := 2.0; }
+    relationship {
+        x := 1.0;
+    }
+    relationship {
+        x := 2.0;
+    }
 }

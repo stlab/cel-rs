@@ -1,1 +1,3 @@
-sheet s { cell x: (i32, i32) = (0, 0) filter identity: _; }
+sheet s {
+    cell x: (i32, i32) = (0, 0) filter identity: _;
+}

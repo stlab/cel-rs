@@ -431,6 +431,66 @@ pub fn format_sheet(sheet: &ast::Sheet) -> String {
     out
 }
 
+/// Error returned by [`format_source`] when `source` can't be safely formatted.
+#[derive(Debug)]
+pub enum FormatSourceError {
+    /// `source` failed to parse at all.
+    Parse(cel_parser::ParseError),
+    /// `source` parsed but recovered one or more syntax errors inside individual sheet items.
+    Recovered(Vec<cel_parser::ParseError>),
+}
+
+impl std::fmt::Display for FormatSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FormatSourceError::Parse(error) => write!(f, "{error}"),
+            FormatSourceError::Recovered(errors) => {
+                for (i, error) in errors.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    write!(f, "{error}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for FormatSourceError {}
+
+/// Parses and formats `source` as a complete adam-lang sheet, matching `adam-lsp`'s
+/// `textDocument/formatting` handler exactly.
+///
+/// # Errors
+///
+/// Returns [`FormatSourceError::Parse`] if `source` fails to parse at all
+/// ([`crate::AdamAstParser::parse_str`] returns `Err`), or [`FormatSourceError::Recovered`] if it
+/// parses with one or more recovered syntax errors (`Sheet.errors` non-empty) — refusing to
+/// format code it can't fully understand, matching `rustfmt`.
+///
+/// # Examples
+///
+/// ```
+/// use adam_lang::format_source;
+///
+/// assert_eq!(
+///     format_source("sheet   s{cell x:i32=1;}").unwrap(),
+///     "sheet s {\n    cell x: i32 = 1;\n}\n"
+/// );
+/// assert!(format_source("not a sheet at all").is_err());
+/// ```
+pub fn format_source(source: &str) -> Result<String, FormatSourceError> {
+    let mut sheet = crate::AdamAstParser::new()
+        .parse_str(source)
+        .map_err(FormatSourceError::Parse)?;
+    if !sheet.errors.is_empty() {
+        return Err(FormatSourceError::Recovered(sheet.errors));
+    }
+    crate::attach_trivia(source, &mut sheet);
+    Ok(format_sheet(&sheet))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -875,5 +935,29 @@ mod tests {
             format_sheet(&sheet),
             "sheet s {\n    cell x: i32 = 0 filter clamp: 0..=10;\n}\n"
         );
+    }
+
+    #[test]
+    fn format_source_formats_valid_source() {
+        assert_eq!(
+            format_source("sheet   s{cell x:i32=1;}").unwrap(),
+            "sheet s {\n    cell x: i32 = 1;\n}\n"
+        );
+    }
+
+    #[test]
+    fn format_source_errors_on_source_that_fails_to_parse() {
+        assert!(matches!(
+            format_source("not a sheet at all"),
+            Err(FormatSourceError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn format_source_errors_on_a_recovered_syntax_error() {
+        assert!(matches!(
+            format_source("sheet s { cell x unknown_syntax }"),
+            Err(FormatSourceError::Recovered(_))
+        ));
     }
 }

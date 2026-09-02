@@ -4,7 +4,9 @@ sheet no_default {
 
     conditional mode {
         0i32 => {
-            relationship { x := 100.0; }
+            relationship {
+                x := 100.0;
+            }
         }
     }
 }
