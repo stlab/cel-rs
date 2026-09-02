@@ -1,4 +1,4 @@
-//! Examples backing `book-src/relationships.md` (Chapter 5). See `src/lib.rs` for how these
+//! Examples backing `book-src/relationships.md` (Chapter 7). See `src/lib.rs` for how these
 //! `.adm2` files are wired into the book.
 
 #[test]

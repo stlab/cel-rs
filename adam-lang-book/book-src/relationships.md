@@ -1,6 +1,6 @@
-# Chapter 5: Relationships and the Solver
+# Chapter 7: Relationships and the Solver
 
-## 5.1 Bindings are alternative methods
+## 7.1 Bindings are alternative methods
 
 ```text
 relationship_decl = "relationship" "{" { binding } "}".
@@ -18,17 +18,39 @@ can never be named on a binding's left-hand side — it's always a source, by co
 a method's output — and an [`out`](outputs.md) cell can be a binding's *input* but never its
 output either, since an `out` already has its own fixed writer.
 
-## 5.2 Strength: who gets to stay a source
+## 7.2 Strength: who gets to stay a source
 
 Every cell carries a **strength**, a write-recency counter: resolving the sheet re-derives the
 *stalest* cells it safely can and leaves the *freshest* cells alone. Two things bump a cell's
 strength: an explicit write, and, once only, the cell's own declaration. Before any explicit
 write has happened, declaration order alone orders every cell's freshness, earliest declared
-being stalest. Chapter 1's [§1.2](tutorial.md#12-relationships-multi-way-constraints) walks
-through the simplest case of this rule. A write never touches strength itself except to promote
-the written cell to "freshest of all"; reading a cell never changes it.
+being stalest. Chapter 1's [§1.5](tutorial.md#15-relationships-a-cell-that-can-be-either-a-source-or-derived)
+walks through the simplest case of this rule. A write never touches strength itself except to
+promote the written cell to "freshest of all"; reading a cell never changes it.
 
-## 5.3 A shared-cell example
+## 7.3 The rules a relationship's methods must satisfy
+
+Every method in the same `relationship` must reference exactly the same set of cells — the
+union of that method's own `inputs` and `outputs` — as every other method in that
+relationship; violating this fails to parse with `methods in a relationship must reference
+the same set of cells`. A relationship models one fixed group of related cells; its
+methods differ only in which subset of that group they treat as the output, using an
+"ignore an input" pattern — not in which cells they touch at all. [Chapter 1 §1.5](tutorial.md#15-relationships-a-cell-that-can-be-either-a-source-or-derived)'s
+multiplication triangle satisfies this: all three of `c := a * b`, `a := c / b`, and
+`b := c / a` reference the same `{a, b, c}`.
+
+A method's own `outputs` list must be duplicate-free, and no two methods in the same
+relationship may claim an identical `outputs` set; violating either fails to parse with
+`a method's outputs must be duplicate-free, and no two methods in a relationship may share
+an outputs set`. The planner treats a method's output set as one indivisible claim, so two
+methods claiming the same set would make that claim ambiguous. The triangle's three output
+sets — `{c}`, `{a}`, `{b}` — are pairwise distinct, as required.
+
+A cell may appear in both a method's `inputs` and its own `outputs` — a **self-referencing**
+method — which is explicitly allowed and has its own rules; see
+[Chapter 8](relationships-continued.md).
+
+## 7.4 A shared-cell example
 
 Cells can be shared across more than one relationship, letting the solver's strength
 preference cross relationship boundaries. Four cells, two relationships, with `b` and `c`
@@ -77,42 +99,20 @@ strongest first, to leave each cell a source:
 Whether a cell came out of the last resolution as a source, left alone rather than derived, is
 useful for a host UI deciding whether a field should be editable.
 
-## 5.4 When no assignment exists
+## 7.5 When no assignment exists
 
 Every relationship in a sheet must end up with exactly one selected binding once the sheet
-resolves: if that's not possible, resolution fails instead of silently picking something
+resolves; if that's not possible, resolution fails instead of silently picking something
 inconsistent. Two relationships that both, unconditionally, insist on writing the *same* cell
-can never both be satisfied:
-
-```
-{{#include examples/relationships/conflict_error.adm2}}
-```
+can never both be satisfied, and resolving fails with `no valid method assignment
+(overconstrained)` (`Error::Conflict`).
 
 A subtler failure is a **cycle**: an assignment exists, but every valid choice of bindings
-forms a closed loop with no cell left as a source anywhere in the loop; nothing external ever
-breaks the chain:
+forms a closed loop with no cell left as a source anywhere in the loop, and resolving fails
+with `selected methods form a cycle` (`Error::Cycle`). This happens when every
+relationship in the loop has only one binding, leaving the solver no alternative to try;
+giving even one relationship in the loop a second, cycle-breaking binding lets the solver
+route around it instead.
 
-```
-{{#include examples/relationships/cycle_error.adm2}}
-```
-
-Each relationship above has only one binding, so the solver has no alternative to try: `x`,
-`y`, and `z` are forced into a cycle regardless of strength. Giving even one of the three
-relationships a second, cycle-breaking binding (e.g. also allowing `y := x` to run in reverse
-as `x := y`) would let the solver route around the loop instead.
-
-## 5.5 Destructuring bindings
-
-A binding's left-hand side can name more than one output cell by parenthesizing it, in which
-case the right-hand side must be a tuple expression of matching arity, split element-wise:
-
-```
-{{#include examples/relationships/destructuring_binding.adm2}}
-```
-
-`(a, b) := ...` and the one-element `(a,) := ...` (trailing comma mandatory, matching Rust's
-own 1-tuple pattern) both destructure; a bare `a := ...` or the equivalent single parenthesized
-`(a) := ...` (mere grouping, no comma) instead binds the right-hand side's *whole* result
-(including a tuple-typed one) directly to the one named cell. Destructuring and direct-bind are
-otherwise governed by the same type-matching rules as any other binding: each output's declared
-type must structurally match what the expression actually produces, checked at parse time.
+Destructuring a binding's output across more than one cell, and a binding that references its
+own output cell, are covered next, in [Chapter 8](relationships-continued.md).
