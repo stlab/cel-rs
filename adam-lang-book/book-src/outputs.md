@@ -13,7 +13,7 @@ binding to choose between, unlike a `relationship`. Its dependencies are
 [deduced](expressions.md#44-deduced-dependencies) the same way. The `: type_expr` annotation is
 optional; when absent, the output's type is inferred from the initializer, the same rule
 [Chapter 2](cells.md#23-built-in-types-and-inference) gives for a plain `cell`. An `out` may
-also carry a `filter` clause, exactly like a plain `cell`; see [Chapter 7](filters.md).
+also carry a `filter` clause, exactly like a plain `cell`; see [Chapter 5](filters.md).
 
 ```
 {{#include examples/outputs/basic_output.adm2}}
@@ -54,14 +54,14 @@ other cells it needs:
 A failed requirement never stops the sheet from resolving, and never stops `area` from being
 computed and readable; a host can query which requirements are currently failing precisely
 because nothing else in the sheet notices a requirement failing on its own (see
-[Appendix A.11](reference.md#a11-the-host-embedding-api)). A requirement's `name` is just a
+[Appendix A.10](reference.md#a10-the-host-embedding-api)). A requirement's `name` is just a
 label surfaced through that query; it happens to read naturally when it echoes a cell name
 (`not_too_big`, `width_max`), but it isn't a cell reference and doesn't have to match one.
 
 ## 6.4 Multiple requirements
 
 An output can list any number of requirements; a host can query exactly the ones currently
-failing, identified individually (see [Appendix A.11](reference.md#a11-the-host-embedding-api)):
+failing, identified individually (see [Appendix A.10](reference.md#a10-the-host-embedding-api)):
 
 ```
 {{#include examples/outputs/multiple_requirements.adm2}}

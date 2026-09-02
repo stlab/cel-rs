@@ -34,8 +34,8 @@ cell area = 0;               // initializer only — type is inferred (2.3)
 At least one of `: type_expr` / `= expression` must be present: `cell width;` alone is a
 syntax error ("expected `:` or `=` in cell declaration"). A `cell` may also carry an optional
 trailing `filter` clause and/or `require` block — a standing domain constraint and named
-boolean diagnostics, respectively, both covered in full in [Chapter 7](filters.md) and
-[Chapter 8](outputs.md#83-requirements-diagnostics-not-gates) (those two chapters introduce the
+boolean diagnostics, respectively, both covered in full in [Chapter 5](filters.md) and
+[Chapter 6](outputs.md#63-requirements-diagnostics-not-gates) (those two chapters introduce the
 mechanisms via `out`, but both apply to a plain `cell` — and, `require` only, to a
 [`source`](source.md) cell — exactly the same way).
 
@@ -66,7 +66,7 @@ must agree exactly, or the sheet fails to parse with a \`type mismatch: expected
 
 A host application can also register additional Rust types under their own Adam type
 names; that's a Rust-level embedding concern, not something a sheet author does; see
-[Appendix A.5](reference.md#a5-the-type-registry).
+[Appendix A.4](reference.md#a4-the-type-registry).
 
 ## 2.4 Cells with no default
 
@@ -82,7 +82,7 @@ type_expr = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ]
 ```
 
 A parenthesized type list is a tuple type. `()` is the empty tuple (an inert, zero-element
-value; see [Chapter 5](relationships.md) for where it's useful); `(T)` with no comma is plain
+value; see [Chapter 7](relationships.md) for where it's useful); `(T)` with no comma is plain
 grouping, identical to `T` (types have no precedence to disambiguate, but the parentheses are
 accepted for symmetry with expression grammar); `(T,)` (trailing comma mandatory) is a
 genuine one-element tuple; `(T, U, ...)` is the general case:

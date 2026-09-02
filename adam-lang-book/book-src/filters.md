@@ -13,7 +13,7 @@ one reserved identifier: `_` always refers to the *candidate value being conform
 filtered cell's own declared type), never a cell. `_` is reserved inside a filter expression
 only; outside one it's an ordinary identifier (or the [conditional](conditionals.md)
 default-branch token). The identifier before the `:` names the filter; it's a label surfaced
-through the host embedding API (see [A.11](reference.md#a11-the-host-embedding-api)), not a
+through the host embedding API (see [A.10](reference.md#a10-the-host-embedding-api)), not a
 cell reference.
 
 ```text
@@ -55,7 +55,7 @@ intermediate clamped value:
 {{#include examples/filters/raw_value_never_lost.adm2}}
 ```
 
-This is the same rule [Chapter 6](conditionals.md#63-the-default-branch) already showed for a
+This is the same rule [Chapter 9 §9.5](conditionals.md#95-the-default-branch-and-reverting-to-source) already showed for a
 relationship's method: a method's output (and a filter's output) always lands in the derived
 value, so nothing a *computation* produces can ever permanently overwrite what was actually
 written.
@@ -82,7 +82,7 @@ Tutorial.
 ## 5.5 Derived cells: diagnosed, never corrected
 
 A filter attaches to *one* cell, but that cell isn't always a source: a relationship may claim
-it instead (Chapter 5). When that happens, the filter no longer has any authority to change the
+it instead (Chapter 7). When that happens, the filter no longer has any authority to change the
 value: it only *observes*. The sheet still resolves successfully, and the out-of-range value is
 still what a read returns; the sheet simply records that the filter is violated:
 
@@ -93,7 +93,7 @@ still what a read returns; the sheet simply records that the filter is violated:
 Resolving the sheet never fails because of a filter violation, on either side (source or
 derived): a filter is a diagnostic and a self-correction mechanism, never a gate. A host UI can
 query which cells currently have a violated filter; see
-[Appendix A.11](reference.md#a11-the-host-embedding-api) for the embedding API that exposes
+[Appendix A.10](reference.md#a10-the-host-embedding-api) for the embedding API that exposes
 this.
 
 ## 5.6 A filter on an output cell

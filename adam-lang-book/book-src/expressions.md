@@ -40,7 +40,7 @@ references (2.6): an identifier can only be recognized as a cell dependency if t
 declared earlier in the same sheet.
 
 A [`filter`](filters.md) clause uses the same deduction, plus one reserved identifier: `_`
-always denotes the candidate value being conformed, never a cell; see [Chapter 7](filters.md).
+always denotes the candidate value being conformed, never a cell; see [Chapter 5](filters.md).
 
 ## 4.5 "Expression produced no value"
 

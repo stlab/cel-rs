@@ -171,7 +171,7 @@ tuple-valued expression on the right into its parts, one cell per element, using
 Tuple *types* (`cell point: (f64, f64) = (0.0, 0.0);`) are a CEL feature, documented in
 [Chapter 2](cells.md); destructuring is the relationship-binding syntax built on top of them,
 and could one day extend to struct patterns too. See
-[Chapter 7, §7.5](relationships.md#75-destructuring-bindings) for the full
+[Chapter 8, §8.1](relationships-continued.md#81-destructuring-bindings) for the full
 destructuring-vs-direct-bind distinction.
 
 A binding may also name the same cell on both sides of `:=` — a **self-referencing method**,

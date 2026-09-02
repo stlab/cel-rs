@@ -31,7 +31,7 @@ declaration is parsed — resolving the sheet is never reached; naming a `source
 binding's left-hand side is rejected before the sheet can ever be resolved.
 
 A plain `cell`'s source/derived status is a per-round decision the solver makes from
-[strength](relationships.md#52-strength-who-gets-to-stay-a-source) — the same cell might be a
+[strength](relationships.md#72-strength-who-gets-to-stay-a-source) — the same cell might be a
 source in one round and derived in the next, depending on what's been written recently. A
 `source` cell opts out of that entirely: whatever a host last wrote to it (or its own declared
 initializer, before any write) is always its value, unconditionally.
