@@ -2,7 +2,19 @@
 
 **Date:** 2026-08-26
 **Branch:** worktree-ez-adam (revises Phase 1, PR #150, not yet merged)
-**Status:** Approved (design), not yet implemented
+**Status:** Implemented in PR #150, with one revision from this design.
+
+> **Superseded (implementation note):** The `MatchLiteral` extension to
+> `adam-lang`'s AST described below (a `Scalar`/`Tuple` enum on
+> `ConditionalBranch.literal`, plus parser/formatter support) was **not**
+> implemented. Instead, `ez-adam` **decomposes** a multi-cell `Cells`-mode
+> conditional into one top-level conditional per non-empty branch, keyed by a
+> boolean conjunction over that branch's cell values (e.g. `flag_a && !flag_b`)
+> — see `ez-adam/src/codegen/ast_builder.rs`'s
+> `build_decomposed_multi_cell_conditionals`. So no `adam-lang` AST change was
+> needed. Full tuple-branch-key support in `adam-lang` remains tracked as
+> [#173](https://github.com/stlab/cel-rs/issues/173). Read the `MatchLiteral`
+> sections below as historical design context, not the shipped approach.
 
 ## Summary
 
@@ -11,11 +23,11 @@ unmerged) to construct an `adam_lang::ast::Sheet` and call the existing,
 shared `format_sheet` instead of hand-formatting `.adm2` text via string
 templates. This closes a real gap Sean Parent flagged in review: two
 independent serialization paths existed (`adam-lang`'s own AST formatter,
-and `ez-adam`'s bespoke string builder) where there should be one. It also
-requires a small extension to `adam-lang`'s own AST, since one construct
-`ez-adam` already emits and tests successfully — a multi-cell tuple
-conditional branch key — has no representation in `adam-lang`'s AST-only
-parser/formatter today, only in its direct parser.
+and `ez-adam`'s bespoke string builder) where there should be one. (As
+originally scoped this also required a small `adam-lang` AST extension for
+multi-cell *tuple* conditional-branch keys; as implemented that was avoided
+by conjunction-based decomposition instead — see the Superseded note above
+and [#173](https://github.com/stlab/cel-rs/issues/173).)
 
 This is a revision to Phase 1's already-implemented `codegen` module, not
 new Phase 2 (UI) work — hence landing in `worktree-ez-adam`/PR #150 rather
