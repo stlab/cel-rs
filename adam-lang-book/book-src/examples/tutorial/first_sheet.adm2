@@ -1,4 +1,4 @@
 sheet hello {
-    cell width: i32 = 1920;
-    cell height: i32 = 1080;
+    source width: i32 = 1920;
+    source height: i32 = 1080;
 }

@@ -1,6 +1,6 @@
 sheet area_demo {
-    cell width: i32 = 10;
-    cell height: i32 = 20;
+    source width: i32 = 10;
+    source height: i32 = 20;
 
     out area: i32 := width * height require {
         not_too_big: area <= 300;

@@ -1,5 +1,5 @@
 sheet mode_demo {
-    cell p: i32 = 0;
+    source p: i32 = 0;
     cell x: f64 = 1.0;
     cell y: f64 = 2.0;
 
