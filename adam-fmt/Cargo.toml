@@ -2,7 +2,7 @@
 name = "adam-fmt"
 version = "0.1.0"
 edition = "2024"
-description = "Formats a single adam-lang .adm2 source file in place"
+description = "Formats adam-lang .adm2 source files in place"
 
 [dependencies]
 adam-lang = { path = "../adam-lang" }
