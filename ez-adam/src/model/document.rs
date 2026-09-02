@@ -1,4 +1,4 @@
-//! The single source-of-truth document a `ez-adam` editor session edits.
+//! The single source-of-truth document an `ez-adam` editor session edits.
 
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;

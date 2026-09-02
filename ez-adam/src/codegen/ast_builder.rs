@@ -442,6 +442,8 @@ fn build_branch_relationships(
 /// `Cells`-mode condition — a single cell renders as a bare identifier
 /// reference instead of a one-element tuple.
 ///
+/// - Precondition: `cells` is non-empty (an empty tuple `()` is neither a
+///   bare identifier nor a valid match subject here).
 /// - Precondition: the synthesized text is always valid CEL (a bare
 ///   identifier, or a parenthesized comma-list of them) — a parse failure
 ///   here indicates a bug in this function, not bad user data, so it
@@ -449,6 +451,7 @@ fn build_branch_relationships(
 ///
 /// - Complexity: O(n) in `cells.len()`.
 fn cells_tuple_expr(doc: &Document, cells: &[CellId]) -> Expr {
+    debug_assert!(!cells.is_empty(), "cells must be non-empty");
     let text = if cells.len() == 1 {
         doc.cells[cells[0]].name.clone()
     } else {
