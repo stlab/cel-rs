@@ -1,6 +1,6 @@
-# Chapter 7: Filters — Self-Correcting Cells
+# Chapter 5: Filters — Self-Correcting Cells
 
-## 7.1 Grammar
+## 5.1 Grammar
 
 ```text
 cell_filter = "filter" identifier ":" expression.
@@ -23,10 +23,10 @@ cell level: i32 = 50 filter clamp: clamp(_, 0, max);      // an arbitrary expres
 ```
 
 A filter expression must reference `_` at least once (unless it's a range expression, see
-7.4) and must produce a value of exactly the filtered cell's own type; violating either is a
+5.4) and must produce a value of exactly the filtered cell's own type; violating either is a
 parse-time error, not a runtime one.
 
-## 7.2 Writing never filters
+## 5.2 Writing never filters
 
 This is the single most important rule in this chapter: **writing a cell always stores exactly
 the value it was given**, filter or no filter. A filter is applied live, when the sheet
@@ -41,7 +41,7 @@ filter's account. Whatever you write is exactly what a read shows until the shee
 resolves: the same "a read reflects the last full resolution, not a per-write side effect" rule
 every other cell in a sheet already follows.
 
-## 7.3 The raw value is never lost
+## 5.3 The raw value is never lost
 
 A filtered cell keeps two values under the hood: its raw last-written value, the **source**,
 and, when something currently claims it, a computed override, the **derived** value. Reading
@@ -60,7 +60,7 @@ relationship's method: a method's output (and a filter's output) always lands in
 value, so nothing a *computation* produces can ever permanently overwrite what was actually
 written.
 
-## 7.4 Range filters
+## 5.4 Range filters
 
 A filter expression whose type is CEL's `lo..=hi` range (over any type this book's
 [built-in numeric types](cells.md#23-built-in-types-and-inference) supports) is recognized
@@ -72,11 +72,14 @@ current live bounds without needing a candidate value at all:
 {{#include examples/filters/range_filter_kind.adm2}}
 ```
 
-A range filter's body is exempt from the "must reference `_`" rule (7.1): a genuine range
+A range filter's body is exempt from the "must reference `_`" rule (5.1): a genuine range
 expression like `0..=max` has no reason to mention `_` at all, since both endpoints are
-independent of the value being conformed.
+independent of the value being conformed. This book's own live examples mount an editable
+widget bound to the filtered cell whose displayed `min`/`max` track the range's current live
+bounds — try the example in [§1.2](tutorial.md#12-filters-self-correcting-cells) of the
+Tutorial.
 
-## 7.5 Derived cells: diagnosed, never corrected
+## 5.5 Derived cells: diagnosed, never corrected
 
 A filter attaches to *one* cell, but that cell isn't always a source: a relationship may claim
 it instead (Chapter 5). When that happens, the filter no longer has any authority to change the
@@ -93,12 +96,12 @@ query which cells currently have a violated filter; see
 [Appendix A.11](reference.md#a11-the-host-embedding-api) for the embedding API that exposes
 this.
 
-## 7.6 A filter on an output cell
+## 5.6 A filter on an output cell
 
 A filter isn't limited to a plain `cell`: an [`out`](outputs.md) declaration's grammar carries
-the same optional `cell_filter` clause (7.1), trailing its `:=` initializer instead of a `cell`
+the same optional `cell_filter` clause (5.1), trailing its `:=` initializer instead of a `cell`
 declaration's own initializer. Everything above applies unchanged — an out cell is always
-derived (7.5 is the only case that ever actually applies to one), so a filter attached to an
+derived (5.5 is the only case that ever actually applies to one), so a filter attached to an
 out cell is a pure diagnostic, exactly like a filter on any other cell a relationship currently
 claims:
 
@@ -111,16 +114,9 @@ too — see [Chapter 3](source.md#33-a-source-cell-can-be-filtered-too). A `filt
 any cell kind (`cell`, `source`, or `out`) exactly the same way; the grammar has no
 per-kind restriction.
 
-## 7.7 Errors
+## 5.7 Errors
 
-Every filter error below is caught while parsing the sheet, before the sheet is ever resolved:
-
-```
-{{#include examples/filters/must_reference_underscore.adm2}}
-```
-
-```
-{{#include examples/filters/tuple_filter_not_supported.adm2}}
-```
-
-At most one filter may be attached per cell.
+Two filter-declaration mistakes are caught while parsing the sheet, before it is ever
+resolved: a non-range filter body that never references `_` fails with `` `filter must
+reference `_`` ``, and a `filter` attached to a tuple-typed cell fails with `` `filter on a
+tuple-typed cell is not yet supported` ``. At most one filter may be attached per cell.

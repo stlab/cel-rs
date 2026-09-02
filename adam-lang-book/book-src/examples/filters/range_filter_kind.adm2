@@ -1,3 +1,3 @@
 sheet s {
-    cell level: i32 = 50 filter clamp: 0..=100;
+    source level: i32 = 50 filter clamp: 0..=100;
 }
