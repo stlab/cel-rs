@@ -172,7 +172,7 @@ pub fn compute_edges(doc: &Document) -> Vec<Edge> {
     // `cond_id` is available directly — no need to recover it separately.
     let mut seen = HashSet::new();
     for (cond_id, cond) in &doc.conditional_groups {
-        let mut linked_groups: Vec<_> = cond.default.iter().copied().collect();
+        let mut linked_groups: Vec<_> = cond.default.to_vec();
         for branch in &cond.branches {
             linked_groups.extend(branch.enabled_groups.iter().copied());
         }
@@ -276,6 +276,23 @@ fn rubber_band_rect(
 /// `add_conditional_drag`, wrapping the source group in a new conditional
 /// group. Zoom (mouse wheel, via `zoom_at`) works regardless of
 /// `active_tool`.
+///
+/// All mouse/wheel handlers read `client_coordinates()` (viewport-relative),
+/// while rendering computes shape positions via `canvas_to_screen(...)` into
+/// SVG-internal coordinates — these two spaces coincide only if the `<svg>`
+/// sits at the viewport origin, which it won't once a menu bar/toolbar is
+/// laid out above it. Dioxus's `MouseData`/`WheelData` do expose an
+/// `element_coordinates()` accessor, but per `dioxus-html`'s own
+/// `InteractionElementOffset` doc comment ("coordinates of the event
+/// relative to the target element") and its backing DOM `offsetX`/`offsetY`
+/// semantics, that's relative to `event.target` — whichever child shape
+/// (`<rect>`/`<circle>`/`<line>`) the pointer is actually over — not to this
+/// `<svg>` (the `currentTarget` the listener is attached to, and the origin
+/// `canvas_to_screen` renders into). So it is not a safe drop-in
+/// replacement here: switching would make hit-testing correct only when the
+/// cursor happens to be over the same-origin `<svg>` background and wrong
+/// over any shape. Left as `client_coordinates()` pending a real
+/// display-based check (see #177) rather than guessing further.
 #[component]
 pub fn Canvas(
     document: Signal<Document>,
@@ -297,6 +314,14 @@ pub fn Canvas(
     rsx! {
         svg {
             class: "canvas",
+            // No stylesheet exists yet (tracked in issue #177), so without an
+            // explicit size an `<svg>` collapses to a zero-size box under
+            // default replaced-element sizing rules. `1200x800` is a
+            // reasonable placeholder desktop-window default until real CSS
+            // layout (flex/grid sizing the canvas to fill its container)
+            // lands.
+            width: "1200",
+            height: "800",
             onmousedown: move |evt: Event<MouseData>| {
                 let data = evt.data();
                 let client_pt = data.client_coordinates();
@@ -310,8 +335,14 @@ pub fn Canvas(
                 // so the AddConditional arm of `onmouseup` never ran to
                 // clear it) — reset unconditionally before dispatching so
                 // a later, unrelated AddConditional gesture can never fire
-                // against a stale group.
+                // against a stale group. The same reasoning applies to
+                // Add-Relationship's click-sequence state: without this, a
+                // stale `pending_first_click` from a completely different
+                // interaction (before a tool switch, or an abandoned
+                // sequence) would silently combine with the next
+                // Add-Relationship click into an unintended relationship.
                 pending_conditional_source.set(None);
+                pending_first_click.set(None);
 
                 match *active_tool.read() {
                     crate::ui::toolbar::Tool::Select => {
@@ -419,7 +450,7 @@ pub fn Canvas(
                 let client_pt = data.client_coordinates();
                 let cursor_point = Point::new(client_pt.x, client_pt.y);
                 let delta_y = data.delta().strip_units().y;
-                let zoom_delta = 1.0 + (-delta_y * 0.001).clamp(-0.5, 0.5);
+                let zoom_delta = wheel_zoom_delta(delta_y);
                 let transform = *view_transform.read();
                 view_transform.set(zoom_at(&transform, cursor_point, zoom_delta));
             },
@@ -543,6 +574,12 @@ pub fn hit_test(doc: &Document, transform: &ViewTransform, screen_point: Point) 
 /// Returns the Euclidean distance between `a` and `b`.
 fn distance(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+/// Converts a wheel event's `delta_y` into a `zoom_at` multiplier, clamped so a
+/// single large scroll tick can't invert or zero the scale.
+fn wheel_zoom_delta(delta_y: f64) -> f64 {
+    1.0 + (-delta_y * 0.001).clamp(-0.5, 0.5)
 }
 
 /// Advances the Add-Relationship tool's click sequence: given whatever was
@@ -945,6 +982,23 @@ mod tests {
         };
         let zoomed = zoom_at(&t, Point::new(0.0, 0.0), 1.1);
         assert!((zoomed.k - 2.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn wheel_zoom_delta_of_zero_is_a_no_op_multiplier() {
+        assert!((wheel_zoom_delta(0.0) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn wheel_zoom_delta_clamps_a_large_positive_delta_y_to_the_lower_bound() {
+        // A large positive delta_y (scroll down, zoom out) clamps to 1.0 - 0.5.
+        assert!((wheel_zoom_delta(100_000.0) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn wheel_zoom_delta_clamps_a_large_negative_delta_y_to_the_upper_bound() {
+        // A large negative delta_y (scroll up, zoom in) clamps to 1.0 + 0.5.
+        assert!((wheel_zoom_delta(-100_000.0) - 1.5).abs() < 1e-9);
     }
 
     #[test]

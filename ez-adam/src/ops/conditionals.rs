@@ -126,6 +126,30 @@ pub fn add_branch(
     group.branches.len() - 1
 }
 
+/// Sets `conditional`'s `Formula`-mode condition expression text.
+///
+/// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
+/// - Precondition: `conditional`'s condition is `ConditionExpr::Formula` (not
+///   `Cells`).
+pub fn set_condition_formula(
+    doc: &mut Document,
+    conditional: ConditionalGroupId,
+    expr: impl Into<String>,
+) {
+    let group = &mut doc.conditional_groups[conditional];
+    let ConditionExpr::Formula {
+        expr: current_expr, ..
+    } = &mut group.condition
+    else {
+        debug_assert!(
+            false,
+            "set_condition_formula requires a Formula-mode condition"
+        );
+        return;
+    };
+    *current_expr = expr.into();
+}
+
 /// Toggles whether `group` is active on `conditional`'s branch at
 /// `branch_index` — enables it if absent, disables it if present.
 ///
@@ -303,6 +327,20 @@ mod formula_tests {
         let i1 = add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(false)]);
         assert_eq!(i0, 0);
         assert_eq!(i1, 1);
+    }
+
+    #[test]
+    fn set_condition_formula_updates_the_formula_expr() {
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+        let cond = add_conditional_with_formula(&mut doc, vec![x], "", Point::new(0.0, 0.0));
+
+        set_condition_formula(&mut doc, cond, "aspect_ratio > 2.0");
+
+        let ConditionExpr::Formula { expr, .. } = &doc.conditional_groups[cond].condition else {
+            panic!("expected a Formula-mode condition");
+        };
+        assert_eq!(expr, "aspect_ratio > 2.0");
     }
 
     #[test]

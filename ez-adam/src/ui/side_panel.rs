@@ -2,11 +2,11 @@
 //! `docs/superpowers/specs/2026-08-26-ez-adam-ui-design.md` §5.
 
 use crate::model::cell::{CellId, CellType};
-use crate::model::conditional_group::{ConditionalBranch, ConditionalGroupId};
+use crate::model::conditional_group::{ConditionExpr, ConditionalBranch, ConditionalGroupId};
 use crate::model::document::Document;
 use crate::model::relationship_group::RelationshipGroupId;
 use crate::ops::cells::{set_output, set_restrict};
-use crate::ops::conditionals::toggle_enabled_group;
+use crate::ops::conditionals::{set_condition_formula, toggle_enabled_group};
 use crate::ops::relationships::set_member_formula;
 use crate::ui::canvas::NodeId;
 use crate::validation::validate_cel_expression;
@@ -189,6 +189,15 @@ pub fn RelationshipPanel(mut document: Signal<Document>, group: RelationshipGrou
     }
 }
 
+/// Returns `condition`'s formula expression text if it is `Formula`-mode, or
+/// `None` for `Cells`-mode conditions, which have no formula to edit.
+fn formula_expr_for_display(condition: &ConditionExpr) -> Option<&str> {
+    match condition {
+        ConditionExpr::Formula { expr, .. } => Some(expr.as_str()),
+        ConditionExpr::Cells(_) => None,
+    }
+}
+
 /// Renders `conditional`'s enable-table: rows = branches, columns =
 /// relationship groups referenced by the conditional's default or any branch,
 /// checkboxes = whether each group is enabled on that branch.
@@ -197,14 +206,30 @@ pub fn ConditionalPanel(
     mut document: Signal<Document>,
     conditional: ConditionalGroupId,
 ) -> Element {
-    let (branches, all_groups) = {
+    let (branches, all_groups, formula_expr) = {
         let doc = document.read();
         let cond = &doc.conditional_groups[conditional];
         let groups = referenced_groups(&cond.default, &cond.branches);
-        (cond.branches.clone(), groups)
+        let formula_expr = formula_expr_for_display(&cond.condition).map(str::to_owned);
+        (cond.branches.clone(), groups, formula_expr)
     };
 
     rsx! {
+        if let Some(expr) = formula_expr {
+            div {
+                class: "conditional-formula",
+                "Condition: "
+                input {
+                    value: "{expr}",
+                    onchange: move |evt| {
+                        set_condition_formula(&mut document.write(), conditional, evt.value());
+                    },
+                }
+                if let Some(diagnostic) = formula_diagnostic(&expr) {
+                    div { class: "diagnostic", "{diagnostic}" }
+                }
+            }
+        }
         table {
             class: "enable-table",
             thead {
@@ -432,6 +457,21 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result.iter().filter(|g| *g == &group_a).count(), 1);
         assert_eq!(result.iter().filter(|g| *g == &group_b).count(), 1);
+    }
+
+    #[test]
+    fn formula_expr_for_display_returns_the_expr_for_formula_mode() {
+        let condition = ConditionExpr::Formula {
+            referenced_cells: vec![],
+            expr: "x > 1.0".to_string(),
+        };
+        assert_eq!(formula_expr_for_display(&condition), Some("x > 1.0"));
+    }
+
+    #[test]
+    fn formula_expr_for_display_is_none_for_cells_mode() {
+        let condition = ConditionExpr::Cells(vec![]);
+        assert_eq!(formula_expr_for_display(&condition), None);
     }
 
     #[test]
