@@ -443,9 +443,9 @@ pub fn Canvas(
                     stroke: "black",
                 }
             }
-            for (id, cell_node) in &doc.cell_nodes {
+            for (id, _) in &doc.cell_nodes {
                 {
-                    let p = canvas_to_screen(&transform, cell_node.position);
+                    let p = canvas_to_screen(&transform, node_position(&doc, NodeId::CellNode(id)));
                     let selected = sel.contains(&NodeId::CellNode(id));
                     rsx! {
                         rect {
@@ -460,9 +460,12 @@ pub fn Canvas(
                     }
                 }
             }
-            for (id, group) in &doc.relationship_groups {
+            for (id, _) in &doc.relationship_groups {
                 {
-                    let p = canvas_to_screen(&transform, group.position);
+                    let p = canvas_to_screen(
+                        &transform,
+                        node_position(&doc, NodeId::RelationshipGroup(id)),
+                    );
                     let selected = sel.contains(&NodeId::RelationshipGroup(id));
                     rsx! {
                         circle {
@@ -475,9 +478,12 @@ pub fn Canvas(
                     }
                 }
             }
-            for (id, cond) in &doc.conditional_groups {
+            for (id, _) in &doc.conditional_groups {
                 {
-                    let p = canvas_to_screen(&transform, cond.position);
+                    let p = canvas_to_screen(
+                        &transform,
+                        node_position(&doc, NodeId::ConditionalGroup(id)),
+                    );
                     let selected = sel.contains(&NodeId::ConditionalGroup(id));
                     rsx! {
                         rect {
