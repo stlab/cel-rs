@@ -13,7 +13,7 @@ what it does with the value it produces.
 
 ## 4.2 No standard library of its own
 
-A parser built with a bare `OpLookup::new()` and no library installed can still parse and run
+A parser built with a bare [`OpLookup::new()`](../cel_parser/op_table/struct.OpLookup.html#method.new) and no library installed can still parse and run
 every construct in this book except a function call — any attempt to call an undefined
 function fails to parse with an error naming the missing function. This book's own examples
 always install `cel-std` (see `support::parser` in `adam-lang-book`'s own source).
@@ -22,7 +22,7 @@ always install `cel-std` (see `support::parser` in `adam-lang-book`'s own source
 
 A `cell`'s `= expression` initializer is evaluated exactly once, eagerly, at the moment
 `cell`'s own declaration is parsed, with no cell scope pushed at all. Referencing any
-identifier that would otherwise name a cell is an \`undeclared cell \`name\`\` error, exactly
+identifier that would otherwise name a cell is an `` `undeclared cell `name`` `` error, exactly
 as if the cell had never been declared at all — see Appendix A.3.
 
 To compute one cell's value from another's, write a [`relationship`](relationships.md) or an

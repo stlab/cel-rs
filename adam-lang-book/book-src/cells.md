@@ -61,8 +61,7 @@ When a cell has an initializer but no `: type_expr` annotation, its type is infe
 initializer expression's own result type (an ordinary CEL literal-defaulting rule: an
 unsuffixed integer literal like `0` is `i32`, an unsuffixed float literal like `0.0` is `f64`;
 see `cel-parser`'s documentation for the full literal grammar). When both are present, they
-must agree exactly, or the sheet fails to parse with a \`type mismatch: expected \`T\`, got
-\`U\`\` error (Appendix A.4).
+must agree exactly, or the sheet fails to parse with a `` `type mismatch: expected `T`, got `U`` `` error (Appendix A.4).
 
 A host application can also register additional Rust types under their own Adam type
 names; that's a Rust-level embedding concern, not something a sheet author does; see
@@ -105,4 +104,4 @@ declarations would be.
 
 Referencing a name before its declaration — as a `relationship` binding's output, a dependency
 inside any expression, a `conditional`'s match subject, or a `filter`'s dependency — is an
-\`undeclared cell \`name\`\` error (Appendix A.3).
+`` `undeclared cell `name`` `` error (Appendix A.3).
