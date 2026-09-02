@@ -47,11 +47,16 @@ def main() -> int:
     paths = [Path(p) for p in sys.argv[1:]] or [Path(".")]
 
     files: list[Path] = []
+    seen: set[Path] = set()
     for path in paths:
         if not path.exists():
             print(f"format_adam.py: {path}: no such file or directory", file=sys.stderr)
             return 1
-        files.extend(find_adm2_files(path))
+        for found in find_adm2_files(path):
+            resolved = found.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                files.append(found)
 
     if not files:
         print("format_adam.py: no .adm2 files found")

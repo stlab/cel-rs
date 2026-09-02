@@ -178,4 +178,19 @@ mod tests {
         );
         assert!(rendered.contains("sheet.adm2"));
     }
+
+    #[test]
+    fn render_error_reports_a_source_snippet_for_each_recovered_error() {
+        // Exercises FormatSourceError::Recovered specifically (as opposed to ::Parse, covered
+        // above), since that's the variant whose `.collect()` a reviewer once mistakenly flagged
+        // as failing to compile (`String` does implement `FromIterator<String>`).
+        let source = "sheet s { cell x unknown_syntax }".to_string();
+        let error = adam_lang::format_source(&source).unwrap_err();
+        assert!(matches!(error, adam_lang::FormatSourceError::Recovered(_)));
+        let rendered = render_error(
+            Path::new("sheet.adm2"),
+            &FormatFileError::Format { source, error },
+        );
+        assert!(rendered.contains("sheet.adm2"));
+    }
 }
