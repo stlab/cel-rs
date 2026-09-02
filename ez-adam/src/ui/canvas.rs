@@ -194,14 +194,16 @@ fn node_stroke(selected: bool) -> &'static str {
 
 /// Renders `document`'s cells, relationship groups, and conditional
 /// groups as SVG shapes, transformed by `view_transform`, with anything in
-/// `selection` visually highlighted. Purely presentational — click/drag
-/// handling is added in later tasks.
+/// `selection` visually highlighted. Supports click-to-select and drag-to-move
+/// gestures via `hit_test` and `apply_drag_delta`.
 #[component]
 pub fn Canvas(
     document: Signal<Document>,
     view_transform: Signal<ViewTransform>,
     selection: Signal<HashSet<NodeId>>,
 ) -> Element {
+    let mut drag_state = use_signal(|| None::<(NodeId, Point)>);
+
     let doc = document.read();
     let transform = *view_transform.read();
     let sel = selection.read();
@@ -211,6 +213,40 @@ pub fn Canvas(
     rsx! {
         svg {
             class: "canvas",
+            onmousedown: move |evt: Event<MouseData>| {
+                let data = evt.data();
+                let client_pt = data.client_coordinates();
+                let screen_point = Point::new(client_pt.x, client_pt.y);
+                let doc = document.read();
+                let transform = *view_transform.read();
+
+                if let Some(node) = hit_test(&doc, &transform, screen_point) {
+                    selection.write().insert(node);
+                    drag_state.set(Some((node, screen_point)));
+                }
+            },
+            onmousemove: move |evt: Event<MouseData>| {
+                let drag_info = *drag_state.read();
+                if let Some((node, last_screen_point)) = drag_info {
+                    let data = evt.data();
+                    let client_pt = data.client_coordinates();
+                    let current_screen_point = Point::new(client_pt.x, client_pt.y);
+                    let transform = *view_transform.read();
+
+                    let last_canvas = screen_to_canvas(&transform, last_screen_point);
+                    let current_canvas = screen_to_canvas(&transform, current_screen_point);
+                    let delta = Point::new(
+                        current_canvas.x - last_canvas.x,
+                        current_canvas.y - last_canvas.y,
+                    );
+
+                    apply_drag_delta(&mut document.write(), node, delta);
+                    drag_state.set(Some((node, current_screen_point)));
+                }
+            },
+            onmouseup: move |_evt| {
+                drag_state.set(None);
+            },
             for edge in &edges {
                 line {
                     x1: "{canvas_to_screen(&transform, edge.from).x}",
@@ -270,6 +306,67 @@ pub fn Canvas(
                 }
             }
         }
+    }
+}
+
+/// The half-width/height (in canvas units) treated as "on" a node for hit
+/// testing — matches [`Canvas`]'s rendered shape sizes (cells: 40×15
+/// half-extents; relationship/conditional groups: 12 half-extent).
+const CELL_HIT_HALF_EXTENT: (f64, f64) = (40.0, 15.0);
+const GROUP_HIT_RADIUS: f64 = 12.0;
+
+/// Returns the topmost node under `screen_point` (converted to canvas
+/// space via `transform`), or `None` if no node is there. Checks cell
+/// nodes, then relationship groups, then conditional groups, matching
+/// [`Canvas`]'s draw order (later-drawn shapes are checked first only in
+/// that sense — ties within a kind are broken by `SlotMap` iteration
+/// order, which is unspecified but acceptable since nodes don't overlap
+/// in practice).
+///
+/// - Complexity: O(n) in the total number of nodes in `doc`.
+#[must_use]
+pub fn hit_test(doc: &Document, transform: &ViewTransform, screen_point: Point) -> Option<NodeId> {
+    let canvas_point = screen_to_canvas(transform, screen_point);
+    for (id, node) in &doc.cell_nodes {
+        let dx = (canvas_point.x - node.position.x).abs();
+        let dy = (canvas_point.y - node.position.y).abs();
+        if dx <= CELL_HIT_HALF_EXTENT.0 && dy <= CELL_HIT_HALF_EXTENT.1 {
+            return Some(NodeId::CellNode(id));
+        }
+    }
+    for (id, group) in &doc.relationship_groups {
+        if distance(canvas_point, group.position) <= GROUP_HIT_RADIUS {
+            return Some(NodeId::RelationshipGroup(id));
+        }
+    }
+    for (id, group) in &doc.conditional_groups {
+        if distance(canvas_point, group.position) <= GROUP_HIT_RADIUS {
+            return Some(NodeId::ConditionalGroup(id));
+        }
+    }
+    None
+}
+
+fn distance(a: Point, b: Point) -> f64 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
+/// Moves `node` by `delta` (canvas-space), mutating `doc` directly (this
+/// is the one canvas gesture that bypasses `ops::*`, since dragging is a
+/// pure position update with no other invariant to maintain — unlike
+/// `ops::relationships::create_relationship` etc., there's no
+/// `ops::canvas::move_node` in Phase 1 to call).
+///
+/// - Precondition: `node` is a valid id in `doc`.
+pub fn apply_drag_delta(doc: &mut Document, node: NodeId, delta: Point) {
+    let apply = |p: &mut Point| {
+        p.x += delta.x;
+        p.y += delta.y;
+    };
+    match node {
+        NodeId::CellNode(id) => apply(&mut doc.cell_nodes[id].position),
+        NodeId::RelationshipGroup(id) => apply(&mut doc.relationship_groups[id].position),
+        NodeId::ConditionalGroup(id) => apply(&mut doc.conditional_groups[id].position),
     }
 }
 
@@ -407,6 +504,36 @@ mod tests {
     #[test]
     fn node_stroke_unselected_node_returns_black() {
         assert_eq!(node_stroke(false), "black");
+    }
+
+    #[test]
+    fn hit_test_finds_a_cell_node_near_its_position() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let node = add_cell_node(&mut doc, a, Point::new(100.0, 100.0));
+        let t = ViewTransform::identity();
+
+        let hit = hit_test(&doc, &t, Point::new(105.0, 102.0));
+
+        assert_eq!(hit, Some(NodeId::CellNode(node)));
+    }
+
+    #[test]
+    fn hit_test_returns_none_for_empty_canvas_area() {
+        let doc = Document::new("demo");
+        let t = ViewTransform::identity();
+        assert_eq!(hit_test(&doc, &t, Point::new(500.0, 500.0)), None);
+    }
+
+    #[test]
+    fn apply_drag_delta_moves_a_cell_node() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let node = add_cell_node(&mut doc, a, Point::new(10.0, 10.0));
+
+        apply_drag_delta(&mut doc, NodeId::CellNode(node), Point::new(5.0, -3.0));
+
+        assert_eq!(doc.cell_nodes[node].position, Point::new(15.0, 7.0));
     }
 }
 
