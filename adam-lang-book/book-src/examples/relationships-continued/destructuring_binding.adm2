@@ -1,6 +1,6 @@
 sheet rect_demo {
-    cell width: f64 = 10.0;
-    cell height: f64 = 4.0;
+    source width: f64 = 10.0;
+    source height: f64 = 4.0;
     cell area: f64;
     cell perimeter: f64;
 
