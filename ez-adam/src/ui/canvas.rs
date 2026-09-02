@@ -304,6 +304,15 @@ pub fn Canvas(
                 let shift_held = data.modifiers().shift();
                 let transform = *view_transform.read();
 
+                // Any new mousedown invalidates a previous, uncompleted
+                // Add-Conditional drag's pending source (e.g. the user
+                // switched tools, or released the mouse outside the SVG,
+                // so the AddConditional arm of `onmouseup` never ran to
+                // clear it) — reset unconditionally before dispatching so
+                // a later, unrelated AddConditional gesture can never fire
+                // against a stale group.
+                pending_conditional_source.set(None);
+
                 match *active_tool.read() {
                     crate::ui::toolbar::Tool::Select => {
                         let doc = document.read();
