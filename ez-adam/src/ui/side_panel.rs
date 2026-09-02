@@ -2,9 +2,11 @@
 //! `docs/superpowers/specs/2026-08-26-ez-adam-ui-design.md` §5.
 
 use crate::model::cell::{CellId, CellType};
+use crate::model::conditional_group::ConditionalGroupId;
 use crate::model::document::Document;
 use crate::model::relationship_group::RelationshipGroupId;
 use crate::ops::cells::{set_output, set_restrict};
+use crate::ops::conditionals::toggle_enabled_group;
 use crate::ops::relationships::set_member_formula;
 use crate::validation::validate_cel_expression;
 use annotate_snippets::Renderer;
@@ -132,6 +134,67 @@ pub fn RelationshipPanel(mut document: Signal<Document>, group: RelationshipGrou
                     }
                     if let Some(diagnostic) = formula_diagnostic(&formula) {
                         div { class: "diagnostic", "{diagnostic}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Renders `conditional`'s enable-table (rows = branches, columns =
+/// relationship groups referenced by any branch or the default, checkboxes
+/// = `enabled_groups` membership) and its condition text (read-only in
+/// this pass — editing the condition expression itself, as opposed to
+/// which groups are enabled per branch, is not covered by this task).
+#[component]
+pub fn ConditionalPanel(
+    mut document: Signal<Document>,
+    conditional: ConditionalGroupId,
+) -> Element {
+    let (branches, all_groups) = {
+        let doc = document.read();
+        let cond = &doc.conditional_groups[conditional];
+        let mut groups: Vec<_> = cond.default.clone();
+        for branch in &cond.branches {
+            for g in &branch.enabled_groups {
+                if !groups.contains(g) {
+                    groups.push(*g);
+                }
+            }
+        }
+        (cond.branches.clone(), groups)
+    };
+
+    rsx! {
+        table {
+            class: "enable-table",
+            thead {
+                tr {
+                    th { "" }
+                    for group in &all_groups {
+                        th { "{document.read().relationship_groups[*group].display_name}" }
+                    }
+                }
+            }
+            tbody {
+                for (branch_index, branch) in branches.iter().enumerate() {
+                    tr {
+                        td { "{branch_index}" }
+                        for group in &all_groups {
+                            {
+                                let group = *group;
+                                let checked = branch.enabled_groups.contains(&group);
+                                rsx! {
+                                    td {
+                                        input {
+                                            r#type: "checkbox",
+                                            checked: checked,
+                                            onchange: move |_| toggle_enabled_group(&mut document.write(), conditional, branch_index, group),
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
