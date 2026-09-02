@@ -42,6 +42,12 @@ cargo test --workspace <test_name>
 cargo clippy --workspace --exclude begin --all-targets -- -D warnings
 cargo clippy -p begin --no-default-features --all-targets -- -D warnings
 cargo clippy -p begin --all-targets -- -D warnings
+# The ez-adam crate is likewise checked separately: once with --no-default-features
+# (to catch issues in the non-desktop build) and once with its default features
+# (desktop) so #[cfg(feature = "desktop")] code -- the code path the app actually
+# ships -- is linted too.
+cargo clippy -p ez-adam --no-default-features --all-targets -- -D warnings
+cargo clippy -p ez-adam --all-targets -- -D warnings
 cargo clippy --fix --workspace --exclude begin --all-targets
 
 # Docs
@@ -67,8 +73,8 @@ If a request is made that requires any modification, additions, or deletions to 
 Never commit directly to `main`.
 
 Before creating a PR, run the full check suite locally — every command in the Commands
-section above, including all three clippy invocations (workspace, and begin with and
-without its default features).
+section above, including all five clippy invocations (workspace, and begin and ez-adam
+each with and without their default features).
 
 `cargo build --workspace` and `cargo test --workspace` must produce zero compiler
 warnings — clippy's `-D warnings` does not catch everything a plain build/test compile
