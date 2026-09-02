@@ -192,23 +192,92 @@ fn node_stroke(selected: bool) -> &'static str {
     if selected { "red" } else { "black" }
 }
 
+/// Which gesture [`Canvas`]'s current mouse drag is performing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DragMode {
+    /// Dragging a hit node to a new position; `last_screen` is the previous
+    /// mouse position.
+    Node { node: NodeId, last_screen: Point },
+    /// Panning the view; `last_screen` is the previous mouse position.
+    Pan { last_screen: Point },
+    /// Drawing a rubber-band selection rectangle in canvas space.
+    RubberBand {
+        start_canvas: Point,
+        current_canvas: Point,
+    },
+}
+
+/// Decides which drag gesture a mousedown at `screen_point` starts: dragging
+/// a hit node, panning (empty canvas, no shift), or rubber-band selecting
+/// (empty canvas, shift held).
+#[must_use]
+fn start_drag(
+    doc: &Document,
+    transform: &ViewTransform,
+    screen_point: Point,
+    shift_held: bool,
+) -> DragMode {
+    match hit_test(doc, transform, screen_point) {
+        Some(node) => DragMode::Node {
+            node,
+            last_screen: screen_point,
+        },
+        None if shift_held => DragMode::RubberBand {
+            start_canvas: screen_to_canvas(transform, screen_point),
+            current_canvas: screen_to_canvas(transform, screen_point),
+        },
+        None => DragMode::Pan {
+            last_screen: screen_point,
+        },
+    }
+}
+
+/// Returns the screen-space `(x, y, width, height)` rectangle to render for
+/// `drag_mode`, if it is currently drawing a rubber-band selection —
+/// `None` for `Node`, `Pan`, or no active drag.
+#[must_use]
+fn rubber_band_rect(
+    drag_mode: Option<DragMode>,
+    transform: &ViewTransform,
+) -> Option<(f64, f64, f64, f64)> {
+    let Some(DragMode::RubberBand {
+        start_canvas,
+        current_canvas,
+    }) = drag_mode
+    else {
+        return None;
+    };
+    let a = canvas_to_screen(transform, start_canvas);
+    let b = canvas_to_screen(transform, current_canvas);
+    Some((
+        a.x.min(b.x),
+        a.y.min(b.y),
+        (a.x - b.x).abs(),
+        (a.y - b.y).abs(),
+    ))
+}
+
 /// Renders `document`'s cells, relationship groups, and conditional
 /// groups as SVG shapes, transformed by `view_transform`, with anything in
-/// `selection` visually highlighted. Supports click-to-select and drag-to-move
-/// gestures via `hit_test` and `apply_drag_delta`.
+/// `selection` visually highlighted. Supports click-to-select and
+/// drag-to-move (via `hit_test`/`apply_drag_delta`), pan (empty-canvas
+/// drag), zoom (mouse wheel, via `zoom_at`), and shift-drag rubber-band
+/// selection (via `nodes_in_rect`) gestures — see `start_drag` for how a
+/// mousedown picks among the drag gestures.
 #[component]
 pub fn Canvas(
     document: Signal<Document>,
     view_transform: Signal<ViewTransform>,
     selection: Signal<HashSet<NodeId>>,
 ) -> Element {
-    let mut drag_state = use_signal(|| None::<(NodeId, Point)>);
+    let mut drag_mode = use_signal(|| None::<DragMode>);
 
     let doc = document.read();
     let transform = *view_transform.read();
     let sel = selection.read();
 
     let edges = compute_edges(&doc);
+    let band = rubber_band_rect(*drag_mode.read(), &transform);
 
     rsx! {
         svg {
@@ -217,36 +286,85 @@ pub fn Canvas(
                 let data = evt.data();
                 let client_pt = data.client_coordinates();
                 let screen_point = Point::new(client_pt.x, client_pt.y);
+                let shift_held = data.modifiers().shift();
                 let doc = document.read();
                 let transform = *view_transform.read();
 
-                if let Some(node) = hit_test(&doc, &transform, screen_point) {
+                let mode = start_drag(&doc, &transform, screen_point, shift_held);
+                if let DragMode::Node { node, .. } = mode {
                     *selection.write() = std::iter::once(node).collect();
-                    drag_state.set(Some((node, screen_point)));
                 }
+                drag_mode.set(Some(mode));
             },
             onmousemove: move |evt: Event<MouseData>| {
-                let drag_info = *drag_state.read();
-                if let Some((node, last_screen_point)) = drag_info {
-                    let data = evt.data();
-                    let client_pt = data.client_coordinates();
-                    let current_screen_point = Point::new(client_pt.x, client_pt.y);
-                    let transform = *view_transform.read();
+                let Some(mode) = *drag_mode.read() else {
+                    return;
+                };
+                let data = evt.data();
+                let client_pt = data.client_coordinates();
+                let current_screen_point = Point::new(client_pt.x, client_pt.y);
 
-                    let last_canvas = screen_to_canvas(&transform, last_screen_point);
-                    let current_canvas = screen_to_canvas(&transform, current_screen_point);
-                    let delta = Point::new(
-                        current_canvas.x - last_canvas.x,
-                        current_canvas.y - last_canvas.y,
-                    );
-
-                    apply_drag_delta(&mut document.write(), node, delta);
-                    drag_state.set(Some((node, current_screen_point)));
+                match mode {
+                    DragMode::Node { node, last_screen } => {
+                        let transform = *view_transform.read();
+                        let last_canvas = screen_to_canvas(&transform, last_screen);
+                        let current_canvas = screen_to_canvas(&transform, current_screen_point);
+                        let delta = Point::new(
+                            current_canvas.x - last_canvas.x,
+                            current_canvas.y - last_canvas.y,
+                        );
+                        apply_drag_delta(&mut document.write(), node, delta);
+                        drag_mode.set(Some(DragMode::Node {
+                            node,
+                            last_screen: current_screen_point,
+                        }));
+                    }
+                    DragMode::Pan { last_screen } => {
+                        let dx = current_screen_point.x - last_screen.x;
+                        let dy = current_screen_point.y - last_screen.y;
+                        let transform = *view_transform.read();
+                        view_transform.set(pan_by(&transform, dx, dy));
+                        drag_mode.set(Some(DragMode::Pan {
+                            last_screen: current_screen_point,
+                        }));
+                    }
+                    DragMode::RubberBand { start_canvas, .. } => {
+                        let transform = *view_transform.read();
+                        let current_canvas = screen_to_canvas(&transform, current_screen_point);
+                        drag_mode.set(Some(DragMode::RubberBand {
+                            start_canvas,
+                            current_canvas,
+                        }));
+                    }
                 }
             },
             onmouseup: move |_evt| {
-                drag_state.set(None);
+                if let Some(DragMode::RubberBand { start_canvas, current_canvas }) = *drag_mode.read() {
+                    let found = nodes_in_rect(&document.read(), start_canvas, current_canvas);
+                    *selection.write() = found.into_iter().collect();
+                }
+                drag_mode.set(None);
             },
+            onwheel: move |evt: Event<WheelData>| {
+                let data = evt.data();
+                let client_pt = data.client_coordinates();
+                let cursor_point = Point::new(client_pt.x, client_pt.y);
+                let delta_y = data.delta().strip_units().y;
+                let zoom_delta = 1.0 + (-delta_y * 0.001).clamp(-0.5, 0.5);
+                let transform = *view_transform.read();
+                view_transform.set(zoom_at(&transform, cursor_point, zoom_delta));
+            },
+            if let Some((x, y, width, height)) = band {
+                rect {
+                    x: "{x}",
+                    y: "{y}",
+                    width: "{width}",
+                    height: "{height}",
+                    fill: "none",
+                    stroke: "black",
+                    stroke_dasharray: "4",
+                }
+            }
             for edge in &edges {
                 line {
                     x1: "{canvas_to_screen(&transform, edge.from).x}",
@@ -535,6 +653,136 @@ mod tests {
         apply_drag_delta(&mut doc, NodeId::CellNode(node), Point::new(5.0, -3.0));
 
         assert_eq!(doc.cell_nodes[node].position, Point::new(15.0, 7.0));
+    }
+
+    #[test]
+    fn start_drag_hitting_a_node_returns_node_mode() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let node = add_cell_node(&mut doc, a, Point::new(100.0, 100.0));
+        let t = ViewTransform::identity();
+
+        let mode = start_drag(&doc, &t, Point::new(105.0, 102.0), false);
+
+        assert_eq!(
+            mode,
+            DragMode::Node {
+                node: NodeId::CellNode(node),
+                last_screen: Point::new(105.0, 102.0),
+            }
+        );
+    }
+
+    #[test]
+    fn start_drag_hitting_a_node_returns_node_mode_even_with_shift_held() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let node = add_cell_node(&mut doc, a, Point::new(100.0, 100.0));
+        let t = ViewTransform::identity();
+
+        let mode = start_drag(&doc, &t, Point::new(105.0, 102.0), true);
+
+        assert_eq!(
+            mode,
+            DragMode::Node {
+                node: NodeId::CellNode(node),
+                last_screen: Point::new(105.0, 102.0),
+            }
+        );
+    }
+
+    #[test]
+    fn start_drag_on_empty_canvas_without_shift_returns_pan_mode() {
+        let doc = Document::new("demo");
+        let t = ViewTransform::identity();
+
+        let mode = start_drag(&doc, &t, Point::new(500.0, 500.0), false);
+
+        assert_eq!(
+            mode,
+            DragMode::Pan {
+                last_screen: Point::new(500.0, 500.0),
+            }
+        );
+    }
+
+    #[test]
+    fn start_drag_on_empty_canvas_with_shift_returns_rubber_band_mode() {
+        let doc = Document::new("demo");
+        let t = ViewTransform::identity();
+
+        let mode = start_drag(&doc, &t, Point::new(500.0, 500.0), true);
+
+        assert_eq!(
+            mode,
+            DragMode::RubberBand {
+                start_canvas: Point::new(500.0, 500.0),
+                current_canvas: Point::new(500.0, 500.0),
+            }
+        );
+    }
+
+    #[test]
+    fn rubber_band_rect_returns_none_for_node_mode() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let t = ViewTransform::identity();
+        let mode = Some(DragMode::Node {
+            node: NodeId::CellNode(node),
+            last_screen: Point::new(0.0, 0.0),
+        });
+        assert_eq!(rubber_band_rect(mode, &t), None);
+    }
+
+    #[test]
+    fn rubber_band_rect_returns_none_for_pan_mode() {
+        let t = ViewTransform::identity();
+        let mode = Some(DragMode::Pan {
+            last_screen: Point::new(0.0, 0.0),
+        });
+        assert_eq!(rubber_band_rect(mode, &t), None);
+    }
+
+    #[test]
+    fn rubber_band_rect_returns_none_when_no_drag_is_active() {
+        let t = ViewTransform::identity();
+        assert_eq!(rubber_band_rect(None, &t), None);
+    }
+
+    #[test]
+    fn rubber_band_rect_computes_bounds_from_corners() {
+        let t = ViewTransform::identity();
+        let mode = Some(DragMode::RubberBand {
+            start_canvas: Point::new(10.0, 20.0),
+            current_canvas: Point::new(30.0, 50.0),
+        });
+        assert_eq!(rubber_band_rect(mode, &t), Some((10.0, 20.0, 20.0, 30.0)));
+    }
+
+    #[test]
+    fn rubber_band_rect_handles_corners_given_in_either_order() {
+        let t = ViewTransform::identity();
+        let mode = Some(DragMode::RubberBand {
+            start_canvas: Point::new(30.0, 50.0),
+            current_canvas: Point::new(10.0, 20.0),
+        });
+        assert_eq!(rubber_band_rect(mode, &t), Some((10.0, 20.0, 20.0, 30.0)));
+    }
+
+    #[test]
+    fn rubber_band_rect_applies_the_view_transform() {
+        let t = ViewTransform {
+            x: 10.0,
+            y: 0.0,
+            k: 2.0,
+        };
+        let mode = Some(DragMode::RubberBand {
+            start_canvas: Point::new(0.0, 0.0),
+            current_canvas: Point::new(10.0, 10.0),
+        });
+        // canvas (0,0) -> screen (10, 0); canvas (10,10) -> screen (30, 20).
+        assert_eq!(rubber_band_rect(mode, &t), Some((10.0, 0.0, 20.0, 20.0)));
     }
 }
 
