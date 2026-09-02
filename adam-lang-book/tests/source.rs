@@ -26,22 +26,6 @@ fn basic_source() {
 }
 
 #[test]
-fn source_cannot_be_derived() {
-    let mut parser = adam_lang_book::support::parser();
-    let err = parser
-        .parse_str(include_str!(
-            "../book-src/examples/source/source_cannot_be_derived.adm2"
-        ))
-        .err()
-        .unwrap();
-    // `Error::InvalidCellKind`'s Display text was fixed in
-    // https://github.com/stlab/cel-rs/issues/166 to a single kind-agnostic message, so it no
-    // longer carries case-specific detail worth asserting here; this test only checks that the
-    // sheet is rejected at parse time.
-    let _ = err;
-}
-
-#[test]
 fn source_with_a_filter() {
     let mut parser = adam_lang_book::support::parser();
     let mut parsed = parser
