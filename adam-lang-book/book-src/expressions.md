@@ -1,6 +1,6 @@
-# Chapter 3: Expressions and Dependency Deduction
+# Chapter 4: Expressions and Dependency Deduction
 
-## 3.1 Expressions are CEL
+## 4.1 Expressions are CEL
 
 Everywhere Adam's grammar calls for `expression` (a cell initializer, a relationship
 binding's right-hand side, a conditional's match subject or branch literal, an `out`
@@ -11,7 +11,7 @@ CEL, and are documented by `cel-parser`'s own crate documentation, not here. Thi
 covers only what Adam does *around* an expression: deciding which cells it may read, and
 what it does with the value it produces.
 
-## 3.2 No standard library of its own
+## 4.2 No standard library of its own
 
 Adam defines no functions. `min`, `max`, `clamp`, `round`, and anything else callable from
 inside an expression come from a function library installed into the
@@ -25,7 +25,7 @@ and run every construct in this book except a function call:
 {{#include examples/expressions/no_standard_library.adm2}}
 ```
 
-## 3.3 Cell initializers see no cells
+## 4.3 Cell initializers see no cells
 
 A `cell`'s `= expression` initializer is evaluated exactly once, eagerly, at the moment
 `cell`'s own declaration is parsed, with no cell scope pushed at all. It may use literals,
@@ -40,7 +40,7 @@ To compute one cell's value from another's, write a [`relationship`](relationshi
 [`out`](outputs.md) declaration; both of those *do* get a live cell scope, per the next
 section.
 
-## 3.4 Deduced dependencies
+## 4.4 Deduced dependencies
 
 A `relationship` binding, a `conditional`'s match subject, an `out` declaration's body, and a
 `require`ment body all share one mechanism for deciding which cells they read: **every**
@@ -51,9 +51,9 @@ references (2.6): an identifier can only be recognized as a cell dependency if t
 declared earlier in the same sheet.
 
 A [`filter`](filters.md) clause uses the same deduction, plus one reserved identifier: `_`
-always denotes the candidate value being conformed, never a cell; see [Chapter 6](filters.md).
+always denotes the candidate value being conformed, never a cell; see [Chapter 7](filters.md).
 
-## 3.5 "Expression produced no value"
+## 4.5 "Expression produced no value"
 
 Every place an `expression` is required must produce a value one of Adam's registered
 types recognizes, at the end of parsing: a bare CEL statement with no trailing value, or an

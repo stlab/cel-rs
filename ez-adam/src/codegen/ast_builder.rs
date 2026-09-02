@@ -11,7 +11,7 @@ use crate::model::document::Document;
 use crate::model::relationship_group::{RelationshipGroup, RelationshipGroupId};
 use adam_lang::ast::{
     BindingDecl, CellDecl, CellFilter, ConditionalBranch, ConditionalDecl, DefaultBranch,
-    MatchLiteral, RelationshipDecl,
+    RelationshipDecl,
 };
 use cel_parser::{AstContext, Expr, ExprSpan, OpLookup, Parser};
 
@@ -57,6 +57,7 @@ pub(crate) fn build_cell_decl(cell: &Cell) -> CellDecl {
         type_name: Some(type_expr_for(&cell.ty)),
         initializer: None,
         filter: clamp_filter(&cell.ty),
+        require: None,
         leading_comment: None,
         doc_comment: None,
         blank_line_before: false,
@@ -64,18 +65,17 @@ pub(crate) fn build_cell_decl(cell: &Cell) -> CellDecl {
     }
 }
 
-/// Returns a hand-built `filter <clamp-call>` clause clamping `ty`'s value
-/// to its clamp bounds, or `None` if `ty` is `Bool`/`Text` or has no bounds
-/// set. `adam-lang`'s current `cell_filter` grammar (`"filter" or_expression`)
-/// takes a bare expression with no explicit closure/parameter list — `_`
-/// implicitly refers to the candidate value being conformed, deduced
-/// automatically by `adam-lang` itself, so no `ClosureParam`/type
-/// annotation needs to be built here (unlike prior revisions of this
-/// function, from before `adam-lang` simplified `cell_filter`'s grammar).
-/// The clamp-call text still uses explicit `i64` suffixes / `f64` `Debug`
-/// formatting to avoid literal-type-inference ambiguity — see this
-/// function's own body — and is parsed into an `Expr` to become the
-/// filter's `body` directly.
+/// Returns a hand-built, `"clamp"`-named `filter` clause clamping `ty`'s
+/// value to its clamp bounds, or `None` if `ty` is `Bool`/`Text` or has no
+/// bounds set. `adam-lang`'s `cell_filter` grammar
+/// (`"filter" identifier ":" expression`) requires every filter clause to
+/// carry a name; `"clamp"` is used uniformly here regardless of whether
+/// one or both bounds are set, since every case serves the same purpose.
+/// `_` inside the body implicitly refers to the candidate value being
+/// conformed, deduced automatically by `adam-lang` itself. The clamp-call
+/// text still uses explicit `i64` suffixes / `f64` `Debug` formatting to
+/// avoid literal-type-inference ambiguity — see this function's own body —
+/// and is parsed into an `Expr` to become the filter's `body` directly.
 ///
 /// - Precondition: the synthesized clamp-call text is always valid CEL —
 ///   a parse failure here indicates a bug in this function, not bad user
@@ -100,6 +100,8 @@ fn clamp_filter(ty: &CellType) -> Option<CellFilter> {
         panic!("synthesized clamp expression {body_text:?} failed to parse: {e:?}")
     });
     Some(CellFilter {
+        name: "clamp".to_string(),
+        name_span: ExprSpan::for_text("clamp"),
         body,
         span: ExprSpan::for_text("_"),
     })
@@ -150,9 +152,21 @@ pub(crate) fn build_relationship_decl(
     })
 }
 
-/// Builds a `conditional <expr> { <literal> => {...} ... _ => {...} }`
-/// declaration for `cond` (identified by `conditional_id`, used only to
-/// label a condition-parse error, not part of the rendered output).
+/// Builds every top-level `conditional <expr> { ... }` declaration needed
+/// to express `cond` (identified by `conditional_id`, used only to label
+/// parse errors, not part of the rendered output).
+///
+/// `adam_lang`'s conditional-branch grammar restricts branch keys to a
+/// single, optionally negated `literal_pattern` — a tuple key like
+/// `(false, true) => { ... }` is a parse error there (see
+/// `adam-lang/src/parser.rs`'s
+/// `conditional_branch_tuple_literal_key_is_error`). A multi-cell
+/// `ConditionExpr::Cells` condition's truth table therefore can't be
+/// expressed as a single `adam_lang` conditional: each of its non-empty
+/// branches becomes its own top-level conditional here instead, keyed by a
+/// synthesized boolean conjunction over that branch's cell values (e.g.
+/// `flag_a && !flag_b`) rather than a tuple literal — see
+/// [`build_decomposed_multi_cell_conditionals`].
 ///
 /// # Errors
 ///
@@ -160,36 +174,79 @@ pub(crate) fn build_relationship_decl(
 /// group's members, or returns [`ExportError::InvalidCondition`] if a
 /// `Formula`-mode condition expression isn't valid CEL.
 ///
+/// Returns [`ExportError::UnsupportedMultiValueCondition`] if a
+/// `Formula`-mode condition's branches don't match on exactly one value
+/// (no codegen strategy exists yet for that case — see
+/// <https://github.com/stlab/cel-rs/issues/172>), or if a multi-cell
+/// `Cells` condition has a non-empty `default` (unreachable in practice,
+/// since `ops::conditionals::add_conditional_from_bool_cells` never
+/// populates it, but not representable under the decomposed encoding if it
+/// were).
+///
 /// - Complexity: O(n) in the total number of branches, their enabled
 ///   groups' members, and the default's members.
 pub(crate) fn build_conditional_decl(
     doc: &Document,
     conditional_id: ConditionalGroupId,
     cond: &ConditionalGroup,
-) -> Result<ConditionalDecl, ExportError> {
-    let match_expr = match &cond.condition {
-        ConditionExpr::Cells(cells) => cells_tuple_expr(doc, cells),
-        ConditionExpr::Formula { expr, .. } => {
-            parse_expr_text(expr).map_err(|source| ExportError::InvalidCondition {
-                conditional: conditional_id,
-                source,
-            })?
+) -> Result<Vec<ConditionalDecl>, ExportError> {
+    match &cond.condition {
+        ConditionExpr::Cells(cells) if cells.len() > 1 => {
+            build_decomposed_multi_cell_conditionals(doc, conditional_id, cond, cells)
         }
-    };
+        ConditionExpr::Cells(cells) => {
+            let match_expr = cells_tuple_expr(doc, cells);
+            Ok(vec![build_single_conditional_decl(doc, cond, match_expr)?])
+        }
+        ConditionExpr::Formula {
+            expr,
+            referenced_cells,
+        } => {
+            if referenced_cells.len() != 1 {
+                return Err(ExportError::UnsupportedMultiValueCondition {
+                    conditional: conditional_id,
+                });
+            }
+            let match_expr =
+                parse_expr_text(expr).map_err(|source| ExportError::InvalidCondition {
+                    conditional: conditional_id,
+                    source,
+                })?;
+            Ok(vec![build_single_conditional_decl(doc, cond, match_expr)?])
+        }
+    }
+}
 
+/// Builds one `conditional <match_expr> { <literal> => {...} ... _ => {...} }`
+/// declaration for a `cond` whose branches each match on exactly one
+/// value — a single-cell `Cells` condition, or a `Formula` condition with
+/// exactly one referenced cell.
+///
+/// # Errors
+///
+/// Propagates [`ExportError::InvalidFormula`] from any nested relationship
+/// group's members.
+///
+/// - Complexity: O(n) in the total number of branches, their enabled
+///   groups' members, and the default's members.
+fn build_single_conditional_decl(
+    doc: &Document,
+    cond: &ConditionalGroup,
+    match_expr: Expr,
+) -> Result<ConditionalDecl, ExportError> {
     let mut branches = Vec::with_capacity(cond.branches.len());
     for branch in &cond.branches {
-        let mut relationships = Vec::with_capacity(branch.enabled_groups.len());
-        for &group_id in &branch.enabled_groups {
-            relationships.push(build_relationship_decl(
-                doc,
-                &doc.relationship_groups[group_id],
-                group_id,
-            )?);
-        }
+        debug_assert_eq!(
+            branch.values.len(),
+            1,
+            "build_single_conditional_decl requires arity-1 branches"
+        );
+        let relationships = build_branch_relationships(doc, &branch.enabled_groups)?;
+        let (negated, literal, literal_span) = literal_and_sign(&branch.values[0]);
         branches.push(ConditionalBranch {
-            literal: match_literal_for(&branch.values),
-            literal_span: match_literal_span(&branch.values),
+            literal,
+            negated,
+            literal_span,
             relationships,
             leading_comment: None,
             blank_line_before: false,
@@ -200,14 +257,7 @@ pub(crate) fn build_conditional_decl(
         });
     }
 
-    let mut default_relationships = Vec::with_capacity(cond.default.len());
-    for &group_id in &cond.default {
-        default_relationships.push(build_relationship_decl(
-            doc,
-            &doc.relationship_groups[group_id],
-            group_id,
-        )?);
-    }
+    let default_relationships = build_branch_relationships(doc, &cond.default)?;
 
     Ok(ConditionalDecl {
         match_expr,
@@ -227,6 +277,122 @@ pub(crate) fn build_conditional_decl(
         open_brace_span: ExprSpan::for_text("conditional"),
         span: ExprSpan::for_text("conditional"),
     })
+}
+
+/// Builds one top-level `conditional <cellA> && !<cellB> && ... { true => {...} _ => {} }`
+/// declaration per branch of a multi-cell `Cells` condition whose
+/// `enabled_groups` is non-empty — see [`build_conditional_decl`]'s doc
+/// comment for why a single tuple-keyed conditional can't express this.
+/// Branches with no enabled groups contribute nothing and are skipped.
+///
+/// # Errors
+///
+/// Propagates [`ExportError::InvalidFormula`] from any nested relationship
+/// group's members. Returns [`ExportError::UnsupportedMultiValueCondition`]
+/// if `cond.default` is non-empty (see [`build_conditional_decl`]'s doc
+/// comment).
+///
+/// - Precondition: every value in every branch of `cond` is
+///   [`CellValueLiteral::Bool`] (guaranteed by
+///   `ops::conditionals::add_conditional_from_bool_cells`, the only way to
+///   construct a multi-cell `Cells` condition).
+///
+/// - Complexity: O(n) in the total number of branches and their enabled
+///   groups' members.
+fn build_decomposed_multi_cell_conditionals(
+    doc: &Document,
+    conditional_id: ConditionalGroupId,
+    cond: &ConditionalGroup,
+    cells: &[CellId],
+) -> Result<Vec<ConditionalDecl>, ExportError> {
+    if !cond.default.is_empty() {
+        return Err(ExportError::UnsupportedMultiValueCondition {
+            conditional: conditional_id,
+        });
+    }
+    let mut decls = Vec::new();
+    for branch in &cond.branches {
+        if branch.enabled_groups.is_empty() {
+            continue;
+        }
+        debug_assert_eq!(
+            branch.values.len(),
+            cells.len(),
+            "branch arity must match cells.len()"
+        );
+        let conjunction_text = cells
+            .iter()
+            .zip(&branch.values)
+            .map(|(cell_id, value)| {
+                let CellValueLiteral::Bool(is_true) = value else {
+                    unreachable!(
+                        "multi-cell Cells conditions only ever hold Bool values (enforced by \
+                         ops::conditionals::add_conditional_from_bool_cells)"
+                    );
+                };
+                let name = &doc.cells[*cell_id].name;
+                if *is_true {
+                    name.clone()
+                } else {
+                    format!("!{name}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" && ");
+        let match_expr = parse_expr_text(&conjunction_text).unwrap_or_else(|e| {
+            panic!("synthesized condition expression {conjunction_text:?} failed to parse: {e:?}")
+        });
+        let relationships = build_branch_relationships(doc, &branch.enabled_groups)?;
+        decls.push(ConditionalDecl {
+            match_expr,
+            branches: vec![ConditionalBranch {
+                literal: lex_single_literal("true"),
+                negated: false,
+                literal_span: ExprSpan::for_text("true"),
+                relationships,
+                leading_comment: None,
+                blank_line_before: false,
+                trailing_comment: None,
+                blank_line_before_close: false,
+                open_brace_span: ExprSpan::for_text("_"),
+                span: ExprSpan::for_text("_"),
+            }],
+            default: Some(DefaultBranch {
+                relationships: Vec::new(),
+                trailing_comment: None,
+                blank_line_before_close: false,
+                open_brace_span: ExprSpan::for_text("_"),
+                span: ExprSpan::for_text("_"),
+            }),
+            leading_comment: None,
+            doc_comment: None,
+            blank_line_before: false,
+            trailing_comment: None,
+            blank_line_before_close: false,
+            open_brace_span: ExprSpan::for_text("conditional"),
+            span: ExprSpan::for_text("conditional"),
+        });
+    }
+    Ok(decls)
+}
+
+/// Builds one `RelationshipDecl` per id in `group_ids`, in order.
+///
+/// # Errors
+///
+/// Returns [`ExportError::InvalidFormula`] for the first member of any
+/// referenced group whose formula text isn't valid CEL.
+///
+/// - Complexity: O(n) in the total number of members across every group in
+///   `group_ids`.
+fn build_branch_relationships(
+    doc: &Document,
+    group_ids: &[RelationshipGroupId],
+) -> Result<Vec<RelationshipDecl>, ExportError> {
+    group_ids
+        .iter()
+        .map(|&group_id| build_relationship_decl(doc, &doc.relationship_groups[group_id], group_id))
+        .collect()
 }
 
 /// Builds the `(a, b, ...)` tuple expression naming `cells`, for a
@@ -251,81 +417,44 @@ fn cells_tuple_expr(doc: &Document, cells: &[CellId]) -> Expr {
     })
 }
 
-/// Returns `value`'s `.adm2` literal spelling (`i64` suffixes,
-/// `Debug`-quoted/escaped strings), the shared text synthesis used by both
-/// [`literal_for`] (to re-lex it into a [`cel_parser::lex_lexer::Literal`])
-/// and [`match_literal_span`] (to widen a `Tuple` branch's span over the
-/// joined text of every element).
-fn literal_text(value: &CellValueLiteral) -> String {
-    match value {
-        CellValueLiteral::Bool(b) => b.to_string(),
-        CellValueLiteral::I64(n) => format!("{n}i64"),
-        CellValueLiteral::Text(s) => format!("{s:?}"),
-    }
-}
-
-/// Converts a branch's `CellValueLiteral`s into a `MatchLiteral` — a bare
-/// scalar for a single value, or a `Tuple` for multiple.
-///
-/// - Complexity: O(n) in `values.len()`.
-fn match_literal_for(values: &[CellValueLiteral]) -> MatchLiteral {
-    if values.len() == 1 {
-        MatchLiteral::Scalar(literal_for(&values[0]))
-    } else {
-        MatchLiteral::Tuple(
-            values
-                .iter()
-                .map(|v| MatchLiteral::Scalar(literal_for(v)))
-                .collect(),
-        )
-    }
-}
-
-/// Returns the span [`adam_lang::fmt`]'s `write_match_literal` re-emits as
-/// `values`' `.adm2` spelling: a single literal's own text for one value,
-/// or the whole parenthesized, comma-joined text (e.g. `"(true, false)"`)
-/// for multiple — never a placeholder, since `write_match_literal` reads
-/// the *entire* rendered literal back from this one span rather than from
-/// the `MatchLiteral` value itself.
-///
-/// - Precondition: `values` is non-empty.
-///
-/// - Complexity: O(n) in `values.len()`.
-fn match_literal_span(values: &[CellValueLiteral]) -> ExprSpan {
-    debug_assert!(!values.is_empty(), "values must be non-empty");
-    if values.len() == 1 {
-        ExprSpan::for_text(&literal_text(&values[0]))
-    } else {
-        let joined = values
-            .iter()
-            .map(literal_text)
-            .collect::<Vec<_>>()
-            .join(", ");
-        ExprSpan::for_text(&format!("({joined})"))
-    }
-}
-
-/// Converts one `CellValueLiteral` into `cel_parser`'s lexer-level
-/// `Literal` (`= syn::Lit`), by re-lexing its `.adm2` text spelling with
-/// [`cel_parser::lex_lexer::LexLexer`] — reusing the same literal-formatting
-/// convention (`i64` suffixes, quoted/escaped strings) `ez-adam` already
-/// relies on elsewhere.
-///
-/// This deliberately does not route through [`parse_expr_text`]/`Expr`:
-/// `Expr::Literal`'s payload is `cel_parser::ast::Literal` (a distinct enum
-/// of concrete Rust values, e.g. `I64(i64)`/`Bool(bool)`), not
-/// `cel_parser::lex_lexer::Literal` (`syn::Lit`, the type
-/// `adam_lang::ast::MatchLiteral::Scalar` actually wraps — see
-/// `adam-lang/src/ast_parser.rs`'s `parse_match_literal`), so extracting one
-/// from the other would mean hand-mapping every variant rather than
-/// re-lexing the same text once.
+/// Splits `value` into `(negated, literal, literal_span)` for building an
+/// `adam_lang::ast::ConditionalBranch`, whose grammar
+/// (`literal_pattern = ["-"] literal.`) stores a leading `-` separately
+/// from the literal token itself — a `Literal`/`syn::Lit` never carries a
+/// sign. `literal`/`literal_span` always hold the *unsigned* spelling;
+/// `negated` is `true` only for a negative [`CellValueLiteral::I64`].
 ///
 /// - Precondition: `value`'s synthesized text always lexes to exactly one
 ///   literal token — a lex failure or non-literal token here indicates a
 ///   bug in this function, not bad user data, so it panics rather than
 ///   returning a `Result`.
-fn literal_for(value: &CellValueLiteral) -> cel_parser::lex_lexer::Literal {
-    let text = literal_text(value);
+fn literal_and_sign(value: &CellValueLiteral) -> (bool, cel_parser::lex_lexer::Literal, ExprSpan) {
+    let (negated, text) = match value {
+        CellValueLiteral::Bool(b) => (false, b.to_string()),
+        CellValueLiteral::I64(n) => (*n < 0, format!("{}i64", n.unsigned_abs())),
+        CellValueLiteral::Text(s) => (false, format!("{s:?}")),
+    };
+    let literal = lex_single_literal(&text);
+    (negated, literal, ExprSpan::for_text(&text))
+}
+
+/// Lexes `text` into `cel_parser`'s lexer-level `Literal` (`= syn::Lit`),
+/// via [`cel_parser::lex_lexer::LexLexer`] — reusing the same
+/// literal-formatting convention (`i64` suffixes, quoted/escaped strings)
+/// `ez-adam` already relies on elsewhere.
+///
+/// This deliberately does not route through [`parse_expr_text`]/`Expr`:
+/// `Expr::Literal`'s payload is `cel_parser::ast::Literal` (a distinct enum
+/// of concrete Rust values, e.g. `I64(i64)`/`Bool(bool)`), not
+/// `cel_parser::lex_lexer::Literal` (`syn::Lit`, the type
+/// `adam_lang::ast::ConditionalBranch::literal` actually wraps), so
+/// extracting one from the other would mean hand-mapping every variant
+/// rather than re-lexing the same text once.
+///
+/// - Precondition: `text` lexes to exactly one literal token — a lex
+///   failure or non-literal token here indicates a bug in the caller, not
+///   bad user data, so it panics rather than returning a `Result`.
+fn lex_single_literal(text: &str) -> cel_parser::lex_lexer::Literal {
     let tokens: proc_macro2::TokenStream = text
         .parse()
         .unwrap_or_else(|e| panic!("synthesized literal text {text:?} failed to tokenize: {e}"));
@@ -456,13 +585,14 @@ mod tests {
             add_conditional_from_bool_cells(&mut doc, vec![flag], group_id, Point::new(0.0, 40.0));
 
         let cond = &doc.conditional_groups[cond_id];
-        let decl = build_conditional_decl(&doc, cond_id, cond).unwrap();
-        assert_eq!(decl.branches.len(), 2);
-        assert!(decl.default.is_some());
+        let decls = build_conditional_decl(&doc, cond_id, cond).unwrap();
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].branches.len(), 2);
+        assert!(decls[0].default.is_some());
     }
 
     #[test]
-    fn build_conditional_decl_for_a_multi_cell_condition_uses_tuple_match_literals() {
+    fn build_conditional_decl_for_a_multi_cell_condition_emits_one_decl_per_enabled_branch() {
         use crate::model::geometry::Point;
         use crate::ops::cells::{add_cell, add_cell_node};
         use crate::ops::conditionals::add_conditional_from_bool_cells;
@@ -486,19 +616,63 @@ mod tests {
         );
 
         let cond = &doc.conditional_groups[cond_id];
-        let decl = build_conditional_decl(&doc, cond_id, cond).unwrap();
-        assert_eq!(decl.branches.len(), 4);
-        assert!(matches!(
-            decl.branches[0].literal,
-            adam_lang::ast::MatchLiteral::Tuple(_)
-        ));
-        // The bug this task's brief flags explicitly: `fmt.rs`'s
-        // `write_match_literal` re-emits a `Tuple` branch's *whole* source
-        // text from `literal_span` alone (see its doc comment), so the span
-        // must cover the synthesized `(v0, v1)` text, not a placeholder.
+        let decls = build_conditional_decl(&doc, cond_id, cond).unwrap();
+        // Per `add_conditional_from_bool_cells`'s contract, only the
+        // all-true branch has a non-empty `enabled_groups` — every other
+        // combination is empty and contributes no decl.
+        assert_eq!(decls.len(), 1);
         assert_eq!(
-            decl.branches[0].literal_span.start.source_text().as_deref(),
-            Some("(false, false)")
+            cel_parser::format_expr(&decls[0].match_expr),
+            "constrain_proportions && lock_aspect"
         );
+        assert_eq!(decls[0].branches.len(), 1);
+        assert_eq!(
+            decls[0].branches[0]
+                .literal_span
+                .start
+                .source_text()
+                .as_deref(),
+            Some("true")
+        );
+        assert_eq!(decls[0].branches[0].relationships.len(), 1);
+    }
+
+    #[test]
+    fn build_conditional_decl_for_a_multi_cell_condition_with_no_enabled_branches_emits_no_decls() {
+        use crate::model::geometry::Point;
+        use crate::ops::cells::add_cell;
+        use crate::ops::conditionals::add_conditional_from_bool_cells;
+        use crate::ops::relationships::create_relationship;
+
+        let mut doc = Document::new("demo");
+        let flag_a = add_cell(&mut doc, "constrain_proportions", CellType::Bool);
+        let flag_b = add_cell(&mut doc, "lock_aspect", CellType::Bool);
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = crate::ops::cells::add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = crate::ops::cells::add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group_id = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        let cond_id = add_conditional_from_bool_cells(
+            &mut doc,
+            vec![flag_a, flag_b],
+            group_id,
+            Point::new(0.0, 40.0),
+        );
+        // Immediately disable the one branch `add_conditional_from_bool_cells` enables.
+        let enabled_branch_index = doc.conditional_groups[cond_id]
+            .branches
+            .iter()
+            .position(|b| !b.enabled_groups.is_empty())
+            .unwrap();
+        crate::ops::conditionals::toggle_enabled_group(
+            &mut doc,
+            cond_id,
+            enabled_branch_index,
+            group_id,
+        );
+
+        let cond = &doc.conditional_groups[cond_id];
+        let decls = build_conditional_decl(&doc, cond_id, cond).unwrap();
+        assert!(decls.is_empty());
     }
 }

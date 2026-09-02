@@ -64,8 +64,16 @@ jobs:
     - name: Build the adam-lang book
       run: mdbook build adam-lang-book
 
+    # `cp -r src dst` only produces a flat `dst` when `dst` doesn't already exist; if
+    # `target/doc/book` survived from a cached `target/` (Swatinem/rust-cache persists it
+    # across runs), `cp -r` instead nests the source *into* it as `target/doc/book/book-dist`,
+    # 404ing every link into `book/` (e.g. `cel-rs`'s root doc comment linking `../book/index.html`).
+    # Removing any stale directory first keeps this step's result independent of what a
+    # previous run left behind.
     - name: Copy the adam-lang book into the docs site
-      run: cp -r adam-lang-book/book-dist target/doc/book
+      run: |
+        rm -rf target/doc/book
+        cp -r adam-lang-book/book-dist target/doc/book
 
     - uses: actions/upload-pages-artifact@v3
       with:

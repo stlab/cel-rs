@@ -4,6 +4,8 @@
 //! stores type-erased function pointers covering:
 //! - `push_arg_fn` — registers a [`cel_runtime::DynSegment::push_arg`] op
 //! - `add_cell_fn` — creates a sheet cell from a `Box<dyn Any>` value
+//! - `add_source_fn` — creates a source-kind sheet cell (via [`Sheet::add_source`]) from a
+//!   `Box<dyn Any>` value
 //! - `call_dyn_fn` — executes a compiled segment and boxes the result
 //! - `default_fn`  — constructs a default `Box<dyn Any>` (when `Default` is available)
 //!
@@ -40,6 +42,10 @@ pub type PushArgFn = fn(&mut DynSegment, usize);
 
 /// Adds a typed cell from a boxed value and returns its handle.
 pub type AddCellFn = fn(&mut Sheet, Box<dyn Any>) -> CellId;
+
+/// Adds a typed source cell (via [`Sheet::add_source`]) from a boxed value and returns its
+/// handle.
+pub type AddSourceFn = fn(&mut Sheet, Box<dyn Any>) -> CellId;
 
 /// Executes a compiled segment with the supplied inputs and boxes the result.
 pub type CallDynFn = fn(&mut DynSegment, &[&dyn Any]) -> anyhow::Result<Box<dyn Any>>;
@@ -84,6 +90,9 @@ pub struct TypeEntry {
     pub push_arg_fn: PushArgFn,
     /// Creates a sheet cell from a `Box<dyn Any>` holding a `T`.
     pub add_cell_fn: AddCellFn,
+    /// Creates a source-kind sheet cell (via [`Sheet::add_source`]) from a `Box<dyn Any>` holding
+    /// a `T`.
+    pub add_source_fn: AddSourceFn,
     /// Calls `DynSegment::call_dyn::<T>` and boxes the result.
     pub call_dyn_fn: CallDynFn,
     /// Compares two type-erased values of this type for equality.
@@ -161,6 +170,17 @@ fn add_cell_impl<T: Any + PartialEq + 'static>(sheet: &mut Sheet, value: Box<dyn
         .downcast::<T>()
         .expect("add_cell_impl: type matches registration");
     sheet.add_cell(*v)
+}
+
+/// Adds `value` to `sheet` as a source-kind cell (via [`Sheet::add_source`]), for
+/// `TypeEntry::add_source_fn`.
+///
+/// - Precondition: `value` holds a `T` matching the registration that produced this fn pointer.
+fn add_source_impl<T: Any + PartialEq + 'static>(sheet: &mut Sheet, value: Box<dyn Any>) -> CellId {
+    let v = value
+        .downcast::<T>()
+        .expect("add_source_impl: type matches registration");
+    sheet.add_source(*v)
 }
 
 /// Compares two type-erased values of `T`, for `TypeEntry::eq_dyn_fn`.
@@ -301,6 +321,7 @@ impl TypeRegistry {
                 type_name: std::any::type_name::<T>(),
                 push_arg_fn: push_arg_impl::<T>,
                 add_cell_fn: add_cell_impl::<T>,
+                add_source_fn: add_source_impl::<T>,
                 call_dyn_fn: call_dyn_impl::<T>,
                 eq_dyn_fn: eq_dyn_impl::<T>,
                 extract_box_fn: extract_box_impl::<T>,
@@ -351,6 +372,7 @@ impl TypeRegistry {
                 type_name: std::any::type_name::<T>(),
                 push_arg_fn: push_arg_impl::<T>,
                 add_cell_fn: add_cell_impl::<T>,
+                add_source_fn: add_source_impl::<T>,
                 call_dyn_fn: call_dyn_impl::<T>,
                 eq_dyn_fn: eq_dyn_impl::<T>,
                 extract_box_fn: extract_box_impl::<T>,

@@ -76,6 +76,30 @@ fn clamp_demo() {
 }
 
 #[test]
+fn destructuring_demo() {
+    let mut parser = adam_lang_book::support::parser();
+    let mut parsed = parser
+        .parse_str(include_str!(
+            "../book-src/examples/tutorial/destructuring_demo.adm2"
+        ))
+        .unwrap();
+    parsed.propagate().unwrap();
+
+    let (area, perimeter) = (
+        parsed.cell_names["area"].0,
+        parsed.cell_names["perimeter"].0,
+    );
+    assert_eq!(*parsed.read::<f64>(area).unwrap(), 40.0); // 10.0 * 4.0
+    assert_eq!(*parsed.read::<f64>(perimeter).unwrap(), 28.0); // 2.0 * (10.0 + 4.0)
+
+    // No writes since the last propagate: re-propagating must be a no-op, unlike a
+    // self-referential swap binding, which would flip values back and forth forever.
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<f64>(area).unwrap(), 40.0);
+    assert_eq!(*parsed.read::<f64>(perimeter).unwrap(), 28.0);
+}
+
+#[test]
 fn area_with_requirement() {
     let mut parser = adam_lang_book::support::parser();
     let mut parsed = parser
@@ -86,10 +110,10 @@ fn area_with_requirement() {
     parsed.propagate().unwrap();
 
     let output = parsed.output_names["area"];
-    assert!(parsed.output_valid(output)); // 10 * 20 == 200 <= 300
+    assert!(parsed.cell_requirements_valid(output)); // 10 * 20 == 200 <= 300
 
     let width = parsed.cell_names["width"].0;
     parsed.write(width, 50_i32).unwrap();
     parsed.propagate().unwrap();
-    assert!(!parsed.output_valid(output)); // 50 * 20 == 1000 > 300
+    assert!(!parsed.cell_requirements_valid(output)); // 50 * 20 == 1000 > 300
 }

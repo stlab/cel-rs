@@ -4,6 +4,7 @@
 
 - [A Tutorial Introduction](tutorial.md)
 - [Sheets, Cells, and Types](cells.md)
+- [Source Cells](source.md)
 - [Expressions and Dependency Deduction](expressions.md)
 - [Relationships and the Solver](relationships.md)
 - [Conditionals](conditionals.md)

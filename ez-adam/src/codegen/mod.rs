@@ -35,6 +35,17 @@ pub enum ExportError {
         /// The parse error that occurred.
         source: cel_parser::ParseError,
     },
+    /// `conditional` matches on more than one value per branch (a
+    /// `Formula`-mode condition with more than one referenced cell, or a
+    /// multi-cell `Cells`-mode condition with a non-empty `default`) —
+    /// `adam_lang`'s conditional-branch grammar only accepts a single,
+    /// optionally negated literal per branch key, and no general codegen
+    /// strategy exists yet for this case. See
+    /// <https://github.com/stlab/cel-rs/issues/172>.
+    UnsupportedMultiValueCondition {
+        /// The conditional group with the unsupported condition.
+        conditional: ConditionalGroupId,
+    },
 }
 
 /// Returns `.adm2` source text for `doc`, by constructing an
@@ -87,9 +98,9 @@ fn build_sheet(doc: &Document) -> Result<Sheet, ExportError> {
     }
 
     for (id, cond) in doc.conditional_groups_in_order() {
-        items.push(SheetItem::Conditional(ast_builder::build_conditional_decl(
-            doc, id, cond,
-        )?));
+        for decl in ast_builder::build_conditional_decl(doc, id, cond)? {
+            items.push(SheetItem::Conditional(decl));
+        }
     }
 
     Ok(Sheet {
@@ -193,7 +204,7 @@ mod tests {
         let out = generate_adm2(&doc).expect("valid document should export cleanly");
         assert_eq!(
             out,
-            "sheet demo {\n    cell width_pixels: i64 filter clamp(_, 0i64, 100i64);\n}\n"
+            "sheet demo {\n    cell width_pixels: i64 filter clamp: clamp(_, 0i64, 100i64);\n}\n"
         );
     }
 
@@ -213,7 +224,7 @@ mod tests {
         let out = generate_adm2(&doc).expect("valid document should export cleanly");
         assert_eq!(
             out,
-            "sheet demo {\n    cell width_pixels: i64 filter max(_, 0i64);\n}\n"
+            "sheet demo {\n    cell width_pixels: i64 filter clamp: max(_, 0i64);\n}\n"
         );
     }
 
@@ -233,7 +244,7 @@ mod tests {
         let out = generate_adm2(&doc).expect("valid document should export cleanly");
         assert_eq!(
             out,
-            "sheet demo {\n    cell width_pixels: f64 filter min(_, 100.0);\n}\n"
+            "sheet demo {\n    cell width_pixels: f64 filter clamp: min(_, 100.0);\n}\n"
         );
     }
 
@@ -271,7 +282,16 @@ mod tests {
     }
 
     #[test]
-    fn generates_a_conditional_group_with_a_multi_cell_tuple_condition() {
+    fn generates_a_conditional_group_with_a_multi_cell_condition_as_a_conjunction() {
+        // `adam_lang`'s conditional-branch grammar rejects tuple branch keys
+        // (`(false, true) => { ... }` is a parse error), so a multi-cell
+        // `Cells` condition is decomposed into one top-level conditional per
+        // non-empty branch, keyed by a boolean conjunction over the branch's
+        // cell values instead of a tuple literal — see
+        // `ast_builder::build_decomposed_multi_cell_conditionals`. Only the
+        // all-true branch has a non-empty `enabled_groups`
+        // (`add_conditional_from_bool_cells`'s contract), so exactly one
+        // conditional is emitted here.
         use crate::ops::conditionals::add_conditional_from_bool_cells;
 
         let mut doc = Document::new("demo");
@@ -292,11 +312,9 @@ mod tests {
         );
 
         let out = generate_adm2(&doc).expect("valid document should export cleanly");
-        // combo 0..4: (false,false), (true,false), (false,true), (true,true) —
-        // bit i of combo selects cells[i]'s value.
         assert_eq!(
             out,
-            "sheet demo {\n    cell constrain_proportions: bool;\n    cell lock_aspect: bool;\n    cell width_pixels: i64;\n    cell height_pixels: i64;\n    conditional (constrain_proportions, lock_aspect) {\n        (false, false) => {\n        }\n        (true, false) => {\n        }\n        (false, true) => {\n        }\n        (true, true) => {\n            relationship {\n                width_pixels := height_pixels * 2i64;\n                height_pixels := width_pixels / 2i64;\n            }\n        }\n        _ => {\n        }\n    }\n}\n"
+            "sheet demo {\n    cell constrain_proportions: bool;\n    cell lock_aspect: bool;\n    cell width_pixels: i64;\n    cell height_pixels: i64;\n    conditional constrain_proportions && lock_aspect {\n        true => {\n            relationship {\n                width_pixels := height_pixels * 2i64;\n                height_pixels := width_pixels / 2i64;\n            }\n        }\n        _ => {\n        }\n    }\n}\n"
         );
     }
 

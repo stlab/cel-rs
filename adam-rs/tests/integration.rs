@@ -3,9 +3,9 @@
 use std::any::TypeId;
 use std::collections::HashSet;
 
-use adam_rs::{CellId, Error, MatchExpr, Method, OutputId, Requirement, RequirementId, Sheet};
+use adam_rs::{CellId, CellKind, Error, MatchExpr, Method, Requirement, RequirementId, Sheet};
 
-fn sheet_with_area_output() -> (Sheet, OutputId, CellId, CellId, CellId) {
+fn sheet_with_area_output() -> (Sheet, CellId, CellId, CellId, CellId) {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
     let height = sheet.add_cell(0_i32);
@@ -14,8 +14,8 @@ fn sheet_with_area_output() -> (Sheet, OutputId, CellId, CellId, CellId) {
     let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| {
         w.checked_mul(*h).ok_or_else(|| anyhow::anyhow!("overflow"))
     });
-    let output = sheet
-        .add_output(
+    let out = sheet
+        .add_out(
             writer,
             vec![(
                 "max_area",
@@ -23,7 +23,7 @@ fn sheet_with_area_output() -> (Sheet, OutputId, CellId, CellId, CellId) {
             )],
         )
         .unwrap();
-    (sheet, output, width, height, max_area)
+    (sheet, out, width, height, max_area)
 }
 
 #[test]
@@ -1242,20 +1242,20 @@ fn mutually_dependent_relationships_with_no_external_input_remain_cycle() {
 }
 
 #[test]
-fn add_output_succeeds_with_no_requirements() {
+fn add_out_succeeds_with_no_requirements() {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
     let height = sheet.add_cell(0_i32);
     let area = sheet.add_cell(0_i32);
     let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h));
-    let output = sheet
-        .add_output(writer, Vec::<(&str, Requirement)>::new())
+    let out = sheet
+        .add_out(writer, Vec::<(&str, Requirement)>::new())
         .unwrap();
-    assert_eq!(sheet.output_cell(output), Some(area));
+    assert_eq!(out, area);
 }
 
 #[test]
-fn add_output_succeeds_with_one_requirement() {
+fn add_out_succeeds_with_one_requirement() {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
     let height = sheet.add_cell(0_i32);
@@ -1264,8 +1264,8 @@ fn add_output_succeeds_with_one_requirement() {
     let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| {
         w.checked_mul(*h).ok_or_else(|| anyhow::anyhow!("overflow"))
     });
-    let output = sheet
-        .add_output(
+    let out = sheet
+        .add_out(
             writer,
             vec![(
                 "max_area",
@@ -1273,11 +1273,11 @@ fn add_output_succeeds_with_one_requirement() {
             )],
         )
         .unwrap();
-    assert_eq!(sheet.output_requirements(output).unwrap().len(), 1);
+    assert_eq!(sheet.cell_requirements(out).unwrap().len(), 1);
 }
 
 #[test]
-fn add_output_succeeds_with_multiple_requirements() {
+fn add_out_succeeds_with_multiple_requirements() {
     let mut sheet = Sheet::new();
     let width = sheet.add_cell(0_i32);
     let height = sheet.add_cell(0_i32);
@@ -1287,8 +1287,8 @@ fn add_output_succeeds_with_multiple_requirements() {
     let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| {
         w.checked_mul(*h).ok_or_else(|| anyhow::anyhow!("overflow"))
     });
-    let output = sheet
-        .add_output(
+    let out = sheet
+        .add_out(
             writer,
             vec![
                 (
@@ -1302,22 +1302,22 @@ fn add_output_succeeds_with_multiple_requirements() {
             ],
         )
         .unwrap();
-    assert_eq!(sheet.output_requirements(output).unwrap().len(), 2);
+    assert_eq!(sheet.cell_requirements(out).unwrap().len(), 2);
 }
 
 #[test]
-fn add_output_returns_invalid_output_for_writer_with_zero_outputs() {
+fn add_out_returns_invalid_output_for_writer_with_zero_outputs() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let writer = Method::new(vec![a], vec![], vec![TypeId::of::<i32>()], vec![], |_| {
         Ok(vec![])
     });
-    let result = sheet.add_output(writer, Vec::<(&str, Requirement)>::new());
+    let result = sheet.add_out(writer, Vec::<(&str, Requirement)>::new());
     assert!(matches!(result, Err(Error::InvalidOutput)));
 }
 
 #[test]
-fn add_output_returns_invalid_output_for_writer_with_two_outputs() {
+fn add_out_returns_invalid_output_for_writer_with_two_outputs() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -1332,56 +1332,65 @@ fn add_output_returns_invalid_output_for_writer_with_two_outputs() {
             Ok(vec![Box::new(*x), Box::new(*x)])
         },
     );
-    let result = sheet.add_output(writer, Vec::<(&str, Requirement)>::new());
+    let result = sheet.add_out(writer, Vec::<(&str, Requirement)>::new());
     assert!(matches!(result, Err(Error::InvalidOutput)));
 }
 
 #[test]
-fn add_output_returns_invalid_output_for_duplicate_requirement_names() {
+fn add_out_returns_invalid_requirement_for_duplicate_requirement_names() {
+    // Under the old `add_output`, duplicate/empty requirement names were validated in a
+    // single pre-pass and reported as `Error::InvalidOutput`. `add_out` now delegates
+    // each requirement to `Sheet::add_requirement` one at a time, so this is
+    // `Error::InvalidRequirement` instead (see `add_out`'s doc comment on the
+    // resulting non-atomicity).
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(a, b, |x: &i32| Ok(*x));
-    let result = sheet.add_output(
+    let result = sheet.add_out(
         writer,
         vec![
             ("check", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0))),
             ("check", Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100))),
         ],
     );
-    assert!(matches!(result, Err(Error::InvalidOutput)));
+    assert!(matches!(result, Err(Error::InvalidRequirement)));
 }
 
 #[test]
-fn add_output_returns_invalid_output_for_empty_requirement_name() {
+fn add_out_returns_invalid_requirement_for_empty_requirement_name() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(a, b, |x: &i32| Ok(*x));
-    let result = sheet.add_output(
+    let result = sheet.add_out(
         writer,
         vec![("", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
     );
-    assert!(matches!(result, Err(Error::InvalidOutput)));
+    assert!(matches!(result, Err(Error::InvalidRequirement)));
 }
 
 #[test]
-fn add_output_returns_terminal_cell_when_output_cell_already_has_a_relationship() {
+fn add_out_returns_invalid_cell_kind_when_output_cell_already_has_a_relationship() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
-    // b already has an incoming relationship before add_output is attempted on it.
+    // b already has an incoming relationship before add_out is attempted on it.
     sheet
         .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
         .unwrap();
     let c = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(c, b, |x: &i32| Ok(*x));
-    let result = sheet.add_output(writer, Vec::<(&str, Requirement)>::new());
-    assert!(matches!(result, Err(Error::TerminalCell)));
+    let result = sheet.add_out(writer, Vec::<(&str, Requirement)>::new());
+    assert!(matches!(result, Err(Error::InvalidCellKind)));
 }
 
 #[test]
-fn add_output_returns_terminal_cell_when_output_cell_is_a_conditional_match_cell() {
+fn add_out_succeeds_when_output_cell_was_previously_a_conditional_match_cell() {
+    // Superseded behavior (was `add_output_returns_invalid_cell_kind_when_output_cell_is_a_conditional_match_cell`,
+    // asserting `Err(InvalidCellKind)`): `add_conditional` never records adjacency in
+    // `cell.adj`/any relationship's outputs, so a plain match cell has no "prior use"
+    // per `cell_has_prior_use` and remains free to become an `out` cell's writer target.
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(0_i32);
     sheet
@@ -1389,57 +1398,64 @@ fn add_output_returns_terminal_cell_when_output_cell_is_a_conditional_match_cell
         .unwrap();
     let a = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(a, mode, |x: &i32| Ok(*x));
-    let result = sheet.add_output(writer, Vec::<(&str, Requirement)>::new());
-    assert!(matches!(result, Err(Error::TerminalCell)));
+    let result = sheet.add_out(writer, Vec::<(&str, Requirement)>::new());
+    assert!(result.is_ok());
+    assert_eq!(sheet.cell_kind(mode), Some(CellKind::Out));
 }
 
 #[test]
-fn add_output_returns_terminal_cell_when_writer_input_is_already_an_output_cell() {
+fn add_out_succeeds_when_writer_input_is_already_an_out_cell() {
+    // Superseded behavior (was `add_output_returns_invalid_cell_kind_when_writer_input_is_already_an_output_cell`,
+    // asserting `Err(InvalidCellKind)`): an `out` cell is no longer terminal — it
+    // remains an ordinary, freely-referenceable cell everywhere except `write()` and a
+    // second writer, so using one as another writer's input is legal.
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     sheet
-        .add_output(
+        .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             Vec::<(&str, Requirement)>::new(),
         )
         .unwrap();
     let c = sheet.add_cell(0_i32);
-    // b is already terminal; using it as a new writer's input must be rejected.
-    let result = sheet.add_output(
+    let result = sheet.add_out(
         Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)),
         Vec::<(&str, Requirement)>::new(),
     );
-    assert!(matches!(result, Err(Error::TerminalCell)));
+    assert!(result.is_ok());
 }
 
 #[test]
-fn add_output_returns_terminal_cell_when_requirement_input_is_already_an_output_cell() {
+fn add_out_succeeds_when_requirement_input_is_already_an_out_cell() {
+    // Superseded behavior (was `add_output_returns_invalid_cell_kind_when_requirement_input_is_already_an_output_cell`,
+    // asserting `Err(InvalidCellKind)`): `Sheet::add_requirement`'s inputs may be any
+    // cell in the sheet, with no kind restriction — an out cell is a legal requirement
+    // input just like any other cell.
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     sheet
-        .add_output(
+        .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             Vec::<(&str, Requirement)>::new(),
         )
         .unwrap();
     let c = sheet.add_cell(0_i32);
     let d = sheet.add_cell(0_i32);
-    // b is already terminal; referencing it from another output's requirement must be rejected.
-    let result = sheet.add_output(
+    let result = sheet.add_out(
         Method::from_fn_1_1(c, d, |x: &i32| Ok(*x)),
         vec![("uses_b", Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0)))],
     );
-    assert!(matches!(result, Err(Error::TerminalCell)));
+    assert!(result.is_ok());
 }
 
 #[test]
-fn add_output_allows_a_requirement_to_reference_the_outputs_own_cell() {
+fn add_out_allows_a_requirement_to_reference_the_outputs_own_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
-    let result = sheet.add_output(
+    let result = sheet.add_out(
         Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
         vec![("positive", Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0)))],
     );
@@ -1447,48 +1463,26 @@ fn add_output_allows_a_requirement_to_reference_the_outputs_own_cell() {
 }
 
 #[test]
-fn write_returns_terminal_cell_for_an_output_cell() {
+fn write_returns_invalid_cell_kind_for_an_output_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     sheet
-        .add_output(
+        .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             Vec::<(&str, Requirement)>::new(),
         )
         .unwrap();
-    assert!(matches!(sheet.write(b, 5_i32), Err(Error::TerminalCell)));
+    assert!(matches!(sheet.write(b, 5_i32), Err(Error::InvalidCellKind)));
 }
 
 #[test]
-fn add_relationship_returns_terminal_cell_for_an_output_cell() {
+fn cell_requirements_returns_requirement_ids_in_declaration_order() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
-    sheet
-        .add_output(
-            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            Vec::<(&str, Requirement)>::new(),
-        )
-        .unwrap();
-    let c = sheet.add_cell(0_i32);
-    let result = sheet.add_relationship(vec![Method::from_fn_1_1(b, c, |x: &i32| Ok(*x))]);
-    assert!(matches!(result, Err(Error::TerminalCell)));
-}
-
-#[test]
-fn output_cell_returns_none_for_invalid_id() {
-    let sheet = Sheet::new();
-    assert_eq!(sheet.output_cell(OutputId::default()), None);
-}
-
-#[test]
-fn output_requirements_returns_requirement_ids_in_declaration_order() {
-    let mut sheet = Sheet::new();
-    let a = sheet.add_cell(0_i32);
-    let b = sheet.add_cell(0_i32);
-    let output = sheet
-        .add_output(
+    let out = sheet
+        .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             vec![
                 ("first", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0))),
@@ -1496,68 +1490,68 @@ fn output_requirements_returns_requirement_ids_in_declaration_order() {
             ],
         )
         .unwrap();
-    let ids = sheet.output_requirements(output).unwrap();
+    let ids = sheet.cell_requirements(out).unwrap();
     assert_eq!(sheet.requirement_name(ids[0]), Some("first"));
     assert_eq!(sheet.requirement_name(ids[1]), Some("second"));
 }
 
 #[test]
-fn requirement_output_and_inputs_return_correct_values() {
+fn requirement_cell_and_inputs_return_correct_values() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
-    let output = sheet
-        .add_output(
+    let out = sheet
+        .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             vec![("check", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
         )
         .unwrap();
-    let id = sheet.output_requirements(output).unwrap()[0];
-    assert_eq!(sheet.requirement_output(id), Some(output));
+    let id = sheet.cell_requirements(out).unwrap()[0];
+    assert_eq!(sheet.requirement_cell(id), Some(out));
     assert_eq!(sheet.requirement_inputs(id), Some([a].as_slice()));
 }
 
 #[test]
-fn requirement_name_output_inputs_return_none_for_invalid_id() {
+fn requirement_name_cell_inputs_return_none_for_invalid_id() {
     let sheet = Sheet::new();
     let id = RequirementId::default();
     assert_eq!(sheet.requirement_name(id), None);
-    assert_eq!(sheet.requirement_output(id), None);
+    assert_eq!(sheet.requirement_cell(id), None);
     assert_eq!(sheet.requirement_inputs(id), None);
 }
 
 #[test]
-fn output_valid_false_before_propagate() {
-    let (sheet, output, ..) = sheet_with_area_output();
-    assert!(!sheet.output_valid(output));
+fn cell_requirements_valid_false_before_propagate() {
+    let (sheet, out, ..) = sheet_with_area_output();
+    assert!(!sheet.cell_requirements_valid(out));
 }
 
 #[test]
-fn output_valid_true_when_requirement_holds() {
-    let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
+fn cell_requirements_valid_true_when_requirement_holds() {
+    let (mut sheet, out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 5_i32).unwrap();
     sheet.write(height, 4_i32).unwrap();
     sheet.propagate().unwrap();
-    assert!(sheet.output_valid(output));
-    assert_eq!(sheet.violated_requirements(output).count(), 0);
+    assert!(sheet.cell_requirements_valid(out));
+    assert_eq!(sheet.violated_requirements(out).count(), 0);
 }
 
 #[test]
-fn output_valid_false_when_requirement_fails() {
-    let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
+fn cell_requirements_valid_false_when_requirement_fails() {
+    let (mut sheet, out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
     sheet.write(height, 40_i32).unwrap();
     sheet.propagate().unwrap();
-    assert!(!sheet.output_valid(output));
+    assert!(!sheet.cell_requirements_valid(out));
 }
 
 #[test]
 fn violated_requirements_lists_the_failing_requirement() {
-    let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
+    let (mut sheet, out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
     sheet.write(height, 40_i32).unwrap();
     sheet.propagate().unwrap();
-    let violated: Vec<_> = sheet.violated_requirements(output).collect();
+    let violated: Vec<_> = sheet.violated_requirements(out).collect();
     assert_eq!(violated.len(), 1);
     assert_eq!(sheet.requirement_name(violated[0]), Some("max_area"));
 }
@@ -1573,8 +1567,8 @@ fn violated_requirements_returns_only_the_failing_subset_of_multiple_requirement
     let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| {
         w.checked_mul(*h).ok_or_else(|| anyhow::anyhow!("overflow"))
     });
-    let output = sheet
-        .add_output(
+    let out = sheet
+        .add_out(
             writer,
             vec![
                 (
@@ -1594,23 +1588,23 @@ fn violated_requirements_returns_only_the_failing_subset_of_multiple_requirement
     sheet.write(height, 60_i32).unwrap();
     sheet.propagate().unwrap();
 
-    assert!(!sheet.output_valid(output));
-    let violated: Vec<_> = sheet.violated_requirements(output).collect();
+    assert!(!sheet.cell_requirements_valid(out));
+    let violated: Vec<_> = sheet.violated_requirements(out).collect();
     assert_eq!(violated.len(), 1);
     assert_eq!(sheet.requirement_name(violated[0]), Some("max_height"));
 }
 
 #[test]
-fn output_valid_updates_across_propagate_calls() {
-    let (mut sheet, output, width, height, _max_area) = sheet_with_area_output();
+fn cell_requirements_valid_updates_across_propagate_calls() {
+    let (mut sheet, out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
     sheet.write(height, 40_i32).unwrap();
     sheet.propagate().unwrap();
-    assert!(!sheet.output_valid(output));
+    assert!(!sheet.cell_requirements_valid(out));
 
     sheet.write(height, 1_i32).unwrap();
     sheet.propagate().unwrap();
-    assert!(sheet.output_valid(output));
+    assert!(sheet.cell_requirements_valid(out));
 }
 
 #[test]
@@ -1619,7 +1613,7 @@ fn requirement_function_error_aborts_propagate_with_method_failed() {
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     sheet
-        .add_output(
+        .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             vec![(
                 "always_errors",
@@ -1789,11 +1783,11 @@ fn contributing_cells_includes_transitive_contributors_of_a_conditional_match_ce
 
 #[test]
 fn requirement_contributing_cells_unions_inputs_outside_writer() {
-    let (mut sheet, output, width, height, max_area) = sheet_with_area_output();
+    let (mut sheet, out, width, height, max_area) = sheet_with_area_output();
     sheet.write(width, 5_i32).unwrap();
     sheet.write(height, 4_i32).unwrap();
     sheet.propagate().unwrap();
-    let id = sheet.output_requirements(output).unwrap()[0];
+    let id = sheet.cell_requirements(out).unwrap()[0];
     let contrib = sheet.requirement_contributing_cells(id);
     assert_eq!(contrib, HashSet::from([width, height, max_area]));
 }
@@ -1808,74 +1802,89 @@ fn requirement_contributing_cells_returns_empty_for_invalid_id() {
 }
 
 #[test]
-fn outputs_empty_for_sheet_with_no_outputs() {
+fn out_cells_empty_for_sheet_with_no_out_cells() {
     let sheet = Sheet::new();
-    assert_eq!(sheet.outputs().count(), 0);
+    assert_eq!(sheet.out_cells().count(), 0);
 }
 
 #[test]
-fn outputs_iterates_every_live_output_id() {
+fn out_cells_iterates_every_live_out_cell() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let out_a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     let out_b = sheet.add_cell(0_i32);
 
-    let id_a = sheet
-        .add_output(Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)), vec![])
+    sheet
+        .add_out(Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)), vec![])
         .unwrap();
-    let id_b = sheet
-        .add_output(Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)), vec![])
+    sheet
+        .add_out(Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)), vec![])
         .unwrap();
 
-    let ids: HashSet<_> = sheet.outputs().collect();
-    assert_eq!(ids, HashSet::from([id_a, id_b]));
+    let ids: HashSet<_> = sheet.out_cells().collect();
+    assert_eq!(ids, HashSet::from([out_a, out_b]));
 }
 
 #[test]
-fn output_relevant_cells_empty_when_sheet_has_no_outputs() {
+fn requirement_relevant_cells_empty_when_sheet_has_no_requirements() {
     let sheet = Sheet::new();
-    assert_eq!(sheet.output_relevant_cells(), HashSet::new());
+    assert_eq!(sheet.requirement_relevant_cells(), HashSet::new());
 }
 
 #[test]
-fn output_relevant_cells_returns_output_cell_itself_before_propagate() {
-    let (sheet, output, ..) = sheet_with_area_output();
-    let area = sheet.output_cell(output).unwrap();
-    assert_eq!(sheet.output_relevant_cells(), HashSet::from([area]));
+fn requirement_relevant_cells_returns_out_cell_itself_before_propagate() {
+    let (sheet, out, ..) = sheet_with_area_output();
+    assert_eq!(sheet.requirement_relevant_cells(), HashSet::from([out]));
 }
 
 #[test]
-fn output_relevant_cells_returns_root_sources_after_propagate() {
-    let (mut sheet, _output, width, height, _max_area) = sheet_with_area_output();
+fn requirement_relevant_cells_returns_root_sources_after_propagate() {
+    let (mut sheet, _out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 5_i32).unwrap();
     sheet.write(height, 4_i32).unwrap();
     sheet.propagate().unwrap();
     assert_eq!(
-        sheet.output_relevant_cells(),
+        sheet.requirement_relevant_cells(),
         HashSet::from([width, height])
     );
 }
 
 #[test]
-fn output_relevant_cells_unions_across_multiple_outputs() {
+fn requirement_relevant_cells_unions_across_multiple_out_cells() {
+    // Unlike the old `output_relevant_cells` (relevant for *any* out cell,
+    // unconditionally), `requirement_relevant_cells` is scoped to cells with at least
+    // one requirement (see its doc comment) — so, unlike the test this replaces, each
+    // out cell here needs a (trivially-true) requirement attached to participate.
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(1_i32);
     let b = sheet.add_cell(2_i32);
     let out_a = sheet.add_cell(0_i32);
     let out_b = sheet.add_cell(0_i32);
     sheet
-        .add_output(Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)), vec![])
+        .add_out(
+            Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)),
+            vec![(
+                "always_true",
+                Requirement::from_fn_1(out_a, |_: &i32| Ok(true)),
+            )],
+        )
         .unwrap();
     sheet
-        .add_output(Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)), vec![])
+        .add_out(
+            Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)),
+            vec![(
+                "always_true",
+                Requirement::from_fn_1(out_b, |_: &i32| Ok(true)),
+            )],
+        )
         .unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(sheet.output_relevant_cells(), HashSet::from([a, b]));
+    assert_eq!(sheet.requirement_relevant_cells(), HashSet::from([a, b]));
 }
 
 #[test]
-fn output_relevant_cells_updates_when_a_different_relationship_becomes_active() {
+fn requirement_relevant_cells_updates_when_a_different_relationship_becomes_active() {
     let mut sheet = Sheet::new();
     let p = sheet.add_cell(0_i32);
     let a = sheet.add_cell(1_i32);
@@ -1895,48 +1904,51 @@ fn output_relevant_cells_updates_when_a_different_relationship_becomes_active() 
         )
         .unwrap();
     sheet
-        .add_output(Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)), vec![])
+        .add_out(
+            Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)),
+            vec![("always_true", Requirement::from_fn_1(c, |_: &i32| Ok(true)))],
+        )
         .unwrap();
 
     sheet.write(p, 0_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(sheet.output_relevant_cells(), HashSet::from([a, p]));
+    assert_eq!(sheet.requirement_relevant_cells(), HashSet::from([a, p]));
 
     sheet.write(p, 1_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(sheet.output_relevant_cells(), HashSet::from([b, p]));
+    assert_eq!(sheet.requirement_relevant_cells(), HashSet::from([b, p]));
 }
 
 #[test]
-fn output_violation_cells_empty_when_sheet_has_no_outputs() {
+fn requirement_violation_cells_empty_when_sheet_has_no_requirements() {
     let sheet = Sheet::new();
-    assert_eq!(sheet.output_violation_cells(), HashSet::new());
+    assert_eq!(sheet.requirement_violation_cells(), HashSet::new());
 }
 
 #[test]
-fn output_violation_cells_empty_when_all_requirements_hold() {
-    let (mut sheet, _output, width, height, _max_area) = sheet_with_area_output();
+fn requirement_violation_cells_empty_when_all_requirements_hold() {
+    let (mut sheet, _out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 5_i32).unwrap();
     sheet.write(height, 4_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(sheet.output_violation_cells(), HashSet::new());
+    assert_eq!(sheet.requirement_violation_cells(), HashSet::new());
 }
 
 #[test]
-fn output_violation_cells_returns_contributing_cells_for_the_failing_requirement() {
-    let (mut sheet, output, width, height, max_area) = sheet_with_area_output();
+fn requirement_violation_cells_returns_contributing_cells_for_the_failing_requirement() {
+    let (mut sheet, out, width, height, max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
     sheet.write(height, 40_i32).unwrap();
     sheet.propagate().unwrap();
-    assert!(!sheet.output_valid(output));
+    assert!(!sheet.cell_requirements_valid(out));
     assert_eq!(
-        sheet.output_violation_cells(),
+        sheet.requirement_violation_cells(),
         HashSet::from([width, height, max_area])
     );
 }
 
 #[test]
-fn output_violation_cells_unions_across_multiple_violated_requirements() {
+fn requirement_violation_cells_unions_across_multiple_violated_requirements() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let max_a = sheet.add_cell(5_i32);
@@ -1946,7 +1958,7 @@ fn output_violation_cells_unions_across_multiple_violated_requirements() {
     let out_b = sheet.add_cell(0_i32);
 
     sheet
-        .add_output(
+        .add_out(
             Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)),
             vec![(
                 "max_a",
@@ -1955,7 +1967,7 @@ fn output_violation_cells_unions_across_multiple_violated_requirements() {
         )
         .unwrap();
     sheet
-        .add_output(
+        .add_out(
             Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)),
             vec![(
                 "max_b",
@@ -1969,20 +1981,20 @@ fn output_violation_cells_unions_across_multiple_violated_requirements() {
     sheet.propagate().unwrap();
 
     assert_eq!(
-        sheet.output_violation_cells(),
+        sheet.requirement_violation_cells(),
         HashSet::from([a, max_a, b, max_b])
     );
 }
 
 #[test]
-fn output_violation_cells_updates_across_propagate_calls() {
-    let (mut sheet, _output, width, height, _max_area) = sheet_with_area_output();
+fn requirement_violation_cells_updates_across_propagate_calls() {
+    let (mut sheet, _out, width, height, _max_area) = sheet_with_area_output();
     sheet.write(width, 50_i32).unwrap();
     sheet.write(height, 40_i32).unwrap();
     sheet.propagate().unwrap();
-    assert!(!sheet.output_violation_cells().is_empty());
+    assert!(!sheet.requirement_violation_cells().is_empty());
 
     sheet.write(height, 1_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(sheet.output_violation_cells(), HashSet::new());
+    assert_eq!(sheet.requirement_violation_cells(), HashSet::new());
 }

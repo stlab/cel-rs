@@ -153,7 +153,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `sheet_item = cell_decl | relationship_decl | conditional_decl | out_decl.`
+    /// `sheet_item = cell_decl | relationship_decl | conditional_decl | out_decl | source_decl.`
     fn parse_sheet_item(&mut self, cursor: &mut TokenCursor) -> Result<ast::SheetItem> {
         use cel_parser::lex_lexer::{HasSpan, Token};
         match cursor.peek_token() {
@@ -169,8 +169,11 @@ impl AdamAstParser {
             Some(Token::Identifier(id)) if id == "out" => {
                 self.parse_out_decl(cursor).map(ast::SheetItem::Out)
             }
+            Some(Token::Identifier(id)) if id == "source" => {
+                self.parse_source_decl(cursor).map(ast::SheetItem::Source)
+            }
             Some(tok) => Err(cel_parser::ParseError::new(
-                "expected `cell`, `relationship`, `conditional`, or `out`",
+                "expected `cell`, `relationship`, `conditional`, `out`, or `source`",
                 tok.span(),
             )),
             None => Err(cel_parser::ParseError::new(
@@ -180,7 +183,8 @@ impl AdamAstParser {
         }
     }
 
-    /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] ";".`
+    /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] [ "require" "{" {
+    /// requirement } "}" ] ";".`
     fn parse_cell_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::CellDecl> {
         let decl_start = cursor.peek_span();
         cursor.is_keyword("cell");
@@ -204,6 +208,11 @@ impl AdamAstParser {
         } else {
             None
         };
+        let require = if cursor.is_keyword("require") {
+            Some(self.parse_require_block(cursor)?)
+        } else {
+            None
+        };
         let semi_span = cursor.expect_punct(";")?;
         Ok(ast::CellDecl {
             name,
@@ -211,6 +220,7 @@ impl AdamAstParser {
             type_name,
             initializer,
             filter,
+            require,
             leading_comment: None,
             doc_comment: None,
             blank_line_before: false,
@@ -221,7 +231,57 @@ impl AdamAstParser {
         })
     }
 
-    /// `cell_filter = "filter" expression.`
+    /// `source_decl = "source" identifier cell_type_init [ cell_filter ] [ "require" "{" {
+    /// requirement } "}" ] ";".`
+    ///
+    /// Mirrors [`Self::parse_cell_decl`] exactly.
+    fn parse_source_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::SourceDecl> {
+        let decl_start = cursor.peek_span();
+        cursor.is_keyword("source");
+        let (name, name_span) = cursor.consume_ident()?;
+        let (type_name, initializer) = if cursor.consume_punct(":") {
+            let type_name = self.parse_type_expr(cursor)?;
+            let initializer = if cursor.consume_punct("=") {
+                Some(self.parse_cel_expression(cursor)?)
+            } else {
+                None
+            };
+            (Some(type_name), initializer)
+        } else if cursor.consume_punct("=") {
+            (None, Some(self.parse_cel_expression(cursor)?))
+        } else {
+            return Err(cursor.err_at("expected `:` or `=` in source declaration"));
+        };
+        let filter = if cursor.is_keyword("filter") {
+            let filter_start = cursor.last_span();
+            Some(self.parse_cell_filter(cursor, filter_start)?)
+        } else {
+            None
+        };
+        let require = if cursor.is_keyword("require") {
+            Some(self.parse_require_block(cursor)?)
+        } else {
+            None
+        };
+        let semi_span = cursor.expect_punct(";")?;
+        Ok(ast::SourceDecl {
+            name,
+            name_span: point(name_span),
+            type_name,
+            initializer,
+            filter,
+            require,
+            leading_comment: None,
+            doc_comment: None,
+            blank_line_before: false,
+            span: ast::ExprSpan {
+                start: decl_start,
+                end: semi_span,
+            },
+        })
+    }
+
+    /// `cell_filter = "filter" identifier ":" expression.`
     ///
     /// - Precondition: the `filter` keyword has already been consumed by the caller; `filter_start`
     ///   is its span.
@@ -230,9 +290,13 @@ impl AdamAstParser {
         cursor: &mut TokenCursor,
         filter_start: proc_macro2::Span,
     ) -> Result<ast::CellFilter> {
+        let (name, name_span) = cursor.consume_ident()?;
+        cursor.expect_punct(":")?;
         let body = self.parse_cel_expression(cursor)?;
         let body_end = body.span().end;
         Ok(ast::CellFilter {
+            name,
+            name_span: point(name_span),
             body,
             span: ast::ExprSpan {
                 start: filter_start,
@@ -379,15 +443,16 @@ impl AdamAstParser {
                 });
                 break; // default branch is always last
             }
-            let (literal, literal_span) = parse_match_literal(cursor)?;
+            let (negated, lit, pattern_start, lit_span) = cursor.consume_literal_pattern()?;
             cursor.expect_punct("=>")?;
             let branch_open = cursor.expect_open_brace()?;
             let relationships = self.parse_branch_relationships(cursor)?;
             let close = cursor.expect_close_brace()?;
             cursor.consume_punct(",");
             branches.push(ast::ConditionalBranch {
-                literal,
-                literal_span,
+                literal: lit,
+                negated,
+                literal_span: point(lit_span),
                 relationships,
                 leading_comment: None,
                 blank_line_before: false,
@@ -395,7 +460,7 @@ impl AdamAstParser {
                 blank_line_before_close: false,
                 open_brace_span: point(branch_open),
                 span: ast::ExprSpan {
-                    start: literal_span.start,
+                    start: pattern_start,
                     end: close,
                 },
             });
@@ -435,8 +500,8 @@ impl AdamAstParser {
         Ok(relationships)
     }
 
-    /// `out_decl = "out" identifier [ ":" type_name ] ":=" expression [ "require" "{" {
-    /// requirement } "}" ] ";".`
+    /// `out_decl = "out" identifier [ ":" type_name ] ":=" expression [ cell_filter ] [ "require"
+    /// "{" { requirement } "}" ] ";".`
     fn parse_out_decl(&mut self, cursor: &mut TokenCursor) -> Result<ast::OutDecl> {
         let decl_start = cursor.peek_span();
         cursor.is_keyword("out");
@@ -448,23 +513,14 @@ impl AdamAstParser {
         };
         cursor.expect_punct(":=")?;
         let initializer = self.parse_cel_expression(cursor)?;
+        let filter = if cursor.is_keyword("filter") {
+            let filter_start = cursor.last_span();
+            Some(self.parse_cell_filter(cursor, filter_start)?)
+        } else {
+            None
+        };
         let require = if cursor.is_keyword("require") {
-            let open_span = cursor.expect_open_brace()?;
-            let mut requirements = Vec::new();
-            while !cursor.at_close_brace() {
-                requirements.push(self.parse_requirement(cursor)?);
-            }
-            let close_span = cursor.expect_close_brace()?;
-            Some(ast::RequireBlock {
-                requirements,
-                trailing_comment: None,
-                blank_line_before_close: false,
-                open_brace_span: point(open_span),
-                span: ast::ExprSpan {
-                    start: open_span,
-                    end: close_span,
-                },
-            })
+            Some(self.parse_require_block(cursor)?)
         } else {
             None
         };
@@ -474,6 +530,7 @@ impl AdamAstParser {
             name_span: point(name_span),
             type_name,
             initializer,
+            filter,
             require,
             leading_comment: None,
             doc_comment: None,
@@ -481,6 +538,28 @@ impl AdamAstParser {
             span: ast::ExprSpan {
                 start: decl_start,
                 end: semi_span,
+            },
+        })
+    }
+
+    /// `require_block = "require" "{" { requirement } "}".`
+    ///
+    /// - Precondition: the `require` keyword has already been consumed by the caller.
+    fn parse_require_block(&mut self, cursor: &mut TokenCursor) -> Result<ast::RequireBlock> {
+        let open_span = cursor.expect_open_brace()?;
+        let mut requirements = Vec::new();
+        while !cursor.at_close_brace() {
+            requirements.push(self.parse_requirement(cursor)?);
+        }
+        let close_span = cursor.expect_close_brace()?;
+        Ok(ast::RequireBlock {
+            requirements,
+            trailing_comment: None,
+            blank_line_before_close: false,
+            open_brace_span: point(open_span),
+            span: ast::ExprSpan {
+                start: open_span,
+                end: close_span,
             },
         })
     }
@@ -577,32 +656,6 @@ fn parse_binding_target(cursor: &mut TokenCursor) -> Result<(Vec<(String, ast::E
 /// parenthesized one the same way (a tuple match key is always written with its own parens), so
 /// there's no scalar/tuple ambiguity to collapse here.
 ///
-/// Returns the parsed literal alongside its span: a single token's span for a scalar, or the span
-/// of the whole `(` ... `)` group for a tuple.
-fn parse_match_literal(cursor: &mut TokenCursor) -> Result<(ast::MatchLiteral, ast::ExprSpan)> {
-    if !cursor.at_open_paren() {
-        let (lit, span) = cursor.consume_literal()?;
-        return Ok((ast::MatchLiteral::Scalar(lit), point(span)));
-    }
-    let open_span = cursor.expect_open_paren()?;
-    let mut elements = Vec::new();
-    while !cursor.at_close_paren() {
-        let (element, _) = parse_match_literal(cursor)?;
-        elements.push(element);
-        if !cursor.consume_punct(",") {
-            break;
-        }
-    }
-    let close_span = cursor.expect_close_paren()?;
-    Ok((
-        ast::MatchLiteral::Tuple(elements),
-        ast::ExprSpan {
-            start: open_span,
-            end: close_span,
-        },
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,6 +708,38 @@ mod tests {
         };
         assert!(cell.type_name.is_none());
         assert!(cell.initializer.is_some());
+    }
+
+    #[test]
+    fn parse_source_decl_produces_a_source_decl_sheet_item() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { source width: i32 = 4; }")
+            .unwrap();
+        assert!(matches!(sheet.items[0], ast::SheetItem::Source(_)));
+    }
+
+    #[test]
+    fn parse_source_with_a_filter() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { source a: i32 = 1 filter clamp: _; }")
+            .unwrap();
+        let ast::SheetItem::Source(source) = &sheet.items[0] else {
+            panic!("expected Source");
+        };
+        let filter = source.filter.as_ref().expect("filter present");
+        assert_eq!(filter.name, "clamp");
+        assert!(matches!(&filter.body, Expr::Ident { name, .. } if name == "_"));
+    }
+
+    #[test]
+    fn parse_source_without_a_filter_leaves_it_none() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { source a: i32 = 1; }")
+            .unwrap();
+        let ast::SheetItem::Source(source) = &sheet.items[0] else {
+            panic!("expected Source");
+        };
+        assert!(source.filter.is_none());
     }
 
     #[test]
@@ -776,7 +861,82 @@ mod tests {
         };
         assert!(matches!(&cond.match_expr, Expr::Ident { name, .. } if name == "mode"));
         assert_eq!(cond.branches.len(), 1);
+        assert!(!cond.branches[0].negated);
         assert!(cond.default.is_some());
+    }
+
+    #[test]
+    fn parse_conditional_records_a_negated_literal_branch_key() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        -1i32 => { relationship { height := width; } },
+                        _ => { relationship { height := width; } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        let ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        assert_eq!(cond.branches.len(), 1);
+        assert!(cond.branches[0].negated);
+    }
+
+    #[test]
+    fn parse_conditional_branch_dash_not_followed_by_a_literal_is_error() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        -width => { relationship { height := width; } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
+    }
+
+    #[test]
+    fn parse_conditional_branch_literal_with_invalid_suffix_is_error() {
+        // `10xyz` isn't a `cel_parser`-recognized literal (unrecognized integer suffix) — must
+        // be rejected here exactly as the runtime parser rejects it, not silently accepted into
+        // the CST and later round-tripped by `fmt`.
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        10xyz => { relationship { height := width; } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
+    }
+
+    #[test]
+    fn parse_conditional_branch_negating_an_unsigned_literal_is_error() {
+        // `-1u32` has no `cel_parser` unary `-` overload — must be rejected here exactly as the
+        // runtime parser rejects it, not silently accepted into the CST.
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+                sheet s {
+                    conditional mode {
+                        -1u32 => { relationship { height := width; } },
+                    }
+                }
+            "#,
+            )
+            .unwrap();
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
     }
 
     #[test]
@@ -824,24 +984,6 @@ mod tests {
             panic!("expected Conditional");
         };
         assert_eq!(cond.branches[0].relationships.len(), 2);
-    }
-
-    #[test]
-    fn parses_a_multi_cell_tuple_conditional_branch() {
-        let mut parser = AdamAstParser::new();
-        let sheet = parser
-            .parse_str(
-                "sheet s { cell a: bool; cell b: bool; conditional (a, b) { (true, false) => { relationship { a := b; } } _ => { } } }",
-            )
-            .unwrap();
-        let ast::SheetItem::Conditional(cond) = &sheet.items[2] else {
-            panic!("expected a Conditional item");
-        };
-        assert_eq!(cond.branches.len(), 1);
-        match &cond.branches[0].literal {
-            ast::MatchLiteral::Tuple(elements) => assert_eq!(elements.len(), 2),
-            ast::MatchLiteral::Scalar(_) => panic!("expected a Tuple match literal"),
-        }
     }
 
     #[test]
@@ -1273,7 +1415,7 @@ mod tests {
     #[test]
     fn parse_cell_with_a_filter() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell a: i32 = 1 filter _; }")
+            .parse_str("sheet s { cell a: i32 = 1 filter clamp: _; }")
             .unwrap();
         let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
             panic!("expected Cell");
@@ -1283,9 +1425,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_cell_filter_records_its_name() {
+        let sheet = AdamAstParser::new()
+            .parse_str("sheet s { cell x: i32 = 0 filter clamp: 0..=10; }")
+            .unwrap();
+        let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
+            panic!("expected a cell decl");
+        };
+        assert_eq!(cell.filter.as_ref().unwrap().name, "clamp");
+    }
+
+    #[test]
     fn parse_cell_with_a_filter_referencing_a_cell() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter _ + hi; }")
+            .parse_str("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter sum: _ + hi; }")
             .unwrap();
         let ast::SheetItem::Cell(cell) = &sheet.items[1] else {
             panic!("expected Cell");
