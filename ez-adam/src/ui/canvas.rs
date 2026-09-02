@@ -304,6 +304,23 @@ pub fn Canvas(
     let mut pending_first_click = use_signal(|| None::<NodeId>);
     let mut pending_conditional_source = use_signal(|| None::<RelationshipGroupId>);
 
+    // Add-Relationship's click-sequence state spans two separate mousedown
+    // events (click A, then later click B), unlike `pending_conditional_source`
+    // (a single mousedown-to-mouseup drag). So it can't be reset at the top
+    // of `onmousedown` the same way — that handler's own `AddRelationship`
+    // arm reads `pending_first_click` back a few lines later to decide
+    // whether the current click is the first or second of the gesture, and
+    // an unconditional reset there would make every click look like a fresh
+    // first click, breaking the tool entirely. Instead, clear it whenever
+    // `active_tool` changes (via this effect) so switching away and back
+    // between click A and click B can't resume a stale first click, while a
+    // same-tool two-click sequence (no tool change in between) is left
+    // untouched and completes normally.
+    use_effect(move || {
+        active_tool.read();
+        pending_first_click.set(None);
+    });
+
     let doc = document.read();
     let transform = *view_transform.read();
     let sel = selection.read();
@@ -335,14 +352,11 @@ pub fn Canvas(
                 // so the AddConditional arm of `onmouseup` never ran to
                 // clear it) — reset unconditionally before dispatching so
                 // a later, unrelated AddConditional gesture can never fire
-                // against a stale group. The same reasoning applies to
-                // Add-Relationship's click-sequence state: without this, a
-                // stale `pending_first_click` from a completely different
-                // interaction (before a tool switch, or an abandoned
-                // sequence) would silently combine with the next
-                // Add-Relationship click into an unintended relationship.
+                // against a stale group. Unlike `pending_first_click` (see
+                // the `use_effect` above this `rsx!` block), nothing in this
+                // handler reads `pending_conditional_source` back, so an
+                // unconditional reset here is safe.
                 pending_conditional_source.set(None);
-                pending_first_click.set(None);
 
                 match *active_tool.read() {
                     crate::ui::toolbar::Tool::Select => {
