@@ -1796,6 +1796,7 @@ name = "ez-adam"
 version = "0.1.0"
 dependencies = [
  "adam-lang",
+ "annotate-snippets",
  "cel-parser",
  "cel-std",
  "dioxus",

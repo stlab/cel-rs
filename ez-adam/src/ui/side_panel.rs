@@ -3,7 +3,11 @@
 
 use crate::model::cell::{CellId, CellType};
 use crate::model::document::Document;
+use crate::model::relationship_group::RelationshipGroupId;
 use crate::ops::cells::{set_output, set_restrict};
+use crate::ops::relationships::set_member_formula;
+use crate::validation::validate_cel_expression;
+use annotate_snippets::Renderer;
 use dioxus::prelude::*;
 
 /// Returns `(min_text, max_text)` for `ty`'s clamp bounds if it's numeric,
@@ -79,6 +83,90 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
                 }
             }
         }
+    }
+}
+
+/// Returns a rendered diagnostic for `text` if it's not valid CEL, or
+/// `None` if it parses cleanly. The empty string is treated as "not yet
+/// filled in" rather than an error worth surfacing, so it also returns
+/// `None`.
+///
+/// The diagnostic is rendered as a caret-annotated, potentially multi-line
+/// string via [`cel_parser::ParseError::format_rustc_style`] (the same
+/// `annotate-snippets`-backed technique `adam-web-ui::labels::format_adam_error`
+/// uses), with [`Renderer::plain`] so no ANSI escapes leak into the DOM.
+pub fn formula_diagnostic(text: &str) -> Option<String> {
+    if text.is_empty() {
+        return None;
+    }
+    validate_cel_expression(text)
+        .err()
+        .map(|e| e.format_rustc_style(text, "formula", 1, &Renderer::plain()))
+}
+
+/// Renders `group`'s member formulas as an editable list, each validated
+/// live via [`formula_diagnostic`].
+#[component]
+pub fn RelationshipPanel(mut document: Signal<Document>, group: RelationshipGroupId) -> Element {
+    let members: Vec<_> = {
+        let doc = document.read();
+        doc.relationship_groups[group]
+            .members
+            .iter()
+            .map(|(node, formula)| {
+                let cell = doc.cells[doc.cell_nodes[*node].cell].name.clone();
+                (*node, cell, formula.clone())
+            })
+            .collect()
+    };
+
+    rsx! {
+        div {
+            class: "relationship-panel",
+            for (node, cell_name, formula) in members {
+                div {
+                    "{cell_name} := "
+                    input {
+                        value: "{formula}",
+                        onchange: move |evt| set_member_formula(&mut document.write(), group, node, evt.value()),
+                    }
+                    if let Some(diagnostic) = formula_diagnostic(&formula) {
+                        div { class: "diagnostic", "{diagnostic}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod formula_tests {
+    use super::*;
+
+    #[test]
+    fn formula_diagnostic_is_none_for_valid_cel() {
+        assert_eq!(formula_diagnostic("a + b"), None);
+    }
+
+    #[test]
+    fn formula_diagnostic_is_none_for_empty_text() {
+        assert_eq!(formula_diagnostic(""), None);
+    }
+
+    #[test]
+    fn formula_diagnostic_is_some_for_invalid_cel() {
+        let diagnostic = formula_diagnostic("a +").expect("invalid CEL should have a diagnostic");
+        assert!(!diagnostic.is_empty());
+    }
+
+    #[test]
+    fn formula_diagnostic_does_not_use_debug_formatting() {
+        // The rendered diagnostic must be a real annotate-snippets caret
+        // rendering, not `format!("{e:?}")` Debug output — which for
+        // `ParseError` would read like `ParseError { message: ..., span: ... }`.
+        let diagnostic = formula_diagnostic("a +").expect("invalid CEL should have a diagnostic");
+        assert!(!diagnostic.contains("ParseError {"));
+        assert!(!diagnostic.contains("span:"));
     }
 }
 
