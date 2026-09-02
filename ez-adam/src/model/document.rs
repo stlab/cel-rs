@@ -110,10 +110,12 @@ impl Document {
 /// live keys (a key encodes its slot index), and this impl compares keys as
 /// well as values. So two maps compare equal exactly when they hold the same
 /// `(key, value)` entries — there is no "same entries, different order"
-/// state to disagree on. Two independently built documents have distinct
-/// keys and so are unequal; equality is meaningful between a document and
-/// its clone or its serde round-trip, where `slotmap`'s serde impl preserves
-/// keys (hence the live-key layout, hence iteration order).
+/// state to disagree on. Once any `SlotMap`-backed entries exist, two
+/// independently built documents differ in those keys and so compare
+/// unequal; the comparison is meaningful between a document and its clone or
+/// its serde round-trip, where `slotmap`'s serde impl preserves keys (hence
+/// the live-key layout, hence iteration order). (Two empty documents with
+/// identical metadata are equal — there are no keys to differ.)
 ///
 /// If new fields are added to `Document`, this impl must be updated to
 /// compare them.

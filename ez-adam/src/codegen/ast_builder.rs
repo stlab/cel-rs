@@ -48,21 +48,26 @@ fn type_expr_for(ty: &CellType) -> adam_lang::ast::TypeExpr {
 /// Builds a `cell <name>: <type> [filter ...];` declaration for `cell`,
 /// including a clamp filter clause when its type has clamp bounds set.
 ///
+/// # Errors
+///
+/// Returns [`ExportError::NonFiniteClampBound`] if `cell` has a non-finite
+/// `f64` clamp bound (no `.adm2` literal can represent it).
+///
 /// - Postcondition: `filter` is `None` iff `cell.ty` is `Bool`/`Text` or
 ///   has no clamp bounds.
-pub(crate) fn build_cell_decl(cell: &Cell) -> CellDecl {
-    CellDecl {
+pub(crate) fn build_cell_decl(cell: &Cell) -> Result<CellDecl, ExportError> {
+    Ok(CellDecl {
         name: cell.name.clone(),
         name_span: ExprSpan::for_text(&cell.name),
         type_name: Some(type_expr_for(&cell.ty)),
         initializer: None,
-        filter: clamp_filter(&cell.ty),
+        filter: clamp_filter(&cell.name, &cell.ty)?,
         require: None,
         leading_comment: None,
         doc_comment: None,
         blank_line_before: false,
         span: ExprSpan::for_text(&cell.name),
-    }
+    })
 }
 
 /// Returns a hand-built, `"clamp"`-named `filter` clause clamping `ty`'s
@@ -77,34 +82,51 @@ pub(crate) fn build_cell_decl(cell: &Cell) -> CellDecl {
 /// avoid literal-type-inference ambiguity — see this function's own body —
 /// and is parsed into an `Expr` to become the filter's `body` directly.
 ///
+/// # Errors
+///
+/// Returns [`ExportError::NonFiniteClampBound`] (naming `cell_name`) if an
+/// `f64` clamp bound is non-finite: `.adm2` has no literal for `NaN`/`±inf`,
+/// and Debug-formatting one emits a bare `NaN`/`inf` token that parses as an
+/// identifier rather than a numeric literal.
+///
 /// - Precondition: the synthesized clamp-call text is always valid CEL —
 ///   a parse failure here indicates a bug in this function, not bad user
 ///   data, so it panics rather than returning a `Result`.
-fn clamp_filter(ty: &CellType) -> Option<CellFilter> {
+fn clamp_filter(cell_name: &str, ty: &CellType) -> Result<Option<CellFilter>, ExportError> {
     let body_text = match ty {
-        CellType::F64 { clamp } => match (clamp.min, clamp.max) {
-            (None, None) => return None,
-            (Some(min), None) => format!("max(_, {min:?})"),
-            (None, Some(max)) => format!("min(_, {max:?})"),
-            (Some(min), Some(max)) => format!("clamp(_, {min:?}, {max:?})"),
-        },
+        CellType::F64 { clamp } => {
+            for bound in [clamp.min, clamp.max].into_iter().flatten() {
+                if !bound.is_finite() {
+                    return Err(ExportError::NonFiniteClampBound {
+                        cell_name: cell_name.to_string(),
+                        bound,
+                    });
+                }
+            }
+            match (clamp.min, clamp.max) {
+                (None, None) => return Ok(None),
+                (Some(min), None) => format!("max(_, {min:?})"),
+                (None, Some(max)) => format!("min(_, {max:?})"),
+                (Some(min), Some(max)) => format!("clamp(_, {min:?}, {max:?})"),
+            }
+        }
         CellType::I64 { clamp } => match (clamp.min, clamp.max) {
-            (None, None) => return None,
+            (None, None) => return Ok(None),
             (Some(min), None) => format!("max(_, {min}i64)"),
             (None, Some(max)) => format!("min(_, {max}i64)"),
             (Some(min), Some(max)) => format!("clamp(_, {min}i64, {max}i64)"),
         },
-        CellType::Bool | CellType::Text => return None,
+        CellType::Bool | CellType::Text => return Ok(None),
     };
     let body = parse_expr_text(&body_text).unwrap_or_else(|e| {
         panic!("synthesized clamp expression {body_text:?} failed to parse: {e:?}")
     });
-    Some(CellFilter {
+    Ok(Some(CellFilter {
         name: "clamp".to_string(),
         name_span: ExprSpan::for_text("clamp"),
         body,
         span: ExprSpan::for_text("_"),
-    })
+    }))
 }
 
 /// Builds a `relationship { ... }` block for `group` (identified by
@@ -502,7 +524,7 @@ mod tests {
     #[test]
     fn build_cell_decl_for_a_plain_cell_has_no_filter() {
         let cell = Cell::new("width_pixels", CellType::i64());
-        let decl = build_cell_decl(&cell);
+        let decl = build_cell_decl(&cell).expect("plain cell should build");
         assert_eq!(decl.name, "width_pixels");
         assert!(decl.filter.is_none());
     }
@@ -518,13 +540,30 @@ mod tests {
                 },
             },
         );
-        let decl = build_cell_decl(&cell);
+        let decl = build_cell_decl(&cell).expect("clamped cell should build");
         let filter = decl.filter.expect("expected a filter clause");
         assert!(matches!(filter.body, cel_parser::Expr::Apply { .. }));
         assert_eq!(
             cel_parser::format_expr(&filter.body),
             "clamp(_, 0i64, 100i64)"
         );
+    }
+
+    #[test]
+    fn build_cell_decl_rejects_a_non_finite_f64_clamp_bound() {
+        let cell = Cell::new(
+            "ratio",
+            CellType::F64 {
+                clamp: ClampRange {
+                    min: Some(0.0),
+                    max: Some(f64::NAN),
+                },
+            },
+        );
+        assert!(matches!(
+            build_cell_decl(&cell),
+            Err(ExportError::NonFiniteClampBound { .. })
+        ));
     }
 
     #[test]

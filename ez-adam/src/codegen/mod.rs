@@ -59,6 +59,16 @@ pub enum ExportError {
         /// The offending branch value (always `i64::MIN`).
         value: i64,
     },
+    /// The cell named `cell_name` has a non-finite (`NaN`/`±inf`) `f64`
+    /// clamp bound. `.adm2` has no literal for a non-finite float — Debug
+    /// formatting emits bare `NaN`/`inf` tokens, which parse as identifiers
+    /// rather than numeric literals — so the bound can't be exported.
+    NonFiniteClampBound {
+        /// The name of the cell whose clamp bound is non-finite.
+        cell_name: String,
+        /// The offending bound value.
+        bound: f64,
+    },
 }
 
 /// Returns `.adm2` source text for `doc`, by constructing an
@@ -97,7 +107,7 @@ fn build_sheet(doc: &Document) -> Result<Sheet, ExportError> {
     // writable cell, so `out <name> := <name>;` doesn't parse. Deferred to
     // future design work — see <https://github.com/stlab/cel-rs/issues/147>.
     for (_, cell) in doc.cells_in_order() {
-        items.push(SheetItem::Cell(ast_builder::build_cell_decl(cell)));
+        items.push(SheetItem::Cell(ast_builder::build_cell_decl(cell)?));
     }
 
     let owned = groups_owned_by_conditionals(doc);

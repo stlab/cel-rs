@@ -77,6 +77,8 @@ pub fn set_member_formula(
 /// copies of the cells themselves.
 ///
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
+/// - Precondition: every member node of `group` is a valid key in
+///   `doc.cell_nodes`.
 /// - Postcondition: the returned group has the same number of members as
 ///   `group`, each bound to a fresh node over the same cell, with empty
 ///   formula text.
@@ -97,6 +99,10 @@ pub fn duplicate_relationship_group(
 
     let mut new_members = Vec::with_capacity(source_members.len());
     for (node, _formula) in &source_members {
+        debug_assert!(
+            doc.cell_nodes.contains_key(*node),
+            "member node is not a valid key"
+        );
         let CellNode { cell, position } = doc.cell_nodes[*node];
         let new_position = Point::new(position.x + offset.x, position.y + offset.y);
         let new_node = doc.cell_nodes.insert(CellNode::new(cell, new_position));
