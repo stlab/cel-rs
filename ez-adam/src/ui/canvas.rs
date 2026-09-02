@@ -3,6 +3,7 @@
 
 use crate::model::cell_node::CellNodeId;
 use crate::model::conditional_group::ConditionalGroupId;
+use crate::model::document::Document;
 use crate::model::geometry::Point;
 use crate::model::relationship_group::RelationshipGroupId;
 
@@ -92,9 +93,94 @@ pub fn zoom_at(transform: &ViewTransform, cursor_screen: Point, delta: f64) -> V
     }
 }
 
+/// Returns `node`'s current canvas/world-space position in `doc`.
+///
+/// - Precondition: `node` is a valid id in `doc` (a `CellNode`,
+///   `RelationshipGroup`, or `ConditionalGroup` that actually exists).
+#[must_use]
+pub fn node_position(doc: &Document, node: NodeId) -> Point {
+    match node {
+        NodeId::CellNode(id) => doc.cell_nodes[id].position,
+        NodeId::RelationshipGroup(id) => doc.relationship_groups[id].position,
+        NodeId::ConditionalGroup(id) => doc.conditional_groups[id].position,
+    }
+}
+
+/// Returns every node in `doc` whose position falls within the axis-aligned
+/// rectangle spanning `corner_a`/`corner_b` (in either corner order) —
+/// the rubber-band selection test.
+///
+/// - Complexity: O(n) in the total number of nodes in `doc`.
+#[must_use]
+pub fn nodes_in_rect(doc: &Document, corner_a: Point, corner_b: Point) -> Vec<NodeId> {
+    let min_x = corner_a.x.min(corner_b.x);
+    let max_x = corner_a.x.max(corner_b.x);
+    let min_y = corner_a.y.min(corner_b.y);
+    let max_y = corner_a.y.max(corner_b.y);
+    let contains = |p: Point| p.x >= min_x && p.x <= max_x && p.y >= min_y && p.y <= max_y;
+
+    let mut found = Vec::new();
+    for (id, node) in &doc.cell_nodes {
+        if contains(node.position) {
+            found.push(NodeId::CellNode(id));
+        }
+    }
+    for (id, group) in &doc.relationship_groups {
+        if contains(group.position) {
+            found.push(NodeId::RelationshipGroup(id));
+        }
+    }
+    for (id, group) in &doc.conditional_groups {
+        if contains(group.position) {
+            found.push(NodeId::ConditionalGroup(id));
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::cell::CellType;
+    use crate::model::document::Document;
+    use crate::ops::cells::{add_cell, add_cell_node};
+
+    #[test]
+    fn node_position_returns_a_cell_nodes_position() {
+        let mut doc = Document::new("demo");
+        let cell = add_cell(&mut doc, "a", CellType::i64());
+        let node = add_cell_node(&mut doc, cell, Point::new(5.0, 7.0));
+        assert_eq!(
+            node_position(&doc, NodeId::CellNode(node)),
+            Point::new(5.0, 7.0)
+        );
+    }
+
+    #[test]
+    fn nodes_in_rect_includes_only_nodes_within_the_bounds() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let inside = add_cell_node(&mut doc, a, Point::new(5.0, 5.0));
+        let outside = add_cell_node(&mut doc, b, Point::new(50.0, 50.0));
+
+        let found = nodes_in_rect(&doc, Point::new(0.0, 0.0), Point::new(10.0, 10.0));
+
+        assert!(found.contains(&NodeId::CellNode(inside)));
+        assert!(!found.contains(&NodeId::CellNode(outside)));
+    }
+
+    #[test]
+    fn nodes_in_rect_handles_corners_given_in_either_order() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let inside = add_cell_node(&mut doc, a, Point::new(5.0, 5.0));
+
+        // corner_a is bottom-right, corner_b is top-left — should still work.
+        let found = nodes_in_rect(&doc, Point::new(10.0, 10.0), Point::new(0.0, 0.0));
+
+        assert!(found.contains(&NodeId::CellNode(inside)));
+    }
 
     #[test]
     fn identity_transform_is_a_no_op_both_ways() {
