@@ -54,7 +54,7 @@ fn build_resize_sheet() -> Document {
         &mut doc,
         r1,
         height_node,
-        "(aspect_ratio / (width_pixels as f64)) as i64",
+        "((width_pixels as f64) / aspect_ratio) as i64",
     );
     set_member_formula(
         &mut doc,

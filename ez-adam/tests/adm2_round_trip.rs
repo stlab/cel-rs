@@ -69,7 +69,7 @@ fn a_document_with_every_construct_generates_valid_adm2() {
         &mut doc,
         r1,
         height_node,
-        "(aspect_ratio / (width_pixels as f64)) as i64",
+        "((width_pixels as f64) / aspect_ratio) as i64",
     );
     set_member_formula(
         &mut doc,

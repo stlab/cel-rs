@@ -35,6 +35,10 @@ pub fn create_relationship(
 /// - Precondition: `node` is a valid key in `doc.cell_nodes`.
 /// - Precondition: `node` is not already a member of `group`.
 pub fn add_member(doc: &mut Document, group: RelationshipGroupId, node: CellNodeId) {
+    debug_assert!(
+        doc.relationship_groups.contains_key(group),
+        "group is not a valid key"
+    );
     debug_assert!(doc.cell_nodes.contains_key(node), "node is not a valid key");
     let g = &mut doc.relationship_groups[group];
     debug_assert!(
@@ -54,6 +58,10 @@ pub fn set_member_formula(
     node: CellNodeId,
     formula: impl Into<String>,
 ) {
+    debug_assert!(
+        doc.relationship_groups.contains_key(group),
+        "group is not a valid key"
+    );
     let g = &mut doc.relationship_groups[group];
     let entry = g.members.iter_mut().find(|(n, _)| *n == node);
     debug_assert!(entry.is_some(), "node is not a member of group");

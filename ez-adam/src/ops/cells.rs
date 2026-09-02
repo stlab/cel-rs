@@ -30,6 +30,7 @@ pub fn add_cell_node(doc: &mut Document, cell: CellId, position: Point) -> CellN
 ///
 /// - Precondition: `cell` is a valid key in `doc.cells`.
 pub fn set_output(doc: &mut Document, cell: CellId, output: bool) {
+    debug_assert!(doc.cells.contains_key(cell), "cell is not a valid key");
     doc.cells[cell].output = output;
 }
 
@@ -37,6 +38,7 @@ pub fn set_output(doc: &mut Document, cell: CellId, output: bool) {
 ///
 /// - Precondition: `cell` is a valid key in `doc.cells`.
 pub fn set_restrict(doc: &mut Document, cell: CellId, restrict: Option<String>) {
+    debug_assert!(doc.cells.contains_key(cell), "cell is not a valid key");
     doc.cells[cell].restrict = restrict;
 }
 

@@ -646,16 +646,6 @@ fn parse_binding_target(cursor: &mut TokenCursor) -> Result<(Vec<(String, ast::E
     Ok((outputs, true))
 }
 
-/// `match_literal = literal | "(" match_literal { "," match_literal } [ "," ] ")".`
-///
-/// Mirrors [`parse_binding_target`]'s `"(" X { "," X } ")"` handling above (the same shape
-/// `AdamAstParser::parse_type_expr` also parses for tuple types), since a tuple match literal is
-/// structurally identical — but unlike `parse_binding_target`, a lone parenthesized literal with
-/// no comma (e.g. `(0i32)`) still becomes a 1-element `MatchLiteral::Tuple`, not a transparent
-/// grouping: `adam-lang/src/parser.rs`'s direct parser distinguishes a bare literal from a
-/// parenthesized one the same way (a tuple match key is always written with its own parens), so
-/// there's no scalar/tuple ambiguity to collapse here.
-///
 #[cfg(test)]
 mod tests {
     use super::*;
