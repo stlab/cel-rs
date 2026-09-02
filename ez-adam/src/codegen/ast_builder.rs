@@ -177,7 +177,7 @@ pub(crate) fn build_relationship_decl(
 /// Returns [`ExportError::UnsupportedMultiValueCondition`] if a
 /// `Formula`-mode condition's branches don't match on exactly one value
 /// (no codegen strategy exists yet for that case — see
-/// <https://github.com/stlab/cel-rs/issues/172>), or if a multi-cell
+/// <https://github.com/stlab/cel-rs/issues/173>), or if a multi-cell
 /// `Cells` condition has a non-empty `default` (unreachable in practice,
 /// since `ops::conditionals::add_conditional_from_bool_cells` never
 /// populates it, but not representable under the decomposed encoding if it

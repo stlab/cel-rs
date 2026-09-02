@@ -41,7 +41,7 @@ pub enum ExportError {
     /// `adam_lang`'s conditional-branch grammar only accepts a single,
     /// optionally negated literal per branch key, and no general codegen
     /// strategy exists yet for this case. See
-    /// <https://github.com/stlab/cel-rs/issues/172>.
+    /// <https://github.com/stlab/cel-rs/issues/173>.
     UnsupportedMultiValueCondition {
         /// The conditional group with the unsupported condition.
         conditional: ConditionalGroupId,
