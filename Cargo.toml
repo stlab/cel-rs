@@ -31,6 +31,7 @@ members = [
     "adam-lang-book-live",
     "adam-lang-book-live-config",
     "adam-lang-book-preprocessor",
+    "adam-fmt",
     "adam-lsp",
     "adam-web-ui",
     "begin",

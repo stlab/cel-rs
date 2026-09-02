@@ -5,10 +5,14 @@ sheet resample_demo {
 
     conditional resample && constrain {
         true => {
-            relationship { locked := true; }
+            relationship {
+                locked := true;
+            }
         }
         false => {
-            relationship { locked := false; }
+            relationship {
+                locked := false;
+            }
         }
     }
 }

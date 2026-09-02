@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "adam-fmt"
+version = "0.1.0"
+dependencies = [
+ "adam-lang",
+ "annotate-snippets",
+]
+
+[[package]]
 name = "adam-lang"
 version = "0.1.0"
 dependencies = [
