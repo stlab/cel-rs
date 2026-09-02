@@ -85,7 +85,18 @@ pub fn Toolbar(
                                     .map(NodeId::RelationshipGroup)
                                     .collect(),
                             );
-                        } else {
+                        } else if tool != *active_tool.read() {
+                            // `Signal::set` has no equality short-circuit — it
+                            // unconditionally notifies subscribers even on a
+                            // same-value write. `Canvas`'s `use_effect` (see
+                            // ez-adam/src/ui/canvas.rs) subscribes to
+                            // `active_tool` to clear its Add-Relationship
+                            // click-sequence state on a genuine tool change;
+                            // without this guard, redundantly re-clicking the
+                            // already-active tool's button mid-gesture would
+                            // re-fire that effect and wipe the in-progress
+                            // gesture. Guarding here keeps a same-value click
+                            // a true no-op.
                             active_tool.set(tool);
                         }
                     },
