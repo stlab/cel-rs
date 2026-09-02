@@ -104,7 +104,7 @@ value rather than rejecting it. A host queries which requirements are currently 
 each resolve.
 
 Two facts here generalize past this one example. `require` isn't limited to `out` — the same
-block can trail a `source` declaration too; see [§2.4](cells.md#24-cells-with-no-default) and
+block can trail a `source` declaration too; see [§2.2](cells.md#22-cell-declarations) and
 [Chapter 3](source.md). And `filter` isn't limited to plain cells, either — the same clause can
 trail an `out` declaration; see [Chapter 5, §5.6](filters.md#56-a-filter-on-an-output-cell). See
 [Chapter 6, §6.3](outputs.md#63-requirements-diagnostics-not-gates) for the full rules governing
@@ -202,7 +202,7 @@ no branch matches and there's no default.
 
 Some branches offer the solver no choice at all. A relationship with exactly one method is
 **forced**: there's no alternative binding to try, so its output cell is claimed every round
-regardless of strength — unlike the freely-chosen `low`/`high` roles in §1.5's triangle. A host
+regardless of strength — unlike the freely-chosen roles in §1.5's triangle. A host
 UI commonly disables the editable widget for a forced cell, since writing it would have no
 lasting effect once the sheet re-resolves.
 
