@@ -196,7 +196,12 @@ pub(crate) fn build_conditional_decl(
         }
         ConditionExpr::Cells(cells) => {
             let match_expr = cells_tuple_expr(doc, cells);
-            Ok(vec![build_single_conditional_decl(doc, cond, match_expr)?])
+            Ok(vec![build_single_conditional_decl(
+                doc,
+                conditional_id,
+                cond,
+                match_expr,
+            )?])
         }
         ConditionExpr::Formula {
             expr,
@@ -212,7 +217,12 @@ pub(crate) fn build_conditional_decl(
                     conditional: conditional_id,
                     source,
                 })?;
-            Ok(vec![build_single_conditional_decl(doc, cond, match_expr)?])
+            Ok(vec![build_single_conditional_decl(
+                doc,
+                conditional_id,
+                cond,
+                match_expr,
+            )?])
         }
     }
 }
@@ -225,12 +235,15 @@ pub(crate) fn build_conditional_decl(
 /// # Errors
 ///
 /// Propagates [`ExportError::InvalidFormula`] from any nested relationship
-/// group's members.
+/// group's members. Returns
+/// [`ExportError::UnrepresentableBranchLiteral`] if a branch is keyed on
+/// `i64::MIN`, which `adam_lang`'s branch grammar can't spell.
 ///
 /// - Complexity: O(n) in the total number of branches, their enabled
 ///   groups' members, and the default's members.
 fn build_single_conditional_decl(
     doc: &Document,
+    conditional_id: ConditionalGroupId,
     cond: &ConditionalGroup,
     match_expr: Expr,
 ) -> Result<ConditionalDecl, ExportError> {
@@ -241,6 +254,12 @@ fn build_single_conditional_decl(
             1,
             "build_single_conditional_decl requires arity-1 branches"
         );
+        if matches!(branch.values[0], CellValueLiteral::I64(i64::MIN)) {
+            return Err(ExportError::UnrepresentableBranchLiteral {
+                conditional: conditional_id,
+                value: i64::MIN,
+            });
+        }
         let relationships = build_branch_relationships(doc, &branch.enabled_groups)?;
         let (negated, literal, literal_span) = literal_and_sign(&branch.values[0]);
         branches.push(ConditionalBranch {
@@ -428,6 +447,11 @@ fn cells_tuple_expr(doc: &Document, cells: &[CellId]) -> Expr {
 ///   literal token — a lex failure or non-literal token here indicates a
 ///   bug in this function, not bad user data, so it panics rather than
 ///   returning a `Result`.
+/// - Precondition: `value` is not `CellValueLiteral::I64(i64::MIN)`. Its
+///   magnitude (`9223372036854775808`) lexes fine here but is out of range
+///   for the `i64` literal token `adam_lang` re-validates on parse; the
+///   caller ([`build_single_conditional_decl`]) rejects it up front with
+///   [`ExportError::UnrepresentableBranchLiteral`].
 fn literal_and_sign(value: &CellValueLiteral) -> (bool, cel_parser::lex_lexer::Literal, ExprSpan) {
     let (negated, text) = match value {
         CellValueLiteral::Bool(b) => (false, b.to_string()),

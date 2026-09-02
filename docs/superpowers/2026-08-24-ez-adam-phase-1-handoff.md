@@ -31,7 +31,7 @@ validation, codegen, and persistence layers from the design spec, with no UI yet
 - **Validation** (`validation.rs`): `validate_cel_expression` — syntax-only CEL validation via
   `cel-parser`, for relationship-group formula text and restrict-expression text. Does not
   type-check against a sheet's declared cell types — see issue #148 below.
-- **Codegen** (`codegen/mod.rs`): `generate_adm2(doc: &Document) -> String`, one-way `Document` →
+- **Codegen** (`codegen/mod.rs`): `generate_adm2(doc: &Document) -> Result<String, ExportError>`, one-way `Document` →
   `.adm2` text, per §5 of the design spec — cell decls (with clamp `filter` clauses), top-level
   `relationship` blocks, and `conditional` blocks (both `Cells` mode, single- and multi-cell
   tuple, and `Formula` mode). Tested both by exact-output-text unit tests in `codegen/mod.rs` and

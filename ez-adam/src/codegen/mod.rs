@@ -46,6 +46,19 @@ pub enum ExportError {
         /// The conditional group with the unsupported condition.
         conditional: ConditionalGroupId,
     },
+    /// `conditional` has a branch keyed on an `i64` value that
+    /// `adam_lang`'s conditional-branch grammar can't represent. Its
+    /// `["-"] literal` form stores the sign separately from an *unsigned*
+    /// literal token, and `i64::MIN`'s magnitude (`9223372036854775808`) is
+    /// out of range for an `i64` literal, so the emitted key would fail to
+    /// parse. `i64::MIN` is the only such value. See
+    /// <https://github.com/stlab/cel-rs/issues/175>.
+    UnrepresentableBranchLiteral {
+        /// The conditional group with the unrepresentable branch key.
+        conditional: ConditionalGroupId,
+        /// The offending branch value (always `i64::MIN`).
+        value: i64,
+    },
 }
 
 /// Returns `.adm2` source text for `doc`, by constructing an

@@ -115,6 +115,60 @@ fn a_multi_cell_cells_mode_conditional_group_generates_valid_adm2() {
     assert_parses(&adm2_text);
 }
 
+/// Builds a document whose one relationship (`width_pixels`/`height_pixels`)
+/// is enabled by a single-branch `Formula`-mode conditional matching a
+/// separate `mode` cell against `key`. The match cell isn't part of the
+/// enabled relationship, so the conditional is structurally valid; the only
+/// variable across calls is the branch key literal.
+fn doc_with_i64_branch_key(key: i64) -> Document {
+    let mut doc = Document::new("repro");
+    let mode = add_cell(&mut doc, "mode", CellType::i64());
+    let width = add_cell(&mut doc, "width_pixels", CellType::i64());
+    let width_node = add_cell_node(&mut doc, width, Point::new(0.0, 0.0));
+    let height = add_cell(&mut doc, "height_pixels", CellType::i64());
+    let height_node = add_cell_node(&mut doc, height, Point::new(10.0, 0.0));
+    let r1 = create_relationship(&mut doc, width_node, height_node, Point::new(5.0, 5.0));
+    set_member_formula(&mut doc, r1, width_node, "height_pixels * 2i64");
+    set_member_formula(&mut doc, r1, height_node, "width_pixels / 2i64");
+    let cond = add_conditional_with_formula(&mut doc, vec![mode], "mode", Point::new(0.0, 40.0));
+    add_branch(&mut doc, cond, vec![CellValueLiteral::I64(key)]);
+    toggle_enabled_group(&mut doc, cond, 0, r1);
+    doc
+}
+
+#[test]
+fn an_i64_min_branch_key_reports_an_unrepresentable_error_rather_than_emitting_unparsable_adm2() {
+    // `adam_lang`'s branch grammar stores the sign separately from an
+    // *unsigned* literal token, and `i64::MIN`'s magnitude is out of range
+    // for an `i64` literal — so it can't be spelled as a branch key. Export
+    // must surface this as an error, not silently emit `.adm2` that fails to
+    // parse. See https://github.com/stlab/cel-rs/issues/175.
+    let doc = doc_with_i64_branch_key(i64::MIN);
+    let result = generate_adm2(&doc);
+    assert!(
+        matches!(
+            result,
+            Err(
+                ez_adam::codegen::ExportError::UnrepresentableBranchLiteral {
+                    value: i64::MIN,
+                    ..
+                }
+            )
+        ),
+        "expected UnrepresentableBranchLiteral, got {result:?}"
+    );
+}
+
+#[test]
+fn an_i64_max_branch_key_still_exports_and_parses() {
+    // The boundary just inside the representable range: `i64::MAX`'s
+    // magnitude equals `i64::MAX`, so it is a valid literal token and must
+    // still round-trip cleanly.
+    let doc = doc_with_i64_branch_key(i64::MAX);
+    let adm2_text = generate_adm2(&doc).expect("i64::MAX branch key should export cleanly");
+    assert_parses(&adm2_text);
+}
+
 #[test]
 fn a_formula_mode_conditional_group_generates_valid_adm2() {
     let mut doc = Document::new("resize");

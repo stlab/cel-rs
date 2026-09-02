@@ -114,6 +114,10 @@ pub fn add_branch(
     conditional: ConditionalGroupId,
     values: Vec<CellValueLiteral>,
 ) -> usize {
+    debug_assert!(
+        doc.conditional_groups.contains_key(conditional),
+        "conditional is not a valid key"
+    );
     let group = &mut doc.conditional_groups[conditional];
     let arity = match &group.condition {
         ConditionExpr::Cells(cells) => cells.len(),
@@ -144,6 +148,14 @@ pub fn toggle_enabled_group(
     branch_index: usize,
     group: RelationshipGroupId,
 ) {
+    debug_assert!(
+        doc.conditional_groups.contains_key(conditional),
+        "conditional is not a valid key"
+    );
+    debug_assert!(
+        branch_index < doc.conditional_groups[conditional].branches.len(),
+        "branch_index is out of bounds"
+    );
     let branch = &mut doc.conditional_groups[conditional].branches[branch_index];
     if let Some(pos) = branch.enabled_groups.iter().position(|g| *g == group) {
         branch.enabled_groups.remove(pos);
