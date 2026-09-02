@@ -130,9 +130,7 @@ The `relationship` block offers three **bindings**: `c := a * b`, `a := c / b`, 
 `b := c / a`, each an alternative *method* for deriving one cell from the others. Only one
 binding is active at a time. Unlike `source` and `out`, a plain `cell` inside a relationship
 isn't fixed as a source or an output the way those two are — which role a given cell plays is
-decided fresh every time the sheet resolves, driven by **strength**
-([§1.5.1](#151-two-structural-rules-on-a-relationships-methods) covers a different rule about
-these same bindings; strength itself is next).
+decided fresh every time the sheet resolves, driven by **strength**.
 
 Every cell carries a strength, a write-recency counter. A cell's own *declaration* counts as a
 write for this purpose, so before anything is ever explicitly written, declaration order alone
