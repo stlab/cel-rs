@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+/// Launches the desktop UI.
 fn main() {
     #[allow(deprecated)]
     LaunchBuilder::new()
