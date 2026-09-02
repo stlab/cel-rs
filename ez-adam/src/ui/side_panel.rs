@@ -2,7 +2,7 @@
 //! `docs/superpowers/specs/2026-08-26-ez-adam-ui-design.md` §5.
 
 use crate::model::cell::{CellId, CellType};
-use crate::model::conditional_group::ConditionalGroupId;
+use crate::model::conditional_group::{ConditionalBranch, ConditionalGroupId};
 use crate::model::document::Document;
 use crate::model::relationship_group::RelationshipGroupId;
 use crate::ops::cells::{set_output, set_restrict};
@@ -106,6 +106,40 @@ pub fn formula_diagnostic(text: &str) -> Option<String> {
         .map(|e| e.format_rustc_style(text, "formula", 1, &Renderer::plain()))
 }
 
+/// Collects all relationship groups referenced by a conditional group's
+/// default and branches, deduplicating so each group appears exactly once.
+///
+/// - Postcondition: result contains each group from `default` and from any
+///   branch's `enabled_groups` exactly once, with no duplicates.
+/// - Complexity: O(n*m) where n is the total number of groups across all
+///   sources and m is the size of the combined default (due to `Vec::contains`
+///   checks).
+///
+/// # Examples
+///
+/// A group appearing in both default and a branch deduplicates to one entry:
+/// ```ignore
+/// let default = vec![group_a];
+/// let branch = ConditionalBranch { enabled_groups: vec![group_a, group_b], .. };
+/// let result = referenced_groups(&default, &[branch]);
+/// assert_eq!(result.len(), 2);
+/// assert_eq!(result.iter().filter(|g| *g == &group_a).count(), 1);
+/// ```
+pub fn referenced_groups(
+    default: &[RelationshipGroupId],
+    branches: &[ConditionalBranch],
+) -> Vec<RelationshipGroupId> {
+    let mut groups: Vec<_> = default.to_vec();
+    for branch in branches {
+        for g in &branch.enabled_groups {
+            if !groups.contains(g) {
+                groups.push(*g);
+            }
+        }
+    }
+    groups
+}
+
 /// Renders `group`'s member formulas as an editable list, each validated
 /// live via [`formula_diagnostic`].
 #[component]
@@ -141,11 +175,9 @@ pub fn RelationshipPanel(mut document: Signal<Document>, group: RelationshipGrou
     }
 }
 
-/// Renders `conditional`'s enable-table (rows = branches, columns =
-/// relationship groups referenced by any branch or the default, checkboxes
-/// = `enabled_groups` membership) and its condition text (read-only in
-/// this pass — editing the condition expression itself, as opposed to
-/// which groups are enabled per branch, is not covered by this task).
+/// Renders `conditional`'s enable-table: rows = branches, columns =
+/// relationship groups referenced by the conditional's default or any branch,
+/// checkboxes = whether each group is enabled on that branch.
 #[component]
 pub fn ConditionalPanel(
     mut document: Signal<Document>,
@@ -154,14 +186,7 @@ pub fn ConditionalPanel(
     let (branches, all_groups) = {
         let doc = document.read();
         let cond = &doc.conditional_groups[conditional];
-        let mut groups: Vec<_> = cond.default.clone();
-        for branch in &cond.branches {
-            for g in &branch.enabled_groups {
-                if !groups.contains(g) {
-                    groups.push(*g);
-                }
-            }
-        }
+        let groups = referenced_groups(&cond.default, &cond.branches);
         (cond.branches.clone(), groups)
     };
 
@@ -280,5 +305,93 @@ mod tests {
             parse_restrict_input("x > 0".to_string()),
             Some("x > 0".to_string())
         );
+    }
+
+    #[test]
+    fn referenced_groups_with_empty_default_and_branches_returns_empty() {
+        let result = referenced_groups(&[], &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn referenced_groups_includes_groups_from_default() {
+        use slotmap::SlotMap;
+
+        let mut groups: SlotMap<RelationshipGroupId, ()> = SlotMap::with_key();
+        let group_a = groups.insert(());
+        let group_b = groups.insert(());
+
+        let default = vec![group_a, group_b];
+        let result = referenced_groups(&default, &[]);
+
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&group_a));
+        assert!(result.contains(&group_b));
+    }
+
+    #[test]
+    fn referenced_groups_includes_groups_from_branches() {
+        use slotmap::SlotMap;
+
+        let mut groups: SlotMap<RelationshipGroupId, ()> = SlotMap::with_key();
+        let group_a = groups.insert(());
+        let group_b = groups.insert(());
+
+        let branch = ConditionalBranch {
+            values: vec![],
+            enabled_groups: vec![group_a, group_b],
+        };
+        let result = referenced_groups(&[], &[branch]);
+
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&group_a));
+        assert!(result.contains(&group_b));
+    }
+
+    #[test]
+    fn referenced_groups_deduplicates_groups_in_default_and_branches() {
+        use slotmap::SlotMap;
+
+        let mut groups: SlotMap<RelationshipGroupId, ()> = SlotMap::with_key();
+        let group_a = groups.insert(());
+        let group_b = groups.insert(());
+        let group_c = groups.insert(());
+
+        let default = vec![group_a];
+        let branch = ConditionalBranch {
+            values: vec![],
+            enabled_groups: vec![group_a, group_b, group_c],
+        };
+        let result = referenced_groups(&default, &[branch]);
+
+        // Should have group_a once (not twice), plus group_b and group_c
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.iter().filter(|g| *g == &group_a).count(), 1);
+        assert!(result.contains(&group_b));
+        assert!(result.contains(&group_c));
+    }
+
+    #[test]
+    fn referenced_groups_deduplicates_groups_across_multiple_branches() {
+        use slotmap::SlotMap;
+
+        let mut groups: SlotMap<RelationshipGroupId, ()> = SlotMap::with_key();
+        let group_a = groups.insert(());
+        let group_b = groups.insert(());
+
+        let branch1 = ConditionalBranch {
+            values: vec![],
+            enabled_groups: vec![group_a],
+        };
+        let branch2 = ConditionalBranch {
+            values: vec![],
+            enabled_groups: vec![group_b, group_a],
+        };
+        let result = referenced_groups(&[], &[branch1, branch2]);
+
+        // Should have group_a once and group_b once
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.iter().filter(|g| *g == &group_a).count(), 1);
+        assert_eq!(result.iter().filter(|g| *g == &group_b).count(), 1);
     }
 }
