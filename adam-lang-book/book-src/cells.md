@@ -61,11 +61,8 @@ When a cell has an initializer but no `: type_expr` annotation, its type is infe
 initializer expression's own result type (an ordinary CEL literal-defaulting rule: an
 unsuffixed integer literal like `0` is `i32`, an unsuffixed float literal like `0.0` is `f64`;
 see `cel-parser`'s documentation for the full literal grammar). When both are present, they
-must agree exactly, or the sheet fails to parse:
-
-```
-{{#include examples/cells/type_mismatch_is_a_parse_error.adm2}}
-```
+must agree exactly, or the sheet fails to parse with a \`type mismatch: expected \`T\`, got
+\`U\`\` error (Appendix A.4).
 
 A host application can also register additional Rust types under their own Adam type
 names; that's a Rust-level embedding concern, not something a sheet author does; see
@@ -106,13 +103,6 @@ declarations share one namespace, so declaring `cell result: i32 = 0;` and later
 `out result := ...;` in the same sheet is a duplicate-name error, exactly as two `cell result`
 declarations would be.
 
-Adam has **no forward references and no hoisting**: a cell must be declared before
-anything else in the sheet mentions its name, whether as a `relationship` binding's output, a
-dependency inside any expression, a `conditional`'s match subject, or a `filter`'s dependency.
-Declaration order matters for more than readability: it determines name resolution and, as
-[Chapter 5](relationships.md) covers, the solver's initial notion of which cells are "fresher"
-than others.
-
-```
-{{#include examples/cells/no_forward_references.adm2}}
-```
+Referencing a name before its declaration — as a `relationship` binding's output, a dependency
+inside any expression, a `conditional`'s match subject, or a `filter`'s dependency — is an
+\`undeclared cell \`name\`\` error (Appendix A.3).
