@@ -10,6 +10,8 @@ use cel_parser::{AstContext, OpLookup, ParseError, Parser};
 ///
 /// Returns the underlying [`ParseError`] if `text` does not parse as a CEL
 /// expression.
+///
+/// - Complexity: O(n) in `text.len()` (it lexes and parses `text`).
 pub fn validate_cel_expression(text: &str) -> Result<(), ParseError> {
     let mut lookup = OpLookup::new();
     cel_std::install(&mut lookup);

@@ -6,10 +6,15 @@ use crate::model::document::Document;
 
 /// Serializes `doc` to pretty-printed JSON.
 ///
+/// # Errors
+///
+/// Returns an error if `doc` holds a non-finite `f64` (`NaN`/`±inf`) — in a
+/// [`Point`](crate::model::geometry::Point) coordinate or an `f64` clamp
+/// bound — which `serde_json` refuses to serialize.
+///
 /// - Complexity: O(n) in the total size of `doc`.
-#[must_use]
-pub fn to_json(doc: &Document) -> String {
-    serde_json::to_string_pretty(doc).expect("Document always serializes")
+pub fn to_json(doc: &Document) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(doc)
 }
 
 /// Deserializes a `Document` from JSON text produced by [`to_json`].
@@ -44,7 +49,7 @@ mod tests {
         let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
         set_member_formula(&mut doc, group, a_node, "height_pixels * 2");
 
-        let json = to_json(&doc);
+        let json = to_json(&doc).unwrap();
         let back = from_json(&json).unwrap();
         assert_eq!(doc, back);
     }
@@ -85,7 +90,7 @@ mod tests {
         );
         toggle_enabled_group(&mut doc, cond, 0, group);
 
-        let json = to_json(&doc);
+        let json = to_json(&doc).unwrap();
         let back = from_json(&json).unwrap();
         assert_eq!(doc, back);
     }

@@ -142,6 +142,7 @@ pub fn add_branch(
 ///
 /// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
 /// - Precondition: `branch_index < conditional.branches.len()`.
+/// - Precondition: `group` is a valid key in `doc.relationship_groups`.
 pub fn toggle_enabled_group(
     doc: &mut Document,
     conditional: ConditionalGroupId,
@@ -155,6 +156,10 @@ pub fn toggle_enabled_group(
     debug_assert!(
         branch_index < doc.conditional_groups[conditional].branches.len(),
         "branch_index is out of bounds"
+    );
+    debug_assert!(
+        doc.relationship_groups.contains_key(group),
+        "group is not a valid key"
     );
     let branch = &mut doc.conditional_groups[conditional].branches[branch_index];
     if let Some(pos) = branch.enabled_groups.iter().position(|g| *g == group) {
@@ -273,7 +278,8 @@ mod tests {
 mod formula_tests {
     use super::*;
     use crate::model::geometry::Point;
-    use crate::ops::cells::add_cell;
+    use crate::ops::cells::{add_cell, add_cell_node};
+    use crate::ops::relationships::create_relationship;
 
     #[test]
     fn add_conditional_with_formula_starts_with_no_branches() {
@@ -336,8 +342,13 @@ mod formula_tests {
         );
         add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(true)]);
 
-        let mut groups: slotmap::SlotMap<RelationshipGroupId, ()> = slotmap::SlotMap::with_key();
-        let group = groups.insert(());
+        // A real relationship group in `doc`, so `group` is a valid key (the
+        // op's precondition), rather than a dangling id from an unrelated map.
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
 
         toggle_enabled_group(&mut doc, cond, 0, group);
         assert_eq!(

@@ -79,7 +79,7 @@ fn the_resize_sheet_generates_valid_adm2() {
 #[test]
 fn the_resize_sheet_survives_a_save_and_load_round_trip() {
     let doc = build_resize_sheet();
-    let reloaded = from_json(&to_json(&doc)).unwrap();
+    let reloaded = from_json(&to_json(&doc).unwrap()).unwrap();
     assert_eq!(doc, reloaded);
     assert_eq!(
         generate_adm2(&doc).expect("document should export cleanly"),
