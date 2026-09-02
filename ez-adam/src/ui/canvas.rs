@@ -167,7 +167,7 @@ pub fn compute_edges(doc: &Document) -> Vec<Edge> {
     }
     // `SlotMap`'s `IntoIterator` already yields `(K, &V)` pairs, so
     // `cond_id` is available directly — no need to recover it separately.
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for (cond_id, cond) in &doc.conditional_groups {
         let mut linked_groups: Vec<_> = cond.default.iter().copied().collect();
         for branch in &cond.branches {
@@ -183,6 +183,13 @@ pub fn compute_edges(doc: &Document) -> Vec<Edge> {
         }
     }
     edges
+}
+
+/// Returns the stroke color for a canvas node based on selection state.
+///
+/// Returns `"red"` if `selected` is true, `"black"` otherwise.
+fn node_stroke(selected: bool) -> &'static str {
+    if selected { "red" } else { "black" }
 }
 
 /// Renders `document`'s cells, relationship groups, and conditional
@@ -225,7 +232,7 @@ pub fn Canvas(
                             height: "30",
                             rx: "6",
                             fill: "lightblue",
-                            stroke: if selected { "red" } else { "black" },
+                            stroke: node_stroke(selected),
                         }
                     }
                 }
@@ -240,7 +247,7 @@ pub fn Canvas(
                             cy: "{p.y}",
                             r: "12",
                             fill: "lightgreen",
-                            stroke: if selected { "red" } else { "black" },
+                            stroke: node_stroke(selected),
                         }
                     }
                 }
@@ -257,7 +264,7 @@ pub fn Canvas(
                             height: "24",
                             transform: "rotate(45 {p.x} {p.y})",
                             fill: "orange",
-                            stroke: if selected { "red" } else { "black" },
+                            stroke: node_stroke(selected),
                         }
                     }
                 }
@@ -391,6 +398,16 @@ mod tests {
         let zoomed = zoom_at(&t, Point::new(0.0, 0.0), 1.1);
         assert!((zoomed.k - 2.2).abs() < 1e-9);
     }
+
+    #[test]
+    fn node_stroke_selected_node_returns_red() {
+        assert_eq!(node_stroke(true), "red");
+    }
+
+    #[test]
+    fn node_stroke_unselected_node_returns_black() {
+        assert_eq!(node_stroke(false), "black");
+    }
 }
 
 #[cfg(test)]
@@ -432,6 +449,11 @@ mod edge_tests {
         let cond =
             add_conditional_with_formula(&mut doc, vec![x], "x > 1.0", Point::new(0.0, 20.0));
         add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(true)]);
+        // Add group to both default and branch — should deduplicate to 1 edge.
+        {
+            let cond_mut = &mut doc.conditional_groups[cond];
+            cond_mut.default.push(group);
+        }
         toggle_enabled_group(&mut doc, cond, 0, group);
 
         let edges = compute_edges(&doc);
