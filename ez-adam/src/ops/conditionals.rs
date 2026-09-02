@@ -18,6 +18,7 @@ use crate::model::relationship_group::RelationshipGroupId;
 /// - Precondition: `cells.len() < usize::BITS`, so `1 << cells.len()` (the
 ///   branch count) neither overflows nor wraps. In practice `cells.len()`
 ///   must be far smaller, since the branch count grows as `2^cells.len()`.
+/// - Precondition: every cell in `cells` is a valid key in `doc.cells`.
 /// - Precondition: every cell in `cells` has [`CellType::Bool`].
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
 /// - Postcondition: the returned group has exactly `2.pow(cells.len())`
@@ -33,8 +34,12 @@ pub fn add_conditional_from_bool_cells(
 ) -> ConditionalGroupId {
     debug_assert!(!cells.is_empty(), "cells must be non-empty");
     debug_assert!(
-        (cells.len() as u32) < usize::BITS,
+        cells.len() < usize::BITS as usize,
         "cells.len() must be shift-safe for 1 << cells.len()"
+    );
+    debug_assert!(
+        cells.iter().all(|c| doc.cells.contains_key(*c)),
+        "every condition cell must be a valid key"
     );
     debug_assert!(
         cells
@@ -78,6 +83,9 @@ pub fn add_conditional_from_bool_cells(
 /// Creates a new conditional group whose condition is a user-authored CEL
 /// formula over `referenced_cells`, with no branches yet (added via
 /// [`add_branch`]) and an empty default.
+///
+/// - Precondition: every cell in `referenced_cells` is a valid key in
+///   `doc.cells`.
 #[must_use]
 pub fn add_conditional_with_formula(
     doc: &mut Document,
@@ -85,6 +93,10 @@ pub fn add_conditional_with_formula(
     expr: impl Into<String>,
     position: Point,
 ) -> ConditionalGroupId {
+    debug_assert!(
+        referenced_cells.iter().all(|c| doc.cells.contains_key(*c)),
+        "every referenced cell must be a valid key"
+    );
     let display_name = format!("c{}", doc.conditional_group_order.len() + 1);
     let id = doc.conditional_groups.insert(ConditionalGroup {
         display_name,

@@ -100,11 +100,20 @@ impl Document {
 
 /// Manual `PartialEq` implementation for `Document`.
 ///
-/// This is implemented manually rather than derived because `SlotMap<K, V>`
-/// does not derive `PartialEq`. The implementation compares the explicit
-/// order vectors directly and compares `SlotMap` fields by iterating their
-/// (key, value) pairs, which works correctly because `slotmap`'s serde impl
-/// preserves key identity and iteration order through serialization.
+/// Implemented manually rather than derived because `SlotMap<K, V>` does not
+/// derive `PartialEq`. It compares the explicit order vectors directly and
+/// compares each `SlotMap` field with `iter().eq(...)`, i.e. pairwise over
+/// `(key, value)` in iteration order.
+///
+/// This is order-safe even though `SlotMap` documents its iteration order as
+/// unspecified: iteration order is a deterministic function of the set of
+/// live keys (a key encodes its slot index), and this impl compares keys as
+/// well as values. So two maps compare equal exactly when they hold the same
+/// `(key, value)` entries — there is no "same entries, different order"
+/// state to disagree on. Two independently built documents have distinct
+/// keys and so are unequal; equality is meaningful between a document and
+/// its clone or its serde round-trip, where `slotmap`'s serde impl preserves
+/// keys (hence the live-key layout, hence iteration order).
 ///
 /// If new fields are added to `Document`, this impl must be updated to
 /// compare them.

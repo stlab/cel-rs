@@ -483,10 +483,15 @@ fn lex_single_literal(text: &str) -> cel_parser::lex_lexer::Literal {
         .parse()
         .unwrap_or_else(|e| panic!("synthesized literal text {text:?} failed to tokenize: {e}"));
     let mut lexer = cel_parser::lex_lexer::LexLexer::new(tokens.into_iter());
-    match lexer.next() {
+    let lit = match lexer.next() {
         Some(cel_parser::lex_lexer::Token::Literal(lit)) => lit,
         other => panic!("expected a literal token for {text:?}, got {other:?}"),
-    }
+    };
+    debug_assert!(
+        lexer.next().is_none(),
+        "text {text:?} must lex to exactly one literal token"
+    );
+    lit
 }
 
 #[cfg(test)]
