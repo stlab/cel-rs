@@ -1,6 +1,6 @@
 sheet resample_demo {
-    cell resample: bool = true;
-    cell constrain: bool = true;
+    source resample: bool = true;
+    source constrain: bool = true;
     cell locked: bool = false;
 
     conditional resample && constrain {
