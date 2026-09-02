@@ -15,6 +15,9 @@ use crate::model::relationship_group::RelationshipGroupId;
 /// default) starts with no enabled groups.
 ///
 /// - Precondition: `cells` is non-empty.
+/// - Precondition: `cells.len() < usize::BITS`, so `1 << cells.len()` (the
+///   branch count) neither overflows nor wraps. In practice `cells.len()`
+///   must be far smaller, since the branch count grows as `2^cells.len()`.
 /// - Precondition: every cell in `cells` has [`CellType::Bool`].
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
 /// - Postcondition: the returned group has exactly `2.pow(cells.len())`
@@ -29,6 +32,10 @@ pub fn add_conditional_from_bool_cells(
     position: Point,
 ) -> ConditionalGroupId {
     debug_assert!(!cells.is_empty(), "cells must be non-empty");
+    debug_assert!(
+        (cells.len() as u32) < usize::BITS,
+        "cells.len() must be shift-safe for 1 << cells.len()"
+    );
     debug_assert!(
         cells
             .iter()

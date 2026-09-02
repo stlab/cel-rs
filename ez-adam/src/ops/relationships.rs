@@ -88,6 +88,10 @@ pub fn duplicate_relationship_group(
     group: RelationshipGroupId,
     offset: Point,
 ) -> RelationshipGroupId {
+    debug_assert!(
+        doc.relationship_groups.contains_key(group),
+        "group is not a valid key"
+    );
     let source_members = doc.relationship_groups[group].members.clone();
     let source_position = doc.relationship_groups[group].position;
 
