@@ -6,6 +6,7 @@ use crate::model::conditional_group::ConditionalGroupId;
 use crate::model::document::Document;
 use crate::model::geometry::Point;
 use crate::model::relationship_group::RelationshipGroupId;
+use crate::ops::relationships::{add_member, create_relationship};
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
@@ -259,18 +260,24 @@ fn rubber_band_rect(
 
 /// Renders `document`'s cells, relationship groups, and conditional
 /// groups as SVG shapes, transformed by `view_transform`, with anything in
-/// `selection` visually highlighted. Supports click-to-select and
-/// drag-to-move (via `hit_test`/`apply_drag_delta`), pan (empty-canvas
-/// drag), zoom (mouse wheel, via `zoom_at`), and shift-drag rubber-band
-/// selection (via `nodes_in_rect`) gestures — see `start_drag` for how a
-/// mousedown picks among the drag gestures.
+/// `selection` visually highlighted. When `active_tool` is `Tool::Select`,
+/// supports click-to-select and drag-to-move (via
+/// `hit_test`/`apply_drag_delta`), pan (empty-canvas drag), and shift-drag
+/// rubber-band selection (via `nodes_in_rect`) — see `start_drag` for how a
+/// mousedown picks among those drag gestures. When `active_tool` is
+/// `Tool::AddRelationship`, a mousedown on a hit node instead advances the
+/// Add-Relationship click sequence via `add_relationship_click`; a
+/// mousedown on empty canvas is a no-op (no pan/rubber-band in this tool).
+/// Zoom (mouse wheel, via `zoom_at`) works regardless of `active_tool`.
 #[component]
 pub fn Canvas(
     document: Signal<Document>,
     view_transform: Signal<ViewTransform>,
     selection: Signal<HashSet<NodeId>>,
+    active_tool: Signal<crate::ui::toolbar::Tool>,
 ) -> Element {
     let mut drag_mode = use_signal(|| None::<DragMode>);
+    let mut pending_first_click = use_signal(|| None::<NodeId>);
 
     let doc = document.read();
     let transform = *view_transform.read();
@@ -287,14 +294,33 @@ pub fn Canvas(
                 let client_pt = data.client_coordinates();
                 let screen_point = Point::new(client_pt.x, client_pt.y);
                 let shift_held = data.modifiers().shift();
-                let doc = document.read();
                 let transform = *view_transform.read();
 
-                let mode = start_drag(&doc, &transform, screen_point, shift_held);
-                if let DragMode::Node { node, .. } = mode {
-                    *selection.write() = std::iter::once(node).collect();
+                match *active_tool.read() {
+                    crate::ui::toolbar::Tool::Select => {
+                        let doc = document.read();
+                        let mode = start_drag(&doc, &transform, screen_point, shift_held);
+                        drop(doc);
+                        if let DragMode::Node { node, .. } = mode {
+                            *selection.write() = std::iter::once(node).collect();
+                        }
+                        drag_mode.set(Some(mode));
+                    }
+                    crate::ui::toolbar::Tool::AddRelationship => {
+                        let hit = hit_test(&document.read(), &transform, screen_point);
+                        if let Some(clicked) = hit {
+                            let canvas_point = screen_to_canvas(&transform, screen_point);
+                            let new_pending = add_relationship_click(
+                                &mut document.write(),
+                                *pending_first_click.read(),
+                                clicked,
+                                canvas_point,
+                            );
+                            pending_first_click.set(new_pending);
+                        }
+                    }
+                    crate::ui::toolbar::Tool::AddConditional | crate::ui::toolbar::Tool::Duplicate => {}
                 }
-                drag_mode.set(Some(mode));
             },
             onmousemove: move |evt: Event<MouseData>| {
                 let Some(mode) = *drag_mode.read() else {
@@ -470,6 +496,42 @@ fn distance(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
 
+/// Advances the Add-Relationship tool's click sequence: given whatever was
+/// clicked previously (`pending_first_click`, `None` if this is a fresh
+/// sequence) and what was just clicked (`clicked`), either creates a new
+/// relationship group, extends an existing one, or does nothing (a bare
+/// first click on something other than a cell), returning the new pending
+/// state.
+///
+/// - `(None, cell)` → pending becomes `Some(cell)`.
+/// - `(Some(cell_a), cell_b)` → creates a relationship binding both,
+///   returns `None`.
+/// - `(Some(cell), group)` or `(Some(group), cell)` → adds `cell` as a
+///   member of `group`, returns `None`.
+/// - Any other combination (e.g. a bare first click on a group, or two
+///   groups) → returns `None` with no mutation — not a meaningful gesture.
+pub fn add_relationship_click(
+    doc: &mut Document,
+    pending_first_click: Option<NodeId>,
+    clicked: NodeId,
+    position: Point,
+) -> Option<NodeId> {
+    match (pending_first_click, clicked) {
+        (None, NodeId::CellNode(_)) => Some(clicked),
+        (None, _) => None,
+        (Some(NodeId::CellNode(a)), NodeId::CellNode(b)) => {
+            let _ = create_relationship(doc, a, b, position);
+            None
+        }
+        (Some(NodeId::CellNode(cell)), NodeId::RelationshipGroup(group))
+        | (Some(NodeId::RelationshipGroup(group)), NodeId::CellNode(cell)) => {
+            add_member(doc, group, cell);
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Moves `node` by `delta` (canvas-space), mutating `doc` directly (this
 /// is the one canvas gesture that bypasses `ops::*`, since dragging is a
 /// pure position update with no other invariant to maintain — unlike
@@ -495,6 +557,91 @@ mod tests {
     use crate::model::cell::CellType;
     use crate::model::document::Document;
     use crate::ops::cells::{add_cell, add_cell_node};
+    use crate::ops::relationships::create_relationship;
+
+    #[test]
+    fn add_relationship_click_first_click_on_a_cell_sets_pending() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+
+        let pending = add_relationship_click(
+            &mut doc,
+            None,
+            NodeId::CellNode(a_node),
+            Point::new(0.0, 0.0),
+        );
+
+        assert_eq!(pending, Some(NodeId::CellNode(a_node)));
+        assert!(doc.relationship_groups_in_order().next().is_none());
+    }
+
+    #[test]
+    fn add_relationship_click_second_click_on_a_cell_creates_a_group() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+
+        let pending = add_relationship_click(
+            &mut doc,
+            Some(NodeId::CellNode(a_node)),
+            NodeId::CellNode(b_node),
+            Point::new(5.0, 5.0),
+        );
+
+        assert_eq!(pending, None);
+        assert_eq!(doc.relationship_groups_in_order().count(), 1);
+    }
+
+    #[test]
+    fn add_relationship_click_second_click_on_an_existing_group_adds_a_member() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let c = add_cell(&mut doc, "c", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let c_node = add_cell_node(&mut doc, c, Point::new(20.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+
+        let pending = add_relationship_click(
+            &mut doc,
+            Some(NodeId::RelationshipGroup(group)),
+            NodeId::CellNode(c_node),
+            Point::new(5.0, 5.0),
+        );
+
+        assert_eq!(pending, None);
+        assert_eq!(doc.relationship_groups[group].members.len(), 3);
+    }
+
+    #[test]
+    fn add_relationship_click_first_click_on_a_non_cell_stays_pending_none() {
+        // Clicking a relationship group first (not a cell) doesn't start a
+        // valid pending state for creating a NEW relationship — only
+        // extending an existing one via a second click makes sense, and
+        // that requires the group to be the SECOND click's target with a
+        // cell as pending, or vice versa. A bare first click on a group
+        // with nothing pending is a no-op.
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+
+        let pending = add_relationship_click(
+            &mut doc,
+            None,
+            NodeId::RelationshipGroup(group),
+            Point::new(5.0, 5.0),
+        );
+
+        assert_eq!(pending, None);
+        assert_eq!(doc.relationship_groups[group].members.len(), 2);
+    }
 
     #[test]
     fn node_position_returns_a_cell_nodes_position() {
