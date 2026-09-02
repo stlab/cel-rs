@@ -6,6 +6,8 @@ use crate::model::conditional_group::ConditionalGroupId;
 use crate::model::document::Document;
 use crate::model::geometry::Point;
 use crate::model::relationship_group::RelationshipGroupId;
+use dioxus::prelude::*;
+use std::collections::HashSet;
 
 /// Identifies a canvas node of any of the three kinds `ez-adam` places on
 /// the canvas, for selection and drag-target tracking. UI-only — not part
@@ -138,6 +140,132 @@ pub fn nodes_in_rect(doc: &Document, corner_a: Point, corner_b: Point) -> Vec<No
     found
 }
 
+/// One edge to render: a line from `from` to `to` in canvas/world space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Edge {
+    pub from: Point,
+    pub to: Point,
+}
+
+/// Returns every edge to render for `doc`: one per relationship-group
+/// member (group ↔ cell) and one per conditional-group's wrapped
+/// relationship groups (conditional ↔ each of its `default`/branch
+/// `enabled_groups`, deduplicated).
+///
+/// - Complexity: O(n) in the total number of relationship-group members
+///   plus conditional-group branch/default entries.
+#[must_use]
+pub fn compute_edges(doc: &Document) -> Vec<Edge> {
+    let mut edges = Vec::new();
+    for (_, group) in &doc.relationship_groups {
+        for (node, _formula) in &group.members {
+            edges.push(Edge {
+                from: group.position,
+                to: doc.cell_nodes[*node].position,
+            });
+        }
+    }
+    // `SlotMap`'s `IntoIterator` already yields `(K, &V)` pairs, so
+    // `cond_id` is available directly — no need to recover it separately.
+    let mut seen = std::collections::HashSet::new();
+    for (cond_id, cond) in &doc.conditional_groups {
+        let mut linked_groups: Vec<_> = cond.default.iter().copied().collect();
+        for branch in &cond.branches {
+            linked_groups.extend(branch.enabled_groups.iter().copied());
+        }
+        for group_id in linked_groups {
+            if seen.insert((cond_id, group_id)) {
+                edges.push(Edge {
+                    from: cond.position,
+                    to: doc.relationship_groups[group_id].position,
+                });
+            }
+        }
+    }
+    edges
+}
+
+/// Renders `document`'s cells, relationship groups, and conditional
+/// groups as SVG shapes, transformed by `view_transform`, with anything in
+/// `selection` visually highlighted. Purely presentational — click/drag
+/// handling is added in later tasks.
+#[component]
+pub fn Canvas(
+    document: Signal<Document>,
+    view_transform: Signal<ViewTransform>,
+    selection: Signal<HashSet<NodeId>>,
+) -> Element {
+    let doc = document.read();
+    let transform = *view_transform.read();
+    let sel = selection.read();
+
+    let edges = compute_edges(&doc);
+
+    rsx! {
+        svg {
+            class: "canvas",
+            for edge in &edges {
+                line {
+                    x1: "{canvas_to_screen(&transform, edge.from).x}",
+                    y1: "{canvas_to_screen(&transform, edge.from).y}",
+                    x2: "{canvas_to_screen(&transform, edge.to).x}",
+                    y2: "{canvas_to_screen(&transform, edge.to).y}",
+                    stroke: "black",
+                }
+            }
+            for (id, cell_node) in &doc.cell_nodes {
+                {
+                    let p = canvas_to_screen(&transform, cell_node.position);
+                    let selected = sel.contains(&NodeId::CellNode(id));
+                    rsx! {
+                        rect {
+                            x: "{p.x - 40.0}",
+                            y: "{p.y - 15.0}",
+                            width: "80",
+                            height: "30",
+                            rx: "6",
+                            fill: "lightblue",
+                            stroke: if selected { "red" } else { "black" },
+                        }
+                    }
+                }
+            }
+            for (id, group) in &doc.relationship_groups {
+                {
+                    let p = canvas_to_screen(&transform, group.position);
+                    let selected = sel.contains(&NodeId::RelationshipGroup(id));
+                    rsx! {
+                        circle {
+                            cx: "{p.x}",
+                            cy: "{p.y}",
+                            r: "12",
+                            fill: "lightgreen",
+                            stroke: if selected { "red" } else { "black" },
+                        }
+                    }
+                }
+            }
+            for (id, cond) in &doc.conditional_groups {
+                {
+                    let p = canvas_to_screen(&transform, cond.position);
+                    let selected = sel.contains(&NodeId::ConditionalGroup(id));
+                    rsx! {
+                        rect {
+                            x: "{p.x - 12.0}",
+                            y: "{p.y - 12.0}",
+                            width: "24",
+                            height: "24",
+                            transform: "rotate(45 {p.x} {p.y})",
+                            fill: "orange",
+                            stroke: if selected { "red" } else { "black" },
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +390,58 @@ mod tests {
         };
         let zoomed = zoom_at(&t, Point::new(0.0, 0.0), 1.1);
         assert!((zoomed.k - 2.2).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+    use crate::model::cell::CellType;
+    use crate::ops::cells::{add_cell, add_cell_node};
+    use crate::ops::relationships::create_relationship;
+
+    #[test]
+    fn compute_edges_connects_relationship_group_to_each_member() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let _ = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+
+        let edges = compute_edges(&doc);
+        assert_eq!(edges.len(), 2);
+        assert!(edges.iter().all(|e| e.from == Point::new(5.0, 5.0)));
+    }
+
+    #[test]
+    fn compute_edges_connects_conditional_group_to_default_and_branch_groups_once_each() {
+        use crate::model::conditional_group::CellValueLiteral;
+        use crate::ops::conditionals::{
+            add_branch, add_conditional_with_formula, toggle_enabled_group,
+        };
+
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "x", CellType::f64());
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+
+        let cond =
+            add_conditional_with_formula(&mut doc, vec![x], "x > 1.0", Point::new(0.0, 20.0));
+        add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(true)]);
+        toggle_enabled_group(&mut doc, cond, 0, group);
+
+        let edges = compute_edges(&doc);
+        let cond_to_group = edges
+            .iter()
+            .filter(|e| {
+                e.from == doc.conditional_groups[cond].position
+                    && e.to == doc.relationship_groups[group].position
+            })
+            .count();
+        assert_eq!(cond_to_group, 1);
     }
 }
