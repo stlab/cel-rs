@@ -8,6 +8,7 @@ use crate::model::relationship_group::RelationshipGroupId;
 use crate::ops::cells::{set_output, set_restrict};
 use crate::ops::conditionals::toggle_enabled_group;
 use crate::ops::relationships::set_member_formula;
+use crate::ui::canvas::NodeId;
 use crate::validation::validate_cel_expression;
 use annotate_snippets::Renderer;
 use dioxus::prelude::*;
@@ -104,6 +105,19 @@ pub fn formula_diagnostic(text: &str) -> Option<String> {
     validate_cel_expression(text)
         .err()
         .map(|e| e.format_rustc_style(text, "formula", 1, &Renderer::plain()))
+}
+
+/// Returns the single node the side panel should show properties for, or
+/// `None` if nothing (or more than one thing) is selected — the panel
+/// only ever targets exactly one node at a time.
+#[must_use]
+pub fn panel_target(selection: &std::collections::HashSet<NodeId>) -> Option<NodeId> {
+    let mut iter = selection.iter();
+    let first = *iter.next()?;
+    if iter.next().is_some() {
+        return None;
+    }
+    Some(first)
 }
 
 /// Collects all relationship groups referenced by a conditional group's
@@ -222,6 +236,31 @@ pub fn ConditionalPanel(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Renders whichever of [`CellPanel`]/[`RelationshipPanel`]/[`ConditionalPanel`]
+/// matches the current single-node `selection`, or nothing if the
+/// selection is empty or multi-node (per [`panel_target`]).
+#[component]
+pub fn SidePanel(
+    document: Signal<Document>,
+    selection: Signal<std::collections::HashSet<NodeId>>,
+) -> Element {
+    let target = panel_target(&selection.read());
+    rsx! {
+        div {
+            class: "side-panel",
+            match target {
+                Some(NodeId::CellNode(node)) => {
+                    let cell = document.read().cell_nodes[node].cell;
+                    rsx! { CellPanel { document, cell } }
+                }
+                Some(NodeId::RelationshipGroup(group)) => rsx! { RelationshipPanel { document, group } },
+                Some(NodeId::ConditionalGroup(conditional)) => rsx! { ConditionalPanel { document, conditional } },
+                None => rsx! { div { "No selection" } },
             }
         }
     }
@@ -393,5 +432,33 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result.iter().filter(|g| *g == &group_a).count(), 1);
         assert_eq!(result.iter().filter(|g| *g == &group_b).count(), 1);
+    }
+
+    #[test]
+    fn panel_target_is_none_for_empty_selection() {
+        let selection = std::collections::HashSet::new();
+        assert_eq!(panel_target(&selection), None);
+    }
+
+    #[test]
+    fn panel_target_is_none_for_multiple_selections() {
+        let mut selection = std::collections::HashSet::new();
+        // Two arbitrary distinct NodeIds — construct via slotmap fixtures
+        // matching this file's existing test conventions.
+        let mut cells: slotmap::SlotMap<crate::model::cell_node::CellNodeId, ()> =
+            slotmap::SlotMap::with_key();
+        selection.insert(NodeId::CellNode(cells.insert(())));
+        selection.insert(NodeId::CellNode(cells.insert(())));
+        assert_eq!(panel_target(&selection), None);
+    }
+
+    #[test]
+    fn panel_target_returns_the_single_selected_node() {
+        let mut cells: slotmap::SlotMap<crate::model::cell_node::CellNodeId, ()> =
+            slotmap::SlotMap::with_key();
+        let node = cells.insert(());
+        let mut selection = std::collections::HashSet::new();
+        selection.insert(NodeId::CellNode(node));
+        assert_eq!(panel_target(&selection), Some(NodeId::CellNode(node)));
     }
 }
