@@ -117,6 +117,6 @@ per-kind restriction.
 ## 5.7 Errors
 
 Two filter-declaration mistakes are caught while parsing the sheet, before it is ever
-resolved: a non-range filter body that never references `_` fails with `` `filter must
-reference `_` `` ``, and a `filter` attached to a tuple-typed cell fails with `` `filter on a
-tuple-typed cell is not yet supported` ``. At most one filter may be attached per cell.
+resolved: a non-range filter body that never references `_` fails with "filter must
+reference `_`", and a `filter` attached to a tuple-typed cell fails with "filter on a
+tuple-typed cell is not yet supported". At most one filter may be attached per cell.

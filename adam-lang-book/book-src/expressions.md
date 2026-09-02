@@ -22,7 +22,7 @@ always install `cel-std` (see `support::parser` in `adam-lang-book`'s own source
 
 A `cell`'s `= expression` initializer is evaluated exactly once, eagerly, at the moment
 `cell`'s own declaration is parsed, with no cell scope pushed at all. Referencing any
-identifier that would otherwise name a cell is an `` `undeclared cell `name`` `` error, exactly
+identifier that would otherwise name a cell is an "undeclared cell `name`" error, exactly
 as if the cell had never been declared at all — see Appendix A.3.
 
 To compute one cell's value from another's, write a [`relationship`](relationships.md) or an
