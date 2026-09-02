@@ -8,7 +8,7 @@ use crate::model::document::Document;
 use crate::model::geometry::Point;
 use crate::model::relationship_group::RelationshipGroupId;
 use crate::ops::conditionals;
-use crate::ops::relationships::{add_member, create_relationship};
+use crate::ops::relationships::{add_member, create_relationship, duplicate_relationship_group};
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
@@ -641,6 +641,25 @@ pub fn apply_drag_delta(doc: &mut Document, node: NodeId, delta: Point) {
     }
 }
 
+/// Duplicates every relationship group in `selection` (ignoring any
+/// selected cell/conditional nodes, which this tool doesn't act on),
+/// offsetting each duplicate by `offset`. Returns the new groups' ids.
+///
+/// - Complexity: O(n) in `selection.len()`.
+pub fn duplicate_selection(
+    doc: &mut Document,
+    selection: &HashSet<NodeId>,
+    offset: Point,
+) -> Vec<RelationshipGroupId> {
+    selection
+        .iter()
+        .filter_map(|node| match node {
+            NodeId::RelationshipGroup(id) => Some(duplicate_relationship_group(doc, *id, offset)),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,6 +1109,38 @@ mod tests {
         });
         // canvas (0,0) -> screen (10, 0); canvas (10,10) -> screen (30, 20).
         assert_eq!(rubber_band_rect(mode, &t), Some((10.0, 0.0, 20.0, 20.0)));
+    }
+
+    #[test]
+    fn duplicate_selection_duplicates_every_selected_relationship_group() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+
+        let mut selection = std::collections::HashSet::new();
+        selection.insert(NodeId::RelationshipGroup(group));
+
+        let duplicated = duplicate_selection(&mut doc, &selection, Point::new(0.0, 50.0));
+
+        assert_eq!(duplicated.len(), 1);
+        assert_eq!(doc.relationship_groups_in_order().count(), 2);
+    }
+
+    #[test]
+    fn duplicate_selection_ignores_non_relationship_group_selections() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+
+        let mut selection = std::collections::HashSet::new();
+        selection.insert(NodeId::CellNode(a_node));
+
+        let duplicated = duplicate_selection(&mut doc, &selection, Point::new(0.0, 50.0));
+
+        assert!(duplicated.is_empty());
     }
 }
 

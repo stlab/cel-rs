@@ -1,7 +1,11 @@
 //! Toolbar for selecting the active interaction tool. See
 //! `docs/superpowers/specs/2026-08-26-ez-adam-ui-design.md` §2.
 
+use crate::model::document::Document;
+use crate::model::geometry::Point;
+use crate::ui::canvas::{NodeId, duplicate_selection};
 use dioxus::prelude::*;
+use std::collections::HashSet;
 
 /// The active canvas interaction mode, selected via the toolbar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,25 +45,50 @@ fn tool_button_class(active: Tool, tool: Tool) -> &'static str {
 }
 
 /// Renders one button per [`Tool`], highlighting whichever is currently
-/// active in `active_tool`, and updates it on click. A direct passthrough
-/// of a click to `active_tool.set(...)` with no branching of its own —
-/// per this workspace's testing convention, delegating the button class
-/// decision to `tool_button_class`.
+/// active in `active_tool`, and updates it on click — except `Tool::Duplicate`,
+/// which is a one-shot action rather than a persistent mode: its button
+/// instead calls `duplicate_selection` on the current `selection` and
+/// replaces `selection` with the newly-duplicated groups, without ever
+/// making `Duplicate` the active tool. The `Duplicate`-vs-other branch in
+/// each button's `onclick` is simple dispatch onto the already-tested
+/// `duplicate_selection`, not new decision logic of its own; the button
+/// class decision is delegated to `tool_button_class`.
 #[component]
-pub fn Toolbar(active_tool: Signal<Tool>) -> Element {
+pub fn Toolbar(
+    active_tool: Signal<Tool>,
+    document: Signal<Document>,
+    selection: Signal<HashSet<NodeId>>,
+) -> Element {
     let tools = [
         Tool::Select,
         Tool::AddRelationship,
         Tool::AddConditional,
         Tool::Duplicate,
     ];
+    let mut selection = selection;
     rsx! {
         div {
             class: "toolbar",
             for tool in tools {
                 button {
                     class: tool_button_class(*active_tool.read(), tool),
-                    onclick: move |_| active_tool.set(tool),
+                    onclick: move |_| {
+                        if tool == Tool::Duplicate {
+                            let duplicated = duplicate_selection(
+                                &mut document.write(),
+                                &selection.read(),
+                                Point::new(0.0, 100.0),
+                            );
+                            selection.set(
+                                duplicated
+                                    .into_iter()
+                                    .map(NodeId::RelationshipGroup)
+                                    .collect(),
+                            );
+                        } else {
+                            active_tool.set(tool);
+                        }
+                    },
                     "{tool_label(tool)}"
                 }
             }
