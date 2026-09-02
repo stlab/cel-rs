@@ -1,11 +1,13 @@
 //! Canvas rendering, coordinates, and gesture handling. See
 //! `docs/superpowers/specs/2026-08-26-ez-adam-ui-design.md` §4.
 
+use crate::model::cell::CellType;
 use crate::model::cell_node::CellNodeId;
-use crate::model::conditional_group::ConditionalGroupId;
+use crate::model::conditional_group::{CellValueLiteral, ConditionalGroupId};
 use crate::model::document::Document;
 use crate::model::geometry::Point;
 use crate::model::relationship_group::RelationshipGroupId;
+use crate::ops::conditionals;
 use crate::ops::relationships::{add_member, create_relationship};
 use dioxus::prelude::*;
 use std::collections::HashSet;
@@ -268,7 +270,12 @@ fn rubber_band_rect(
 /// `Tool::AddRelationship`, a mousedown on a hit node instead advances the
 /// Add-Relationship click sequence via `add_relationship_click`; a
 /// mousedown on empty canvas is a no-op (no pan/rubber-band in this tool).
-/// Zoom (mouse wheel, via `zoom_at`) works regardless of `active_tool`.
+/// When `active_tool` is `Tool::AddConditional`, a mousedown on a
+/// relationship-group node starts a drag (tracked internally, not via
+/// `DragMode`); a mouseup over any node then completes the gesture via
+/// `add_conditional_drag`, wrapping the source group in a new conditional
+/// group. Zoom (mouse wheel, via `zoom_at`) works regardless of
+/// `active_tool`.
 #[component]
 pub fn Canvas(
     document: Signal<Document>,
@@ -278,6 +285,7 @@ pub fn Canvas(
 ) -> Element {
     let mut drag_mode = use_signal(|| None::<DragMode>);
     let mut pending_first_click = use_signal(|| None::<NodeId>);
+    let mut pending_conditional_source = use_signal(|| None::<RelationshipGroupId>);
 
     let doc = document.read();
     let transform = *view_transform.read();
@@ -319,7 +327,13 @@ pub fn Canvas(
                             pending_first_click.set(new_pending);
                         }
                     }
-                    crate::ui::toolbar::Tool::AddConditional | crate::ui::toolbar::Tool::Duplicate => {}
+                    crate::ui::toolbar::Tool::AddConditional => {
+                        let hit = hit_test(&document.read(), &transform, screen_point);
+                        if let Some(NodeId::RelationshipGroup(group)) = hit {
+                            pending_conditional_source.set(Some(group));
+                        }
+                    }
+                    crate::ui::toolbar::Tool::Duplicate => {}
                 }
             },
             onmousemove: move |evt: Event<MouseData>| {
@@ -364,12 +378,32 @@ pub fn Canvas(
                     }
                 }
             },
-            onmouseup: move |_evt| {
+            onmouseup: move |evt: Event<MouseData>| {
                 if let Some(DragMode::RubberBand { start_canvas, current_canvas }) = *drag_mode.read() {
                     let found = nodes_in_rect(&document.read(), start_canvas, current_canvas);
                     *selection.write() = found.into_iter().collect();
                 }
                 drag_mode.set(None);
+
+                if *active_tool.read() == crate::ui::toolbar::Tool::AddConditional {
+                    let source = *pending_conditional_source.read();
+                    if let Some(group) = source {
+                        let data = evt.data();
+                        let client_pt = data.client_coordinates();
+                        let mouseup_screen_point = Point::new(client_pt.x, client_pt.y);
+                        let transform = *view_transform.read();
+                        let hit = hit_test(&document.read(), &transform, mouseup_screen_point);
+                        if let Some(target) = hit {
+                            let _ = add_conditional_drag(
+                                &mut document.write(),
+                                group,
+                                target,
+                                screen_to_canvas(&transform, mouseup_screen_point),
+                            );
+                        }
+                        pending_conditional_source.set(None);
+                    }
+                }
             },
             onwheel: move |evt: Event<WheelData>| {
                 let data = evt.data();
@@ -532,6 +566,53 @@ pub fn add_relationship_click(
     }
 }
 
+/// Completes an Add-Conditional drag from `group` onto `target`: wraps
+/// `group` in a new conditional group at `position`, `Cells`-mode if
+/// `target` is a `Bool` cell, `Formula`-mode otherwise.
+///
+/// In `Formula`-mode, the formula expression itself starts empty (filled in
+/// later via the side panel), but a single placeholder branch with value
+/// `CellValueLiteral::Bool(true)` is added immediately and `group` is
+/// enabled on it. This is not a guess at the referenced cell's own type —
+/// branch values always match the *expression's* evaluated type (a boolean
+/// comparison the user will write, e.g. `"threshold > 2.0"`), which is
+/// `Bool` regardless of what type of cell the formula references, so
+/// `Bool(true)` is the correct placeholder shape (every existing
+/// Formula-mode branch in this codebase's Phase-1 test suite uses it for
+/// exactly this reason). Doing this immediately — rather than waiting for
+/// the side panel — also keeps `group` from silently becoming orphaned:
+/// `compute_edges` only draws a conditional→group edge for groups that
+/// appear in `cond.default` or some branch's `enabled_groups`, so without
+/// this, `group` would render disconnected until the user finishes editing
+/// the side panel.
+///
+/// # Errors
+///
+/// Returns `Err` if `target` is not a cell node at all (e.g. dropping onto
+/// another relationship or conditional group is not a meaningful gesture
+/// for this tool).
+pub fn add_conditional_drag(
+    doc: &mut Document,
+    group: RelationshipGroupId,
+    target: NodeId,
+    position: Point,
+) -> Result<(), &'static str> {
+    let NodeId::CellNode(node) = target else {
+        return Err("Add Conditional target must be a cell");
+    };
+    let cell_id = doc.cell_nodes[node].cell;
+    if matches!(doc.cells[cell_id].ty, CellType::Bool) {
+        let _ = conditionals::add_conditional_from_bool_cells(doc, vec![cell_id], group, position);
+    } else {
+        let cond_id =
+            conditionals::add_conditional_with_formula(doc, vec![cell_id], String::new(), position);
+        let branch_index =
+            conditionals::add_branch(doc, cond_id, vec![CellValueLiteral::Bool(true)]);
+        conditionals::toggle_enabled_group(doc, cond_id, branch_index, group);
+    }
+    Ok(())
+}
+
 /// Moves `node` by `delta` (canvas-space), mutating `doc` directly (this
 /// is the one canvas gesture that bypasses `ops::*`, since dragging is a
 /// pure position update with no other invariant to maintain — unlike
@@ -555,9 +636,79 @@ pub fn apply_drag_delta(doc: &mut Document, node: NodeId, delta: Point) {
 mod tests {
     use super::*;
     use crate::model::cell::CellType;
+    use crate::model::cell::CellType as CT;
     use crate::model::document::Document;
     use crate::ops::cells::{add_cell, add_cell_node};
     use crate::ops::relationships::create_relationship;
+
+    #[test]
+    fn add_conditional_drag_onto_a_bool_cell_creates_a_cells_mode_conditional() {
+        let mut doc = Document::new("demo");
+        let flag = add_cell(&mut doc, "flag", CT::Bool);
+        let a = add_cell(&mut doc, "a", CT::i64());
+        let b = add_cell(&mut doc, "b", CT::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+
+        let flag_node = add_cell_node(&mut doc, flag, Point::new(0.0, 20.0));
+        let result = add_conditional_drag(
+            &mut doc,
+            group,
+            NodeId::CellNode(flag_node),
+            Point::new(0.0, 40.0),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(doc.conditional_groups_in_order().count(), 1);
+    }
+
+    #[test]
+    fn add_conditional_drag_onto_a_non_bool_cell_starts_formula_mode() {
+        let mut doc = Document::new("demo");
+        let threshold = add_cell(&mut doc, "threshold", CT::f64());
+        let a = add_cell(&mut doc, "a", CT::i64());
+        let b = add_cell(&mut doc, "b", CT::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        let threshold_node = add_cell_node(&mut doc, threshold, Point::new(0.0, 20.0));
+
+        let result = add_conditional_drag(
+            &mut doc,
+            group,
+            NodeId::CellNode(threshold_node),
+            Point::new(0.0, 40.0),
+        );
+
+        assert!(result.is_ok());
+        let (_, cond) = doc.conditional_groups_in_order().next().unwrap();
+        assert!(matches!(
+            cond.condition,
+            crate::model::conditional_group::ConditionExpr::Formula { .. }
+        ));
+        assert_eq!(cond.branches.len(), 1);
+        assert!(cond.branches[0].enabled_groups.contains(&group));
+    }
+
+    #[test]
+    fn add_conditional_drag_onto_a_non_cell_target_errors() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CT::i64());
+        let b = add_cell(&mut doc, "b", CT::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+
+        let result = add_conditional_drag(
+            &mut doc,
+            group,
+            NodeId::RelationshipGroup(group),
+            Point::new(0.0, 40.0),
+        );
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn add_relationship_click_first_click_on_a_cell_sets_pending() {
