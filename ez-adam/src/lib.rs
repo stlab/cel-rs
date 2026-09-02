@@ -7,3 +7,6 @@ pub mod model;
 pub mod ops;
 pub mod persistence;
 pub mod validation;
+
+#[cfg(feature = "desktop")]
+pub mod ui;
