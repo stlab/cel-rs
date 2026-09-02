@@ -1,6 +1,6 @@
 sheet resize {
     source width: i32 = 1920;
-    cell height: i32 = 1080;
+    source height: i32 = 1080;
 
     out area := width * height;
 }
