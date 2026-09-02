@@ -2,7 +2,7 @@
 //! `.adm2` export ([`crate::codegen::generate_adm2`]) is a separate,
 //! one-way operation; it is never read back in.
 
-use crate::model::document::Document;
+use crate::model::document::{CURRENT_FORMAT_VERSION, Document};
 
 /// Serializes `doc` to pretty-printed JSON.
 ///
@@ -21,14 +21,22 @@ pub fn to_json(doc: &Document) -> Result<String, serde_json::Error> {
 ///
 /// # Errors
 ///
-/// Returns an error if `text` is not valid JSON, or does not match
-/// [`Document`]'s current shape. Only
-/// [`crate::model::document::CURRENT_FORMAT_VERSION`] is currently
-/// supported — no migration path exists yet for older versions.
+/// Returns an error if `text` is not valid JSON, does not match
+/// [`Document`]'s current shape, or declares a `format_version` other than
+/// [`CURRENT_FORMAT_VERSION`] — no migration path exists yet for other
+/// versions.
 ///
 /// - Complexity: O(n) in the length of `text`.
 pub fn from_json(text: &str) -> Result<Document, serde_json::Error> {
-    serde_json::from_str(text)
+    use serde::de::Error as _;
+    let doc: Document = serde_json::from_str(text)?;
+    if doc.format_version != CURRENT_FORMAT_VERSION {
+        return Err(serde_json::Error::custom(format!(
+            "unsupported document format version {}: only version {CURRENT_FORMAT_VERSION} is supported",
+            doc.format_version
+        )));
+    }
+    Ok(doc)
 }
 
 #[cfg(test)]
@@ -57,6 +65,14 @@ mod tests {
     #[test]
     fn from_json_rejects_malformed_json() {
         assert!(from_json("not json").is_err());
+    }
+
+    #[test]
+    fn from_json_rejects_an_unsupported_format_version() {
+        let mut doc = Document::new("demo");
+        doc.format_version = CURRENT_FORMAT_VERSION + 1;
+        let json = to_json(&doc).unwrap();
+        assert!(from_json(&json).is_err());
     }
 
     #[test]
