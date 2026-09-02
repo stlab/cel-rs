@@ -71,6 +71,52 @@ pub enum ExportError {
     },
 }
 
+impl std::fmt::Display for ExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExportError::InvalidFormula {
+                group,
+                cell,
+                source,
+            } => write!(
+                f,
+                "invalid formula for cell {cell:?} in relationship group {group:?}: {source}"
+            ),
+            ExportError::InvalidCondition {
+                conditional,
+                source,
+            } => write!(
+                f,
+                "invalid condition expression in conditional group {conditional:?}: {source}"
+            ),
+            ExportError::UnsupportedMultiValueCondition { conditional } => write!(
+                f,
+                "conditional group {conditional:?} matches on more than one value per branch, which .adm2 cannot represent"
+            ),
+            ExportError::UnrepresentableBranchLiteral { conditional, value } => write!(
+                f,
+                "conditional group {conditional:?} has a branch keyed on {value}, which .adm2's branch grammar cannot represent"
+            ),
+            ExportError::NonFiniteClampBound { cell_name, bound } => write!(
+                f,
+                "cell `{cell_name}` has a non-finite f64 clamp bound ({bound}), which .adm2 cannot represent"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ExportError::InvalidFormula { source, .. }
+            | ExportError::InvalidCondition { source, .. } => Some(source),
+            ExportError::UnsupportedMultiValueCondition { .. }
+            | ExportError::UnrepresentableBranchLiteral { .. }
+            | ExportError::NonFiniteClampBound { .. } => None,
+        }
+    }
+}
+
 /// Returns `.adm2` source text for `doc`, by constructing an
 /// `adam_lang::ast::Sheet` and rendering it via the shared
 /// `adam_lang::format_sheet` — the same formatter `adam-fmt`/the VS Code
@@ -386,5 +432,24 @@ mod tests {
 
         let result = generate_adm2(&doc);
         assert!(matches!(result, Err(ExportError::InvalidFormula { .. })));
+    }
+
+    #[test]
+    fn export_error_implements_display_and_error_source() {
+        use std::error::Error;
+
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let _ = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        // Formulas left empty, so export fails with `InvalidFormula`.
+        let err = generate_adm2(&doc).expect_err("empty formulas should fail export");
+
+        // `Display` is implemented (not just `Debug`), and the `InvalidFormula`
+        // variant chains to the underlying parse error via `Error::source`.
+        assert!(!err.to_string().is_empty());
+        assert!(err.source().is_some());
     }
 }
