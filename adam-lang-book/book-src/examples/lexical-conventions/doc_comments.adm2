@@ -1,0 +1,8 @@
+//! A sheet describing a simple resize dialog.
+sheet image_resize {
+    /// The image's width in pixels, before any resampling.
+    cell width_pixels: i32 = 1920; // a trailing comment
+    /* a block comment,
+       on several lines */
+    cell height_pixels: i32 = 1080;
+}
