@@ -24,6 +24,8 @@ use super::ExportError;
 ///
 /// Returns the underlying [`cel_parser::ParseError`] if `text` is not
 /// syntactically valid CEL.
+///
+/// - Complexity: O(n) in `text.len()` (it lexes and parses `text`).
 fn parse_expr_text(text: &str) -> Result<cel_parser::Expr, cel_parser::ParseError> {
     let mut lookup = OpLookup::new();
     cel_std::install(&mut lookup);

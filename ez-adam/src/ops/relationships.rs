@@ -34,6 +34,9 @@ pub fn create_relationship(
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
 /// - Precondition: `node` is a valid key in `doc.cell_nodes`.
 /// - Precondition: `node` is not already a member of `group`.
+///
+/// - Complexity: O(n) in `group`'s member count (it scans to reject a
+///   duplicate `node`).
 pub fn add_member(doc: &mut Document, group: RelationshipGroupId, node: CellNodeId) {
     debug_assert!(
         doc.relationship_groups.contains_key(group),
@@ -52,6 +55,8 @@ pub fn add_member(doc: &mut Document, group: RelationshipGroupId, node: CellNode
 ///
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
 /// - Precondition: `node` is a member of `group`.
+///
+/// - Complexity: O(n) in `group`'s member count (linear search for `node`).
 pub fn set_member_formula(
     doc: &mut Document,
     group: RelationshipGroupId,

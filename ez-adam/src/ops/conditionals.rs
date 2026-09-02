@@ -155,6 +155,9 @@ pub fn add_branch(
 /// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
 /// - Precondition: `branch_index < conditional.branches.len()`.
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
+///
+/// - Complexity: O(n) in the branch's `enabled_groups` length (it scans for
+///   `group` to toggle it).
 pub fn toggle_enabled_group(
     doc: &mut Document,
     conditional: ConditionalGroupId,
