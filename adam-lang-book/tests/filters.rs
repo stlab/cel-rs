@@ -1,4 +1,4 @@
-//! Examples backing `book-src/filters.md` (Chapter 6). See `src/lib.rs` for how these `.adm2`
+//! Examples backing `book-src/filters.md` (Chapter 7). See `src/lib.rs` for how these `.adm2`
 //! files are wired into the book.
 
 #[test]
@@ -90,4 +90,19 @@ fn tuple_filter_not_supported() {
         .err()
         .unwrap();
     assert!(format!("{err}").contains("tuple"));
+}
+
+#[test]
+fn filter_on_an_out_cell() {
+    let mut parser = adam_lang_book::support::parser();
+    let mut parsed = parser
+        .parse_str(include_str!(
+            "../book-src/examples/filters/filter_on_an_out_cell.adm2"
+        ))
+        .unwrap();
+    let area = parsed.output_names["area"];
+    assert_eq!(parsed.filter_name(area), Some("clamp"));
+
+    parsed.propagate().unwrap();
+    assert_eq!(*parsed.read::<i32>(area).unwrap(), 4); // within range, unclamped
 }

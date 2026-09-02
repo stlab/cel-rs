@@ -1,6 +1,6 @@
-# Chapter 4: Relationships and the Solver
+# Chapter 5: Relationships and the Solver
 
-## 4.1 Bindings are alternative methods
+## 5.1 Bindings are alternative methods
 
 ```text
 relationship_decl = "relationship" "{" { binding } "}".
@@ -9,13 +9,16 @@ binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
 ```
 
 Each `binding` inside a `relationship` block is a candidate **method**: an expression whose
-dependencies are [deduced](expressions.md#34-deduced-dependencies) from whichever
+dependencies are [deduced](expressions.md#44-deduced-dependencies) from whichever
 already-declared cells it references, paired with the cell(s) named on its left of `:=`. A
 relationship's bindings are alternatives, not a sequence: at any moment, exactly one of them
 is *selected*, and only the selected one's output cell(s) are actually written when the sheet
-resolves. The other bindings simply aren't evaluated that round.
+resolves. The other bindings simply aren't evaluated that round. A [`source`](source.md) cell
+can never be named on a binding's left-hand side — it's always a source, by construction, never
+a method's output — and an [`out`](outputs.md) cell can be a binding's *input* but never its
+output either, since an `out` already has its own fixed writer.
 
-## 4.2 Strength: who gets to stay a source
+## 5.2 Strength: who gets to stay a source
 
 Every cell carries a **strength**, a write-recency counter: resolving the sheet re-derives the
 *stalest* cells it safely can and leaves the *freshest* cells alone. Two things bump a cell's
@@ -25,7 +28,7 @@ being stalest. Chapter 1's [§1.2](tutorial.md#12-relationships-multi-way-constr
 through the simplest case of this rule. A write never touches strength itself except to promote
 the written cell to "freshest of all"; reading a cell never changes it.
 
-## 4.3 A shared-cell example
+## 5.3 A shared-cell example
 
 Cells can be shared across more than one relationship, letting the solver's strength
 preference cross relationship boundaries. Four cells, two relationships, with `b` and `c`
@@ -74,7 +77,7 @@ strongest first, to leave each cell a source:
 Whether a cell came out of the last resolution as a source, left alone rather than derived, is
 useful for a host UI deciding whether a field should be editable.
 
-## 4.4 When no assignment exists
+## 5.4 When no assignment exists
 
 Every relationship in a sheet must end up with exactly one selected binding once the sheet
 resolves: if that's not possible, resolution fails instead of silently picking something
@@ -98,7 +101,7 @@ Each relationship above has only one binding, so the solver has no alternative t
 relationships a second, cycle-breaking binding (e.g. also allowing `y := x` to run in reverse
 as `x := y`) would let the solver route around the loop instead.
 
-## 4.5 Destructuring bindings
+## 5.5 Destructuring bindings
 
 A binding's left-hand side can name more than one output cell by parenthesizing it, in which
 case the right-hand side must be a tuple expression of matching arity, split element-wise:

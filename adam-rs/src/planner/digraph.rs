@@ -188,6 +188,7 @@ mod tests {
         sheet
             .add_filter(
                 a,
+                "bound",
                 Filter::from_fn_1(bound, |x: &i32, b: &i32| Ok((*x).min(*b))),
             )
             .unwrap();
@@ -212,6 +213,7 @@ mod tests {
         sheet
             .add_filter(
                 y,
+                "bound",
                 Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
             )
             .unwrap();
@@ -229,7 +231,11 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
         sheet
-            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+            .add_filter(
+                a,
+                "clamp",
+                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
+            )
             .unwrap();
 
         let assignment =

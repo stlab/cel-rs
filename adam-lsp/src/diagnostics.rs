@@ -106,12 +106,12 @@ mod tests {
 
     #[test]
     fn filter_clause_with_matching_types_has_no_diagnostics() {
-        assert!(diagnostics_for_source("sheet s { cell a: i32 = 1 filter _; }").is_empty());
+        assert!(diagnostics_for_source("sheet s { cell a: i32 = 1 filter f: _; }").is_empty());
     }
 
     #[test]
     fn filter_clause_without_underscore_is_a_diagnostic() {
-        let diags = diagnostics_for_source("sheet s { cell a: i32 = 1 filter 1; }");
+        let diags = diagnostics_for_source("sheet s { cell a: i32 = 1 filter f: 1; }");
         assert_eq!(diags.len(), 1);
     }
 }

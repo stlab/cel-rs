@@ -33,11 +33,13 @@
 //! assert_eq!(*sheet.read::<f64>(c).unwrap(), 6.0);
 //! ```
 //!
-//! # Outputs and requirements
+//! # Out cells and requirements
 //!
-//! An output is a terminal cell written by a single method, with named requirements
-//! checked after every `propagate()`. Unlike an ordinary derived cell, an output's cell
-//! can never be used as an input elsewhere in the sheet.
+//! An out cell is always derived by exactly one fixed writer method, with named
+//! requirements checked after every `propagate()`. Unlike an ordinary derived cell, an
+//! out cell can never be `write()`-ed or claimed as another method's output — but it
+//! remains an ordinary, freely-referenceable cell everywhere else (as another
+//! relationship's input, a conditional's match subject, and so on).
 //!
 //! ```rust
 //! use adam_rs::{Requirement, Method, Sheet};
@@ -51,8 +53,8 @@
 //! let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| {
 //!     w.checked_mul(*h).ok_or_else(|| anyhow::anyhow!("overflow"))
 //! });
-//! let output = sheet
-//!     .add_output(
+//! let area_cell = sheet
+//!     .add_out(
 //!         writer,
 //!         vec![(
 //!             "max_area",
@@ -64,11 +66,11 @@
 //! sheet.write(width, 20_i32).unwrap();
 //! sheet.write(height, 3_i32).unwrap();
 //! sheet.propagate().unwrap();
-//! assert!(sheet.output_valid(output));
+//! assert!(sheet.cell_requirements_valid(area_cell));
 //!
 //! sheet.write(height, 30_i32).unwrap();
 //! sheet.propagate().unwrap();
-//! assert!(!sheet.output_valid(output));
+//! assert!(!sheet.cell_requirements_valid(area_cell));
 //! ```
 //!
 //! # Filters
@@ -86,10 +88,10 @@
 //! let a = sheet.add_cell(0_i32);
 //! let b = sheet.add_cell(0_i32);
 //! sheet
-//!     .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+//!     .add_filter(a, "clamp", Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
 //!     .unwrap();
 //! sheet
-//!     .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+//!     .add_filter(b, "clamp", Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
 //!     .unwrap();
 //! sheet
 //!     .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
@@ -112,17 +114,15 @@ pub mod cell;
 pub mod conditional;
 pub mod error;
 pub mod filter;
-pub mod output;
 mod planner;
 pub mod relationship;
 pub mod requirement;
 pub mod sheet;
 
-pub use cell::CellId;
+pub use cell::{CellId, CellKind};
 pub use conditional::{ConditionalId, MatchExpr};
 pub use error::Error;
 pub use filter::{Filter, FilterKind, FilterViolation};
-pub use output::OutputId;
 pub use relationship::{Method, RelationshipId};
 pub use requirement::{Requirement, RequirementId};
 pub use sheet::Sheet;

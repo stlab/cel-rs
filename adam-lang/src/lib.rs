@@ -7,18 +7,21 @@
 //!
 //! ```text
 //! sheet              = "sheet" identifier "{" { sheet_item } "}".
-//! sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl).
-//! cell_decl          = "cell" identifier cell_type_init [ cell_filter ] ";".
-//! cell_filter        = "filter" or_expression.
+//! sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl
+//!                        | source_decl).
+//! cell_decl          = "cell" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
+//! cell_filter        = "filter" identifier ":" or_expression.
 //! cell_type_init     = (":" type_expr ["=" or_expression]) | ("=" or_expression).
+//! source_decl        = "source" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 //! type_expr          = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 //! relationship_decl  = "relationship" "{" { binding } "}".
 //! binding            = binding_target ":=" or_expression ";".
 //! binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
 //! conditional_decl   = "conditional" or_expression "{" { conditional_branch } "}".
-//! conditional_branch = (or_expression | "_") "=>" "{" { relationship_decl } "}" [ "," ].
+//! conditional_branch = (literal_pattern | "_") "=>" "{" { relationship_decl } "}" [ "," ].
 //! out_decl           = "out" identifier [":" type_expr] ":=" or_expression
-//!                        [ "require" "{" { requirement } "}" ] ";".
+//!                        [ cell_filter ] [ require_block ] ";".
+//! require_block      = "require" "{" { requirement } "}".
 //! requirement        = identifier ":" or_expression ";".
 //! ```
 //!
@@ -26,11 +29,13 @@
 //! clause, not shown above because **this crate does not yet implement it** — see
 //! `docs/superpowers/specs/2026-08-19-adam-lang-syntax-design.md`'s "Explicitly out of scope"
 //! section; it's deferred pending a forward-reference/hoisting decision. Only `cell_decl`'s
-//! `"=" or_expression` one-time initializer and its optional `cell_filter` clause are
-//! implemented today.
+//! `"=" or_expression` one-time initializer and its optional `cell_filter`/`require_block`
+//! clauses are implemented today.
 //!
 //! `or_expression` and its descendants (`literal`, `identifier`, and the rest of the
-//! CEL expression grammar) are defined by `cel_parser` — see that crate's own
+//! CEL expression grammar), as well as `literal_pattern` (a bare literal, optionally negated by
+//! a leading `-`, matching Rust's own `LiteralPattern` rule — CEL has no constant-expression
+//! syntax in pattern position), are defined by `cel_parser` — see that crate's own
 //! [`# Grammar`](../cel_parser/index.html#grammar) section.
 //!
 //! A `cell_filter`'s `or_expression` names no explicit parameter list: `_` always refers to the

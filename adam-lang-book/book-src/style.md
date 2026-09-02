@@ -1,6 +1,6 @@
-# Chapter 8: Program Style
+# Chapter 9: Program Style
 
-## 8.1 Comments
+## 9.1 Comments
 
 `//` starts a line comment; `/* ... */` a block comment, exactly the same two forms C, Rust,
 and CEL all share:
@@ -11,12 +11,12 @@ cell width: i32 = 1920; // a trailing comment
 /* a block comment, on one line or several */
 ```
 
-## 8.2 Doc comments
+## 9.2 Doc comments
 
-`///` immediately before a `cell`, `relationship`, `conditional`, or `out` declaration, and
-`//!` immediately before the `sheet` keyword itself, are doc comments, recovered by the
-language server and the formatter, and otherwise inert (they carry no meaning when the sheet
-resolves):
+`///` immediately before a `cell`, `source`, `relationship`, `conditional`, or `out`
+declaration, and `//!` immediately before the `sheet` keyword itself, are doc comments,
+recovered by the language server and the formatter, and otherwise inert (they carry no meaning
+when the sheet resolves):
 
 ```text
 //! Describes a simple resize dialog.
@@ -26,7 +26,7 @@ sheet image_resize {
 }
 ```
 
-## 8.3 Canonical formatting
+## 9.3 Canonical formatting
 
 Adam ships its own formatter (`adam fmt`, backed by
 [`format_sheet`](../adam_lang/fn.format_sheet.html)) with one canonical layout: 4-space

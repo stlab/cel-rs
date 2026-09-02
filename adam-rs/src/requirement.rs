@@ -1,16 +1,15 @@
-//! Named boolean checks attached to outputs.
+//! Named boolean checks attached to a cell.
 //!
 //! Each [`Requirement`] is a pure predicate over some set of cells, evaluated after every
-//! `Sheet::propagate` to determine whether an output's preconditions currently hold. A
-//! requirement's inputs may be any cells in the sheet, not only the inputs of the output's
-//! writer method. See [`crate::sheet::Sheet::add_output`].
+//! `Sheet::propagate` to determine whether a cell's preconditions currently hold. A
+//! requirement's inputs may be any cells in the sheet, not only the cell it's attached to.
+//! See [`crate::sheet::Sheet::add_requirement`].
 
 use std::any::{Any, TypeId};
 
 use slotmap::new_key_type;
 
 use crate::cell::CellId;
-use crate::output::OutputId;
 
 new_key_type! {
     /// A stable handle to a requirement in a [`crate::sheet::Sheet`].
@@ -20,7 +19,7 @@ new_key_type! {
 /// Type-erased predicate stored inside a [`Requirement`].
 type RequirementFn = Box<dyn Fn(&[&dyn Any]) -> Result<bool, anyhow::Error>>;
 
-/// A single named boolean check over some set of cells, attached to an output.
+/// A single named boolean check over some set of cells, attached to a cell.
 pub struct Requirement {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) input_types: Vec<TypeId>,
@@ -46,7 +45,7 @@ impl Requirement {
     /// Creates a 1-input requirement from a typed closure.
     ///
     /// The TypeId for `A` is captured automatically. The requirement is validated against
-    /// its cell registration when passed to [`crate::sheet::Sheet::add_output`].
+    /// its cell registration when passed to [`crate::sheet::Sheet::add_requirement`].
     pub fn from_fn_1<A, F>(input: CellId, f: F) -> Self
     where
         A: Any + 'static,
@@ -58,7 +57,7 @@ impl Requirement {
             function: Box::new(move |args| {
                 let a = args[0]
                     .downcast_ref::<A>()
-                    .expect("type checked at add_output");
+                    .expect("type checked at add_requirement");
                 f(a)
             }),
         }
@@ -68,7 +67,7 @@ impl Requirement {
     ///
     /// `inputs[0]` maps to `A` and `inputs[1]` maps to `B`. TypeIds are captured
     /// automatically. The requirement is validated when passed to
-    /// [`crate::sheet::Sheet::add_output`].
+    /// [`crate::sheet::Sheet::add_requirement`].
     pub fn from_fn_2<A, B, F>(inputs: [CellId; 2], f: F) -> Self
     where
         A: Any + 'static,
@@ -81,10 +80,10 @@ impl Requirement {
             function: Box::new(move |args| {
                 let a = args[0]
                     .downcast_ref::<A>()
-                    .expect("type checked at add_output");
+                    .expect("type checked at add_requirement");
                 let b = args[1]
                     .downcast_ref::<B>()
-                    .expect("type checked at add_output");
+                    .expect("type checked at add_requirement");
                 f(a, b)
             }),
         }
@@ -94,7 +93,7 @@ impl Requirement {
 /// Internal storage for a single requirement.
 pub(crate) struct RequirementData {
     pub(crate) name: String,
-    pub(crate) output: OutputId,
+    pub(crate) cell: CellId,
     pub(crate) inputs: Vec<CellId>,
     pub(crate) function: RequirementFn,
 }

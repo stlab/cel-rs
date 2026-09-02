@@ -1,4 +1,4 @@
-//! Examples backing `book-src/outputs.md` (Chapter 7). See `src/lib.rs` for how these `.adm2`
+//! Examples backing `book-src/outputs.md` (Chapter 8). See `src/lib.rs` for how these `.adm2`
 //! files are wired into the book.
 
 #[test]
@@ -15,17 +15,22 @@ fn basic_output() {
 }
 
 #[test]
-fn output_cell_is_terminal() {
+fn output_cell_can_be_referenced_but_never_written() {
     let mut parser = adam_lang_book::support::parser();
     let mut parsed = parser
         .parse_str(include_str!(
-            "../book-src/examples/outputs/output_cell_is_terminal.adm2"
+            "../book-src/examples/outputs/output_cell_can_be_referenced.adm2"
         ))
         .unwrap();
-    let output = parsed.output_names["area"];
-    let area_cell = parsed.output_cell(output).unwrap();
-    let err = parsed.write(area_cell, 999_i32).unwrap_err();
-    assert!(matches!(err, adam_rs::Error::TerminalCell));
+    parsed.propagate().unwrap();
+
+    let area = parsed.output_names["area"];
+    let doubled_area = parsed.output_names["doubled_area"];
+    assert_eq!(*parsed.read::<i32>(area).unwrap(), 20); // width (10) * 2
+    assert_eq!(*parsed.read::<i32>(doubled_area).unwrap(), 40); // area (20) * 2, cross-referenced
+
+    let err = parsed.write(area, 999_i32).unwrap_err();
+    assert!(matches!(err, adam_rs::Error::InvalidCellKind));
 }
 
 #[test]
@@ -38,12 +43,12 @@ fn requirement_diagnostic() {
         .unwrap();
     parsed.propagate().unwrap();
     let output = parsed.output_names["area"];
-    assert!(parsed.output_valid(output));
+    assert!(parsed.cell_requirements_valid(output));
 
     let width = parsed.cell_names["width"].0;
     parsed.write(width, 50_i32).unwrap();
     parsed.propagate().unwrap();
-    assert!(!parsed.output_valid(output));
+    assert!(!parsed.cell_requirements_valid(output));
 }
 
 #[test]
@@ -60,5 +65,5 @@ fn multiple_requirements() {
     parsed.write(x, -10_i32).unwrap();
     parsed.propagate().unwrap();
     assert_eq!(parsed.violated_requirements(output).count(), 1);
-    assert!(!parsed.output_valid(output));
+    assert!(!parsed.cell_requirements_valid(output));
 }

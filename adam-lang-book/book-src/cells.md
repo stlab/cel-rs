@@ -19,7 +19,7 @@ example picker, to have something to display.
 ## 2.2 Cell declarations
 
 ```text
-cell_decl      = "cell" identifier cell_type_init [ "filter" expression ] ";".
+cell_decl      = "cell" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).
 ```
 
@@ -32,8 +32,12 @@ cell area = 0;               // initializer only — type is inferred (2.3)
 ```
 
 At least one of `: type_expr` / `= expression` must be present: `cell width;` alone is a
-syntax error ("expected `:` or `=` in cell declaration"). The `filter` clause is covered in
-full in [Chapter 6](filters.md).
+syntax error ("expected `:` or `=` in cell declaration"). A `cell` may also carry an optional
+trailing `filter` clause and/or `require` block — a standing domain constraint and named
+boolean diagnostics, respectively, both covered in full in [Chapter 7](filters.md) and
+[Chapter 8](outputs.md#83-requirements-diagnostics-not-gates) (those two chapters introduce the
+mechanisms via `out`, but both apply to a plain `cell` — and, `require` only, to a
+[`source`](source.md) cell — exactly the same way).
 
 A cell's initializer is evaluated **once**, eagerly, at parse time; it may reference literals
 and CEL operators, but not other cells (there's no "current sheet state" yet for it to read).
@@ -81,7 +85,7 @@ type_expr = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ]
 ```
 
 A parenthesized type list is a tuple type. `()` is the empty tuple (an inert, zero-element
-value; see [Chapter 4](relationships.md) for where it's useful); `(T)` with no comma is plain
+value; see [Chapter 5](relationships.md) for where it's useful); `(T)` with no comma is plain
 grouping, identical to `T` (types have no precedence to disambiguate, but the parentheses are
 accepted for symmetry with expression grammar); `(T,)` (trailing comma mandatory) is a
 genuine one-element tuple; `(T, U, ...)` is the general case:
@@ -106,7 +110,7 @@ Adam has **no forward references and no hoisting**: a cell must be declared befo
 anything else in the sheet mentions its name, whether as a `relationship` binding's output, a
 dependency inside any expression, a `conditional`'s match subject, or a `filter`'s dependency.
 Declaration order matters for more than readability: it determines name resolution and, as
-[Chapter 4](relationships.md) covers, the solver's initial notion of which cells are "fresher"
+[Chapter 5](relationships.md) covers, the solver's initial notion of which cells are "fresher"
 than others.
 
 ```

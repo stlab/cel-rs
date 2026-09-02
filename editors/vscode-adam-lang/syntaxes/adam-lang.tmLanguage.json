@@ -28,7 +28,7 @@
       "patterns": [
         {
           "name": "keyword.declaration.adam-lang",
-          "match": "\\b(sheet|cell|relationship|conditional|out|require|filter)\\b"
+          "match": "\\b(sheet|cell|source|relationship|conditional|out|require|filter)\\b"
         },
         {
           "name": "keyword.other.wildcard.adam-lang",

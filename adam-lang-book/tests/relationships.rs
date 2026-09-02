@@ -1,4 +1,4 @@
-//! Examples backing `book-src/relationships.md` (Chapter 4). See `src/lib.rs` for how these
+//! Examples backing `book-src/relationships.md` (Chapter 5). See `src/lib.rs` for how these
 //! `.adm2` files are wired into the book.
 
 #[test]
@@ -60,7 +60,10 @@ fn destructuring_binding() {
         ))
         .unwrap();
     parsed.propagate().unwrap();
-    let (a, b) = (parsed.cell_names["a"].0, parsed.cell_names["b"].0);
-    assert_eq!(*parsed.read::<i32>(a).unwrap(), 2);
-    assert_eq!(*parsed.read::<i32>(b).unwrap(), 1);
+    let (area, perimeter) = (
+        parsed.cell_names["area"].0,
+        parsed.cell_names["perimeter"].0,
+    );
+    assert_eq!(*parsed.read::<f64>(area).unwrap(), 40.0); // 10.0 * 4.0
+    assert_eq!(*parsed.read::<f64>(perimeter).unwrap(), 28.0); // 2.0 * (10.0 + 4.0)
 }
