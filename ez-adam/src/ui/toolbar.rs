@@ -13,6 +13,7 @@ pub enum Tool {
 }
 
 impl Default for Tool {
+    /// Returns `Tool::Select`.
     fn default() -> Self {
         Tool::Select
     }
@@ -28,12 +29,22 @@ fn tool_label(tool: Tool) -> &'static str {
     }
 }
 
+/// Returns the CSS class name for a tool button based on whether it is the active tool.
+///
+/// Returns `"tool-active"` if `active == tool`, `"tool"` otherwise.
+fn tool_button_class(active: Tool, tool: Tool) -> &'static str {
+    if active == tool {
+        "tool-active"
+    } else {
+        "tool"
+    }
+}
+
 /// Renders one button per [`Tool`], highlighting whichever is currently
 /// active in `active_tool`, and updates it on click. A direct passthrough
 /// of a click to `active_tool.set(...)` with no branching of its own —
-/// per this workspace's testing convention, this needs no dedicated pure
-/// function to extract, since `tool_label` already covers the only
-/// non-trivial decision (the label text).
+/// per this workspace's testing convention, delegating the button class
+/// decision to `tool_button_class`.
 #[component]
 pub fn Toolbar(active_tool: Signal<Tool>) -> Element {
     let tools = [
@@ -47,7 +58,7 @@ pub fn Toolbar(active_tool: Signal<Tool>) -> Element {
             class: "toolbar",
             for tool in tools {
                 button {
-                    class: if *active_tool.read() == tool { "tool-active" } else { "tool" },
+                    class: tool_button_class(*active_tool.read(), tool),
                     onclick: move |_| active_tool.set(tool),
                     "{tool_label(tool)}"
                 }
@@ -75,5 +86,26 @@ mod tests {
         ];
         let unique: std::collections::HashSet<_> = labels.iter().collect();
         assert_eq!(unique.len(), labels.len());
+    }
+
+    #[test]
+    fn tool_button_class_active_tool_returns_tool_active() {
+        assert_eq!(tool_button_class(Tool::Select, Tool::Select), "tool-active");
+        assert_eq!(
+            tool_button_class(Tool::AddRelationship, Tool::AddRelationship),
+            "tool-active"
+        );
+    }
+
+    #[test]
+    fn tool_button_class_inactive_tool_returns_tool() {
+        assert_eq!(
+            tool_button_class(Tool::Select, Tool::AddRelationship),
+            "tool"
+        );
+        assert_eq!(
+            tool_button_class(Tool::AddConditional, Tool::Duplicate),
+            "tool"
+        );
     }
 }
