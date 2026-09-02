@@ -221,7 +221,7 @@ pub fn Canvas(
                 let transform = *view_transform.read();
 
                 if let Some(node) = hit_test(&doc, &transform, screen_point) {
-                    selection.write().insert(node);
+                    *selection.write() = std::iter::once(node).collect();
                     drag_state.set(Some((node, screen_point)));
                 }
             },
@@ -347,6 +347,7 @@ pub fn hit_test(doc: &Document, transform: &ViewTransform, screen_point: Point) 
     None
 }
 
+/// Returns the Euclidean distance between `a` and `b`.
 fn distance(a: Point, b: Point) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
