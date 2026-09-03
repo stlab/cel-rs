@@ -56,7 +56,7 @@ Cells can be shared across more than one relationship, letting the solver's stre
 preference cross relationship boundaries. Four cells, two relationships, with `b` and `c`
 shared between them:
 
-```text
+```adam
 sheet diamond {
     cell a = 0.0;
     cell b = 0.0;
@@ -92,7 +92,7 @@ strongest first, to leave each cell a source:
 - **`a`**: stalest, and the first relationship's remaining choice is `a := c/b`; `a` is
   derived.
 
-```
+```adam
 {{#include examples/relationships/shared_cell_example.adm2}}
 ```
 

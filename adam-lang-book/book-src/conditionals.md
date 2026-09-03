@@ -21,7 +21,7 @@ cell's current value. The match subject can also be a general expression over se
 already-declared cells, [deduced](expressions.md#44-deduced-dependencies) exactly like a
 relationship binding's body:
 
-```
+```adam
 {{#include examples/conditionals/multi_cell_match_subject.adm2}}
 ```
 
@@ -51,7 +51,7 @@ methods both keep a cell's own raw *source* value forever, underneath whatever *
 value a live correction currently computes. A forced cell works the same way: forcing it
 shadows its own source, never overwrites it.
 
-```
+```adam
 {{#include examples/conditionals/forced_and_self_ref_shadow.adm2}}
 ```
 
@@ -89,7 +89,7 @@ triggered here by *no* branch matching at all rather than by switching branches:
 that stops being active can never have written a cell's source, so the cell has nothing to
 revert to except that untouched source.
 
-```
+```adam
 {{#include examples/conditionals/default_branch_and_spring_back.adm2}}
 ```
 

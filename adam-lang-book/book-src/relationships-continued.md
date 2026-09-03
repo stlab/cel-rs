@@ -5,7 +5,7 @@
 A binding's left-hand side can name more than one output cell by parenthesizing it, in which
 case the right-hand side must be a tuple expression of matching arity, split element-wise:
 
-```
+```adam
 {{#include examples/relationships-continued/destructuring_binding.adm2}}
 ```
 
@@ -25,7 +25,7 @@ Each time the sheet resolves, a self-referencing method reads its own cell's *so
 never a previous round's derived value — the same source/derived split
 [Chapter 5](filters.md#53-the-raw-value-is-never-lost) already introduced for filters:
 
-```
+```adam
 {{#include examples/relationships-continued/self_referencing_method.adm2}}
 ```
 

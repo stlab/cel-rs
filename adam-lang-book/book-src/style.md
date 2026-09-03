@@ -8,7 +8,7 @@ indentation, opening braces on the same line as the keyword that introduces them
 before a declaration's closing `;`. Given input that doesn't already follow this layout,
 formatting normalizes it:
 
-```
+```adam
 {{#include examples/style/canonical_formatting.adm2}}
 ```
 

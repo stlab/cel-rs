@@ -17,7 +17,7 @@ a `.adm2` file, and the UI controls are constructed entirely from the sheet decl
 An Adam program is a single `sheet`, named, with a body of declarations between braces. The simplest
 useful sheet declares a couple of source cells and nothing else:
 
-```
+```adam
 {{#include examples/tutorial/first_sheet.adm2}}
 ```
 
@@ -35,7 +35,7 @@ not a sequence of statements. A sheet describes a _graph_ of cells and the const
 
 A `filter` clause attaches a standing domain constraint to a cell, most commonly a range:
 
-```
+```adam
 {{#include examples/tutorial/clamp_demo.adm2}}
 ```
 
@@ -79,7 +79,7 @@ An `out` declaration (or a `cell`, or a `source`) can carry named `require`ments
 re-evaluated and reported each time the sheet resolves, never enforced by rejecting a write or
 blocking resolution:
 
-```
+```adam
 {{#include examples/tutorial/area_with_requirement.adm2}}
 ```
 
@@ -106,7 +106,7 @@ The classic example is three numbers related by multiplication (`a * b = c`), wh
 three can be computed from the other two, the same shape as `pixels == inches * resolution` from
 [the introduction](intro.md#why-adam). As a sheet:
 
-```
+```adam
 {{#include examples/tutorial/multiplication_triangle.adm2}}
 ```
 
@@ -148,7 +148,7 @@ A binding's left-hand side can name more than one output cell by parenthesizing 
 tuple-valued expression on the right into its parts, one cell per element, using the same `(a, b)`
 syntax Rust uses for tuple patterns:
 
-```
+```adam
 {{#include examples/tutorial/destructuring_demo.adm2}}
 ```
 
@@ -172,7 +172,7 @@ solver never checks this; it's on the sheet author.
 A `conditional` groups relationships that are only active under a matching condition. It evaluates a
 _match subject_, then activates whichever branch's literal equals the current match value:
 
-```
+```adam
 {{#include examples/tutorial/mode_demo.adm2}}
 ```
 
@@ -189,7 +189,7 @@ strength, unlike the freely-chosen roles in §1.5's triangle. A host UI commonly
 editable widget for a forced cell, since writing it would have no lasting effect once the sheet
 re-resolves.
 
-```
+```adam
 {{#include examples/tutorial/forced_and_self_ref_shadow.adm2}}
 ```
 

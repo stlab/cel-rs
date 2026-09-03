@@ -10,7 +10,7 @@ one lexical extension on top of CEL's own conventions: doc comments.
 `//` starts a line comment; `/* ... */` a block comment — the same two forms C, Rust, and CEL
 all share:
 
-```text
+```adam
 // a whole-line comment
 cell width: i32 = 1920; // a trailing comment
 /* a block comment, on one line or several */
@@ -23,7 +23,7 @@ declaration, and `//!` immediately before the `sheet` keyword itself, are Adam's
 CEL's lexical grammar: doc comments, recovered by the language server and the formatter, and
 otherwise inert — they carry no meaning when the sheet resolves:
 
-```
+```adam
 {{#include examples/lexical-conventions/doc_comments.adm2}}
 ```
 

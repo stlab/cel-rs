@@ -4,7 +4,7 @@
 
 Every Adam source file is one sheet:
 
-```text
+```adam
 sheet name {
     /* cell, relationship, conditional, and out declarations, in any order,
        except that each identifier must be declared before it is referenced —
@@ -25,7 +25,7 @@ cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).
 
 A cell needs a type, an initial value, or both:
 
-```text
+```adam
 cell width: i32;             // type only — needs a registered default (2.4)
 cell height: i32 = 1080;     // type and initializer
 cell area = 0;               // initializer only — type is inferred (2.3)
@@ -86,7 +86,7 @@ grouping, identical to `T` (types have no precedence to disambiguate, but the pa
 accepted for symmetry with expression grammar); `(T,)` (trailing comma mandatory) is a
 genuine one-element tuple; `(T, U, ...)` is the general case:
 
-```
+```adam
 {{#include examples/cells/tuple_typed_cell.adm2}}
 ```
 
