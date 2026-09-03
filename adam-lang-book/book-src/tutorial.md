@@ -148,10 +148,10 @@ parsed, well before it's ever resolved:
 
 - Every method's `inputs ∪ outputs` must be exactly the same set of cells as every other
   method's in the same relationship. Violating this is `Error::MismatchedMethodCells`:
-  "methods in a relationship must reference the same set of cells."
+  "methods in a relationship must reference the same set of cells".
 - No two methods in the same relationship may share an identical output set. Violating this is
   `Error::DuplicateMethodOutputs`: "a method's outputs must be duplicate-free, and no two
-  methods in a relationship may share an outputs set."
+  methods in a relationship may share an outputs set".
 
 `multiplication_triangle.adm2`'s own three bindings satisfy both. `c := a * b` reads `a` and
 `b` and writes `c`; `a := c / b` reads `c` and `b` and writes `a`; `b := c / a` reads `c` and
