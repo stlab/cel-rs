@@ -69,6 +69,18 @@ pub enum ExportError {
         /// The offending bound value.
         bound: f64,
     },
+    /// The cell named `cell_name` has an `i64::MIN` clamp bound. `.adm2`'s
+    /// `["-"] literal` grammar stores the sign separately from an
+    /// *unsigned* literal token, and `i64::MIN`'s magnitude
+    /// (`9223372036854775808`) is out of range for an `i64` literal, so the
+    /// synthesized clamp expression would fail to parse. `i64::MIN` is the
+    /// only such value. See <https://github.com/stlab/cel-rs/issues/175>.
+    UnrepresentableClampBound {
+        /// The name of the cell whose clamp bound is `i64::MIN`.
+        cell_name: String,
+        /// The offending bound value (always `i64::MIN`).
+        bound: i64,
+    },
 }
 
 impl std::fmt::Display for ExportError {
@@ -101,6 +113,10 @@ impl std::fmt::Display for ExportError {
                 f,
                 "cell `{cell_name}` has a non-finite f64 clamp bound ({bound}), which .adm2 cannot represent"
             ),
+            ExportError::UnrepresentableClampBound { cell_name, bound } => write!(
+                f,
+                "cell `{cell_name}` has a clamp bound of {bound}, which .adm2's literal grammar cannot represent"
+            ),
         }
     }
 }
@@ -112,7 +128,8 @@ impl std::error::Error for ExportError {
             | ExportError::InvalidCondition { source, .. } => Some(source),
             ExportError::UnsupportedMultiValueCondition { .. }
             | ExportError::UnrepresentableBranchLiteral { .. }
-            | ExportError::NonFiniteClampBound { .. } => None,
+            | ExportError::NonFiniteClampBound { .. }
+            | ExportError::UnrepresentableClampBound { .. } => None,
         }
     }
 }

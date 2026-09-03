@@ -53,7 +53,9 @@ fn type_expr_for(ty: &CellType) -> adam_lang::ast::TypeExpr {
 /// # Errors
 ///
 /// Returns [`ExportError::NonFiniteClampBound`] if `cell` has a non-finite
-/// `f64` clamp bound (no `.adm2` literal can represent it).
+/// `f64` clamp bound (no `.adm2` literal can represent it), or
+/// [`ExportError::UnrepresentableClampBound`] if `cell` has an `i64::MIN`
+/// clamp bound (no `.adm2` literal can represent it either).
 ///
 /// - Postcondition: `filter` is `None` iff `cell.ty` is `Bool`/`Text` or
 ///   has no clamp bounds.
@@ -89,7 +91,11 @@ pub(crate) fn build_cell_decl(cell: &Cell) -> Result<CellDecl, ExportError> {
 /// Returns [`ExportError::NonFiniteClampBound`] (naming `cell_name`) if an
 /// `f64` clamp bound is non-finite: `.adm2` has no literal for `NaN`/`±inf`,
 /// and Debug-formatting one emits a bare `NaN`/`inf` token that parses as an
-/// identifier rather than a numeric literal.
+/// identifier rather than a numeric literal. Returns
+/// [`ExportError::UnrepresentableClampBound`] (naming `cell_name`) if an
+/// `i64` clamp bound is `i64::MIN`: `.adm2`'s `["-"] literal` grammar
+/// stores the sign separately from an *unsigned* literal token, and
+/// `i64::MIN`'s magnitude is out of range for one.
 ///
 /// - Precondition: the synthesized clamp-call text is always valid CEL —
 ///   a parse failure here indicates a bug in this function, not bad user
@@ -112,12 +118,22 @@ fn clamp_filter(cell_name: &str, ty: &CellType) -> Result<Option<CellFilter>, Ex
                 (Some(min), Some(max)) => format!("clamp(_, {min:?}, {max:?})"),
             }
         }
-        CellType::I64 { clamp } => match (clamp.min, clamp.max) {
-            (None, None) => return Ok(None),
-            (Some(min), None) => format!("max(_, {min}i64)"),
-            (None, Some(max)) => format!("min(_, {max}i64)"),
-            (Some(min), Some(max)) => format!("clamp(_, {min}i64, {max}i64)"),
-        },
+        CellType::I64 { clamp } => {
+            for bound in [clamp.min, clamp.max].into_iter().flatten() {
+                if bound == i64::MIN {
+                    return Err(ExportError::UnrepresentableClampBound {
+                        cell_name: cell_name.to_string(),
+                        bound,
+                    });
+                }
+            }
+            match (clamp.min, clamp.max) {
+                (None, None) => return Ok(None),
+                (Some(min), None) => format!("max(_, {min}i64)"),
+                (None, Some(max)) => format!("min(_, {max}i64)"),
+                (Some(min), Some(max)) => format!("clamp(_, {min}i64, {max}i64)"),
+            }
+        }
         CellType::Bool | CellType::Text => return Ok(None),
     };
     let body = parse_expr_text(&body_text).unwrap_or_else(|e| {
@@ -569,6 +585,45 @@ mod tests {
             build_cell_decl(&cell),
             Err(ExportError::NonFiniteClampBound { .. })
         ));
+    }
+
+    #[test]
+    fn build_cell_decl_rejects_an_i64_min_clamp_bound() {
+        let cell = Cell::new(
+            "offset",
+            CellType::I64 {
+                clamp: ClampRange {
+                    min: Some(i64::MIN),
+                    max: None,
+                },
+            },
+        );
+        assert!(matches!(
+            build_cell_decl(&cell),
+            Err(ExportError::UnrepresentableClampBound {
+                bound: i64::MIN,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn build_cell_decl_accepts_an_i64_max_clamp_bound() {
+        let cell = Cell::new(
+            "offset",
+            CellType::I64 {
+                clamp: ClampRange {
+                    min: None,
+                    max: Some(i64::MAX),
+                },
+            },
+        );
+        let decl = build_cell_decl(&cell).expect("i64::MAX clamp bound should export cleanly");
+        let filter = decl.filter.expect("expected a filter clause");
+        assert_eq!(
+            cel_parser::format_expr(&filter.body),
+            format!("min(_, {}i64)", i64::MAX)
+        );
     }
 
     #[test]

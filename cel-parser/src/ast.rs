@@ -47,6 +47,8 @@ impl ExprSpan {
     ///
     /// - Precondition: `text` tokenizes to exactly one token tree.
     ///
+    /// - Complexity: O(n) in `text.len()` (it lexes `text`).
+    ///
     /// # Examples
     ///
     /// ```
