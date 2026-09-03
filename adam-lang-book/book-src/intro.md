@@ -23,7 +23,7 @@ much like a spreadsheet holds named, typed values. A `relationship` plays the ro
 spreadsheet's equation cell, but unlike a spreadsheet formula, which computes in one direction
 only, a relationship is multi-way: `a == b` means that changing `a` updates `b` to match, and
 changing `b` updates `a` to match. Which cell is the source and which is derived is decided
-each time the sheet is solved, not fixed by the declaration.
+based on the cell strength. Typically, cells modified most recently have greater strength.
 
 ## About this book
 

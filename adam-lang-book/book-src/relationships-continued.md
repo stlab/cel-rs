@@ -18,7 +18,7 @@ type must structurally match what the expression actually produces, checked at p
 
 ## 8.2 Self-referencing methods
 
-A method's expression may reference the very cell it writes — a **self-referencing** method —
+A method's expression may reference the very cell it writes — a _self-referencing_ method —
 which [Chapter 7](relationships.md#73-the-rules-a-relationships-methods-must-satisfy) already
 noted is explicitly allowed: a cell may appear in both a method's inputs and its own outputs.
 Each time the sheet resolves, a self-referencing method reads its own cell's *source* value —

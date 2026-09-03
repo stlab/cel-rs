@@ -7,7 +7,7 @@ conditional_decl   = "conditional" expression "{" { conditional_branch } "}".
 conditional_branch = (expression | "_") "=>" "{" { relationship_decl } "}" [ "," ].
 ```
 
-A `conditional` evaluates its **match subject** (the `expression` right after the
+A `conditional` evaluates its _match subject_ (the `expression` right after the
 `conditional` keyword) and activates the one branch, if any, whose literal equals the current
 match value. Only that branch's `relationship` blocks participate in the round's solve; every
 other branch's relationships are invisible to the planner, exactly as if they weren't declared.
@@ -33,7 +33,7 @@ expression of the same shape.
 ## 9.3 Forced cells
 
 A relationship with exactly one method has no alternative binding to choose: its output cell
-is claimed every time the sheet resolves, regardless of strength. Such a cell is **forced**
+is claimed every time the sheet resolves, regardless of strength. Such a cell is _forced_
 — `Sheet::is_forced` reports this, and it's `false` for a cell whose relationship has two or
 more methods, even if strength happens to pick the same direction every round.
 

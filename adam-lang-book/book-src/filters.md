@@ -43,8 +43,8 @@ every other cell in a sheet already follows.
 
 ## 5.3 The raw value is never lost
 
-A filtered cell keeps two values under the hood: its raw last-written value, the **source**,
-and, when something currently claims it, a computed override, the **derived** value. Reading
+A filtered cell keeps two values under the hood: its raw last-written value, the _source_,
+and, when something currently claims it, a computed override, the _derived_ value. Reading
 the cell always returns the derived value if one is present, the source value otherwise. A
 filter's live output always lands in the derived value, **never** in the source, so a filtered
 cell's original input is never destroyed, even after many rounds of clamping. If a dynamic
@@ -64,7 +64,7 @@ written.
 
 A filter expression whose type is CEL's `lo..=hi` range (over any type this book's
 [built-in numeric types](cells.md#23-built-in-types-and-inference) supports) is recognized
-structurally as a **range filter**: resolving the sheet clamps into `[lo, hi]` instead of
+structurally as a _range filter_: resolving the sheet clamps into `[lo, hi]` instead of
 running the expression as an arbitrary function of `_`, and the sheet can report the range's
 current live bounds without needing a candidate value at all:
 

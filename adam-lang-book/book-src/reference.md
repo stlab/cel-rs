@@ -58,7 +58,7 @@ initializer and the `cell_filter`/`require_block` clauses shown above exist toda
 ## A.3 Cells and source cells
 
 - `cell name: T;`: requires `T` to have a registered default; the cell starts at that default.
-- `cell name = expr;`: `expr` is evaluated once, eagerly, with **no cell scope**: it may not
+- `cell name = expr;`: `expr` is evaluated once, eagerly, with _no cell scope_: it may not
   reference any other cell. The cell's type is inferred from `expr`'s result type.
 - `cell name: T = expr;`: both forms combined; `expr`'s inferred type must equal `T` exactly,
   or the sheet fails to parse with a "type mismatch" error.
@@ -68,7 +68,7 @@ initializer and the `cell_filter`/`require_block` clauses shown above exist toda
 - `source name: T;` / `source name = expr;` / `source name: T = expr;`: identical rules to the
   three `cell` forms above, evaluated the same way — a `source` declaration is a `cell`
   declaration in every respect except its fixed `CellKind` (below).
-- Every cell has a fixed **kind**, assigned once at declaration and never reassigned: a plain
+- Every cell has a fixed _kind_, assigned once at declaration and never reassigned: a plain
   `cell` may be a planner source or claimed as a method's output, chosen per round; a `source`
   cell is always a source, never claimable as any method's output; an `out` cell is always
   derived by its own fixed writer, never `write()`-able. See [Chapter 3](source.md) for
@@ -102,7 +102,7 @@ type in the current design.
 
 - A `relationship` names one or more `binding`s; exactly one is selected each time the sheet
   resolves.
-- Selection is driven by cell **strength**, a write-recency counter: a cell's own declaration
+- Selection is driven by cell _strength_, a write-recency counter: a cell's own declaration
   and any explicit write both bump it, so before any explicit write, declaration order alone
   ranks every cell: later declared is "fresher." The solver tries, freshest first, to leave
   each cell a source (unclaimed by any binding), keeping the attempt only if a valid, acyclic
@@ -119,8 +119,8 @@ type in the current design.
 - A cell may appear in both a method's inputs and its own outputs — a self-referencing method
   — which is explicitly allowed. See
   [Chapter 8](relationships-continued.md#82-self-referencing-methods).
-- Resolving the sheet fails with a **conflict** if no valid assignment exists at all, or a
-  **cycle** if every valid assignment forms a closed dependency loop with no source anywhere in
+- Resolving the sheet fails with a _conflict_ if no valid assignment exists at all, or a
+  _cycle_ if every valid assignment forms a closed dependency loop with no source anywhere in
   it. See [7.5](relationships.md#75-when-no-assignment-exists).
 - A binding's left-hand side destructures a tuple result element-wise when parenthesized with
   more than one name, or exactly one name plus a trailing comma; a bare name or a single
@@ -142,7 +142,7 @@ type in the current design.
   their would-be output cells are left as sources.
 - A branch body holds only `relationship` declarations: no `cell` declarations, no nested
   `conditional`.
-- A relationship with exactly one method is **forced**: its output cell is claimed every
+- A relationship with exactly one method is _forced_: its output cell is claimed every
   round, regardless of strength. `Sheet::is_forced` reports this. See
   [Chapter 9 §9.3](conditionals.md#93-forced-cells).
 
@@ -160,8 +160,8 @@ See [Chapter 9](conditionals.md).
   expression, `lo..=hi`, which is exempt) and must produce the filtered cell's own type.
 - **Writing a cell never applies a filter.** A filter is applied live, each time the sheet
   resolves, against the cell's current value.
-- A filtered cell keeps a raw **source** value (last written, untouched by any filter forever)
-  and a computed **derived** value (the filter's live output, recomputed every time the sheet
+- A filtered cell keeps a raw _source_ value (last written, untouched by any filter forever)
+  and a computed _derived_ value (the filter's live output, recomputed every time the sheet
   resolves); reading the cell returns the derived value when present, the source value
   otherwise.
 - A filter attached to a cell a relationship currently claims (a *derived* cell that round) is

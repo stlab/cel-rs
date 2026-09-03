@@ -5,14 +5,12 @@ document's structure, constraints between a command's arguments and its result, 
 useful for constructing a new argument or document state), instead of the event logic that
 would otherwise maintain them by hand.
 
-Let's get started. The best way to learn a new language is to write programs in it, and
-Adam programs are called **sheets**. This chapter is a fast, informal tour of every
+Adam programs are called _sheets_, a term borrowed from spreasheets. This chapter is a fast, informal tour of every
 construct Adam has; later chapters go back over the same ground in more detail, and the
 [reference manual](reference.md) collects the precise rules for looking things up.
 
 You don't need to install anything to follow along: every source fragment below stands on its
-own as a `.adm2` file, included directly from a test that also exercises it, so a chapter's
-prose can never drift from code that actually parses and runs.
+own as a `.adm2` file, and the UI controls are constructed entirely from the sheet declaration
 
 ## 1.1 A first sheet
 
@@ -23,7 +21,7 @@ The simplest useful sheet declares a couple of inputs and nothing else:
 {{#include examples/tutorial/first_sheet.adm2}}
 ```
 
-A **cell** is a named, typed storage location: the basic unit of state in a property model.
+A _cell_ is a named, typed storage location: the basic unit of state in a property model.
 `width` and `height` are `i32`-typed cells, each given an initial value, but notice the
 keyword: `source`, not `cell`. A `source` cell is like a spreadsheet's value cell: a slot you
 type a number into directly, with nothing else in the sheet computing it for you. Syntactically,
@@ -38,7 +36,7 @@ below, where a plain `cell`'s role is decided fresh every time the sheet resolve
 
 Semicolons end declarations, exactly as in Rust or C; a sheet's body is a sequence of
 declarations, not a sequence of statements: there is no control flow at this level, no loops,
-and no imperative execution order. A sheet describes a *graph* of cells and the constraints
+and no imperative execution order. A sheet describes a _graph_ of cells and the constraints
 between them, not a sequence of steps to run.
 
 Parsing this text and reading or writing its cells is a Rust-level embedding concern, not
@@ -53,7 +51,7 @@ A `filter` clause attaches a standing domain constraint to a cell, most commonly
 {{#include examples/tutorial/clamp_demo.adm2}}
 ```
 
-`0..=100` is an **inclusive** range: both `0` and `100` are themselves valid values for
+`0..=100` is an _inclusive_ range: both `0` and `100` are themselves valid values for
 `level`, and only something outside that closed interval ever gets corrected. A host UI
 commonly mounts a filtered cell like this one as a live, editable widget. If this page is
 rendered live for you, try writing a value outside `[0, 100]` into `level` above and watch it
@@ -70,7 +68,7 @@ actually last wrote, not to some intermediate clamped value.
 A filter's bounds don't have to be constants: `0..=max` references another cell, and the clamp
 tracks it live. [Chapter 5](filters.md) covers filters in full, including the precise
 source/derived model behind "the cell keeps its own raw value forever, and the filter only ever
-corrects what you *read*," and how the same `filter` clause also attaches to an `out`
+corrects what you _read_," and how the same `filter` clause also attaches to an `out`
 declaration.
 
 ## 1.3 Outputs: read-only, computed cells
@@ -113,7 +111,7 @@ requirements.
 ## 1.5 Relationships: a cell that can be either a source or derived
 
 A sheet with only `source`/`cell` declarations and no relationships is just a struct. What
-makes Adam interesting is the **relationship**: a set of alternative ways to keep a group of
+makes Adam interesting is the _relationship_: a set of alternative ways to keep a group of
 cells consistent, any one of which the solver may pick at any given moment. A `relationship`
 binding can never derive a [`source`](source.md) cell: that's the one kind of cell always left
 alone as a source, unconditionally; more on that in [Chapter 3](source.md).
@@ -126,13 +124,13 @@ from [the introduction](intro.md#why-adam). As a sheet:
 {{#include examples/tutorial/multiplication_triangle.adm2}}
 ```
 
-The `relationship` block offers three **bindings**: `c := a * b`, `a := c / b`, and
-`b := c / a`, each an alternative *method* for deriving one cell from the others. Only one
+The `relationship` block offers three _bindings_: `c := a * b`, `a := c / b`, and
+`b := c / a`, each an alternative _method_ for deriving one cell from the others. Only one
 binding is active at a time. Unlike `source` and `out`, a plain `cell` inside a relationship
 isn't fixed as a source or an output the way those two are: which role a given cell plays is
-decided fresh every time the sheet resolves, driven by **strength**.
+decided fresh every time the sheet resolves, driven by _strength_.
 
-Every cell carries a strength, a write-recency counter. A cell's own *declaration* counts as a
+Every cell carries a strength, a write-recency counter. A cell's own _declaration_ counts as a
 write for this purpose, so before anything is ever explicitly written, declaration order alone
 breaks the tie: cells declared earlier are staler than cells declared later. The solver prefers
 to leave the freshest cells alone and derive the stalest one: here, `c`, declared first. Writing
@@ -168,13 +166,13 @@ tuple-valued expression on the right into its parts, one cell per element, using
 {{#include examples/tutorial/destructuring_demo.adm2}}
 ```
 
-Tuple *types* (`cell point: (f64, f64) = (0.0, 0.0);`) are a CEL feature, documented in
+Tuple _types_ (`cell point: (f64, f64) = (0.0, 0.0);`) are a CEL feature, documented in
 [Chapter 2](cells.md); destructuring is the relationship-binding syntax built on top of them,
 and could one day extend to struct patterns too. See
 [Chapter 8, §8.1](relationships-continued.md#81-destructuring-bindings) for the full
 destructuring-vs-direct-bind distinction.
 
-A binding may also name the same cell on both sides of `:=`: a **self-referencing method**,
+A binding may also name the same cell on both sides of `:=`: a _self-referencing method_,
 deriving a cell's own next value from its own current one. [Chapter 8](relationships-continued.md)
 walks through a full worked example with its own `self_referencing_method.adm2`, rather than
 repeating one here; §1.7 below shows the same pattern once more, inside a conditional branch.
@@ -186,7 +184,7 @@ well-defined in the first place. The solver never checks this; it's on the sheet
 ## 1.7 Conditionals
 
 A `conditional` groups relationships that are only active under a matching condition. It
-evaluates a **match subject**, then activates whichever branch's literal equals the current
+evaluates a _match subject_, then activates whichever branch's literal equals the current
 match value:
 
 ```
@@ -201,7 +199,7 @@ See [Chapter 9](conditionals.md) for branch types, tuple match subjects, and wha
 no branch matches and there's no default.
 
 Some branches offer the solver no choice at all. A relationship with exactly one method is
-**forced**: there's no alternative binding to try, so its output cell is claimed every round
+_forced_: there's no alternative binding to try, so its output cell is claimed every round
 regardless of strength, unlike the freely-chosen roles in §1.5's triangle. A host
 UI commonly disables the editable widget for a forced cell, since writing it would have no
 lasting effect once the sheet re-resolves.
@@ -221,15 +219,15 @@ reporting its own untouched value, `9`.
 Writing `high` to `42` and switching to `mode == 1` activates a relationship with a single
 method, `low := high`: forced. `low` is claimed every round this branch is active, so it now
 reads back `42`, `high`'s current value, no matter what strength would otherwise prefer. But
-`low`'s own underlying raw value, its **source**, is untouched by any of this: it's still `4`,
-exactly where it started, *shadowed* by the forced derived value the same way a filter's
+`low`'s own underlying raw value, its _source_, is untouched by any of this: it's still `4`,
+exactly where it started, _shadowed_ by the forced derived value the same way a filter's
 correction shadows a cell's raw value in §1.2; a derived value never destroys the source
 underneath it, whichever mechanism produced that derived value.
 
 Switching back to `mode == 0` reactivates the two-method relationship, and strength has changed
 in the meantime: `high` was just written, so it's freshest now, and `low`, never itself
 explicitly written, is stalest, so the solver again derives `low`. It derives it
-from each cell's own **source**, not from the stale forced value `low` was shadowing a moment
+from each cell's own _source_, not from the stale forced value `low` was shadowing a moment
 ago: `low := min(4, 42)`, using `low`'s untouched source `4` and `high`'s actual current value
 `42`, giving `low = 4` and leaving `high = 42` alone as a source. The `42` `low` displayed while
 forced belonged to the now-inactive `mode == 1` relationship, and simply stopped existing the

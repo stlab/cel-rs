@@ -12,7 +12,7 @@ formatting normalizes it:
 {{#include examples/style/canonical_formatting.adm2}}
 ```
 
-A formatter run is expected to be **idempotent** (formatting already-canonical source
+A formatter run is expected to be _idempotent_ (formatting already-canonical source
 reproduces it unchanged) and preserves every comment, doc comment, and blank line exactly
 where it appeared, including a file-header comment before `sheet` itself and a trailing comment
 before a block's own closing `}`. `adam-lsp`'s `textDocument/formatting` handler refuses to

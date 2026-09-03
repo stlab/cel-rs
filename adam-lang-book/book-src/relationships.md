@@ -8,7 +8,7 @@ binding            = binding_target ":=" expression ";".
 binding_target     = identifier | "(" identifier { "," identifier } [ "," ] ")".
 ```
 
-Each `binding` inside a `relationship` block is a candidate **method**: an expression whose
+Each `binding` inside a `relationship` block is a candidate _method_: an expression whose
 dependencies are [deduced](expressions.md#44-deduced-dependencies) from whichever
 already-declared cells it references, paired with the cell(s) named on its left of `:=`. A
 relationship's bindings are alternatives, not a sequence: at any moment, exactly one of them
@@ -20,7 +20,7 @@ output either, since an `out` already has its own fixed writer.
 
 ## 7.2 Strength: who gets to stay a source
 
-Every cell carries a **strength**, a write-recency counter: resolving the sheet re-derives the
+Every cell carries a _strength_, a write-recency counter: resolving the sheet re-derives the
 *stalest* cells it safely can and leaves the *freshest* cells alone. Two things bump a cell's
 strength: an explicit write, and, once only, the cell's own declaration. Before any explicit
 write has happened, declaration order alone orders every cell's freshness, earliest declared
@@ -46,7 +46,7 @@ an outputs set`. The planner treats a method's output set as one indivisible cla
 methods claiming the same set would make that claim ambiguous. The triangle's three output
 sets — `{c}`, `{a}`, `{b}` — are pairwise distinct, as required.
 
-A cell may appear in both a method's `inputs` and its own `outputs` — a **self-referencing**
+A cell may appear in both a method's `inputs` and its own `outputs` — a _self-referencing_
 method — which is explicitly allowed and has its own rules; see
 [Chapter 8](relationships-continued.md).
 
@@ -107,7 +107,7 @@ inconsistent. Two relationships that both, unconditionally, insist on writing th
 can never both be satisfied, and resolving fails with `no valid method assignment
 (overconstrained)` (`Error::Conflict`).
 
-A subtler failure is a **cycle**: an assignment exists, but every valid choice of bindings
+A subtler failure is a _cycle_: an assignment exists, but every valid choice of bindings
 forms a closed loop with no cell left as a source anywhere in the loop, and resolving fails
 with `selected methods form a cycle` (`Error::Cycle`). This happens when every
 relationship in the loop has only one binding, leaving the solver no alternative to try;
