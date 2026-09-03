@@ -55,7 +55,11 @@ fn forced_and_self_ref_shadow() {
         parsed.cell_names["high"].0,
     );
 
+    // `low`, declared first, is stalest, so the solver selects `low := min(low, high)`;
+    // `high` stays an ordinary, unclaimed source throughout this branch.
     parsed.propagate().unwrap();
+    assert!(!parsed.is_source(low));
+    assert!(parsed.is_source(high));
     assert_eq!(*parsed.read::<i32>(low).unwrap(), 4);
     assert_eq!(*parsed.read::<i32>(high).unwrap(), 9);
     assert_eq!(*parsed.source::<i32>(low).unwrap(), 4);
@@ -70,6 +74,17 @@ fn forced_and_self_ref_shadow() {
 
     parsed.write(mode, 0_i32).unwrap();
     parsed.propagate().unwrap();
+    assert!(!parsed.is_source(low));
+    assert!(parsed.is_source(high));
     assert_eq!(*parsed.read::<i32>(low).unwrap(), 4);
     assert_eq!(*parsed.read::<i32>(high).unwrap(), 42);
+
+    // Writing `low` promotes it to freshest, flipping which binding the solver selects: now
+    // `high := max(low, high)` fires instead, pulling `high` up to match `low`.
+    parsed.write(low, 100_i32).unwrap();
+    parsed.propagate().unwrap();
+    assert!(parsed.is_source(low));
+    assert!(!parsed.is_source(high));
+    assert_eq!(*parsed.read::<i32>(low).unwrap(), 100);
+    assert_eq!(*parsed.read::<i32>(high).unwrap(), 100);
 }

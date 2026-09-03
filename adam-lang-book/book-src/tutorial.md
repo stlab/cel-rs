@@ -212,10 +212,11 @@ lasting effect once the sheet re-resolves.
 
 With `mode == 0` (the declared default), `range_bounds`'s relationship has two self-referencing
 methods, `low := min(low, high)` and `high := max(low, high)` — a relationship exactly like
-§1.5's triangle, where either cell could end up derived, decided by strength. Declared first,
-`low` is staler, so the solver derives it: `low := min(4, 9)`, which happens to equal `low`'s
-own current value, so nothing visibly changes; both `low` and `high` still report their own
-untouched source values, `4` and `9`.
+§1.5's triangle, where either cell could end up derived, decided by strength — never both at
+once. Declared first, `low` is staler, so the solver derives it: `low := min(4, 9)`, which
+happens to equal `low`'s own current value, so nothing visibly changes. `high`'s own `max`
+method is never invoked at all this round; `high` is simply an ordinary, unclaimed source,
+reporting its own untouched value, `9`.
 
 Writing `high` to `42` and switching to `mode == 1` activates a relationship with a single
 method, `low := high` — forced. `low` is claimed every round this branch is active, so it now
@@ -233,6 +234,11 @@ ago: `low := min(4, 42)`, using `low`'s untouched source `4` and `high`'s actual
 `42`, giving `low = 4` and leaving `high = 42` alone as a source. The `42` `low` displayed while
 forced belonged to the now-inactive `mode == 1` relationship, and simply stopped existing the
 moment that relationship stopped being selected.
+
+Writing `low` to `100` promotes it to freshest, flipping the two-method relationship's choice:
+now `high := max(low, high)` is the one selected instead, deriving `high` and leaving `low` as
+the source — `high` reads `100`, pulled up to match. Either binding can fire; which one does is
+strength's call, never both at once.
 
 Adam's comment and doc-comment syntax is covered in [Chapter 10](lexical-conventions.md), not
 here.

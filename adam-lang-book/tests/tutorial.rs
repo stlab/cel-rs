@@ -128,8 +128,12 @@ fn forced_and_self_ref_shadow() {
         parsed.cell_names["high"].0,
     );
 
-    // mode == 0 (declared default): self-referencing branch. 4 <= 9 already: unchanged.
+    // mode == 0 (declared default): self-referencing branch. `low`, declared first, is
+    // stalest, so the solver selects `low := min(low, high)`; `high` stays an ordinary,
+    // unclaimed source. 4 <= 9 already, so nothing visibly changes either way.
     parsed.propagate().unwrap();
+    assert!(!parsed.is_source(low));
+    assert!(parsed.is_source(high));
     assert_eq!(*parsed.read::<i32>(low).unwrap(), 4);
     assert_eq!(*parsed.read::<i32>(high).unwrap(), 9);
     assert_eq!(*parsed.source::<i32>(low).unwrap(), 4);
@@ -143,10 +147,22 @@ fn forced_and_self_ref_shadow() {
     assert_eq!(*parsed.read::<i32>(low).unwrap(), 42);
     assert_eq!(*parsed.source::<i32>(low).unwrap(), 4); // low's own source, untouched
 
-    // Back to mode == 0: both cells recomputed fresh from their own sources (4, 42),
-    // not from the stale forced 42.
+    // Back to mode == 0: `low` is recomputed fresh from both cells' own sources (4, 42), not
+    // from the stale forced 42; `high` (never written since the first round) is still the
+    // one left as a source.
     parsed.write(mode, 0_i32).unwrap();
     parsed.propagate().unwrap();
+    assert!(!parsed.is_source(low));
+    assert!(parsed.is_source(high));
     assert_eq!(*parsed.read::<i32>(low).unwrap(), 4);
     assert_eq!(*parsed.read::<i32>(high).unwrap(), 42);
+
+    // Writing `low` promotes it to freshest, flipping which binding the solver selects: now
+    // `high := max(low, high)` fires instead, pulling `high` up to match `low`.
+    parsed.write(low, 100_i32).unwrap();
+    parsed.propagate().unwrap();
+    assert!(parsed.is_source(low));
+    assert!(!parsed.is_source(high));
+    assert_eq!(*parsed.read::<i32>(low).unwrap(), 100);
+    assert_eq!(*parsed.read::<i32>(high).unwrap(), 100);
 }

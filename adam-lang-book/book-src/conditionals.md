@@ -55,14 +55,26 @@ shadows its own source, never overwrites it.
 {{#include examples/conditionals/forced_and_self_ref_shadow.adm2}}
 ```
 
-With `mode == 0` (the declared default), the self-referencing branch is active: `low` and
-`high` start at `4` and `9`, already satisfying `low <= high`, so both are left unchanged.
+With `mode == 0` (the declared default), the self-referencing branch is active — two methods,
+`low := min(low, high)` and `high := max(low, high)`, exactly like [Chapter 7](relationships.md#72-strength-who-gets-to-stay-a-source)'s
+triangle: only one is ever selected, and which one is decided by strength. `low`, declared
+first, is stalest, so the solver picks `low := min(low, high)`; `high` is left alone as an
+ordinary source, its own `max` method never invoked. `low` and `high` start at `4` and `9`,
+already satisfying `low <= high`, so nothing visibly changes.
+
 Writing `high` to `42` and switching to `mode == 1` activates the single-method branch,
 forcing `low` from `high`: `low` reads `42`, but its own *source* is still `4` — the write
 that actually changed something (`high`) never touched `low`'s source at all. Switching back
-to `mode == 0` recomputes both cells fresh from their own sources — `4` and `42` — via
-`min`/`max`, not from the stale forced `42`: `low` reads back down to `4`, `high` stays at
-`42`.
+to `mode == 0` reselects `low := min(low, high)` (still the stalest cell) and recomputes it
+fresh from both cells' own sources — `4` and `42` — not from the stale forced `42`: `low`
+reads back down to `4`; `high`, never written since the first round, is still the one left as
+a source, at `42`.
+
+Writing `low` to `100` promotes it to freshest, flipping the solver's choice: now
+`high := max(low, high)` is the one selected, deriving `high` and leaving `low` as the
+source instead — `high` reads `100`, pulled up to match. Either binding can fire; which one
+does is strength's call, exactly as in [Chapter 7](relationships.md#72-strength-who-gets-to-stay-a-source),
+never both at once.
 
 ## 9.5 The default branch and reverting to source
 
