@@ -1,0 +1,19 @@
+sheet range_bounds {
+    source mode: i32 = 0;
+    cell low: i32 = 4;
+    cell high: i32 = 9;
+
+    conditional mode {
+        0i32 => {
+            relationship {
+                low := min(low, high);
+                high := max(low, high);
+            }
+        }
+        1i32 => {
+            relationship {
+                low := high;
+            }
+        }
+    }
+}

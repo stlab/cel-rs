@@ -201,7 +201,7 @@ pub struct CellDecl {
     pub name_span: ExprSpan,
     /// The `: type_expr` annotation, if present.
     pub type_name: Option<TypeExpr>,
-    /// The `= or_expression` initializer, if present. Unresolved and unevaluated here — see
+    /// The `= expression` initializer, if present. Unresolved and unevaluated here — see
     /// `crate::parser::AdamParser` for the compile-to-`Sheet` phase, which parses this with no
     /// cell scope pushed and evaluates it eagerly, once, at parse time.
     pub initializer: Option<cel_parser::Expr>,
@@ -235,7 +235,7 @@ pub struct SourceDecl {
     pub name_span: ExprSpan,
     /// The `: type_expr` annotation, if present.
     pub type_name: Option<TypeExpr>,
-    /// The `= or_expression` initializer, if present. Unresolved and unevaluated here — see
+    /// The `= expression` initializer, if present. Unresolved and unevaluated here — see
     /// `crate::parser::AdamParser` for the compile-to-`Sheet` phase, which parses this with no
     /// cell scope pushed and evaluates it eagerly, once, at parse time.
     pub initializer: Option<cel_parser::Expr>,
@@ -295,7 +295,7 @@ pub struct RelationshipDecl {
     pub span: ExprSpan,
 }
 
-/// `binding = binding_target ":=" or_expression ";".`
+/// `binding = binding_target ":=" expression ";".`
 /// `binding_target = identifier | "(" identifier { "," identifier } [ "," ] ")".`
 ///
 /// Unlike the old `method_decl` this replaces, a binding names no explicit input cell list —
@@ -332,7 +332,7 @@ pub struct BindingDecl {
     pub span: ExprSpan,
 }
 
-/// `out_decl = "out" identifier [ ":" type_expr ] ":=" or_expression [ cell_filter ] [ "require"
+/// `out_decl = "out" identifier [ ":" type_expr ] ":=" expression [ cell_filter ] [ "require"
 /// "{" { requirement } "}" ] ";".`
 ///
 /// `type_expr` is unresolved here (no `TypeRegistry` lookup), matching `CellDecl`. When
@@ -383,7 +383,7 @@ pub struct RequireBlock {
     pub span: ExprSpan,
 }
 
-/// `requirement = identifier ":" or_expression ";".`
+/// `requirement = identifier ":" expression ";".`
 ///
 /// `name` is a plain string label passed to `adam_rs::Sheet::add_requirement`, not a cell
 /// reference — it may coincide with a cell name declared elsewhere in the sheet but doesn't
@@ -406,7 +406,7 @@ pub struct RequirementDecl {
     pub span: ExprSpan,
 }
 
-/// `conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".`
+/// `conditional_decl = "conditional" expression "{" { conditional_branch } "}".`
 #[derive(Debug, Clone)]
 pub struct ConditionalDecl {
     /// The match subject: an arbitrary expression over already-declared cells (a bare

@@ -1,6 +1,6 @@
-# Chapter 8: Outputs and Requirements
+# Chapter 6: Outputs and Requirements
 
-## 8.1 Grammar
+## 6.1 Grammar
 
 ```text
 out_decl    = "out" identifier [ ":" type_expr ] ":=" expression
@@ -13,13 +13,13 @@ binding to choose between, unlike a `relationship`. Its dependencies are
 [deduced](expressions.md#44-deduced-dependencies) the same way. The `: type_expr` annotation is
 optional; when absent, the output's type is inferred from the initializer, the same rule
 [Chapter 2](cells.md#23-built-in-types-and-inference) gives for a plain `cell`. An `out` may
-also carry a `filter` clause, exactly like a plain `cell`; see [Chapter 7](filters.md).
+also carry a `filter` clause, exactly like a plain `cell`; see [Chapter 5](filters.md).
 
 ```adam
 {{#include examples/outputs/basic_output.adm2}}
 ```
 
-## 8.2 An output cell can be read anywhere, written nowhere
+## 6.2 An output cell can be read anywhere, written nowhere
 
 `out` shares one namespace with `cell`: declaring `out result := ...;` after (or before) a
 `cell result` in the same sheet is a duplicate-name error, exactly like two `cell` declarations
@@ -35,15 +35,17 @@ exactly once each time the sheet resolves, by its own initializer, and nothing e
 {{#include examples/outputs/output_cell_can_be_referenced.adm2}}
 ```
 
-## 8.3 Requirements: diagnostics, not gates
+## 6.3 Requirements: diagnostics, not gates
 
 `require` is not an outputs-only mechanism: a `require { ... }` block can trail a plain `cell`
 or a [`source`](source.md) declaration's initializer too, with the same meaning described here
-— see [Chapter 2](cells.md#22-cell-declarations) and [Chapter 3](source.md) for those forms.
-Trailing an `out`'s initializer, `require { ... }` names zero or more boolean checks. Each
-`requirement`'s own dependencies are deduced separately from the output's initializer; a
-requirement commonly reads the output's own value by name, alongside whatever other cells it
-needs:
+— see [Chapter 2](cells.md#22-cell-declarations) and [Chapter 3](source.md) for those forms. A
+`filter` clause is just as unrestricted — see
+[Chapter 5 §5.6](filters.md#56-a-filter-on-an-output-cell) for a filter attached to an `out`
+declaration. Trailing an `out`'s initializer, `require { ... }` names zero or more boolean
+checks. Each `requirement`'s own dependencies are deduced separately from the output's
+initializer; a requirement commonly reads the output's own value by name, alongside whatever
+other cells it needs:
 
 ```adam
 {{#include examples/outputs/requirement_diagnostic.adm2}}
@@ -52,14 +54,14 @@ needs:
 A failed requirement never stops the sheet from resolving, and never stops `area` from being
 computed and readable; a host can query which requirements are currently failing precisely
 because nothing else in the sheet notices a requirement failing on its own (see
-[Appendix A.11](reference.md#a11-the-host-embedding-api)). A requirement's `name` is just a
+[Appendix A.10](reference.md#a10-the-host-embedding-api)). A requirement's `name` is just a
 label surfaced through that query; it happens to read naturally when it echoes a cell name
 (`not_too_big`, `width_max`), but it isn't a cell reference and doesn't have to match one.
 
-## 8.4 Multiple requirements
+## 6.4 Multiple requirements
 
 An output can list any number of requirements; a host can query exactly the ones currently
-failing, identified individually (see [Appendix A.11](reference.md#a11-the-host-embedding-api)):
+failing, identified individually (see [Appendix A.10](reference.md#a10-the-host-embedding-api)):
 
 ```adam
 {{#include examples/outputs/multiple_requirements.adm2}}
