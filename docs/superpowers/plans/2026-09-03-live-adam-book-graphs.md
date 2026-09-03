@@ -1145,6 +1145,22 @@ sheet, new data) instead of `graph.js` inferring it from a passed-in id string.
 
 - [ ] **Step 2: Update `GraphView`'s effect logic in `adam-web-ui/src/graph/view.rs`**
 
+The "same sheet, new data" vs. "different sheet" decision is real branching logic embedded in
+framework-coupled code, not a trivial passthrough — per this repo's CLAUDE.md, extract it into
+its own pure, contract-documented, unit-tested function rather than leaving it inline in the
+`use_effect` closure.
+
+Add this function above `GraphView` (after the `use super::data::GraphData;` import line):
+
+```rust
+/// Returns `true` when `current_source` differs from `initialized_source` — i.e. [`GraphView`]
+/// should call `window.beginGraph.init` (a different sheet, needing a fresh D3 instance with no
+/// carried-over layout) rather than `update` (the same sheet, new data — preserve layout).
+fn source_changed(current_source: &str, initialized_source: &str) -> bool {
+    current_source != initialized_source
+}
+```
+
 Replace the entire `GraphView` function body with:
 
 ```rust
@@ -1161,7 +1177,7 @@ pub fn GraphView(
         let id = graph_id.read().clone();
         let json = serde_json::to_string(&*data.read()).unwrap_or_default();
         let current_source = source_id.read().clone();
-        let is_new_source = current_source != *initialized_source.peek();
+        let is_new_source = source_changed(&current_source, &initialized_source.peek());
         if is_new_source {
             initialized_source.set(current_source);
         }
@@ -1195,6 +1211,29 @@ pub fn GraphView(
             },
             GraphLegend {}
         }
+    }
+}
+```
+
+Add unit tests for the new pure function. This file doesn't have a `#[cfg(test)] mod tests`
+block yet — add one at the end of the file:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_changed_is_false_for_identical_sources() {
+        assert!(!source_changed("tutorial/first_sheet", "tutorial/first_sheet"));
+    }
+
+    #[test]
+    fn source_changed_is_true_for_different_sources() {
+        assert!(source_changed(
+            "tutorial/first_sheet",
+            "tutorial/area_with_requirement"
+        ));
     }
 }
 ```
@@ -1319,8 +1358,9 @@ with:
 - [ ] **Step 4: Run the test suite**
 
 Run: `cargo test -p adam-web-ui -p begin`
-Expected: PASS. (`graph.js` has no Rust-side unit tests; this only re-confirms the Rust changes
-compile and existing non-graph tests pass.)
+Expected: PASS, including the two new `source_changed` tests. (`graph.js` itself has no
+Rust-side unit tests; this step also re-confirms the Rust changes compile and existing
+non-graph tests pass.)
 
 - [ ] **Step 5: Run clippy**
 
