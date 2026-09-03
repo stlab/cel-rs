@@ -1,0 +1,7 @@
+sheet clamp_via_relationship {
+    cell level: i32 = 0;
+
+    relationship {
+        level := min(level, 0);
+    }
+}

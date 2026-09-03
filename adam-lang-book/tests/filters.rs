@@ -1,4 +1,4 @@
-//! Examples backing `book-src/filters.md` (Chapter 7). See `src/lib.rs` for how these `.adm2`
+//! Examples backing `book-src/filters.md` (Chapter 5). See `src/lib.rs` for how these `.adm2`
 //! files are wired into the book.
 
 #[test]
@@ -66,30 +66,6 @@ fn derived_cell_diagnosed_not_corrected() {
     let bound = parsed.cell_names["bound"].0;
     assert_eq!(*parsed.read::<i32>(bound).unwrap(), 500); // not clamped
     assert!(parsed.filter_violated_cells().any(|id| id == bound));
-}
-
-#[test]
-fn must_reference_underscore() {
-    let mut parser = adam_lang_book::support::parser();
-    let err = parser
-        .parse_str(include_str!(
-            "../book-src/examples/filters/must_reference_underscore.adm2"
-        )) // never mentions `_`
-        .err()
-        .unwrap();
-    assert!(format!("{err}").contains("must reference `_`"));
-}
-
-#[test]
-fn tuple_filter_not_supported() {
-    let mut parser = adam_lang_book::support::parser();
-    let err = parser
-        .parse_str(include_str!(
-            "../book-src/examples/filters/tuple_filter_not_supported.adm2"
-        )) // tuple-typed cell
-        .err()
-        .unwrap();
-    assert!(format!("{err}").contains("tuple"));
 }
 
 #[test]

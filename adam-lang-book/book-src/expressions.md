@@ -13,28 +13,17 @@ what it does with the value it produces.
 
 ## 4.2 No standard library of its own
 
-Adam defines no functions. `min`, `max`, `clamp`, `round`, and anything else callable from
-inside an expression come from a function library installed into the
-[`OpLookup`](../cel_parser/op_table/struct.OpLookup.html) passed to
-[`AdamParser::new`](../adam_lang/struct.AdamParser.html#method.new); this book's own examples
-install `cel-std` (see `support::parser` in `adam-lang-book`'s own source). A parser built with
-a bare `OpLookup::new()` and no library installed can still parse
-and run every construct in this book except a function call:
-
-```
-{{#include examples/expressions/no_standard_library.adm2}}
-```
+A parser built with a bare [`OpLookup::new()`](../cel_parser/op_table/struct.OpLookup.html#method.new) and no library installed can still parse and run
+every construct in this book except a function call — any attempt to call an undefined
+function fails to parse with an error naming the missing function. This book's own examples
+always install `cel-std` (see `support::parser` in `adam-lang-book`'s own source).
 
 ## 4.3 Cell initializers see no cells
 
 A `cell`'s `= expression` initializer is evaluated exactly once, eagerly, at the moment
-`cell`'s own declaration is parsed, with no cell scope pushed at all. It may use literals,
-operators, and library functions, but referencing *any* identifier that would otherwise name a
-cell is unresolved:
-
-```
-{{#include examples/expressions/initializer_sees_no_cells.adm2}}
-```
+`cell`'s own declaration is parsed, with no cell scope pushed at all. Referencing any
+identifier that would otherwise name a cell is an "undeclared cell `name`" error, exactly
+as if the cell had never been declared at all — see Appendix A.9.
 
 To compute one cell's value from another's, write a [`relationship`](relationships.md) or an
 [`out`](outputs.md) declaration; both of those *do* get a live cell scope, per the next
@@ -51,7 +40,7 @@ references (2.6): an identifier can only be recognized as a cell dependency if t
 declared earlier in the same sheet.
 
 A [`filter`](filters.md) clause uses the same deduction, plus one reserved identifier: `_`
-always denotes the candidate value being conformed, never a cell; see [Chapter 7](filters.md).
+always denotes the candidate value being conformed, never a cell; see [Chapter 5](filters.md).
 
 ## 4.5 "Expression produced no value"
 

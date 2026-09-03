@@ -250,7 +250,7 @@ fn literal_matches_declared_ty(lit: &Literal, declared: Ty) -> bool {
 /// Checks whether `expr` structurally matches `shape`, recursively: a `TypeShape::Named` leaf
 /// must be a non-tuple `Expr` whose checked `Ty` unifies with that leaf (mirroring
 /// `literal_matches_declared_ty`'s spirit, generalized past bare literals now that initializers
-/// are full `or_expression`s); a `TypeShape::Tuple` must be an `Expr::Tuple` of matching arity,
+/// are full `expression`s); a `TypeShape::Tuple` must be an `Expr::Tuple` of matching arity,
 /// checked element-wise, or an `Expr::If` whose `then_branch` (and `else_branch`, if present —
 /// itself possibly another `Expr::If`, covering `else if` chains) each recursively match the same
 /// `shape`, since every branch that can be taken must produce a value of that shape. An `if` with
