@@ -1,4 +1,4 @@
 sheet hello {
-    source width: i32 = 1920;
-    source height: i32 = 1080;
+    source width = 1920;
+    source height = 1080;
 }
