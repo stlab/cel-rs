@@ -19,7 +19,7 @@ prose can never drift from code that actually parses and runs.
 An Adam program is a single `sheet`, named, with a body of declarations between braces.
 The simplest useful sheet declares a few cells and nothing else:
 
-```
+```adam
 {{#include examples/tutorial/first_sheet.adm2}}
 ```
 
@@ -46,7 +46,7 @@ The classic example is three numbers related by multiplication (`a * b = c`), wh
 the three can be computed from the other two, the same shape as `pixels == inches * resolution`
 from [the introduction](intro.md#why-adam). As a sheet:
 
-```
+```adam
 {{#include examples/tutorial/multiplication_triangle.adm2}}
 ```
 
@@ -68,7 +68,7 @@ A `conditional` groups relationships that are only active under a matching condi
 evaluates a **match subject**, then activates whichever branch's literal equals the current
 match value:
 
-```
+```adam
 {{#include examples/tutorial/mode_demo.adm2}}
 ```
 
@@ -83,7 +83,7 @@ no branch matches and there's no default.
 
 A `filter` clause attaches a standing domain constraint to a cell, most commonly a range:
 
-```
+```adam
 {{#include examples/tutorial/clamp_demo.adm2}}
 ```
 
@@ -103,7 +103,7 @@ A binding's left-hand side can name more than one output cell by parenthesizing 
 tuple-valued expression on the right into its parts, one cell per element, using the same
 `(a, b)` syntax Rust uses for tuple patterns:
 
-```
+```adam
 {{#include examples/tutorial/destructuring_demo.adm2}}
 ```
 
@@ -119,7 +119,7 @@ An `out` declaration computes one final, read-only value from the rest of the sh
 carry named `require`ments: boolean checks re-evaluated and reported each time the sheet
 resolves, never enforced by rejecting a write:
 
-```
+```adam
 {{#include examples/tutorial/area_with_requirement.adm2}}
 ```
 
@@ -134,7 +134,7 @@ see [Chapter 2](cells.md#22-cell-declarations) and [Chapter 3](source.md).
 immediately before a declaration and `//!` immediately before the `sheet` keyword are doc
 comments, carried through by the language server and formatter but otherwise inert:
 
-```text
+```adam
 //! A sheet describing a simple resize dialog.
 sheet image_resize {
     /// The image's width in pixels, before any resampling.

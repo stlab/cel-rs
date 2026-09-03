@@ -29,8 +29,9 @@ each time the sheet is solved, not fixed by the declaration.
 
 This book has three parts: a tutorial introduction you can read start to finish, chapters that
 go back over the same ground in more detail, and a terse reference manual for looking things up.
-Every Adam source fragment shown in a fenced `text` block is exactly what you'd type into a
-`.adm2` file; every fenced `rust` block shows Adam driven through its host embedding API.
+Every Adam source fragment shown in a fenced `adam` block is exactly what you'd type into a
+`.adm2` file; a fenced `text` block instead shows grammar notation (EBNF), not Adam source
+itself.
 
 ## Expressions and the standard library
 

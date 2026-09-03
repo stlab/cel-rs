@@ -4,7 +4,7 @@
 
 Every Adam source file is one sheet:
 
-```text
+```adam
 sheet name {
     /* cell, relationship, conditional, and out declarations, in any order,
        except that each identifier must be declared before it is referenced —
@@ -25,7 +25,7 @@ cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).
 
 A cell needs a type, an initial value, or both:
 
-```text
+```adam
 cell width: i32;             // type only — needs a registered default (2.4)
 cell height: i32 = 1080;     // type and initializer
 cell area = 0;               // initializer only — type is inferred (2.3)
@@ -63,7 +63,7 @@ unsuffixed integer literal like `0` is `i32`, an unsuffixed float literal like `
 see `cel-parser`'s documentation for the full literal grammar). When both are present, they
 must agree exactly, or the sheet fails to parse:
 
-```
+```adam
 {{#include examples/cells/type_mismatch_is_a_parse_error.adm2}}
 ```
 
@@ -90,7 +90,7 @@ grouping, identical to `T` (types have no precedence to disambiguate, but the pa
 accepted for symmetry with expression grammar); `(T,)` (trailing comma mandatory) is a
 genuine one-element tuple; `(T, U, ...)` is the general case:
 
-```
+```adam
 {{#include examples/cells/tuple_typed_cell.adm2}}
 ```
 
@@ -113,6 +113,6 @@ Declaration order matters for more than readability: it determines name resoluti
 [Chapter 5](relationships.md) covers, the solver's initial notion of which cells are "fresher"
 than others.
 
-```
+```adam
 {{#include examples/cells/no_forward_references.adm2}}
 ```

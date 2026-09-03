@@ -5,7 +5,7 @@
 `//` starts a line comment; `/* ... */` a block comment, exactly the same two forms C, Rust,
 and CEL all share:
 
-```text
+```adam
 // a whole-line comment
 cell width: i32 = 1920; // a trailing comment
 /* a block comment, on one line or several */
@@ -18,7 +18,7 @@ declaration, and `//!` immediately before the `sheet` keyword itself, are doc co
 recovered by the language server and the formatter, and otherwise inert (they carry no meaning
 when the sheet resolves):
 
-```text
+```adam
 //! Describes a simple resize dialog.
 sheet image_resize {
     /// The image's width in pixels, before any resampling.
@@ -34,7 +34,7 @@ indentation, opening braces on the same line as the keyword that introduces them
 before a declaration's closing `;`. Given input that doesn't already follow this layout,
 formatting normalizes it:
 
-```
+```adam
 {{#include examples/style/canonical_formatting.adm2}}
 ```
 

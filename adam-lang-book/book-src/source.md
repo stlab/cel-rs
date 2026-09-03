@@ -13,7 +13,7 @@ block. `source` and `cell` even share one namespace with `out`, so declaring `so
 `cell width` in the same sheet is the same "duplicate cell" error two `cell width` declarations
 would be.
 
-```
+```adam
 {{#include examples/source/basic_source.adm2}}
 ```
 
@@ -28,7 +28,7 @@ never claimable as a `relationship` binding's output, a `conditional` branch's o
 `out`'s own writer target. This is checked once, structurally, the moment the offending
 declaration is parsed — resolving the sheet is never reached:
 
-```
+```adam
 {{#include examples/source/source_cannot_be_derived.adm2}}
 ```
 
@@ -45,7 +45,7 @@ can, written directly at any time (that's the whole point — a `source` cell al
 whatever was last supplied from outside the sheet), can carry a `require` block for domain
 diagnostics, exactly like a `cell` or `out`:
 
-```
+```adam
 {{#include examples/source/source_with_a_requirement.adm2}}
 ```
 
@@ -53,7 +53,7 @@ and can carry a [`filter`](filters.md) clause, exactly like a `cell` or `out`: w
 writes to a filtered `source` cell is conformed the same way a filtered plain `cell`'s value
 is, live, whenever the sheet resolves:
 
-```
+```adam
 {{#include examples/source/source_with_a_filter.adm2}}
 ```
 

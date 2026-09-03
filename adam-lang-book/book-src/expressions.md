@@ -21,7 +21,7 @@ install `cel-std` (see `support::parser` in `adam-lang-book`'s own source). A pa
 a bare `OpLookup::new()` and no library installed can still parse
 and run every construct in this book except a function call:
 
-```
+```adam
 {{#include examples/expressions/no_standard_library.adm2}}
 ```
 
@@ -32,7 +32,7 @@ A `cell`'s `= expression` initializer is evaluated exactly once, eagerly, at the
 operators, and library functions, but referencing *any* identifier that would otherwise name a
 cell is unresolved:
 
-```
+```adam
 {{#include examples/expressions/initializer_sees_no_cells.adm2}}
 ```
 

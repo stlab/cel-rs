@@ -16,7 +16,7 @@ default-branch token). The identifier before the `:` names the filter; it's a la
 through the host embedding API (see [A.11](reference.md#a11-the-host-embedding-api)), not a
 cell reference.
 
-```text
+```adam
 cell level: i32 = 50 filter clamp: 0..=100;             // a fixed range, named "clamp"
 cell level: i32 = 50 filter clamp: 0..=max;              // upper bound is another cell
 cell level: i32 = 50 filter clamp: clamp(_, 0, max);      // an arbitrary expression over `_`
@@ -32,7 +32,7 @@ This is the single most important rule in this chapter: **writing a cell always 
 the value it was given**, filter or no filter. A filter is applied live, when the sheet
 resolves, against the cell's own current value, never synchronously at the moment of the write.
 
-```
+```adam
 {{#include examples/filters/write_never_filters.adm2}}
 ```
 
@@ -51,7 +51,7 @@ cell's original input is never destroyed, even after many rounds of clamping. If
 bound loosens back up, the cell springs back to exactly what was last written, not to some
 intermediate clamped value:
 
-```
+```adam
 {{#include examples/filters/raw_value_never_lost.adm2}}
 ```
 
@@ -68,7 +68,7 @@ structurally as a **range filter**: resolving the sheet clamps into `[lo, hi]` i
 running the expression as an arbitrary function of `_`, and the sheet can report the range's
 current live bounds without needing a candidate value at all:
 
-```
+```adam
 {{#include examples/filters/range_filter_kind.adm2}}
 ```
 
@@ -83,7 +83,7 @@ it instead (Chapter 5). When that happens, the filter no longer has any authorit
 value: it only *observes*. The sheet still resolves successfully, and the out-of-range value is
 still what a read returns; the sheet simply records that the filter is violated:
 
-```
+```adam
 {{#include examples/filters/derived_cell_diagnosed_not_corrected.adm2}}
 ```
 
@@ -102,7 +102,7 @@ derived (7.5 is the only case that ever actually applies to one), so a filter at
 out cell is a pure diagnostic, exactly like a filter on any other cell a relationship currently
 claims:
 
-```
+```adam
 {{#include examples/filters/filter_on_an_out_cell.adm2}}
 ```
 
@@ -115,11 +115,11 @@ per-kind restriction.
 
 Every filter error below is caught while parsing the sheet, before the sheet is ever resolved:
 
-```
+```adam
 {{#include examples/filters/must_reference_underscore.adm2}}
 ```
 
-```
+```adam
 {{#include examples/filters/tuple_filter_not_supported.adm2}}
 ```
 

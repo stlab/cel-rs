@@ -15,7 +15,7 @@ optional; when absent, the output's type is inferred from the initializer, the s
 [Chapter 2](cells.md#23-built-in-types-and-inference) gives for a plain `cell`. An `out` may
 also carry a `filter` clause, exactly like a plain `cell`; see [Chapter 7](filters.md).
 
-```
+```adam
 {{#include examples/outputs/basic_output.adm2}}
 ```
 
@@ -31,7 +31,7 @@ output's cell can never be produced by more than one method, and can never be wr
 not by a host write, not by a `relationship` binding, not by a second `out`. It's computed
 exactly once each time the sheet resolves, by its own initializer, and nothing else:
 
-```
+```adam
 {{#include examples/outputs/output_cell_can_be_referenced.adm2}}
 ```
 
@@ -45,7 +45,7 @@ Trailing an `out`'s initializer, `require { ... }` names zero or more boolean ch
 requirement commonly reads the output's own value by name, alongside whatever other cells it
 needs:
 
-```
+```adam
 {{#include examples/outputs/requirement_diagnostic.adm2}}
 ```
 
@@ -61,6 +61,6 @@ label surfaced through that query; it happens to read naturally when it echoes a
 An output can list any number of requirements; a host can query exactly the ones currently
 failing, identified individually (see [Appendix A.11](reference.md#a11-the-host-embedding-api)):
 
-```
+```adam
 {{#include examples/outputs/multiple_requirements.adm2}}
 ```

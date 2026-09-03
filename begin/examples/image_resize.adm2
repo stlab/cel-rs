@@ -1,86 +1,45 @@
-// Copyright 2013 Adobe
-// Distributed under the Boost Software License, Version 1.0.
-// (See accompanying file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
-// 
-// Ported from ASL's classic `image_size` Adam sheet. adam-lang has no separate
-// input/constant/interface/output/invariant sections and no `unlink`. The translation below:
-// - ASL `constant`/one-directional `<==` rules -> a `relationship` block with a single binding
-// (the planner always derives that cell; there is no alternative binding to pick).
-// - ASL `when (cond) relationship {}` (arbitrary boolean expressions) -> `conditional <expr> {
-// true => {...} false => {...} }`.
-// - ASL `unlink x : init <== cond ? x : fallback;` -> `conditional cond`'s "false" branch
-// forces `x` back to `fallback`; its "true" branch leaves `x` untouched (a free,
-// directly writable cell), matching the checkbox-like behavior `unlink` describes.
-// - ASL's `@bicubic`/`@draft`/etc. symbolic tags -> `String` literals (adam-lang has no
-// atom/enum literal).
-// The `result` output is approximated as a single tuple `(command, width, height,
-// resolution, scale_styles, resample_method)`, command first — adam-lang has no
-// tagged-union/struct output type, only tuples. Unlike ASL, the pixel/scale_styles/
-// resample_method fields are present (and treated as relevant) even in the
-// `set_resolution` case, where ASL would omit them entirely.
+//! Copyright 2013 Adobe
+//! Distributed under the Boost Software License, Version 1.0.
+//! (See accompanying file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+//! 
+//! Ported from ASL's classic `image_size` Adam sheet.
 sheet image_resize {
-    cell original_width_pixels: i32 = 1600;
-    cell original_height_pixels: i32 = 1200;
-    cell original_resolution: f64 = 300.0;
+    source original_width_pixels: i32 = 1600;
+    source original_height_pixels = 1200;
+    source original_resolution = 300.0;
 
-    // --- constant (derived once from input; never a source) ---
-    cell original_width_inches: f64;
-    cell original_height_inches: f64;
+    out original_width_inches := original_width_pixels as f64 / original_resolution;
+    out original_height_inches := original_height_pixels as f64 / original_resolution;
 
-    // --- interface ---
-    cell resample: bool = true;
-    cell constrain: bool = true;
-    cell scale_styles: bool = true;
+    cell resample = true;
+    cell constrain = true;
+    cell scale_styles = true;
 
-    cell resample_method: String = "bicubic";
+    cell resample_method = "bicubic";
 
-    cell width_pixels: i32 = 1600;
-    // Photoshop: dim_width_pixels
-    cell width_pixels_percent: f64 = 100.0;
+    cell width_pixels = 1600;
+    cell width_pixels_percent = 100.0;
 
-    cell height_pixels: i32 = 1200;
-    // Photoshop: dim_height_pixels
-    cell height_pixels_percent: f64 = 100.0;
+    cell height_pixels = 1200;
+    cell height_pixels_percent = 100.0;
 
-    cell width_inches: f64 = 5.333333333333333;
-    cell width_inches_percent: f64 = 100.0;
+    cell width_inches = 5.333333333333333;
+    cell width_inches_percent = 100.0;
 
-    // Resolution is declared before the height/inches cells below, mirroring the ASL
-    // source's own comment: "Resolution must be initialized before width and height
-    // inches to allow proportions to be constrained." adam-rs assigns each cell's initial
-    // solver priority from declaration order, so this ordering is preserved best-effort;
-    // the two solvers don't guarantee identical tie-breaking.
-    cell resolution: f64 = 300.0;
+    cell resolution = 300.0;
 
-    cell height_inches: f64 = 4.0;
-    cell height_inches_percent: f64 = 100.0;
+    cell height_inches = 4.0;
+    cell height_inches_percent = 100.0;
 
-    cell auto_quality: String = "draft";
+    cell auto_quality = "draft";
 
-    // ASL leaves this uninitialized ("initialized from resolution"), relying on
-    // its solver to seed it from resolution's *current* value before first use.
-    // adam-lang cell initializers are literals only, and the planner's strength-based
-    // release order can pick screen_lpi itself as the free source rather than deriving
-    // it from resolution — so unlike the sheet's other derived cells, leaving this
-    // at a default 0.0 does NOT get corrected by the first propagate(); it must already
-    // be consistent with resolution's own default (300.0) at the default "draft"
-    // quality (factor 1): 300.0 / 1 = 300.0.
-    cell screen_lpi: f64 = 300.0;
+    cell screen_lpi = 300.0;
 
-    relationship {
-        original_width_inches := original_width_pixels as f64 / original_resolution;
-    }
-    relationship {
-        original_height_inches := original_height_pixels as f64 / original_resolution;
-    }
-
-    // Unconditional: width_inches <-> width_inches_percent, pinned to original_width_inches.
     relationship {
         width_inches := width_inches_percent * original_width_inches / 100.0;
         width_inches_percent := width_inches * 100.0 / original_width_inches;
     }
 
-    // Unconditional: height_inches <-> height_inches_percent, pinned to original_height_inches.
     relationship {
         height_inches := height_inches_percent * original_height_inches / 100.0;
         height_inches_percent := height_inches * 100.0 / original_height_inches;
@@ -116,7 +75,6 @@ sheet image_resize {
             relationship {
                 constrain := true;
             }
-            // width_pixels/percent snap back to the un-resampled defaults.
             relationship {
                 (width_pixels, width_pixels_percent) := (original_width_pixels, 100.0);
             }
@@ -148,9 +106,9 @@ sheet image_resize {
         }
     }
 
-    out byte_count: i64 := width_pixels as i64 * height_pixels as i64 * 32i64;
+    out byte_count := width_pixels as i64 * height_pixels as i64 * 32i64;
 
-    out result: (String, i32, i32, f64, bool, String) := if resample { ("resize_image", width_pixels, height_pixels, resolution, scale_styles, resample_method) } else { ("set_resolution", 0, 0, resolution, false, "") } require {
+    out result := if resample { ("resize_image", width_pixels, height_pixels, resolution, scale_styles, resample_method) } else { ("set_resolution", 0, 0, resolution, false, "") } require {
         width_max: width_pixels <= 300000;
         height_max: height_pixels <= 300000;
     };
