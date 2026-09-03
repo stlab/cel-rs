@@ -24,14 +24,14 @@ The simplest useful sheet declares a couple of inputs and nothing else:
 ```
 
 A **cell** is a named, typed storage location: the basic unit of state in a property model.
-`width` and `height` are `i32`-typed cells, each given an initial value — but notice the
+`width` and `height` are `i32`-typed cells, each given an initial value, but notice the
 keyword: `source`, not `cell`. A `source` cell is like a spreadsheet's value cell: a slot you
 type a number into directly, with nothing else in the sheet computing it for you. Syntactically,
-a `source` declaration looks exactly like a `cell` declaration — the same type, the same
+a `source` declaration looks exactly like a `cell` declaration: the same type, the same
 `= initializer`, the same trailing semicolon. What sets it apart from a plain `cell` is a fact
 about behavior, not spelling: a `source` cell is always an input, never a value some
-relationship computes on your behalf. That distinction has no visible effect yet — there's
-nothing here to compute `width` or `height` from — but it starts to matter the moment
+relationship computes on your behalf. That distinction has no visible effect yet (there's
+nothing here to compute `width` or `height` from), but it starts to matter the moment
 relationships enter the picture, in [§1.5](#15-relationships-a-cell-that-can-be-either-a-source-or-derived)
 below, where a plain `cell`'s role is decided fresh every time the sheet resolves and a
 `source` cell's is not.
@@ -55,7 +55,7 @@ A `filter` clause attaches a standing domain constraint to a cell, most commonly
 
 `0..=100` is an **inclusive** range: both `0` and `100` are themselves valid values for
 `level`, and only something outside that closed interval ever gets corrected. A host UI
-commonly mounts a filtered cell like this one as a live, editable widget — if this page is
+commonly mounts a filtered cell like this one as a live, editable widget. If this page is
 rendered live for you, try writing a value outside `[0, 100]` into `level` above and watch it
 snap back into range, but not instantly: the correction only takes effect the next time the
 sheet resolves, never at the moment of the write itself.
@@ -79,7 +79,7 @@ An `out` declaration computes one final, read-only value from the rest of the sh
 cell is like a spreadsheet's equation cell: you never type into it directly, and its value is
 always whatever its formula currently computes.
 
-Two rules hold without exception. First, nothing may ever write an `out` cell directly — not a
+Two rules hold without exception. First, nothing may ever write an `out` cell directly: not a
 host write, not a `relationship` binding, not even another `out`'s own initializer; an output
 has exactly one writer, itself, fixed forever at the point it's declared. Second, an `out` is
 recomputed exactly once every time the sheet resolves, from its own initializer, using whatever
@@ -90,7 +90,7 @@ the rest of the sheet's cells currently hold.
 
 ## 1.4 Requirements
 
-An `out` declaration — or a `cell`, or a `source` — can carry named `require`ments: boolean
+An `out` declaration (or a `cell`, or a `source`) can carry named `require`ments: boolean
 checks re-evaluated and reported each time the sheet resolves, never enforced by rejecting a
 write or blocking resolution:
 
@@ -103,9 +103,9 @@ computed and readable: it's a diagnostic, not a gate, exactly the way §1.2's fi
 value rather than rejecting it. A host queries which requirements are currently failing after
 each resolve.
 
-Two facts here generalize past this one example. `require` isn't limited to `out` — the same
+Two facts here generalize past this one example. `require` isn't limited to `out`: the same
 block can trail a `source` declaration too; see [§2.2](cells.md#22-cell-declarations) and
-[Chapter 3](source.md). And `filter` isn't limited to plain cells, either — the same clause can
+[Chapter 3](source.md). And `filter` isn't limited to plain cells, either: the same clause can
 trail an `out` declaration; see [Chapter 5, §5.6](filters.md#56-a-filter-on-an-output-cell). See
 [Chapter 6, §6.3](outputs.md#63-requirements-diagnostics-not-gates) for the full rules governing
 requirements.
@@ -115,7 +115,7 @@ requirements.
 A sheet with only `source`/`cell` declarations and no relationships is just a struct. What
 makes Adam interesting is the **relationship**: a set of alternative ways to keep a group of
 cells consistent, any one of which the solver may pick at any given moment. A `relationship`
-binding can never derive a [`source`](source.md) cell — that's the one kind of cell always left
+binding can never derive a [`source`](source.md) cell: that's the one kind of cell always left
 alone as a source, unconditionally; more on that in [Chapter 3](source.md).
 
 The classic example is three numbers related by multiplication (`a * b = c`), where any one of
@@ -129,7 +129,7 @@ from [the introduction](intro.md#why-adam). As a sheet:
 The `relationship` block offers three **bindings**: `c := a * b`, `a := c / b`, and
 `b := c / a`, each an alternative *method* for deriving one cell from the others. Only one
 binding is active at a time. Unlike `source` and `out`, a plain `cell` inside a relationship
-isn't fixed as a source or an output the way those two are — which role a given cell plays is
+isn't fixed as a source or an output the way those two are: which role a given cell plays is
 decided fresh every time the sheet resolves, driven by **strength**.
 
 Every cell carries a strength, a write-recency counter. A cell's own *declaration* counts as a
@@ -155,7 +155,7 @@ parsed, well before it's ever resolved:
 
 `multiplication_triangle.adm2`'s own three bindings satisfy both. `c := a * b` reads `a` and
 `b` and writes `c`; `a := c / b` reads `c` and `b` and writes `a`; `b := c / a` reads `c` and
-`a` and writes `b` — every method's `inputs ∪ outputs` comes out to the same set, `{a, b, c}`.
+`a` and writes `b`; every method's `inputs ∪ outputs` comes out to the same set, `{a, b, c}`.
 And the three output sets, `{c}`, `{a}`, and `{b}`, are pairwise distinct.
 
 ## 1.6 Relationships continued: destructuring and self-reference
@@ -174,14 +174,14 @@ and could one day extend to struct patterns too. See
 [Chapter 8, §8.1](relationships-continued.md#81-destructuring-bindings) for the full
 destructuring-vs-direct-bind distinction.
 
-A binding may also name the same cell on both sides of `:=` — a **self-referencing method**,
+A binding may also name the same cell on both sides of `:=`: a **self-referencing method**,
 deriving a cell's own next value from its own current one. [Chapter 8](relationships-continued.md)
 walks through a full worked example with its own `self_referencing_method.adm2`, rather than
 repeating one here; §1.7 below shows the same pattern once more, inside a conditional branch.
 The obligation on a self-referencing method is stricter than an ordinary one: the method's own
 job is to correct a value into whatever set the relationship enforces, and if reapplying it to
 its own already-corrected output would change the value again, the "correction" was never
-well-defined in the first place. The solver never checks this — it's on the sheet author.
+well-defined in the first place. The solver never checks this; it's on the sheet author.
 
 ## 1.7 Conditionals
 
@@ -202,7 +202,7 @@ no branch matches and there's no default.
 
 Some branches offer the solver no choice at all. A relationship with exactly one method is
 **forced**: there's no alternative binding to try, so its output cell is claimed every round
-regardless of strength — unlike the freely-chosen roles in §1.5's triangle. A host
+regardless of strength, unlike the freely-chosen roles in §1.5's triangle. A host
 UI commonly disables the editable widget for a forced cell, since writing it would have no
 lasting effect once the sheet re-resolves.
 
@@ -211,24 +211,24 @@ lasting effect once the sheet re-resolves.
 ```
 
 With `mode == 0` (the declared default), `range_bounds`'s relationship has two self-referencing
-methods, `low := min(low, high)` and `high := max(low, high)` — a relationship exactly like
-§1.5's triangle, where either cell could end up derived, decided by strength — never both at
+methods, `low := min(low, high)` and `high := max(low, high)`: a relationship exactly like
+§1.5's triangle, where either cell could end up derived, decided by strength, and never both at
 once. Declared first, `low` is staler, so the solver derives it: `low := min(4, 9)`, which
 happens to equal `low`'s own current value, so nothing visibly changes. `high`'s own `max`
 method is never invoked at all this round; `high` is simply an ordinary, unclaimed source,
 reporting its own untouched value, `9`.
 
 Writing `high` to `42` and switching to `mode == 1` activates a relationship with a single
-method, `low := high` — forced. `low` is claimed every round this branch is active, so it now
+method, `low := high`: forced. `low` is claimed every round this branch is active, so it now
 reads back `42`, `high`'s current value, no matter what strength would otherwise prefer. But
 `low`'s own underlying raw value, its **source**, is untouched by any of this: it's still `4`,
 exactly where it started, *shadowed* by the forced derived value the same way a filter's
-correction shadows a cell's raw value in §1.2 — a derived value never destroys the source
+correction shadows a cell's raw value in §1.2; a derived value never destroys the source
 underneath it, whichever mechanism produced that derived value.
 
 Switching back to `mode == 0` reactivates the two-method relationship, and strength has changed
-in the meantime: `high` was just written, so it's freshest now, and `low` — never itself
-explicitly written — is stalest, so the solver again derives `low`. Crucially, it derives it
+in the meantime: `high` was just written, so it's freshest now, and `low`, never itself
+explicitly written, is stalest, so the solver again derives `low`. It derives it
 from each cell's own **source**, not from the stale forced value `low` was shadowing a moment
 ago: `low := min(4, 42)`, using `low`'s untouched source `4` and `high`'s actual current value
 `42`, giving `low = 4` and leaving `high = 42` alone as a source. The `42` `low` displayed while
@@ -237,7 +237,7 @@ moment that relationship stopped being selected.
 
 Writing `low` to `100` promotes it to freshest, flipping the two-method relationship's choice:
 now `high := max(low, high)` is the one selected instead, deriving `high` and leaving `low` as
-the source — `high` reads `100`, pulled up to match. Either binding can fire; which one does is
+the source: `high` reads `100`, pulled up to match. Either binding can fire; which one does is
 strength's call, never both at once.
 
 Adam's comment and doc-comment syntax is covered in [Chapter 10](lexical-conventions.md), not
