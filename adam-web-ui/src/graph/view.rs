@@ -5,8 +5,8 @@
 //! writes to its own entry in `window.__beginGraphData` (a map keyed by
 //! container id) so that `onmounted`'s polling loop always calls `init` with
 //! the latest snapshot for this container rather than the one captured at
-//! mount time — and so that multiple `GraphView`s on one page never clobber
-//! each other's snapshots.
+//! mount time. Keying by container id also keeps multiple `GraphView`s on one
+//! page from clobbering each other's snapshots.
 //!
 //! `graph_id` names the `<div>` this instance mounts into, and is passed to the
 //! `window.beginGraph.init` call — see `begin/assets/graph.js` — so the graph
