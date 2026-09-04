@@ -203,10 +203,10 @@ pub fn App() -> Element {
     let mut show_inactive = use_signal(|| true);
     use_effect(move || {
         let show = *show_inactive.read();
+        let id = graph_id.peek().clone();
         spawn(async move {
             let _ = document::eval(&format!(
-                "if (typeof window.beginGraph !== 'undefined') window.beginGraph.setShowInactive({});",
-                show
+                "if (typeof window.beginGraph !== 'undefined') window.beginGraph.setShowInactive('{id}', {show});"
             ))
             .await;
         });
@@ -268,24 +268,27 @@ pub fn App() -> Element {
                         compact: true,
                         SpActionButton {
                             onclick: move |_| {
+                                let id = graph_id.peek().clone();
                                 spawn(async move {
-                                    let _ = document::eval("window.beginGraph.zoomOut();").await;
+                                    let _ = document::eval(&format!("window.beginGraph.zoomOut('{id}');")).await;
                                 });
                             },
                             SpIconZoomOut {}
                         }
                         SpActionButton {
                             onclick: move |_| {
+                                let id = graph_id.peek().clone();
                                 spawn(async move {
-                                    let _ = document::eval("window.beginGraph.resetZoom();").await;
+                                    let _ = document::eval(&format!("window.beginGraph.resetZoom('{id}');")).await;
                                 });
                             },
                             "Fit"
                         }
                         SpActionButton {
                             onclick: move |_| {
+                                let id = graph_id.peek().clone();
                                 spawn(async move {
-                                    let _ = document::eval("window.beginGraph.zoomIn();").await;
+                                    let _ = document::eval(&format!("window.beginGraph.zoomIn('{id}');")).await;
                                 });
                             },
                             SpIconZoomIn {}

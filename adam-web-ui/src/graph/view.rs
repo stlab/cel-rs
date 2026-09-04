@@ -10,17 +10,24 @@
 //! `window.beginGraph.init` call — see `begin/assets/graph.js` — so the graph
 //! attaches to this component's own container rather than a hardcoded id.
 //!
-//! `source_id` (see `App`'s doc comment for how it's derived) is passed
-//! alongside every `init`/`update` call so `graph.js` can tell "the same
-//! source got a new snapshot" (e.g. a hot-reloaded edit — keep the live
-//! layout) apart from "a different demo/file just became active" (wipe the
-//! layout cache instead of risking a stale position/width bleeding in from
-//! an unrelated node that happens to reuse the same id — cell/relationship
-//! node ids are only unique within one `Sheet`, not across different ones).
+//! `source_id` (see `App`'s doc comment for how it's derived) is compared against the last
+//! source this component initialized for: unchanged means "the same source got a new
+//! snapshot" (e.g. a hot-reloaded edit — call `update`, keeping the live layout); changed means
+//! "a different demo/file just became active" — call `init`, which replaces any existing
+//! `graph.js` instance for this id with a brand new one, so a stale position/width can never
+//! bleed in from an unrelated node that happens to reuse the same id (cell/relationship node
+//! ids are only unique within one `Sheet`, not across different ones).
 
 use dioxus::prelude::*;
 
 use super::data::GraphData;
+
+/// Returns `true` when `current_source` differs from `initialized_source` — i.e. [`GraphView`]
+/// should call `window.beginGraph.init` (a different sheet, needing a fresh D3 instance with no
+/// carried-over layout) rather than `update` (the same sheet, new data — preserve layout).
+fn source_changed(current_source: &str, initialized_source: &str) -> bool {
+    current_source != initialized_source
+}
 
 /// Renders the property model bipartite graph using D3.
 ///
@@ -40,14 +47,20 @@ pub fn GraphView(
     source_id: ReadSignal<String>,
 ) -> Element {
     let container_id = graph_id.read().clone();
+    let mut initialized_source = use_signal(|| source_id.peek().clone());
 
     use_effect(move || {
+        let id = graph_id.read().clone();
         let json = serde_json::to_string(&*data.read()).unwrap_or_default();
-        let source_id_json = serde_json::to_string(&*source_id.read()).unwrap_or_default();
+        let current_source = source_id.read().clone();
+        let is_new_source = source_changed(&current_source, &initialized_source.peek());
+        if is_new_source {
+            initialized_source.set(current_source);
+        }
         spawn(async move {
+            let call = if is_new_source { "init" } else { "update" };
             let _ = document::eval(&format!(
-                "window.__beginGraphData = {}; if (typeof window.beginGraph !== 'undefined') window.beginGraph.update(window.__beginGraphData, {});",
-                json, source_id_json
+                "window.__beginGraphData = {json}; if (typeof window.beginGraph !== 'undefined') window.beginGraph.{call}('{id}', window.__beginGraphData);"
             ))
             .await;
         });
@@ -60,15 +73,11 @@ pub fn GraphView(
             onmounted: move |_evt| async move {
                 let id = graph_id.peek().clone();
                 let json = serde_json::to_string(&data.peek().clone()).unwrap_or_default();
-                let source_id_json = serde_json::to_string(&source_id.peek().clone()).unwrap_or_default();
-                // Seed __beginGraphData with the current snapshot; use_effect may
-                // update it if the sheet changes before D3 finishes loading.
-                // document::Script injects <script> tags asynchronously.
                 let script = format!(
                     r#"if (!window.__beginGraphData) window.__beginGraphData = {json};
                        (function tryInit(n) {{
                            if (typeof d3 !== 'undefined' && typeof window.beginGraph !== 'undefined') {{
-                               window.beginGraph.init('{id}', window.__beginGraphData, {source_id_json});
+                               window.beginGraph.init('{id}', window.__beginGraphData);
                            }} else if (n > 0) {{
                                setTimeout(function() {{ tryInit(n - 1); }}, 50);
                            }}
@@ -165,5 +174,26 @@ fn GraphLegend() -> Element {
                 "Inactive (branch not selected)"
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_changed_is_false_for_identical_sources() {
+        assert!(!source_changed(
+            "tutorial/first_sheet",
+            "tutorial/first_sheet"
+        ));
+    }
+
+    #[test]
+    fn source_changed_is_true_for_different_sources() {
+        assert!(source_changed(
+            "tutorial/first_sheet",
+            "tutorial/area_with_requirement"
+        ));
     }
 }
