@@ -4,6 +4,7 @@ use adam_rs::Sheet;
 use dioxus::prelude::*;
 
 use crate::example_source::{ActiveSource, SourceOrigin, available_examples, load_example_source};
+use crate::graph_legend::GraphLegend;
 use adam_web_ui::GraphView;
 use adam_web_ui::Labels;
 use adam_web_ui::SheetInspector;
@@ -308,7 +309,14 @@ pub fn App() -> Element {
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
                     ExamplesPicker { sheet, labels, active_source, example_names, on_select: on_example_selected }
-                    GraphView { graph_id, data: graph_data, source_id }
+                    // Positioned wrapper so `GraphLegend` (position: absolute) overlays the
+                    // graph. The legend lives here in `begin`, not inside the shared
+                    // `GraphView`, so the book's live graphs render without it.
+                    div {
+                        style: "flex: 1; position: relative; display: flex; min-height: 0; overflow: hidden;",
+                        GraphView { graph_id, data: graph_data, source_id }
+                        GraphLegend {}
+                    }
                     SheetInspector { sheet, labels, source_text, source_name }
                 }
             }
