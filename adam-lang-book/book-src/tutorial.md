@@ -26,7 +26,7 @@ and `height` are `i32`-typed cells, each given an initial value (the types are d
 initial value). A `source` cell is like a spreadsheet's value cell: it holds a value written into it
 and is never derived.
 
-![alt text](image.png)
+<graph sheet="first_sheet">
 
 Semicolons end declarations, exactly as in Rust or C; a sheet's body is a sequence of declarations,
 not a sequence of statements. A sheet describes a _graph_ of cells and the constraints between them.
