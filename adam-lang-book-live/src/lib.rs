@@ -5,8 +5,7 @@
 //! shared state between them.
 
 use adam_web_ui::spectrum::SpTheme;
-use adam_web_ui::{GraphView, to_graph_data};
-use adam_web_ui::{Renderer, SheetInspector, build_sheet};
+use adam_web_ui::{Renderer, SheetInspector, build_sheet, graph_drive_script, to_graph_data};
 use dioxus::prelude::*;
 use wasm_bindgen::prelude::*;
 
@@ -14,6 +13,7 @@ use wasm_bindgen::prelude::*;
 struct RootProps {
     source: String,
     name: String,
+    graph_ids: Vec<String>,
 }
 
 /// Parses `props.source`, then renders either a live [`SheetInspector`] (on success) or the
@@ -56,6 +56,30 @@ fn Root(props: RootProps) -> Element {
             let sheet = use_signal(|| sheet);
             let labels = use_signal(|| labels);
             let error = outcome.error.clone();
+
+            let data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
+            let graph_ids = props.graph_ids.clone();
+            let mut first_drive = use_signal(|| true);
+            use_effect(move || {
+                let is_first = *first_drive.peek();
+                if is_first {
+                    first_drive.set(false);
+                }
+                let call = if is_first { "init" } else { "update" };
+                // Read `data` synchronously so this effect re-subscribes to it, then build every
+                // script before the async block: the container ids are all driven with one shared
+                // `init` on the first run (the graphs draw from initial state) and `update` after.
+                let scripts: Vec<String> = graph_ids
+                    .iter()
+                    .map(|id| graph_drive_script(id, &data.read(), call))
+                    .collect();
+                spawn(async move {
+                    for script in scripts {
+                        let _ = document::eval(&script).await;
+                    }
+                });
+            });
+
             rsx! {
                 SheetInspector { sheet, labels, source_text, source_name }
                 if let Some(err) = error {
@@ -83,88 +107,21 @@ fn Root(props: RootProps) -> Element {
 
 /// Mounts a live [`SheetInspector`] for `source` into the DOM element with id `element_id`,
 /// using `name` (the example's `data-example` attribute, e.g. `"relationships/conflict_error"`)
-/// as the diagnostic file name shown in any parse/propagate error.
+/// as the diagnostic file name shown in any parse/propagate error. Also drives each id in
+/// `graph_ids` (the graph containers bound to this example's sheet) on every propagate, via
+/// [`graph_drive_script`].
 ///
 /// - Precondition: an element with id `element_id` already exists in the document — the
 ///   mdBook `live-examples` preprocessor is what creates it (see
 ///   `adam-lang-book-preprocessor`).
 #[wasm_bindgen]
-pub fn mount(element_id: &str, source: &str, name: &str) {
+pub fn mount(element_id: &str, source: &str, name: &str, graph_ids: Vec<String>) {
     let props = RootProps {
         source: source.to_string(),
         name: format!("{name}.adm2"),
+        graph_ids,
     };
     let vdom = VirtualDom::new_with_props(Root, props);
-    let config = dioxus::web::Config::new().rootname(element_id);
-    dioxus::web::launch::launch_virtual_dom(vdom, config);
-}
-
-#[derive(Clone, PartialEq, Props)]
-struct GraphRootProps {
-    source: String,
-    name: String,
-    graph_id: String,
-}
-
-/// Parses `props.source`, then renders either a live [`GraphView`] (on success) or the
-/// formatted diagnostic (on parse failure) — mirroring [`Root`]'s same two-outcome shape.
-/// `graph_id`/`source_id` are both set to `props.graph_id`: within one independent mount the
-/// source never changes, so there's nothing for `GraphView`'s destroy-vs-update logic to
-/// distinguish (see [`mount_graph`]'s doc comment for why `graph_id` isn't just `element_id`).
-#[component]
-fn GraphRoot(props: GraphRootProps) -> Element {
-    let outcome = build_sheet(&props.source, &props.name, &Renderer::plain());
-    let graph_id = use_memo({
-        let id = props.graph_id.clone();
-        move || id.clone()
-    });
-    let source_id = use_memo({
-        let id = props.graph_id.clone();
-        move || id.clone()
-    });
-
-    match outcome.sheet_labels {
-        Some((sheet, labels)) => {
-            let sheet = use_signal(|| sheet);
-            let labels = use_signal(|| labels);
-            let data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
-            let error = outcome.error.clone();
-            rsx! {
-                GraphView { graph_id, data, source_id }
-                if let Some(err) = error {
-                    pre { class: "adam-live-error", "{err}" }
-                }
-            }
-        }
-        None => {
-            let error = outcome.error.unwrap_or_default();
-            rsx! {
-                pre { class: "adam-live-error", "{error}" }
-            }
-        }
-    }
-}
-
-/// Mounts a live [`GraphView`] for `source` into the DOM element with id `element_id`, using
-/// `name` (the example's `data-example` attribute, e.g. `"tutorial/first_sheet"`) as the
-/// diagnostic file name shown in any parse/propagate error.
-///
-/// `GraphView`'s own rendered `<div>` (what `graph.js` actually attaches D3 to) gets a derived
-/// id, `"{element_id}-container"`, distinct from `element_id` itself: `element_id` names the
-/// wrapper `<div>` the mdBook preprocessor already created (see `adam-lang-book-preprocessor`)
-/// and that Dioxus mounts *into* as a child, so giving `GraphView`'s own `<div>` the same id
-/// would create a duplicate-id DOM, and `document.getElementById` would resolve to the outer
-/// wrapper instead of the div `graph.js` needs.
-///
-/// - Precondition: an element with id `element_id` already exists in the document.
-#[wasm_bindgen]
-pub fn mount_graph(element_id: &str, source: &str, name: &str) {
-    let props = GraphRootProps {
-        source: source.to_string(),
-        name: format!("{name}.adm2"),
-        graph_id: format!("{element_id}-container"),
-    };
-    let vdom = VirtualDom::new_with_props(GraphRoot, props);
     let config = dioxus::web::Config::new().rootname(element_id);
     dioxus::web::launch::launch_virtual_dom(vdom, config);
 }
