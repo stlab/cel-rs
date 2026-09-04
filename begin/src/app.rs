@@ -4,7 +4,7 @@ use adam_rs::Sheet;
 use dioxus::prelude::*;
 
 use crate::example_source::{ActiveSource, SourceOrigin, available_examples, load_example_source};
-use crate::graph_view::GraphView;
+use adam_web_ui::GraphView;
 use adam_web_ui::Labels;
 use adam_web_ui::SheetInspector;
 use adam_web_ui::spectrum::{
@@ -191,6 +191,7 @@ pub fn App() -> Element {
     let source_id = use_memo(move || active_source.read().file_name());
     let source_text = use_memo(move || active_source.read().text.clone());
     let source_name = use_memo(move || active_source.read().file_name());
+    let graph_id = use_signal(|| "graph-container".to_string());
 
     // Drives graph.js's show/hide-inactive-branches mode via
     // `window.beginGraph.setShowInactive`; lives here (rather than in
@@ -294,7 +295,7 @@ pub fn App() -> Element {
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
                     ExamplesPicker { sheet, labels, active_source, example_names, on_select: on_example_selected }
-                    GraphView { data: graph_data, source_id }
+                    GraphView { graph_id, data: graph_data, source_id }
                     SheetInspector { sheet, labels, source_text, source_name }
                 }
             }

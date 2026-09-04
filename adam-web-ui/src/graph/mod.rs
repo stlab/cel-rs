@@ -2,5 +2,7 @@
 //! component that renders it.
 
 mod data;
+mod view;
 
 pub use data::{GraphData, LinkData, LinkKind, NodeData, NodeKind, to_graph_data};
+pub use view::GraphView;

@@ -6,6 +6,10 @@
 //! always calls `init` with the latest snapshot rather than the one captured
 //! at mount time.
 //!
+//! `graph_id` names the `<div>` this instance mounts into, and is passed to every
+//! `window.beginGraph.*` call — see `begin/assets/graph.js` — so multiple independent
+//! `GraphView`s (e.g. several live examples on one book page) never share D3/container state.
+//!
 //! `source_id` (see `App`'s doc comment for how it's derived) is passed
 //! alongside every `init`/`update` call so `graph.js` can tell "the same
 //! source got a new snapshot" (e.g. a hot-reloaded edit — keep the live
@@ -16,7 +20,7 @@
 
 use dioxus::prelude::*;
 
-use adam_web_ui::GraphData;
+use super::data::GraphData;
 
 /// Renders the property model bipartite graph using D3.
 ///
@@ -30,7 +34,13 @@ use adam_web_ui::GraphData;
 /// (not here) — they only ever call `window.beginGraph.*`/set a signal `App`
 /// owns, so they don't need to be inside this component to work.
 #[component]
-pub fn GraphView(data: ReadSignal<GraphData>, source_id: ReadSignal<String>) -> Element {
+pub fn GraphView(
+    graph_id: ReadSignal<String>,
+    data: ReadSignal<GraphData>,
+    source_id: ReadSignal<String>,
+) -> Element {
+    let container_id = graph_id.read().clone();
+
     use_effect(move || {
         let json = serde_json::to_string(&*data.read()).unwrap_or_default();
         let source_id_json = serde_json::to_string(&*source_id.read()).unwrap_or_default();
@@ -45,9 +55,10 @@ pub fn GraphView(data: ReadSignal<GraphData>, source_id: ReadSignal<String>) -> 
 
     rsx! {
         div {
-            id: "graph-container",
+            id: "{container_id}",
             style: "flex: 1; height: 100%; overflow: hidden; position: relative;",
             onmounted: move |_evt| async move {
+                let id = graph_id.peek().clone();
                 let json = serde_json::to_string(&data.peek().clone()).unwrap_or_default();
                 let source_id_json = serde_json::to_string(&source_id.peek().clone()).unwrap_or_default();
                 // Seed __beginGraphData with the current snapshot; use_effect may
@@ -57,7 +68,7 @@ pub fn GraphView(data: ReadSignal<GraphData>, source_id: ReadSignal<String>) -> 
                     r#"if (!window.__beginGraphData) window.__beginGraphData = {json};
                        (function tryInit(n) {{
                            if (typeof d3 !== 'undefined' && typeof window.beginGraph !== 'undefined') {{
-                               window.beginGraph.init('graph-container', window.__beginGraphData, {source_id_json});
+                               window.beginGraph.init('{id}', window.__beginGraphData, {source_id_json});
                            }} else if (n > 0) {{
                                setTimeout(function() {{ tryInit(n - 1); }}, 50);
                            }}
