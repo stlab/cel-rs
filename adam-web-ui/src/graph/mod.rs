@@ -1,5 +1,5 @@
-//! The property-model constraint graph: D3-ready serialization ([`data`]) and the Dioxus
-//! component that renders it.
+//! The property-model constraint graph: D3-ready serialization ([`GraphData`] and friends) and
+//! the Dioxus component that renders it.
 
 mod data;
 mod view;

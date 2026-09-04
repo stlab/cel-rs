@@ -6,9 +6,9 @@
 //! always calls `init` with the latest snapshot rather than the one captured
 //! at mount time.
 //!
-//! `graph_id` names the `<div>` this instance mounts into, and is passed to every
-//! `window.beginGraph.*` call — see `begin/assets/graph.js` — so multiple independent
-//! `GraphView`s (e.g. several live examples on one book page) never share D3/container state.
+//! `graph_id` names the `<div>` this instance mounts into, and is passed to the
+//! `window.beginGraph.init` call — see `begin/assets/graph.js` — so the graph
+//! attaches to this component's own container rather than a hardcoded id.
 //!
 //! `source_id` (see `App`'s doc comment for how it's derived) is passed
 //! alongside every `init`/`update` call so `graph.js` can tell "the same
