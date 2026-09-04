@@ -16,7 +16,7 @@
 
 use dioxus::prelude::*;
 
-use crate::bridge::GraphData;
+use adam_web_ui::GraphData;
 
 /// Renders the property model bipartite graph using D3.
 ///

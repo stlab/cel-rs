@@ -3,7 +3,6 @@
 use adam_rs::Sheet;
 use dioxus::prelude::*;
 
-use crate::bridge::to_graph_data;
 use crate::example_source::{ActiveSource, SourceOrigin, available_examples, load_example_source};
 use crate::graph_view::GraphView;
 use adam_web_ui::Labels;
@@ -12,6 +11,7 @@ use adam_web_ui::spectrum::{
     SpActionButton, SpActionGroup, SpDivider, SpHeading, SpIconZoomIn, SpIconZoomOut, SpSideNav,
     SpSideNavItem, SpSwitch, SpTheme,
 };
+use adam_web_ui::to_graph_data;
 use adam_web_ui::{Renderer, build_sheet};
 
 /// Root component: Spectrum theme wrapper with an examples picker, the graph, and

@@ -6,11 +6,13 @@
 
 pub mod build;
 pub mod diagnostics;
+pub mod graph;
 mod inspector;
 pub mod labels;
 pub mod spectrum;
 
 pub use build::{BuildOutcome, build_sheet};
+pub use graph::{GraphData, LinkData, LinkKind, NodeData, NodeKind, to_graph_data};
 pub use inspector::SheetInspector;
 pub use labels::{
     CellMeta, Labels, Renderer, WriteStrFn, format_adam_error, format_rounded,
