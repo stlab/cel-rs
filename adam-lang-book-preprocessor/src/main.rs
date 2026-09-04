@@ -172,6 +172,11 @@ fn chapter_dir_name(chapter: &Chapter) -> String {
 /// Returns `Err` if any referenced `<examples_dir>/<chapter_dir>/<name>.adm2` file doesn't
 /// exist, naming the missing path — matching how a broken `{{#include}}` already fails the
 /// `mdbook build` via mdBook's own "links" preprocessor.
+///
+/// Also returns `Err` if `content` has no paired `<div class="adam-live"
+/// data-example="chapter_dir/name">` inspector mount for the referenced sheet (checked after
+/// `inject_mount_points` has already run, so an `{{#include}}` on the same page would already
+/// have inserted that div): a `<graph>` with no inspector on the page can never become dynamic.
 fn inject_graph_mount_points(
     content: &str,
     re: &Regex,
@@ -187,6 +192,17 @@ fn inject_graph_mount_points(
                 format!(
                     "<graph sheet=\"{name}\"> in chapter \"{chapter_dir}\" references {}, which does not exist",
                     adm2_path.display()
+                )
+            });
+            return String::new();
+        }
+        let inspector_div = format!("class=\"adam-live\" data-example=\"{chapter_dir}/{name}\"");
+        if !content.contains(&inspector_div) {
+            error.get_or_insert_with(|| {
+                format!(
+                    "<graph sheet=\"{name}\"> in chapter \"{chapter_dir}\" has no paired \
+                     live example on the page: the chapter must {{{{#include}}}} \
+                     examples/{chapter_dir}/{name}.adm2 so an inspector owns its sheet"
                 )
             });
             return String::new();
@@ -437,7 +453,7 @@ mod tests {
         write_example(&tmp, "tutorial", "first_sheet");
 
         let re = graph_tag_regex();
-        let content = "prose\n\n<graph sheet=\"first_sheet\">\n\nmore prose";
+        let content = "<div class=\"adam-live\" data-example=\"tutorial/first_sheet\"></div>\n\nprose\n\n<graph sheet=\"first_sheet\">\n\nmore prose";
         let result = inject_graph_mount_points(content, &re, "tutorial", &tmp).unwrap();
 
         assert!(result.contains(
@@ -456,7 +472,7 @@ mod tests {
         write_example(&tmp, "tutorial", "first_sheet");
 
         let re = graph_tag_regex();
-        let content = "<graph sheet=\"first_sheet\"></graph>";
+        let content = "<div class=\"adam-live\" data-example=\"tutorial/first_sheet\"></div>\n<graph sheet=\"first_sheet\"></graph>";
         let result = inject_graph_mount_points(content, &re, "tutorial", &tmp).unwrap();
 
         assert!(result.contains(
@@ -504,6 +520,53 @@ mod tests {
             !err.contains("missing_two"),
             "error must not report the last missing reference instead of the first: {err}"
         );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn inject_graph_mount_points_errors_when_no_paired_inspector_is_present() {
+        let tmp = std::env::temp_dir().join(format!(
+            "adam-lang-book-preprocessor-test-{}-e",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write_example(&tmp, "tutorial", "first_sheet");
+
+        let re = graph_tag_regex();
+        // The example file exists on disk, but the chapter never includes it, so no inspector
+        // mount will own its sheet — the graph could never become dynamic.
+        let content = "prose\n\n<graph sheet=\"first_sheet\">\n\nmore prose";
+        let result = inject_graph_mount_points(content, &re, "tutorial", &tmp);
+
+        assert!(
+            result.is_err(),
+            "a <graph> with no paired inspector on the page must fail the build"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("first_sheet"),
+            "error must name the unpaired graph: {err}"
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn inject_graph_mount_points_accepts_a_graph_with_a_paired_inspector() {
+        let tmp = std::env::temp_dir().join(format!(
+            "adam-lang-book-preprocessor-test-{}-f",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write_example(&tmp, "tutorial", "first_sheet");
+
+        let re = graph_tag_regex();
+        // Mirrors post-`inject_mount_points` content: the inspector div is already present.
+        let content = "<div class=\"adam-live\" data-example=\"tutorial/first_sheet\"></div>\n\n<graph sheet=\"first_sheet\">";
+        let result = inject_graph_mount_points(content, &re, "tutorial", &tmp).unwrap();
+
+        assert!(result.contains(
+            "<div class=\"adam-live-graph\" data-example=\"tutorial/first_sheet\"></div>"
+        ));
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
