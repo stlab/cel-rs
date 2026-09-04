@@ -69,9 +69,10 @@ fn Root(props: RootProps) -> Element {
                 // Read `data` synchronously so this effect re-subscribes to it, then build every
                 // script before the async block: the container ids are all driven with one shared
                 // `init` on the first run (the graphs draw from initial state) and `update` after.
+                let d = data.read();
                 let scripts: Vec<String> = graph_ids
                     .iter()
-                    .map(|id| graph_drive_script(id, &data.read(), call))
+                    .map(|id| graph_drive_script(id, &d, call))
                     .collect();
                 spawn(async move {
                     for script in scripts {
