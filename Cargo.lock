@@ -1800,6 +1800,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ez-adam"
+version = "0.1.0"
+dependencies = [
+ "adam-lang",
+ "cel-parser",
+ "cel-std",
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "slotmap",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

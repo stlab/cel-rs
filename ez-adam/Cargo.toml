@@ -1,0 +1,19 @@
+[package]
+name = "ez-adam"
+version = "0.1.0"
+edition = "2024"
+description = "Standalone visual editor for adam-rs property models"
+
+[dependencies]
+slotmap = { version = "1.1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
+cel-parser = { path = "../cel-parser" }
+cel-std = { path = "../cel-std" }
+adam-lang = { path = "../adam-lang" }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
