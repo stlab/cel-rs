@@ -21,6 +21,7 @@ const moduleUrl = new URL("adam_lang_book_live.js", themeBase).href;
 const manifestUrl = new URL("adam-live-examples.json", themeBase).href;
 const swcUrl = new URL("swc.js", themeBase).href;
 const d3Url = new URL("d3.v7.min.js", themeBase).href;
+const graphJsUrl = new URL("graph.js", themeBase).href;
 
 // `SheetInspector` renders `sp-*` elements (see `adam-web-ui/src/spectrum.rs`), but each
 // mounted `VirtualDom` is rooted at its own `.adam-live` div — none of them ever renders a
@@ -55,6 +56,20 @@ function loadD3() {
   });
 }
 
+// Loaded once at the page level: `graph.js` defines `window.beginGraph`, the D3 driver that
+// `GraphView` (mounted by `mount_graph`) calls via its `onmounted` handler. It's a classic
+// (non-module) IIFE that sets `window.beginGraph` at load with no top-level `d3` dependency, so
+// it can load in parallel with `d3.v7.min.js`; both must simply be present before any graph mounts.
+function loadGraphJs() {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = graphJsUrl;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`adam-live: failed to load ${graphJsUrl}`));
+    document.head.appendChild(script);
+  });
+}
+
 (async () => {
   const inspectorMounts = document.querySelectorAll(".adam-live");
   const graphMounts = document.querySelectorAll(".adam-live-graph");
@@ -65,6 +80,7 @@ function loadD3() {
   const loaders = [import(moduleUrl), fetch(manifestUrl).then((r) => r.json()), loadSwc()];
   if (graphMounts.length > 0) {
     loaders.push(loadD3());
+    loaders.push(loadGraphJs());
   }
   const [{ default: init, mount, mount_graph: mountGraph }, manifest] = await Promise.all(loaders);
   await init();
