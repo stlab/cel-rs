@@ -249,6 +249,7 @@ pub fn App() -> Element {
 
     rsx! {
         document::Link { rel: "icon", r#type: "image/x-icon", href: "/favicon.ico" }
+        document::Link { rel: "stylesheet", href: asset!("/assets/app-shell.css") }
         document::Link { rel: "stylesheet", href: asset!("/assets/graph.css") }
         document::Link { rel: "stylesheet", href: asset!("/assets/inspector.css") }
         document::Script { src: asset!("/assets/d3.v7.min.js") }

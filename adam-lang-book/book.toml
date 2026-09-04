@@ -20,5 +20,5 @@ before = ["links"]
 [output.html]
 git-repository-url = "https://github.com/stlab/cel-rs"
 edit-url-template = "https://github.com/stlab/cel-rs/edit/main/adam-lang-book/{path}"
-additional-css = ["book-src/theme/adam-live.css", "book-src/theme/inspector.css"]
+additional-css = ["book-src/theme/adam-live.css", "book-src/theme/inspector.css", "book-src/theme/graph.css"]
 additional-js = ["book-src/theme/adam-live-bootstrap.js"]

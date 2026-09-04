@@ -69,7 +69,7 @@ pub fn GraphView(
     rsx! {
         div {
             id: "{container_id}",
-            style: "flex: 1; height: 100%; overflow: hidden; position: relative;",
+            class: "graph-view",
             onmounted: move |_evt| async move {
                 let id = graph_id.peek().clone();
                 let json = serde_json::to_string(&data.peek().clone()).unwrap_or_default();
