@@ -37,6 +37,7 @@ fn source_changed(current_source: &str, initialized_source: &str) -> bool {
 ///
 /// - Precondition: `call` is `"init"` or `"update"`.
 /// - Precondition: `container_id` contains no `'` (it is a DOM element id).
+/// - Complexity: O(n) in the size of `data` (serialization plus string formatting).
 pub fn graph_drive_script(container_id: &str, data: &GraphData, call: &str) -> String {
     let json = serde_json::to_string(data).unwrap_or_default();
     format!(
