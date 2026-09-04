@@ -203,16 +203,30 @@
         var container = document.getElementById(this.containerId);
 
         // Keep observing for the life of this instance so the view area tracks the
-        // container's size continuously, not just once at mount. The first firing
-        // measures after layout has settled -- a plain clientWidth/clientHeight read
-        // here can race layout and return a stale (often zero) size -- and builds
-        // the graph; every later firing just resizes the existing canvas.
+        // container's size continuously, not just once at mount. Every firing after
+        // the first just resizes the existing canvas.
+        //
+        // The FIRST build is deferred until the container reports a real (non-zero)
+        // size: a ResizeObserver callback can fire before layout has settled, reading
+        // a stale 0 width/height. Building then would fit the graph to the 800x600
+        // fallback, and because a later real-size firing only calls resizeCanvas()
+        // (which preserves the current view rather than re-fitting), that wrong
+        // initial fit would stick -- the graph appears zoomed/cut off on first load.
+        // Waiting for a real size guarantees the one-time initial fit is computed
+        // against the actual viewport.
         this.resizeObserver = new ResizeObserver(function () {
-            self.width = container.clientWidth || self.width;
-            self.height = container.clientHeight || self.height;
+            var w = container.clientWidth;
+            var h = container.clientHeight;
             if (!self.svg) {
+                if (!w || !h) {
+                    return;
+                }
+                self.width = w;
+                self.height = h;
                 self.buildGraph(container, self.latestData);
             } else {
+                self.width = w || self.width;
+                self.height = h || self.height;
                 self.resizeCanvas();
             }
         });
