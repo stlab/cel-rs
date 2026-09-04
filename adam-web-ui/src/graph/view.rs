@@ -2,9 +2,11 @@
 //!
 //! Mounts D3 once via the element's `onmounted` event; pushes JSON updates
 //! via `document::eval` whenever the `data` signal changes. Each update also
-//! writes to `window.__beginGraphData` so that `onmounted`'s polling loop
-//! always calls `init` with the latest snapshot rather than the one captured
-//! at mount time.
+//! writes to its own entry in `window.__beginGraphData` (a map keyed by
+//! container id) so that `onmounted`'s polling loop always calls `init` with
+//! the latest snapshot for this container rather than the one captured at
+//! mount time — and so that multiple `GraphView`s on one page never clobber
+//! each other's snapshots.
 //!
 //! `graph_id` names the `<div>` this instance mounts into, and is passed to the
 //! `window.beginGraph.init` call — see `begin/assets/graph.js` — so the graph
@@ -32,9 +34,11 @@ fn source_changed(current_source: &str, initialized_source: &str) -> bool {
 /// Renders the property model bipartite graph using D3.
 ///
 /// On mount, polls until D3 is ready, then calls `window.beginGraph.init`
-/// using `window.__beginGraphData`, which always holds the latest snapshot.
-/// On every change to `data`, writes the latest snapshot to
-/// `window.__beginGraphData` and calls `window.beginGraph.update`. The JS
+/// using this container's own entry in `window.__beginGraphData` (a map
+/// keyed by container id), which always holds its latest snapshot. On every
+/// change to `data`, writes the latest snapshot to that same entry and calls
+/// `window.beginGraph.update`. Keying by container id keeps multiple
+/// `GraphView`s on one page from clobbering each other's snapshots. The JS
 /// guard in `graph.js` makes any `update` call before `init` a no-op.
 ///
 /// The zoom controls and the "Show inactive" toggle live in `App`'s top bar
@@ -60,7 +64,7 @@ pub fn GraphView(
         spawn(async move {
             let call = if is_new_source { "init" } else { "update" };
             let _ = document::eval(&format!(
-                "window.__beginGraphData = {json}; if (typeof window.beginGraph !== 'undefined') window.beginGraph.{call}('{id}', window.__beginGraphData);"
+                "window.__beginGraphData = window.__beginGraphData || {{}}; window.__beginGraphData['{id}'] = {json}; if (typeof window.beginGraph !== 'undefined') window.beginGraph.{call}('{id}', window.__beginGraphData['{id}']);"
             ))
             .await;
         });
@@ -74,10 +78,11 @@ pub fn GraphView(
                 let id = graph_id.peek().clone();
                 let json = serde_json::to_string(&data.peek().clone()).unwrap_or_default();
                 let script = format!(
-                    r#"if (!window.__beginGraphData) window.__beginGraphData = {json};
+                    r#"window.__beginGraphData = window.__beginGraphData || {{}};
+                       if (!('{id}' in window.__beginGraphData)) window.__beginGraphData['{id}'] = {json};
                        (function tryInit(n) {{
                            if (typeof d3 !== 'undefined' && typeof window.beginGraph !== 'undefined') {{
-                               window.beginGraph.init('{id}', window.__beginGraphData);
+                               window.beginGraph.init('{id}', window.__beginGraphData['{id}']);
                            }} else if (n > 0) {{
                                setTimeout(function() {{ tryInit(n - 1); }}, 50);
                            }}

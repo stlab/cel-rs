@@ -23,49 +23,15 @@ const swcUrl = new URL("swc.js", themeBase).href;
 const d3Url = new URL("d3.v7.min.js", themeBase).href;
 const graphJsUrl = new URL("graph.js", themeBase).href;
 
-// `SheetInspector` renders `sp-*` elements (see `adam-web-ui/src/spectrum.rs`), but each
-// mounted `VirtualDom` is rooted at its own `.adam-live` div — none of them ever renders a
-// `<script>` tag of their own the way `begin/src/app.rs`'s top-level `App` component does for
-// its single, page-wide desktop/web window. Left unloaded, every `sp-*` tag on the page stays
-// an undefined custom element: no shadow DOM, so `SheetInspector`'s own `shadowRoot.querySelector`
-// reads come back null and the number-field/slider write paths never fire, and no visible input
-// box at all (an undefined custom element renders only its — here, absent — light-DOM children).
-// Load `swc.js` once at the page level, in parallel with the wasm/manifest fetches below, so it
-// defines every `sp-*` element exactly once regardless of how many examples the page mounts.
-function loadSwc() {
+// Loads a page-level <script> from `url`, resolving when it has loaded. Pass `{ module: true }`
+// for an ES module (e.g. swc.js); classic scripts (d3, graph.js) omit it.
+function loadScript(url, { module = false } = {}) {
   return new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    script.type = "module";
-    script.src = swcUrl;
+    if (module) script.type = "module";
+    script.src = url;
     script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`adam-live: failed to load ${swcUrl}`));
-    document.head.appendChild(script);
-  });
-}
-
-// Loaded once at the page level for the same reason `swc.js` is: `GraphView` (mounted by
-// `mount_graph`) drives D3 through `window.beginGraph` (see `begin/assets/graph.js`), which
-// expects a global `d3`, regardless of how many `.adam-live-graph` divs the page mounts.
-function loadD3() {
-  return new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = d3Url;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`adam-live: failed to load ${d3Url}`));
-    document.head.appendChild(script);
-  });
-}
-
-// Loaded once at the page level: `graph.js` defines `window.beginGraph`, the D3 driver that
-// `GraphView` (mounted by `mount_graph`) calls via its `onmounted` handler. It's a classic
-// (non-module) IIFE that sets `window.beginGraph` at load with no top-level `d3` dependency, so
-// it can load in parallel with `d3.v7.min.js`; both must simply be present before any graph mounts.
-function loadGraphJs() {
-  return new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = graphJsUrl;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`adam-live: failed to load ${graphJsUrl}`));
+    script.onerror = () => reject(new Error(`adam-live: failed to load ${url}`));
     document.head.appendChild(script);
   });
 }
@@ -77,10 +43,30 @@ function loadGraphJs() {
     return;
   }
 
-  const loaders = [import(moduleUrl), fetch(manifestUrl).then((r) => r.json()), loadSwc()];
+  // `SheetInspector` renders `sp-*` elements (see `adam-web-ui/src/spectrum.rs`), but each
+  // mounted `VirtualDom` is rooted at its own `.adam-live` div — none of them ever renders a
+  // `<script>` tag of their own the way `begin/src/app.rs`'s top-level `App` component does for
+  // its single, page-wide desktop/web window. Left unloaded, every `sp-*` tag on the page stays
+  // an undefined custom element: no shadow DOM, so `SheetInspector`'s own `shadowRoot.querySelector`
+  // reads come back null and the number-field/slider write paths never fire, and no visible input
+  // box at all (an undefined custom element renders only its — here, absent — light-DOM children).
+  // Load `swc.js` once at the page level, in parallel with the wasm/manifest fetches below, so it
+  // defines every `sp-*` element exactly once regardless of how many examples the page mounts.
+  const loaders = [
+    import(moduleUrl),
+    fetch(manifestUrl).then((r) => r.json()),
+    loadScript(swcUrl, { module: true }),
+  ];
   if (graphMounts.length > 0) {
-    loaders.push(loadD3());
-    loaders.push(loadGraphJs());
+    // Loaded once at the page level for the same reason `swc.js` is: `GraphView` (mounted by
+    // `mount_graph`) drives D3 through `window.beginGraph` (see `begin/assets/graph.js`), which
+    // expects a global `d3`, regardless of how many `.adam-live-graph` divs the page mounts.
+    loaders.push(loadScript(d3Url));
+    // `graph.js` defines `window.beginGraph`, the D3 driver that `GraphView` (mounted by
+    // `mount_graph`) calls via its `onmounted` handler. It's a classic (non-module) IIFE that
+    // sets `window.beginGraph` at load with no top-level `d3` dependency, so it can load in
+    // parallel with `d3.v7.min.js`; both must simply be present before any graph mounts.
+    loaders.push(loadScript(graphJsUrl));
   }
   const [{ default: init, mount, mount_graph: mountGraph }, manifest] = await Promise.all(loaders);
   await init();

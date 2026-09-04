@@ -342,7 +342,7 @@
 
         // Node ids are only unique *within* the one Sheet this instance was created
         // for -- they're built from a cell's raw slotmap index (see cell_node_id()
-        // in bridge.rs) -- and begin rebuilds a brand-new Sheet from source text on
+        // in adam-web-ui/src/graph/data.rs) -- and begin rebuilds a brand-new Sheet from source text on
         // every same-source hot-reload (see App's use_effect in begin/src/app.rs),
         // so an id can be silently recycled for a *different* cell across two
         // consecutive update() calls on this same instance. relabeledIds tracks
