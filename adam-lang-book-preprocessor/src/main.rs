@@ -6,11 +6,12 @@
 //! Registered in `book.toml` as `[preprocessor.live-examples]`.
 
 use adam_lang_book_live_config::NO_LIVE_MOUNT;
-use mdbook_preprocessor::book::{Book, BookItem};
+use mdbook_preprocessor::book::{Book, BookItem, Chapter};
 use mdbook_preprocessor::errors::{Error, Result};
 use mdbook_preprocessor::{Preprocessor, PreprocessorContext, parse_input};
 use regex::Regex;
 use std::io;
+use std::path::Path;
 
 /// Matches an `.adm2` include directive, capturing `<chapter>/<name>` (without the
 /// `.adm2` extension) for use as both the mount div's `data-example` value and the
@@ -143,6 +144,59 @@ fn inject_mount_points(content: &str, re: &Regex) -> String {
     out
 }
 
+/// Matches a `<graph sheet="name">` tag, self-closing or with a matching `</graph>`, capturing
+/// the bare example name to resolve against the current chapter.
+fn graph_tag_regex() -> Regex {
+    Regex::new(r#"<graph\s+sheet="([A-Za-z0-9_]+)"\s*/?>(\s*</graph>)?"#).unwrap()
+}
+
+/// Returns the chapter directory name (matching `book-src/examples/<chapter>/`) for `chapter`,
+/// derived from its source file's stem — e.g. `tutorial.md` -> `tutorial`.
+///
+/// - Postcondition: returns an empty string for a draft chapter (`source_path` is `None`); no
+///   real chapter in this book is a draft, so this never occurs for a chapter [`run`] actually
+///   scans a `<graph>` tag in.
+fn chapter_dir_name(chapter: &Chapter) -> String {
+    chapter
+        .source_path
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Replaces every `<graph sheet="name">` tag in `content` with a live-mount `<div>`, resolving
+/// `name` against `chapter_dir` (e.g. `tutorial`).
+///
+/// # Errors
+/// Returns `Err` if any referenced `<examples_dir>/<chapter_dir>/<name>.adm2` file doesn't
+/// exist, naming the missing path — matching how a broken `{{#include}}` already fails the
+/// `mdbook build` via mdBook's own "links" preprocessor.
+fn inject_graph_mount_points(
+    content: &str,
+    re: &Regex,
+    chapter_dir: &str,
+    examples_dir: &Path,
+) -> Result<String> {
+    let mut error = None;
+    let replaced = re.replace_all(content, |caps: &regex::Captures| {
+        let name = &caps[1];
+        let adm2_path = examples_dir.join(chapter_dir).join(format!("{name}.adm2"));
+        if !adm2_path.is_file() {
+            error = Some(format!(
+                "<graph sheet=\"{name}\"> in chapter \"{chapter_dir}\" references {}, which does not exist",
+                adm2_path.display()
+            ));
+            return String::new();
+        }
+        format!("<div class=\"adam-live-graph\" data-example=\"{chapter_dir}/{name}\"></div>")
+    });
+    match error {
+        Some(msg) => Err(Error::msg(msg)),
+        None => Ok(replaced.into_owned()),
+    }
+}
+
 struct LiveExamples;
 
 impl Preprocessor for LiveExamples {
@@ -150,13 +204,32 @@ impl Preprocessor for LiveExamples {
         "live-examples"
     }
 
-    fn run(&self, _ctx: &PreprocessorContext, mut book: Book) -> Result<Book> {
-        let re = adm2_include_regex();
+    fn run(&self, ctx: &PreprocessorContext, mut book: Book) -> Result<Book> {
+        let include_re = adm2_include_regex();
+        let graph_re = graph_tag_regex();
+        let examples_dir = ctx.root.join(&ctx.config.book.src).join("examples");
+        let mut error = None;
         book.for_each_mut(|item| {
+            if error.is_some() {
+                return;
+            }
             if let BookItem::Chapter(chapter) = item {
-                chapter.content = inject_mount_points(&chapter.content, &re);
+                chapter.content = inject_mount_points(&chapter.content, &include_re);
+                let chapter_dir = chapter_dir_name(chapter);
+                match inject_graph_mount_points(
+                    &chapter.content,
+                    &graph_re,
+                    &chapter_dir,
+                    &examples_dir,
+                ) {
+                    Ok(content) => chapter.content = content,
+                    Err(e) => error = Some(e),
+                }
             }
         });
+        if let Some(e) = error {
+            return Err(e);
+        }
         Ok(book)
     }
 
@@ -344,5 +417,72 @@ mod tests {
     fn live_examples_only_supports_html_renderer() {
         assert!(LiveExamples.supports_renderer("html").unwrap());
         assert!(!LiveExamples.supports_renderer("epub").unwrap());
+    }
+
+    fn write_example(dir: &std::path::Path, chapter: &str, name: &str) {
+        let chapter_dir = dir.join(chapter);
+        std::fs::create_dir_all(&chapter_dir).unwrap();
+        std::fs::write(chapter_dir.join(format!("{name}.adm2")), "cell x: Int = 1;").unwrap();
+    }
+
+    #[test]
+    fn inject_graph_mount_points_replaces_a_known_sheet_reference() {
+        let tmp = std::env::temp_dir().join(format!(
+            "adam-lang-book-preprocessor-test-{}-a",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write_example(&tmp, "tutorial", "first_sheet");
+
+        let re = graph_tag_regex();
+        let content = "prose\n\n<graph sheet=\"first_sheet\">\n\nmore prose";
+        let result = inject_graph_mount_points(content, &re, "tutorial", &tmp).unwrap();
+
+        assert!(result.contains(
+            "<div class=\"adam-live-graph\" data-example=\"tutorial/first_sheet\"></div>"
+        ));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn inject_graph_mount_points_accepts_a_paired_closing_tag() {
+        let tmp = std::env::temp_dir().join(format!(
+            "adam-lang-book-preprocessor-test-{}-b",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        write_example(&tmp, "tutorial", "first_sheet");
+
+        let re = graph_tag_regex();
+        let content = "<graph sheet=\"first_sheet\"></graph>";
+        let result = inject_graph_mount_points(content, &re, "tutorial", &tmp).unwrap();
+
+        assert!(result.contains(
+            "<div class=\"adam-live-graph\" data-example=\"tutorial/first_sheet\"></div>"
+        ));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn inject_graph_mount_points_errors_when_the_example_does_not_exist() {
+        let tmp = std::env::temp_dir().join(format!(
+            "adam-lang-book-preprocessor-test-{}-c",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let re = graph_tag_regex();
+        let content = "<graph sheet=\"does_not_exist\">";
+        let result = inject_graph_mount_points(content, &re, "tutorial", &tmp);
+
+        assert!(result.is_err());
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn chapter_dir_name_uses_the_source_file_stem() {
+        let chapter = Chapter::new("Chapter 1", String::new(), "tutorial.md", vec![]);
+        assert_eq!(chapter_dir_name(&chapter), "tutorial");
     }
 }
