@@ -31,6 +31,22 @@ fn source_changed(current_source: &str, initialized_source: &str) -> bool {
     current_source != initialized_source
 }
 
+/// Builds the JavaScript that stores `data` (serialized) as container `container_id`'s entry in
+/// `window.__beginGraphData` and invokes `window.beginGraph.<call>(container_id, data)` when the
+/// driver script (`begin/assets/graph.js`) is loaded.
+///
+/// - Precondition: `call` is `"init"` or `"update"`.
+/// - Precondition: `container_id` contains no `'` (it is a DOM element id).
+pub fn graph_drive_script(container_id: &str, data: &GraphData, call: &str) -> String {
+    let json = serde_json::to_string(data).unwrap_or_default();
+    format!(
+        "window.__beginGraphData = window.__beginGraphData || {{}}; \
+         window.__beginGraphData['{container_id}'] = {json}; \
+         if (typeof window.beginGraph !== 'undefined') \
+         window.beginGraph.{call}('{container_id}', window.__beginGraphData['{container_id}']);"
+    )
+}
+
 /// Renders the property model bipartite graph using D3.
 ///
 /// On mount, polls until D3 is ready, then calls `window.beginGraph.init`
@@ -55,18 +71,15 @@ pub fn GraphView(
 
     use_effect(move || {
         let id = graph_id.read().clone();
-        let json = serde_json::to_string(&*data.read()).unwrap_or_default();
         let current_source = source_id.read().clone();
         let is_new_source = source_changed(&current_source, &initialized_source.peek());
         if is_new_source {
             initialized_source.set(current_source);
         }
+        let call = if is_new_source { "init" } else { "update" };
+        let script = graph_drive_script(&id, &data.read(), call);
         spawn(async move {
-            let call = if is_new_source { "init" } else { "update" };
-            let _ = document::eval(&format!(
-                "window.__beginGraphData = window.__beginGraphData || {{}}; window.__beginGraphData['{id}'] = {json}; if (typeof window.beginGraph !== 'undefined') window.beginGraph.{call}('{id}', window.__beginGraphData['{id}']);"
-            ))
-            .await;
+            let _ = document::eval(&script).await;
         });
     });
 
@@ -112,5 +125,42 @@ mod tests {
             "tutorial/first_sheet",
             "tutorial/area_with_requirement"
         ));
+    }
+
+    fn empty_graph_data() -> GraphData {
+        GraphData {
+            nodes: vec![],
+            links: vec![],
+            changed: vec![],
+            forced: vec![],
+            forced_relationships: vec![],
+            arrows: false,
+        }
+    }
+
+    #[test]
+    fn graph_drive_script_init_calls_begin_graph_init() {
+        let script = graph_drive_script("g1", &empty_graph_data(), "init");
+        assert!(script.contains("window.beginGraph.init('g1'"));
+        assert!(script.contains("window.__beginGraphData['g1']"));
+    }
+
+    #[test]
+    fn graph_drive_script_update_calls_begin_graph_update() {
+        let script = graph_drive_script("g1", &empty_graph_data(), "update");
+        assert!(script.contains("window.beginGraph.update('g1'"));
+    }
+
+    #[test]
+    fn graph_drive_script_guards_on_begin_graph_being_defined() {
+        let script = graph_drive_script("g1", &empty_graph_data(), "init");
+        assert!(script.contains("typeof window.beginGraph !== 'undefined'"));
+    }
+
+    #[test]
+    fn graph_drive_script_embeds_the_serialized_data() {
+        let script = graph_drive_script("g1", &empty_graph_data(), "init");
+        // GraphData serializes its fields; `nodes` is always present.
+        assert!(script.contains("\"nodes\""));
     }
 }
