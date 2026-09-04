@@ -177,6 +177,9 @@ fn chapter_dir_name(chapter: &Chapter) -> String {
 /// data-example="chapter_dir/name">` inspector mount for the referenced sheet (checked after
 /// `inject_mount_points` has already run, so an `{{#include}}` on the same page would already
 /// have inserted that div): a `<graph>` with no inspector on the page can never become dynamic.
+///
+/// - Complexity: O(m * n), where m is the number of `<graph>` tags in `content` and n is the
+///   length of `content` -- each tag re-scans `content` for its paired inspector div.
 fn inject_graph_mount_points(
     content: &str,
     re: &Regex,
