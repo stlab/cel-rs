@@ -16,12 +16,13 @@ behavior change for `begin`. Contract-tested for the `init`/`update` calls and f
 `container_id`/JSON.
 
 **Task 2 (commits `926943a..aa5b942c`).** `adam-lang-book-preprocessor`'s `<graph sheet="name">`
-pass gained a paired-include check: alongside its existing file-existence check, it now verifies
-the same chapter's raw content also contains `{{#include ...<chapter>/<name>.adm2}}` — the
-inspector mount that will own the sheet. A `<graph>` with no paired include makes `run()` return
-`Err`, failing the `mdbook build`, exactly like the existing bad-file-reference case. 16 unit
-tests cover both the failing (no include) and passing paths alongside the existing tag-rewrite
-tests.
+pass gained a paired-include check: alongside its existing file-existence check, `inject_graph_mount_points`
+runs after `inject_mount_points` has already turned each `{{#include ...<chapter>/<name>.adm2}}`
+into an inspector mount, and it verifies the same chapter's already-include-processed content
+contains the injected `<div class="adam-live" data-example="<chapter>/<name>">` — the inspector
+mount that owns the sheet. A `<graph>` with no paired include makes `run()` return `Err`, failing
+the `mdbook build`, exactly like the existing bad-file-reference case. 16 unit tests cover both
+the failing (no include) and passing paths alongside the existing tag-rewrite tests.
 
 **Task 3 (commits `aa5b942c..9cbbe5ac`).** `adam-lang-book-live` now owns the sheet and drives the
 graph itself: `mount_graph`, `GraphRootProps`, and `GraphRoot` are deleted. `mount(element_id,

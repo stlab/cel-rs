@@ -60,6 +60,10 @@ fn Root(props: RootProps) -> Element {
             let data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
             let graph_ids = props.graph_ids.clone();
             let mut first_drive = use_signal(|| true);
+            // The first-run `init` call relies on the bootstrap having already loaded
+            // `graph.js` (defining `window.beginGraph`) before `mount` runs `graph_drive_script`
+            // — there is no polling fallback here (unlike `GraphView`'s `onmounted`), so the
+            // bootstrap's load-before-mount ordering must hold or the graph stays blank.
             use_effect(move || {
                 let is_first = *first_drive.peek();
                 if is_first {
