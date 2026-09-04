@@ -1,12 +1,13 @@
-// Mounts a live SheetInspector into every `.adam-live` div the live-examples preprocessor
-// inserted. Each div's `data-example` (e.g. "cells/tuple_typed_cell") names one of the
-// `adam-live-examples.json` manifest's entries; the manifest and the compiled
-// adam-lang-book-live wasm/js bundle are both generated into `book-src/theme/` by the book
-// build (see the CI workflow changes), and mdBook's built-in theme-directory mechanism copies
-// everything under `book-src/theme/` into `book-dist/theme/` verbatim (at the site root),
-// regardless of whether it's also named in `book.toml`'s `additional-js`/`additional-css`
-// (which this script itself is, so it is served from a different path — alongside a copy of
-// `book-src/` preserved verbatim — than its sibling wasm/js/manifest files land at).
+// Mounts a live SheetInspector into every `.adam-live` div, and a live GraphView into every
+// `.adam-live-graph` div, that the live-examples preprocessor inserted. Each div's
+// `data-example` (e.g. "cells/tuple_typed_cell") names one of the `adam-live-examples.json`
+// manifest's entries; the manifest and the compiled adam-lang-book-live wasm/js bundle are both
+// generated into `book-src/theme/` by the book build (see the CI workflow changes), and
+// mdBook's built-in theme-directory mechanism copies everything under `book-src/theme/` into
+// `book-dist/theme/` verbatim (at the site root), regardless of whether it's also named in
+// `book.toml`'s `additional-js`/`additional-css` (which this script itself is, so it is served
+// from a different path — alongside a copy of `book-src/` preserved verbatim — than its sibling
+// wasm/js/manifest files land at).
 //
 // A plain relative specifier can't paper over that split: `fetch()` resolves a relative URL
 // against the *document's* URL, but a dynamic `import()` in a classic (non-module) script
@@ -19,6 +20,7 @@ const themeBase = new URL("theme/", document.baseURI);
 const moduleUrl = new URL("adam_lang_book_live.js", themeBase).href;
 const manifestUrl = new URL("adam-live-examples.json", themeBase).href;
 const swcUrl = new URL("swc.js", themeBase).href;
+const d3Url = new URL("d3.v7.min.js", themeBase).href;
 
 // `SheetInspector` renders `sp-*` elements (see `adam-web-ui/src/spectrum.rs`), but each
 // mounted `VirtualDom` is rooted at its own `.adam-live` div — none of them ever renders a
@@ -40,20 +42,34 @@ function loadSwc() {
   });
 }
 
+// Loaded once at the page level for the same reason `swc.js` is: `GraphView` (mounted by
+// `mount_graph`) drives D3 through `window.beginGraph` (see `begin/assets/graph.js`), which
+// expects a global `d3`, regardless of how many `.adam-live-graph` divs the page mounts.
+function loadD3() {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = d3Url;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error(`adam-live: failed to load ${d3Url}`));
+    document.head.appendChild(script);
+  });
+}
+
 (async () => {
-  const mounts = document.querySelectorAll(".adam-live");
-  if (mounts.length === 0) {
+  const inspectorMounts = document.querySelectorAll(".adam-live");
+  const graphMounts = document.querySelectorAll(".adam-live-graph");
+  if (inspectorMounts.length === 0 && graphMounts.length === 0) {
     return;
   }
 
-  const [{ default: init, mount }, manifest] = await Promise.all([
-    import(moduleUrl),
-    fetch(manifestUrl).then((r) => r.json()),
-    loadSwc(),
-  ]);
+  const loaders = [import(moduleUrl), fetch(manifestUrl).then((r) => r.json()), loadSwc()];
+  if (graphMounts.length > 0) {
+    loaders.push(loadD3());
+  }
+  const [{ default: init, mount, mount_graph: mountGraph }, manifest] = await Promise.all(loaders);
   await init();
 
-  mounts.forEach((div, index) => {
+  inspectorMounts.forEach((div, index) => {
     const name = div.dataset.example;
     const source = manifest[name];
     if (source === undefined) {
@@ -63,5 +79,17 @@ function loadSwc() {
     const id = `adam-live-${index}`;
     div.id = id;
     mount(id, source, name);
+  });
+
+  graphMounts.forEach((div, index) => {
+    const name = div.dataset.example;
+    const source = manifest[name];
+    if (source === undefined) {
+      console.error(`adam-live: no embedded source for "${name}"`);
+      return;
+    }
+    const id = `adam-live-graph-${index}`;
+    div.id = id;
+    mountGraph(id, source, name);
   });
 })();
