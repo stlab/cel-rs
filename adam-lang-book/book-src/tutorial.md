@@ -14,8 +14,7 @@ a `.adm2` file, and the UI controls are constructed entirely from the sheet decl
 
 ## 1.1 A first sheet
 
-An Adam program is a single `sheet`, named, with a body of declarations between braces. The simplest
-useful sheet declares a couple of source cells and nothing else:
+An Adam program is a single `sheet`, named, with a body of declarations between braces. A simple sheet declars a couple of source cells:
 
 ```adam
 {{#include examples/tutorial/first_sheet.adm2}}
@@ -23,15 +22,14 @@ useful sheet declares a couple of source cells and nothing else:
 
 A _cell_ is a named, typed storage location: the basic unit of state in a property model. `width`
 and `height` are `i32`-typed cells, each given an initial value (the types are deduced from the
-initial value). A `source` cell is like a spreadsheet's value cell: it holds a value written into it
-and is never derived.
+initial value). A `source` cell is like a spreadsheet's value cell: it holds a value written into it.
+
+Semicolons end declarations, exactly as in Rust or C; a sheet's body is a sequence of declarations,
+not a sequence of statements. A sheet describes a _graph_ of cells and the constraints between them. The graph for `hello` is just the two, unconnected, cells.
 
 <graph sheet="first_sheet">
 
-Semicolons end declarations, exactly as in Rust or C; a sheet's body is a sequence of declarations,
-not a sequence of statements. A sheet describes a _graph_ of cells and the constraints between them.
-
-## 1.2 Filters: self-correcting cells
+## 1.2 Filters
 
 A `filter` clause attaches a standing domain constraint to a cell, most commonly a range:
 
@@ -39,91 +37,62 @@ A `filter` clause attaches a standing domain constraint to a cell, most commonly
 {{#include examples/tutorial/clamp_demo.adm2}}
 ```
 
-`0..=100` is an _inclusive_ range: both `0` and `100` are themselves valid values for `level`, and
-only something outside that closed interval ever gets corrected. A host UI commonly mounts a
-filtered cell like this one as a live, editable widget. If this page is rendered live for you, try
-writing a value outside `[0, 100]` into `level` above and watch it snap back into range, but not
-instantly: the correction only takes effect the next time the sheet resolves, never at the moment of
-the write itself.
-
-Write an out-of-range value and the cell keeps it, raw: a filter never inspects or blocks the value
-at the moment it's written. The clamp only takes effect the next time the sheet resolves, and it's
-that corrected value every read of the cell sees from then on. The raw value you actually wrote is
-never lost, either: the filter's correction lands in a separate, computed slot alongside it, so
-loosening the bound later snaps the cell straight back to what you actually last wrote, not to some
-intermediate clamped value.
+`0..=100` is an _inclusive_ range: both `0` and `100` are themselves valid values for `level`. Try
+writing a value outside `[0, 100]` into `level` above and watch it snap back into range.
 
 A filter's bounds don't have to be constants: `0..=max` references another cell, and the clamp
-tracks it live. [Chapter 5](filters.md) covers filters in full, including the precise source/derived
-model behind "the cell keeps its own raw value forever, and the filter only ever corrects what you
-_read_," and how the same `filter` clause also attaches to an `out` declaration.
+tracks it live. [Chapter 5](filters.md) covers filters in full.
 
-## 1.3 Outputs: read-only, computed cells
+## 1.3 Out Cells
 
-An `out` declaration computes one final, read-only value from the rest of the sheet. An `out` cell
-is like a spreadsheet's equation cell: you never type into it directly, and its value is always
-whatever its formula currently computes.
-
-Two rules hold without exception. First, nothing may ever write an `out` cell directly: not a host
-write, not a `relationship` binding, not even another `out`'s own initializer; an output has exactly
-one writer, itself, fixed forever at the point it's declared. Second, an `out` is recomputed exactly
-once every time the sheet resolves, from its own initializer, using whatever the rest of the sheet's
-cells currently hold.
-
-[§1.4](#14-requirements) below puts an `out` to work in a worked example, once there's a `require`
-block worth attaching to one. See [Chapter 6](outputs.md) for the full treatment.
-
-## 1.4 Requirements
-
-An `out` declaration (or a `cell`, or a `source`) can carry named `require`ments: boolean checks
-re-evaluated and reported each time the sheet resolves, never enforced by rejecting a write or
-blocking resolution:
+An `out` declaration is like a spreadsheet's equation cell. Its value is computed from the provided _method_.
 
 ```adam
-{{#include examples/tutorial/area_with_requirement.adm2}}
+{{#include examples/tutorial/basic_output.adm2}}
 ```
 
-A failed requirement never stops the sheet from resolving, and never stops `area` from being
-computed and readable: it's a diagnostic, not a gate, exactly the way §1.2's filter corrects a value
-rather than rejecting it. A host queries which requirements are currently failing after each
-resolve.
+The method on the out cell can reference other cells in the sheet and the calculation is reapplied when those values change. In the graph representation, the method is a relationship and drawn as a circle between the cells. The heavy arrows and border around the out cell indicate that the value is _forced_ by the relationship.
 
-Two facts here generalize past this one example. `require` isn't limited to `out`: the same block
-can trail a `source` declaration too; see [§2.2](cells.md#22-cell-declarations) and [Chapter
-3](source.md). And `filter` isn't limited to plain cells, either: the same clause can trail an `out`
-declaration; see [Chapter 5, §5.6](filters.md#56-a-filter-on-an-output-cell). See [Chapter 6,
-§6.3](outputs.md#63-requirements-diagnostics-not-gates) for the full rules governing requirements.
+<graph sheet="basic_output">
 
-## 1.5 Relationships: a cell that can be either a source or derived
+See [Chapter 6](outputs.md) for the full treatment.
 
-A sheet with only `source`/`cell` declarations and no relationships is just a struct. What makes
-Adam interesting is the _relationship_: a set of alternative ways to keep a group of cells
-consistent, any one of which the solver may pick at any given moment. A `relationship` binding can
-never derive a [`source`](source.md) cell: that's the one kind of cell always left alone as a
-source, unconditionally; more on that in [Chapter 3](source.md).
+## 1.5 Cells and Relationships
 
-The classic example is three numbers related by multiplication (`a * b = c`), where any one of the
-three can be computed from the other two, the same shape as `pixels == inches * resolution` from
-[the introduction](intro.md#why-adam). As a sheet:
+A plain `cell` declaration acts as a source or derived cell. Cells are connected by one or more _relationship_ that is a bundle of methods that each satisfy the relationship but solve for a different term.
+
+For example, if we have two values `a` and `b` where `a == 2b`, that can be represented as:
 
 ```adam
-{{#include examples/tutorial/multiplication_triangle.adm2}}
+{{#include examples/tutorial/basic_relationship.adm2}}
 ```
 
-The `relationship` block offers three _bindings_: `c := a * b`, `a := c / b`, and `b := c / a`, each
-an alternative _method_ for deriving one cell from the others. Only one binding is active at a time.
-Unlike `source` and `out`, a plain `cell` inside a relationship isn't fixed as a source or an output
-the way those two are: which role a given cell plays is decided fresh every time the sheet resolves,
-driven by _strength_.
+For any active `relationship`, exactly one method is selected to execute. The method choosen is based on the _strength_ of the cells. Cells that have been written more recently have a higher strength. The initial strength of the cells is determined by the declaration order. Cells declared later have a higher strength.
 
-Every cell carries a strength, a write-recency counter. A cell's own _declaration_ counts as a write
-for this purpose, so before anything is ever explicitly written, declaration order alone breaks the
-tie: cells declared earlier are staler than cells declared later. The solver prefers to leave the
-freshest cells alone and derive the stalest one: here, `c`, declared first. Writing a cell promotes
-it to freshest of all, which is what tells the solver "trust this one; recompute something else
-instead." See [Chapter 7](relationships.md) for strength's full treatment, including what happens
-when a cell is shared across more than one relationship, when no valid assignment exists, and
-cycles.
+In the graph, you can see the flow change as you write `a` or `b`.
+
+<graph sheet="basic_relationship">
+
+The methods in a relationship must be _consistant_. If the result of the selected methed is used to recalculate the non-selected methods, the result should not change the value of the assigned cells within an error epsilon.
+
+Relationship can be chained together. We can express the relationship `a <= b <= c` like this:
+
+```adam
+{{#include examples/tutorial/inequality.adm2}}
+```
+
+<graph sheet="inequality">
+
+This example also demonstrates two additional features.
+
+- A method can be _self-referential_, naming a cell as both a dependency and a result. In such a case, the method must be idempotent.
+- When a cell value is derived in terms of itself via a self-referential method (or filter). The last written value is preserved.
+
+You can see the effect of the second behavior by sliding `a` to `100` which will pull `b` and `c` to `100` and then slide `a` back to `0`. `b` and `c` will return to their prior values.
+
+> _Note: There is an [open issue](https://github.com/stlab/cel-rs/issues/182) with this example that is being actively worked on._
+
+In [Chapter 7](relationships.md) you will see relationships are not limited in their arity (you can have n-way relationships with each method solving for 1 or more cells).
 
 ### 1.5.1 Two structural rules on a relationship's methods
 
@@ -223,6 +192,27 @@ source: `high` reads `100`, pulled up to match. Either binding can fire; which o
 strength's call, never both at once.
 
 Adam's comment and doc-comment syntax is covered in [Chapter 10](lexical-conventions.md), not here.
+
+## 1.4 Requirements
+
+An `out` declaration (or a `cell`, or a `source`) can carry named `require`ments: boolean checks
+re-evaluated and reported each time the sheet resolves, never enforced by rejecting a write or
+blocking resolution:
+
+```adam
+{{#include examples/tutorial/area_with_requirement.adm2}}
+```
+
+A failed requirement never stops the sheet from resolving, and never stops `area` from being
+computed and readable: it's a diagnostic, not a gate, exactly the way §1.2's filter corrects a value
+rather than rejecting it. A host queries which requirements are currently failing after each
+resolve.
+
+Two facts here generalize past this one example. `require` isn't limited to `out`: the same block
+can trail a `source` declaration too; see [§2.2](cells.md#22-cell-declarations) and [Chapter
+3](source.md). And `filter` isn't limited to plain cells, either: the same clause can trail an `out`
+declaration; see [Chapter 5, §5.6](filters.md#56-a-filter-on-an-output-cell). See [Chapter 6,
+§6.3](outputs.md#63-requirements-diagnostics-not-gates) for the full rules governing requirements.
 
 ## 1.8 Where to go next
 
