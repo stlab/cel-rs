@@ -27,3 +27,24 @@ sp-sidenav {
     width: 100% !important;
     box-sizing: border-box !important;
 }
+
+/* A ranged numeric cell lays its slider and number field out side by side, slider on the
+   left, rather than stacking the slider below the field. The slider grows to fill the row
+   (`flex: 1`), while the number field keeps its natural, compact width (`flex: 0 0 auto`) —
+   important in the 260px-wide inspector sidebar, where a full-width slider plus field would
+   otherwise overflow. `min-width: 0` lets the slider shrink below its intrinsic content
+   width instead of forcing the row wider than the sidebar. */
+.cell-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.cell-slider-row sp-slider {
+    flex: 1;
+    min-width: 0;
+}
+
+.cell-slider-row sp-number-field {
+    flex: 0 0 auto;
+}
