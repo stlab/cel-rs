@@ -35,16 +35,20 @@ fn source_changed(current_source: &str, initialized_source: &str) -> bool {
 /// `window.__beginGraphData` and invokes `window.beginGraph.<call>(container_id, data)` when the
 /// driver script (`begin/assets/graph.js`) is loaded.
 ///
+/// `container_id` is embedded as a JSON-encoded JS string literal, so any characters it contains
+/// (quotes, backslashes, newlines) are escaped rather than breaking or injecting into the emitted
+/// JS — `graph_id` is a public [`GraphView`] prop, so the id is not assumed to be a bare DOM id.
+///
 /// - Precondition: `call` is `"init"` or `"update"`.
-/// - Precondition: `container_id` contains no `'` (it is a DOM element id).
 /// - Complexity: O(n) in the size of `data` (serialization plus string formatting).
 pub fn graph_drive_script(container_id: &str, data: &GraphData, call: &str) -> String {
+    let id = serde_json::to_string(container_id).unwrap_or_else(|_| "\"\"".to_string());
     let json = serde_json::to_string(data).unwrap_or_default();
     format!(
         "window.__beginGraphData = window.__beginGraphData || {{}}; \
-         window.__beginGraphData['{container_id}'] = {json}; \
+         window.__beginGraphData[{id}] = {json}; \
          if (typeof window.beginGraph !== 'undefined') \
-         window.beginGraph.{call}('{container_id}', window.__beginGraphData['{container_id}']);"
+         window.beginGraph.{call}({id}, window.__beginGraphData[{id}]);"
     )
 }
 
@@ -90,13 +94,17 @@ pub fn GraphView(
             class: "graph-view",
             onmounted: move |_evt| async move {
                 let id = graph_id.peek().clone();
+                // Embed the container id as a JSON-encoded JS string literal (see
+                // `graph_drive_script`) so a quote/backslash/newline in the id can't break or
+                // inject into the polling script.
+                let id = serde_json::to_string(&id).unwrap_or_else(|_| "\"\"".to_string());
                 let json = serde_json::to_string(&data.peek().clone()).unwrap_or_default();
                 let script = format!(
                     r#"window.__beginGraphData = window.__beginGraphData || {{}};
-                       if (!('{id}' in window.__beginGraphData)) window.__beginGraphData['{id}'] = {json};
+                       if (!({id} in window.__beginGraphData)) window.__beginGraphData[{id}] = {json};
                        (function tryInit(n) {{
                            if (typeof d3 !== 'undefined' && typeof window.beginGraph !== 'undefined') {{
-                               window.beginGraph.init('{id}', window.__beginGraphData['{id}']);
+                               window.beginGraph.init({id}, window.__beginGraphData[{id}]);
                            }} else if (n > 0) {{
                                setTimeout(function() {{ tryInit(n - 1); }}, 50);
                            }}
@@ -142,14 +150,15 @@ mod tests {
     #[test]
     fn graph_drive_script_init_calls_begin_graph_init() {
         let script = graph_drive_script("g1", &empty_graph_data(), "init");
-        assert!(script.contains("window.beginGraph.init('g1'"));
-        assert!(script.contains("window.__beginGraphData['g1']"));
+        // The id is embedded as a JSON string literal (double-quoted).
+        assert!(script.contains("window.beginGraph.init(\"g1\""));
+        assert!(script.contains("window.__beginGraphData[\"g1\"]"));
     }
 
     #[test]
     fn graph_drive_script_update_calls_begin_graph_update() {
         let script = graph_drive_script("g1", &empty_graph_data(), "update");
-        assert!(script.contains("window.beginGraph.update('g1'"));
+        assert!(script.contains("window.beginGraph.update(\"g1\""));
     }
 
     #[test]
@@ -163,5 +172,23 @@ mod tests {
         let script = graph_drive_script("g1", &empty_graph_data(), "init");
         // GraphData serializes its fields; `nodes` is always present.
         assert!(script.contains("\"nodes\""));
+    }
+
+    #[test]
+    fn graph_drive_script_escapes_a_quote_in_the_container_id() {
+        // A container id containing a single quote must not break out of the JS string or
+        // inject: JSON-encoding turns `'` into a plain character inside a double-quoted literal,
+        // and there must be no raw `'g'` string-open left in the output.
+        let script = graph_drive_script("a'b", &empty_graph_data(), "init");
+        assert!(script.contains("window.beginGraph.init(\"a'b\""));
+        assert!(!script.contains("['a'b']"));
+    }
+
+    #[test]
+    fn graph_drive_script_escapes_a_double_quote_and_backslash_in_the_container_id() {
+        // JSON-encoding escapes `"` and `\`, so the emitted literal stays a single well-formed
+        // JS string rather than terminating early.
+        let script = graph_drive_script("a\"b\\c", &empty_graph_data(), "init");
+        assert!(script.contains(r#"window.beginGraph.init("a\"b\\c""#));
     }
 }

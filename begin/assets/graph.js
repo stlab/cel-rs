@@ -312,10 +312,17 @@
 
     var defs = this.svg.append("defs");
 
+    // Marker ids are namespaced per container so multiple graphs on one page don't collide:
+    // SVG `url(#id)` resolves to the first matching id in the *document*, so a shared id would
+    // make every graph's arrows/dots reference the first instance's markers (and break when
+    // that instance is destroyed). See url() references in update().
+    this.arrowMarkerId = "arrowhead-" + this.containerId;
+    this.dotMarkerId = "dot-" + this.containerId;
+
     // Arrowhead: refX=10 places the tip (at local x=10) at the line endpoint.
     defs
       .append("marker")
-      .attr("id", "arrowhead")
+      .attr("id", this.arrowMarkerId)
       .attr("viewBox", "0 -5 10 10")
       .attr("refX", 10)
       .attr("refY", 0)
@@ -330,7 +337,7 @@
     // Dot marker: caps control links where they meet the relationship they target.
     defs
       .append("marker")
-      .attr("id", "dot")
+      .attr("id", this.dotMarkerId)
       .attr("viewBox", "0 0 10 10")
       .attr("refX", 5)
       .attr("refY", 5)
@@ -570,7 +577,9 @@
       .attr("marker-end", function (d) {
         var tgtId = typeof d.target === "object" ? d.target.id : d.target;
         var tgtNode = nodeMap.get(tgtId);
-        return tgtNode && tgtNode.kind === "Branch" ? null : "url(#dot)";
+        return tgtNode && tgtNode.kind === "Branch"
+          ? null
+          : "url(#" + self.dotMarkerId + ")";
       })
       .style("stroke", function (d) {
         return d.branch_active ? null : INACTIVE_STROKE;
@@ -659,7 +668,7 @@
           var tgtId = typeof d.target === "object" ? d.target.id : d.target;
           if (isInactive(srcId) || isInactive(tgtId)) return null;
           var tgtNode = nodeMap.get(tgtId);
-          return tgtNode ? "url(#arrowhead)" : null;
+          return tgtNode ? "url(#" + self.arrowMarkerId + ")" : null;
         });
     })();
 
