@@ -183,10 +183,12 @@ fn inject_graph_mount_points(
         let name = &caps[1];
         let adm2_path = examples_dir.join(chapter_dir).join(format!("{name}.adm2"));
         if !adm2_path.is_file() {
-            error = Some(format!(
-                "<graph sheet=\"{name}\"> in chapter \"{chapter_dir}\" references {}, which does not exist",
-                adm2_path.display()
-            ));
+            error.get_or_insert_with(|| {
+                format!(
+                    "<graph sheet=\"{name}\"> in chapter \"{chapter_dir}\" references {}, which does not exist",
+                    adm2_path.display()
+                )
+            });
             return String::new();
         }
         format!("<div class=\"adam-live-graph\" data-example=\"{chapter_dir}/{name}\"></div>")
@@ -477,6 +479,31 @@ mod tests {
         let result = inject_graph_mount_points(content, &re, "tutorial", &tmp);
 
         assert!(result.is_err());
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn inject_graph_mount_points_reports_the_first_missing_reference_not_the_last() {
+        let tmp = std::env::temp_dir().join(format!(
+            "adam-lang-book-preprocessor-test-{}-d",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let re = graph_tag_regex();
+        let content = "<graph sheet=\"missing_one\">\n\n<graph sheet=\"missing_two\">";
+        let result = inject_graph_mount_points(content, &re, "tutorial", &tmp);
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("missing_one"),
+            "error must name the first missing reference: {err}"
+        );
+        assert!(
+            !err.contains("missing_two"),
+            "error must not report the last missing reference instead of the first: {err}"
+        );
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
