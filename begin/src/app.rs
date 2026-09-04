@@ -200,13 +200,22 @@ pub fn App() -> Element {
     // (dim, not hide) to match graph.js's own initial `showInactive` value,
     // and persists across example/file switches since `App` is never
     // remounted by them.
+    //
+    // Also writes `window.__beginShowInactive`, mirroring the existing
+    // `window.__beginGraphData` seam: `GraphView`'s effect calls `init` (not
+    // `update`) on a source switch, which builds a brand-new `GraphInstance` in
+    // graph.js — that instance seeds its own `showInactive` from this global
+    // rather than defaulting to `true`, so this toggle's current value survives
+    // a source switch (which this `use_effect` alone would not re-run for,
+    // since `graph_id`/`source_id` aren't read here — only `show_inactive`
+    // itself re-fires this effect).
     let mut show_inactive = use_signal(|| true);
     use_effect(move || {
         let show = *show_inactive.read();
         let id = graph_id.peek().clone();
         spawn(async move {
             let _ = document::eval(&format!(
-                "if (typeof window.beginGraph !== 'undefined') window.beginGraph.setShowInactive('{id}', {show});"
+                "window.__beginShowInactive = {show}; if (typeof window.beginGraph !== 'undefined') window.beginGraph.setShowInactive('{id}', {show});"
             ))
             .await;
         });

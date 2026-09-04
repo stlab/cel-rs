@@ -117,7 +117,15 @@
         this.zoomLayer = null;
         this.hasInitialFit = false;
         this.latestData = null;
-        this.showInactive = true;
+        // Seeded from a JS global that begin (not graph.js/GraphView -- see their
+        // doc comments) sets alongside its "Show inactive" toggle, mirroring the
+        // existing window.__beginGraphData seam: this lets a fresh instance (built
+        // by init() on a source switch) start from whatever value the toggle is
+        // currently showing instead of always resetting to true, without threading
+        // a begin-only concern through GraphView's props. Falls back to true (dim,
+        // not hide) when the global is unset -- e.g. every book page, which has no
+        // such toggle.
+        this.showInactive = (typeof window.__beginShowInactive === 'boolean') ? window.__beginShowInactive : true;
         this.hiddenNodeIds = new Set();
     }
 
@@ -332,10 +340,20 @@
             || data.nodes.some(function (n) { return !oldNodeIds.has(n.id); })
             || data.links.some(function (l) { return !oldLinkSet.has(linkKey(l.source, l.target)); });
 
+        // Node ids are only unique *within* the one Sheet this instance was created
+        // for -- they're built from a cell's raw slotmap index (see cell_node_id()
+        // in bridge.rs) -- and begin rebuilds a brand-new Sheet from source text on
+        // every same-source hot-reload (see App's use_effect in begin/src/app.rs),
+        // so an id can be silently recycled for a *different* cell across two
+        // consecutive update() calls on this same instance. relabeledIds tracks
+        // exactly that case so the width-measuring step below knows to remeasure
+        // even though oldNodeMap already has the id.
         var oldNodeMap = new Map(this.nodes.map(function (n) { return [n.id, n]; }));
+        var relabeledIds = new Set();
         this.nodes = data.nodes.map(function (n) {
             var existing = oldNodeMap.get(n.id);
             if (existing) {
+                if (existing.label !== n.label) relabeledIds.add(n.id);
                 existing.kind = n.kind;
                 existing.label = n.label;
                 existing.value = n.value;
@@ -419,11 +437,11 @@
             .text(function (d) { return d.value || ''; });
 
         labelSel.each(function (d) {
-            if (oldNodeMap.has(d.id)) return;
+            if (oldNodeMap.has(d.id) && !relabeledIds.has(d.id)) return;
             d.w = Math.max(CELL_W, this.getBBox().width + CELL_LABEL_PADDING);
         });
         valueSel.each(function (d) {
-            if (oldNodeMap.has(d.id) && !changedSet.has(d.id)) return;
+            if (oldNodeMap.has(d.id) && !changedSet.has(d.id) && !relabeledIds.has(d.id)) return;
             d.w = Math.max(d.w, this.getBBox().width + CELL_LABEL_PADDING);
         });
 
