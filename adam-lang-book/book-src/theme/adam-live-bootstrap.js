@@ -1,6 +1,8 @@
-// Mounts a live SheetInspector into every `.adam-live` div, and a live GraphView into every
-// `.adam-live-graph` div, that the live-examples preprocessor inserted. Each div's
-// `data-example` (e.g. "cells/tuple_typed_cell") names one of the `adam-live-examples.json`
+// Mounts a live SheetInspector into every `.adam-live` div that the live-examples preprocessor
+// inserted. Each `.adam-live-graph` div sharing that mount's `data-example` is not mounted on
+// its own; it's a plain container whose id is handed to the inspector's `mount` call, and the
+// inspector's own sheet drives it via `window.beginGraph` (see `begin/assets/graph.js`). Each
+// div's `data-example` (e.g. "cells/tuple_typed_cell") names one of the `adam-live-examples.json`
 // manifest's entries; the manifest and the compiled adam-lang-book-live wasm/js bundle are both
 // generated into `book-src/theme/` by the book build (see the CI workflow changes), and
 // mdBook's built-in theme-directory mechanism copies everything under `book-src/theme/` into
@@ -58,18 +60,30 @@ function loadScript(url, { module = false } = {}) {
     loadScript(swcUrl, { module: true }),
   ];
   if (graphMounts.length > 0) {
-    // Loaded once at the page level for the same reason `swc.js` is: `GraphView` (mounted by
-    // `mount_graph`) drives D3 through `window.beginGraph` (see `begin/assets/graph.js`), which
+    // Loaded once at the page level for the same reason `swc.js` is: the sheet each inspector
+    // mount owns drives D3 through `window.beginGraph` (see `begin/assets/graph.js`), which
     // expects a global `d3`, regardless of how many `.adam-live-graph` divs the page mounts.
     loaders.push(loadScript(d3Url));
-    // `graph.js` defines `window.beginGraph`, the D3 driver that `GraphView` (mounted by
-    // `mount_graph`) calls via its `onmounted` handler. It's a classic (non-module) IIFE that
-    // sets `window.beginGraph` at load with no top-level `d3` dependency, so it can load in
-    // parallel with `d3.v7.min.js`; both must simply be present before any graph mounts.
+    // `graph.js` defines `window.beginGraph`, the D3 driver each inspector mount's sheet calls
+    // once it has a graph container id to draw into. It's a classic (non-module) IIFE that sets
+    // `window.beginGraph` at load with no top-level `d3` dependency, so it can load in parallel
+    // with `d3.v7.min.js`; both must simply be present before any graph mounts.
     loaders.push(loadScript(graphJsUrl));
   }
-  const [{ default: init, mount, mount_graph: mountGraph }, manifest] = await Promise.all(loaders);
+  const [{ default: init, mount }, manifest] = await Promise.all(loaders);
   await init();
+
+  // Assign each graph container its own id and index it by the example it shows, so each
+  // inspector mount can be handed the ids of the graphs its sheet must drive. The graph divs
+  // are now plain containers graph.js attaches to; the inspector mount owns the sheet.
+  const graphIdsByExample = new Map();
+  graphMounts.forEach((div, index) => {
+    const name = div.dataset.example;
+    const id = `adam-live-graph-${index}`;
+    div.id = id;
+    if (!graphIdsByExample.has(name)) graphIdsByExample.set(name, []);
+    graphIdsByExample.get(name).push(id);
+  });
 
   inspectorMounts.forEach((div, index) => {
     const name = div.dataset.example;
@@ -80,18 +94,7 @@ function loadScript(url, { module = false } = {}) {
     }
     const id = `adam-live-${index}`;
     div.id = id;
-    mount(id, source, name);
-  });
-
-  graphMounts.forEach((div, index) => {
-    const name = div.dataset.example;
-    const source = manifest[name];
-    if (source === undefined) {
-      console.error(`adam-live: no embedded source for "${name}"`);
-      return;
-    }
-    const id = `adam-live-graph-${index}`;
-    div.id = id;
-    mountGraph(id, source, name);
+    const graphIds = graphIdsByExample.get(name) || [];
+    mount(id, source, name, graphIds);
   });
 })();
