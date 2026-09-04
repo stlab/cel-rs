@@ -35,6 +35,7 @@ members = [
     "adam-lsp",
     "adam-web-ui",
     "begin",
+    "ez-adam",
     "xtask",
 ]
 [lib]
