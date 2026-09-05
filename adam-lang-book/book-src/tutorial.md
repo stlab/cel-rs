@@ -59,7 +59,7 @@ See [Chapter 6](outputs.md) for the full treatment.
 
 ## 1.5 Cells and Relationships
 
-A plain `cell` declaration acts as a source or derived cell. Cells are connected by one or more _relationship_ that is a bundle of methods that each satisfy the relationship but solve for a different term.
+A plain `cell` declaration acts as a source or derived cell. Cells are connected by one or more _relationships_, each a bundle of methods that satisfy the relationship but solve for a different term.
 
 For example, if we have two values `a` and `b` where `a == 2b`, that can be represented as:
 
@@ -67,15 +67,15 @@ For example, if we have two values `a` and `b` where `a == 2b`, that can be repr
 {{#include examples/tutorial/basic_relationship.adm2}}
 ```
 
-For any active `relationship`, exactly one method is selected to execute. The method choosen is based on the _strength_ of the cells. Cells that have been written more recently have a higher strength. The initial strength of the cells is determined by the declaration order. Cells declared later have a higher strength.
+For any active `relationship`, exactly one method is selected to execute. The method chosen is based on the _strength_ of the cells. Cells that have been written more recently have a higher strength. The initial strength of the cells is determined by the declaration order. Cells declared later have a higher strength.
 
 In the graph, you can see the flow change as you write `a` or `b`.
 
 <graph sheet="basic_relationship">
 
-The methods in a relationship must be _consistant_. If the result of the selected methed is used to recalculate the non-selected methods, the result should not change the value of the assigned cells within an error epsilon.
+The methods in a relationship must be _consistent_. If the result of the selected method is used to recalculate the non-selected methods, the result should not change the value of the assigned cells within an error epsilon.
 
-Relationship can be chained together. We can express the relationship `a <= b <= c` like this:
+Relationships can be chained together. We can express the relationship `a <= b <= c` like this:
 
 ```adam
 {{#include examples/tutorial/inequality.adm2}}
