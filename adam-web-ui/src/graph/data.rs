@@ -1,7 +1,7 @@
-//! Serialization bridge from [`adam_rs::Sheet`] to D3-ready JSON, for [`crate::graph_view`].
+//! Serialization bridge from [`adam_rs::Sheet`] to D3-ready JSON, for `GraphView`.
 
+use crate::labels::Labels;
 use adam_rs::{CellId, ConditionalId, RelationshipId, Sheet};
-use adam_web_ui::Labels;
 use serde::Serialize;
 use slotmap::Key;
 

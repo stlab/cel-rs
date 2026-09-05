@@ -1,0 +1,15 @@
+sheet inequality {
+    cell a = 10 filter clamp: 0..=100;
+    cell b = 20 filter clamp: 0..=100;
+    cell c = 30 filter clamp: 0..=100;
+
+    relationship {
+        a := min(a, b);
+        b := max(a, b);
+    }
+
+    relationship {
+        b := min(b, c);
+        c := max(b, c);
+    }
+}

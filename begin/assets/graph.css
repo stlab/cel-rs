@@ -1,7 +1,8 @@
-html, body {
-    margin: 0;
-    padding: 0;
+.graph-view {
+    flex: 1;
+    height: 100%;
     overflow: hidden;
+    position: relative;
 }
 
 .bg-layer rect {

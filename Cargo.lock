@@ -91,6 +91,9 @@ dependencies = [
  "cel-std",
  "dioxus",
  "indexmap",
+ "serde",
+ "serde_json",
+ "slotmap",
  "wasm-bindgen",
  "web-sys",
 ]
@@ -383,7 +386,6 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
- "slotmap",
 ]
 
 [[package]]

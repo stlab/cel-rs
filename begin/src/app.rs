@@ -3,15 +3,16 @@
 use adam_rs::Sheet;
 use dioxus::prelude::*;
 
-use crate::bridge::to_graph_data;
 use crate::example_source::{ActiveSource, SourceOrigin, available_examples, load_example_source};
-use crate::graph_view::GraphView;
+use crate::graph_legend::GraphLegend;
+use adam_web_ui::GraphView;
 use adam_web_ui::Labels;
 use adam_web_ui::SheetInspector;
 use adam_web_ui::spectrum::{
     SpActionButton, SpActionGroup, SpDivider, SpHeading, SpIconZoomIn, SpIconZoomOut, SpSideNav,
     SpSideNavItem, SpSwitch, SpTheme,
 };
+use adam_web_ui::to_graph_data;
 use adam_web_ui::{Renderer, build_sheet};
 
 /// Root component: Spectrum theme wrapper with an examples picker, the graph, and
@@ -191,6 +192,7 @@ pub fn App() -> Element {
     let source_id = use_memo(move || active_source.read().file_name());
     let source_text = use_memo(move || active_source.read().text.clone());
     let source_name = use_memo(move || active_source.read().file_name());
+    let graph_id = use_signal(|| "graph-container".to_string());
 
     // Drives graph.js's show/hide-inactive-branches mode via
     // `window.beginGraph.setShowInactive`; lives here (rather than in
@@ -199,13 +201,22 @@ pub fn App() -> Element {
     // (dim, not hide) to match graph.js's own initial `showInactive` value,
     // and persists across example/file switches since `App` is never
     // remounted by them.
+    //
+    // Also writes `window.__beginShowInactive`, mirroring the existing
+    // `window.__beginGraphData` seam: `GraphView`'s effect calls `init` (not
+    // `update`) on a source switch, which builds a brand-new `GraphInstance` in
+    // graph.js — that instance seeds its own `showInactive` from this global
+    // rather than defaulting to `true`, so this toggle's current value survives
+    // a source switch (which this `use_effect` alone would not re-run for,
+    // since `graph_id`/`source_id` aren't read here — only `show_inactive`
+    // itself re-fires this effect).
     let mut show_inactive = use_signal(|| true);
     use_effect(move || {
         let show = *show_inactive.read();
+        let id = graph_id.peek().clone();
         spawn(async move {
             let _ = document::eval(&format!(
-                "if (typeof window.beginGraph !== 'undefined') window.beginGraph.setShowInactive({});",
-                show
+                "window.__beginShowInactive = {show}; if (typeof window.beginGraph !== 'undefined') window.beginGraph.setShowInactive('{id}', {show});"
             ))
             .await;
         });
@@ -239,6 +250,7 @@ pub fn App() -> Element {
 
     rsx! {
         document::Link { rel: "icon", r#type: "image/x-icon", href: "/favicon.ico" }
+        document::Link { rel: "stylesheet", href: asset!("/assets/app-shell.css") }
         document::Link { rel: "stylesheet", href: asset!("/assets/graph.css") }
         document::Link { rel: "stylesheet", href: asset!("/assets/inspector.css") }
         document::Script { src: asset!("/assets/d3.v7.min.js") }
@@ -267,24 +279,27 @@ pub fn App() -> Element {
                         compact: true,
                         SpActionButton {
                             onclick: move |_| {
+                                let id = graph_id.peek().clone();
                                 spawn(async move {
-                                    let _ = document::eval("window.beginGraph.zoomOut();").await;
+                                    let _ = document::eval(&format!("window.beginGraph.zoomOut('{id}');")).await;
                                 });
                             },
                             SpIconZoomOut {}
                         }
                         SpActionButton {
                             onclick: move |_| {
+                                let id = graph_id.peek().clone();
                                 spawn(async move {
-                                    let _ = document::eval("window.beginGraph.resetZoom();").await;
+                                    let _ = document::eval(&format!("window.beginGraph.resetZoom('{id}');")).await;
                                 });
                             },
                             "Fit"
                         }
                         SpActionButton {
                             onclick: move |_| {
+                                let id = graph_id.peek().clone();
                                 spawn(async move {
-                                    let _ = document::eval("window.beginGraph.zoomIn();").await;
+                                    let _ = document::eval(&format!("window.beginGraph.zoomIn('{id}');")).await;
                                 });
                             },
                             SpIconZoomIn {}
@@ -294,7 +309,14 @@ pub fn App() -> Element {
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
                     ExamplesPicker { sheet, labels, active_source, example_names, on_select: on_example_selected }
-                    GraphView { data: graph_data, source_id }
+                    // Positioned wrapper so `GraphLegend` (position: absolute) overlays the
+                    // graph. The legend lives here in `begin`, not inside the shared
+                    // `GraphView`, so the book's live graphs render without it.
+                    div {
+                        style: "flex: 1; position: relative; display: flex; min-height: 0; overflow: hidden;",
+                        GraphView { graph_id, data: graph_data, source_id }
+                        GraphLegend {}
+                    }
                     SheetInspector { sheet, labels, source_text, source_name }
                 }
             }

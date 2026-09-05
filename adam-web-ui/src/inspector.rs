@@ -509,7 +509,7 @@ fn CellRow(
                 {
                     let (min, max) = number_field_bounds(&input.read(), *range.read());
                     let step = is_integer.read().then(|| "1".to_string());
-                    rsx! {
+                    let number_field = rsx! {
                         SpNumberfield {
                             id: field_id.clone(),
                             value: input.read().clone(),
@@ -610,26 +610,39 @@ fn CellRow(
                                 SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{names}" }
                             }
                         }
-                    }
-                }
-                if let Some((lo, hi)) = *range.read() {
-                    SpSlider {
-                        id: format!("cell-{}-{id:?}-slider", dom_id_namespace(&source_name.read())),
-                        value: input.read().clone(),
-                        min: format!("{lo}"),
-                        max: format!("{hi}"),
-                        disabled: flags.read().disabled,
-                        oninput: move |_: FormEvent| {
-                            let ns = dom_id_namespace(&source_name.read());
-                            spawn(async move {
-                                let mut eval = document::eval(&format!(
-                                    r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}-slider").value.toString())"#
-                                ));
-                                let Ok(val) = eval.recv::<String>().await else { return; };
-                                input.set(val.clone());
-                                write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
-                            });
-                        },
+                    };
+                    // A ranged numeric cell shows its slider to the *left* of the number
+                    // field, side by side, rather than stacked below it. The `.cell-slider-row`
+                    // flex rule (inspector.css) lets the slider grow to fill the row while the
+                    // number field keeps its natural width. A non-ranged cell has no slider, so
+                    // it renders the number field alone, unchanged.
+                    if let Some((lo, hi)) = *range.read() {
+                        rsx! {
+                            div {
+                                class: "cell-slider-row",
+                                SpSlider {
+                                    id: format!("cell-{}-{id:?}-slider", dom_id_namespace(&source_name.read())),
+                                    value: input.read().clone(),
+                                    min: format!("{lo}"),
+                                    max: format!("{hi}"),
+                                    disabled: flags.read().disabled,
+                                    oninput: move |_: FormEvent| {
+                                        let ns = dom_id_namespace(&source_name.read());
+                                        spawn(async move {
+                                            let mut eval = document::eval(&format!(
+                                                r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}-slider").value.toString())"#
+                                            ));
+                                            let Ok(val) = eval.recv::<String>().await else { return; };
+                                            input.set(val.clone());
+                                            write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
+                                        });
+                                    },
+                                }
+                                {number_field}
+                            }
+                        }
+                    } else {
+                        number_field
                     }
                 }
             } else {
