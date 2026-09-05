@@ -5,7 +5,9 @@
 //! shared state between them.
 
 use adam_web_ui::spectrum::SpTheme;
-use adam_web_ui::{Renderer, SheetInspector, build_sheet, graph_drive_script, to_graph_data};
+use adam_web_ui::{
+    GraphDrive, Renderer, SheetInspector, build_sheet, graph_drive_script, to_graph_data,
+};
 use dioxus::prelude::*;
 use wasm_bindgen::prelude::*;
 
@@ -69,7 +71,11 @@ fn Root(props: RootProps) -> Element {
                 if is_first {
                     first_drive.set(false);
                 }
-                let call = if is_first { "init" } else { "update" };
+                let call = if is_first {
+                    GraphDrive::Init
+                } else {
+                    GraphDrive::Update
+                };
                 // Read `data` synchronously so this effect re-subscribes to it, then build every
                 // script before the async block: the container ids are all driven with one shared
                 // `init` on the first run (the graphs draw from initial state) and `update` after.

@@ -13,7 +13,8 @@ pub mod spectrum;
 
 pub use build::{BuildOutcome, build_sheet};
 pub use graph::{
-    GraphData, GraphView, LinkData, LinkKind, NodeData, NodeKind, graph_drive_script, to_graph_data,
+    GraphData, GraphDrive, GraphView, LinkData, LinkKind, NodeData, NodeKind, graph_drive_script,
+    to_graph_data,
 };
 pub use inspector::SheetInspector;
 pub use labels::{

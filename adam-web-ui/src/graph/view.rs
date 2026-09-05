@@ -31,24 +31,48 @@ fn source_changed(current_source: &str, initialized_source: &str) -> bool {
     current_source != initialized_source
 }
 
+/// Which `window.beginGraph` driver method a [`graph_drive_script`] invokes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GraphDrive {
+    /// `window.beginGraph.init` — build a fresh D3 instance for the container, replacing any
+    /// existing one (a new sheet, or the first mount).
+    Init,
+    /// `window.beginGraph.update` — push new data into the container's existing instance.
+    Update,
+}
+
+impl GraphDrive {
+    /// The `window.beginGraph` method name this variant invokes.
+    fn method(self) -> &'static str {
+        match self {
+            GraphDrive::Init => "init",
+            GraphDrive::Update => "update",
+        }
+    }
+}
+
 /// Builds the JavaScript that stores `data` (serialized) as container `container_id`'s entry in
-/// `window.__beginGraphData` and invokes `window.beginGraph.<call>(container_id, data)` when the
-/// driver script (`begin/assets/graph.js`) is loaded.
+/// `window.__beginGraphData` and invokes the [`GraphDrive`] method `call` on `window.beginGraph`
+/// when the driver script (`begin/assets/graph.js`) is loaded.
 ///
 /// `container_id` is embedded as a JSON-encoded JS string literal, so any characters it contains
 /// (quotes, backslashes, newlines) are escaped rather than breaking or injecting into the emitted
 /// JS — `graph_id` is a public [`GraphView`] prop, so the id is not assumed to be a bare DOM id.
+/// The invoked method name comes from the [`GraphDrive`] enum, never a free string, so it can
+/// never be an arbitrary (injecting) value.
 ///
-/// - Precondition: `call` is `"init"` or `"update"`.
 /// - Complexity: O(n) in the size of `data` (serialization plus string formatting).
-pub fn graph_drive_script(container_id: &str, data: &GraphData, call: &str) -> String {
+pub fn graph_drive_script(container_id: &str, data: &GraphData, call: GraphDrive) -> String {
     let id = serde_json::to_string(container_id).unwrap_or_else(|_| "\"\"".to_string());
-    let json = serde_json::to_string(data).unwrap_or_default();
+    // Fall back to a valid JS literal (`null`), never an empty string, so the emitted assignment
+    // stays syntactically valid even in the (unreachable for `GraphData`) serialization-failure case.
+    let json = serde_json::to_string(data).unwrap_or_else(|_| "null".to_string());
+    let method = call.method();
     format!(
         "window.__beginGraphData = window.__beginGraphData || {{}}; \
          window.__beginGraphData[{id}] = {json}; \
          if (typeof window.beginGraph !== 'undefined') \
-         window.beginGraph.{call}({id}, window.__beginGraphData[{id}]);"
+         window.beginGraph.{method}({id}, window.__beginGraphData[{id}]);"
     )
 }
 
@@ -81,7 +105,11 @@ pub fn GraphView(
         if is_new_source {
             initialized_source.set(current_source);
         }
-        let call = if is_new_source { "init" } else { "update" };
+        let call = if is_new_source {
+            GraphDrive::Init
+        } else {
+            GraphDrive::Update
+        };
         let script = graph_drive_script(&id, &data.read(), call);
         spawn(async move {
             let _ = document::eval(&script).await;
@@ -149,7 +177,7 @@ mod tests {
 
     #[test]
     fn graph_drive_script_init_calls_begin_graph_init() {
-        let script = graph_drive_script("g1", &empty_graph_data(), "init");
+        let script = graph_drive_script("g1", &empty_graph_data(), GraphDrive::Init);
         // The id is embedded as a JSON string literal (double-quoted).
         assert!(script.contains("window.beginGraph.init(\"g1\""));
         assert!(script.contains("window.__beginGraphData[\"g1\"]"));
@@ -157,19 +185,19 @@ mod tests {
 
     #[test]
     fn graph_drive_script_update_calls_begin_graph_update() {
-        let script = graph_drive_script("g1", &empty_graph_data(), "update");
+        let script = graph_drive_script("g1", &empty_graph_data(), GraphDrive::Update);
         assert!(script.contains("window.beginGraph.update(\"g1\""));
     }
 
     #[test]
     fn graph_drive_script_guards_on_begin_graph_being_defined() {
-        let script = graph_drive_script("g1", &empty_graph_data(), "init");
+        let script = graph_drive_script("g1", &empty_graph_data(), GraphDrive::Init);
         assert!(script.contains("typeof window.beginGraph !== 'undefined'"));
     }
 
     #[test]
     fn graph_drive_script_embeds_the_serialized_data() {
-        let script = graph_drive_script("g1", &empty_graph_data(), "init");
+        let script = graph_drive_script("g1", &empty_graph_data(), GraphDrive::Init);
         // GraphData serializes its fields; `nodes` is always present.
         assert!(script.contains("\"nodes\""));
     }
@@ -179,7 +207,7 @@ mod tests {
         // A container id containing a single quote must not break out of the JS string or
         // inject: JSON-encoding turns `'` into a plain character inside a double-quoted literal,
         // and there must be no raw `'g'` string-open left in the output.
-        let script = graph_drive_script("a'b", &empty_graph_data(), "init");
+        let script = graph_drive_script("a'b", &empty_graph_data(), GraphDrive::Init);
         assert!(script.contains("window.beginGraph.init(\"a'b\""));
         assert!(!script.contains("['a'b']"));
     }
@@ -188,7 +216,7 @@ mod tests {
     fn graph_drive_script_escapes_a_double_quote_and_backslash_in_the_container_id() {
         // JSON-encoding escapes `"` and `\`, so the emitted literal stays a single well-formed
         // JS string rather than terminating early.
-        let script = graph_drive_script("a\"b\\c", &empty_graph_data(), "init");
+        let script = graph_drive_script("a\"b\\c", &empty_graph_data(), GraphDrive::Init);
         assert!(script.contains(r#"window.beginGraph.init("a\"b\\c""#));
     }
 }

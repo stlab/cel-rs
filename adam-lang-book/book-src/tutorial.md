@@ -14,7 +14,7 @@ a `.adm2` file, and the UI controls are constructed entirely from the sheet decl
 
 ## 1.1 A first sheet
 
-An Adam program is a single `sheet`, named, with a body of declarations between braces. A simple sheet declars a couple of source cells:
+An Adam program is a single `sheet`, named, with a body of declarations between braces. A simple sheet declares a couple of source cells:
 
 ```adam
 {{#include examples/tutorial/first_sheet.adm2}}
