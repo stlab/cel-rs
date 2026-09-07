@@ -27,8 +27,10 @@ pub struct CellMeta {
     /// instead of a plain text field.
     pub is_numeric: bool,
     /// `true` if the cell holds one of the 12 integer primitive types (as opposed to
-    /// `f32`/`f64`), so [`crate::SheetInspector`] can set [`crate::spectrum::SpNumberfield`]'s
-    /// `step` to `1` — an integer cell has no fractional steps to land on.
+    /// `f32`/`f64`), so [`crate::SheetInspector`] can set its numeric widget's `step` to `1` —
+    /// [`crate::spectrum::SpNumberfield`]'s, or, for a range-filtered cell,
+    /// [`crate::spectrum::SpSlider`]'s — since an integer cell has no fractional steps to land
+    /// on.
     pub is_integer: bool,
     /// Returns the current cell value as a display string.
     pub display: Box<dyn Fn(&Sheet) -> String>,

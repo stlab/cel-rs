@@ -239,35 +239,26 @@ fn dom_id_namespace(source_name: &str) -> u64 {
     hasher.finish()
 }
 
-/// Returns the `min`/`max` bounds to pass to a cell's [`SpNumberfield`]: `range`'s bounds,
-/// widened if necessary so `current` (the field's own displayed text) always falls within them.
+/// Returns the `min`/`max` bounds to pass to a range-filtered numeric cell's [`SpSlider`]:
+/// `range`'s bounds, widened if necessary so `current` (the field's own displayed text) always
+/// falls within them.
 ///
-/// `sp-number-field` clamps its displayed value to fit whatever `min`/`max` it's given — not
-/// just in response to user input, but on *any* update to `min`, `max`, or `value` where the
-/// three momentarily disagree — and, worse, resets its displayed value to `0` rather than
-/// restoring the true value if `min`/`max` are later removed entirely rather than merely
-/// changed. A range filter's live bounds (`range`, recomputed from the filter's *current*
-/// argument values) can transiently exclude a cell's actual stored value: the filter only
-/// re-clamps a cell at the moment that cell itself is written, so changing another cell its
-/// bounds depend on (e.g. a shared `max` cell) does not retroactively pull this cell back in
-/// range. Widening `range` to always include `current` guarantees the three never disagree, so
-/// the widget never mis-clamps or resets — at the cost of its stepper arrows not disabling
-/// exactly at the filter's true limit while a cell sits outside it, until the cell's own next
-/// write brings it back in range and the true bounds resume being enforced.
-///
-/// - Postcondition: returns `(None, None)` whenever `range` is `None`.
-fn number_field_bounds(
-    current: &str,
-    range: Option<(f64, f64)>,
-) -> (Option<String>, Option<String>) {
-    let Some((lo, hi)) = range else {
-        return (None, None);
-    };
+/// `sp-slider` (and, when `editable`, its inline `sp-number-field`) clamps its displayed value
+/// to fit whatever `min`/`max` it's given — not just in response to user input, but on *any*
+/// update to `min`, `max`, or `value` where the three momentarily disagree — mirroring
+/// `sp-number-field`'s own documented clamp-on-update behavior (see [`SpNumberfield`]). A range
+/// filter's live bounds (`range`, recomputed from the filter's *current* argument values) can
+/// transiently exclude a cell's actual stored value: the filter only re-clamps a cell at the
+/// moment that cell itself is written, so changing another cell its bounds depend on (e.g. a
+/// shared `max` cell) does not retroactively pull this cell back in range. Widening `range` to
+/// always include `current` guarantees the two never disagree, so the widget never mis-clamps —
+/// at the cost of its handle/stepper not disabling exactly at the filter's true limit while a
+/// cell sits outside it, until the cell's own next write brings it back in range and the true
+/// bounds resume being enforced.
+fn slider_bounds(current: &str, range: (f64, f64)) -> (String, String) {
+    let (lo, hi) = range;
     let current = current.parse::<f64>().unwrap_or(lo);
-    (
-        Some(lo.min(current).to_string()),
-        Some(hi.max(current).to_string()),
-    )
+    (lo.min(current).to_string(), hi.max(current).to_string())
 }
 
 /// Returns `true` if `typed`, read as a number, differs from `actual` (a cell's post-write
@@ -351,8 +342,9 @@ fn write_and_propagate(
 }
 
 /// Sidebar panel showing all cells with labels and inputs for writing — a checkbox for
-/// `bool`-typed cells, a number field (plus a live-range slider when the cell has a range
-/// filter) for numeric cells, and a text field for everything else.
+/// `bool`-typed cells, a single editable slider (its label built in) for a numeric cell with a
+/// range filter, a plain number field for any other numeric cell, and a text field for
+/// everything else.
 ///
 /// Editing an input immediately writes the parsed value to the sheet and propagates
 /// constraints. If parsing or propagation fails (for example, non-numeric input or division
@@ -478,191 +470,211 @@ fn CellRow(
     rsx! {
         div {
             style: "margin-bottom: 8px;",
-            SpFieldLabel { for_: field_id.clone(), "{label}" }
-            if *is_bool.read() {
-                SpCheckbox {
-                    id: field_id,
-                    checked: *value.read() == "true",
-                    invalid: flags.read().invalid,
-                    disabled: flags.read().disabled,
-                    onclick: move |_| {
-                        let next = toggled_bool_value(&value.peek());
-                        write_and_propagate(sheet, labels, id, next, has_error, source_text, source_name);
-                        // `sp-checkbox` toggles its own shadow-DOM `checked` state
-                        // natively in response to the click, before this handler runs
-                        // and independent of the `checked` prop below. If the write above
-                        // was rejected, `value` recomputes to the same string as before,
-                        // so Dioxus's diff sees no change and never re-touches the DOM —
-                        // leaving the visual checkbox desynced from the sheet. Force the
-                        // element back to the actual committed value here.
-                        let checked = *value.read() == "true";
-                        let ns = dom_id_namespace(&source_name.read());
-                        spawn(async move {
-                            let _ = document::eval(&format!(
-                                r#"document.getElementById("cell-{ns}-{id:?}").checked = {checked};"#
-                            ))
-                            .await;
-                        });
-                    },
-                }
-            } else if *is_numeric.read() {
+            if let Some((lo, hi)) = *range.read() {
                 {
-                    let (min, max) = number_field_bounds(&input.read(), *range.read());
+                    let (min, max) = slider_bounds(&input.read(), (lo, hi));
                     let step = is_integer.read().then(|| "1".to_string());
                     rsx! {
-                        SpNumberfield {
-                            id: field_id.clone(),
+                        SpSlider {
+                            id: field_id,
+                            label: label.read().clone(),
                             value: input.read().clone(),
                             min,
                             max,
                             step,
-                            invalid: flags.read().invalid,
-                            // An out cell's field is always `disabled` too (its cell is
-                            // always `forced`, never a candidate write target), but
-                            // `readonly` is what actually renders here — a disabled
-                            // `sp-number-field` suppresses `invalid` styling, which would
-                            // hide a failed `require`.
-                            disabled: flags.read().disabled && !flags.read().readonly,
-                            readonly: flags.read().readonly,
+                            editable: true,
+                            disabled: flags.read().disabled,
                             oninput: move |_: FormEvent| {
                                 let ns = dom_id_namespace(&source_name.read());
                                 spawn(async move {
-                                    // Reads the shadow-DOM `<input>`'s raw text, not the host's
-                                    // `value` property: once `min`/`max` are set, `sp-number-field`
-                                    // clamps its own `value` to that range on every keystroke,
-                                    // which would hide an out-of-range-for-type entry from
-                                    // `write_and_propagate` below before it ever sees the digits
-                                    // the user actually typed.
-                                    //
-                                    // `sp-number-field` displays (and lets the user type) numbers
-                                    // grouped and decimal-marked per the resolved locale — e.g.
-                                    // `"1,920"` in `en`, `"1.920,5"` in `de`. `el.numberFormatter`
-                                    // is the exact `Intl.NumberFormat` the element itself renders
-                                    // with, so reading its group/decimal separators here (rather
-                                    // than assuming `,`/`.`) and normalizing the raw text to a
-                                    // plain `.`-decimal, ungrouped string keeps this locale-aware
-                                    // for any resolved locale. Rust only ever sees that normalized
-                                    // form, both for `write_and_propagate` below and for the
-                                    // `value` this component's `value` prop round-trips back —
-                                    // `sp-number-field`'s host `value` is a plain JS `Number`
-                                    // property, so echoing back ungrouped text is required to
-                                    // avoid the element itself parsing it as `NaN`.
-                                    //
-                                    // The stepper buttons (and scroll-wheel/arrow-key stepping)
-                                    // change `value` and fire this same `input` event without ever
-                                    // focusing the field the way Dioxus's `onfocus` can observe:
-                                    // `sp-number-field::stepBy()` calls the DOM `.focus()` method
-                                    // directly on itself, which moves `document.activeElement` but
-                                    // — unlike focus arriving from an actual pointer/keyboard
-                                    // interaction with the field — never dispatches a `focus` event
-                                    // Dioxus's delegated listener sees, so `is_focused` stays stuck
-                                    // at `false` and every stepper click was silently dropped below.
-                                    // Reading `document.activeElement` fresh here, instead of
-                                    // trusting the `is_focused` signal, sidesteps that gap while
-                                    // still discarding a response that arrives after a genuine
-                                    // blur-while-in-flight (`activeElement` has moved on by then).
                                     let mut eval = document::eval(&format!(
-                                        r#"
-                                        const el = document.getElementById("cell-{ns}-{id:?}");
-                                        const raw = el.shadowRoot.querySelector("input").value;
-                                        let group = "", decimal = ".";
-                                        try {{
-                                            for (const p of el.numberFormatter.formatToParts(1234.5)) {{
-                                                if (p.type === "group") group = p.value;
-                                                if (p.type === "decimal") decimal = p.value;
-                                            }}
-                                        }} catch (e) {{}}
-                                        let normalized = group ? raw.split(group).join("") : raw;
-                                        if (decimal && decimal !== ".") {{
-                                            normalized = normalized.split(decimal).join(".");
-                                        }}
-                                        dioxus.send((document.activeElement === el ? "1" : "0") + "|" + normalized);
-                                        "#
+                                        r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value.toString())"#
                                     ));
-                                    let Ok(payload) = eval.recv::<String>().await else { return; };
-                                    let Some((still_focused, val)) = payload.split_once('|') else { return; };
-                                    if still_focused != "1" {
-                                        return;
-                                    }
-                                    input.set(val.to_string());
-                                    write_and_propagate(sheet, labels, id, val, has_error, source_text, source_name);
+                                    let Ok(val) = eval.recv::<String>().await else { return; };
+                                    input.set(val.clone());
+                                    write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
                                 });
                             },
-                            onfocus: move |_| is_focused.set(true),
-                            onblur: move |_| {
-                                is_focused.set(false);
-                                has_error.set(false);
-                            },
-                            // `sp-number-field` only exposes its `negative-help-text` slot
-                            // while its own `invalid` prop is `true` (SWC's `HelpTextManager`
-                            // renders `<slot name="negative-help-text">` vs. a discarded
-                            // pass-through slot based on exactly that), so this always mounts
-                            // when there's a name to show — never independently gated on
-                            // `invalid` here, since `violated_requirement_names` is already
-                            // empty whenever `invalid` is false for an output cell (see
-                            // `OutputStatus::invalid_output_requirement_names`). Names the
-                            // `require` currently failing on this out cell — a stopgap: a real
-                            // message (see `Requirement::from_fn_*`'s own
-                            // `require { name: expression; }` source) would need the sheet to
-                            // carry more than just a name, so this just surfaces the name a
-                            // sheet author already chose.
-                            if let Some(names) = violated_requirement_names.read().clone() {
-                                SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{names}" }
-                            }
+                        }
+                        // `sp-slider` has no `negative-help-text` slot the way
+                        // `sp-number-field` does (see `SpSlider`'s doc comment), so a
+                        // failing `require` on a range-filtered out cell is surfaced as a
+                        // plain sibling `SpHelpText` instead of slotted content — never
+                        // independently gated on `invalid` here, since
+                        // `violated_requirement_names` is already empty whenever `invalid`
+                        // is false for an output cell (see
+                        // `OutputStatus::invalid_output_requirement_names`). Names the
+                        // `require` currently failing on this out cell — a stopgap: a real
+                        // message (see `Requirement::from_fn_*`'s own
+                        // `require { name: expression; }` source) would need the sheet to
+                        // carry more than just a name, so this just surfaces the name a
+                        // sheet author already chose.
+                        if let Some(names) = violated_requirement_names.read().clone() {
+                            SpHelpText { slot: String::new(), variant: "negative".to_string(), "{names}" }
                         }
                     }
                 }
-                if let Some((lo, hi)) = *range.read() {
-                    SpSlider {
-                        id: format!("cell-{}-{id:?}-slider", dom_id_namespace(&source_name.read())),
-                        value: input.read().clone(),
-                        min: format!("{lo}"),
-                        max: format!("{hi}"),
+            } else {
+                SpFieldLabel { for_: field_id.clone(), "{label}" }
+                if *is_bool.read() {
+                    SpCheckbox {
+                        id: field_id,
+                        checked: *value.read() == "true",
+                        invalid: flags.read().invalid,
                         disabled: flags.read().disabled,
+                        onclick: move |_| {
+                            let next = toggled_bool_value(&value.peek());
+                            write_and_propagate(sheet, labels, id, next, has_error, source_text, source_name);
+                            // `sp-checkbox` toggles its own shadow-DOM `checked` state
+                            // natively in response to the click, before this handler runs
+                            // and independent of the `checked` prop below. If the write above
+                            // was rejected, `value` recomputes to the same string as before,
+                            // so Dioxus's diff sees no change and never re-touches the DOM —
+                            // leaving the visual checkbox desynced from the sheet. Force the
+                            // element back to the actual committed value here.
+                            let checked = *value.read() == "true";
+                            let ns = dom_id_namespace(&source_name.read());
+                            spawn(async move {
+                                let _ = document::eval(&format!(
+                                    r#"document.getElementById("cell-{ns}-{id:?}").checked = {checked};"#
+                                ))
+                                .await;
+                            });
+                        },
+                    }
+                } else if *is_numeric.read() {
+                    SpNumberfield {
+                        id: field_id,
+                        value: input.read().clone(),
+                        min: None,
+                        max: None,
+                        step: is_integer.read().then(|| "1".to_string()),
+                        invalid: flags.read().invalid,
+                        // An out cell's field is always `disabled` too (its cell is
+                        // always `forced`, never a candidate write target), but
+                        // `readonly` is what actually renders here — a disabled
+                        // `sp-number-field` suppresses `invalid` styling, which would
+                        // hide a failed `require`.
+                        disabled: flags.read().disabled && !flags.read().readonly,
+                        readonly: flags.read().readonly,
+                        oninput: move |_: FormEvent| {
+                            let ns = dom_id_namespace(&source_name.read());
+                            spawn(async move {
+                                // Reads the shadow-DOM `<input>`'s raw text, not the host's
+                                // `value` property: once `min`/`max` are set, `sp-number-field`
+                                // clamps its own `value` to that range on every keystroke,
+                                // which would hide an out-of-range-for-type entry from
+                                // `write_and_propagate` below before it ever sees the digits
+                                // the user actually typed.
+                                //
+                                // `sp-number-field` displays (and lets the user type) numbers
+                                // grouped and decimal-marked per the resolved locale — e.g.
+                                // `"1,920"` in `en`, `"1.920,5"` in `de`. `el.numberFormatter`
+                                // is the exact `Intl.NumberFormat` the element itself renders
+                                // with, so reading its group/decimal separators here (rather
+                                // than assuming `,`/`.`) and normalizing the raw text to a
+                                // plain `.`-decimal, ungrouped string keeps this locale-aware
+                                // for any resolved locale. Rust only ever sees that normalized
+                                // form, both for `write_and_propagate` below and for the
+                                // `value` this component's `value` prop round-trips back —
+                                // `sp-number-field`'s host `value` is a plain JS `Number`
+                                // property, so echoing back ungrouped text is required to
+                                // avoid the element itself parsing it as `NaN`.
+                                //
+                                // The stepper buttons (and scroll-wheel/arrow-key stepping)
+                                // change `value` and fire this same `input` event without ever
+                                // focusing the field the way Dioxus's `onfocus` can observe:
+                                // `sp-number-field::stepBy()` calls the DOM `.focus()` method
+                                // directly on itself, which moves `document.activeElement` but
+                                // — unlike focus arriving from an actual pointer/keyboard
+                                // interaction with the field — never dispatches a `focus` event
+                                // Dioxus's delegated listener sees, so `is_focused` stays stuck
+                                // at `false` and every stepper click was silently dropped below.
+                                // Reading `document.activeElement` fresh here, instead of
+                                // trusting the `is_focused` signal, sidesteps that gap while
+                                // still discarding a response that arrives after a genuine
+                                // blur-while-in-flight (`activeElement` has moved on by then).
+                                let mut eval = document::eval(&format!(
+                                    r#"
+                                    const el = document.getElementById("cell-{ns}-{id:?}");
+                                    const raw = el.shadowRoot.querySelector("input").value;
+                                    let group = "", decimal = ".";
+                                    try {{
+                                        for (const p of el.numberFormatter.formatToParts(1234.5)) {{
+                                            if (p.type === "group") group = p.value;
+                                            if (p.type === "decimal") decimal = p.value;
+                                        }}
+                                    }} catch (e) {{}}
+                                    let normalized = group ? raw.split(group).join("") : raw;
+                                    if (decimal && decimal !== ".") {{
+                                        normalized = normalized.split(decimal).join(".");
+                                    }}
+                                    dioxus.send((document.activeElement === el ? "1" : "0") + "|" + normalized);
+                                    "#
+                                ));
+                                let Ok(payload) = eval.recv::<String>().await else { return; };
+                                let Some((still_focused, val)) = payload.split_once('|') else { return; };
+                                if still_focused != "1" {
+                                    return;
+                                }
+                                input.set(val.to_string());
+                                write_and_propagate(sheet, labels, id, val, has_error, source_text, source_name);
+                            });
+                        },
+                        onfocus: move |_| is_focused.set(true),
+                        onblur: move |_| {
+                            is_focused.set(false);
+                            has_error.set(false);
+                        },
+                        // `sp-number-field` only exposes its `negative-help-text` slot
+                        // while its own `invalid` prop is `true` (SWC's `HelpTextManager`
+                        // renders `<slot name="negative-help-text">` vs. a discarded
+                        // pass-through slot based on exactly that), so this always mounts
+                        // when there's a name to show — never independently gated on
+                        // `invalid` here, since `violated_requirement_names` is already
+                        // empty whenever `invalid` is false for an output cell (see
+                        // `OutputStatus::invalid_output_requirement_names`). Names the
+                        // `require` currently failing on this out cell — a stopgap: a real
+                        // message (see `Requirement::from_fn_*`'s own
+                        // `require { name: expression; }` source) would need the sheet to
+                        // carry more than just a name, so this just surfaces the name a
+                        // sheet author already chose.
+                        if let Some(names) = violated_requirement_names.read().clone() {
+                            SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{names}" }
+                        }
+                    }
+                } else {
+                    SpTextfield {
+                        id: field_id,
+                        value: input.read().clone(),
+                        invalid: flags.read().invalid,
+                        disabled: flags.read().disabled,
+                        // Dioxus's event serializer only reads event.target.value for
+                        // HTMLInputElement — custom elements (sp-textfield) always give "".
+                        // Use dioxus.send() in JS and eval.recv() to read the live value.
                         oninput: move |_: FormEvent| {
                             let ns = dom_id_namespace(&source_name.read());
                             spawn(async move {
                                 let mut eval = document::eval(&format!(
-                                    r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}-slider").value.toString())"#
+                                    r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value)"#
                                 ));
                                 let Ok(val) = eval.recv::<String>().await else { return; };
+                                // Discard the result if the user blurred while the round-trip was
+                                // in flight; blur already cleared the error and use_effect will
+                                // restore the last valid computed value.
+                                if !*is_focused.read() {
+                                    return;
+                                }
                                 input.set(val.clone());
                                 write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
                             });
                         },
+                        onfocus: move |_| is_focused.set(true),
+                        onblur: move |_| {
+                            is_focused.set(false);
+                            has_error.set(false);
+                        },
                     }
-                }
-            } else {
-                SpTextfield {
-                    id: field_id,
-                    value: input.read().clone(),
-                    invalid: flags.read().invalid,
-                    disabled: flags.read().disabled,
-                    // Dioxus's event serializer only reads event.target.value for
-                    // HTMLInputElement — custom elements (sp-textfield) always give "".
-                    // Use dioxus.send() in JS and eval.recv() to read the live value.
-                    oninput: move |_: FormEvent| {
-                        let ns = dom_id_namespace(&source_name.read());
-                        spawn(async move {
-                            let mut eval = document::eval(&format!(
-                                r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value)"#
-                            ));
-                            let Ok(val) = eval.recv::<String>().await else { return; };
-                            // Discard the result if the user blurred while the round-trip was
-                            // in flight; blur already cleared the error and use_effect will
-                            // restore the last valid computed value.
-                            if !*is_focused.read() {
-                                return;
-                            }
-                            input.set(val.clone());
-                            write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
-                        });
-                    },
-                    onfocus: move |_| is_focused.set(true),
-                    onblur: move |_| {
-                        is_focused.set(false);
-                        has_error.set(false);
-                    },
                 }
             }
         }
@@ -1074,39 +1086,34 @@ mod tests {
     }
 
     #[test]
-    fn number_field_bounds_none_when_no_range() {
-        assert_eq!(number_field_bounds("50", None), (None, None));
-    }
-
-    #[test]
-    fn number_field_bounds_returns_range_unchanged_when_current_is_within_it() {
+    fn slider_bounds_returns_range_unchanged_when_current_is_within_it() {
         assert_eq!(
-            number_field_bounds("50", Some((0.0, 100.0))),
-            (Some("0".to_string()), Some("100".to_string()))
+            slider_bounds("50", (0.0, 100.0)),
+            ("0".to_string(), "100".to_string())
         );
     }
 
     #[test]
-    fn number_field_bounds_widens_max_to_include_a_current_value_above_it() {
+    fn slider_bounds_widens_max_to_include_a_current_value_above_it() {
         assert_eq!(
-            number_field_bounds("150", Some((0.0, 100.0))),
-            (Some("0".to_string()), Some("150".to_string()))
+            slider_bounds("150", (0.0, 100.0)),
+            ("0".to_string(), "150".to_string())
         );
     }
 
     #[test]
-    fn number_field_bounds_widens_min_to_include_a_current_value_below_it() {
+    fn slider_bounds_widens_min_to_include_a_current_value_below_it() {
         assert_eq!(
-            number_field_bounds("-50", Some((0.0, 100.0))),
-            (Some("-50".to_string()), Some("100".to_string()))
+            slider_bounds("-50", (0.0, 100.0)),
+            ("-50".to_string(), "100".to_string())
         );
     }
 
     #[test]
-    fn number_field_bounds_falls_back_to_the_unwidened_range_when_current_does_not_parse() {
+    fn slider_bounds_falls_back_to_the_unwidened_range_when_current_does_not_parse() {
         assert_eq!(
-            number_field_bounds("not a number", Some((0.0, 100.0))),
-            (Some("0".to_string()), Some("100".to_string()))
+            slider_bounds("not a number", (0.0, 100.0)),
+            ("0".to_string(), "100".to_string())
         );
     }
 
