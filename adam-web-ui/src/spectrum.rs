@@ -135,7 +135,11 @@ pub fn SpNumberfield(
 /// the live numeric value off the DOM (not the synthetic event) is the caller's job, mirroring
 /// [`SpTextfield`]/[`SpNumberfield`]. `sp-slider` has no `invalid`/`readonly` state; a caller
 /// that needs to surface either (e.g. a failing `require` on a range-filtered out cell) has to
-/// render that separately, alongside this component.
+/// render that separately, alongside this component. `onfocus`/`onblur` fire for both the drag
+/// handle and (when `editable` is set) the inline number field — neither SWC handle re-dispatches
+/// a bubbling event, but DOM `focus`/`blur` are `composed`, so a listener on this host element
+/// still observes them across the intervening shadow boundaries, mirroring
+/// [`SpTextfield`]/[`SpNumberfield`].
 #[component]
 pub fn SpSlider(
     id: String,
@@ -147,6 +151,8 @@ pub fn SpSlider(
     editable: bool,
     disabled: bool,
     oninput: EventHandler<FormEvent>,
+    onfocus: EventHandler<FocusEvent>,
+    onblur: EventHandler<FocusEvent>,
 ) -> Element {
     rsx! {
         sp-slider {
@@ -159,6 +165,8 @@ pub fn SpSlider(
             "editable": if editable { "true" },
             "disabled": if disabled { "true" },
             oninput: move |e| oninput.call(e),
+            onfocus: move |e| onfocus.call(e),
+            onblur: move |e| onblur.call(e),
         }
     }
 }

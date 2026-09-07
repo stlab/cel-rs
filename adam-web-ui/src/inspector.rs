@@ -491,16 +491,30 @@ fn CellRow(
                                         r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value.toString())"#
                                     ));
                                     let Ok(val) = eval.recv::<String>().await else { return; };
+                                    // Discard the result if the user blurred while the round-trip
+                                    // is in flight; blur already cleared the error and use_effect
+                                    // will restore the last valid computed value.
+                                    if !*is_focused.read() {
+                                        return;
+                                    }
                                     input.set(val.clone());
                                     write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
                                 });
+                            },
+                            onfocus: move |_| is_focused.set(true),
+                            onblur: move |_| {
+                                is_focused.set(false);
+                                has_error.set(false);
                             },
                         }
                         // `sp-slider` has no `negative-help-text` slot the way
                         // `sp-number-field` does (see `SpSlider`'s doc comment), so a
                         // failing `require` on a range-filtered out cell is surfaced as a
-                        // plain sibling `SpHelpText` instead of slotted content — never
-                        // independently gated on `invalid` here, since
+                        // plain sibling `SpHelpText` instead of slotted content — its parent
+                        // here is a plain `div`, not a shadow host, so `slot` has no effect;
+                        // "negative-help-text" is passed anyway (rather than an empty string)
+                        // to match the name used for the same purpose in the non-range branch
+                        // below — never independently gated on `invalid` here, since
                         // `violated_requirement_names` is already empty whenever `invalid`
                         // is false for an output cell (see
                         // `OutputStatus::invalid_output_requirement_names`). Names the
@@ -510,7 +524,7 @@ fn CellRow(
                         // carry more than just a name, so this just surfaces the name a
                         // sheet author already chose.
                         if let Some(names) = violated_requirement_names.read().clone() {
-                            SpHelpText { slot: String::new(), variant: "negative".to_string(), "{names}" }
+                            SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{names}" }
                         }
                     }
                 }
