@@ -1,8 +1,7 @@
 //! Entry point for the `begin` property model development environment.
 mod app;
-mod bridge;
 mod example_source;
-mod graph_view;
+mod graph_legend;
 mod open_file;
 
 use dioxus::prelude::*;

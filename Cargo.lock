@@ -91,6 +91,9 @@ dependencies = [
  "cel-std",
  "dioxus",
  "indexmap",
+ "serde",
+ "serde_json",
+ "slotmap",
  "wasm-bindgen",
  "web-sys",
 ]
@@ -383,7 +386,6 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
- "slotmap",
 ]
 
 [[package]]
@@ -1797,6 +1799,19 @@ dependencies = [
  "rayon-core",
  "smallvec",
  "zune-inflate",
+]
+
+[[package]]
+name = "ez-adam"
+version = "0.1.0"
+dependencies = [
+ "adam-lang",
+ "cel-parser",
+ "cel-std",
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "slotmap",
 ]
 
 [[package]]
