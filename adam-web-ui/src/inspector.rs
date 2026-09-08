@@ -487,16 +487,22 @@ fn CellRow(
                             oninput: move |_: FormEvent| {
                                 let ns = dom_id_namespace(&source_name.read());
                                 spawn(async move {
+                                    // No focus/blur staleness guard here (unlike the number and
+                                    // text fields below): dragging an `sp-slider` handle fires
+                                    // `input` without ever focusing the element — SWC's
+                                    // `SliderHandle` uses pointer capture, not focus, so neither
+                                    // `is_focused` nor `document.activeElement` reports the slider
+                                    // as focused mid-drag, and any such gate would silently drop
+                                    // every drag write. A guard is also unnecessary: the value read
+                                    // is always the slider's live position, never a partially typed
+                                    // buffer, so writing it on each event (even one whose round-trip
+                                    // resolves just after release) only ever commits the current
+                                    // value. `onfocus`/`onblur` are still wired below for the inline
+                                    // editable number field, whose real focus events do fire.
                                     let mut eval = document::eval(&format!(
                                         r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value.toString())"#
                                     ));
                                     let Ok(val) = eval.recv::<String>().await else { return; };
-                                    // Discard the result if the user blurred while the round-trip
-                                    // is in flight; blur already cleared the error and use_effect
-                                    // will restore the last valid computed value.
-                                    if !*is_focused.read() {
-                                        return;
-                                    }
                                     input.set(val.clone());
                                     write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
                                 });
