@@ -116,7 +116,8 @@
 //!
 //! - Every relationship's methods share the same `inputs ∪ outputs` cell set
 //!   ([`Sheet::add_relationship`] validation; [`Error::MismatchedMethodCells`]).
-//! - No two relationships may claim the same cell as a pure output in one round
+//! - No two relationships may claim the same cell as an output in one round —
+//!   self-referencing outputs are claimed exactly like any other
 //!   ([`Error::Conflict`] when infeasible).
 //! - The selected methods' induced dependency digraph is acyclic before execution
 //!   ([`Error::Cycle`]/[`Error::FilterCycle`] when not).

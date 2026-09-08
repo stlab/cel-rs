@@ -77,7 +77,9 @@ pub(crate) fn partition_components(
 /// Executes `assignment`'s chosen methods against `cells`' current values, without
 /// mutating `cells`. Returns the sorted-descending strengths of every self-referencing
 /// output whose tentative value differs from that cell's own `source` (a violated
-/// stay), or `None` if any method returns `Err`.
+/// stay), or `None` if any method returns `Err`, produces the wrong number of outputs,
+/// or produces an output whose runtime type doesn't match its destination cell's
+/// registered type.
 ///
 /// Mirrors `Sheet::execute_plan`'s input rule exactly: a self-referencing input always
 /// reads the cell's real `source`, never a tentative value from this same scoring pass;
@@ -127,6 +129,22 @@ fn score_candidate(
 
         let outputs = (method.function)(&inputs).ok()?;
         if outputs.len() != method.outputs.len() {
+            return None;
+        }
+        if method
+            .outputs
+            .iter()
+            .zip(&outputs)
+            .any(|(&output_id, value)| value.as_ref().type_id() != cells[output_id].type_id)
+        {
+            // A method's declared `output_types` is checked against the destination
+            // cell's registered type at `add_relationship` time, but that can't verify
+            // what a type-erased closure actually produces at runtime for a given
+            // input -- exactly the condition `Sheet::execute_plan` treats as
+            // `Error::TypeMismatch`. Scoring this candidate as worst-case (rather than
+            // inserting the mismatched value into `overlay`) keeps a downstream method
+            // in this same candidate from downcasting it and panicking during planning,
+            // before `execute_plan` ever gets a chance to fail gracefully.
             return None;
         }
 
@@ -376,6 +394,56 @@ mod tests {
 
         assert_eq!(assignment.claimed[&p], rel);
         assert!(!assignment.claimed.contains_key(&q));
+    }
+
+    #[test]
+    fn resolve_component_does_not_panic_on_a_mistyped_functional_output() {
+        // rel2 declares an i32 output type (passing add_relationship's static check
+        // against the cell's registered type) but its closure actually returns a String
+        // at runtime -- add_relationship cannot catch this, since it only validates the
+        // *declared* type, not what a type-erased closure actually produces. rel3 reads
+        // rel2's output as a plain i32 input and downcasts it. Every candidate for this
+        // component runs rel2 (it has only one method) then rel3, regardless of which
+        // side of rel1's self-referencing pair wins -- so if score_candidate doesn't
+        // reject a type-mismatched output before it reaches a downstream consumer, this
+        // panics during planning, before execute_plan ever gets a chance to fail
+        // gracefully with Error::TypeMismatch.
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(5_i32);
+        let y = sheet.add_cell(10_i32);
+        let rel1 = sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([x, y], x, |x: &i32, y: &i32| Ok((*x).min(*y))),
+                Method::from_fn_2_1([x, y], y, |x: &i32, y: &i32| Ok((*x).max(*y))),
+            ])
+            .unwrap();
+
+        let p = sheet.add_cell(0_i32);
+        let i32_ty = std::any::TypeId::of::<i32>();
+        let rel2 = sheet
+            .add_relationship(vec![Method::new(
+                vec![y],
+                vec![p],
+                vec![i32_ty],
+                vec![i32_ty],
+                |_args| Ok(vec![Box::new("oops".to_string()) as Box<dyn Any>]),
+            )])
+            .unwrap();
+
+        let z = sheet.add_cell(0_i32);
+        let rel3 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(p, z, |v: &i32| Ok(*v + 1))])
+            .unwrap();
+
+        let component: HashSet<_> = [rel1, rel2, rel3].into_iter().collect();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            resolve_component(&sheet.cells, &sheet.relationships, &component)
+        }));
+
+        assert!(
+            result.is_ok(),
+            "resolve_component must not panic on a mistyped functional output"
+        );
     }
 
     #[test]
