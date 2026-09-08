@@ -90,8 +90,12 @@ pub(crate) struct Plan {
 ///   cyclic: a genuine algebraic loop with no external input, regardless of strength.
 ///
 /// - Complexity: O(C · R² · M · K) where C = cells, R = active relationships, M =
-///   methods per relationship, K = cells per method — [`release::resolve`] attempts up
-///   to C full re-solves, each up to O(R² · M · K) in the worst case.
+///   methods per relationship, K = cells per method — this bound covers a component with
+///   no self-referencing method, where [`release::resolve`] attempts up to C full
+///   re-solves, each up to O(R² · M · K) in the worst case. A component containing a
+///   self-referencing method is instead resolved by [`stay::resolve_component`]'s
+///   enumerate-and-score approach; see that function's own doc comment for its
+///   complexity.
 pub(crate) fn plan(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,

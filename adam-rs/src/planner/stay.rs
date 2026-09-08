@@ -24,6 +24,8 @@ use super::scc;
 
 /// Returns `true` if any of `rel`'s methods is self-referencing (some cell appears in
 /// both its `inputs` and `outputs`).
+///
+/// - Complexity: O(inputs × outputs) per method.
 pub(crate) fn has_self_reference(rel: &RelationshipData) -> bool {
     rel.methods
         .iter()
@@ -35,6 +37,9 @@ pub(crate) fn has_self_reference(rel: &RelationshipData) -> bool {
 /// self-referencing chain overlapping a functional diamond via a shared cell always
 /// lands in one component — see the design doc's rationale for why no separate cascade
 /// step is needed on top of this.
+///
+/// - Precondition: every relationship in `active` is present in `relationships`, and
+///   every cell reachable from them is present in `cells`.
 ///
 /// - Complexity: O(R + sum of adjacency sizes) via breadth-first search.
 pub(crate) fn partition_components(
@@ -433,8 +438,8 @@ mod tests {
         // were wrongly scored instead, the p-remains-source candidate's spurious
         // violation (attached to y's strength) would beat the other two candidates'
         // zero violations, and p would wrongly end up claimed rather than remaining
-        // the source -- so this test is verified (see task-3-report.md's Finding 1 fix
-        // section) to fail under that mutation, unlike the version it replaces.
+        // the source -- so this test is verified to fail under that mutation, unlike the
+        // version it replaces.
         let mut sheet = Sheet::new();
         let x = sheet.add_cell(5_i32);
         let y = sheet.add_cell(10_i32);
