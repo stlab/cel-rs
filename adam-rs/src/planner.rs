@@ -29,6 +29,7 @@
 //! does not influence method selection above, which discovers the same infeasibility
 //! structurally via failed augmenting-path displacement in [`matching::Assignment::solve`].
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
 use slotmap::SlotMap;
@@ -81,7 +82,12 @@ pub(crate) struct Plan {
 /// Assigns one method per active relationship and returns them in dependency order.
 ///
 /// Only relationships in `active` are planned; relationships outside `active` are
-/// invisible to method selection.
+/// invisible to method selection. `prior_derived` maps each cell with a live derived
+/// value at the start of this round to the relationship that produced it and that value
+/// (see `Sheet::propagate`'s Phase 0), used only when a self-referencing method needs to
+/// decide between reading a self-referencing cell's `source` and its prior derived
+/// value; empty (or missing an entry) means a self-referencing method falls back to
+/// reading `source`, exactly as before this parameter existed.
 ///
 /// # Errors
 ///
@@ -100,13 +106,15 @@ pub(crate) fn plan(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
+    prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
 ) -> Result<Plan, Error> {
     let (forced_outputs, alive) = forced_output_cells(relationships, active);
 
-    let assignment = release::resolve(cells, relationships, active).map_err(|e| match e {
-        ReleaseFailure::NoAssignment => Error::Conflict,
-        ReleaseFailure::NoAcyclicAssignment => Error::Cycle,
-    })?;
+    let assignment =
+        release::resolve(cells, relationships, active, prior_derived).map_err(|e| match e {
+            ReleaseFailure::NoAssignment => Error::Conflict,
+            ReleaseFailure::NoAcyclicAssignment => Error::Cycle,
+        })?;
 
     let mut adj = build_digraph(&assignment, relationships);
     add_filter_edges(&mut adj, cells, &assignment);
@@ -236,7 +244,7 @@ fn forced_output_cells(
 mod tests {
     use crate::planner::PlanStep;
     use crate::{Error, Filter, Method, Sheet};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     // Propagation-behavior tests live in the integration tests.
 
@@ -262,7 +270,9 @@ mod tests {
         let mut active = HashSet::new();
         active.insert(r1);
 
-        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let plan =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
+                .unwrap();
         assert_eq!(plan.execution_order.len(), 1);
         assert!(matches!(plan.execution_order[0], PlanStep::Method(r, _) if r == r1));
     }
@@ -325,7 +335,9 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let plan =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
+                .unwrap();
 
         assert!(plan.forced_outputs.contains(&b));
         assert!(!plan.forced_outputs.contains(&a));
@@ -352,7 +364,9 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let plan =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
+                .unwrap();
 
         assert!(plan.forced_outputs.contains(&b));
         assert!(plan.forced_outputs.contains(&c));
@@ -370,7 +384,9 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let plan =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
+                .unwrap();
 
         assert!(plan.forced_relationships.contains(&rel));
     }
@@ -392,7 +408,9 @@ mod tests {
         sheet.write(b, 3.0_f64).unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let plan =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
+                .unwrap();
 
         assert!(!plan.forced_relationships.contains(&rel));
     }
@@ -418,7 +436,9 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let plan =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
+                .unwrap();
 
         assert!(plan.forced_relationships.contains(&r1));
         assert!(plan.forced_relationships.contains(&r2));
@@ -499,7 +519,9 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let plan =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
+                .unwrap();
 
         assert_eq!(plan.execution_order, vec![PlanStep::Method(rel, 0)]);
     }
@@ -521,7 +543,9 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let plan =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
+                .unwrap();
 
         assert!(
             !plan
@@ -549,7 +573,9 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let plan =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
+                .unwrap();
 
         let reclamp_pos = plan
             .execution_order
@@ -582,7 +608,9 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let plan =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
+                .unwrap();
 
         let reclamp_pos = plan
             .execution_order
@@ -614,7 +642,8 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
+        let result =
+            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new());
         assert!(matches!(result, Err(Error::FilterCycle)));
     }
 }

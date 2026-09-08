@@ -21,8 +21,9 @@
 //! if that combined graph turns out cyclic. Generalizing `resolve` itself to search
 //! around filter edges is tracked as issue #153.
 
+use std::any::Any;
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use slotmap::SlotMap;
 
@@ -49,9 +50,11 @@ pub(crate) enum ReleaseFailure {
 /// component ([`stay::partition_components`]) to whichever algorithm applies: a
 /// component with no self-referencing method is resolved by [`resolve_plain`]
 /// (unchanged strength-lexicographic release); a component containing at least one is
-/// resolved by [`stay::resolve_component`] (value-aware release). The two never
-/// interact, since components are disjoint by construction, so their results merge
-/// directly.
+/// resolved by [`stay::resolve_component`] (value-aware release), which needs
+/// `prior_derived` (the round's pre-Phase-0 snapshot of every cell's `derived` value and
+/// the relationship that produced it, see `Sheet::propagate`) to decide each
+/// self-referencing method's input choice. The two never interact, since components are
+/// disjoint by construction, so their results merge directly.
 ///
 /// Failure precedence is computed across *every* component before returning, matching
 /// the single monolithic pre-partition algorithm's semantics: since components are
@@ -74,6 +77,7 @@ pub(crate) fn resolve(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
+    prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
 ) -> Result<Assignment, ReleaseFailure> {
     let mut plain: HashSet<RelationshipId> = HashSet::new();
     let mut value_aware: Vec<HashSet<RelationshipId>> = Vec::new();
@@ -92,13 +96,15 @@ pub(crate) fn resolve(
     let component_results: Vec<Result<Assignment, ReleaseFailure>> = value_aware
         .iter()
         .map(|component| {
-            stay::resolve_component(cells, relationships, component).ok_or_else(|| {
-                if Assignment::solve(relationships, component, &HashSet::new()).is_some() {
-                    ReleaseFailure::NoAcyclicAssignment
-                } else {
-                    ReleaseFailure::NoAssignment
-                }
-            })
+            stay::resolve_component(cells, relationships, component, prior_derived).ok_or_else(
+                || {
+                    if Assignment::solve(relationships, component, &HashSet::new()).is_some() {
+                        ReleaseFailure::NoAcyclicAssignment
+                    } else {
+                        ReleaseFailure::NoAssignment
+                    }
+                },
+            )
         })
         .collect();
 
@@ -203,7 +209,7 @@ mod tests {
             .unwrap();
         let active: HashSet<_> = [r1, r2].into_iter().collect();
         assert!(matches!(
-            resolve(&sheet.cells, &sheet.relationships, &active),
+            resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new()),
             Err(ReleaseFailure::NoAssignment)
         ));
     }
@@ -223,7 +229,7 @@ mod tests {
             .unwrap();
         let active: HashSet<_> = [r1, r2].into_iter().collect();
         assert!(matches!(
-            resolve(&sheet.cells, &sheet.relationships, &active),
+            resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new()),
             Err(ReleaseFailure::NoAcyclicAssignment)
         ));
     }
@@ -247,7 +253,8 @@ mod tests {
         sheet.write(a, 2.0).unwrap();
         sheet.write(b, 3.0).unwrap();
         let active: HashSet<_> = [rel].into_iter().collect();
-        let assignment = resolve(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let assignment =
+            resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new()).unwrap();
         assert_eq!(assignment.claimed[&c], rel);
         assert!(!assignment.claimed.contains_key(&a));
         assert!(!assignment.claimed.contains_key(&b));
@@ -282,7 +289,7 @@ mod tests {
         sheet.write(a, 3.0).unwrap();
         sheet.write(d, 24.0).unwrap();
         let active: HashSet<_> = [r1, r2].into_iter().collect();
-        let assignment = resolve(&sheet.cells, &sheet.relationships, &active)
+        let assignment = resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
             .expect("a valid acyclic assignment exists for this structure");
         assert_eq!(assignment.chosen.len(), 2);
         let unique: HashSet<_> = assignment.claimed.values().collect();
@@ -328,7 +335,8 @@ mod tests {
         sheet.write(c, 40_i32).unwrap();
 
         let active: HashSet<_> = [rel1, rel2].into_iter().collect();
-        let assignment = resolve(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let assignment =
+            resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new()).unwrap();
 
         assert!(
             !assignment.claimed.contains_key(&a),
@@ -365,7 +373,8 @@ mod tests {
         sheet.write(q, 3.0).unwrap();
 
         let active: HashSet<_> = [rel1, rel2].into_iter().collect();
-        let assignment = resolve(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let assignment =
+            resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new()).unwrap();
 
         assert_eq!(assignment.chosen.len(), 2);
         assert_eq!(
@@ -405,7 +414,7 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let result = resolve(&sheet.cells, &sheet.relationships, &active);
+        let result = resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new());
 
         assert!(matches!(result, Err(ReleaseFailure::NoAssignment)));
     }

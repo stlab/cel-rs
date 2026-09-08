@@ -39,6 +39,7 @@ enum Change {
 
 /// One method chosen per active relationship, and which relationship currently claims
 /// each output cell (self-referencing outputs included).
+#[derive(Default)]
 pub(crate) struct Assignment {
     pub(crate) chosen: HashMap<RelationshipId, usize>,
     pub(crate) claimed: HashMap<CellId, RelationshipId>,
@@ -69,10 +70,7 @@ impl Assignment {
         active: &HashSet<RelationshipId>,
         forbidden: &HashSet<CellId>,
     ) -> Option<Self> {
-        let mut this = Assignment {
-            chosen: HashMap::new(),
-            claimed: HashMap::new(),
-        };
+        let mut this = Assignment::default();
         let order: Vec<RelationshipId> = relationships
             .keys()
             .filter(|r| active.contains(r))
@@ -228,10 +226,7 @@ impl Assignment {
             .keys()
             .filter(|r| active.contains(r))
             .collect();
-        let mut assignment = Assignment {
-            chosen: HashMap::new(),
-            claimed: HashMap::new(),
-        };
+        let mut assignment = Assignment::default();
         search_acyclic(&order, 0, relationships, forbidden, &mut assignment).then_some(assignment)
     }
 
@@ -258,10 +253,7 @@ impl Assignment {
             .keys()
             .filter(|r| active.contains(r))
             .collect();
-        let mut assignment = Assignment {
-            chosen: HashMap::new(),
-            claimed: HashMap::new(),
-        };
+        let mut assignment = Assignment::default();
         let mut results = Vec::new();
         search_acyclic_all(
             &order,

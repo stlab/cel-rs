@@ -2065,3 +2065,40 @@ fn issue_182_inequality_chain_discriminating_case_unchanged() {
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
     assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
 }
+
+#[test]
+fn issue_182_inequality_chain_later_edit_below_earlier_one_repropagates() {
+    // a<=b<=c again. Writing a=25 raises b to 25 too. Writing c=24 then makes the
+    // chain jointly inconsistent unless a also moves down: r2's min-method is
+    // self-referencing on b, and must consult b's *derived* 25 (from r1, a different
+    // relationship) rather than b's stale source of 20 -- otherwise b snaps to 20 and
+    // drags a down to 20 with it, discarding a's higher-strength 25 for a value nobody
+    // asked for. Consulting the derived 25 instead lets r2 settle b (and so a, via r1)
+    // at 24, the strongest value consistent with both edits.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+    sheet.write(a, 25_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(c, 24_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 24);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 24);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 24);
+}

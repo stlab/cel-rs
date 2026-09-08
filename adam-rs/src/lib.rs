@@ -121,8 +121,13 @@
 //!   ([`Error::Conflict`] when infeasible).
 //! - The selected methods' induced dependency digraph is acyclic before execution
 //!   ([`Error::Cycle`]/[`Error::FilterCycle`] when not).
-//! - A self-referencing input always reads the pre-round `source` value, never a
-//!   same-round derived value.
+//! - A self-referencing input never reads a same-round derived value. Across rounds, it
+//!   reads the pre-round `source` value, unless a *different* relationship produced the
+//!   cell's derived value last round, in which case it reads that prior derived value
+//!   instead — this preserves the settled multi-way state a different relationship left
+//!   behind, while a relationship that repeatedly self-references the same cell keeps
+//!   reading `source` every round so it can spring back once contending pressure
+//!   relaxes.
 //! - `source` is written only by [`Sheet::write`]/[`Sheet::add_cell`], never by method
 //!   or filter execution.
 //! - An `Out`-kind cell can never be [`Sheet::write`]-ed or claimed as another method's

@@ -45,7 +45,7 @@ pub struct Sheet {
     /// later and cells written later have strictly higher strength, making the
     /// default method-selection direction deterministic.
     next_strength: u64,
-    last_plan: Option<Vec<PlanStep>>,
+    last_plan: Option<CachedPlan>,
     /// Cells reported forced (see [`Sheet::is_forced`]) by the last full `propagate()`
     /// call. Not recomputed by `propagate_without_replan`.
     last_forced: Option<HashSet<CellId>>,
@@ -73,6 +73,17 @@ pub struct Sheet {
     /// invalidation, matching every other per-cell set/map `Sheet` already maintains
     /// for its own lifetime.
     filter_dependents: HashMap<CellId, Vec<CellId>>,
+}
+
+/// The cached result of the last successful `plan()` call, replayable by
+/// [`Sheet::propagate_without_replan`] without re-invoking the planner.
+struct CachedPlan {
+    execution_order: Vec<PlanStep>,
+    /// The pre-Phase-0 `derived` snapshot `plan()` was given when it produced
+    /// `execution_order`, mapping each cell to the relationship that derived it and its
+    /// value. `propagate_without_replan` replays it unchanged, since it does not re-run
+    /// Phase 0 (there is no new round to snapshot).
+    prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
 }
 
 /// A conditional's evaluated match value: borrowed (existing cell, no allocation) or owned
@@ -127,6 +138,7 @@ impl Sheet {
         self.cells.insert(CellData {
             source: Box::new(value),
             derived: None,
+            derived_by: None,
             type_id: TypeId::of::<T>(),
             strength,
             changed: false,
@@ -855,7 +867,8 @@ impl Sheet {
     /// Returns `false` if no propagation has run yet.
     fn is_relationship_active(&self, rel_id: RelationshipId) -> bool {
         self.last_plan.as_ref().is_some_and(|plan| {
-            plan.iter()
+            plan.execution_order
+                .iter()
                 .any(|step| matches!(step, PlanStep::Method(r, _) if *r == rel_id))
         })
     }
@@ -1274,16 +1287,32 @@ impl Sheet {
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.clear_changed();
 
-        // Phase 0: snapshot cells with a live derived override (for Phase 5 only),
-        // then reset every cell's derived override before planning begins.
+        // Phase 0: snapshot cells with a live derived override (for Phase 5, unchanged
+        // from before this mechanism existed: any shadowed cell counts, self-referencing
+        // or merely conditional), then drain every cell's derived override -- and, only
+        // for a genuinely self-referencing output, the relationship that produced it --
+        // into a per-round snapshot, `prior_derived`, before planning begins. A
+        // self-referencing method may read a value from `prior_derived` instead of
+        // `source` when it is not the same relationship that produced that value -- see
+        // docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md,
+        // Part 2. A cell shadowed only because its relationship is conditional (not
+        // self-referencing) is deliberately excluded from `prior_derived`: it has no
+        // ongoing self-referencing identity to track once that conditional branch
+        // deactivates, and must instead fall through to Phase 5's plain revert-to-source
+        // handling.
         let previously_derived: Vec<CellId> = self
             .cells
             .iter()
             .filter(|(_, cell)| cell.derived.is_some())
             .map(|(id, _)| id)
             .collect();
-        for (_, cell) in self.cells.iter_mut() {
-            cell.derived = None;
+        let mut prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        for (id, cell) in self.cells.iter_mut() {
+            let derived = cell.derived.take();
+            let derived_by = cell.derived_by.take();
+            if let (Some(v), Some(rel_id)) = (derived, derived_by) {
+                prior_derived.insert(id, (rel_id, v));
+            }
         }
 
         // Phase 1: pre-plan for derived match cells.
@@ -1295,8 +1324,13 @@ impl Sheet {
                 .collect();
             let pre_active = self.match_cell_subgraph(&match_cells);
             if !pre_active.is_empty() {
-                let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
-                self.execute_plan(&pre_plan.execution_order, &mut Vec::new())?;
+                let pre_plan = crate::planner::plan(
+                    &self.cells,
+                    &self.relationships,
+                    &pre_active,
+                    &prior_derived,
+                )?;
+                self.execute_plan(&pre_plan.execution_order, &prior_derived, &mut Vec::new())?;
             }
         }
 
@@ -1304,9 +1338,13 @@ impl Sheet {
         let active = self.build_active_set()?;
 
         // Phase 3: general plan on the active set.
-        let plan = crate::planner::plan(&self.cells, &self.relationships, &active)?;
+        let plan = crate::planner::plan(&self.cells, &self.relationships, &active, &prior_derived)?;
         let mut source_filter_violations: Vec<(CellId, FilterViolation)> = Vec::new();
-        self.execute_plan(&plan.execution_order, &mut source_filter_violations)?;
+        self.execute_plan(
+            &plan.execution_order,
+            &prior_derived,
+            &mut source_filter_violations,
+        )?;
 
         // Phase 4: assign derived-cell strengths in evaluation order.
         self.post_process_strengths(&plan.execution_order);
@@ -1395,13 +1433,22 @@ impl Sheet {
 
         self.last_forced = Some(plan.forced_outputs);
         self.last_forced_relationships = Some(plan.forced_relationships);
-        self.last_plan = Some(plan.execution_order);
+        self.last_plan = Some(CachedPlan {
+            execution_order: plan.execution_order,
+            prior_derived,
+        });
         Ok(())
     }
 
     /// Executes `execution_order` without invoking the planner.
     ///
-    /// A `PlanStep::FilterReclamp(id)` step re-evaluates `id`'s filter against `id`'s own
+    /// A `PlanStep::Method` step's self-referencing input reads `source`, unless
+    /// `prior_derived` has an entry for that cell produced by a *different*
+    /// relationship than the one currently self-referencing it, in which case it reads
+    /// that prior value instead — see
+    /// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`,
+    /// Part 2. `prior_derived` is unrelated to filters: a
+    /// `PlanStep::FilterReclamp(id)` step re-evaluates `id`'s filter against `id`'s own
     /// current `source` value (never a possibly-shadowed `derived` — the same
     /// self-referencing-input rule a `PlanStep::Method` step's self-referencing inputs
     /// follow) and its filter arguments' current effective values, writing the result
@@ -1425,23 +1472,32 @@ impl Sheet {
     fn execute_plan(
         &mut self,
         execution_order: &[PlanStep],
+        prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
         filter_violations: &mut Vec<(CellId, FilterViolation)>,
     ) -> Result<(), Error> {
         for step in execution_order {
             match *step {
                 PlanStep::Method(rel_id, method_idx) => {
                     let is_conditional = self.conditional_relationships.contains(&rel_id);
-                    let (outputs, output_ids, shadow_outputs) = {
+                    let (outputs, output_ids, shadow_outputs, self_ref_outputs) = {
                         let method = &self.relationships[rel_id].methods[method_idx];
                         let inputs: Vec<&dyn Any> = method
                             .inputs
                             .iter()
                             .map(|&id| {
                                 if method.outputs.contains(&id) {
-                                    // Self-referencing input: always the pre-execution
-                                    // source, never a derived override from a previous
-                                    // execution.
-                                    self.cells[id].source.as_ref()
+                                    // Self-referencing input: the pre-execution source,
+                                    // unless a *different* relationship produced this
+                                    // round's prior derived value for it (see
+                                    // docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md,
+                                    // Part 2). Either way, never a derived override from
+                                    // this same execution.
+                                    match prior_derived.get(&id) {
+                                        Some((derived_by, prior)) if *derived_by != rel_id => {
+                                            prior.as_ref()
+                                        }
+                                        _ => self.cells[id].source.as_ref(),
+                                    }
                                 } else {
                                     self.cells[id].effective()
                                 }
@@ -1449,12 +1505,16 @@ impl Sheet {
                             .collect();
                         let outputs = (method.function)(&inputs).map_err(Error::MethodFailed)?;
                         let output_ids = method.outputs.clone();
-                        let shadow_outputs: Vec<bool> = method
+                        let self_ref_outputs: Vec<bool> = method
                             .outputs
                             .iter()
-                            .map(|o| method.inputs.contains(o) || is_conditional)
+                            .map(|o| method.inputs.contains(o))
                             .collect();
-                        (outputs, output_ids, shadow_outputs)
+                        let shadow_outputs: Vec<bool> = self_ref_outputs
+                            .iter()
+                            .map(|&self_ref| self_ref || is_conditional)
+                            .collect();
+                        (outputs, output_ids, shadow_outputs, self_ref_outputs)
                     };
 
                     if outputs.len() != output_ids.len() {
@@ -1465,8 +1525,11 @@ impl Sheet {
                         )));
                     }
 
-                    for ((cell_id, new_value), shadow) in
-                        output_ids.into_iter().zip(outputs).zip(shadow_outputs)
+                    for (((cell_id, new_value), shadow), self_ref) in output_ids
+                        .into_iter()
+                        .zip(outputs)
+                        .zip(shadow_outputs)
+                        .zip(self_ref_outputs)
                     {
                         let cell = &mut self.cells[cell_id];
                         let found = new_value.as_ref().type_id();
@@ -1478,6 +1541,16 @@ impl Sheet {
                         }
                         if shadow {
                             cell.derived = Some(new_value);
+                            // Only a genuinely self-referencing output gets `derived_by`
+                            // recorded: a cell shadowed purely because its relationship
+                            // is conditional (not self-referencing) has no ongoing "same
+                            // vs different relationship" identity to track once that
+                            // conditional branch deactivates -- it must revert to
+                            // `source` on the next round exactly as before this
+                            // mechanism existed, not consult a stale value from a
+                            // relationship that isn't even active anymore. See
+                            // `cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another`.
+                            cell.derived_by = self_ref.then_some(rel_id);
                         } else {
                             cell.source = new_value;
                         }
@@ -1540,10 +1613,14 @@ impl Sheet {
     /// Returns `None` if no propagation has run yet, `rel` is not in the cached plan,
     /// or `rel` was added after the last `propagate()` call.
     pub fn selected_method(&self, rel: RelationshipId) -> Option<usize> {
-        self.last_plan.as_ref()?.iter().find_map(|step| match step {
-            PlanStep::Method(r, idx) if *r == rel => Some(*idx),
-            _ => None,
-        })
+        self.last_plan
+            .as_ref()?
+            .execution_order
+            .iter()
+            .find_map(|step| match step {
+                PlanStep::Method(r, idx) if *r == rel => Some(*idx),
+                _ => None,
+            })
     }
 
     /// Returns the input cells of method `idx` in relationship `rel`.
@@ -1577,7 +1654,7 @@ impl Sheet {
         let Some(plan) = &self.last_plan else {
             return false;
         };
-        !plan.iter().any(|step| match step {
+        !plan.execution_order.iter().any(|step| match step {
             PlanStep::Method(rel_id, method_idx) => self
                 .relationships
                 .get(*rel_id)
@@ -1741,18 +1818,24 @@ impl Sheet {
     ///
     /// - Complexity: O(R·K) where R is the number of relationships in the cached plan and K is the maximum cells per method, plus per-method execution cost.
     pub fn propagate_without_replan(&mut self) -> Result<(), Error> {
-        let Some(execution_order) = self.last_plan.take() else {
+        let Some(cached) = self.last_plan.take() else {
             return Err(Error::Conflict);
         };
         self.clear_changed();
         // Discarded: this replays any cached FilterReclamp step's mutation
         // unconditionally, but last_filter_violations stays pinned to the last full
-        // propagate()'s result, per this method's documented contract.
-        let result = self.execute_plan(&execution_order, &mut Vec::new());
+        // propagate()'s result, per this method's documented contract. `prior_derived`
+        // is replayed unchanged from the propagate() call that produced this cached
+        // plan, since there is no new round here to snapshot.
+        let result = self.execute_plan(
+            &cached.execution_order,
+            &cached.prior_derived,
+            &mut Vec::new(),
+        );
         if result.is_ok() {
-            self.post_process_strengths(&execution_order);
+            self.post_process_strengths(&cached.execution_order);
         }
-        self.last_plan = Some(execution_order);
+        self.last_plan = Some(cached);
         result
     }
 }

@@ -191,6 +191,252 @@ split:
 per self-referencing component, merge the resulting `Assignment`s. `Plan`, `Error`, and the
 public `Sheet` API are unchanged: this is entirely internal to `release::resolve`.
 
+**Superseded by Part 2 below**: implementation and further testing (against a live sheet
+with interleaved `write`/`propagate` rounds, not just single-round `resolve_component` unit
+tests) found that Part 1 alone is necessary but not sufficient — a second, deeper bug
+surfaces across *successive* rounds, and fixing it does, after all, touch `Plan` and
+`Sheet::propagate`'s Phase 0. See Part 2.
+
+## Part 2: Self-referencing input across propagate() rounds
+
+**Date added:** 2026-09-08
+**Status:** Draft — found during PR review of Part 1's implementation, before merge.
+
+### Second bug: a continuously-self-referenced cell loses its settled value
+
+Reproduction, continuing directly from Part 1's example (same sheet, same first two steps):
+
+```
+write(a, 25), propagate()   // a=25, b=25, c=30 -- Part 1's fix, correct
+write(c, 24), propagate()   // actual: a=20, b=20, c=24 -- still wrong
+```
+
+Expected: `a=24, b=24, c=24`. `c=24` is now *below* `a`'s stay (25), so `a<=b<=c` cannot hold
+with `a` left at 25 — some violation of `a`'s stay is unavoidable. But the *minimal* correction
+is `a=24` (pulled down exactly to meet `c`), not `a=20`.
+
+After the first round, `b` is not a literal source: `rel1` claimed it (`b := max(a, b)`,
+self-referencing on `b`), writing `25` into `b.derived` and leaving `b.source` at its original
+`add_cell(20)` declaration, untouched (per the shadow-state split). At the *start* of the
+second round, `Sheet::propagate`'s Phase 0 unconditionally resets every cell's `derived` to
+`None` before planning — including `b`'s. By the time `stay::resolve_component` (or, on the
+winning candidate, `Sheet::execute_plan`) evaluates `rel2`'s self-referencing method on `b`
+(`b := min(b, c)`), the self-referencing-input rule reads `cells[b].source`, which is `20`:
+`b`'s only real information about its own recent state — `derived = Some(25)` — was already
+discarded by Phase 0, before planning ever got a chance to use it. `b := min(20, 24) = 20`,
+then `a := min(25, 20) = 20`.
+
+This is not a bug introduced by Part 1's `score_candidate`; it is a pre-existing gap in
+`Sheet::propagate`'s Phase 0 / `execute_plan`'s self-referencing-input rule, which Part 1
+inherited unchanged. It did not surface in Part 1's own test suite because every test there
+exercises only a *single* value-aware round (or rounds where the numbers happen not to expose
+it — `max(a, ghost_b)` and `max(a, true_b)` coincide whenever `a` dominates both, which was
+true in every Part 1 scenario).
+
+### Why "always prefer the last derived value" is also wrong
+
+The obvious-looking fix — self-referencing input reads the cell's last *derived* value if it
+has one, falling back to `source` — breaks the existing, tested
+`self_ref_pressure_persists_without_rewriting_anchor` (`adam-rs/tests/integration.rs`):
+`a := min(a, b)` is *repeatedly* self-referencing across many rounds where only `b` changes.
+That test asserts `a` must keep reading its own frozen `source` every round specifically so it
+can spring back to its original written value once `b`'s downward pressure relaxes; reading
+`a`'s own last-*derived* (clamped) value instead would reintroduce the exact "shrinking
+accumulator" bug the 2026-08-02 `source`/`derived` split was built to prevent — `a` would
+ratchet down and never recover.
+
+The two cases look identical at the mechanism level (a self-referencing input choosing between
+`source` and a prior derived value) but need opposite answers. The distinguishing factor is
+**not** whether the cell has ever been explicitly `write()`-ed (both `a` and `b` have — `b` via
+its `add_cell` declaration, which sets `source` and bumps strength exactly like `write()`
+does). It is a **relative-strength comparison against what the choice affects downstream**:
+
+- In the anchor-pressure test, `b` (the cell applying pressure) is written on every round and
+  so is *always* strictly stronger than `a`. Preferring `source` (the strength-dominant
+  choice) is unconditionally right there; there is never a competing cell whose stay would be
+  better served by the other option.
+- In the inequality-chain case, `rel2`'s self-referencing choice for `b` is not really "about"
+  `b` in isolation — `b`'s value flows into `rel1`, which self-references `a`. Reading `b`'s
+  `source` (20) forces `a` down to 20, violating `a`'s stay (strength from `write(a, 25)`, the
+  second-most-recent write). Reading `b`'s prior *derived* value (25, `b`'s actual settled
+  state as of the end of the previous round) instead lets `rel1` derive `a := min(25, 24) =
+  24` — the *same* stay-violation the chain cannot avoid regardless (since `c=24 < a=25`
+  structurally forces some correction), but no worse than necessary, and it does not
+  additionally clobber `a` down to `b`'s meaningless ghost floor.
+
+So the choice for a *given* self-referencing cell cannot be decided locally, by inspecting only
+that cell's own value: it depends on which relationship is asking. The distinguishing fact
+turns out to be purely structural, not a value comparison at all, and needs no backtracking
+search over the two options:
+
+- In the anchor-pressure test, `a` is self-referenced by the *same* relationship every round
+  (there is only one relationship touching `a`). "Same relationship as last time" always
+  resolves to `source`, which is exactly the spring-back behavior that test requires.
+- In the inequality-chain case, `b`'s prior derived value (25) was produced by `rel1`
+  (`b := max(a, b)`), but the self-reference being resolved this round is `rel2`'s
+  (`b := min(b, c)`) -- a *different* relationship. Reading the prior-derived value precisely
+  here, instead of `source`, is what lets `rel1` re-derive `a` to 24 instead of 20.
+
+So the rule is: a self-referencing input for cell `C`, read by relationship `R`'s method,
+reads `prior_derived[C]` when a prior-derived value exists for `C` *and* it was produced by a
+relationship other than `R`; otherwise it reads `cells[C].source`. This is a deterministic O(1)
+lookup, decided once the method doing the reading is known -- no value comparison, no
+backtracking, and no additional exponential factor on top of Part 1's candidate enumeration.
+
+### Design
+
+**1. `CellData` gains `derived_by: Option<RelationshipId>`,** recording which relationship
+produced the cell's current `derived` value -- but only when that output is *genuinely*
+self-referencing. A cell shadowed only because its relationship is a currently-active
+conditional branch (not self-referencing) never gets `derived_by` set, so a stale value from a
+now-inactive branch is never mistaken for a self-referencing producer (see item 6 below).
+
+**2. `Sheet::propagate`'s Phase 0 stops discarding `derived` outright -- it relocates the
+genuinely self-referencing part of it.**
+
+Phase 0 still computes `previously_derived` (every cell with a live `derived`, feeding Phase
+5's existing revert-tracking) exactly as before, by an independent scan of
+`cell.derived.is_some()` -- this list must stay untouched by the new mechanism, since it also
+covers conditional-only shadowing, which `derived_by` deliberately does not track. Separately,
+draining `derived` also drains `derived_by`, and where *both* are `Some` the pair is kept in a
+per-round snapshot:
+
+```rust
+let mut prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+for (id, cell) in self.cells.iter_mut() {
+    let derived = cell.derived.take();
+    let derived_by = cell.derived_by.take();
+    if let (Some(v), Some(rel_id)) = (derived, derived_by) {
+        prior_derived.insert(id, (rel_id, v));
+    }
+}
+```
+
+`cell.derived` ends up `None` either way (same observable state for `effective()`/`read()`
+during planning), but a genuinely self-referencing value is no longer lost -- it is available,
+for this round only, as `prior_derived`, threaded through `plan()` into
+`stay::resolve_component`/`score_candidate` and back out to `execute_plan`.
+
+**3. `stay::self_reference` replaces the unconditional "self-referencing input always reads
+`source`" rule with the same-vs-different-relationship lookup:**
+
+```rust
+fn self_reference<'a>(
+    output_id: CellId,
+    rel_id: RelationshipId,
+    cells: &'a SlotMap<CellId, CellData>,
+    prior_derived: &'a HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
+) -> &'a dyn Any {
+    match prior_derived.get(&output_id) {
+        Some((derived_by, prior)) if *derived_by != rel_id => prior.as_ref(),
+        _ => cells[output_id].source.as_ref(),
+    }
+}
+```
+
+`score_candidate` (Part 1, step 4) calls this for every self-referencing input instead of
+reading `cells[id].source.as_ref()` directly; `Sheet::execute_plan` does the same for the
+`PlanStep::Method` case. No search is layered on top: this is a single lookup per
+self-referencing input, evaluated once per candidate execution exactly as the old
+unconditional rule was.
+
+**4. `stay::has_own_stay` decides whether a self-referencing output still has an independent
+stay of its own to violate:**
+
+```rust
+fn has_own_stay(
+    output_id: CellId,
+    rel_id: RelationshipId,
+    prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
+) -> bool {
+    !matches!(prior_derived.get(&output_id), Some((derived_by, _)) if *derived_by != rel_id)
+}
+```
+
+When `self_reference` resolves to a *different* relationship's prior-derived value, that value
+is itself derived, not an independently asserted stay -- scoring the tentative output against
+`source` in that case would wrongly penalize the cell for not equalling a value that was never
+its own. `score_candidate`'s violation check is gated on `has_own_stay`, so only cells that
+still have a real stay of their own (no entry, or an entry produced by this same relationship)
+are scored; a downstream cell's own violation already carries the real cost of the choice (see
+`stay.rs`'s doc comments for the verification that skipping this check reintroduces a tie
+between the correct and incorrect outcomes).
+
+**5. `resolve_component` and `plan()`/`release::resolve()` are structurally unchanged.**
+`Assignment` and `Plan` gain no new field: `resolve_component` still just enumerates
+structural candidates via `solve_acyclic_all` and scores each with `score_candidate` (now
+threading `prior_derived` through), exactly as Part 1 already did. `prior_derived` itself is
+the only new value passed down the call chain (`plan()` takes it as a new parameter, threaded
+from `Sheet::propagate`'s Phase 0 through `release::resolve` and `stay::resolve_component`) --
+there is no extra thing to select among, so there is nothing new to merge across components or
+carry on `Plan`.
+
+**6. `Sheet::execute_plan` writes `derived_by` only for genuinely self-referencing outputs:**
+
+```rust
+let self_ref_outputs: Vec<bool> = method.outputs.iter().map(|o| method.inputs.contains(o)).collect();
+let shadow_outputs: Vec<bool> = self_ref_outputs.iter().map(|&self_ref| self_ref || is_conditional).collect();
+```
+
+and, when writing each output:
+
+```rust
+if shadow {
+    cell.derived = Some(new_value);
+    cell.derived_by = self_ref.then_some(rel_id);
+} else {
+    cell.source = new_value;
+}
+```
+
+A cell shadowed only because it belongs to the active branch of a conditional relationship
+(`is_conditional`, not self-referencing) gets `derived` set but `derived_by` left `None` --
+this is what keeps `prior_derived` (Part 2's mechanism) and `previously_derived` (Phase 5's
+pre-existing revert-tracking) independent, so a branch deactivating still reverts its cells to
+`source` exactly as it always has, unaffected by this design.
+
+### Interaction with Part 1
+
+This does not change Part 1's steps or its overall selection criterion (lexicographically
+fewest/weakest violated stays, tie-broken by source-set strength): it only changes what value
+a self-referencing input actually reads during execution, and which outputs count toward the
+violated-stay vector. A component with no self-referencing method is completely unaffected
+(such a component has no self-referencing outputs, so `self_reference`/`has_own_stay` are
+never consulted for it). A self-referencing component whose cells have no live
+`prior_derived` value at all (the very first `propagate()` call, or a chain where nothing was
+actually derived last round) also degenerates to exactly Part 1's original behavior, since
+`self_reference` falls through to `source` whenever `prior_derived` has no entry.
+
+### Updated Non-goals
+
+Part 1's claim "No change to `Method`, `Filter`, `Plan`, or any public `Sheet` API: entirely
+internal to `release::resolve`" still holds for `Plan`'s fields and every *public* API.
+`planner::plan()`'s and `release::resolve()`'s `pub(crate)` signatures gain a new
+`prior_derived` parameter, and `CellData` (already `pub(crate)`) gains the `derived_by` field;
+neither is visible outside the crate.
+
+### Updated Testing
+
+New in `adam-rs/tests/integration.rs` (extends the existing three-write-round shape):
+
+- `issue_182_inequality_chain_later_edit_below_earlier_one_repropagates`: continuing directly
+  from `issue_182_inequality_chain_preserves_a_consistent_edit`'s first two steps
+  (`write(a, 25)`, propagate), `write(c, 24)`, propagate, expecting `a=24, b=24, c=24` -- the
+  reproduction above, confirming the minimal-necessary-violation outcome once `c` drops below
+  `a`'s stay.
+- Unit-level tests in `adam-rs/src/planner/stay.rs` (`self_reference_reads_prior_derived_when_produced_by_a_different_relationship`,
+  `self_reference_reads_source_when_prior_derived_was_produced_by_the_same_relationship`,
+  `self_reference_reads_source_when_no_prior_derived_value_exists`, and the equivalent trio
+  for `has_own_stay`) exercising the same-vs-different-relationship rule directly against a
+  hand-built `prior_derived`, independent of any full `propagate()` round.
+- A regression confirming `self_ref_pressure_persists_without_rewriting_anchor` still passes
+  unmodified: verified against the implementation (not just argued from the design), since `a`
+  there is self-referenced by the same relationship every round, so `self_reference` always
+  falls through to `source`, exactly as before this design.
+- A regression confirming `cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another`
+  and `changed_reports_cell_reverted_by_conditional_deactivation` still pass unmodified,
+  guarding the `derived_by`/conditional-branch independence from item 6 above.
+
 ## Alternatives considered
 
 The issue's Option 2 models inequalities as filters instead of self-referencing
@@ -220,12 +466,15 @@ Enforced by code:
 
 - Every relationship's methods share the same `inputs ∪ outputs` cell set
   (`Sheet::add_relationship` validation; `Error::MismatchedMethodCells`).
-- No two relationships may claim the same cell as a pure output in one round
-  (`planner::matching::Assignment`; `Error::Conflict` when infeasible).
+- No two relationships may claim the same cell as an output in one round — self-referencing
+  outputs are claimed exactly like any other (`planner::matching::Assignment`;
+  `Error::Conflict` when infeasible).
 - The selected methods' induced dependency digraph is acyclic before execution
   (`planner::digraph::is_acyclic`; `Error::Cycle`/`Error::FilterCycle` when not).
-- A self-referencing input always reads the pre-round `source` value, never a same-round
-  `derived` value (`Sheet::execute_plan`).
+- A self-referencing input never reads a same-round `derived` value (`Sheet::execute_plan`).
+  Across rounds, it reads the pre-round `source` value, unless a *different* relationship
+  produced the cell's derived value last round, in which case it reads that prior derived
+  value instead (Part 2, above).
 - `source` is written only by `write()`/`add_cell`, never by method or filter execution; the
   entire `source`/`derived` shadow-state split exists to uphold this.
 - An `Out`-kind cell can never be `write()`-ed or claimed as another method's output

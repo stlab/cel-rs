@@ -74,16 +74,63 @@ pub(crate) fn partition_components(
     components
 }
 
+/// Returns the value a self-referencing input for `output_id`, claimed by `rel_id`,
+/// should read: `prior_derived[output_id]`'s value if it exists and was produced by a
+/// *different* relationship than `rel_id`, else `cells[output_id].source`.
+///
+/// The two cases this distinguishes: a relationship repeatedly self-clamping the same
+/// cell round after round (e.g. `a := min(a, b)`, tested by
+/// `self_ref_pressure_persists_without_rewriting_anchor`) must keep reading its own true
+/// `source` every round to preserve spring-back once the clamp relaxes -- reading its
+/// own prior *derived* (already-clamped) value instead would reintroduce the exact
+/// "shrinking accumulator" bug the `source`/`derived` split exists to prevent. But a
+/// *different* relationship self-referencing a cell that some other relationship
+/// derived last round needs that cell's actual settled state, not a stale value that
+/// predates it ever being derived (issue #182's second bug). See
+/// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`,
+/// Part 2.
+///
+/// - Complexity: O(1).
+fn self_reference<'a>(
+    output_id: CellId,
+    rel_id: RelationshipId,
+    cells: &'a SlotMap<CellId, CellData>,
+    prior_derived: &'a HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
+) -> &'a dyn Any {
+    match prior_derived.get(&output_id) {
+        Some((derived_by, prior)) if *derived_by != rel_id => prior.as_ref(),
+        _ => cells[output_id].source.as_ref(),
+    }
+}
+
+/// Returns `true` if `output_id`, self-referenced by `rel_id`, has an independent stay
+/// of its own to violate: `source` (when [`self_reference`] would return it, i.e. no
+/// prior-derived entry exists, or it belongs to `rel_id` itself). Returns `false` when
+/// [`self_reference`] would instead return a *different* relationship's prior derived
+/// value -- that value is itself derived, not an independently asserted stay, so there
+/// is nothing meaningful to compare the tentative output against; scoring one would
+/// wrongly penalize a cell for not equalling a value that was never its own to begin
+/// with (verified: two cells with a genuine choice tie at equal violation counts unless
+/// this check is skipped, since the *downstream* cell's own violation already carries
+/// the real cost).
+///
+/// - Complexity: O(1).
+fn has_own_stay(
+    output_id: CellId,
+    rel_id: RelationshipId,
+    prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
+) -> bool {
+    !matches!(prior_derived.get(&output_id), Some((derived_by, _)) if *derived_by != rel_id)
+}
+
 /// Executes `assignment`'s chosen methods against `cells`' current values, without
 /// mutating `cells`. Returns the sorted-descending strengths of every self-referencing
-/// output whose tentative value differs from that cell's own `source` (a violated
-/// stay), or `None` if any method returns `Err`, produces the wrong number of outputs,
-/// or produces an output whose runtime type doesn't match its destination cell's
-/// registered type.
+/// output that has an independent stay to violate ([`has_own_stay`]) whose tentative
+/// value differs from its own `source` (a violated stay), or `None` if any method
+/// returns `Err`, produces the wrong number of outputs, or produces an output whose
+/// runtime type doesn't match its destination cell's registered type.
 ///
-/// Mirrors `Sheet::execute_plan`'s input rule exactly: a self-referencing input always
-/// reads the cell's real `source`, never a tentative value from this same scoring pass;
-/// every other input reads a prior method's tentative output if this pass already
+/// Every other input reads a prior method's tentative output if this pass already
 /// produced one, else the cell's real current `effective()` value. A purely functional
 /// (non-self-referencing) output is executed, since a downstream method may depend on
 /// it, but never scored — only a self-referencing output has a stay to violate.
@@ -96,6 +143,7 @@ fn score_candidate(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     assignment: &Assignment,
+    prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
 ) -> Option<Vec<u64>> {
     let adj = digraph::build_digraph(assignment, relationships);
     let mut components = scc::tarjan_scc(&adj);
@@ -117,7 +165,7 @@ fn score_candidate(
             .iter()
             .map(|&id| {
                 if method.outputs.contains(&id) {
-                    cells[id].source.as_ref()
+                    self_reference(id, rel_id, cells, prior_derived)
                 } else {
                     overlay
                         .get(&id)
@@ -149,7 +197,8 @@ fn score_candidate(
         }
 
         for (&output_id, value) in method.outputs.iter().zip(outputs) {
-            if method.inputs.contains(&output_id) {
+            if method.inputs.contains(&output_id) && has_own_stay(output_id, rel_id, prior_derived)
+            {
                 let cell = &cells[output_id];
                 if !(cell.eq_fn)(value.as_ref(), cell.source.as_ref()) {
                     violated.push(cell.strength);
@@ -188,6 +237,7 @@ pub(crate) fn resolve_component(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     component: &HashSet<RelationshipId>,
+    prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
 ) -> Option<Assignment> {
     let candidates =
         matching::Assignment::solve_acyclic_all(relationships, component, &HashSet::new());
@@ -200,8 +250,8 @@ pub(crate) fn resolve_component(
     candidates
         .into_iter()
         .map(|assignment| {
-            let violated =
-                score_candidate(cells, relationships, &assignment).unwrap_or(vec![u64::MAX]);
+            let violated = score_candidate(cells, relationships, &assignment, prior_derived)
+                .unwrap_or_else(|| vec![u64::MAX]);
             let mut source_strengths: Vec<u64> = source_cells
                 .iter()
                 .filter(|c| !assignment.claimed.contains_key(c))
@@ -292,6 +342,100 @@ mod tests {
     }
 
     #[test]
+    fn self_reference_reads_prior_derived_when_produced_by_a_different_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel1 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        let rel2 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+            .unwrap();
+        let mut prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        prior_derived.insert(b, (rel1, Box::new(42_i32)));
+
+        let value = self_reference(b, rel2, &sheet.cells, &prior_derived);
+
+        assert_eq!(*value.downcast_ref::<i32>().unwrap(), 42);
+    }
+
+    #[test]
+    fn self_reference_reads_source_when_prior_derived_was_produced_by_the_same_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(7_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        let mut prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        prior_derived.insert(b, (rel, Box::new(42_i32)));
+
+        let value = self_reference(b, rel, &sheet.cells, &prior_derived);
+
+        assert_eq!(*value.downcast_ref::<i32>().unwrap(), 7);
+    }
+
+    #[test]
+    fn self_reference_reads_source_when_no_prior_derived_value_exists() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(7_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+
+        let prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        let value = self_reference(b, rel, &sheet.cells, &prior_derived);
+
+        assert_eq!(*value.downcast_ref::<i32>().unwrap(), 7);
+    }
+
+    #[test]
+    fn has_own_stay_false_when_self_reference_resolves_to_a_different_relationships_prior_value() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel1 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        let rel2 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+            .unwrap();
+        let mut prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        prior_derived.insert(b, (rel1, Box::new(1_i32)));
+
+        assert!(!has_own_stay(b, rel2, &prior_derived));
+    }
+
+    #[test]
+    fn has_own_stay_true_when_prior_derived_was_produced_by_the_same_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        let mut prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        prior_derived.insert(b, (rel, Box::new(1_i32)));
+
+        assert!(has_own_stay(b, rel, &prior_derived));
+    }
+
+    #[test]
+    fn has_own_stay_true_when_no_prior_derived_value_exists() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+
+        let prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        assert!(has_own_stay(b, rel, &prior_derived));
+    }
+
+    #[test]
     fn resolve_component_prefers_the_consistent_edit_over_the_higher_strength_cell() {
         // Issue #182: a<=b<=c. Writing a=25 then c=40 is jointly consistent (any
         // b in [25,40] satisfies a<=b<=c), so a's edit must survive even though c's
@@ -316,8 +460,13 @@ mod tests {
         sheet.write(c, 40_i32).unwrap();
 
         let component: HashSet<_> = [rel1, rel2].into_iter().collect();
-        let assignment = resolve_component(&sheet.cells, &sheet.relationships, &component)
-            .expect("a valid acyclic assignment exists");
+        let assignment = resolve_component(
+            &sheet.cells,
+            &sheet.relationships,
+            &component,
+            &HashMap::new(),
+        )
+        .expect("a valid acyclic assignment exists");
 
         assert!(
             !assignment.claimed.contains_key(&a),
@@ -353,8 +502,13 @@ mod tests {
         sheet.write(c, 100_i32).unwrap();
 
         let component: HashSet<_> = [rel1, rel2].into_iter().collect();
-        let assignment = resolve_component(&sheet.cells, &sheet.relationships, &component)
-            .expect("a valid acyclic assignment exists");
+        let assignment = resolve_component(
+            &sheet.cells,
+            &sheet.relationships,
+            &component,
+            &HashMap::new(),
+        )
+        .expect("a valid acyclic assignment exists");
 
         assert!(
             !assignment.claimed.contains_key(&c),
@@ -389,8 +543,13 @@ mod tests {
             .unwrap();
 
         let component: HashSet<_> = [rel].into_iter().collect();
-        let assignment = resolve_component(&sheet.cells, &sheet.relationships, &component)
-            .expect("a valid acyclic assignment exists");
+        let assignment = resolve_component(
+            &sheet.cells,
+            &sheet.relationships,
+            &component,
+            &HashMap::new(),
+        )
+        .expect("a valid acyclic assignment exists");
 
         assert_eq!(assignment.claimed[&p], rel);
         assert!(!assignment.claimed.contains_key(&q));
@@ -437,7 +596,12 @@ mod tests {
 
         let component: HashSet<_> = [rel1, rel2, rel3].into_iter().collect();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            resolve_component(&sheet.cells, &sheet.relationships, &component)
+            resolve_component(
+                &sheet.cells,
+                &sheet.relationships,
+                &component,
+                &HashMap::new(),
+            )
         }));
 
         assert!(
@@ -480,8 +644,13 @@ mod tests {
         sheet.write(d, 999_i32).unwrap();
 
         let component: HashSet<_> = [rel1, rel2, rel3].into_iter().collect();
-        let assignment = resolve_component(&sheet.cells, &sheet.relationships, &component)
-            .expect("a valid acyclic assignment exists");
+        let assignment = resolve_component(
+            &sheet.cells,
+            &sheet.relationships,
+            &component,
+            &HashMap::new(),
+        )
+        .expect("a valid acyclic assignment exists");
 
         assert!(
             !assignment.claimed.contains_key(&a),
@@ -529,8 +698,13 @@ mod tests {
             .unwrap();
 
         let component: HashSet<_> = [rel1, rel2].into_iter().collect();
-        let assignment = resolve_component(&sheet.cells, &sheet.relationships, &component)
-            .expect("a valid acyclic assignment exists");
+        let assignment = resolve_component(
+            &sheet.cells,
+            &sheet.relationships,
+            &component,
+            &HashMap::new(),
+        )
+        .expect("a valid acyclic assignment exists");
 
         assert!(
             !assignment.claimed.contains_key(&p),
