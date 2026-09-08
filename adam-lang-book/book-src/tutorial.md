@@ -90,8 +90,6 @@ This example also demonstrates two additional features.
 
 You can see the effect of the second behavior by sliding `a` to `100` which will pull `b` and `c` to `100` and then slide `a` back to `0`. `b` and `c` will return to their prior values.
 
-> _Note: There is an [open issue](https://github.com/stlab/cel-rs/issues/182) with this example that is being actively worked on._
-
 In [Chapter 7](relationships.md) you will see relationships are not limited in their arity (you can have n-way relationships with each method solving for 1 or more cells).
 
 ### 1.5.1 Two structural rules on a relationship's methods
