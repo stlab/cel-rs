@@ -375,17 +375,18 @@ mod tests {
         let components = partition_components(&sheet.cells, &sheet.relationships, &active);
 
         assert_eq!(components.len(), 2);
-        let expected: HashSet<HashSet<RelationshipId>> = [
-            [rel1].into_iter().collect(),
-            [rel2].into_iter().collect(),
-        ]
-        .into_iter()
-        .collect();
-        let actual: HashSet<HashSet<RelationshipId>> = components.into_iter().collect();
-        assert_eq!(actual, expected);
+        let comp1: HashSet<_> = [rel1].into_iter().collect();
+        let comp2: HashSet<_> = [rel2].into_iter().collect();
+        assert!(
+            (components[0] == comp1 && components[1] == comp2)
+                || (components[0] == comp2 && components[1] == comp1)
+        );
     }
 }
 ```
+
+(Note: `HashSet<T>` does not implement `Hash`, so a `HashSet<HashSet<RelationshipId>>` does
+not compile — the assertion above checks both valid orderings directly instead.)
 
 - [ ] **Step 3: Run tests to verify they fail**
 
