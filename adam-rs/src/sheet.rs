@@ -1455,8 +1455,12 @@ impl Sheet {
     /// into `id`'s `derived` unconditionally — `source` is never touched by this step,
     /// exactly as it's never touched by any other self-referencing method's output. A
     /// `PlanStep::Method` step's outputs follow the existing shadow/non-shadow rule,
-    /// unchanged. A reclamp whose filter returns `Err`, or a value of the wrong type, is
-    /// pushed into `filter_violations` instead of aborting; the cell's stored value is
+    /// unchanged; a non-shadow output also clears any leftover `derived`/`derived_by`
+    /// from an earlier step in this same call (e.g. Phase 1 shadowing a cell that a
+    /// later Phase 3 step then claims as a plain output), so `effective()` reflects the
+    /// fresh `source` write rather than a stale override. A reclamp whose filter
+    /// returns `Err`, or a value of the wrong type, is pushed into `filter_violations`
+    /// instead of aborting; the cell's stored value is
     /// left untouched in that case (its `derived` stays unset, so `read()` falls back to
     /// `source`).
     ///
@@ -1553,6 +1557,8 @@ impl Sheet {
                             cell.derived_by = self_ref.then_some(rel_id);
                         } else {
                             cell.source = new_value;
+                            cell.derived = None;
+                            cell.derived_by = None;
                         }
                         if !cell.changed {
                             cell.changed = true;
@@ -1849,9 +1855,11 @@ mod tests {
         CellKind, ConditionalId, Error, MatchExpr, Method, Requirement, Sheet,
         cell::CellId,
         filter::{Filter, FilterKind, FilterViolation},
+        planner::PlanStep,
         relationship::RelationshipId,
     };
     use std::any::{Any, TypeId};
+    use std::collections::HashMap;
 
     #[test]
     fn add_cell_has_cell_kind() {
@@ -1879,6 +1887,50 @@ mod tests {
         // (a same-index key from a second fresh SlotMap
         // would otherwise collide with `sheet`'s own key)
         assert_eq!(sheet.cell_kind(bogus), None);
+    }
+
+    #[test]
+    fn execute_plan_clears_a_stale_derived_override_on_a_later_plain_write() {
+        // Simulates two execute_plan calls within one propagate() (e.g. Phase 1 then
+        // Phase 3) without an intervening Phase 0 reset: the first shadows `x` via a
+        // self-referencing method; the second claims `x` as a plain (non-self,
+        // non-conditional) output of a different relationship. `x`'s stale `derived`
+        // override from the first call must not survive to mask the second call's
+        // fresh `source` write.
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(1_i32);
+        let y = sheet.add_cell(2_i32);
+        let z = sheet.add_cell(10_i32);
+        let self_ref = sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([x, y], x, |a: &i32, b: &i32| Ok((*a).min(*b))),
+                Method::from_fn_2_1([x, y], y, |a: &i32, b: &i32| Ok((*a).max(*b))),
+            ])
+            .unwrap();
+        let plain = sheet
+            .add_relationship(vec![Method::from_fn_1_1(z, x, |v: &i32| Ok(*v + 1))])
+            .unwrap();
+
+        let empty_prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        sheet
+            .execute_plan(
+                &[PlanStep::Method(self_ref, 0)],
+                &empty_prior_derived,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(*sheet.read::<i32>(x).unwrap(), 1);
+
+        sheet.write(z, 41_i32).unwrap();
+        sheet
+            .execute_plan(
+                &[PlanStep::Method(plain, 0)],
+                &empty_prior_derived,
+                &mut Vec::new(),
+            )
+            .unwrap();
+
+        assert_eq!(*sheet.read::<i32>(x).unwrap(), 42);
     }
 
     #[test]
