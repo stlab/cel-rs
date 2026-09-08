@@ -40,14 +40,6 @@ pub(crate) struct CellData {
     /// registered relationship). Reset to `None` for every cell at the start of
     /// every `Sheet::propagate` call, before planning begins.
     pub(crate) derived: Option<Box<dyn Any>>,
-    /// The relationship that produced `derived`'s current value, if any. Drained
-    /// alongside `derived` into each round's `prior_derived` snapshot, so a
-    /// self-referencing method can tell whether it is the same relationship that
-    /// produced this cell's prior value (reads `source`, preserving spring-back) or a
-    /// different one (reads the prior value) -- see
-    /// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`,
-    /// Part 2.
-    pub(crate) derived_by: Option<RelationshipId>,
     /// The `TypeId` of the value, fixed at cell creation.
     pub(crate) type_id: TypeId,
     /// Write-recency strength. High-order bit (bit 63) is set for cells that have been
@@ -86,7 +78,6 @@ mod tests {
         let data = CellData {
             source: Box::new(42_i32),
             derived: None,
-            derived_by: None,
             type_id: TypeId::of::<i32>(),
             strength: 0,
             changed: false,

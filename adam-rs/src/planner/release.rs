@@ -1,15 +1,14 @@
 //! Chooses which cells are sources.
 //!
-//! [`resolve`] partitions the active relationship set into connected components
-//! ([`super::stay::partition_components`]). A component with no self-referencing method
-//! is resolved by [`resolve_plain`]: greedily releasing cells in descending strength
-//! order, checking at each step whether a matching + acyclic assignment still exists
-//! with that cell (and every previously released cell) forbidden from being claimed. A
-//! component containing at least one self-referencing method is instead resolved by
-//! [`super::stay::resolve_component`], which compares candidates by the concrete values
-//! they would produce rather than by strength alone — plain strength-lexicographic
-//! release is not value-safe once a method can read one of its own outputs; see
-//! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`.
+//! [`resolve`] greedily releases cells in descending strength order, checking at each
+//! step whether a matching + acyclic assignment still exists with that cell (and every
+//! previously released cell) forbidden from being claimed. Self-referencing methods need
+//! no special handling here: a self-referencing output places no exclusive claim
+//! ([`super::matching::pure_outputs`]) and draws no self-dependency edge
+//! ([`super::digraph::build_digraph`]), so the same strength-lexicographic release finds
+//! the right *assignment*; the correct *values* then come from [`super::seed::build_seeds`]
+//! at execution time, not from a value-aware planning choice (see
+//! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`).
 //!
 //! This module has no visibility into a filter's dynamic-argument dependencies —
 //! `digraph::add_filter_edges` adds those edges to the digraph only *after* `resolve` has
@@ -32,7 +31,6 @@ use crate::{
 };
 
 use super::matching::Assignment;
-use super::stay;
 
 /// Why [`resolve`] could not find a strength-optimal acyclic assignment.
 #[derive(Debug)]
@@ -45,90 +43,9 @@ pub(crate) enum ReleaseFailure {
     NoAcyclicAssignment,
 }
 
-/// Finds the optimal acyclic assignment for `active`, dispatching each connected
-/// component ([`stay::partition_components`]) to whichever algorithm applies: a
-/// component with no self-referencing method is resolved by [`resolve_plain`]
-/// (unchanged strength-lexicographic release); a component containing at least one is
-/// resolved by [`stay::resolve_component`] (value-aware release), which needs
-/// `prior_derived` (the round's pre-Phase-0 snapshot of every cell's `derived` value and
-/// the relationship that produced it, see `Sheet::propagate`) to decide each
-/// self-referencing method's input choice. The two never interact, since components are
-/// disjoint by construction, so their results merge directly.
-///
-/// Failure precedence is computed across *every* component before returning, matching
-/// the single monolithic pre-partition algorithm's semantics: since components are
-/// cell-disjoint, a full assignment over `active` exists iff one exists for every
-/// individual component, so [`ReleaseFailure::NoAssignment`] takes precedence over
-/// [`ReleaseFailure::NoAcyclicAssignment`] even when a *different* component is the one
-/// that failed acyclicity — checking only the first failing component (in partition
-/// order) would report a less severe failure than the sheet as a whole actually has.
-///
-/// # Errors
-///
-/// - [`ReleaseFailure::NoAssignment`] — no method assignment exists at all for some
-///   component, cyclic or not.
-/// - [`ReleaseFailure::NoAcyclicAssignment`] — a method assignment exists for every
-///   component, but at least one component admits no acyclic assignment.
-///
-/// - Complexity: see [`resolve_plain`] and [`stay::resolve_component`]; components are
-///   independent, so their costs add rather than multiply.
-pub(crate) fn resolve(
-    cells: &SlotMap<CellId, CellData>,
-    relationships: &SlotMap<RelationshipId, RelationshipData>,
-    active: &HashSet<RelationshipId>,
-    prior_derived: &super::PriorDerived,
-) -> Result<Assignment, ReleaseFailure> {
-    let mut plain: HashSet<RelationshipId> = HashSet::new();
-    let mut value_aware: Vec<HashSet<RelationshipId>> = Vec::new();
-    for component in stay::partition_components(cells, relationships, active) {
-        if component
-            .iter()
-            .any(|&rel_id| stay::has_self_reference(&relationships[rel_id]))
-        {
-            value_aware.push(component);
-        } else {
-            plain.extend(component);
-        }
-    }
-
-    let plain_result = resolve_plain(cells, relationships, &plain);
-    let component_results: Vec<Result<Assignment, ReleaseFailure>> = value_aware
-        .iter()
-        .map(|component| {
-            stay::resolve_component(cells, relationships, component, prior_derived).ok_or_else(
-                || {
-                    if Assignment::solve(relationships, component, &HashSet::new()).is_some() {
-                        ReleaseFailure::NoAcyclicAssignment
-                    } else {
-                        ReleaseFailure::NoAssignment
-                    }
-                },
-            )
-        })
-        .collect();
-
-    let any_no_assignment = matches!(plain_result, Err(ReleaseFailure::NoAssignment))
-        || component_results
-            .iter()
-            .any(|r| matches!(r, Err(ReleaseFailure::NoAssignment)));
-    if any_no_assignment {
-        return Err(ReleaseFailure::NoAssignment);
-    }
-
-    let mut assignment = plain_result?;
-    for result in component_results {
-        let component_assignment = result?;
-        assignment.chosen.extend(component_assignment.chosen);
-        assignment.claimed.extend(component_assignment.claimed);
-    }
-
-    Ok(assignment)
-}
-
-/// Finds the strength-optimal acyclic assignment for a relationship set containing no
-/// self-referencing method: an [`Assignment`] where the set of cells left unclaimed
-/// (sources) is lexicographically maximal in descending strength order among all
-/// assignments whose induced digraph is acyclic.
+/// Finds the strength-optimal acyclic assignment for `active`: an [`Assignment`] where
+/// the set of cells left unclaimed (sources) is lexicographically maximal in descending
+/// strength order among all assignments whose induced digraph is acyclic.
 ///
 /// Processes every cell in descending strength order, tentatively adding it to the
 /// forbidden set and searching for an assignment that is both valid (no double claims)
@@ -155,7 +72,7 @@ pub(crate) fn resolve(
 /// - Complexity: O(C · `solve_acyclic`) where C = cells -- each cell triggers one
 ///   `solve_acyclic` attempt, itself exponential in the number of active relationships
 ///   in the worst case (see its own doc comment).
-fn resolve_plain(
+pub(crate) fn resolve(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
@@ -193,7 +110,6 @@ fn resolve_plain(
 mod tests {
     use super::*;
     use crate::{Method, Sheet};
-    use std::collections::HashMap;
 
     #[test]
     fn no_assignment_returns_no_assignment_failure() {
@@ -209,7 +125,7 @@ mod tests {
             .unwrap();
         let active: HashSet<_> = [r1, r2].into_iter().collect();
         assert!(matches!(
-            resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new()),
+            resolve(&sheet.cells, &sheet.relationships, &active),
             Err(ReleaseFailure::NoAssignment)
         ));
     }
@@ -229,7 +145,7 @@ mod tests {
             .unwrap();
         let active: HashSet<_> = [r1, r2].into_iter().collect();
         assert!(matches!(
-            resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new()),
+            resolve(&sheet.cells, &sheet.relationships, &active),
             Err(ReleaseFailure::NoAcyclicAssignment)
         ));
     }
@@ -253,8 +169,7 @@ mod tests {
         sheet.write(a, 2.0).unwrap();
         sheet.write(b, 3.0).unwrap();
         let active: HashSet<_> = [rel].into_iter().collect();
-        let assignment =
-            resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new()).unwrap();
+        let assignment = resolve(&sheet.cells, &sheet.relationships, &active).unwrap();
         assert_eq!(assignment.claimed[&c], rel);
         assert!(!assignment.claimed.contains_key(&a));
         assert!(!assignment.claimed.contains_key(&b));
@@ -289,7 +204,7 @@ mod tests {
         sheet.write(a, 3.0).unwrap();
         sheet.write(d, 24.0).unwrap();
         let active: HashSet<_> = [r1, r2].into_iter().collect();
-        let assignment = resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
+        let assignment = resolve(&sheet.cells, &sheet.relationships, &active)
             .expect("a valid acyclic assignment exists for this structure");
         assert_eq!(assignment.chosen.len(), 2);
         let unique: HashSet<_> = assignment.claimed.values().collect();
@@ -311,10 +226,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_prefers_the_consistent_edit_over_the_higher_strength_cell() {
-        // The issue #182 shape, exercised through the public resolve() dispatch (not
-        // stay::resolve_component directly) to confirm the partition/merge wiring
-        // itself routes a self-referencing component to the value-aware path.
+    fn resolve_releases_the_highest_strength_cell_in_a_self_referencing_chain() {
+        // The issue #182 shape. Method selection is purely strength-based: c, written
+        // last, is the highest-strength cell and is released as the source; a and b are
+        // both claimed. The correct *values* (a's edit surviving) come from build_seeds
+        // at execution time, not from this assignment -- see the integration tests.
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(10_i32);
         let b = sheet.add_cell(20_i32);
@@ -335,20 +251,20 @@ mod tests {
         sheet.write(c, 40_i32).unwrap();
 
         let active: HashSet<_> = [rel1, rel2].into_iter().collect();
-        let assignment =
-            resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new()).unwrap();
+        let assignment = resolve(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         assert!(
-            !assignment.claimed.contains_key(&a),
-            "a must remain the literal source"
+            !assignment.claimed.contains_key(&c),
+            "c (highest strength) must remain the literal source"
         );
+        assert!(assignment.claimed.contains_key(&a));
+        assert!(assignment.claimed.contains_key(&b));
     }
 
     #[test]
-    fn resolve_merges_independent_plain_and_value_aware_components() {
+    fn resolve_merges_a_self_referencing_pair_with_a_functional_diamond() {
         // A self-referencing pair (x,y) fully disjoint from a functional diamond
-        // (p,q,r): each must be resolved by its own algorithm and merged without
-        // interference.
+        // (p,q,r): the single strength-based release handles both together.
         let mut sheet = Sheet::new();
         let x = sheet.add_cell(5_i32);
         let y = sheet.add_cell(10_i32);
@@ -373,8 +289,7 @@ mod tests {
         sheet.write(q, 3.0).unwrap();
 
         let active: HashSet<_> = [rel1, rel2].into_iter().collect();
-        let assignment =
-            resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new()).unwrap();
+        let assignment = resolve(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         assert_eq!(assignment.chosen.len(), 2);
         assert_eq!(
@@ -414,7 +329,7 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let result = resolve(&sheet.cells, &sheet.relationships, &active, &HashMap::new());
+        let result = resolve(&sheet.cells, &sheet.relationships, &active);
 
         assert!(matches!(result, Err(ReleaseFailure::NoAssignment)));
     }

@@ -2,20 +2,22 @@
 //! order.
 //!
 //! The planner finds the strength-optimal acyclic assignment of methods to
-//! relationships: for a connected component with no self-referencing method,
-//! [`release::resolve`] greedily tries, in descending cell-strength order, to leave
-//! each cell unclaimed (a source), keeping the change only when a valid method
-//! assignment still exists ([`matching::Assignment::solve`]) *and* its induced
-//! dependency digraph is acyclic ([`digraph::is_acyclic`]). A component containing a
-//! self-referencing method is instead resolved by `stay::resolve_component`'s
-//! value-aware comparison — see
-//! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`.
-//! This single mechanism handles both ordinary strength-based method selection (an
-//! uncontested relationship's choice of which cell to leave exogenous) and overlapping
-//! cyclic ("diamond") structures uniformly -- both are instances of "does releasing
-//! this cell still admit a valid acyclic assignment". See
-//! `docs/superpowers/specs/2026-08-04-cyclic-constraint-planner-design.md` for the
-//! full design rationale and literature grounding.
+//! relationships: [`release::resolve`] greedily tries, in descending cell-strength
+//! order, to leave each cell unclaimed (a source), keeping the change only when a valid
+//! method assignment still exists ([`matching::Assignment::solve`]) *and* its induced
+//! dependency digraph is acyclic ([`digraph::is_acyclic`]). This single mechanism
+//! handles ordinary strength-based method selection (an uncontested relationship's
+//! choice of which cell to leave exogenous) and overlapping cyclic ("diamond")
+//! structures uniformly -- both are instances of "does releasing this cell still admit
+//! a valid acyclic assignment". See
+//! `docs/superpowers/specs/2026-08-04-cyclic-constraint-planner-design.md` for the full
+//! design rationale and literature grounding.
+//!
+//! Method selection is value-blind, including for self-referencing components: a
+//! self-referencing chain reaches the correct values through [`build_seeds`], which
+//! reconstructs each self-referencing input's value at execution time (see
+//! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`),
+//! not through a value-aware assignment choice.
 //!
 //! Once [`release::resolve`] succeeds, its result's induced digraph is guaranteed
 //! acyclic, so a plain topological sort (reusing [`scc::tarjan_scc`], which produces
@@ -44,17 +46,18 @@ mod digraph;
 mod matching;
 mod release;
 mod scc;
-mod stay;
+mod seed;
 
 use digraph::{Node, add_filter_edges, build_digraph};
 use matching::pure_outputs;
 use release::ReleaseFailure;
 
-/// A round's snapshot of every cell with a live, genuinely self-referencing `derived`
-/// value: the relationship that produced it, and the value itself. See
-/// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`,
-/// Part 2.
-pub(crate) type PriorDerived = HashMap<CellId, (RelationshipId, Box<dyn Any>)>;
+pub(crate) use seed::build_seeds;
+
+/// The seed value each self-referencing input should read this round, keyed by cell. A
+/// cell absent from the map reads its own `source`. See [`seed`] and
+/// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`.
+pub(crate) type Seeds = HashMap<CellId, Box<dyn Any>>;
 
 /// One step of a [`Plan`]'s `execution_order`: either a selected method, or reapplying a
 /// source cell's filter against its (now-settled) current argument values.
@@ -88,12 +91,10 @@ pub(crate) struct Plan {
 /// Assigns one method per active relationship and returns them in dependency order.
 ///
 /// Only relationships in `active` are planned; relationships outside `active` are
-/// invisible to method selection. `prior_derived` maps each cell with a live derived
-/// value at the start of this round to the relationship that produced it and that value
-/// (see `Sheet::propagate`'s Phase 0), used only when a self-referencing method needs to
-/// decide between reading a self-referencing cell's `source` and its prior derived
-/// value; empty (or missing an entry) means a self-referencing method falls back to
-/// reading `source`, exactly as before this parameter existed.
+/// invisible to method selection. Method selection is purely strength-based and
+/// value-blind: a self-referencing chain reaches the correct values not by choosing a
+/// value-aware assignment, but by [`build_seeds`] reconstructing each self-referencing
+/// input's value at execution time.
 ///
 /// # Errors
 ///
@@ -102,25 +103,19 @@ pub(crate) struct Plan {
 ///   cyclic: a genuine algebraic loop with no external input, regardless of strength.
 ///
 /// - Complexity: O(C · R² · M · K) where C = cells, R = active relationships, M =
-///   methods per relationship, K = cells per method — this bound covers a component with
-///   no self-referencing method, where [`release::resolve`] attempts up to C full
-///   re-solves, each up to O(R² · M · K) in the worst case. A component containing a
-///   self-referencing method is instead resolved by [`stay::resolve_component`]'s
-///   enumerate-and-score approach; see that function's own doc comment for its
-///   complexity.
+///   methods per relationship, K = cells per method — [`release::resolve`] attempts up
+///   to C full re-solves, each up to O(R² · M · K) in the worst case.
 pub(crate) fn plan(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
-    prior_derived: &PriorDerived,
 ) -> Result<Plan, Error> {
     let (forced_outputs, alive) = forced_output_cells(relationships, active);
 
-    let assignment =
-        release::resolve(cells, relationships, active, prior_derived).map_err(|e| match e {
-            ReleaseFailure::NoAssignment => Error::Conflict,
-            ReleaseFailure::NoAcyclicAssignment => Error::Cycle,
-        })?;
+    let assignment = release::resolve(cells, relationships, active).map_err(|e| match e {
+        ReleaseFailure::NoAssignment => Error::Conflict,
+        ReleaseFailure::NoAcyclicAssignment => Error::Cycle,
+    })?;
 
     let mut adj = build_digraph(&assignment, relationships);
     add_filter_edges(&mut adj, cells, &assignment);
@@ -250,7 +245,7 @@ fn forced_output_cells(
 mod tests {
     use crate::planner::PlanStep;
     use crate::{Error, Filter, Method, Sheet};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     // Propagation-behavior tests live in the integration tests.
 
@@ -276,9 +271,7 @@ mod tests {
         let mut active = HashSet::new();
         active.insert(r1);
 
-        let plan =
-            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
-                .unwrap();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
         assert_eq!(plan.execution_order.len(), 1);
         assert!(matches!(plan.execution_order[0], PlanStep::Method(r, _) if r == r1));
     }
@@ -341,9 +334,7 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan =
-            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
-                .unwrap();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         assert!(plan.forced_outputs.contains(&b));
         assert!(!plan.forced_outputs.contains(&a));
@@ -370,9 +361,7 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan =
-            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
-                .unwrap();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         assert!(plan.forced_outputs.contains(&b));
         assert!(plan.forced_outputs.contains(&c));
@@ -390,9 +379,7 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan =
-            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
-                .unwrap();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         assert!(plan.forced_relationships.contains(&rel));
     }
@@ -414,9 +401,7 @@ mod tests {
         sheet.write(b, 3.0_f64).unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan =
-            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
-                .unwrap();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         assert!(!plan.forced_relationships.contains(&rel));
     }
@@ -442,9 +427,7 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan =
-            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
-                .unwrap();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         assert!(plan.forced_relationships.contains(&r1));
         assert!(plan.forced_relationships.contains(&r2));
@@ -525,9 +508,7 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan =
-            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
-                .unwrap();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         assert_eq!(plan.execution_order, vec![PlanStep::Method(rel, 0)]);
     }
@@ -549,9 +530,7 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan =
-            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
-                .unwrap();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         assert!(
             !plan
@@ -579,9 +558,7 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan =
-            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
-                .unwrap();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         let reclamp_pos = plan
             .execution_order
@@ -614,9 +591,7 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let plan =
-            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new())
-                .unwrap();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         let reclamp_pos = plan
             .execution_order
@@ -648,8 +623,7 @@ mod tests {
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
-        let result =
-            crate::planner::plan(&sheet.cells, &sheet.relationships, &active, &HashMap::new());
+        let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
         assert!(matches!(result, Err(Error::FilterCycle)));
     }
 }

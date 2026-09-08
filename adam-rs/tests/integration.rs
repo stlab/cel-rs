@@ -2103,11 +2103,22 @@ fn issue_182_inequality_chain_later_edit_below_earlier_one_repropagates() {
     assert_eq!(*sheet.read::<i32>(c).unwrap(), 24);
 }
 
-fn inequality_chain_sheet_after_two_rounds() -> (Sheet, CellId, CellId, CellId) {
+#[test]
+fn issue_182_inequality_chain_survives_two_consecutive_edits_to_the_same_cell() {
+    // a<=b<=c again. Writing a=25 raises b to 25. Writing c=24 correctly pulls a and b
+    // down to 24 (issue_182_inequality_chain_later_edit_below_earlier_one_repropagates).
+    // A THIRD edit to c (23, continuing to slide down) is where the original fix broke:
+    // by this round, r2 has claimed b for two consecutive rounds, so comparing only
+    // against "which relationship produced b's value last round" sees "same relationship
+    // as before" and (wrongly) springs b back to its untouched declared value (20)
+    // instead of continuing to track the chain -- snapping a and b to 20 instead of
+    // sliding them down to 23. b is genuinely contested between two self-referencing
+    // relationships (r1 and r2), so its settled value must keep being tracked across any
+    // number of consecutive rounds the same relationship claims it, not just one.
     let mut sheet = Sheet::new();
-    let a = sheet.add_cell(0_i32);
-    let b = sheet.add_cell(0_i32);
-    let c = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
     sheet
         .add_relationship(vec![
             Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
@@ -2121,45 +2132,95 @@ fn inequality_chain_sheet_after_two_rounds() -> (Sheet, CellId, CellId, CellId) 
         ])
         .unwrap();
 
-    // Round 0: a=100, b=50, c=10 (strengths a<b<c) settles with rel1 claiming a and
-    // rel2 claiming b, matching resolve_component's today's-choice tie-break.
-    sheet.write(a, 100_i32).unwrap();
-    sheet.write(b, 50_i32).unwrap();
-    sheet.write(c, 10_i32).unwrap();
     sheet.propagate().unwrap();
-
-    // Round 1: writing a bumps it to the highest strength, flipping which relationship
-    // claims b (rel1 now claims b instead of rel2) -- exactly the kind of claimant
-    // change across rounds that the next write's replay must track correctly.
     sheet.write(a, 25_i32).unwrap();
     sheet.propagate().unwrap();
+    sheet.write(c, 24_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(c, 23_i32).unwrap();
+    sheet.propagate().unwrap();
 
-    (sheet, a, b, c)
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 23);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 23);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 23);
 }
 
 #[test]
-fn propagate_without_replan_tracks_claimant_changes_across_prior_rounds() {
-    // Continuing from a round where b's self-referencing claimant changed from rel2 to
-    // rel1, propagate_without_replan must derive the same result a fresh propagate()
-    // would for the same final write -- it must not compare against a relationship
-    // from a round before the one it is actually continuing from.
-    let (mut sheet_no_replan, a, b, c) = inequality_chain_sheet_after_two_rounds();
-    sheet_no_replan.write(a, 26_i32).unwrap();
-    sheet_no_replan.propagate_without_replan().unwrap();
+fn issue_182_inequality_chain_springs_back_when_the_raising_edit_is_lowered() {
+    // a<=b<=c. Writing a=100 raises b and c to 100 (a pushes the whole chain up). Then
+    // writing a=0 releases that pressure: b and c must spring back to their own
+    // untouched declared values (20, 30), not stay pinned at 100. b's derived value
+    // (100) is stale once a stops forcing it up, so the planner has to re-solve from
+    // source values rather than replay the a=100 plan (which claimed b and c and can
+    // only push them up). See the design doc: value-aware planning is why replaying a
+    // cached plan across an edit is unsound, and why `propagate()` always re-plans.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
 
-    let (mut sheet_full_replan, a2, b2, c2) = inequality_chain_sheet_after_two_rounds();
-    sheet_full_replan.write(a2, 26_i32).unwrap();
-    sheet_full_replan.propagate().unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(a, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
 
-    assert_eq!(*sheet_no_replan.read::<i32>(a).unwrap(), 26);
-    assert_eq!(*sheet_no_replan.read::<i32>(b).unwrap(), 50);
-    assert_eq!(*sheet_no_replan.read::<i32>(c).unwrap(), 50);
-    assert_eq!(
-        *sheet_no_replan.read::<i32>(b).unwrap(),
-        *sheet_full_replan.read::<i32>(b2).unwrap()
-    );
-    assert_eq!(
-        *sheet_no_replan.read::<i32>(c).unwrap(),
-        *sheet_full_replan.read::<i32>(c2).unwrap()
-    );
+    sheet.write(a, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 30);
+}
+
+#[test]
+fn issue_182_inequality_chain_has_no_spring_back_hysteresis_when_dragging_a_bound() {
+    // Simulates dragging the `c` slider in the a<=b<=c tutorial after writing a=25:
+    // down through the point where the chain fully collapses (a=b=c=20), then back up.
+    // At every step a and b must equal min(c, 25) -- a's stored aspiration, clamped by
+    // c. The two-method min/max encoding on its own cannot raise a "sunk" cell back up
+    // when c relaxes (a single execution pass only lowers); seedfill removes that
+    // hysteresis by rebuilding each self-referencing input's value from source every
+    // round, so b re-aspires to a=25 and both climb back as c does.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(a, 25_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    // Slide c down past the collapse point, then back up above a's stored 25.
+    for c_val in [29, 28, 25, 24, 23, 22, 21, 20, 21, 24, 30, 40] {
+        sheet.write(c, c_val).unwrap();
+        sheet.propagate().unwrap();
+        let expected = c_val.min(25);
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), expected, "a at c={c_val}");
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), expected, "b at c={c_val}");
+        assert_eq!(*sheet.read::<i32>(c).unwrap(), c_val);
+    }
 }

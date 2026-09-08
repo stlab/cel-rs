@@ -164,55 +164,6 @@ fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) 
     }
 }
 
-/// Returns `true` if writing `id` can invalidate more than just the cached plan's
-/// execution order, so a full `Sheet::propagate()` is required instead of the cheaper
-/// `Sheet::propagate_without_replan()`.
-///
-/// This holds for a conditional's match cell (writing it can switch the active branch,
-/// which `propagate_without_replan` never re-evaluates) and for any cell that can move
-/// an output requirement's own true/false result (`propagate_without_replan` does not
-/// re-evaluate output requirements at all, per its own documented contract — so
-/// `cell_requirements_valid`/`requirement_violation_cells` would otherwise go stale after
-/// such a write): either a cell a requirement's own expression names directly (transitively,
-/// via `Sheet::requirement_contributing_cells`), or — since a requirement commonly reads
-/// its own output's value by name alongside whatever else it needs (outputs.md §7.3) —
-/// any cell contributing to that requirement's output's own value, even when the
-/// requirement's expression never names that cell directly.
-///
-/// This also holds for a cell referenced as another cell's filter argument
-/// ([`adam_rs::Sheet::filter_dependents`]): a source-cell filter reclamp is folded into
-/// the planner's own dependency graph (see the adam-rs planner) and is only revalidated
-/// by a full `Sheet::propagate()`'s own diagnostic phase, not by
-/// `propagate_without_replan`.
-///
-/// - Complexity: O(number of conditionals + sum of `contributing_cells`/
-///   `requirement_contributing_cells` cost over every output requirement + number of
-///   filter dependents of `id`).
-fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
-    let is_match_cell = sheet.conditionals().any(|cid| {
-        sheet
-            .conditional_match_cells(cid)
-            .is_some_and(|c| c.contains(&id))
-    });
-    // `oid` is now the out cell's own `CellId` directly (see `compute_output_status`'s
-    // comment) — the old `Sheet::output_cell(oid)` lookup collapses to `oid` itself.
-    let feeds_requirement = sheet.out_cells().any(|oid| {
-        let Some(requirements) = sheet.cell_requirements(oid) else {
-            return false;
-        };
-        if requirements.is_empty() {
-            return false;
-        }
-        let feeds_the_outputs_own_value = sheet.contributing_cells(oid).contains(&id);
-        let feeds_a_requirement_directly = requirements
-            .iter()
-            .any(|&rid| sheet.requirement_contributing_cells(rid).contains(&id));
-        feeds_the_outputs_own_value || feeds_a_requirement_directly
-    });
-    let feeds_a_filter = !sheet.filter_dependents(id).is_empty();
-    is_match_cell || feeds_requirement || feeds_a_filter
-}
-
 /// Returns the toggled value ("true"/"false") for a bool cell currently displaying `current`.
 fn toggled_bool_value(current: &str) -> &'static str {
     if current == "true" { "false" } else { "true" }
@@ -300,13 +251,7 @@ fn write_and_propagate(
     let write_result = (meta.write_str)(&mut sheet_w, val);
     drop(labels_r);
     let propagate_result = match write_result {
-        Ok(()) => {
-            if sheet_w.is_source(id) && !cell_needs_full_propagate(&sheet_w, id) {
-                sheet_w.propagate_without_replan()
-            } else {
-                sheet_w.propagate()
-            }
-        }
+        Ok(()) => sheet_w.propagate(),
         Err(e) => Err(e),
     };
     match propagate_result {
@@ -1135,126 +1080,6 @@ mod tests {
             slider_bounds("not a number", (0.0, 100.0)),
             ("0".to_string(), "100".to_string())
         );
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_false_when_sheet_has_no_conditionals_or_outputs() {
-        let id = dummy_cell();
-        let sheet = Sheet::new();
-        assert!(!cell_needs_full_propagate(&sheet, id));
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_true_for_conditional_match_cell() {
-        use adam_rs::{MatchExpr, Method};
-
-        let mut sheet = Sheet::new();
-        let p = sheet.add_cell(0_i32);
-        let a = sheet.add_cell(0.0_f64);
-        let b = sheet.add_cell(0.0_f64);
-        let rel = sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &f64| Ok(*v))])
-            .unwrap();
-        sheet
-            .add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![])
-            .unwrap();
-
-        assert!(cell_needs_full_propagate(&sheet, p));
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_true_for_cell_feeding_an_output_requirement() {
-        use adam_rs::{Method, Requirement};
-
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        let result = sheet.add_cell(0_i32);
-        sheet
-            .add_out(
-                Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
-                vec![(
-                    "min_a",
-                    Requirement::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
-                )],
-            )
-            .unwrap();
-
-        assert!(cell_needs_full_propagate(&sheet, a));
-        assert!(cell_needs_full_propagate(&sheet, b));
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_true_for_a_cell_feeding_the_output_when_its_requirement_only_names_the_output_itself()
-     {
-        // Mirrors `tutorial/area_with_requirement.adm2`: `out area := width * height
-        // require { not_too_big: area <= 300; }` — the requirement's own expression
-        // names only `area`, never `width`/`height` directly, so `requirement_inputs`
-        // alone would miss that writing `width` can flip `not_too_big`.
-        use adam_rs::{Method, Requirement};
-
-        let mut sheet = Sheet::new();
-        let width = sheet.add_cell(10_i32);
-        let height = sheet.add_cell(20_i32);
-        let area = sheet.add_cell(0_i32);
-        sheet
-            .add_out(
-                Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
-                vec![(
-                    "not_too_big",
-                    Requirement::from_fn_1(area, |a: &i32| Ok(*a <= 300)),
-                )],
-            )
-            .unwrap();
-        // `contributing_cells` (and so this fix) only resolves past the output cell
-        // itself once a plan has been computed — its own documented pre-propagate
-        // postcondition returns just `{cell}` — so establish one first, mirroring how
-        // `build_sheet` always runs an initial `propagate()` before the Inspector ever
-        // lets a user write anything.
-        sheet.propagate().unwrap();
-
-        assert!(cell_needs_full_propagate(&sheet, width));
-        assert!(cell_needs_full_propagate(&sheet, height));
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_true_for_a_cell_referenced_as_a_filter_argument() {
-        use adam_rs::Filter;
-
-        let mut sheet = Sheet::new();
-        let bound = sheet.add_cell(10_i32);
-        let a = sheet.add_cell(5_i32);
-        sheet
-            .add_filter(
-                a,
-                "clamp_to_bound",
-                Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
-            )
-            .unwrap();
-
-        assert!(cell_needs_full_propagate(&sheet, bound));
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_false_for_cell_not_a_match_cell_or_requirement_input() {
-        use adam_rs::{Method, Requirement};
-
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        let result = sheet.add_cell(0_i32);
-        let unrelated = sheet.add_cell(0_i32);
-        sheet
-            .add_out(
-                Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
-                vec![(
-                    "min_a",
-                    Requirement::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
-                )],
-            )
-            .unwrap();
-
-        assert!(!cell_needs_full_propagate(&sheet, unrelated));
     }
 
     #[test]
