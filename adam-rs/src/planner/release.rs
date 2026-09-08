@@ -53,6 +53,14 @@ pub(crate) enum ReleaseFailure {
 /// interact, since components are disjoint by construction, so their results merge
 /// directly.
 ///
+/// Failure precedence is computed across *every* component before returning, matching
+/// the single monolithic pre-partition algorithm's semantics: since components are
+/// cell-disjoint, a full assignment over `active` exists iff one exists for every
+/// individual component, so [`ReleaseFailure::NoAssignment`] takes precedence over
+/// [`ReleaseFailure::NoAcyclicAssignment`] even when a *different* component is the one
+/// that failed acyclicity — checking only the first failing component (in partition
+/// order) would report a less severe failure than the sheet as a whole actually has.
+///
 /// # Errors
 ///
 /// - [`ReleaseFailure::NoAssignment`] — no method assignment exists at all for some
@@ -80,19 +88,31 @@ pub(crate) fn resolve(
         }
     }
 
-    let mut assignment = resolve_plain(cells, relationships, &plain)?;
-
-    for component in &value_aware {
-        let Some(component_assignment) = stay::resolve_component(cells, relationships, component)
-        else {
-            return Err(
+    let plain_result = resolve_plain(cells, relationships, &plain);
+    let component_results: Vec<Result<Assignment, ReleaseFailure>> = value_aware
+        .iter()
+        .map(|component| {
+            stay::resolve_component(cells, relationships, component).ok_or_else(|| {
                 if Assignment::solve(relationships, component, &HashSet::new()).is_some() {
                     ReleaseFailure::NoAcyclicAssignment
                 } else {
                     ReleaseFailure::NoAssignment
-                },
-            );
-        };
+                }
+            })
+        })
+        .collect();
+
+    let any_no_assignment = matches!(plain_result, Err(ReleaseFailure::NoAssignment))
+        || component_results
+            .iter()
+            .any(|r| matches!(r, Err(ReleaseFailure::NoAssignment)));
+    if any_no_assignment {
+        return Err(ReleaseFailure::NoAssignment);
+    }
+
+    let mut assignment = plain_result?;
+    for result in component_results {
+        let component_assignment = result?;
         assignment.chosen.extend(component_assignment.chosen);
         assignment.claimed.extend(component_assignment.claimed);
     }
@@ -352,5 +372,41 @@ mod tests {
             assignment.claimed[&r], rel2,
             "the functional diamond must still pick r as the derived cell"
         );
+    }
+
+    #[test]
+    fn resolve_reports_no_assignment_when_any_component_lacks_one_even_if_another_only_fails_acyclically()
+     {
+        // A plain component that's a genuine algebraic loop (x=f(y); y=g(x), single
+        // method each, no self-reference) -- NoAcyclicAssignment on its own, mirroring
+        // genuinely_unsolvable_cycle_returns_no_acyclic_assignment_failure -- alongside a
+        // disjoint self-referencing component whose two relationships both insist on
+        // claiming the same cell with no alternative method -- NoAssignment on its own.
+        // The aggregate failure must be NoAssignment, matching the pre-partition
+        // monolithic algorithm's semantics (a full assignment exists iff every disjoint
+        // component has one), not NoAcyclicAssignment just because resolve_plain --
+        // checked first -- only sees its own component's cyclic-only failure.
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(0_i32);
+        let y = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(y, x, |v: &i32| Ok(*v + 1))])
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v + 1))])
+            .unwrap();
+
+        let a = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, a, |x: &i32| Ok((*x).min(0)))])
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, a, |x: &i32| Ok((*x).max(0)))])
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let result = resolve(&sheet.cells, &sheet.relationships, &active);
+
+        assert!(matches!(result, Err(ReleaseFailure::NoAssignment)));
     }
 }
