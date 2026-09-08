@@ -2102,3 +2102,64 @@ fn issue_182_inequality_chain_later_edit_below_earlier_one_repropagates() {
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 24);
     assert_eq!(*sheet.read::<i32>(c).unwrap(), 24);
 }
+
+fn inequality_chain_sheet_after_two_rounds() -> (Sheet, CellId, CellId, CellId) {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let c = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    // Round 0: a=100, b=50, c=10 (strengths a<b<c) settles with rel1 claiming a and
+    // rel2 claiming b, matching resolve_component's today's-choice tie-break.
+    sheet.write(a, 100_i32).unwrap();
+    sheet.write(b, 50_i32).unwrap();
+    sheet.write(c, 10_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    // Round 1: writing a bumps it to the highest strength, flipping which relationship
+    // claims b (rel1 now claims b instead of rel2) -- exactly the kind of claimant
+    // change across rounds that the next write's replay must track correctly.
+    sheet.write(a, 25_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    (sheet, a, b, c)
+}
+
+#[test]
+fn propagate_without_replan_tracks_claimant_changes_across_prior_rounds() {
+    // Continuing from a round where b's self-referencing claimant changed from rel2 to
+    // rel1, propagate_without_replan must derive the same result a fresh propagate()
+    // would for the same final write -- it must not compare against a relationship
+    // from a round before the one it is actually continuing from.
+    let (mut sheet_no_replan, a, b, c) = inequality_chain_sheet_after_two_rounds();
+    sheet_no_replan.write(a, 26_i32).unwrap();
+    sheet_no_replan.propagate_without_replan().unwrap();
+
+    let (mut sheet_full_replan, a2, b2, c2) = inequality_chain_sheet_after_two_rounds();
+    sheet_full_replan.write(a2, 26_i32).unwrap();
+    sheet_full_replan.propagate().unwrap();
+
+    assert_eq!(*sheet_no_replan.read::<i32>(a).unwrap(), 26);
+    assert_eq!(*sheet_no_replan.read::<i32>(b).unwrap(), 50);
+    assert_eq!(*sheet_no_replan.read::<i32>(c).unwrap(), 50);
+    assert_eq!(
+        *sheet_no_replan.read::<i32>(b).unwrap(),
+        *sheet_full_replan.read::<i32>(b2).unwrap()
+    );
+    assert_eq!(
+        *sheet_no_replan.read::<i32>(c).unwrap(),
+        *sheet_full_replan.read::<i32>(c2).unwrap()
+    );
+}

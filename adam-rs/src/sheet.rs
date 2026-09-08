@@ -13,7 +13,7 @@ use crate::{
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::Error,
     filter::{Filter, FilterKind, FilterViolation},
-    planner::PlanStep,
+    planner::{PlanStep, PriorDerived},
     relationship::{Method, RelationshipData, RelationshipId},
     requirement::{Requirement, RequirementData, RequirementId},
 };
@@ -45,7 +45,7 @@ pub struct Sheet {
     /// later and cells written later have strictly higher strength, making the
     /// default method-selection direction deterministic.
     next_strength: u64,
-    last_plan: Option<CachedPlan>,
+    last_plan: Option<Vec<PlanStep>>,
     /// Cells reported forced (see [`Sheet::is_forced`]) by the last full `propagate()`
     /// call. Not recomputed by `propagate_without_replan`.
     last_forced: Option<HashSet<CellId>>,
@@ -73,17 +73,6 @@ pub struct Sheet {
     /// invalidation, matching every other per-cell set/map `Sheet` already maintains
     /// for its own lifetime.
     filter_dependents: HashMap<CellId, Vec<CellId>>,
-}
-
-/// The cached result of the last successful `plan()` call, replayable by
-/// [`Sheet::propagate_without_replan`] without re-invoking the planner.
-struct CachedPlan {
-    execution_order: Vec<PlanStep>,
-    /// The pre-Phase-0 `derived` snapshot `plan()` was given when it produced
-    /// `execution_order`, mapping each cell to the relationship that derived it and its
-    /// value. `propagate_without_replan` replays it unchanged, since it does not re-run
-    /// Phase 0 (there is no new round to snapshot).
-    prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
 }
 
 /// A conditional's evaluated match value: borrowed (existing cell, no allocation) or owned
@@ -867,8 +856,7 @@ impl Sheet {
     /// Returns `false` if no propagation has run yet.
     fn is_relationship_active(&self, rel_id: RelationshipId) -> bool {
         self.last_plan.as_ref().is_some_and(|plan| {
-            plan.execution_order
-                .iter()
+            plan.iter()
                 .any(|step| matches!(step, PlanStep::Method(r, _) if *r == rel_id))
         })
     }
@@ -1243,6 +1231,44 @@ impl Sheet {
         }
     }
 
+    /// Snapshots cells with a live derived override, then drains every cell's derived
+    /// override -- and, only for a genuinely self-referencing output, the relationship
+    /// that produced it -- into a per-round `prior_derived` snapshot. A self-referencing
+    /// method may read a value from `prior_derived` instead of `source` when it is not
+    /// the same relationship that produced that value -- see
+    /// docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md,
+    /// Part 2. A cell shadowed only because its relationship is conditional (not
+    /// self-referencing) is deliberately excluded from `prior_derived`: it has no
+    /// ongoing self-referencing identity to track once that conditional branch
+    /// deactivates, and must instead fall through to `propagate()`'s Phase 5 plain
+    /// revert-to-source handling.
+    ///
+    /// Called at the start of both `propagate()` (Phase 0) and every
+    /// `propagate_without_replan()` call, so a self-referencing method's
+    /// same-vs-different-relationship comparison is always decided against the most
+    /// recent execution's outcome, never a stale round's.
+    ///
+    /// - Postcondition: every cell's `derived` and `derived_by` are `None`.
+    ///
+    /// - Complexity: O(cells).
+    fn drain_prior_derived(&mut self) -> (Vec<CellId>, PriorDerived) {
+        let previously_derived: Vec<CellId> = self
+            .cells
+            .iter()
+            .filter(|(_, cell)| cell.derived.is_some())
+            .map(|(id, _)| id)
+            .collect();
+        let mut prior_derived: PriorDerived = HashMap::new();
+        for (id, cell) in self.cells.iter_mut() {
+            let derived = cell.derived.take();
+            let derived_by = cell.derived_by.take();
+            if let (Some(v), Some(rel_id)) = (derived, derived_by) {
+                prior_derived.insert(id, (rel_id, v));
+            }
+        }
+        (previously_derived, prior_derived)
+    }
+
     /// Runs the planning pass and executes the selected methods.
     ///
     /// Clears the changed-cell set from the previous `propagate()` call before planning.
@@ -1287,33 +1313,10 @@ impl Sheet {
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.clear_changed();
 
-        // Phase 0: snapshot cells with a live derived override (for Phase 5, unchanged
-        // from before this mechanism existed: any shadowed cell counts, self-referencing
-        // or merely conditional), then drain every cell's derived override -- and, only
-        // for a genuinely self-referencing output, the relationship that produced it --
-        // into a per-round snapshot, `prior_derived`, before planning begins. A
-        // self-referencing method may read a value from `prior_derived` instead of
-        // `source` when it is not the same relationship that produced that value -- see
-        // docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md,
-        // Part 2. A cell shadowed only because its relationship is conditional (not
-        // self-referencing) is deliberately excluded from `prior_derived`: it has no
-        // ongoing self-referencing identity to track once that conditional branch
-        // deactivates, and must instead fall through to Phase 5's plain revert-to-source
-        // handling.
-        let previously_derived: Vec<CellId> = self
-            .cells
-            .iter()
-            .filter(|(_, cell)| cell.derived.is_some())
-            .map(|(id, _)| id)
-            .collect();
-        let mut prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
-        for (id, cell) in self.cells.iter_mut() {
-            let derived = cell.derived.take();
-            let derived_by = cell.derived_by.take();
-            if let (Some(v), Some(rel_id)) = (derived, derived_by) {
-                prior_derived.insert(id, (rel_id, v));
-            }
-        }
+        // Phase 0: snapshot cells with a live derived override (for Phase 5) and drain
+        // every cell's derived override into this round's `prior_derived` snapshot,
+        // before planning begins. See `drain_prior_derived`.
+        let (previously_derived, prior_derived) = self.drain_prior_derived();
 
         // Phase 1: pre-plan for derived match cells.
         if !self.conditionals.is_empty() {
@@ -1433,10 +1436,7 @@ impl Sheet {
 
         self.last_forced = Some(plan.forced_outputs);
         self.last_forced_relationships = Some(plan.forced_relationships);
-        self.last_plan = Some(CachedPlan {
-            execution_order: plan.execution_order,
-            prior_derived,
-        });
+        self.last_plan = Some(plan.execution_order);
         Ok(())
     }
 
@@ -1472,7 +1472,7 @@ impl Sheet {
     fn execute_plan(
         &mut self,
         execution_order: &[PlanStep],
-        prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
+        prior_derived: &PriorDerived,
         filter_violations: &mut Vec<(CellId, FilterViolation)>,
     ) -> Result<(), Error> {
         for step in execution_order {
@@ -1613,14 +1613,10 @@ impl Sheet {
     /// Returns `None` if no propagation has run yet, `rel` is not in the cached plan,
     /// or `rel` was added after the last `propagate()` call.
     pub fn selected_method(&self, rel: RelationshipId) -> Option<usize> {
-        self.last_plan
-            .as_ref()?
-            .execution_order
-            .iter()
-            .find_map(|step| match step {
-                PlanStep::Method(r, idx) if *r == rel => Some(*idx),
-                _ => None,
-            })
+        self.last_plan.as_ref()?.iter().find_map(|step| match step {
+            PlanStep::Method(r, idx) if *r == rel => Some(*idx),
+            _ => None,
+        })
     }
 
     /// Returns the input cells of method `idx` in relationship `rel`.
@@ -1654,7 +1650,7 @@ impl Sheet {
         let Some(plan) = &self.last_plan else {
             return false;
         };
-        !plan.execution_order.iter().any(|step| match step {
+        !plan.iter().any(|step| match step {
             PlanStep::Method(rel_id, method_idx) => self
                 .relationships
                 .get(*rel_id)
@@ -1818,24 +1814,24 @@ impl Sheet {
     ///
     /// - Complexity: O(R·K) where R is the number of relationships in the cached plan and K is the maximum cells per method, plus per-method execution cost.
     pub fn propagate_without_replan(&mut self) -> Result<(), Error> {
-        let Some(cached) = self.last_plan.take() else {
+        let Some(execution_order) = self.last_plan.take() else {
             return Err(Error::Conflict);
         };
         self.clear_changed();
         // Discarded: this replays any cached FilterReclamp step's mutation
         // unconditionally, but last_filter_violations stays pinned to the last full
         // propagate()'s result, per this method's documented contract. `prior_derived`
-        // is replayed unchanged from the propagate() call that produced this cached
-        // plan, since there is no new round here to snapshot.
-        let result = self.execute_plan(
-            &cached.execution_order,
-            &cached.prior_derived,
-            &mut Vec::new(),
-        );
+        // is rebuilt fresh from cells' current derived/derived_by state (see
+        // `drain_prior_derived`), mirroring `propagate()`'s Phase 0 -- reusing a
+        // snapshot from whichever call produced `execution_order` would compare a
+        // self-referencing cell's claimant against a relationship from a stale round
+        // instead of the round this call is actually continuing from.
+        let (_, prior_derived) = self.drain_prior_derived();
+        let result = self.execute_plan(&execution_order, &prior_derived, &mut Vec::new());
         if result.is_ok() {
-            self.post_process_strengths(&cached.execution_order);
+            self.post_process_strengths(&execution_order);
         }
-        self.last_plan = Some(cached);
+        self.last_plan = Some(execution_order);
         result
     }
 }

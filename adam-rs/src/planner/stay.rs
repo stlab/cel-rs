@@ -18,6 +18,7 @@ use crate::{
     relationship::{RelationshipData, RelationshipId},
 };
 
+use super::PriorDerived;
 use super::digraph::{self, Node};
 use super::matching::{self, Assignment};
 use super::scc;
@@ -95,7 +96,7 @@ fn self_reference<'a>(
     output_id: CellId,
     rel_id: RelationshipId,
     cells: &'a SlotMap<CellId, CellData>,
-    prior_derived: &'a HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
+    prior_derived: &'a PriorDerived,
 ) -> &'a dyn Any {
     match prior_derived.get(&output_id) {
         Some((derived_by, prior)) if *derived_by != rel_id => prior.as_ref(),
@@ -115,11 +116,7 @@ fn self_reference<'a>(
 /// the real cost).
 ///
 /// - Complexity: O(1).
-fn has_own_stay(
-    output_id: CellId,
-    rel_id: RelationshipId,
-    prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
-) -> bool {
+fn has_own_stay(output_id: CellId, rel_id: RelationshipId, prior_derived: &PriorDerived) -> bool {
     !matches!(prior_derived.get(&output_id), Some((derived_by, _)) if *derived_by != rel_id)
 }
 
@@ -143,7 +140,7 @@ fn score_candidate(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     assignment: &Assignment,
-    prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
+    prior_derived: &PriorDerived,
 ) -> Option<Vec<u64>> {
     let adj = digraph::build_digraph(assignment, relationships);
     let mut components = scc::tarjan_scc(&adj);
@@ -237,7 +234,7 @@ pub(crate) fn resolve_component(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     component: &HashSet<RelationshipId>,
-    prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
+    prior_derived: &PriorDerived,
 ) -> Option<Assignment> {
     let candidates =
         matching::Assignment::solve_acyclic_all(relationships, component, &HashSet::new());
@@ -352,7 +349,7 @@ mod tests {
         let rel2 = sheet
             .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
             .unwrap();
-        let mut prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        let mut prior_derived: PriorDerived = HashMap::new();
         prior_derived.insert(b, (rel1, Box::new(42_i32)));
 
         let value = self_reference(b, rel2, &sheet.cells, &prior_derived);
@@ -368,7 +365,7 @@ mod tests {
         let rel = sheet
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
             .unwrap();
-        let mut prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        let mut prior_derived: PriorDerived = HashMap::new();
         prior_derived.insert(b, (rel, Box::new(42_i32)));
 
         let value = self_reference(b, rel, &sheet.cells, &prior_derived);
@@ -385,7 +382,7 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
             .unwrap();
 
-        let prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        let prior_derived: PriorDerived = HashMap::new();
         let value = self_reference(b, rel, &sheet.cells, &prior_derived);
 
         assert_eq!(*value.downcast_ref::<i32>().unwrap(), 7);
@@ -402,7 +399,7 @@ mod tests {
         let rel2 = sheet
             .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
             .unwrap();
-        let mut prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        let mut prior_derived: PriorDerived = HashMap::new();
         prior_derived.insert(b, (rel1, Box::new(1_i32)));
 
         assert!(!has_own_stay(b, rel2, &prior_derived));
@@ -416,7 +413,7 @@ mod tests {
         let rel = sheet
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
             .unwrap();
-        let mut prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        let mut prior_derived: PriorDerived = HashMap::new();
         prior_derived.insert(b, (rel, Box::new(1_i32)));
 
         assert!(has_own_stay(b, rel, &prior_derived));
@@ -431,7 +428,7 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
             .unwrap();
 
-        let prior_derived: HashMap<CellId, (RelationshipId, Box<dyn Any>)> = HashMap::new();
+        let prior_derived: PriorDerived = HashMap::new();
         assert!(has_own_stay(b, rel, &prior_derived));
     }
 

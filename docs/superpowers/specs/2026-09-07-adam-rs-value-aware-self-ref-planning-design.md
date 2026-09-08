@@ -437,6 +437,34 @@ New in `adam-rs/tests/integration.rs` (extends the existing three-write-round sh
   and `changed_reports_cell_reverted_by_conditional_deactivation` still pass unmodified,
   guarding the `derived_by`/conditional-branch independence from item 6 above.
 
+### Follow-up: `propagate_without_replan` must rebuild `prior_derived` too
+
+**Date added:** 2026-09-08. **Status:** fixed, found by a fresh Copilot review pass after
+Part 2's initial merge to this branch.
+
+`Sheet::propagate_without_replan` re-executes a cached `execution_order` without re-invoking
+the planner, for a caller that only wrote to cells known to remain literal sources. Its first
+implementation reused the `prior_derived` snapshot captured by whichever `propagate()` call
+originally produced that cached plan, on the reasoning that "there is no new round here to
+snapshot." That reasoning is wrong whenever a self-referencing cell's claimant relationship
+changed across the *last two* real rounds: the reused snapshot reflects the round before last,
+not the round `propagate_without_replan` is actually continuing from, so `self_reference`'s
+same-vs-different-relationship comparison can be decided against a relationship that no longer
+even claims the cell. Verified by reproduction: a three-round scenario (two `propagate()` calls
+where `b`'s self-referencing claimant flips from `rel2` to `rel1`, then a third write replayed
+via `propagate_without_replan`) diverged sharply from what a fourth full `propagate()` call
+computes for the identical final state (`b=26` vs. the correct `b=50`).
+
+Fixed by extracting Phase 0's drain-and-snapshot logic into `Sheet::drain_prior_derived`, called
+at the start of both `propagate()` and every `propagate_without_replan()` call, so the
+same-vs-different-relationship comparison is always decided against the most recent execution's
+actual outcome. This made the previous `CachedPlan` wrapper (added solely to carry a
+`prior_derived` snapshot alongside `execution_order`) entirely dead weight, since nothing reads
+a stored snapshot anymore -- `last_plan` reverts to a plain `Vec<PlanStep>`, as it was before
+Part 2. The permanent regression test is
+`propagate_without_replan_tracks_claimant_changes_across_prior_rounds`
+(`adam-rs/tests/integration.rs`).
+
 ## Alternatives considered
 
 The issue's Option 2 models inequalities as filters instead of self-referencing

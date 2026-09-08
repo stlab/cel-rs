@@ -50,6 +50,12 @@ use digraph::{Node, add_filter_edges, build_digraph};
 use matching::pure_outputs;
 use release::ReleaseFailure;
 
+/// A round's snapshot of every cell with a live, genuinely self-referencing `derived`
+/// value: the relationship that produced it, and the value itself. See
+/// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`,
+/// Part 2.
+pub(crate) type PriorDerived = HashMap<CellId, (RelationshipId, Box<dyn Any>)>;
+
 /// One step of a [`Plan`]'s `execution_order`: either a selected method, or reapplying a
 /// source cell's filter against its (now-settled) current argument values.
 ///
@@ -106,7 +112,7 @@ pub(crate) fn plan(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
-    prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
+    prior_derived: &PriorDerived,
 ) -> Result<Plan, Error> {
     let (forced_outputs, alive) = forced_output_cells(relationships, active);
 

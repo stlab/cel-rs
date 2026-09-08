@@ -21,9 +21,8 @@
 //! if that combined graph turns out cyclic. Generalizing `resolve` itself to search
 //! around filter edges is tracked as issue #153.
 
-use std::any::Any;
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use slotmap::SlotMap;
 
@@ -77,7 +76,7 @@ pub(crate) fn resolve(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
-    prior_derived: &HashMap<CellId, (RelationshipId, Box<dyn Any>)>,
+    prior_derived: &super::PriorDerived,
 ) -> Result<Assignment, ReleaseFailure> {
     let mut plain: HashSet<RelationshipId> = HashSet::new();
     let mut value_aware: Vec<HashSet<RelationshipId>> = Vec::new();
@@ -194,6 +193,7 @@ fn resolve_plain(
 mod tests {
     use super::*;
     use crate::{Method, Sheet};
+    use std::collections::HashMap;
 
     #[test]
     fn no_assignment_returns_no_assignment_failure() {
