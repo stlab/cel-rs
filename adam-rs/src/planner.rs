@@ -2,14 +2,18 @@
 //! order.
 //!
 //! The planner finds the strength-optimal acyclic assignment of methods to
-//! relationships: [`release::resolve`] greedily tries, in descending cell-strength
-//! order, to leave each cell unclaimed (a source), keeping the change only when a
-//! valid method assignment still exists ([`matching::Assignment::solve`]) *and* its
-//! induced dependency digraph is acyclic ([`digraph::is_acyclic`]). This single
-//! mechanism handles both ordinary strength-based method selection (an uncontested
-//! relationship's choice of which cell to leave exogenous) and overlapping cyclic
-//! ("diamond") structures uniformly -- both are instances of "does releasing this cell
-//! still admit a valid acyclic assignment". See
+//! relationships: for a connected component with no self-referencing method,
+//! [`release::resolve`] greedily tries, in descending cell-strength order, to leave
+//! each cell unclaimed (a source), keeping the change only when a valid method
+//! assignment still exists ([`matching::Assignment::solve`]) *and* its induced
+//! dependency digraph is acyclic ([`digraph::is_acyclic`]). A component containing a
+//! self-referencing method is instead resolved by `stay::resolve_component`'s
+//! value-aware comparison — see
+//! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`.
+//! This single mechanism handles both ordinary strength-based method selection (an
+//! uncontested relationship's choice of which cell to leave exogenous) and overlapping
+//! cyclic ("diamond") structures uniformly -- both are instances of "does releasing
+//! this cell still admit a valid acyclic assignment". See
 //! `docs/superpowers/specs/2026-08-04-cyclic-constraint-planner-design.md` for the
 //! full design rationale and literature grounding.
 //!
