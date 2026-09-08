@@ -1998,3 +1998,70 @@ fn requirement_violation_cells_updates_across_propagate_calls() {
     sheet.propagate().unwrap();
     assert_eq!(sheet.requirement_violation_cells(), HashSet::new());
 }
+
+#[test]
+fn issue_182_inequality_chain_preserves_a_consistent_edit() {
+    // a<=b<=c via two self-referencing relationships (the inequality.adm2 tutorial
+    // shape). Writing a=25 then c=40 is jointly consistent (any b in [25,40] satisfies
+    // a<=b<=c), so both edits must survive across two separate propagate() rounds.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+    sheet.write(a, 25_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(c, 40_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 25);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 25);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 40);
+}
+
+#[test]
+fn issue_182_inequality_chain_discriminating_case_unchanged() {
+    // The case that must stay correct: stays are already consistent (11 <= 20 <= 100),
+    // so nothing needs to move.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+    sheet.write(a, 11_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(c, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(c, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 11);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+}
