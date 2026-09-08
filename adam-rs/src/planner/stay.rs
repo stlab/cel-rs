@@ -344,9 +344,10 @@ mod tests {
     #[test]
     fn resolve_component_treats_a_candidate_execution_error_as_worst_case() {
         // rel's method claiming q always errors; its only alternative (claiming p)
-        // always succeeds and honors p's stay. Even though q has higher strength than p
-        // (so today's plain algorithm would prefer releasing q, choosing the method that
-        // ALWAYS ERRORS), resolve_component must still pick the method claiming p.
+        // always succeeds and honors p's stay. This verifies that a candidate whose
+        // execution errors is neither panicked on nor incorrectly preferred over a
+        // succeeding one -- it must be scored as worst-case, regardless of q's higher
+        // strength.
         let mut sheet = Sheet::new();
         let p = sheet.add_cell(5_i32);
         let q = sheet.add_cell(50_i32);
@@ -417,11 +418,27 @@ mod tests {
 
     #[test]
     fn resolve_component_never_scores_a_functional_output_as_a_violated_stay() {
+        // x=5 <= y=10 already holds, so rel1 (the self-referencing x<=y pair) carries
+        // zero true violations no matter which side it claims. rel2 is a purely
+        // functional (non-self-referencing) pair over (y, p) whose two methods are
+        // deliberately NOT inverses of each other: method0 (p := y - 5) reproduces p's
+        // stored value (5) exactly, but method1 (y := p + 3) does NOT reproduce y's
+        // stored value (10) -- it computes 8. That asymmetry means only the candidate
+        // where rel2 claims y (leaving p as the source) has a mismatching functional
+        // output; the other two candidates' functional outputs match exactly.
+        //
+        // A correct scorer never counts either mismatch (rel2's output is never
+        // self-referencing), so all three candidates tie at zero real violations and p
+        // (created last, highest strength) wins the tie-break. If a functional output
+        // were wrongly scored instead, the p-remains-source candidate's spurious
+        // violation (attached to y's strength) would beat the other two candidates'
+        // zero violations, and p would wrongly end up claimed rather than remaining
+        // the source -- so this test is verified (see task-3-report.md's Finding 1 fix
+        // section) to fail under that mutation, unlike the version it replaces.
         let mut sheet = Sheet::new();
         let x = sheet.add_cell(5_i32);
-        let p = sheet.add_cell(3_i32);
         let y = sheet.add_cell(10_i32);
-        sheet.write(y, 10_i32).unwrap(); // bump y's strength above x and p; value unchanged
+        let p = sheet.add_cell(5_i32);
 
         let rel1 = sheet
             .add_relationship(vec![
@@ -429,11 +446,12 @@ mod tests {
                 Method::from_fn_2_1([x, y], y, |x: &i32, y: &i32| Ok((*x).max(*y))),
             ])
             .unwrap();
-        // Purely functional (non-self-referencing) pair sharing y with rel1.
+        // Purely functional (non-self-referencing) pair sharing y with rel1; its two
+        // methods are intentionally not inverses of each other (see comment above).
         let rel2 = sheet
             .add_relationship(vec![
-                Method::from_fn_1_1(y, p, |y: &i32| Ok(*y + 1)),
-                Method::from_fn_1_1(p, y, |p: &i32| Ok(*p - 1)),
+                Method::from_fn_1_1(y, p, |y: &i32| Ok(*y - 5)),
+                Method::from_fn_1_1(p, y, |p: &i32| Ok(*p + 3)),
             ])
             .unwrap();
 
@@ -441,16 +459,11 @@ mod tests {
         let assignment = resolve_component(&sheet.cells, &sheet.relationships, &component)
             .expect("a valid acyclic assignment exists");
 
-        // x=5 <= y=10 already holds, so rel1 carries zero self-referencing violations
-        // either way, and rel2 is never self-referencing, so every candidate has zero
-        // true violations; y's strength (highest) must decide the tie-break. If a
-        // functional output were wrongly scored, rel2 claiming p (derived value 11 vs
-        // its stored 3) would be spuriously penalized and this would fail.
         assert!(
-            !assignment.claimed.contains_key(&y),
-            "y must remain the literal source"
+            !assignment.claimed.contains_key(&p),
+            "p must remain the literal source"
         );
         assert_eq!(assignment.claimed[&x], rel1);
-        assert_eq!(assignment.claimed[&p], rel2);
+        assert_eq!(assignment.claimed[&y], rel2);
     }
 }
