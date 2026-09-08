@@ -39,6 +39,7 @@ mod digraph;
 mod matching;
 mod release;
 mod scc;
+mod stay;
 
 use digraph::{Node, add_filter_edges, build_digraph};
 use matching::pure_outputs;
