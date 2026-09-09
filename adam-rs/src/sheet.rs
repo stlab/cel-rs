@@ -11,7 +11,7 @@ use slotmap::SlotMap;
 use crate::{
     cell::{CellData, CellId, CellKind},
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
-    error::Error,
+    error::{Error, ErrorLocation},
     filter::{Filter, FilterKind, FilterViolation},
     planner::{PlanStep, Seeds},
     relationship::{Method, RelationshipData, RelationshipId},
@@ -184,19 +184,23 @@ impl Sheet {
     ///   maximum number of cells per method (due to duplicate output set comparison).
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
-            return Err(Error::InvalidMethod);
+            return Err(Error::InvalidMethod { location: None });
         }
 
-        for method in &methods {
+        for (idx, method) in methods.iter().enumerate() {
             if method.outputs.is_empty() {
-                return Err(Error::InvalidMethod);
+                return Err(Error::InvalidMethod {
+                    location: Some(ErrorLocation::MethodIndex(idx)),
+                });
             }
 
             // declared type counts must match cell-id counts
             if method.inputs.len() != method.input_types.len()
                 || method.outputs.len() != method.output_types.len()
             {
-                return Err(Error::InvalidMethod);
+                return Err(Error::InvalidMethod {
+                    location: Some(ErrorLocation::MethodIndex(idx)),
+                });
             }
 
             for (&cell_id, &declared) in method.inputs.iter().zip(method.input_types.iter()) {
@@ -205,6 +209,7 @@ impl Sheet {
                     return Err(Error::TypeMismatch {
                         expected: cell.type_id,
                         found: declared,
+                        location: Some(ErrorLocation::MethodIndex(idx)),
                     });
                 }
             }
@@ -212,12 +217,15 @@ impl Sheet {
             for (&cell_id, &declared) in method.outputs.iter().zip(method.output_types.iter()) {
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                 if cell.kind == CellKind::Source {
-                    return Err(Error::InvalidCellKind);
+                    return Err(Error::InvalidCellKind {
+                        location: Some(ErrorLocation::MethodIndex(idx)),
+                    });
                 }
                 if cell.type_id != declared {
                     return Err(Error::TypeMismatch {
                         expected: cell.type_id,
                         found: declared,
+                        location: Some(ErrorLocation::MethodIndex(idx)),
                     });
                 }
             }
@@ -232,8 +240,10 @@ impl Sheet {
             .iter()
             .map(|m| m.inputs.iter().chain(m.outputs.iter()).copied().collect())
             .collect();
-        if cell_sets[1..].iter().any(|set| set != &cell_sets[0]) {
-            return Err(Error::MismatchedMethodCells);
+        if let Some(rel_idx) = cell_sets[1..].iter().position(|set| set != &cell_sets[0]) {
+            return Err(Error::MismatchedMethodCells {
+                location: Some(ErrorLocation::MethodIndex(rel_idx + 1)),
+            });
         }
 
         // A method's own outputs must be duplicate-free, and no two methods in a
@@ -241,10 +251,12 @@ impl Sheet {
         // treats a method's pure-output set as an indivisible claim, so two methods
         // sharing an output set would make that claim ambiguous.
         let mut seen_output_sets: Vec<HashSet<CellId>> = Vec::with_capacity(methods.len());
-        for method in &methods {
+        for (idx, method) in methods.iter().enumerate() {
             let output_set: HashSet<CellId> = method.outputs.iter().copied().collect();
             if output_set.len() != method.outputs.len() || seen_output_sets.contains(&output_set) {
-                return Err(Error::DuplicateMethodOutputs);
+                return Err(Error::DuplicateMethodOutputs {
+                    location: Some(ErrorLocation::MethodIndex(idx)),
+                });
             }
             seen_output_sets.push(output_set);
         }
@@ -323,6 +335,7 @@ impl Sheet {
                         return Err(Error::TypeMismatch {
                             expected: cell_data.type_id,
                             found: declared,
+                            location: None,
                         });
                     }
                 }
@@ -490,6 +503,7 @@ impl Sheet {
                 return Err(Error::TypeMismatch {
                     expected: input_cell.type_id,
                     found: declared,
+                    location: None,
                 });
             }
         }
@@ -500,7 +514,10 @@ impl Sheet {
                 .iter()
                 .map(|&id| self.cells[id].effective())
                 .collect();
-            let holds = (requirement.function)(&inputs).map_err(Error::MethodFailed)?;
+            let holds = (requirement.function)(&inputs).map_err(|error| Error::MethodFailed {
+                error,
+                location: None,
+            })?;
             if !holds {
                 return Err(Error::InvalidRequirement);
             }
@@ -549,7 +566,7 @@ impl Sheet {
 
         let kind = self.cells.get(out_cell).ok_or(Error::InvalidId)?.kind;
         if kind != CellKind::Cell || self.cell_has_prior_use(out_cell) {
-            return Err(Error::InvalidCellKind);
+            return Err(Error::InvalidCellKind { location: None });
         }
 
         self.add_relationship(vec![writer])?;
@@ -607,6 +624,7 @@ impl Sheet {
                 return Err(Error::TypeMismatch {
                     expected: arg_cell.type_id,
                     found: declared,
+                    location: None,
                 });
             }
         }
@@ -946,13 +964,14 @@ impl Sheet {
     /// - `Error::InvalidCellKind` — `id` is `Out`-kind.
     pub fn write<T: Any + 'static>(&mut self, id: CellId, value: T) -> Result<(), Error> {
         if self.cells.get(id).is_some_and(|c| c.kind == CellKind::Out) {
-            return Err(Error::InvalidCellKind);
+            return Err(Error::InvalidCellKind { location: None });
         }
         let cell_type = self.cells.get(id).ok_or(Error::InvalidId)?.type_id;
         if cell_type != TypeId::of::<T>() {
             return Err(Error::TypeMismatch {
                 expected: cell_type,
                 found: TypeId::of::<T>(),
+                location: None,
             });
         }
 
@@ -977,6 +996,7 @@ impl Sheet {
             return Err(Error::TypeMismatch {
                 expected: cell.type_id,
                 found: TypeId::of::<T>(),
+                location: None,
             });
         }
         Ok(cell
@@ -1012,6 +1032,7 @@ impl Sheet {
             return Err(Error::TypeMismatch {
                 expected: cell.type_id,
                 found: TypeId::of::<T>(),
+                location: None,
             });
         }
         Ok(cell.source.downcast_ref::<T>().expect("type checked above"))
@@ -1138,7 +1159,10 @@ impl Sheet {
                     .iter()
                     .map(|&id| self.cells[id].effective())
                     .collect();
-                let value = (expr.function)(&args).map_err(Error::MethodFailed)?;
+                let value = (expr.function)(&args).map_err(|error| Error::MethodFailed {
+                    error,
+                    location: None,
+                })?;
                 Ok(MatchValue::Owned(value))
             }
         }
@@ -1353,7 +1377,10 @@ impl Sheet {
                 .iter()
                 .map(|&id| self.cells[id].effective())
                 .collect();
-            let holds = (requirement.function)(&inputs).map_err(Error::MethodFailed)?;
+            let holds = (requirement.function)(&inputs).map_err(|error| Error::MethodFailed {
+                error,
+                location: None,
+            })?;
             if !holds {
                 last_requirement_violations
                     .entry(requirement.cell)
@@ -1480,7 +1507,11 @@ impl Sheet {
                                 }
                             })
                             .collect();
-                        let outputs = (method.function)(&inputs).map_err(Error::MethodFailed)?;
+                        let outputs =
+                            (method.function)(&inputs).map_err(|error| Error::MethodFailed {
+                                error,
+                                location: Some(ErrorLocation::Method(rel_id, method_idx)),
+                            })?;
                         let output_ids = method.outputs.clone();
                         let shadow_outputs: Vec<bool> = method
                             .outputs
@@ -1491,11 +1522,14 @@ impl Sheet {
                     };
 
                     if outputs.len() != output_ids.len() {
-                        return Err(Error::MethodFailed(anyhow::anyhow!(
-                            "method produced {} outputs but relationship expects {}",
-                            outputs.len(),
-                            output_ids.len()
-                        )));
+                        return Err(Error::MethodFailed {
+                            error: anyhow::anyhow!(
+                                "method produced {} outputs but relationship expects {}",
+                                outputs.len(),
+                                output_ids.len()
+                            ),
+                            location: Some(ErrorLocation::Method(rel_id, method_idx)),
+                        });
                     }
 
                     for ((cell_id, new_value), shadow) in
@@ -1507,6 +1541,7 @@ impl Sheet {
                             return Err(Error::TypeMismatch {
                                 expected: cell.type_id,
                                 found,
+                                location: Some(ErrorLocation::Method(rel_id, method_idx)),
                             });
                         }
                         if shadow {
@@ -1762,6 +1797,7 @@ mod tests {
     use crate::{
         CellKind, ConditionalId, Error, MatchExpr, Method, Requirement, Sheet,
         cell::CellId,
+        error::ErrorLocation,
         filter::{Filter, FilterKind, FilterViolation},
         planner::{PlanStep, Seeds},
         relationship::RelationshipId,
@@ -1985,7 +2021,7 @@ mod tests {
             .add_conditional::<i32>(expr, vec![(vec![0], vec![])], vec![])
             .unwrap();
         let result = sheet.propagate();
-        assert!(matches!(result, Err(Error::MethodFailed(_))));
+        assert!(matches!(result, Err(Error::MethodFailed { .. })));
     }
 
     #[test]
@@ -2079,7 +2115,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             sheet.write(out, 5_i32),
-            Err(Error::InvalidCellKind)
+            Err(Error::InvalidCellKind { .. })
         ));
     }
 
@@ -2089,7 +2125,11 @@ mod tests {
         let a = sheet.add_source(0_i32);
         let b = sheet.add_cell(0_i32);
         let result = sheet.add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))]);
-        assert!(matches!(result, Err(Error::InvalidCellKind)));
+        assert!(matches!(result, Err(Error::InvalidCellKind { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(0))
+        );
     }
 
     #[test]
@@ -2112,7 +2152,7 @@ mod tests {
     fn error_variant_is_invalid_cell_kind_not_terminal_cell() {
         // Compile-time check that the rename landed; exercised for real once Task 3
         // wires up the CellKind-based checks that actually return this variant.
-        let _err = Error::InvalidCellKind;
+        let _err = Error::InvalidCellKind { location: None };
     }
 
     #[test]
@@ -2182,10 +2222,9 @@ mod tests {
     #[test]
     fn add_relationship_empty_methods_returns_invalid_method() {
         let mut sheet = Sheet::new();
-        assert!(matches!(
-            sheet.add_relationship(vec![]),
-            Err(Error::InvalidMethod)
-        ));
+        let result = sheet.add_relationship(vec![]);
+        assert!(matches!(result, Err(Error::InvalidMethod { .. })));
+        assert_eq!(result.unwrap_err().location(), None);
     }
 
     #[test]
@@ -2195,10 +2234,59 @@ mod tests {
         let b = sheet.add_cell(0_i32);
         // Method declares f64 input but cell holds i32.
         let method = Method::from_fn_1_1(a, b, |x: &f64| Ok(*x * 2.0));
-        assert!(matches!(
-            sheet.add_relationship(vec![method]),
-            Err(Error::TypeMismatch { .. })
-        ));
+        let result = sheet.add_relationship(vec![method]);
+        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(0))
+        );
+    }
+
+    #[test]
+    fn execute_plan_type_mismatch_reports_the_method_that_produced_it() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(false); // bool cell
+        // Declares an i32 output (matching nothing about `b`'s actual bool type at
+        // add_relationship time -- add_relationship validates output_types against the cell,
+        // so declare bool here to pass that check, then lie about it at runtime below).
+        let method = Method::new(
+            vec![a],
+            vec![b],
+            vec![TypeId::of::<i32>()],
+            vec![TypeId::of::<bool>()],
+            |args| {
+                let x = *args[0].downcast_ref::<i32>().unwrap();
+                // Lies: returns an i32 though output_types declared bool, reproducing the
+                // execute_plan runtime type-mismatch path (add_relationship can't catch this --
+                // it only checks the declared TypeId, not what the closure actually returns).
+                Ok(vec![Box::new(x) as Box<dyn std::any::Any>])
+            },
+        );
+        let rel_id = sheet.add_relationship(vec![method]).unwrap();
+        let result = sheet.propagate();
+        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::Method(rel_id, 0))
+        );
+    }
+
+    #[test]
+    fn execute_plan_method_failed_reports_the_method_that_produced_it() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let method = Method::from_fn_1_1(a, b, |_: &i32| -> Result<i32, anyhow::Error> {
+            Err(anyhow::anyhow!("boom"))
+        });
+        let rel_id = sheet.add_relationship(vec![method]).unwrap();
+        let result = sheet.propagate();
+        assert!(matches!(result, Err(Error::MethodFailed { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::Method(rel_id, 0))
+        );
     }
 
     #[test]
@@ -2228,10 +2316,12 @@ mod tests {
             vec![],
             |_| Ok(vec![]),
         );
-        assert!(matches!(
-            sheet.add_relationship(vec![method]),
-            Err(Error::InvalidMethod)
-        ));
+        let result = sheet.add_relationship(vec![method]);
+        assert!(matches!(result, Err(Error::InvalidMethod { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(0))
+        );
     }
 
     #[test]
@@ -2260,7 +2350,11 @@ mod tests {
             Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
             Method::from_fn_1_1(b, c, |v: &i32| Ok(*v)),
         ]);
-        assert!(matches!(result, Err(Error::MismatchedMethodCells)));
+        assert!(matches!(result, Err(Error::MismatchedMethodCells { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2291,7 +2385,11 @@ mod tests {
             Method::from_fn_2_1([a, b], b, |x: &i32, _y: &i32| Ok(*x)),
             Method::from_fn_2_1([a, b], b, |_x: &i32, y: &i32| Ok(*y)),
         ]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2321,7 +2419,11 @@ mod tests {
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             Method::from_fn_1_1(c, d, |x: &i32| Ok(*x)),
         ]);
-        assert!(matches!(result, Err(Error::MismatchedMethodCells)));
+        assert!(matches!(result, Err(Error::MismatchedMethodCells { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2335,7 +2437,11 @@ mod tests {
             Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x + *y)),
             Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x - *y)),
         ]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2355,7 +2461,11 @@ mod tests {
             },
         );
         let result = sheet.add_relationship(vec![method]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(0))
+        );
     }
 
     #[test]
@@ -3606,7 +3716,7 @@ mod tests {
             "always_errors",
             Requirement::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("boom"))),
         );
-        assert!(matches!(result, Err(Error::MethodFailed(_))));
+        assert!(matches!(result, Err(Error::MethodFailed { .. })));
     }
 
     #[test]
@@ -3690,7 +3800,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             sheet.write(area, 99_i32),
-            Err(Error::InvalidCellKind)
+            Err(Error::InvalidCellKind { .. })
         ));
     }
 
@@ -3704,7 +3814,7 @@ mod tests {
             .add_out(Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)), vec![])
             .unwrap();
         let result = sheet.add_out(Method::from_fn_1_1(height, area, |h: &i32| Ok(*h)), vec![]);
-        assert!(matches!(result, Err(Error::InvalidCellKind)));
+        assert!(matches!(result, Err(Error::InvalidCellKind { .. })));
     }
 
     #[test]

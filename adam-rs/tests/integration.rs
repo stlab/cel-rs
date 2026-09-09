@@ -429,7 +429,7 @@ fn method_returning_error_propagates_as_method_failed() {
         .unwrap();
 
     let result = sheet.propagate();
-    assert!(matches!(result, Err(Error::MethodFailed(_))));
+    assert!(matches!(result, Err(Error::MethodFailed { .. })));
 }
 
 #[test]
@@ -1382,7 +1382,7 @@ fn add_out_returns_invalid_cell_kind_when_output_cell_already_has_a_relationship
     let c = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(c, b, |x: &i32| Ok(*x));
     let result = sheet.add_out(writer, Vec::<(&str, Requirement)>::new());
-    assert!(matches!(result, Err(Error::InvalidCellKind)));
+    assert!(matches!(result, Err(Error::InvalidCellKind { .. })));
 }
 
 #[test]
@@ -1473,7 +1473,10 @@ fn write_returns_invalid_cell_kind_for_an_output_cell() {
             Vec::<(&str, Requirement)>::new(),
         )
         .unwrap();
-    assert!(matches!(sheet.write(b, 5_i32), Err(Error::InvalidCellKind)));
+    assert!(matches!(
+        sheet.write(b, 5_i32),
+        Err(Error::InvalidCellKind { .. })
+    ));
 }
 
 #[test]
@@ -1621,7 +1624,7 @@ fn requirement_function_error_aborts_propagate_with_method_failed() {
             )],
         )
         .unwrap();
-    assert!(matches!(sheet.propagate(), Err(Error::MethodFailed(_))));
+    assert!(matches!(sheet.propagate(), Err(Error::MethodFailed { .. })));
 }
 
 #[test]

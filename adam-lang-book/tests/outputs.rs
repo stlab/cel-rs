@@ -30,7 +30,7 @@ fn output_cell_can_be_referenced_but_never_written() {
     assert_eq!(*parsed.read::<i32>(doubled_area).unwrap(), 40); // area (20) * 2, cross-referenced
 
     let err = parsed.write(area, 999_i32).unwrap_err();
-    assert!(matches!(err, adam_rs::Error::InvalidCellKind));
+    assert!(matches!(err, adam_rs::Error::InvalidCellKind { .. }));
 }
 
 #[test]

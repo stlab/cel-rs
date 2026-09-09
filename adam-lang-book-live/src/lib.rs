@@ -57,6 +57,7 @@ fn Root(props: RootProps) -> Element {
         Some((sheet, labels)) => {
             let sheet = use_signal(|| sheet);
             let labels = use_signal(|| labels);
+            let method_spans = use_signal(|| outcome.method_spans.clone().unwrap_or_default());
             let error = outcome.error.clone();
 
             let data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
@@ -92,7 +93,7 @@ fn Root(props: RootProps) -> Element {
             });
 
             rsx! {
-                SheetInspector { sheet, labels, source_text, source_name }
+                SheetInspector { sheet, labels, method_spans, source_text, source_name }
                 if let Some(err) = error {
                     pre { class: "adam-live-error", "{err}" }
                 }

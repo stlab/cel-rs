@@ -1,6 +1,19 @@
 //! The `Error` type returned by all fallible operations in this crate.
 
+use crate::relationship::RelationshipId;
 use std::any::TypeId;
+
+/// Identifies which sheet component an error originates from, for translating back to a
+/// source location.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorLocation {
+    /// Index into the `methods` `Vec` passed to `add_relationship`, before any
+    /// `RelationshipId` exists for it.
+    MethodIndex(usize),
+    /// A method within an already-registered relationship.
+    Method(RelationshipId, usize),
+}
 
 /// Errors returned by `Sheet` operations and propagation.
 #[derive(Debug)]
@@ -15,6 +28,8 @@ pub enum Error {
         expected: TypeId,
         /// The TypeId of the value or declaration supplied by the caller.
         found: TypeId,
+        /// The method this mismatch was detected in, if known.
+        location: Option<ErrorLocation>,
     },
 
     /// A `CellId` or `RelationshipId` was not found in the sheet.
@@ -27,22 +42,41 @@ pub enum Error {
     Cycle,
 
     /// A method's function returned an error during execution.
-    MethodFailed(anyhow::Error),
+    MethodFailed {
+        /// The underlying error the method's function (or a requirement's/conditional's
+        /// expression function) returned.
+        error: anyhow::Error,
+        /// The method this failure originated from, if known.
+        location: Option<ErrorLocation>,
+    },
 
     /// A method is structurally invalid (e.g. the outputs list is empty, a
     /// relationship's methods reference different sets of cells, or two methods in
     /// a relationship share an identical output set). A method with no inputs is
     /// not an error: it defines a fixed point (a constant) rather than a derivation.
-    InvalidMethod,
+    InvalidMethod {
+        /// The method (by index within the `Vec` passed to `add_relationship`) that's
+        /// invalid, if known — `None` when `methods` itself is empty.
+        location: Option<ErrorLocation>,
+    },
 
     /// Two methods in the same relationship have `inputs ∪ outputs` sets that don't
     /// match. Every method in a relationship must reference exactly the same set of
     /// cells.
-    MismatchedMethodCells,
+    MismatchedMethodCells {
+        /// The first method (by index within the `Vec` passed to `add_relationship`) whose
+        /// cell set diverges from method 0's, if known. Method 0 is the baseline every other
+        /// method's cell set is compared against, so it is never itself the reported index.
+        location: Option<ErrorLocation>,
+    },
 
     /// A method's own `outputs` list names a cell more than once, or two methods in
     /// the same relationship have identical `outputs` sets.
-    DuplicateMethodOutputs,
+    DuplicateMethodOutputs {
+        /// The method (by index within the `Vec` passed to `add_relationship`) whose output
+        /// set collided, if known.
+        location: Option<ErrorLocation>,
+    },
 
     /// A conditional is structurally invalid: the cell was not found, a referenced
     /// relationship was not found, a branch relationship that shares a cell with the match
@@ -59,7 +93,11 @@ pub enum Error {
     /// method's output, `write()` targeted an `Out`-kind cell, or `add_out` targeted a
     /// cell that is already `Source`/`Out` kind or already claimed as another method's
     /// output.
-    InvalidCellKind,
+    InvalidCellKind {
+        /// The method (by index within the `Vec` passed to `add_relationship`) whose output
+        /// cell has the wrong kind, if the error originated there.
+        location: Option<ErrorLocation>,
+    },
 
     /// An `add_filter` call is structurally invalid: `name` is empty, the cell already
     /// has a filter, the filter's own value type does not match the cell's registered
@@ -87,26 +125,30 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::TypeMismatch { expected, found } => {
+            Error::TypeMismatch {
+                expected, found, ..
+            } => {
                 write!(f, "type mismatch: expected {expected:?}, found {found:?}")
             }
             Error::InvalidId => write!(f, "invalid cell or relationship id"),
             Error::Conflict => write!(f, "no valid method assignment (overconstrained)"),
             Error::Cycle => write!(f, "selected methods form a cycle"),
-            Error::MethodFailed(e) => write!(f, "method execution failed: {e}"),
-            Error::InvalidMethod => write!(f, "method is structurally invalid"),
-            Error::MismatchedMethodCells => write!(
+            Error::MethodFailed { error, .. } => write!(f, "method execution failed: {error}"),
+            Error::InvalidMethod { .. } => write!(f, "method is structurally invalid"),
+            Error::MismatchedMethodCells { .. } => write!(
                 f,
                 "methods in a relationship must reference the same set of cells"
             ),
-            Error::DuplicateMethodOutputs => write!(
+            Error::DuplicateMethodOutputs { .. } => write!(
                 f,
                 "a method's outputs must be duplicate-free, and no two methods in a \
                  relationship may share an outputs set"
             ),
             Error::InvalidConditional => write!(f, "conditional is structurally invalid"),
             Error::InvalidOutput => write!(f, "output is structurally invalid"),
-            Error::InvalidCellKind => write!(f, "cell's kind does not permit this operation"),
+            Error::InvalidCellKind { .. } => {
+                write!(f, "cell's kind does not permit this operation")
+            }
             Error::InvalidFilter => write!(f, "filter is structurally invalid"),
             Error::InvalidRequirement => write!(f, "requirement is structurally invalid"),
             Error::FilterCycle => write!(
@@ -120,10 +162,28 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {
     /// Returns the underlying `anyhow::Error` source for `MethodFailed`.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        if let Error::MethodFailed(e) = self {
-            Some(e.as_ref())
+        if let Error::MethodFailed { error, .. } = self {
+            Some(error.as_ref())
         } else {
             None
+        }
+    }
+}
+
+impl Error {
+    /// Returns the sheet component (relationship method) this error originates from, if
+    /// known. `None` for variants that never track a location, or when a location
+    /// legitimately doesn't apply to this occurrence (e.g. `add_relationship(vec![])`'s
+    /// `InvalidMethod`).
+    pub fn location(&self) -> Option<ErrorLocation> {
+        match self {
+            Error::TypeMismatch { location, .. } => *location,
+            Error::MismatchedMethodCells { location } => *location,
+            Error::DuplicateMethodOutputs { location } => *location,
+            Error::InvalidMethod { location } => *location,
+            Error::InvalidCellKind { location } => *location,
+            Error::MethodFailed { location, .. } => *location,
+            _ => None,
         }
     }
 }
@@ -137,11 +197,16 @@ mod tests {
         use std::any::TypeId;
         let expected = TypeId::of::<i32>();
         let found = TypeId::of::<f64>();
-        let e = Error::TypeMismatch { expected, found };
+        let e = Error::TypeMismatch {
+            expected,
+            found,
+            location: None,
+        };
         match e {
             Error::TypeMismatch {
                 expected: e,
                 found: f,
+                ..
             } => {
                 assert_eq!(e, TypeId::of::<i32>());
                 assert_eq!(f, TypeId::of::<f64>());
@@ -155,6 +220,7 @@ mod tests {
         let err = Error::TypeMismatch {
             expected: TypeId::of::<i32>(),
             found: TypeId::of::<f64>(),
+            location: None,
         };
         assert!(err.to_string().contains("type mismatch"));
     }
@@ -176,13 +242,20 @@ mod tests {
 
     #[test]
     fn method_failed_display_contains_source_message() {
-        let err = Error::MethodFailed(anyhow::anyhow!("division by zero"));
+        let err = Error::MethodFailed {
+            error: anyhow::anyhow!("division by zero"),
+            location: None,
+        };
         assert!(err.to_string().contains("division by zero"));
     }
 
     #[test]
     fn invalid_method_display_contains_invalid() {
-        assert!(Error::InvalidMethod.to_string().contains("invalid"));
+        assert!(
+            Error::InvalidMethod { location: None }
+                .to_string()
+                .contains("invalid")
+        );
     }
 
     #[test]
@@ -194,7 +267,10 @@ mod tests {
 
     #[test]
     fn method_failed_source_returns_some() {
-        let err = Error::MethodFailed(anyhow::anyhow!("inner"));
+        let err = Error::MethodFailed {
+            error: anyhow::anyhow!("inner"),
+            location: None,
+        };
         assert!(std::error::Error::source(&err).is_some());
     }
 
@@ -203,16 +279,21 @@ mod tests {
         assert!(std::error::Error::source(&Error::InvalidId).is_none());
         assert!(std::error::Error::source(&Error::Conflict).is_none());
         assert!(std::error::Error::source(&Error::Cycle).is_none());
-        assert!(std::error::Error::source(&Error::InvalidMethod).is_none());
+        assert!(std::error::Error::source(&Error::InvalidMethod { location: None }).is_none());
         assert!(
             std::error::Error::source(&Error::TypeMismatch {
                 expected: std::any::TypeId::of::<i32>(),
                 found: std::any::TypeId::of::<f64>(),
+                location: None,
             })
             .is_none()
         );
-        assert!(std::error::Error::source(&Error::MismatchedMethodCells).is_none());
-        assert!(std::error::Error::source(&Error::DuplicateMethodOutputs).is_none());
+        assert!(
+            std::error::Error::source(&Error::MismatchedMethodCells { location: None }).is_none()
+        );
+        assert!(
+            std::error::Error::source(&Error::DuplicateMethodOutputs { location: None }).is_none()
+        );
     }
 
     #[test]
@@ -231,13 +312,17 @@ mod tests {
 
     #[test]
     fn mismatched_method_cells_display_contains_cells() {
-        assert!(Error::MismatchedMethodCells.to_string().contains("cells"));
+        assert!(
+            Error::MismatchedMethodCells { location: None }
+                .to_string()
+                .contains("cells")
+        );
     }
 
     #[test]
     fn duplicate_method_outputs_display_contains_outputs() {
         assert!(
-            Error::DuplicateMethodOutputs
+            Error::DuplicateMethodOutputs { location: None }
                 .to_string()
                 .contains("outputs")
         );
@@ -255,7 +340,11 @@ mod tests {
 
     #[test]
     fn invalid_cell_kind_display_contains_kind() {
-        assert!(Error::InvalidCellKind.to_string().contains("kind"));
+        assert!(
+            Error::InvalidCellKind { location: None }
+                .to_string()
+                .contains("kind")
+        );
     }
 
     // Regression guard for https://github.com/stlab/cel-rs/issues/166: the message used to
@@ -263,12 +352,16 @@ mod tests {
     // became usable as inputs, and never covered the `Source`-kind case at all.
     #[test]
     fn invalid_cell_kind_display_does_not_mention_terminal() {
-        assert!(!Error::InvalidCellKind.to_string().contains("terminal"));
+        assert!(
+            !Error::InvalidCellKind { location: None }
+                .to_string()
+                .contains("terminal")
+        );
     }
 
     #[test]
     fn invalid_cell_kind_has_no_source() {
-        assert!(std::error::Error::source(&Error::InvalidCellKind).is_none());
+        assert!(std::error::Error::source(&Error::InvalidCellKind { location: None }).is_none());
     }
 
     #[test]
@@ -303,5 +396,20 @@ mod tests {
     #[test]
     fn filter_cycle_has_no_source() {
         assert!(std::error::Error::source(&Error::FilterCycle).is_none());
+    }
+
+    #[test]
+    fn error_location_variants_are_distinct() {
+        let a = ErrorLocation::MethodIndex(0);
+        let b = ErrorLocation::MethodIndex(1);
+        let c = ErrorLocation::Method(RelationshipId::default(), 0);
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a, ErrorLocation::MethodIndex(0));
+    }
+
+    #[test]
+    fn location_is_none_for_a_locationless_variant() {
+        assert_eq!(Error::InvalidId.location(), None);
     }
 }
