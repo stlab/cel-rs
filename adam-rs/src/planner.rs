@@ -3,15 +3,21 @@
 //!
 //! The planner finds the strength-optimal acyclic assignment of methods to
 //! relationships: [`release::resolve`] greedily tries, in descending cell-strength
-//! order, to leave each cell unclaimed (a source), keeping the change only when a
-//! valid method assignment still exists ([`matching::Assignment::solve`]) *and* its
-//! induced dependency digraph is acyclic ([`digraph::is_acyclic`]). This single
-//! mechanism handles both ordinary strength-based method selection (an uncontested
-//! relationship's choice of which cell to leave exogenous) and overlapping cyclic
-//! ("diamond") structures uniformly -- both are instances of "does releasing this cell
-//! still admit a valid acyclic assignment". See
-//! `docs/superpowers/specs/2026-08-04-cyclic-constraint-planner-design.md` for the
-//! full design rationale and literature grounding.
+//! order, to leave each cell unclaimed (a source), keeping the change only when a valid
+//! method assignment still exists ([`matching::Assignment::solve`]) *and* its induced
+//! dependency digraph is acyclic ([`digraph::is_acyclic`]). This single mechanism
+//! handles ordinary strength-based method selection (an uncontested relationship's
+//! choice of which cell to leave exogenous) and overlapping cyclic ("diamond")
+//! structures uniformly -- both are instances of "does releasing this cell still admit
+//! a valid acyclic assignment". See
+//! `docs/superpowers/specs/2026-08-04-cyclic-constraint-planner-design.md` for the full
+//! design rationale and literature grounding.
+//!
+//! Method selection is value-blind, including for self-referencing components: a
+//! self-referencing chain reaches the correct values through [`build_seeds`], which
+//! reconstructs each self-referencing input's value at execution time (see
+//! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`),
+//! not through a value-aware assignment choice.
 //!
 //! Once [`release::resolve`] succeeds, its result's induced digraph is guaranteed
 //! acyclic, so a plain topological sort (reusing [`scc::tarjan_scc`], which produces
@@ -25,6 +31,7 @@
 //! does not influence method selection above, which discovers the same infeasibility
 //! structurally via failed augmenting-path displacement in [`matching::Assignment::solve`].
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
 use slotmap::SlotMap;
@@ -39,10 +46,18 @@ mod digraph;
 mod matching;
 mod release;
 mod scc;
+mod seed;
 
 use digraph::{Node, add_filter_edges, build_digraph};
 use matching::pure_outputs;
 use release::ReleaseFailure;
+
+pub(crate) use seed::build_seeds;
+
+/// The seed value each self-referencing input should read this round, keyed by cell. A
+/// cell absent from the map reads its own `source`. See [`seed`] and
+/// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`.
+pub(crate) type Seeds = HashMap<CellId, Box<dyn Any>>;
 
 /// One step of a [`Plan`]'s `execution_order`: either a selected method, or reapplying a
 /// source cell's filter against its (now-settled) current argument values.
@@ -76,7 +91,10 @@ pub(crate) struct Plan {
 /// Assigns one method per active relationship and returns them in dependency order.
 ///
 /// Only relationships in `active` are planned; relationships outside `active` are
-/// invisible to method selection.
+/// invisible to method selection. Method selection is purely strength-based and
+/// value-blind: a self-referencing chain reaches the correct values not by choosing a
+/// value-aware assignment, but by [`build_seeds`] reconstructing each self-referencing
+/// input's value at execution time.
 ///
 /// # Errors
 ///

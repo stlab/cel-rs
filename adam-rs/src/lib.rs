@@ -109,6 +109,48 @@
 //! assert_eq!(*sheet.read::<i32>(b).unwrap(), 200);
 //! assert!(sheet.filter_violated_cells().any(|id| id == b));
 //! ```
+//!
+//! # Invariants
+//!
+//! Enforced by code:
+//!
+//! - Every relationship's methods share the same `inputs ∪ outputs` cell set
+//!   ([`Sheet::add_relationship`] validation; [`Error::MismatchedMethodCells`]).
+//! - No two relationships may claim the same cell as an output in one round —
+//!   self-referencing outputs are claimed exactly like any other
+//!   ([`Error::Conflict`] when infeasible).
+//! - The selected methods' induced dependency digraph is acyclic before execution
+//!   ([`Error::Cycle`]/[`Error::FilterCycle`] when not).
+//! - A self-referencing input never reads a same-round derived value. Instead it reads a
+//!   seed reconstructed from `source`: `planner::build_seeds` folds every other
+//!   relationship incident to the cell (excluding its own claimant) through that
+//!   relationship's cell-producing method, giving the cell's aspiration before its
+//!   claimant tightens it; a cell no other relationship contributes to just reads its
+//!   own `source`. The seed is rebuilt from `source` every round, so it is never stale
+//!   and never accumulates.
+//! - `source` is written only by [`Sheet::write`]/[`Sheet::add_cell`], never by method
+//!   or filter execution.
+//! - An `Out`-kind cell can never be [`Sheet::write`]-ed or claimed as another method's
+//!   output ([`Error::InvalidCellKind`]).
+//!
+//! Enforced only by convention (caller contract, not checked by the runtime):
+//!
+//! - A self-referencing method must be idempotent: applying it twice to the same inputs
+//!   must produce the same result as applying it once.
+//! - A filter must be a pure, conforming function of its cell's value and its argument
+//!   cells' values.
+//! - Iteration order used to break ties among equal-strength cells is not stable API
+//!   and must not be relied on by callers.
+//!
+//! The source-capture property:
+//!
+//! Capturing every cell's `source` value and reapplying the highest-strength sources
+//! reconstructs the sheet's *current* state, but not what a subsequent edit will do,
+//! since no method-selection state is captured, only values. This holds even for a
+//! self-referencing cell: `planner::build_seeds` reconstructs its contribution to a
+//! sibling relationship's method purely from current `source` values (recursively, for
+//! any other self-referencing cell that sibling method itself reads), so no state
+//! beyond `source` needs to be captured to reproduce the derived state.
 
 pub mod cell;
 pub mod conditional;
