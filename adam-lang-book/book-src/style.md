@@ -1,6 +1,6 @@
-# Chapter 11: Program Style
+# Program Style
 
-## 11.1 Canonical formatting
+## Canonical formatting
 
 Adam ships its own formatter (`adam fmt`, backed by
 [`format_sheet`](../adam_lang/fn.format_sheet.html)) with one canonical layout: 4-space

@@ -1,6 +1,6 @@
-# Chapter 5: Filters — Self-Correcting Cells
+# Filters — Self-Correcting Cells
 
-## 5.1 Grammar
+## Grammar
 
 ```text
 cell_filter = "filter" identifier ":" expression.
@@ -8,12 +8,12 @@ cell_filter = "filter" identifier ":" expression.
 
 A `filter` clause is optional and trails a `cell`, [`source`](source.md), or
 [`out`](outputs.md) declaration's type/initializer. Its `expression` is
-[deduced](expressions.md#44-deduced-dependencies) exactly like a relationship binding's, plus
+[deduced](expressions.md#deduced-dependencies) exactly like a relationship binding's, plus
 one reserved identifier: `_` always refers to the *candidate value being conformed* (of the
 filtered cell's own declared type), never a cell. `_` is reserved inside a filter expression
 only; outside one it's an ordinary identifier (or the [conditional](conditionals.md)
 default-branch token). The identifier before the `:` names the filter; it's a label surfaced
-through the host embedding API (see [A.10](reference.md#a10-the-host-embedding-api)), not a
+through the host embedding API (see the [host embedding API](reference.md#the-host-embedding-api)), not a
 cell reference.
 
 ```adam
@@ -23,10 +23,10 @@ cell level: i32 = 50 filter clamp: clamp(_, 0, max);      // an arbitrary expres
 ```
 
 A filter expression must reference `_` at least once (unless it's a range expression, see
-5.4) and must produce a value of exactly the filtered cell's own type; violating either is a
+[range filters](#range-filters)) and must produce a value of exactly the filtered cell's own type; violating either is a
 parse-time error, not a runtime one.
 
-## 5.2 Writing never filters
+## Writing never filters
 
 This is the single most important rule in this chapter: **writing a cell always stores exactly
 the value it was given**, filter or no filter. A filter is applied live, when the sheet
@@ -41,9 +41,9 @@ filter's account. Whatever you write is exactly what a read shows until the shee
 resolves: the same "a read reflects the last full resolution, not a per-write side effect" rule
 every other cell in a sheet already follows.
 
-## 5.3 The raw value is never lost
+## The raw value is never lost
 
-A filtered cell keeps two values under the hood: its raw last-written value, the _source_,
+A filtered cell keeps two values: its raw last-written value, the _source_,
 and, when something currently claims it, a computed override, the _derived_ value. Reading
 the cell always returns the derived value if one is present, the source value otherwise. A
 filter's live output always lands in the derived value, **never** in the source, so a filtered
@@ -55,15 +55,15 @@ intermediate clamped value:
 {{#include examples/filters/raw_value_never_lost.adm2}}
 ```
 
-This is the same rule [Chapter 9 §9.5](conditionals.md#95-the-default-branch-and-reverting-to-source) already showed for a
+This is the same rule the [default branch and reverting to source](conditionals.md#the-default-branch-and-reverting-to-source) section already showed for a
 relationship's method: a method's output (and a filter's output) always lands in the derived
 value, so nothing a *computation* produces can ever permanently overwrite what was actually
 written.
 
-## 5.4 Range filters
+## Range filters
 
 A filter expression whose type is CEL's `lo..=hi` range (over any type this book's
-[built-in numeric types](cells.md#23-built-in-types-and-inference) supports) is recognized
+[built-in numeric types](cells.md#built-in-types-and-inference) supports) is recognized
 structurally as a _range filter_: resolving the sheet clamps into `[lo, hi]` instead of
 running the expression as an arbitrary function of `_`, and the sheet can report the range's
 current live bounds without needing a candidate value at all:
@@ -72,17 +72,17 @@ current live bounds without needing a candidate value at all:
 {{#include examples/filters/range_filter_kind.adm2}}
 ```
 
-A range filter's body is exempt from the "must reference `_`" rule (5.1): a genuine range
+A range filter's body is exempt from the "must reference `_`" rule stated in the [Grammar](#grammar) above: a genuine range
 expression like `0..=max` has no reason to mention `_` at all, since both endpoints are
 independent of the value being conformed. This book's own live examples mount an editable
 widget bound to the filtered cell whose displayed `min`/`max` track the range's current live
-bounds — try the example in [§1.2](tutorial.md#12-filters-self-correcting-cells) of the
-Tutorial.
+bounds — try the example in the [Filters](tutorial.md#filters) section of the
+tutorial.
 
-## 5.5 Derived cells: diagnosed, never corrected
+## Derived cells: diagnosed, never corrected
 
 A filter attaches to *one* cell, but that cell isn't always a source: a relationship may claim
-it instead (Chapter 7). When that happens, the filter no longer has any authority to change the
+it instead (see the [relationships chapter](relationships.md)). When that happens, the filter no longer has any authority to change the
 value: it only *observes*. The sheet still resolves successfully, and the out-of-range value is
 still what a read returns; the sheet simply records that the filter is violated:
 
@@ -92,16 +92,16 @@ still what a read returns; the sheet simply records that the filter is violated:
 
 Resolving the sheet never fails because of a filter violation, on either side (source or
 derived): a filter is a diagnostic and a self-correction mechanism, never a gate. A host UI can
-query which cells currently have a violated filter; see
-[Appendix A.10](reference.md#a10-the-host-embedding-api) for the embedding API that exposes
+query which cells currently have a violated filter; see the
+[host embedding API](reference.md#the-host-embedding-api) that exposes
 this.
 
-## 5.6 A filter on an output cell
+## A filter on an output cell
 
 A filter isn't limited to a plain `cell`: an [`out`](outputs.md) declaration's grammar carries
-the same optional `cell_filter` clause (5.1), trailing its `:=` initializer instead of a `cell`
+the same optional `cell_filter` clause (see [Grammar](#grammar)), trailing its `:=` initializer instead of a `cell`
 declaration's own initializer. Everything above applies unchanged — an out cell is always
-derived (5.5 is the only case that ever actually applies to one), so a filter attached to an
+derived ([derived cells: diagnosed, never corrected](#derived-cells-diagnosed-never-corrected) is the only case that ever actually applies to one), so a filter attached to an
 out cell is a pure diagnostic, exactly like a filter on any other cell a relationship currently
 claims:
 
@@ -110,11 +110,11 @@ claims:
 ```
 
 A [`source`](source.md) declaration's grammar carries the same optional `cell_filter` clause
-too — see [Chapter 3](source.md#33-a-source-cell-can-be-filtered-too). A `filter` attaches to
+too — see [a source cell can be filtered too](source.md#a-source-cell-can-be-filtered-too). A `filter` attaches to
 any cell kind (`cell`, `source`, or `out`) exactly the same way; the grammar has no
 per-kind restriction.
 
-## 5.7 Errors
+## Errors
 
 Two filter-declaration mistakes are caught while parsing the sheet, before it is ever
 resolved: a non-range filter body that never references `_` fails with "filter must

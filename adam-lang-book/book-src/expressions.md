@@ -1,6 +1,6 @@
-# Chapter 4: Expressions and Dependency Deduction
+# Expressions and Dependency Deduction
 
-## 4.1 Expressions are CEL
+## Expressions are CEL
 
 Everywhere Adam's grammar calls for `expression` (a cell initializer, a relationship
 binding's right-hand side, a conditional's match subject or branch literal, an `out`
@@ -11,38 +11,37 @@ CEL, and are documented by `cel-parser`'s own crate documentation, not here. Thi
 covers only what Adam does *around* an expression: deciding which cells it may read, and
 what it does with the value it produces.
 
-## 4.2 No standard library of its own
+## No standard library of its own
 
 A parser built with a bare [`OpLookup::new()`](../cel_parser/op_table/struct.OpLookup.html#method.new) and no library installed can still parse and run
 every construct in this book except a function call — any attempt to call an undefined
 function fails to parse with an error naming the missing function. This book's own examples
 always install `cel-std` (see `support::parser` in `adam-lang-book`'s own source).
 
-## 4.3 Cell initializers see no cells
+## Cell initializers see no cells
 
-A `cell`'s `= expression` initializer is evaluated exactly once, eagerly, at the moment
-`cell`'s own declaration is parsed, with no cell scope pushed at all. Referencing any
+A `cell`'s `= expression` initializer is evaluated with no cell scope at all. Referencing any
 identifier that would otherwise name a cell is an "undeclared cell `name`" error, exactly
-as if the cell had never been declared at all — see Appendix A.9.
+as if the cell had never been declared; see [error messages](reference.md#error-messages).
 
 To compute one cell's value from another's, write a [`relationship`](relationships.md) or an
 [`out`](outputs.md) declaration; both of those *do* get a live cell scope, per the next
 section.
 
-## 4.4 Deduced dependencies
+## Deduced dependencies
 
 A `relationship` binding, a `conditional`'s match subject, an `out` declaration's body, and a
 `require`ment body all share one mechanism for deciding which cells they read: **every**
 identifier the expression references that names an already-declared cell becomes an input,
 automatically; there is no explicit parameter list to write. Referencing the same cell more
 than once (`a && a`) still counts as one input, not two. This is why Adam has no forward
-references (2.6): an identifier can only be recognized as a cell dependency if that cell was
+references (see [names and declaration order](cells.md#names-and-declaration-order)): an identifier can only be recognized as a cell dependency if that cell was
 declared earlier in the same sheet.
 
 A [`filter`](filters.md) clause uses the same deduction, plus one reserved identifier: `_`
-always denotes the candidate value being conformed, never a cell; see [Chapter 5](filters.md).
+always denotes the candidate value being conformed, never a cell; see the [filters chapter](filters.md).
 
-## 4.5 "Expression produced no value"
+## "Expression produced no value"
 
 Every place an `expression` is required must produce a value one of Adam's registered
 types recognizes, at the end of parsing: a bare CEL statement with no trailing value, or an
