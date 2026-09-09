@@ -234,8 +234,10 @@ impl Sheet {
             .iter()
             .map(|m| m.inputs.iter().chain(m.outputs.iter()).copied().collect())
             .collect();
-        if cell_sets[1..].iter().any(|set| set != &cell_sets[0]) {
-            return Err(Error::MismatchedMethodCells);
+        if let Some(rel_idx) = cell_sets[1..].iter().position(|set| set != &cell_sets[0]) {
+            return Err(Error::MismatchedMethodCells {
+                location: Some(ErrorLocation::MethodIndex(rel_idx + 1)),
+            });
         }
 
         // A method's own outputs must be duplicate-free, and no two methods in a
@@ -243,10 +245,12 @@ impl Sheet {
         // treats a method's pure-output set as an indivisible claim, so two methods
         // sharing an output set would make that claim ambiguous.
         let mut seen_output_sets: Vec<HashSet<CellId>> = Vec::with_capacity(methods.len());
-        for method in &methods {
+        for (idx, method) in methods.iter().enumerate() {
             let output_set: HashSet<CellId> = method.outputs.iter().copied().collect();
             if output_set.len() != method.outputs.len() || seen_output_sets.contains(&output_set) {
-                return Err(Error::DuplicateMethodOutputs);
+                return Err(Error::DuplicateMethodOutputs {
+                    location: Some(ErrorLocation::MethodIndex(idx)),
+                });
             }
             seen_output_sets.push(output_set);
         }
@@ -2302,7 +2306,11 @@ mod tests {
             Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
             Method::from_fn_1_1(b, c, |v: &i32| Ok(*v)),
         ]);
-        assert!(matches!(result, Err(Error::MismatchedMethodCells)));
+        assert!(matches!(result, Err(Error::MismatchedMethodCells { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2333,7 +2341,11 @@ mod tests {
             Method::from_fn_2_1([a, b], b, |x: &i32, _y: &i32| Ok(*x)),
             Method::from_fn_2_1([a, b], b, |_x: &i32, y: &i32| Ok(*y)),
         ]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2363,7 +2375,11 @@ mod tests {
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             Method::from_fn_1_1(c, d, |x: &i32| Ok(*x)),
         ]);
-        assert!(matches!(result, Err(Error::MismatchedMethodCells)));
+        assert!(matches!(result, Err(Error::MismatchedMethodCells { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2377,7 +2393,11 @@ mod tests {
             Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x + *y)),
             Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x - *y)),
         ]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2397,7 +2417,11 @@ mod tests {
             },
         );
         let result = sheet.add_relationship(vec![method]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(0))
+        );
     }
 
     #[test]

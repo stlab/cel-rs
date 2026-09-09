@@ -53,11 +53,19 @@ pub enum Error {
     /// Two methods in the same relationship have `inputs ∪ outputs` sets that don't
     /// match. Every method in a relationship must reference exactly the same set of
     /// cells.
-    MismatchedMethodCells,
+    MismatchedMethodCells {
+        /// The first method (by index within the `Vec` passed to `add_relationship`) whose
+        /// cell set diverges from method 0's, if known.
+        location: Option<ErrorLocation>,
+    },
 
     /// A method's own `outputs` list names a cell more than once, or two methods in
     /// the same relationship have identical `outputs` sets.
-    DuplicateMethodOutputs,
+    DuplicateMethodOutputs {
+        /// The method (by index within the `Vec` passed to `add_relationship`) whose output
+        /// set collided, if known.
+        location: Option<ErrorLocation>,
+    },
 
     /// A conditional is structurally invalid: the cell was not found, a referenced
     /// relationship was not found, a branch relationship that shares a cell with the match
@@ -112,11 +120,11 @@ impl std::fmt::Display for Error {
             Error::Cycle => write!(f, "selected methods form a cycle"),
             Error::MethodFailed(e) => write!(f, "method execution failed: {e}"),
             Error::InvalidMethod => write!(f, "method is structurally invalid"),
-            Error::MismatchedMethodCells => write!(
+            Error::MismatchedMethodCells { .. } => write!(
                 f,
                 "methods in a relationship must reference the same set of cells"
             ),
-            Error::DuplicateMethodOutputs => write!(
+            Error::DuplicateMethodOutputs { .. } => write!(
                 f,
                 "a method's outputs must be duplicate-free, and no two methods in a \
                  relationship may share an outputs set"
@@ -153,6 +161,8 @@ impl Error {
     pub fn location(&self) -> Option<ErrorLocation> {
         match self {
             Error::TypeMismatch { location, .. } => *location,
+            Error::MismatchedMethodCells { location } => *location,
+            Error::DuplicateMethodOutputs { location } => *location,
             _ => None,
         }
     }
@@ -248,8 +258,12 @@ mod tests {
             })
             .is_none()
         );
-        assert!(std::error::Error::source(&Error::MismatchedMethodCells).is_none());
-        assert!(std::error::Error::source(&Error::DuplicateMethodOutputs).is_none());
+        assert!(
+            std::error::Error::source(&Error::MismatchedMethodCells { location: None }).is_none()
+        );
+        assert!(
+            std::error::Error::source(&Error::DuplicateMethodOutputs { location: None }).is_none()
+        );
     }
 
     #[test]
@@ -268,13 +282,17 @@ mod tests {
 
     #[test]
     fn mismatched_method_cells_display_contains_cells() {
-        assert!(Error::MismatchedMethodCells.to_string().contains("cells"));
+        assert!(
+            Error::MismatchedMethodCells { location: None }
+                .to_string()
+                .contains("cells")
+        );
     }
 
     #[test]
     fn duplicate_method_outputs_display_contains_outputs() {
         assert!(
-            Error::DuplicateMethodOutputs
+            Error::DuplicateMethodOutputs { location: None }
                 .to_string()
                 .contains("outputs")
         );
