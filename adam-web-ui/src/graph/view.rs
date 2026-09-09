@@ -171,7 +171,6 @@ mod tests {
             changed: vec![],
             forced: vec![],
             forced_relationships: vec![],
-            arrows: false,
         }
     }
 

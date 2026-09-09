@@ -49,8 +49,14 @@ pub enum LinkKind {
 
 /// A single edge in the D3 graph.
 ///
-/// When [`GraphData::arrows`] is `false` constraint edges are undirected; when `true`
-/// they are directed from `source` to `target`. Control edges are always directed — from a
+/// `directed` is `true` when this specific link's direction is known and should render
+/// with an arrowhead from `source` to `target`; `false` renders it as a plain undirected
+/// line. This is a per-link fact, not a sheet-wide one: a cell ↔ relationship link is
+/// directed only once *that relationship* has a selected method, so one relationship
+/// having a cached plan says nothing about another relationship (or a currently-inactive
+/// conditional branch's relationship) that doesn't. A match cell → conditional link is
+/// always directed — evaluating a conditional's match expression doesn't depend on any
+/// relationship ever being planned. Control edges are always directed too — from a
 /// conditional node to a relationship, or, when a branch has more than one relationship, from
 /// the conditional to an intermediate `Branch` node and from that node to each relationship —
 /// and styled by `branch_index` and `branch_active`.
@@ -62,6 +68,8 @@ pub struct LinkData {
     pub target: String,
     /// The kind of link, determining its visual rendering.
     pub kind: LinkKind,
+    /// `true` if this link's direction is known and should render with an arrowhead.
+    pub directed: bool,
     /// Branch index for `Control` links; `None` for `Constraint` links and default-branch control links.
     pub branch_index: Option<usize>,
     /// `true` if this branch is currently active; `None` for `Constraint` links.
@@ -85,9 +93,6 @@ pub struct GraphData {
     /// [`adam_rs::Sheet::is_relationship_forced`]); consumers may render them
     /// distinctly, along with their constraint edges.
     pub forced_relationships: Vec<String>,
-    /// `true` when at least one relationship has a cached plan and constraint links are directed
-    /// where plans exist; `false` when no plan has been computed.
-    pub arrows: bool,
 }
 
 fn cell_node_id(id: CellId) -> String {
@@ -141,6 +146,7 @@ fn push_branch_links(
             source: cond_id_str.to_string(),
             target: bnode_id.clone(),
             kind: LinkKind::Control,
+            directed: true,
             branch_index,
             branch_active: Some(branch_active),
         });
@@ -149,6 +155,7 @@ fn push_branch_links(
                 source: bnode_id.clone(),
                 target: rel_node_id(rel_id),
                 kind: LinkKind::Control,
+                directed: true,
                 branch_index,
                 branch_active: Some(branch_active),
             });
@@ -159,6 +166,7 @@ fn push_branch_links(
                 source: cond_id_str.to_string(),
                 target: rel_node_id(rel_id),
                 kind: LinkKind::Control,
+                directed: true,
                 branch_index,
                 branch_active: Some(branch_active),
             });
@@ -168,14 +176,17 @@ fn push_branch_links(
 
 /// Serializes `sheet` and `labels` into a [`GraphData`] snapshot for D3.
 ///
-/// Constraint links: when a plan is cached (`sheet.selected_method` returns `Some`) links are
-/// directed (inputs → relationship → outputs) and [`GraphData::arrows`] is `true`. Otherwise
-/// all cells adjacent to the relationship are emitted as undirected source→relationship edges.
+/// Constraint links: when a relationship has a cached plan (`sheet.selected_method` returns
+/// `Some`) its links are directed (inputs → relationship → outputs, [`LinkData::directed`]
+/// `true`). Otherwise all cells adjacent to that relationship are emitted as undirected
+/// source→relationship edges (`directed` `false`) — this is decided per relationship, so one
+/// relationship having a plan never marks another relationship's links as directed.
 ///
-/// Conditional nodes: for each conditional, emits one `Conditional` node, one `Constraint` link
-/// from the match cell to the conditional node, and one `Control` link per relationship in each
-/// branch/default. When a branch (or the default) holds more than one relationship, its control
-/// links route through an intermediate `Branch` junction node (`conditional → branch →
+/// Conditional nodes: for each conditional, emits one `Conditional` node, one always-directed
+/// `Constraint` link from the match cell to the conditional node, and one `Control` link per
+/// relationship in each branch/default. When a branch (or the default) holds more than one
+/// relationship, its control links route through an intermediate `Branch` junction node
+/// (`conditional → branch →
 /// relationship`) instead of a direct edge, so the branch's relationships visually group
 /// together; branches with 0 or 1 relationships keep a direct edge. Control links carry
 /// `branch_index` and `branch_active` for rendering, shared identically across both hops of a
@@ -186,7 +197,6 @@ fn push_branch_links(
 pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
     let mut nodes = Vec::new();
     let mut links = Vec::new();
-    let mut arrows = false;
 
     // Cell nodes
     for id in sheet.cells() {
@@ -213,13 +223,13 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
         });
 
         if let Some(method_idx) = sheet.selected_method(id) {
-            arrows = true;
             if let Some(inputs) = sheet.method_inputs(id, method_idx) {
                 for &cell_id in inputs {
                     links.push(LinkData {
                         source: cell_node_id(cell_id),
                         target: rel_node_id(id),
                         kind: LinkKind::Constraint,
+                        directed: true,
                         branch_index: None,
                         branch_active: None,
                     });
@@ -231,6 +241,7 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
                         source: rel_node_id(id),
                         target: cell_node_id(cell_id),
                         kind: LinkKind::Constraint,
+                        directed: true,
                         branch_index: None,
                         branch_active: None,
                     });
@@ -242,6 +253,7 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
                     source: cell_node_id(cell_id),
                     target: rel_node_id(id),
                     kind: LinkKind::Constraint,
+                    directed: false,
                     branch_index: None,
                     branch_active: None,
                 });
@@ -259,13 +271,17 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
             value: String::new(),
         });
 
-        // Constraint links: every match cell → conditional node
+        // Constraint links: every match cell → conditional node. Always directed --
+        // evaluating a conditional's match expression doesn't depend on any relationship
+        // (in this branch or any other) ever having a selected method, so this must not
+        // be gated on relationship planning the way cell ↔ relationship links are.
         if let Some(match_cells) = sheet.conditional_match_cells(cond_id) {
             for &match_cell in match_cells {
                 links.push(LinkData {
                     source: cell_node_id(match_cell),
                     target: node_id.clone(),
                     kind: LinkKind::Constraint,
+                    directed: true,
                     branch_index: None,
                     branch_active: None,
                 });
@@ -321,7 +337,6 @@ pub fn to_graph_data(sheet: &Sheet, labels: &Labels) -> GraphData {
         changed,
         forced,
         forced_relationships,
-        arrows,
     }
 }
 
@@ -662,18 +677,109 @@ mod tests {
     }
 
     #[test]
-    fn to_graph_data_arrows_false_before_propagate() {
+    fn to_graph_data_constraint_links_undirected_before_propagate() {
         let (sheet, labels) = demo_sheet_with_plan();
         let data = to_graph_data(&sheet, &labels);
-        assert!(!data.arrows);
+        assert!(
+            data.links
+                .iter()
+                .filter(|l| matches!(l.kind, LinkKind::Constraint))
+                .all(|l| !l.directed),
+            "no relationship has a cached plan yet, so every constraint link must be undirected"
+        );
     }
 
     #[test]
-    fn to_graph_data_arrows_true_after_propagate() {
+    fn to_graph_data_constraint_links_directed_after_propagate() {
         let (mut sheet, labels) = demo_sheet_with_plan();
         sheet.propagate().unwrap();
         let data = to_graph_data(&sheet, &labels);
-        assert!(data.arrows);
+        assert!(
+            data.links
+                .iter()
+                .filter(|l| matches!(l.kind, LinkKind::Constraint))
+                .any(|l| l.directed),
+            "the relationship's cached plan should make its constraint links directed"
+        );
+    }
+
+    #[test]
+    fn to_graph_data_match_cell_link_is_directed_even_when_conditional_branch_is_inactive() {
+        // Reproduces adam-lang-book's constrain.adm2: a sheet whose only relationship
+        // lives inside a conditional, currently not matching any branch. No relationship
+        // anywhere in the sheet has a cached plan, but the match cell -> conditional link
+        // must still render directed -- evaluating the conditional's match expression
+        // doesn't depend on any relationship ever being planned.
+        let (mut sheet, labels) = sheet_with_conditional();
+        sheet.propagate().unwrap();
+        let data = to_graph_data(&sheet, &labels);
+
+        let cond_id = data
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Conditional)
+            .map(|n| n.id.clone())
+            .unwrap();
+        let match_link = data
+            .links
+            .iter()
+            .find(|l| matches!(l.kind, LinkKind::Constraint) && l.target == cond_id)
+            .expect("expected a Constraint link targeting the conditional node");
+        assert!(
+            match_link.directed,
+            "the match cell -> conditional link must be directed regardless of whether \
+             the conditional's own relationship currently has a plan"
+        );
+    }
+
+    #[test]
+    fn to_graph_data_undirected_relationship_link_is_independent_of_other_relationships() {
+        // R1 (a -> b) is unconditional and always planned; R2 (x <-> y, two methods) lives
+        // in a conditional that currently doesn't match any branch, so R2 has no plan. R1
+        // having a plan must not make R2's fallback adjacency links directed too -- each
+        // relationship's `directed` flag is its own fact, not a sheet-wide one.
+        let mut sheet = Sheet::new();
+        let mut labels = Labels::new();
+        let a = sheet.add_cell(2.0_f64);
+        labels.add_cell::<f64>(a, "a");
+        let b = sheet.add_cell(0.0_f64);
+        labels.add_cell::<f64>(b, "b");
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &f64| Ok(*v))])
+            .unwrap();
+
+        let x = sheet.add_cell(1.0_f64);
+        labels.add_cell::<f64>(x, "x");
+        let y = sheet.add_cell(2.0_f64);
+        labels.add_cell::<f64>(y, "y");
+        let p = sheet.add_cell(0_i32);
+        labels.add_cell::<i32>(p, "p");
+        let rel_xy = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(x, y, |v: &f64| Ok(*v)),
+                Method::from_fn_1_1(y, x, |v: &f64| Ok(*v)),
+            ])
+            .unwrap();
+        sheet
+            .add_conditional(
+                MatchExpr::cell(p),
+                vec![(vec![1_i32], vec![rel_xy])],
+                vec![],
+            )
+            .unwrap();
+
+        sheet.propagate().unwrap();
+        let data = to_graph_data(&sheet, &labels);
+
+        let rel_xy_id = rel_node_id(rel_xy);
+        assert!(
+            data.links
+                .iter()
+                .filter(|l| matches!(l.kind, LinkKind::Constraint)
+                    && (l.source == rel_xy_id || l.target == rel_xy_id))
+                .all(|l| !l.directed),
+            "R2's links must stay undirected even though R1 elsewhere has a cached plan"
+        );
     }
 
     #[test]

@@ -1,20 +1,22 @@
 # A Tutorial Introduction
 
-An Adam sheet declares the relationships among a set of properties (invariants in a document's
-structure, constraints between a command's arguments and its result, or values useful for
-constructing a new argument or document state), instead of the event logic that would otherwise
-maintain them by hand.
+Adam programs are called _sheets_, a term borrowed from spreasheets. This chapter is an informal
+tour of every construct Adam has; later chapters go back over the same ground in more detail, and
+the [reference manual](reference.md) provides a full specification.
 
-Adam programs are called _sheets_, a term borrowed from spreasheets. This chapter is a fast,
-informal tour of every construct Adam has; later chapters go back over the same ground in more
-detail, and the [reference manual](reference.md) collects the precise rules for looking things up.
+An Adam sheet declares the relationships among a set of properties called _cells_. These
+relationships are maintained when edits occur, providing complex behaviors without having to
+imperatively code how events are handled.
 
-You don't need to install anything to follow along: every source fragment below stands on its own as
-a `.adm2` file, and the UI controls are constructed entirely from the sheet declaration
+Every source fragment below is the complete description used to geenrate the UI, UI behavior, and
+graph visualization. The UI is live, so you can change the values and explore the behavior. Within
+an application, a sheet instance is typically bound to a UI construct or scripting system with human
+readable text lables, instead of cell identifiers.
 
 ## A first sheet
 
-An Adam program is a single `sheet`, named, with a body of declarations between braces. A simple sheet declares a couple of source cells:
+An Adam program is a single `sheet`, named, with a body of declarations between braces. A simple
+sheet declares a couple of source cells:
 
 ```adam
 {{#include examples/tutorial/first_sheet.adm2}}
@@ -22,9 +24,11 @@ An Adam program is a single `sheet`, named, with a body of declarations between 
 
 A _cell_ is a named, typed storage location: the basic unit of state in a property model. `width`
 and `height` are `i32`-typed cells, each given an initial value (the types are deduced from the
-initial value). A `source` cell is like a spreadsheet's value cell: it holds a value written into it.
+initial value). A `source` cell is like a spreadsheet's value cell: it holds a value written into
+it.
 
-A sheet's body is a sequence of declarations. A sheet describes a _graph_ of cells and the constraints between them. The graph for `hello` is just the two, unconnected, cells.
+A sheet's body is a sequence of declarations. A sheet describes a _graph_ of cells and the
+constraints between them. The graph for `hello` is just the two, unconnected, cells.
 
 <graph sheet="first_sheet">
 
@@ -36,20 +40,25 @@ A `filter` clause attaches a domain constraint to a cell, most commonly a range:
 {{#include examples/tutorial/clamp_demo.adm2}}
 ```
 
-`0..=100` is an _inclusive_ range. Try
-writing a value outside `[0, 100]` into `level` above and watch it snap back into range.
+`0..=100` is an _inclusive_ range. Try writing a value outside `[0, 100]` into `level` above and
+watch it snap back into range.
 
-A filter's bounds don't have to be constants: `0..=max` references another cell. The [filters chapter](filters.md) covers filters in full.
+A filter's bounds don't have to be constants: `0..=max` references another cell. The [filters
+chapter](filters.md) covers filters in full.
 
 ## Out Cells
 
-An `out` declaration is like a spreadsheet's equation cell. Its value is computed from the provided _method_.
+An `out` declaration is like a spreadsheet's equation cell. Its value is computed from the provided
+_method_.
 
 ```adam
 {{#include examples/tutorial/basic_output.adm2}}
 ```
 
-The method on the out cell can reference other cells in the sheet and the calculation is reapplied when those values change. In the graph representation, the method is a relationship and drawn as a circle between the cells. The heavy arrows and border around the out cell indicate that the value is _forced_ by the relationship. A forced cell's value is not editable.
+The method on the out cell can reference other cells in the sheet and the calculation is reapplied
+when those values change. In the graph representation, the method is a relationship and drawn as a
+circle between the cells. The heavy arrows and border around the out cell indicate that the value is
+_forced_ by the relationship. A forced cell's value is not editable.
 
 <graph sheet="basic_output">
 
@@ -57,21 +66,29 @@ See the [outputs and requirements chapter](outputs.md) for the full treatment.
 
 ## Cells and Relationships
 
-A plain `cell` declaration acts as a source or derived cell. Cells are connected by one or more _relationships_, each a bundle of methods that satisfy the relationship but solve for a different term.
+A plain `cell` declaration acts as a source _or_ out cell. Cells are connected by one or more
+_relationships_, each a bundle of methods that satisfy the relationship but solve for a different
+term (or set of terms).
 
-For example, if we have two values \\(a\\) and \\(b\\) where \\(a = 2b\\), that can be represented as:
+For example, if we have two values \\(a\\) and \\(b\\) where \\(a = 2b\\), that can be represented
+as:
 
 ```adam
 {{#include examples/tutorial/basic_relationship.adm2}}
 ```
 
-For any active `relationship`, exactly one method is selected to execute. The method chosen is based on the _strength_ of the cells. Cells that have been written more recently have a higher strength. The initial strength of the cells is determined by the declaration order. Cells declared later have a higher strength.
+For any active `relationship`, exactly one method is selected to execute. The method chosen is based
+on the _strength_ of the cells. Cells that have been written more recently have a higher strength.
+The initial strength of the cells is determined by the declaration order. Cells declared later have
+a higher strength.
 
 In the graph, you can see the flow change as you write `a` or `b`.
 
 <graph sheet="basic_relationship">
 
-The methods in a relationship must be _consistent_. If the result of the selected method is used to recalculate the non-selected methods, the result should not change the value of the assigned cells within an error epsilon.
+The methods in a relationship must be _consistent_. If the result of the selected method is used to
+recalculate the non-selected methods, the result should not change the value of the assigned cells
+within an error epsilon.
 
 Relationships can be chained together. We can express the relationship `a <= b <= c` like this:
 
@@ -83,12 +100,16 @@ Relationships can be chained together. We can express the relationship `a <= b <
 
 This example also demonstrates two additional features.
 
-- A method can be _self-referential_, naming a cell as both a dependency and a result. In such a case, the method must be idempotent.
-- When a cell value is derived in terms of itself via a self-referential method (or filter). The last written value is preserved.
+- A method can be _self-referential_, naming a cell as both a dependency and a result. In such a
+  case, the method must be idempotent.
+- When a cell value is derived in terms of itself via a self-referential method (or filter). The
+  last written value is preserved.
 
-You can see the effect of the second behavior by sliding `a` to `100` which will pull `b` and `c` to `100` and then slide `a` back to `0`. `b` and `c` will return to their prior values.
+You can see the effect of the second behavior by sliding `a` to `100` which will pull `b` and `c` to
+`100` and then slide `a` back to `0`. `b` and `c` will return to their prior values.
 
-In the [relationships chapter](relationships.md) you will see relationships are not limited in their arity (you can have n-way relationships with each method solving for 1 or more cells).
+In the [relationships chapter](relationships.md) you will see relationships are not limited in their
+arity (you can have n-way relationships with each method solving for 1 or more cells).
 
 ## Conditionals
 
@@ -100,15 +121,18 @@ _match subject_, then activates whichever branch's literal equals the current ma
 ```
 
 Only the active branch's relationships participate. The `_` branch, if present, catches any value
-none of the named branches list, and must be written last. If no branch is matched, the conditional has no effect.
+none of the named branches list, and must be written last. If no branch is matched, the conditional
+has no effect.
+
+<graph sheet="constrain">
 
 See the [conditionals chapter](conditionals.md) for branch types, tuple match subjects.
 
 Some branches offer the solver no choice at all. A relationship with exactly one method is _forced_:
 there's no alternative binding to try, so its output cell is claimed every round regardless of
-strength, unlike the freely-chosen roles in the earlier [triangle](#cells-and-relationships). A host UI commonly disables the
-editable widget for a forced cell, since writing it would have no lasting effect once the sheet
-re-resolves.
+strength, unlike the freely-chosen roles in the earlier [triangle](#cells-and-relationships). A host
+UI commonly disables the editable widget for a forced cell, since writing it would have no lasting
+effect once the sheet re-resolves.
 
 ```adam
 {{#include examples/tutorial/forced_and_self_ref_shadow.adm2}}
@@ -116,19 +140,19 @@ re-resolves.
 
 With `mode == 0` (the declared default), `range_bounds`'s relationship has two self-referencing
 methods, `low := min(low, high)` and `high := max(low, high)`: a relationship exactly like the
-earlier [triangle](#cells-and-relationships), where either cell could end up derived, decided by strength, and never both at once.
-Declared first, `low` is staler, so the solver derives it: `low := min(4, 9)`, which happens to
-equal `low`'s own current value, so nothing visibly changes. `high`'s own `max` method is never
-invoked at all this round; `high` is simply an ordinary, unclaimed source, reporting its own
-untouched value, `9`.
+earlier [triangle](#cells-and-relationships), where either cell could end up derived, decided by
+strength, and never both at once. Declared first, `low` is staler, so the solver derives it: `low :=
+min(4, 9)`, which happens to equal `low`'s own current value, so nothing visibly changes. `high`'s
+own `max` method is never invoked at all this round; `high` is simply an ordinary, unclaimed source,
+reporting its own untouched value, `9`.
 
 Writing `high` to `42` and switching to `mode == 1` activates a relationship with a single method,
 `low := high`: forced. `low` is claimed every round this branch is active, so it now reads back
 `42`, `high`'s current value, no matter what strength would otherwise prefer. But `low`'s own
 underlying raw value, its _source_, is untouched by any of this: it's still `4`, exactly where it
 started, _shadowed_ by the forced derived value the same way a filter's correction shadows a cell's
-raw value in the [Filters](#filters) section; a derived value never destroys the source underneath it, whichever mechanism
-produced that derived value.
+raw value in the [Filters](#filters) section; a derived value never destroys the source underneath
+it, whichever mechanism produced that derived value.
 
 Switching back to `mode == 0` reactivates the two-method relationship, and strength has changed in
 the meantime: `high` was just written, so it's freshest now, and `low`, never itself explicitly
@@ -143,14 +167,15 @@ Writing `low` to `100` promotes it to freshest, flipping the two-method relation
 source: `high` reads `100`, pulled up to match. Either binding can fire; which one does is
 strength's call, never both at once.
 
-Adam's comment and doc-comment syntax is covered in the [lexical conventions chapter](lexical-conventions.md), not here.
+Adam's comment and doc-comment syntax is covered in the [lexical conventions
+chapter](lexical-conventions.md), not here.
 
 ### Relationship Rules
 
 Every relationship's methods must satisfy a set of rules:
 
-- Every method's \\(inputs \cup outputs\\) must be exactly the same set of cells as every other method's in
-  the same relationship.
+- Every method's \\(inputs \cup outputs\\) must be exactly the same set of cells as every other
+  method's in the same relationship.
 
 ```adam
 {{#include examples/tutorial/fail_mismatched_cells.adm2}}
@@ -180,18 +205,17 @@ syntax Rust uses for tuple patterns:
 {{#include examples/tutorial/destructuring_demo.adm2}}
 ```
 
-Tuple _types_ (`cell point: (f64, f64) = (0.0, 0.0);`) are a CEL feature, documented in the
-[types chapter](cells.md); destructuring is the relationship-binding syntax built on top of them,
-and could one day extend to struct patterns too. See
-[destructuring bindings](relationships-continued.md#destructuring-bindings) for the full
+Tuple _types_ (`cell point: (f64, f64) = (0.0, 0.0);`) are a CEL feature, documented in the [types
+chapter](cells.md); destructuring is the relationship-binding syntax built on top of them, and could
+one day extend to struct patterns too. See [destructuring
+bindings](relationships-continued.md#destructuring-bindings) for the full
 destructuring-vs-direct-bind distinction.
 
 A binding may also name the same cell on both sides of `:=`: a _self-referencing method_, deriving a
-cell's own next value from its own current one. The
-[relationships-continued chapter](relationships-continued.md) walks
-through a full worked example with its own `self_referencing_method.adm2`, rather than repeating one
-here; the [Conditionals](#conditionals) section below shows the same pattern once more, inside a
-conditional branch. The obligation on a
+cell's own next value from its own current one. The [relationships-continued
+chapter](relationships-continued.md) walks through a full worked example with its own
+`self_referencing_method.adm2`, rather than repeating one here; the [Conditionals](#conditionals)
+section below shows the same pattern once more, inside a conditional branch. The obligation on a
 self-referencing method is stricter than an ordinary one: the method's own job is to correct a value
 into whatever set the relationship enforces, and if reapplying it to its own already-corrected
 output would change the value again, the "correction" was never well-defined in the first place. The
@@ -209,8 +233,8 @@ blocking resolution:
 
 A failed requirement never stops the sheet from resolving, and never stops `area` from being
 computed and readable: it's a diagnostic, not a gate, exactly the way the [Filters](#filters)
-section's filter corrects a value rather than rejecting it. A host queries which requirements are currently failing after each
-resolve.
+section's filter corrects a value rather than rejecting it. A host queries which requirements are
+currently failing after each resolve.
 
 Two facts here generalize past this one example. `require` isn't limited to `out`: the same block
 can trail a `source` declaration too; see [cell declarations](cells.md#cell-declarations) and
@@ -221,6 +245,6 @@ full rules governing requirements.
 
 ## Where to go next
 
-That's the whole language. The remaining chapters, starting with [sheets, cells, and types](cells.md),
-cover each construct in the depth this chapter skipped past, and the [reference manual](reference.md) gives you the full grammar and every
-built-in type in one place.
+That's the whole language. The remaining chapters, starting with [sheets, cells, and
+types](cells.md), cover each construct in the depth this chapter skipped past, and the [reference
+manual](reference.md) gives you the full grammar and every built-in type in one place.

@@ -3,7 +3,7 @@ sheet constrain {
     cell a = 5 filter clamp: 1..=100;
     cell b = 10 filter clamp: 1..=100;
 
-    conditional p {
+    conditional constrain {
         true => {
             relationship {
                 a := b;

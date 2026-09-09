@@ -498,35 +498,40 @@ fn CellRow(
                         }
                     }
                 }
+            } else if *is_bool.read() {
+                // `sp-checkbox`'s label is its own light-DOM child text, not a sibling
+                // `SpFieldLabel` (which renders as a separate line above the checkbox,
+                // disconnected from it) -- unlike the numeric/text fields below, which
+                // have no such built-in label slot.
+                SpCheckbox {
+                    id: field_id,
+                    checked: *value.read() == "true",
+                    invalid: flags.read().invalid,
+                    disabled: flags.read().disabled,
+                    onclick: move |_| {
+                        let next = toggled_bool_value(&value.peek());
+                        write_and_propagate(sheet, labels, id, next, has_error, errors);
+                        // `sp-checkbox` toggles its own shadow-DOM `checked` state
+                        // natively in response to the click, before this handler runs
+                        // and independent of the `checked` prop below. If the write above
+                        // was rejected, `value` recomputes to the same string as before,
+                        // so Dioxus's diff sees no change and never re-touches the DOM —
+                        // leaving the visual checkbox desynced from the sheet. Force the
+                        // element back to the actual committed value here.
+                        let checked = *value.read() == "true";
+                        let ns = dom_id_namespace(&source_name.read());
+                        spawn(async move {
+                            let _ = document::eval(&format!(
+                                r#"document.getElementById("cell-{ns}-{id:?}").checked = {checked};"#
+                            ))
+                            .await;
+                        });
+                    },
+                    "{label}"
+                }
             } else {
                 SpFieldLabel { for_: field_id.clone(), "{label}" }
-                if *is_bool.read() {
-                    SpCheckbox {
-                        id: field_id,
-                        checked: *value.read() == "true",
-                        invalid: flags.read().invalid,
-                        disabled: flags.read().disabled,
-                        onclick: move |_| {
-                            let next = toggled_bool_value(&value.peek());
-                            write_and_propagate(sheet, labels, id, next, has_error, errors);
-                            // `sp-checkbox` toggles its own shadow-DOM `checked` state
-                            // natively in response to the click, before this handler runs
-                            // and independent of the `checked` prop below. If the write above
-                            // was rejected, `value` recomputes to the same string as before,
-                            // so Dioxus's diff sees no change and never re-touches the DOM —
-                            // leaving the visual checkbox desynced from the sheet. Force the
-                            // element back to the actual committed value here.
-                            let checked = *value.read() == "true";
-                            let ns = dom_id_namespace(&source_name.read());
-                            spawn(async move {
-                                let _ = document::eval(&format!(
-                                    r#"document.getElementById("cell-{ns}-{id:?}").checked = {checked};"#
-                                ))
-                                .await;
-                            });
-                        },
-                    }
-                } else if *is_numeric.read() {
+                if *is_numeric.read() {
                     SpNumberfield {
                         id: field_id,
                         value: input.read().clone(),

@@ -1035,10 +1035,13 @@ fn conditional_match_cell_is_derived_from_unconditional_relationship() {
 }
 
 #[test]
-fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
+fn cell_shadowed_as_self_ref_in_one_branch_and_plain_reassignment_in_another() {
     // p == 0: a <= b enforced by a two-way self-referencing relationship.
-    // p != 0 (default): a and b are forced from each other directly, whichever
-    // is the stronger (more recently written) cell wins.
+    // p != 0 (default): a and b are mutually assignable (two methods, neither
+    // structurally forced), so whichever is the stronger (more recently written)
+    // cell wins and becomes the new source, exactly as an unconditional two-method
+    // relationship would behave -- being inside a conditional does not, on its own,
+    // shadow a genuinely choosable output.
     let mut sheet = Sheet::new();
     let p = sheet.add_cell(0_i32);
     let a = sheet.add_cell(4_i32);
@@ -1050,7 +1053,7 @@ fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
             Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
         ])
         .unwrap();
-    let rel_force = sheet
+    let rel_swap = sheet
         .add_relationship(vec![
             Method::from_fn_1_1(b, a, |y: &i32| Ok(*y)),
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
@@ -1060,7 +1063,7 @@ fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
         .add_conditional(
             MatchExpr::cell(p),
             vec![(vec![0_i32], vec![rel_self_ref])],
-            vec![rel_force],
+            vec![rel_swap],
         )
         .unwrap();
 
@@ -1072,24 +1075,134 @@ fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
     assert_eq!(*sheet.source::<i32>(a).unwrap(), 4);
     assert_eq!(*sheet.source::<i32>(b).unwrap(), 9);
 
-    // p == 1: default (forcing) branch. b is the more recently written cell,
-    // so a <- b.
+    // p == 1: default (swap) branch. b is the more recently written cell, so
+    // a <- b -- and, since rel_swap is not structurally forced (either cell could
+    // be the source), a's source is overwritten just like an ordinary derived
+    // cell, not preserved.
     sheet.write(a, 4_i32).unwrap();
     sheet.write(b, 20_i32).unwrap();
     sheet.write(p, 1_i32).unwrap();
     sheet.propagate().unwrap();
     assert_eq!(*sheet.read::<i32>(a).unwrap(), 20);
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
-    // Sources are untouched by the forcing branch.
-    assert_eq!(*sheet.source::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 20);
     assert_eq!(*sheet.source::<i32>(b).unwrap(), 20);
 
-    // Back to p == 0: self-ref recomputed fresh from each cell's own source
-    // (4 and 20), not from the stale forced value.
+    // Back to p == 0: self-ref recomputed fresh from each cell's own source --
+    // both now 20, since rel_swap already overwrote a's source above.
     sheet.write(p, 0_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(*sheet.read::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 20);
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+}
+
+#[test]
+fn unforced_conditional_relationship_does_not_shadow_its_losing_cell() {
+    // A two-method mutual relationship (`a := b; b := a;`), active only while a
+    // conditional's key matches -- e.g. adam-lang-book's constrain.adm2. Neither
+    // method is self-referencing, and with two live methods the relationship is
+    // never structurally forced, so activating it must behave exactly like an
+    // ordinary (unconditional) two-method relationship: the losing cell's source
+    // is overwritten, not preserved for later reveal.
+    let mut sheet = Sheet::new();
+    let constrain = sheet.add_cell(false);
+    let a = sheet.add_cell(5_i32);
+    let b = sheet.add_cell(10_i32);
+
+    let rel = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(constrain),
+            vec![(vec![true], vec![rel])],
+            vec![],
+        )
+        .unwrap();
+
+    // Inactive: both cells are plain, untouched sources.
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    assert!(sheet.is_source(a));
+    assert!(sheet.is_source(b));
+
+    // Active: b has higher strength (added after a), so a <- b, and a's source is
+    // overwritten (not shadowed) -- matching an unconditional two-method
+    // relationship's behavior.
+    sheet.write(constrain, true).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 10);
+
+    // Deactivating again does not reveal a stale original value: a's source was
+    // genuinely overwritten while the relationship was active, so it stays 10.
+    sheet.write(constrain, false).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+}
+
+#[test]
+fn cascaded_forced_output_of_an_unconditional_relationship_shadows_and_reverts() {
+    // R1 (a -> b, single method) lives in a conditional and forces b only while
+    // active. R2 (b <-> c, two methods) is itself unconditional, but once R1 is
+    // active, R2's c -> b method would double-write b, so c becomes forced too --
+    // purely via cascading through the planner's forced-output fixpoint, not
+    // because R2 is registered under any conditional. c's output must still be
+    // shadowed while forced, preserving its own original source underneath --
+    // otherwise it would be permanently overwritten by the cascaded value, with
+    // no original left to fall back to once R1 deactivates and the cascade lifts.
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(2_i32);
+    let b = sheet.add_cell(0_i32);
+    let c = sheet.add_cell(9_i32);
+
+    let rel_force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 10))])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(b, c, |x: &i32| Ok(*x + 1)),
+            Method::from_fn_1_1(c, b, |x: &i32| Ok(*x + 1)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(p),
+            vec![(vec![1_i32], vec![rel_force])],
+            vec![],
+        )
+        .unwrap();
+
+    // p == 1: R1 active, forces b, which cascades to force c too.
+    sheet.write(p, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 21);
+    assert_eq!(
+        *sheet.source::<i32>(c).unwrap(),
+        9,
+        "c's cascade-forced output must be shadowed, preserving its own original source"
+    );
+
+    // p == 0: R1 inactive, cascade lifts, and R2 is a genuine two-way choice
+    // again. b's derived strength (assigned while forced) still outranks c's, so
+    // b is preferred as the source this round -- revealing its own untouched
+    // original (0), not the stale forced 20, exactly because it was shadowed
+    // rather than overwritten. c is then freshly derived from that real value
+    // (0 + 1 = 1), not left stuck at the stale cascaded 21.
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(
+        *sheet.read::<i32>(b).unwrap(),
+        0,
+        "b must reveal its own untouched original value, not the stale forced 20"
+    );
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 1);
 }
 
 #[test]

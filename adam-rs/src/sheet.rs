@@ -1340,7 +1340,12 @@ impl Sheet {
                     &self.cells,
                     &self.relationships,
                 );
-                self.execute_plan(&pre_plan.execution_order, &seeds, &mut Vec::new())?;
+                self.execute_plan(
+                    &pre_plan.execution_order,
+                    &seeds,
+                    &pre_plan.forced_outputs,
+                    &mut Vec::new(),
+                )?;
             }
         }
 
@@ -1352,7 +1357,12 @@ impl Sheet {
         let seeds =
             crate::planner::build_seeds(&plan.execution_order, &self.cells, &self.relationships);
         let mut source_filter_violations: Vec<(CellId, FilterViolation)> = Vec::new();
-        self.execute_plan(&plan.execution_order, &seeds, &mut source_filter_violations)?;
+        self.execute_plan(
+            &plan.execution_order,
+            &seeds,
+            &plan.forced_outputs,
+            &mut source_filter_violations,
+        )?;
 
         // Phase 4: assign derived-cell strengths in evaluation order.
         self.post_process_strengths(&plan.execution_order);
@@ -1482,12 +1492,12 @@ impl Sheet {
         &mut self,
         execution_order: &[PlanStep],
         seeds: &Seeds,
+        forced_outputs: &HashSet<CellId>,
         filter_violations: &mut Vec<(CellId, FilterViolation)>,
     ) -> Result<(), Error> {
         for step in execution_order {
             match *step {
                 PlanStep::Method(rel_id, method_idx) => {
-                    let is_conditional = self.conditional_relationships.contains(&rel_id);
                     let (outputs, output_ids, shadow_outputs) = {
                         let method = &self.relationships[rel_id].methods[method_idx];
                         let inputs: Vec<&dyn Any> = method
@@ -1516,7 +1526,7 @@ impl Sheet {
                         let shadow_outputs: Vec<bool> = method
                             .outputs
                             .iter()
-                            .map(|o| method.inputs.contains(o) || is_conditional)
+                            .map(|o| method.inputs.contains(o) || forced_outputs.contains(o))
                             .collect();
                         (outputs, output_ids, shadow_outputs)
                     };
@@ -1803,7 +1813,7 @@ mod tests {
         relationship::RelationshipId,
     };
     use std::any::{Any, TypeId};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn add_cell_has_cell_kind() {
@@ -1856,14 +1866,25 @@ mod tests {
             .unwrap();
 
         let no_seeds: Seeds = HashMap::new();
+        let no_forced: HashSet<CellId> = HashSet::new();
         sheet
-            .execute_plan(&[PlanStep::Method(self_ref, 0)], &no_seeds, &mut Vec::new())
+            .execute_plan(
+                &[PlanStep::Method(self_ref, 0)],
+                &no_seeds,
+                &no_forced,
+                &mut Vec::new(),
+            )
             .unwrap();
         assert_eq!(*sheet.read::<i32>(x).unwrap(), 1);
 
         sheet.write(z, 41_i32).unwrap();
         sheet
-            .execute_plan(&[PlanStep::Method(plain, 0)], &no_seeds, &mut Vec::new())
+            .execute_plan(
+                &[PlanStep::Method(plain, 0)],
+                &no_seeds,
+                &no_forced,
+                &mut Vec::new(),
+            )
             .unwrap();
 
         assert_eq!(*sheet.read::<i32>(x).unwrap(), 42);
