@@ -1809,7 +1809,7 @@ mod tests {
     fn parse_cell_unknown_type_is_error() {
         let result = parser().parse_str("sheet s { cell x: unknown_type; }");
         assert!(result.is_err());
-        let err = result.err().expect("expected Err");
+        let err = result.expect_err("expected Err");
         let msg = err.message().to_lowercase();
         assert!(
             msg.contains("unknown type") || msg.contains("unknown_type"),
@@ -2010,8 +2010,7 @@ mod tests {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let err = parser
             .parse_str("sheet s { cell a: f64 filter clamp: 0..=100; }")
-            .err()
-            .expect("expected Err");
+            .expect_err("expected Err");
         assert!(
             err.message().contains("filter range bounds must be"),
             "{}",
@@ -2028,8 +2027,7 @@ mod tests {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let err = parser
             .parse_str("sheet s { cell a: f64 filter clamp: (_ as i32)..=100; }")
-            .err()
-            .expect("expected Err");
+            .expect_err("expected Err");
         assert!(
             err.message().contains("filter range bounds must be"),
             "{}",
@@ -2485,7 +2483,7 @@ mod tests {
         "#,
         );
         assert!(result.is_err());
-        let err = result.err().expect("expected Err");
+        let err = result.expect_err("expected Err");
         let msg = err.message().to_lowercase();
         assert!(msg.contains("bogus") || msg.contains("undefined"), "{msg}");
     }
@@ -2546,7 +2544,7 @@ mod tests {
             result.is_err(),
             "2-tuple body for 3 declared outputs must be an error"
         );
-        let err = result.err().expect("expected Err");
+        let err = result.expect_err("expected Err");
         let msg = err.message().to_lowercase();
         assert!(msg.contains("arity"), "{msg}");
     }
@@ -2568,7 +2566,7 @@ mod tests {
             result.is_err(),
             "f64 tuple element for an i32 output must be an error"
         );
-        let err = result.err().expect("expected Err");
+        let err = result.expect_err("expected Err");
         let msg = err.message().to_lowercase();
         assert!(msg.contains("type mismatch"), "{msg}");
     }
@@ -2794,7 +2792,7 @@ mod tests {
         "#,
         );
         assert!(result.is_err());
-        let err = result.err().expect("expected Err");
+        let err = result.expect_err("expected Err");
         let msg = err.message().to_lowercase();
         assert!(msg.contains("bogus") || msg.contains("undeclared"), "{msg}");
     }
@@ -3358,7 +3356,7 @@ mod tests {
         // at the grammar level, which would indicate the entry-point swap didn't take effect).
         let result = parser().parse_str("sheet s { cell x = 1i32..5i32; }");
         assert!(result.is_err());
-        let err = result.err().expect("expected Err");
+        let err = result.expect_err("expected Err");
         assert_eq!(
             err.message(),
             "cannot infer a type for this expression; register a type name for it or add an \
