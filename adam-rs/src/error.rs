@@ -1,6 +1,19 @@
 //! The `Error` type returned by all fallible operations in this crate.
 
+use crate::relationship::RelationshipId;
 use std::any::TypeId;
+
+/// Identifies which sheet component an error originates from, for translating back to a
+/// source location.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorLocation {
+    /// Index into the `methods` `Vec` passed to `add_relationship`, before any
+    /// `RelationshipId` exists for it.
+    MethodIndex(usize),
+    /// A method within an already-registered relationship.
+    Method(RelationshipId, usize),
+}
 
 /// Errors returned by `Sheet` operations and propagation.
 #[derive(Debug)]
@@ -125,6 +138,16 @@ impl std::error::Error for Error {
         } else {
             None
         }
+    }
+}
+
+impl Error {
+    /// Returns the sheet component (relationship method) this error originates from, if
+    /// known. `None` for variants that never track a location, or when a location
+    /// legitimately doesn't apply to this occurrence (e.g. `add_relationship(vec![])`'s
+    /// `InvalidMethod`).
+    pub fn location(&self) -> Option<ErrorLocation> {
+        None
     }
 }
 
@@ -303,5 +326,20 @@ mod tests {
     #[test]
     fn filter_cycle_has_no_source() {
         assert!(std::error::Error::source(&Error::FilterCycle).is_none());
+    }
+
+    #[test]
+    fn error_location_variants_are_distinct() {
+        let a = ErrorLocation::MethodIndex(0);
+        let b = ErrorLocation::MethodIndex(1);
+        let c = ErrorLocation::Method(RelationshipId::default(), 0);
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a, ErrorLocation::MethodIndex(0));
+    }
+
+    #[test]
+    fn location_is_none_for_a_locationless_variant() {
+        assert_eq!(Error::InvalidId.location(), None);
     }
 }
