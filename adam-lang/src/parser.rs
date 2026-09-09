@@ -4,14 +4,15 @@
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 
-use adam_rs::{CellId, MatchExpr, Method, RelationshipId, Requirement, Sheet};
+use adam_rs::{CellId, ErrorLocation, MatchExpr, Method, RelationshipId, Requirement, Sheet};
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Token};
-use cel_parser::{CELParser, OpLookup, ParseError};
+use cel_parser::{CELParser, OpLookup, ParseError, SourceSpan};
 use cel_runtime::DynSegment;
 use proc_macro2::{Span, TokenStream};
 
@@ -44,6 +45,11 @@ pub struct ParsedSheet {
     /// that need to look up `Sheet::cell_requirements_valid`/`Sheet::violated_requirements` by
     /// name.
     pub output_names: IndexMap<String, CellId>,
+    /// `(RelationshipId, method index)` → the source span of that binding, populated for
+    /// every successfully-added relationship. Lets a caller translate an `adam_rs::Error`'s
+    /// `ErrorLocation::Method` (raised well after parsing, e.g. from `Sheet::propagate`) back
+    /// to a source location.
+    pub method_spans: HashMap<(RelationshipId, usize), SourceSpan>,
 }
 
 impl std::fmt::Debug for ParsedSheet {
@@ -51,6 +57,7 @@ impl std::fmt::Debug for ParsedSheet {
         f.debug_struct("ParsedSheet")
             .field("cell_names", &self.cell_names)
             .field("output_names", &self.output_names)
+            .field("method_spans", &self.method_spans)
             .finish()
     }
 }
@@ -82,6 +89,9 @@ struct ParseContext {
     /// Maps output name → `CellId`, in declaration order, for exposing to callers via
     /// `ParsedSheet`.
     output_names: IndexMap<String, CellId>,
+    /// Accumulates spans for every successfully-added relationship's methods, for exposing to
+    /// callers via `ParsedSheet::method_spans`.
+    method_spans: HashMap<(RelationshipId, usize), SourceSpan>,
 }
 
 impl std::ops::Deref for ParseContext {
@@ -157,6 +167,7 @@ impl AdamParser {
             sheet: Sheet::new(),
             cell_names: IndexMap::new(),
             output_names: IndexMap::new(),
+            method_spans: HashMap::new(),
         };
         let _ = ctx.consume_doc_comment_run(true); // sheet-level `//!` docs (ignored at runtime)
         self.parse_sheet(&mut ctx)?;
@@ -167,6 +178,7 @@ impl AdamParser {
             sheet: ctx.sheet,
             cell_names: ctx.cell_names,
             output_names: ctx.output_names,
+            method_spans: ctx.method_spans,
         })
     }
 
@@ -795,21 +807,48 @@ impl AdamParser {
     ///
     /// - Postcondition: the returned `RelationshipId` identifies the relationship just added to
     ///   `ctx.sheet`.
+    /// - Postcondition: on success, `ctx.method_spans` gains one entry per parsed binding,
+    ///   keyed by `(rel_id, binding_index)`, mapping to that binding's source span.
     fn parse_relationship_decl(&mut self, ctx: &mut ParseContext) -> Result<RelationshipId> {
+        let block_start = ctx.peek_span();
         ctx.is_keyword("relationship"); // consume
         ctx.expect_open_brace()?;
         let mut methods = Vec::new();
+        let mut spans: Vec<(Span, Span)> = Vec::new();
         while !ctx.at_close_brace() {
-            methods.push(self.parse_binding(ctx)?);
+            let (method, start, end) = self.parse_binding(ctx)?;
+            methods.push(method);
+            spans.push((start, end));
         }
-        ctx.expect_close_brace()?;
-        ctx.sheet
-            .add_relationship(methods)
-            .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))
+        let close_span = ctx.expect_close_brace()?;
+        match ctx.sheet.add_relationship(methods) {
+            Ok(rel_id) => {
+                for (idx, (start, end)) in spans.into_iter().enumerate() {
+                    ctx.method_spans.insert(
+                        (rel_id, idx),
+                        SourceSpan::from_proc_macro2_range(start, end),
+                    );
+                }
+                Ok(rel_id)
+            }
+            Err(e) => {
+                let (start, end) = match e.location() {
+                    Some(ErrorLocation::MethodIndex(i)) => {
+                        spans.get(i).copied().unwrap_or((block_start, close_span))
+                    }
+                    _ => (block_start, close_span),
+                };
+                Err(ParseError::new_range(e.to_string(), start, end))
+            }
+        }
     }
 
     /// `binding = binding_target ":=" expression ";".`
-    fn parse_binding(&mut self, ctx: &mut ParseContext) -> Result<Method> {
+    ///
+    /// - Postcondition: the returned `Span`s bound the binding's full source range, from its
+    ///   first token through the terminating `;`, for use in error-location resolution.
+    fn parse_binding(&mut self, ctx: &mut ParseContext) -> Result<(Method, Span, Span)> {
+        let start_span = ctx.peek_span();
         let (names, destructure) = parse_binding_target(ctx)?;
         let mut outputs: NamedCells = Vec::with_capacity(names.len());
         for (name, span) in names {
@@ -822,9 +861,13 @@ impl AdamParser {
         }
         ctx.expect_punct(":=")?;
         let (segment, inputs) = self.parse_deduced_expr(ctx)?;
-        ctx.expect_punct(";")?;
+        let end_span = ctx.expect_punct(";")?;
         let compiled = self.compile_outputs(ctx, &segment, &outputs, destructure)?;
-        Ok(build_method(inputs, outputs, segment, compiled))
+        Ok((
+            build_method(inputs, outputs, segment, compiled),
+            start_span,
+            end_span,
+        ))
     }
 
     /// Parses an `expression` whose input cells are deduced from whichever already-declared
@@ -2163,6 +2206,29 @@ mod tests {
         sheet.propagate().unwrap();
         let (c_id, _) = sheet.cell_names["c"].clone();
         assert_eq!(*sheet.read::<i32>(c_id).unwrap(), 6);
+    }
+
+    #[test]
+    fn mismatched_method_cells_error_spans_the_relationship_block_not_the_sheet() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let source = "sheet s {\n    cell a: i32;\n    cell b: i32;\n\n    relationship {\n        a := b;\n        b := 42;\n    }\n}";
+        let err = parser.parse_str(source).err().unwrap();
+        // The mismatched binding (`b := 42;`, method index 1) is on line 7; the sheet's
+        // opening line (1) must not be reported instead. `ParseError::span()` returns a
+        // `proc_macro2::Span`, so `.start()` is a method call here, not a field access (unlike
+        // `cel_parser::SourceSpan`, whose `start`/`end` are public `LineColumn` fields).
+        assert_eq!(err.span().start().line, 7);
+    }
+
+    #[test]
+    fn successful_relationship_parse_populates_method_spans() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let source = "sheet s {\n    cell a: i32;\n    cell b: i32;\n\n    relationship {\n        a := b;\n    }\n}";
+        let parsed = parser.parse_str(source).unwrap();
+        assert_eq!(parsed.method_spans.len(), 1);
+        let ((_, idx), span) = parsed.method_spans.iter().next().unwrap();
+        assert_eq!(*idx, 0);
+        assert_eq!(span.start.line, 6);
     }
 
     #[test]
