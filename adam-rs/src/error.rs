@@ -42,7 +42,13 @@ pub enum Error {
     Cycle,
 
     /// A method's function returned an error during execution.
-    MethodFailed(anyhow::Error),
+    MethodFailed {
+        /// The underlying error the method's function (or a requirement's/conditional's
+        /// expression function) returned.
+        error: anyhow::Error,
+        /// The method this failure originated from, if known.
+        location: Option<ErrorLocation>,
+    },
 
     /// A method is structurally invalid (e.g. the outputs list is empty, a
     /// relationship's methods reference different sets of cells, or two methods in
@@ -126,7 +132,7 @@ impl std::fmt::Display for Error {
             Error::InvalidId => write!(f, "invalid cell or relationship id"),
             Error::Conflict => write!(f, "no valid method assignment (overconstrained)"),
             Error::Cycle => write!(f, "selected methods form a cycle"),
-            Error::MethodFailed(e) => write!(f, "method execution failed: {e}"),
+            Error::MethodFailed { error, .. } => write!(f, "method execution failed: {error}"),
             Error::InvalidMethod { .. } => write!(f, "method is structurally invalid"),
             Error::MismatchedMethodCells { .. } => write!(
                 f,
@@ -155,8 +161,8 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {
     /// Returns the underlying `anyhow::Error` source for `MethodFailed`.
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        if let Error::MethodFailed(e) = self {
-            Some(e.as_ref())
+        if let Error::MethodFailed { error, .. } = self {
+            Some(error.as_ref())
         } else {
             None
         }
@@ -175,6 +181,7 @@ impl Error {
             Error::DuplicateMethodOutputs { location } => *location,
             Error::InvalidMethod { location } => *location,
             Error::InvalidCellKind { location } => *location,
+            Error::MethodFailed { location, .. } => *location,
             _ => None,
         }
     }
@@ -234,7 +241,10 @@ mod tests {
 
     #[test]
     fn method_failed_display_contains_source_message() {
-        let err = Error::MethodFailed(anyhow::anyhow!("division by zero"));
+        let err = Error::MethodFailed {
+            error: anyhow::anyhow!("division by zero"),
+            location: None,
+        };
         assert!(err.to_string().contains("division by zero"));
     }
 
@@ -256,7 +266,10 @@ mod tests {
 
     #[test]
     fn method_failed_source_returns_some() {
-        let err = Error::MethodFailed(anyhow::anyhow!("inner"));
+        let err = Error::MethodFailed {
+            error: anyhow::anyhow!("inner"),
+            location: None,
+        };
         assert!(std::error::Error::source(&err).is_some());
     }
 

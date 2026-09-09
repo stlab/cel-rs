@@ -514,7 +514,10 @@ impl Sheet {
                 .iter()
                 .map(|&id| self.cells[id].effective())
                 .collect();
-            let holds = (requirement.function)(&inputs).map_err(Error::MethodFailed)?;
+            let holds = (requirement.function)(&inputs).map_err(|error| Error::MethodFailed {
+                error,
+                location: None,
+            })?;
             if !holds {
                 return Err(Error::InvalidRequirement);
             }
@@ -1156,7 +1159,10 @@ impl Sheet {
                     .iter()
                     .map(|&id| self.cells[id].effective())
                     .collect();
-                let value = (expr.function)(&args).map_err(Error::MethodFailed)?;
+                let value = (expr.function)(&args).map_err(|error| Error::MethodFailed {
+                    error,
+                    location: None,
+                })?;
                 Ok(MatchValue::Owned(value))
             }
         }
@@ -1371,7 +1377,10 @@ impl Sheet {
                 .iter()
                 .map(|&id| self.cells[id].effective())
                 .collect();
-            let holds = (requirement.function)(&inputs).map_err(Error::MethodFailed)?;
+            let holds = (requirement.function)(&inputs).map_err(|error| Error::MethodFailed {
+                error,
+                location: None,
+            })?;
             if !holds {
                 last_requirement_violations
                     .entry(requirement.cell)
@@ -1498,7 +1507,11 @@ impl Sheet {
                                 }
                             })
                             .collect();
-                        let outputs = (method.function)(&inputs).map_err(Error::MethodFailed)?;
+                        let outputs =
+                            (method.function)(&inputs).map_err(|error| Error::MethodFailed {
+                                error,
+                                location: Some(ErrorLocation::Method(rel_id, method_idx)),
+                            })?;
                         let output_ids = method.outputs.clone();
                         let shadow_outputs: Vec<bool> = method
                             .outputs
@@ -1509,11 +1522,14 @@ impl Sheet {
                     };
 
                     if outputs.len() != output_ids.len() {
-                        return Err(Error::MethodFailed(anyhow::anyhow!(
-                            "method produced {} outputs but relationship expects {}",
-                            outputs.len(),
-                            output_ids.len()
-                        )));
+                        return Err(Error::MethodFailed {
+                            error: anyhow::anyhow!(
+                                "method produced {} outputs but relationship expects {}",
+                                outputs.len(),
+                                output_ids.len()
+                            ),
+                            location: Some(ErrorLocation::Method(rel_id, method_idx)),
+                        });
                     }
 
                     for ((cell_id, new_value), shadow) in
@@ -2005,7 +2021,7 @@ mod tests {
             .add_conditional::<i32>(expr, vec![(vec![0], vec![])], vec![])
             .unwrap();
         let result = sheet.propagate();
-        assert!(matches!(result, Err(Error::MethodFailed(_))));
+        assert!(matches!(result, Err(Error::MethodFailed { .. })));
     }
 
     #[test]
@@ -2250,6 +2266,23 @@ mod tests {
         let rel_id = sheet.add_relationship(vec![method]).unwrap();
         let result = sheet.propagate();
         assert!(matches!(result, Err(Error::TypeMismatch { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::Method(rel_id, 0))
+        );
+    }
+
+    #[test]
+    fn execute_plan_method_failed_reports_the_method_that_produced_it() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let method = Method::from_fn_1_1(a, b, |_: &i32| -> Result<i32, anyhow::Error> {
+            Err(anyhow::anyhow!("boom"))
+        });
+        let rel_id = sheet.add_relationship(vec![method]).unwrap();
+        let result = sheet.propagate();
+        assert!(matches!(result, Err(Error::MethodFailed { .. })));
         assert_eq!(
             result.unwrap_err().location(),
             Some(ErrorLocation::Method(rel_id, 0))
@@ -3683,7 +3716,7 @@ mod tests {
             "always_errors",
             Requirement::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("boom"))),
         );
-        assert!(matches!(result, Err(Error::MethodFailed(_))));
+        assert!(matches!(result, Err(Error::MethodFailed { .. })));
     }
 
     #[test]

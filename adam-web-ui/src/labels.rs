@@ -83,9 +83,10 @@ impl Labels {
                         .unwrap_or_else(|_| "?".to_owned())
                 }),
                 write_str: Box::new(move |sheet, s| {
-                    let value = s
-                        .parse::<T>()
-                        .map_err(|e| Error::MethodFailed(anyhow::anyhow!("parse error: {}", e)))?;
+                    let value = s.parse::<T>().map_err(|e| Error::MethodFailed {
+                        error: anyhow::anyhow!("parse error: {}", e),
+                        location: None,
+                    })?;
                     sheet.write(id, value)
                 }),
                 range: None,
@@ -118,9 +119,10 @@ impl Labels {
                         .unwrap_or_else(|_| "?".to_owned())
                 }),
                 write_str: Box::new(|_sheet, _s| {
-                    Err(Error::MethodFailed(anyhow::anyhow!(
-                        "editing tuple-typed cells is not yet supported"
-                    )))
+                    Err(Error::MethodFailed {
+                        error: anyhow::anyhow!("editing tuple-typed cells is not yet supported"),
+                        location: None,
+                    })
                 }),
                 range: None,
             },
@@ -301,7 +303,9 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
 /// their `Display` message, ignoring `file_name` and `renderer`.
 pub fn format_adam_error(e: &Error, source: &str, file_name: &str, renderer: &Renderer) -> String {
     match e {
-        Error::MethodFailed(inner) => inner.format_rustc_style(source, file_name, 1, renderer),
+        Error::MethodFailed { error, .. } => {
+            error.format_rustc_style(source, file_name, 1, renderer)
+        }
         other => other.to_string(),
     }
 }
@@ -329,7 +333,10 @@ mod tests {
         let source = "1i32 / 0i32";
         let span = SourceSpan::new(1, 0, 1, 11);
         let inner = anyhow::anyhow!("division by zero").context(SpanContext::new(span));
-        let err = Error::MethodFailed(inner);
+        let err = Error::MethodFailed {
+            error: inner,
+            location: None,
+        };
 
         let msg = format_adam_error(&err, source, "test.adm2", &Renderer::styled());
 
@@ -344,7 +351,10 @@ mod tests {
         let source = "1i32 / 0i32";
         let span = SourceSpan::new(1, 0, 1, 11);
         let inner = anyhow::anyhow!("division by zero").context(SpanContext::new(span));
-        let err = Error::MethodFailed(inner);
+        let err = Error::MethodFailed {
+            error: inner,
+            location: None,
+        };
 
         let msg = format_adam_error(&err, source, "test.adm2", &Renderer::plain());
 

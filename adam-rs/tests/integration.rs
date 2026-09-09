@@ -429,7 +429,7 @@ fn method_returning_error_propagates_as_method_failed() {
         .unwrap();
 
     let result = sheet.propagate();
-    assert!(matches!(result, Err(Error::MethodFailed(_))));
+    assert!(matches!(result, Err(Error::MethodFailed { .. })));
 }
 
 #[test]
@@ -1624,7 +1624,7 @@ fn requirement_function_error_aborts_propagate_with_method_failed() {
             )],
         )
         .unwrap();
-    assert!(matches!(sheet.propagate(), Err(Error::MethodFailed(_))));
+    assert!(matches!(sheet.propagate(), Err(Error::MethodFailed { .. })));
 }
 
 #[test]
