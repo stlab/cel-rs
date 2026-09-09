@@ -65,7 +65,8 @@ pub enum Error {
     /// cells.
     MismatchedMethodCells {
         /// The first method (by index within the `Vec` passed to `add_relationship`) whose
-        /// cell set diverges from method 0's, if known.
+        /// cell set diverges from method 0's, if known. Method 0 is the baseline every other
+        /// method's cell set is compared against, so it is never itself the reported index.
         location: Option<ErrorLocation>,
     },
 

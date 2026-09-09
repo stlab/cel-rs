@@ -49,6 +49,14 @@ pub struct ParsedSheet {
     /// every successfully-added relationship. Lets a caller translate an `adam_rs::Error`'s
     /// `ErrorLocation::Method` (raised well after parsing, e.g. from `Sheet::propagate`) back
     /// to a source location.
+    ///
+    /// `out` declarations' internal writer relationships (created via `Sheet::add_out`, not
+    /// `parse_relationship_decl`) are not recorded here, since `add_out` returns only a
+    /// `CellId`, not the writer's `RelationshipId`. In practice this is narrow: an `out`
+    /// writer's body is always a CEL expression, so arithmetic failures already carry a
+    /// `cel_parser::SpanContext` regardless of this gap. A `MethodFailed`/`TypeMismatch` from
+    /// an `out` writer without a `SpanContext` falls back to `Display` instead of a
+    /// source-span diagnostic — never worse than the pre-`ErrorLocation` behavior.
     pub method_spans: HashMap<(RelationshipId, usize), SourceSpan>,
 }
 
