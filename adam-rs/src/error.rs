@@ -28,6 +28,8 @@ pub enum Error {
         expected: TypeId,
         /// The TypeId of the value or declaration supplied by the caller.
         found: TypeId,
+        /// The method this mismatch was detected in, if known.
+        location: Option<ErrorLocation>,
     },
 
     /// A `CellId` or `RelationshipId` was not found in the sheet.
@@ -100,7 +102,9 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::TypeMismatch { expected, found } => {
+            Error::TypeMismatch {
+                expected, found, ..
+            } => {
                 write!(f, "type mismatch: expected {expected:?}, found {found:?}")
             }
             Error::InvalidId => write!(f, "invalid cell or relationship id"),
@@ -147,7 +151,10 @@ impl Error {
     /// legitimately doesn't apply to this occurrence (e.g. `add_relationship(vec![])`'s
     /// `InvalidMethod`).
     pub fn location(&self) -> Option<ErrorLocation> {
-        None
+        match self {
+            Error::TypeMismatch { location, .. } => *location,
+            _ => None,
+        }
     }
 }
 
@@ -160,11 +167,16 @@ mod tests {
         use std::any::TypeId;
         let expected = TypeId::of::<i32>();
         let found = TypeId::of::<f64>();
-        let e = Error::TypeMismatch { expected, found };
+        let e = Error::TypeMismatch {
+            expected,
+            found,
+            location: None,
+        };
         match e {
             Error::TypeMismatch {
                 expected: e,
                 found: f,
+                ..
             } => {
                 assert_eq!(e, TypeId::of::<i32>());
                 assert_eq!(f, TypeId::of::<f64>());
@@ -178,6 +190,7 @@ mod tests {
         let err = Error::TypeMismatch {
             expected: TypeId::of::<i32>(),
             found: TypeId::of::<f64>(),
+            location: None,
         };
         assert!(err.to_string().contains("type mismatch"));
     }
@@ -231,6 +244,7 @@ mod tests {
             std::error::Error::source(&Error::TypeMismatch {
                 expected: std::any::TypeId::of::<i32>(),
                 found: std::any::TypeId::of::<f64>(),
+                location: None,
             })
             .is_none()
         );

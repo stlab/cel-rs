@@ -11,7 +11,7 @@ use slotmap::SlotMap;
 use crate::{
     cell::{CellData, CellId, CellKind},
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
-    error::Error,
+    error::{Error, ErrorLocation},
     filter::{Filter, FilterKind, FilterViolation},
     planner::{PlanStep, Seeds},
     relationship::{Method, RelationshipData, RelationshipId},
@@ -187,7 +187,7 @@ impl Sheet {
             return Err(Error::InvalidMethod);
         }
 
-        for method in &methods {
+        for (idx, method) in methods.iter().enumerate() {
             if method.outputs.is_empty() {
                 return Err(Error::InvalidMethod);
             }
@@ -205,6 +205,7 @@ impl Sheet {
                     return Err(Error::TypeMismatch {
                         expected: cell.type_id,
                         found: declared,
+                        location: Some(ErrorLocation::MethodIndex(idx)),
                     });
                 }
             }
@@ -218,6 +219,7 @@ impl Sheet {
                     return Err(Error::TypeMismatch {
                         expected: cell.type_id,
                         found: declared,
+                        location: Some(ErrorLocation::MethodIndex(idx)),
                     });
                 }
             }
@@ -323,6 +325,7 @@ impl Sheet {
                         return Err(Error::TypeMismatch {
                             expected: cell_data.type_id,
                             found: declared,
+                            location: None,
                         });
                     }
                 }
@@ -490,6 +493,7 @@ impl Sheet {
                 return Err(Error::TypeMismatch {
                     expected: input_cell.type_id,
                     found: declared,
+                    location: None,
                 });
             }
         }
@@ -607,6 +611,7 @@ impl Sheet {
                 return Err(Error::TypeMismatch {
                     expected: arg_cell.type_id,
                     found: declared,
+                    location: None,
                 });
             }
         }
@@ -953,6 +958,7 @@ impl Sheet {
             return Err(Error::TypeMismatch {
                 expected: cell_type,
                 found: TypeId::of::<T>(),
+                location: None,
             });
         }
 
@@ -977,6 +983,7 @@ impl Sheet {
             return Err(Error::TypeMismatch {
                 expected: cell.type_id,
                 found: TypeId::of::<T>(),
+                location: None,
             });
         }
         Ok(cell
@@ -1012,6 +1019,7 @@ impl Sheet {
             return Err(Error::TypeMismatch {
                 expected: cell.type_id,
                 found: TypeId::of::<T>(),
+                location: None,
             });
         }
         Ok(cell.source.downcast_ref::<T>().expect("type checked above"))
@@ -1507,6 +1515,7 @@ impl Sheet {
                             return Err(Error::TypeMismatch {
                                 expected: cell.type_id,
                                 found,
+                                location: Some(ErrorLocation::Method(rel_id, method_idx)),
                             });
                         }
                         if shadow {
@@ -1762,6 +1771,7 @@ mod tests {
     use crate::{
         CellKind, ConditionalId, Error, MatchExpr, Method, Requirement, Sheet,
         cell::CellId,
+        error::ErrorLocation,
         filter::{Filter, FilterKind, FilterViolation},
         planner::{PlanStep, Seeds},
         relationship::RelationshipId,
@@ -2195,10 +2205,42 @@ mod tests {
         let b = sheet.add_cell(0_i32);
         // Method declares f64 input but cell holds i32.
         let method = Method::from_fn_1_1(a, b, |x: &f64| Ok(*x * 2.0));
-        assert!(matches!(
-            sheet.add_relationship(vec![method]),
-            Err(Error::TypeMismatch { .. })
-        ));
+        let result = sheet.add_relationship(vec![method]);
+        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(0))
+        );
+    }
+
+    #[test]
+    fn execute_plan_type_mismatch_reports_the_method_that_produced_it() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(false); // bool cell
+        // Declares an i32 output (matching nothing about `b`'s actual bool type at
+        // add_relationship time -- add_relationship validates output_types against the cell,
+        // so declare bool here to pass that check, then lie about it at runtime below).
+        let method = Method::new(
+            vec![a],
+            vec![b],
+            vec![TypeId::of::<i32>()],
+            vec![TypeId::of::<bool>()],
+            |args| {
+                let x = *args[0].downcast_ref::<i32>().unwrap();
+                // Lies: returns an i32 though output_types declared bool, reproducing the
+                // execute_plan runtime type-mismatch path (add_relationship can't catch this --
+                // it only checks the declared TypeId, not what the closure actually returns).
+                Ok(vec![Box::new(x) as Box<dyn std::any::Any>])
+            },
+        );
+        let rel_id = sheet.add_relationship(vec![method]).unwrap();
+        let result = sheet.propagate();
+        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::Method(rel_id, 0))
+        );
     }
 
     #[test]
