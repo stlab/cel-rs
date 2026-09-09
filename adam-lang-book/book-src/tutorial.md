@@ -100,7 +100,7 @@ _match subject_, then activates whichever branch's literal equals the current ma
 ```
 
 Only the active branch's relationships participate. The `_` branch, if present, catches any value
-none of the named branches list, and must be written last. If no branch is matched, no
+none of the named branches list, and must be written last. If no branch is matched, the conditional has no effect.
 
 See the [conditionals chapter](conditionals.md) for branch types, tuple match subjects.
 
