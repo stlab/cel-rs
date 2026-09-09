@@ -184,19 +184,23 @@ impl Sheet {
     ///   maximum number of cells per method (due to duplicate output set comparison).
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
-            return Err(Error::InvalidMethod);
+            return Err(Error::InvalidMethod { location: None });
         }
 
         for (idx, method) in methods.iter().enumerate() {
             if method.outputs.is_empty() {
-                return Err(Error::InvalidMethod);
+                return Err(Error::InvalidMethod {
+                    location: Some(ErrorLocation::MethodIndex(idx)),
+                });
             }
 
             // declared type counts must match cell-id counts
             if method.inputs.len() != method.input_types.len()
                 || method.outputs.len() != method.output_types.len()
             {
-                return Err(Error::InvalidMethod);
+                return Err(Error::InvalidMethod {
+                    location: Some(ErrorLocation::MethodIndex(idx)),
+                });
             }
 
             for (&cell_id, &declared) in method.inputs.iter().zip(method.input_types.iter()) {
@@ -213,7 +217,9 @@ impl Sheet {
             for (&cell_id, &declared) in method.outputs.iter().zip(method.output_types.iter()) {
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                 if cell.kind == CellKind::Source {
-                    return Err(Error::InvalidCellKind);
+                    return Err(Error::InvalidCellKind {
+                        location: Some(ErrorLocation::MethodIndex(idx)),
+                    });
                 }
                 if cell.type_id != declared {
                     return Err(Error::TypeMismatch {
@@ -557,7 +563,7 @@ impl Sheet {
 
         let kind = self.cells.get(out_cell).ok_or(Error::InvalidId)?.kind;
         if kind != CellKind::Cell || self.cell_has_prior_use(out_cell) {
-            return Err(Error::InvalidCellKind);
+            return Err(Error::InvalidCellKind { location: None });
         }
 
         self.add_relationship(vec![writer])?;
@@ -955,7 +961,7 @@ impl Sheet {
     /// - `Error::InvalidCellKind` — `id` is `Out`-kind.
     pub fn write<T: Any + 'static>(&mut self, id: CellId, value: T) -> Result<(), Error> {
         if self.cells.get(id).is_some_and(|c| c.kind == CellKind::Out) {
-            return Err(Error::InvalidCellKind);
+            return Err(Error::InvalidCellKind { location: None });
         }
         let cell_type = self.cells.get(id).ok_or(Error::InvalidId)?.type_id;
         if cell_type != TypeId::of::<T>() {
@@ -2093,7 +2099,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             sheet.write(out, 5_i32),
-            Err(Error::InvalidCellKind)
+            Err(Error::InvalidCellKind { .. })
         ));
     }
 
@@ -2103,7 +2109,11 @@ mod tests {
         let a = sheet.add_source(0_i32);
         let b = sheet.add_cell(0_i32);
         let result = sheet.add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))]);
-        assert!(matches!(result, Err(Error::InvalidCellKind)));
+        assert!(matches!(result, Err(Error::InvalidCellKind { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(0))
+        );
     }
 
     #[test]
@@ -2126,7 +2136,7 @@ mod tests {
     fn error_variant_is_invalid_cell_kind_not_terminal_cell() {
         // Compile-time check that the rename landed; exercised for real once Task 3
         // wires up the CellKind-based checks that actually return this variant.
-        let _err = Error::InvalidCellKind;
+        let _err = Error::InvalidCellKind { location: None };
     }
 
     #[test]
@@ -2196,10 +2206,9 @@ mod tests {
     #[test]
     fn add_relationship_empty_methods_returns_invalid_method() {
         let mut sheet = Sheet::new();
-        assert!(matches!(
-            sheet.add_relationship(vec![]),
-            Err(Error::InvalidMethod)
-        ));
+        let result = sheet.add_relationship(vec![]);
+        assert!(matches!(result, Err(Error::InvalidMethod { .. })));
+        assert_eq!(result.unwrap_err().location(), None);
     }
 
     #[test]
@@ -2274,10 +2283,12 @@ mod tests {
             vec![],
             |_| Ok(vec![]),
         );
-        assert!(matches!(
-            sheet.add_relationship(vec![method]),
-            Err(Error::InvalidMethod)
-        ));
+        let result = sheet.add_relationship(vec![method]);
+        assert!(matches!(result, Err(Error::InvalidMethod { .. })));
+        assert_eq!(
+            result.unwrap_err().location(),
+            Some(ErrorLocation::MethodIndex(0))
+        );
     }
 
     #[test]
@@ -3756,7 +3767,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             sheet.write(area, 99_i32),
-            Err(Error::InvalidCellKind)
+            Err(Error::InvalidCellKind { .. })
         ));
     }
 
@@ -3770,7 +3781,7 @@ mod tests {
             .add_out(Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)), vec![])
             .unwrap();
         let result = sheet.add_out(Method::from_fn_1_1(height, area, |h: &i32| Ok(*h)), vec![]);
-        assert!(matches!(result, Err(Error::InvalidCellKind)));
+        assert!(matches!(result, Err(Error::InvalidCellKind { .. })));
     }
 
     #[test]

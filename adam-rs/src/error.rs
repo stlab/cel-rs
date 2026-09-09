@@ -48,7 +48,11 @@ pub enum Error {
     /// relationship's methods reference different sets of cells, or two methods in
     /// a relationship share an identical output set). A method with no inputs is
     /// not an error: it defines a fixed point (a constant) rather than a derivation.
-    InvalidMethod,
+    InvalidMethod {
+        /// The method (by index within the `Vec` passed to `add_relationship`) that's
+        /// invalid, if known — `None` when `methods` itself is empty.
+        location: Option<ErrorLocation>,
+    },
 
     /// Two methods in the same relationship have `inputs ∪ outputs` sets that don't
     /// match. Every method in a relationship must reference exactly the same set of
@@ -82,7 +86,11 @@ pub enum Error {
     /// method's output, `write()` targeted an `Out`-kind cell, or `add_out` targeted a
     /// cell that is already `Source`/`Out` kind or already claimed as another method's
     /// output.
-    InvalidCellKind,
+    InvalidCellKind {
+        /// The method (by index within the `Vec` passed to `add_relationship`) whose output
+        /// cell has the wrong kind, if the error originated there.
+        location: Option<ErrorLocation>,
+    },
 
     /// An `add_filter` call is structurally invalid: `name` is empty, the cell already
     /// has a filter, the filter's own value type does not match the cell's registered
@@ -119,7 +127,7 @@ impl std::fmt::Display for Error {
             Error::Conflict => write!(f, "no valid method assignment (overconstrained)"),
             Error::Cycle => write!(f, "selected methods form a cycle"),
             Error::MethodFailed(e) => write!(f, "method execution failed: {e}"),
-            Error::InvalidMethod => write!(f, "method is structurally invalid"),
+            Error::InvalidMethod { .. } => write!(f, "method is structurally invalid"),
             Error::MismatchedMethodCells { .. } => write!(
                 f,
                 "methods in a relationship must reference the same set of cells"
@@ -131,7 +139,9 @@ impl std::fmt::Display for Error {
             ),
             Error::InvalidConditional => write!(f, "conditional is structurally invalid"),
             Error::InvalidOutput => write!(f, "output is structurally invalid"),
-            Error::InvalidCellKind => write!(f, "cell's kind does not permit this operation"),
+            Error::InvalidCellKind { .. } => {
+                write!(f, "cell's kind does not permit this operation")
+            }
             Error::InvalidFilter => write!(f, "filter is structurally invalid"),
             Error::InvalidRequirement => write!(f, "requirement is structurally invalid"),
             Error::FilterCycle => write!(
@@ -163,6 +173,8 @@ impl Error {
             Error::TypeMismatch { location, .. } => *location,
             Error::MismatchedMethodCells { location } => *location,
             Error::DuplicateMethodOutputs { location } => *location,
+            Error::InvalidMethod { location } => *location,
+            Error::InvalidCellKind { location } => *location,
             _ => None,
         }
     }
@@ -228,7 +240,11 @@ mod tests {
 
     #[test]
     fn invalid_method_display_contains_invalid() {
-        assert!(Error::InvalidMethod.to_string().contains("invalid"));
+        assert!(
+            Error::InvalidMethod { location: None }
+                .to_string()
+                .contains("invalid")
+        );
     }
 
     #[test]
@@ -249,7 +265,7 @@ mod tests {
         assert!(std::error::Error::source(&Error::InvalidId).is_none());
         assert!(std::error::Error::source(&Error::Conflict).is_none());
         assert!(std::error::Error::source(&Error::Cycle).is_none());
-        assert!(std::error::Error::source(&Error::InvalidMethod).is_none());
+        assert!(std::error::Error::source(&Error::InvalidMethod { location: None }).is_none());
         assert!(
             std::error::Error::source(&Error::TypeMismatch {
                 expected: std::any::TypeId::of::<i32>(),
@@ -310,7 +326,11 @@ mod tests {
 
     #[test]
     fn invalid_cell_kind_display_contains_kind() {
-        assert!(Error::InvalidCellKind.to_string().contains("kind"));
+        assert!(
+            Error::InvalidCellKind { location: None }
+                .to_string()
+                .contains("kind")
+        );
     }
 
     // Regression guard for https://github.com/stlab/cel-rs/issues/166: the message used to
@@ -318,12 +338,16 @@ mod tests {
     // became usable as inputs, and never covered the `Source`-kind case at all.
     #[test]
     fn invalid_cell_kind_display_does_not_mention_terminal() {
-        assert!(!Error::InvalidCellKind.to_string().contains("terminal"));
+        assert!(
+            !Error::InvalidCellKind { location: None }
+                .to_string()
+                .contains("terminal")
+        );
     }
 
     #[test]
     fn invalid_cell_kind_has_no_source() {
-        assert!(std::error::Error::source(&Error::InvalidCellKind).is_none());
+        assert!(std::error::Error::source(&Error::InvalidCellKind { location: None }).is_none());
     }
 
     #[test]
