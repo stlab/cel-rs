@@ -61,7 +61,7 @@ pub fn build_sheet(source: &str, file_name: &str, renderer: &Renderer) -> BuildO
             }
         }
         Err(e) => {
-            let msg = format_adam_error(&e, source, file_name, renderer);
+            let msg = format_adam_error(&e, &parsed.method_spans, source, file_name, renderer);
             BuildOutcome {
                 sheet_labels: Some((parsed.sheet, labels)),
                 error: Some(msg),

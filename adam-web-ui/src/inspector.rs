@@ -276,8 +276,15 @@ fn write_and_propagate(
         }
         Err(e) => {
             has_error.set(true);
+            // Empty table: `write_and_propagate` only has the built `Sheet`/`Labels`, not the
+            // `ParsedSheet` that produced them, so `ErrorLocation::Method` can't be resolved
+            // here yet. `Error::MethodFailed`'s existing CEL-internal `SpanContext` path (e.g.
+            // division-by-zero) is unaffected by this. Tracked as a follow-up: threading a
+            // `method_spans` signal through `begin`'s component tree so a live cell edit gets
+            // the same fallback `build_sheet`'s initial parse already does.
             crate::diagnostics::report_error(&format_adam_error(
                 &e,
+                &std::collections::HashMap::new(),
                 &source_text.read(),
                 &source_name.read(),
                 &Renderer::styled(),

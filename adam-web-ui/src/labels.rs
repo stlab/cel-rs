@@ -6,11 +6,12 @@
 //! possible.
 
 use adam_lang::type_registry::TypeShape;
-use adam_rs::{CellId, Error, Sheet};
+use adam_rs::{CellId, Error, RelationshipId, Sheet};
 pub use annotate_snippets::Renderer;
-use cel_parser::FormatRustcStyle;
+use cel_parser::{FormatRustcStyle, SourceSpan, SpanContext};
 use indexmap::IndexMap;
 use std::any::TypeId;
+use std::collections::HashMap;
 
 /// Type-erased write closure: parses a string and writes it to a cell.
 pub type WriteStrFn = Box<dyn Fn(&mut Sheet, &str) -> Result<(), Error>>;
@@ -299,14 +300,63 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
 /// [`Renderer::styled`] for a real terminal (ANSI colors) or [`Renderer::plain`]
 /// for a context that can't display them (a browser `<pre>` element, a log file) —
 /// with `file_name` (e.g. `"begin/examples/toy_example.adm2"`) shown in the
-/// diagnostic header. All other variants have no source span and fall back to
-/// their `Display` message, ignoring `file_name` and `renderer`.
-pub fn format_adam_error(e: &Error, source: &str, file_name: &str, renderer: &Renderer) -> String {
+/// diagnostic header. When it doesn't (a custom method error with no CEL-internal
+/// span), `method_spans` — `adam_lang::ParsedSheet::method_spans` — is consulted via
+/// the error's `ErrorLocation` as a fallback, underlining the whole failing binding
+/// instead of a sub-expression. `Error::TypeMismatch` has no inner CEL error, so it goes
+/// straight to the `method_spans` fallback. Every other variant has no source span and
+/// falls back to its `Display` message, ignoring `method_spans`/`file_name`/`renderer`.
+pub fn format_adam_error(
+    e: &Error,
+    method_spans: &HashMap<(RelationshipId, usize), SourceSpan>,
+    source: &str,
+    file_name: &str,
+    renderer: &Renderer,
+) -> String {
     match e {
-        Error::MethodFailed { error, .. } => {
-            error.format_rustc_style(source, file_name, 1, renderer)
+        Error::MethodFailed { error, location } => {
+            if error.downcast_ref::<SpanContext>().is_some() {
+                return error.format_rustc_style(source, file_name, 1, renderer);
+            }
+            match location_span(*location, method_spans) {
+                Some(span) => SpanContext::new(span).format_rustc_style(
+                    &error.to_string(),
+                    source,
+                    file_name,
+                    1,
+                    renderer,
+                ),
+                None => e.to_string(),
+            }
         }
+        Error::TypeMismatch { location, .. } => match location_span(*location, method_spans) {
+            Some(span) => SpanContext::new(span).format_rustc_style(
+                &e.to_string(),
+                source,
+                file_name,
+                1,
+                renderer,
+            ),
+            None => e.to_string(),
+        },
         other => other.to_string(),
+    }
+}
+
+/// Resolves an `ErrorLocation` to a source span via `method_spans`. `MethodIndex` never
+/// appears here in practice — it's only ever produced by `add_relationship` and always
+/// resolved immediately by `adam-lang`'s parser (see `AdamParser::parse_relationship_decl`),
+/// so it never survives into a post-parse `adam_rs::Error`.
+fn location_span(
+    location: Option<adam_rs::ErrorLocation>,
+    method_spans: &HashMap<(RelationshipId, usize), SourceSpan>,
+) -> Option<SourceSpan> {
+    match location? {
+        adam_rs::ErrorLocation::Method(rel_id, idx) => method_spans.get(&(rel_id, idx)).copied(),
+        adam_rs::ErrorLocation::MethodIndex(_) => None,
+        // `ErrorLocation` is `#[non_exhaustive]`; adam-web-ui is a downstream crate, so a
+        // wildcard arm is required even though only the two variants above exist today.
+        _ => None,
     }
 }
 
@@ -319,6 +369,7 @@ mod tests {
     fn format_adam_error_invalid_id_falls_back_to_display() {
         let msg = format_adam_error(
             &Error::InvalidId,
+            &HashMap::new(),
             "source text",
             "test.adm2",
             &Renderer::styled(),
@@ -338,7 +389,13 @@ mod tests {
             location: None,
         };
 
-        let msg = format_adam_error(&err, source, "test.adm2", &Renderer::styled());
+        let msg = format_adam_error(
+            &err,
+            &HashMap::new(),
+            source,
+            "test.adm2",
+            &Renderer::styled(),
+        );
 
         assert!(msg.contains("division by zero"), "{msg}");
         assert!(msg.contains(source), "{msg}");
@@ -356,13 +413,51 @@ mod tests {
             location: None,
         };
 
-        let msg = format_adam_error(&err, source, "test.adm2", &Renderer::plain());
+        let msg = format_adam_error(
+            &err,
+            &HashMap::new(),
+            source,
+            "test.adm2",
+            &Renderer::plain(),
+        );
 
         assert!(msg.contains("division by zero"), "{msg}");
         assert!(
             !msg.contains('\u{1b}'),
             "expected no ANSI escapes, got: {msg}"
         );
+    }
+
+    #[test]
+    fn format_adam_error_method_failed_falls_back_to_method_span_without_a_span_context() {
+        use adam_rs::ErrorLocation;
+        use cel_parser::SourceSpan;
+
+        let source =
+            "sheet s {\n    cell a: i32;\n    relationship {\n        a := oops();\n    }\n}";
+        let mut sheet = adam_rs::Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let rel_id = sheet
+            .add_relationship(vec![adam_rs::Method::new(
+                vec![],
+                vec![a],
+                vec![],
+                vec![std::any::TypeId::of::<i32>()],
+                |_| Err(anyhow::anyhow!("boom")),
+            )])
+            .unwrap();
+        let mut method_spans = HashMap::new();
+        method_spans.insert((rel_id, 0), SourceSpan::new(4, 8, 4, 20));
+
+        let err = Error::MethodFailed {
+            error: anyhow::anyhow!("boom"),
+            location: Some(ErrorLocation::Method(rel_id, 0)),
+        };
+
+        let msg = format_adam_error(&err, &method_spans, source, "test.adm2", &Renderer::plain());
+
+        assert!(msg.contains("boom"), "{msg}");
+        assert!(msg.contains("a := oops();"), "{msg}");
     }
 
     #[test]
