@@ -13,7 +13,7 @@ use adam_web_ui::spectrum::{
     SpSideNavItem, SpSwitch, SpTheme,
 };
 use adam_web_ui::to_graph_data;
-use adam_web_ui::{Renderer, build_sheet};
+use adam_web_ui::{MethodSpans, Renderer, build_sheet};
 
 /// Root component: Spectrum theme wrapper with an examples picker, the graph, and
 /// the SheetInspector filling the viewport. `begin` ships with several example
@@ -46,10 +46,11 @@ pub fn App() -> Element {
     });
 
     let initial_example_name = available_examples().first().cloned().unwrap_or_default();
-    let (initial_sheet, initial_labels, initial_active_source) =
+    let (initial_sheet, initial_labels, initial_method_spans, initial_active_source) =
         load_example(&initial_example_name);
     let sheet = use_signal(|| initial_sheet);
     let labels = use_signal(|| initial_labels);
+    let method_spans: Signal<MethodSpans> = use_signal(|| initial_method_spans);
     let active_source = use_signal(|| initial_active_source);
     let example_names = use_signal(available_examples);
 
@@ -80,6 +81,7 @@ pub fn App() -> Element {
     let reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>> = {
         let mut sheet = sheet;
         let mut labels = labels;
+        let mut method_spans = method_spans;
         let mut active_source = active_source;
         let mut example_names = example_names;
         let mut examples_watcher_slot = examples_watcher_slot;
@@ -120,6 +122,9 @@ pub fn App() -> Element {
                     if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
                         sheet.set(new_sheet);
                         labels.set(new_labels);
+                        if let Some(new_method_spans) = outcome.method_spans {
+                            method_spans.set(new_method_spans);
+                        }
                         active_source.set(ActiveSource {
                             text: source,
                             ..current
@@ -233,6 +238,7 @@ pub fn App() -> Element {
         OpenFileControls {
             sheet,
             labels,
+            method_spans,
             active_source,
             reload_tx,
             watcher_slot,
@@ -243,6 +249,7 @@ pub fn App() -> Element {
         OpenFileControls {
             sheet,
             labels,
+            method_spans,
             active_source,
             refresh_handle,
         }
@@ -308,7 +315,7 @@ pub fn App() -> Element {
                 }
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
-                    ExamplesPicker { sheet, labels, active_source, example_names, on_select: on_example_selected }
+                    ExamplesPicker { sheet, labels, method_spans, active_source, example_names, on_select: on_example_selected }
                     // Positioned wrapper so `GraphLegend` (position: absolute) overlays the
                     // graph. The legend lives here in `begin`, not inside the shared
                     // `GraphView`, so the book's live graphs render without it.
@@ -317,7 +324,7 @@ pub fn App() -> Element {
                         GraphView { graph_id, data: graph_data, source_id }
                         GraphLegend {}
                     }
-                    SheetInspector { sheet, labels, source_text, source_name }
+                    SheetInspector { sheet, labels, method_spans, source_text, source_name }
                 }
             }
         }
@@ -337,7 +344,7 @@ pub fn App() -> Element {
 ///
 /// - Complexity: O(n) in the length of the example's source, plus the cost
 ///   of one `build_sheet` parse/propagate.
-fn load_example(name: &str) -> (Sheet, Labels, ActiveSource) {
+fn load_example(name: &str) -> (Sheet, Labels, MethodSpans, ActiveSource) {
     match load_example_source(name) {
         Ok(source) => {
             let outcome = build_sheet(
@@ -354,8 +361,18 @@ fn load_example(name: &str) -> (Sheet, Labels, ActiveSource) {
                 origin: SourceOrigin::Example,
             };
             match outcome.sheet_labels {
-                Some((sheet, labels)) => (sheet, labels, active_source),
-                None => (Sheet::new(), Labels::new(), active_source),
+                Some((sheet, labels)) => (
+                    sheet,
+                    labels,
+                    outcome.method_spans.unwrap_or_default(),
+                    active_source,
+                ),
+                None => (
+                    Sheet::new(),
+                    Labels::new(),
+                    std::collections::HashMap::new(),
+                    active_source,
+                ),
             }
         }
         Err(err) => {
@@ -363,6 +380,7 @@ fn load_example(name: &str) -> (Sheet, Labels, ActiveSource) {
             (
                 Sheet::new(),
                 Labels::new(),
+                std::collections::HashMap::new(),
                 ActiveSource {
                     name: name.to_string(),
                     text: String::new(),
@@ -390,7 +408,7 @@ fn load_example(name: &str) -> (Sheet, Labels, ActiveSource) {
 /// - Complexity: O(n) in the size of the file at `path`, plus the cost of
 ///   one `build_sheet` parse/propagate.
 #[cfg(feature = "desktop")]
-fn load_opened(path: std::path::PathBuf) -> (Option<(Sheet, Labels)>, ActiveSource) {
+fn load_opened(path: std::path::PathBuf) -> (Option<(Sheet, Labels, MethodSpans)>, ActiveSource) {
     let file_name = path.display().to_string();
     let name = path
         .file_name()
@@ -407,7 +425,12 @@ fn load_opened(path: std::path::PathBuf) -> (Option<(Sheet, Labels)>, ActiveSour
                 text: source,
                 origin: SourceOrigin::Opened(path.into_os_string()),
             };
-            (outcome.sheet_labels, active_source)
+            (
+                outcome.sheet_labels.map(|(sheet, labels)| {
+                    (sheet, labels, outcome.method_spans.unwrap_or_default())
+                }),
+                active_source,
+            )
         }
         Err(err) => {
             eprintln!("{err}");
@@ -437,6 +460,7 @@ fn load_opened(path: std::path::PathBuf) -> (Option<(Sheet, Labels)>, ActiveSour
 fn OpenFileControls(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
+    method_spans: Signal<MethodSpans>,
     active_source: Signal<ActiveSource>,
     reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>>,
     mut watcher_slot: Signal<Option<notify::RecommendedWatcher>>,
@@ -448,6 +472,7 @@ fn OpenFileControls(
                 onclick: move |_| {
                     let mut sheet = sheet;
                     let mut labels = labels;
+                    let mut method_spans = method_spans;
                     let mut active_source = active_source;
                     let reload_tx = reload_tx.read().clone();
                     spawn(async move {
@@ -455,9 +480,10 @@ fn OpenFileControls(
                             return;
                         };
                         let (new_sheet_labels, new_active) = load_opened(path.clone());
-                        if let Some((new_sheet, new_labels)) = new_sheet_labels {
+                        if let Some((new_sheet, new_labels, new_method_spans)) = new_sheet_labels {
                             sheet.set(new_sheet);
                             labels.set(new_labels);
+                            method_spans.set(new_method_spans);
                         }
                         active_source.set(new_active);
                         match crate::open_file::spawn_watch(path, move || {
@@ -498,7 +524,7 @@ fn OpenFileControls(
 #[cfg(not(feature = "desktop"))]
 fn load_from_payload(
     payload: crate::open_file::OpenedFilePayload,
-) -> (Option<(Sheet, Labels)>, ActiveSource) {
+) -> (Option<(Sheet, Labels, MethodSpans)>, ActiveSource) {
     let outcome = build_sheet(&payload.text, &payload.name, &Renderer::styled());
     if let Some(err) = &outcome.error {
         adam_web_ui::diagnostics::report_error(err);
@@ -508,7 +534,12 @@ fn load_from_payload(
         text: payload.text,
         origin: SourceOrigin::Opened(payload.name.into()),
     };
-    (outcome.sheet_labels, active_source)
+    (
+        outcome
+            .sheet_labels
+            .map(|(sheet, labels)| (sheet, labels, outcome.method_spans.unwrap_or_default())),
+        active_source,
+    )
 }
 
 /// "Open…"/"Refresh" controls for the web build: "Open…" always calls
@@ -521,6 +552,7 @@ fn load_from_payload(
 fn OpenFileControls(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
+    method_spans: Signal<MethodSpans>,
     active_source: Signal<ActiveSource>,
     mut refresh_handle: Signal<Option<u32>>,
 ) -> Element {
@@ -531,6 +563,7 @@ fn OpenFileControls(
                 onclick: move |_| {
                     let mut sheet = sheet;
                     let mut labels = labels;
+                    let mut method_spans = method_spans;
                     let mut active_source = active_source;
                     let mut refresh_handle = refresh_handle;
                     spawn(async move {
@@ -554,9 +587,10 @@ fn OpenFileControls(
                         };
                         refresh_handle.set(payload.id);
                         let (new_sheet_labels, new_active) = load_from_payload(payload);
-                        if let Some((new_sheet, new_labels)) = new_sheet_labels {
+                        if let Some((new_sheet, new_labels, new_method_spans)) = new_sheet_labels {
                             sheet.set(new_sheet);
                             labels.set(new_labels);
+                            method_spans.set(new_method_spans);
                         }
                         active_source.set(new_active);
                     });
@@ -568,6 +602,7 @@ fn OpenFileControls(
                     onclick: move |_| {
                         let mut sheet = sheet;
                         let mut labels = labels;
+                        let mut method_spans = method_spans;
                         let mut active_source = active_source;
                         spawn(async move {
                             let script = crate::open_file::refresh_script(id);
@@ -590,9 +625,10 @@ fn OpenFileControls(
                                 }
                             };
                             let (new_sheet_labels, new_active) = load_from_payload(payload);
-                            if let Some((new_sheet, new_labels)) = new_sheet_labels {
+                            if let Some((new_sheet, new_labels, new_method_spans)) = new_sheet_labels {
                                 sheet.set(new_sheet);
                                 labels.set(new_labels);
+                                method_spans.set(new_method_spans);
                             }
                             active_source.set(new_active);
                         });
@@ -618,6 +654,7 @@ fn OpenFileControls(
 fn ExamplesPicker(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
+    method_spans: Signal<MethodSpans>,
     active_source: Signal<ActiveSource>,
     example_names: Signal<Vec<String>>,
     on_select: Callback<()>,
@@ -649,12 +686,14 @@ fn ExamplesPicker(
                         onclick: {
                             let mut sheet = sheet;
                             let mut labels = labels;
+                            let mut method_spans = method_spans;
                             let mut active_source = active_source;
                             let name = name.clone();
                             move |_| {
-                                let (new_sheet, new_labels, new_active_source) = load_example(&name);
+                                let (new_sheet, new_labels, new_method_spans, new_active_source) = load_example(&name);
                                 sheet.set(new_sheet);
                                 labels.set(new_labels);
+                                method_spans.set(new_method_spans);
                                 active_source.set(new_active_source);
                                 on_select.call(());
                             }
@@ -746,7 +785,7 @@ mod tests {
 
     #[test]
     fn load_example_unknown_name_falls_back_to_empty_sheet() {
-        let (sheet, labels, active) = load_example("does_not_exist");
+        let (sheet, labels, _, active) = load_example("does_not_exist");
         assert_eq!(sheet.cells().count(), 0);
         assert_eq!(labels.cells.len(), 0);
         assert_eq!(

@@ -3,6 +3,7 @@
 use adam_rs::{CellId, FilterViolation, Sheet};
 use dioxus::prelude::*;
 
+use crate::build::MethodSpans;
 use crate::labels::{Labels, Renderer, format_adam_error, format_rounded};
 use crate::spectrum::{
     SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpHelpText, SpNumberfield, SpSlider,
@@ -228,6 +229,16 @@ fn clamped_away(typed: &str, actual: &str) -> bool {
     }
 }
 
+/// The source context needed to format an evaluation error into a rustc-style diagnostic:
+/// the current source text and name, plus the relationship-method spans that resolve an
+/// [`adam_rs::ErrorLocation::Method`] back to its declaration site.
+#[derive(Clone, Copy)]
+struct ErrorContext {
+    source_text: Memo<String>,
+    source_name: Memo<String>,
+    method_spans: Signal<MethodSpans>,
+}
+
 /// Parses `val` for `id` via its `Labels` metadata, writes it to `sheet`, and propagates the
 /// sheet's constraints, updating `has_error` and reporting any error — or, on success, any
 /// currently-violated filter — to `crate::diagnostics`.
@@ -240,8 +251,7 @@ fn write_and_propagate(
     id: CellId,
     val: &str,
     mut has_error: Signal<bool>,
-    source_text: Memo<String>,
-    source_name: Memo<String>,
+    errors: ErrorContext,
 ) {
     let mut sheet_w = sheet.write();
     let labels_r = labels.read();
@@ -278,8 +288,9 @@ fn write_and_propagate(
             has_error.set(true);
             crate::diagnostics::report_error(&format_adam_error(
                 &e,
-                &source_text.read(),
-                &source_name.read(),
+                &errors.method_spans.read(),
+                &errors.source_text.read(),
+                &errors.source_name.read(),
                 &Renderer::styled(),
             ));
         }
@@ -300,6 +311,7 @@ fn write_and_propagate(
 pub fn SheetInspector(
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
+    method_spans: Signal<MethodSpans>,
     source_text: Memo<String>,
     source_name: Memo<String>,
 ) -> Element {
@@ -312,7 +324,7 @@ pub fn SheetInspector(
             SpHeading { "Cells" }
             SpDivider {}
             for id in ids {
-                CellRow { key: "{id:?}", id, sheet, labels, source_text, source_name, output_status }
+                CellRow { key: "{id:?}", id, sheet, labels, method_spans, source_text, source_name, output_status }
             }
         }
     }
@@ -323,6 +335,7 @@ fn CellRow(
     id: CellId,
     sheet: Signal<Sheet>,
     labels: Signal<Labels>,
+    method_spans: Signal<MethodSpans>,
     source_text: Memo<String>,
     source_name: Memo<String>,
     output_status: Memo<OutputStatus>,
@@ -387,6 +400,12 @@ fn CellRow(
     let mut is_focused = use_signal(|| false);
     let mut has_error = use_signal(|| false);
 
+    let errors = ErrorContext {
+        source_text,
+        source_name,
+        method_spans,
+    };
+
     let flags =
         use_memo(move || cell_flags(id, *forced.read(), *has_error.read(), &output_status.read()));
 
@@ -449,7 +468,7 @@ fn CellRow(
                                     ));
                                     let Ok(val) = eval.recv::<String>().await else { return; };
                                     input.set(val.clone());
-                                    write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
+                                    write_and_propagate(sheet, labels, id, &val, has_error, errors);
                                 });
                             },
                             onfocus: move |_| is_focused.set(true),
@@ -489,7 +508,7 @@ fn CellRow(
                         disabled: flags.read().disabled,
                         onclick: move |_| {
                             let next = toggled_bool_value(&value.peek());
-                            write_and_propagate(sheet, labels, id, next, has_error, source_text, source_name);
+                            write_and_propagate(sheet, labels, id, next, has_error, errors);
                             // `sp-checkbox` toggles its own shadow-DOM `checked` state
                             // natively in response to the click, before this handler runs
                             // and independent of the `checked` prop below. If the write above
@@ -583,7 +602,7 @@ fn CellRow(
                                     return;
                                 }
                                 input.set(val.to_string());
-                                write_and_propagate(sheet, labels, id, val, has_error, source_text, source_name);
+                                write_and_propagate(sheet, labels, id, val, has_error, errors);
                             });
                         },
                         onfocus: move |_| is_focused.set(true),
@@ -631,7 +650,7 @@ fn CellRow(
                                     return;
                                 }
                                 input.set(val.clone());
-                                write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
+                                write_and_propagate(sheet, labels, id, &val, has_error, errors);
                             });
                         },
                         onfocus: move |_| is_focused.set(true),
