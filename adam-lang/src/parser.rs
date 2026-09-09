@@ -10,8 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 
-use adam_rs::error::ErrorLocation;
-use adam_rs::{CellId, MatchExpr, Method, RelationshipId, Requirement, Sheet};
+use adam_rs::{CellId, ErrorLocation, MatchExpr, Method, RelationshipId, Requirement, Sheet};
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Token};
 use cel_parser::{CELParser, OpLookup, ParseError, SourceSpan};
 use cel_runtime::DynSegment;
@@ -798,6 +797,8 @@ impl AdamParser {
     ///
     /// - Postcondition: the returned `RelationshipId` identifies the relationship just added to
     ///   `ctx.sheet`.
+    /// - Postcondition: on success, `ctx.method_spans` gains one entry per parsed binding,
+    ///   keyed by `(rel_id, binding_index)`, mapping to that binding's source span.
     fn parse_relationship_decl(&mut self, ctx: &mut ParseContext) -> Result<RelationshipId> {
         let block_start = ctx.peek_span();
         ctx.is_keyword("relationship"); // consume
@@ -833,6 +834,9 @@ impl AdamParser {
     }
 
     /// `binding = binding_target ":=" expression ";".`
+    ///
+    /// - Postcondition: the returned `Span`s bound the binding's full source range, from its
+    ///   first token through the terminating `;`, for use in error-location resolution.
     fn parse_binding(&mut self, ctx: &mut ParseContext) -> Result<(Method, Span, Span)> {
         let start_span = ctx.peek_span();
         let (names, destructure) = parse_binding_target(ctx)?;
