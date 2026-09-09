@@ -301,15 +301,16 @@ mod tests {
     #[test]
     fn resolve_reports_no_assignment_when_any_component_lacks_one_even_if_another_only_fails_acyclically()
      {
-        // A plain component that's a genuine algebraic loop (x=f(y); y=g(x), single
-        // method each, no self-reference) -- NoAcyclicAssignment on its own, mirroring
-        // genuinely_unsolvable_cycle_returns_no_acyclic_assignment_failure -- alongside a
-        // disjoint self-referencing component whose two relationships both insist on
-        // claiming the same cell with no alternative method -- NoAssignment on its own.
-        // The aggregate failure must be NoAssignment, matching the pre-partition
-        // monolithic algorithm's semantics (a full assignment exists iff every disjoint
-        // component has one), not NoAcyclicAssignment just because resolve_plain --
-        // checked first -- only sees its own component's cyclic-only failure.
+        // Two disjoint connected components, active together: a plain one that's a
+        // genuine algebraic loop (x=f(y); y=g(x), single method each, no
+        // self-reference) -- unsolvable acyclically on its own, mirroring
+        // genuinely_unsolvable_cycle_returns_no_acyclic_assignment_failure -- and a
+        // self-referencing one whose two relationships both insist on claiming the same
+        // cell with no alternative method -- infeasible even ignoring acyclicity on its
+        // own. `resolve` searches every active relationship together in one assignment
+        // (it does not partition by component), so the infeasible component's
+        // NoAssignment must win over the other component's separately-cyclic shape:
+        // the overall result must be NoAssignment, not NoAcyclicAssignment.
         let mut sheet = Sheet::new();
         let x = sheet.add_cell(0_i32);
         let y = sheet.add_cell(0_i32);

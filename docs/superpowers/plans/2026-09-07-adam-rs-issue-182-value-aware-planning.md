@@ -1,5 +1,13 @@
 # Value-Aware Self-Referencing Planning Implementation Plan
 
+**Superseded:** the architecture below was implemented, then replaced by *seedfill* — a
+value-blind planner plus `planner::build_seeds`, which reconstructs each self-referencing
+input's value from `source` at execution time instead of partitioning into components and
+scoring candidate assignments. Kept here as the record of the approach that was tried and
+why it fell short; see the `refactor(adam-rs): replace value-aware self-ref planning with
+seedfill` commit message and `adam-rs/src/planner/seed.rs` for the mechanism actually
+shipped.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Fix issue #182 (planner silently overwrites a consistent edit in a self-referencing inequality chain) by making source selection value-aware for self-referencing relationships, and document `adam-rs`'s sheet invariants.

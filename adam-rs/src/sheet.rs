@@ -1423,13 +1423,7 @@ impl Sheet {
 
     /// Executes `execution_order` without invoking the planner.
     ///
-    /// A `PlanStep::Method` step's self-referencing input reads `source`, unless
-    /// `prior_derived` has an entry for that cell produced by a *different*
-    /// relationship than the one currently self-referencing it, in which case it reads
-    /// that prior value instead — see
-    /// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`,
-    /// Part 2. `prior_derived` is unrelated to filters: a
-    /// `PlanStep::FilterReclamp(id)` step re-evaluates `id`'s filter against `id`'s own
+    /// A `PlanStep::FilterReclamp(id)` step re-evaluates `id`'s filter against `id`'s own
     /// current `source` value (never a possibly-shadowed `derived` — the same
     /// self-referencing-input rule a `PlanStep::Method` step's self-referencing inputs
     /// follow) and its filter arguments' current effective values, writing the result

@@ -2,8 +2,17 @@
 
 **Date:** 2026-09-07
 **Author:** Sean Parent (with Claude)
-**Status:** Draft
+**Status:** Superseded — see note below
 **Fixes:** #182
+
+**Superseded:** the value-aware mechanism this document designs (`stay::resolve_component`,
+candidate enumeration and scoring, `prior_derived`/same-vs-different-relationship tracking)
+was implemented, then replaced by *seedfill*: a value-blind planner plus
+`planner::build_seeds`, which reconstructs each self-referencing input's value from
+`source` at execution time instead of the planner comparing candidate values. Kept here as
+the record of the approaches that were tried and why they fell short; see the
+`refactor(adam-rs): replace value-aware self-ref planning with seedfill` commit message and
+`adam-rs/src/planner/seed.rs` for the mechanism actually shipped.
 
 ## Problem
 

@@ -121,13 +121,13 @@
 //!   ([`Error::Conflict`] when infeasible).
 //! - The selected methods' induced dependency digraph is acyclic before execution
 //!   ([`Error::Cycle`]/[`Error::FilterCycle`] when not).
-//! - A self-referencing input never reads a same-round derived value. Across rounds, it
-//!   reads the pre-round `source` value, unless a *different* relationship produced the
-//!   cell's derived value last round, in which case it reads that prior derived value
-//!   instead — this preserves the settled multi-way state a different relationship left
-//!   behind, while a relationship that repeatedly self-references the same cell keeps
-//!   reading `source` every round so it can spring back once contending pressure
-//!   relaxes.
+//! - A self-referencing input never reads a same-round derived value. Instead it reads a
+//!   seed reconstructed from `source`: `planner::build_seeds` folds every other
+//!   relationship incident to the cell (excluding its own claimant) through that
+//!   relationship's cell-producing method, giving the cell's aspiration before its
+//!   claimant tightens it; a cell no other relationship contributes to just reads its
+//!   own `source`. The seed is rebuilt from `source` every round, so it is never stale
+//!   and never accumulates.
 //! - `source` is written only by [`Sheet::write`]/[`Sheet::add_cell`], never by method
 //!   or filter execution.
 //! - An `Out`-kind cell can never be [`Sheet::write`]-ed or claimed as another method's
@@ -142,22 +142,15 @@
 //! - Iteration order used to break ties among equal-strength cells is not stable API
 //!   and must not be relied on by callers.
 //!
-//! The source-capture property, amended:
+//! The source-capture property:
 //!
 //! Capturing every cell's `source` value and reapplying the highest-strength sources
 //! reconstructs the sheet's *current* state, but not what a subsequent edit will do,
-//! since no method-selection state is captured, only values. This property does not
-//! hold as stated for a self-referencing cell: because which method a relationship
-//! selects is chosen by strength, but a strictly weaker self-referenced cell can still
-//! contribute to that method's output, the *source* value alone is not sufficient to
-//! reconstruct even the current state for such a cell.
-//!
-//! Amended: for a self-referencing cell, the value that must be captured to reconstruct
-//! current state is its *derived* value ([`Sheet::read`]'s effective value), not its raw
-//! `source`. Because a self-referencing method is required to be idempotent, replaying
-//! that derived value through the same method again is guaranteed to reproduce it: the
-//! capture is stable under replay even though it discards the cell's original written
-//! value.
+//! since no method-selection state is captured, only values. This holds even for a
+//! self-referencing cell: `planner::build_seeds` reconstructs its contribution to a
+//! sibling relationship's method purely from current `source` values (recursively, for
+//! any other self-referencing cell that sibling method itself reads), so no state
+//! beyond `source` needs to be captured to reproduce the derived state.
 
 pub mod cell;
 pub mod conditional;

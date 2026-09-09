@@ -2070,11 +2070,12 @@ fn issue_182_inequality_chain_discriminating_case_unchanged() {
 fn issue_182_inequality_chain_later_edit_below_earlier_one_repropagates() {
     // a<=b<=c again. Writing a=25 raises b to 25 too. Writing c=24 then makes the
     // chain jointly inconsistent unless a also moves down: r2's min-method is
-    // self-referencing on b, and must consult b's *derived* 25 (from r1, a different
-    // relationship) rather than b's stale source of 20 -- otherwise b snaps to 20 and
-    // drags a down to 20 with it, discarding a's higher-strength 25 for a value nobody
-    // asked for. Consulting the derived 25 instead lets r2 settle b (and so a, via r1)
-    // at 24, the strongest value consistent with both edits.
+    // self-referencing on b, and its seed must be b's aspiration from r1 (b := max(a,
+    // b) = 25, build_seeds folding r1's method from a's source) rather than b's stale
+    // source of 20 -- otherwise b snaps to 20 and drags a down to 20 with it,
+    // discarding a's higher-strength 25 for a value nobody asked for. Seeding from 25
+    // instead lets r2 settle b (and so a, via r1) at 24, the strongest value
+    // consistent with both edits.
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(10_i32);
     let b = sheet.add_cell(20_i32);
@@ -2107,14 +2108,12 @@ fn issue_182_inequality_chain_later_edit_below_earlier_one_repropagates() {
 fn issue_182_inequality_chain_survives_two_consecutive_edits_to_the_same_cell() {
     // a<=b<=c again. Writing a=25 raises b to 25. Writing c=24 correctly pulls a and b
     // down to 24 (issue_182_inequality_chain_later_edit_below_earlier_one_repropagates).
-    // A THIRD edit to c (23, continuing to slide down) is where the original fix broke:
-    // by this round, r2 has claimed b for two consecutive rounds, so comparing only
-    // against "which relationship produced b's value last round" sees "same relationship
-    // as before" and (wrongly) springs b back to its untouched declared value (20)
-    // instead of continuing to track the chain -- snapping a and b to 20 instead of
-    // sliding them down to 23. b is genuinely contested between two self-referencing
-    // relationships (r1 and r2), so its settled value must keep being tracked across any
-    // number of consecutive rounds the same relationship claims it, not just one.
+    // A THIRD edit to c (23, continuing to slide down) guards against any mechanism that
+    // only rebuilds a self-referencing input's seed correctly on the *first* round a
+    // relationship claims it: build_seeds recomputes b's seed from a's `source` fresh
+    // every round regardless of how many consecutive rounds r2 has claimed b, so a and b
+    // must keep sliding down to 23 rather than springing back to their untouched
+    // declared values (10, 20) on this second consecutive round.
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(10_i32);
     let b = sheet.add_cell(20_i32);
@@ -2150,10 +2149,9 @@ fn issue_182_inequality_chain_springs_back_when_the_raising_edit_is_lowered() {
     // a<=b<=c. Writing a=100 raises b and c to 100 (a pushes the whole chain up). Then
     // writing a=0 releases that pressure: b and c must spring back to their own
     // untouched declared values (20, 30), not stay pinned at 100. b's derived value
-    // (100) is stale once a stops forcing it up, so the planner has to re-solve from
-    // source values rather than replay the a=100 plan (which claimed b and c and can
-    // only push them up). See the design doc: value-aware planning is why replaying a
-    // cached plan across an edit is unsound, and why `propagate()` always re-plans.
+    // (100) is stale once a stops forcing it up; build_seeds recomputes b's and c's
+    // seeds from `source` fresh every round, so the spring-back falls out of seedfill
+    // directly rather than needing any dedicated unwind logic.
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(10_i32);
     let b = sheet.add_cell(20_i32);
