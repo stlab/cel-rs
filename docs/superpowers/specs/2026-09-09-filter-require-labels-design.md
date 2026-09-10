@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-09
 **Branch:** worktree-adam-lang/filter-require-labels
-**Status:** Approved (design), not yet implemented
+**Status:** Implemented
 
 ## Summary
 
