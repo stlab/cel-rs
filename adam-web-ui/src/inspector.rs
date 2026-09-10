@@ -490,7 +490,7 @@ fn CellRow(
                         // `OutputStatus::invalid_output_requirement_names`). Names the
                         // `require` currently failing on this out cell — a stopgap: a real
                         // message (see `Requirement::from_fn_*`'s own
-                        // `require { name: expression; }` source) would need the sheet to
+                        // `require { @name expression; }` source) would need the sheet to
                         // carry more than just a name, so this just surfaces the name a
                         // sheet author already chose.
                         if let Some(names) = violated_requirement_names.read().clone() {
@@ -625,7 +625,7 @@ fn CellRow(
                         // `OutputStatus::invalid_output_requirement_names`). Names the
                         // `require` currently failing on this out cell — a stopgap: a real
                         // message (see `Requirement::from_fn_*`'s own
-                        // `require { name: expression; }` source) would need the sheet to
+                        // `require { @name expression; }` source) would need the sheet to
                         // carry more than just a name, so this just surfaces the name a
                         // sheet author already chose.
                         if let Some(names) = violated_requirement_names.read().clone() {
