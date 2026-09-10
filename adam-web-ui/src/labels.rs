@@ -607,7 +607,7 @@ mod tests {
                 ))
             },
         );
-        sheet.add_filter(a, "range_0_100", filter).unwrap();
+        sheet.add_filter(a, filter).unwrap();
 
         let mut cell_names = IndexMap::new();
         cell_names.insert("a".to_string(), (a, TypeShape::Named(TypeId::of::<i32>())));

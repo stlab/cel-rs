@@ -739,11 +739,7 @@ mod tests {
         let a = sheet.add_cell(0.0_f64);
         let b = sheet.add_cell(0.0_f64);
         sheet
-            .add_filter(
-                a,
-                "clamp_0_100",
-                Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))))
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(b, a, |v: &f64| Ok(*v))])
@@ -764,11 +760,7 @@ mod tests {
         let a = sheet.add_cell(0.0_f64);
         let b = sheet.add_cell(0.0_f64);
         sheet
-            .add_filter(
-                a,
-                "clamp_0_100",
-                Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))))
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(b, a, |v: &f64| Ok(*v))])
@@ -816,7 +808,7 @@ mod tests {
             .add_out(
                 Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
                 vec![(
-                    "not_too_big",
+                    Some("not_too_big"),
                     Requirement::from_fn_1(area, |a: &i32| Ok(*a <= 300)),
                 )],
             )
@@ -842,7 +834,7 @@ mod tests {
             .add_out(
                 Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
                 vec![(
-                    "not_too_big",
+                    Some("not_too_big"),
                     Requirement::from_fn_1(area, |a: &i32| Ok(*a <= 300)),
                 )],
             )
@@ -865,11 +857,11 @@ mod tests {
                 Method::from_fn_1_1(a, result, |x: &i32| Ok(*x)),
                 vec![
                     (
-                        "too_big",
+                        Some("too_big"),
                         Requirement::from_fn_1(result, |r: &i32| Ok(*r <= 10)),
                     ),
                     (
-                        "not_even",
+                        Some("not_even"),
                         Requirement::from_fn_1(result, |r: &i32| Ok(r % 2 == 0)),
                     ),
                 ],
@@ -899,7 +891,7 @@ mod tests {
         sheet
             .add_requirement(
                 a,
-                "too_big",
+                Some("too_big"),
                 Requirement::from_fn_1(a, |x: &i32| Ok(*x > 100)),
             )
             .unwrap();
