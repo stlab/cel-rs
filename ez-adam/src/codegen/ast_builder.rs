@@ -140,8 +140,6 @@ fn clamp_filter(cell_name: &str, ty: &CellType) -> Result<Option<CellFilter>, Ex
         panic!("synthesized clamp expression {body_text:?} failed to parse: {e:?}")
     });
     Ok(Some(CellFilter {
-        name: "clamp".to_string(),
-        name_span: ExprSpan::for_text("clamp"),
         body,
         span: ExprSpan::for_text("_"),
     }))
