@@ -1,4 +1,4 @@
 sheet s {
     source width: i32 = 4;
-    out area := width filter clamp: 0..=100;
+    out area := width filter 0..=100;
 }

@@ -14,7 +14,7 @@ sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditiona
 
 cell_decl          = "cell" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 cell_type_init     = (":" type_expr ["=" expression]) | ("=" expression).
-cell_filter        = "filter" identifier ":" expression.
+cell_filter        = "filter" expression.
 source_decl        = "source" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 
 type_expr          = identifier
@@ -30,7 +30,7 @@ conditional_branch = (expression | "_") "=>" "{" { relationship_decl } "}" [ ","
 out_decl           = "out" identifier [ ":" type_expr ] ":=" expression
                        [ cell_filter ] [ require_block ] ";".
 require_block      = "require" "{" { requirement } "}".
-requirement        = identifier ":" expression ";".
+requirement        = [ "@" identifier ] expression ";".
 ```
 
 `expression` and everything it expands to (`literal`, `identifier`, operators, `if`/`else`,
@@ -150,14 +150,13 @@ See [conditionals](conditionals.md).
 
 ## Filters
 
-- `cell_filter = "filter" identifier ":" expression`, trailing a `cell_decl`, `source_decl`, or
-  `out_decl` — a filter attaches to any cell kind, with no per-kind restriction (see
-  [a source cell can be filtered too](source.md#a-source-cell-can-be-filtered-too)). The
-  identifier names the filter, surfaced through the host embedding API
-  (see [the host embedding API](#the-host-embedding-api)); it is not a cell reference. `_` inside the expression
-  denotes the candidate value (of the cell's own declared type); every other identifier is a
-  deduced dependency. The expression must reference `_` at least once (unless it's a range
-  expression, `lo..=hi`, which is exempt) and must produce the filtered cell's own type.
+- `cell_filter = "filter" expression`, trailing a `cell_decl`, `source_decl`, or `out_decl` —
+  a filter attaches to any cell kind, with no per-kind restriction (see
+  [a source cell can be filtered too](source.md#a-source-cell-can-be-filtered-too)). A filter
+  carries no name; `_` inside the expression denotes the candidate value (of the cell's own
+  declared type); every other identifier is a deduced dependency. The expression must
+  reference `_` at least once (unless it's a range expression, `lo..=hi`, which is exempt)
+  and must produce the filtered cell's own type.
 - **Writing a cell never applies a filter.** A filter is applied live, each time the sheet
   resolves, against the cell's current value.
 - A filtered cell keeps a raw _source_ value (last written, untouched by any filter forever)
@@ -178,13 +177,13 @@ See the [filters chapter](filters.md) for the full model and worked examples.
   directly — not by a host write, not a `relationship`, not another `out` — but otherwise an
   ordinary, freely-referenceable cell: any later declaration may read it by name exactly like
   any other already-declared cell. See [outputs and requirements](outputs.md).
-- `require { name: expr; ... }` attaches named boolean checks. Unlike `filter`, `require` is
-  not tied to `out`: a `require` block may trail a `cell`, `source`, or `out` declaration's
-  initializer, with the same meaning in every case. Each `requirement`'s own dependencies are
-  deduced separately from its declaration's own expression. A failing requirement never stops
-  the sheet from resolving, or its cell's own value from being computed: it's reported as a
-  diagnostic, nothing more, queryable by a host (see
-  [the host embedding API](#the-host-embedding-api)).
+- `require { [ "@" name ] expr; ... }` attaches boolean checks, each with an optional
+  `@name` label. Unlike `filter`, `require` is not tied to `out`: a `require` block may
+  trail a `cell`, `source`, or `out` declaration's initializer, with the same meaning in
+  every case. Each `requirement`'s own dependencies are deduced separately from its
+  declaration's own expression. A failing requirement never stops the sheet from resolving,
+  or its cell's own value from being computed: it's reported as a diagnostic, nothing more,
+  queryable by a host (see [the host embedding API](#the-host-embedding-api)).
 
 See [requirements: diagnostics, not gates](outputs.md#requirements-diagnostics-not-gates) and [cell declarations](cells.md#cell-declarations)
 for `require` on a plain `cell`, and [source cells](source.md) for `require` on a `source` cell.
@@ -213,7 +212,7 @@ Selected messages, verbatim:
 | `filter on a tuple-typed cell is not yet supported` | `filter` attached to a tuple-typed `cell` |
 | `output \`name\`: type mismatch: ...` | a `relationship` binding output's declared vs. actual type |
 | `output expression has arity N but M output(s) declared` | a destructuring binding's tuple arity mismatch |
-| `requirement \`name\`: expected \`bool\`, got \`T\`` | a `require`ment body that isn't boolean |
+| `requirement[ \`name\`]: expected \`bool\`, got \`T\`` | a `require`ment body that isn't boolean — the `` `name` `` segment appears only when the requirement is labeled; the colon is always present |
 | `methods in a relationship must reference the same set of cells` | a relationship's methods have different `inputs ∪ outputs` sets |
 | `a method's outputs must be duplicate-free, and no two methods in a relationship may share an outputs set` | two methods in one relationship claim the same `outputs` set, or one method repeats a cell in its own `outputs` |
 

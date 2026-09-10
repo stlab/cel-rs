@@ -92,7 +92,7 @@ impl Requirement {
 
 /// Internal storage for a single requirement.
 pub(crate) struct RequirementData {
-    pub(crate) name: String,
+    pub(crate) name: Option<String>,
     pub(crate) cell: CellId,
     pub(crate) inputs: Vec<CellId>,
     pub(crate) function: RequirementFn,

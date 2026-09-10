@@ -77,7 +77,6 @@ fn filter_on_an_out_cell() {
         ))
         .unwrap();
     let area = parsed.output_names["area"];
-    assert_eq!(parsed.filter_name(area), Some("clamp"));
 
     parsed.propagate().unwrap();
     assert_eq!(*parsed.read::<i32>(area).unwrap(), 4); // within range, unclamped

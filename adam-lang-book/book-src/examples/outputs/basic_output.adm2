@@ -1,6 +1,6 @@
 sheet area_demo {
-    source width = 10 filter clamp: 0..=100;
-    source height = 20 filter clamp: 0..=100;
+    source width = 10 filter 0..=100;
+    source height = 20 filter 0..=100;
 
     out area := width * height;
 }

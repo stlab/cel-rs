@@ -35,8 +35,8 @@
 //!
 //! # Out cells and requirements
 //!
-//! An out cell is always derived by exactly one fixed writer method, with named
-//! requirements checked after every `propagate()`. Unlike an ordinary derived cell, an
+//! An out cell is always derived by exactly one fixed writer method, with optionally
+//! named requirements checked after every `propagate()`. Unlike an ordinary derived cell, an
 //! out cell can never be `write()`-ed or claimed as another method's output — but it
 //! remains an ordinary, freely-referenceable cell everywhere else (as another
 //! relationship's input, a conditional's match subject, and so on).
@@ -57,7 +57,7 @@
 //!     .add_out(
 //!         writer,
 //!         vec![(
-//!             "max_area",
+//!             Some("max_area"),
 //!             Requirement::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
 //!         )],
 //!     )
@@ -88,10 +88,10 @@
 //! let a = sheet.add_cell(0_i32);
 //! let b = sheet.add_cell(0_i32);
 //! sheet
-//!     .add_filter(a, "clamp", Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+//!     .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
 //!     .unwrap();
 //! sheet
-//!     .add_filter(b, "clamp", Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
+//!     .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
 //!     .unwrap();
 //! sheet
 //!     .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])

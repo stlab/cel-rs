@@ -34,7 +34,6 @@ fn source_with_a_filter() {
         ))
         .unwrap();
     let level = parsed.cell_names["level"].0;
-    assert_eq!(parsed.filter_name(level), Some("clamp"));
 
     parsed.write(level, 500_i32).unwrap();
     assert_eq!(*parsed.read::<i32>(level).unwrap(), 500); // the raw value, unfiltered

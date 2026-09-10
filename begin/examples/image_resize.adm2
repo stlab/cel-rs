@@ -109,7 +109,7 @@ sheet image_resize {
     out byte_count := width_pixels as i64 * height_pixels as i64 * 32i64;
 
     out result := if resample { ("resize_image", width_pixels, height_pixels, resolution, scale_styles, resample_method) } else { ("set_resolution", 0, 0, resolution, false, "") } require {
-        width_max: width_pixels <= 300000;
-        height_max: height_pixels <= 300000;
+        @width_max width_pixels <= 300000;
+        @height_max height_pixels <= 300000;
     };
 }

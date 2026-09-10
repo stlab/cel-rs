@@ -716,11 +716,16 @@ fn check_requirements(
         diagnostics.extend(req_diags);
         if !req_ty.unifies_with(&Ty::Bool) {
             diagnostics.push(ParseError::new_range(
-                format!(
-                    "requirement `{}` produces `{}`, but requirements must be `bool`",
-                    requirement.name,
-                    req_ty.name()
-                ),
+                match &requirement.name {
+                    Some(name) => format!(
+                        "requirement `{name}` produces `{}`, but requirements must be `bool`",
+                        req_ty.name()
+                    ),
+                    None => format!(
+                        "requirement produces `{}`, but requirements must be `bool`",
+                        req_ty.name()
+                    ),
+                },
                 requirement.body.span().start,
                 requirement.body.span().end,
             ));
@@ -762,7 +767,7 @@ mod tests {
 
     #[test]
     fn cell_requirement_non_bool_body_is_a_diagnostic() {
-        let sheet = parse("sheet s { cell x: i32 = 5 require { positive: x; }; }");
+        let sheet = parse("sheet s { cell x: i32 = 5 require { @positive x; }; }");
         let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diagnostics.len(), 1);
     }
@@ -949,7 +954,7 @@ mod tests {
         let sheet = parse(
             "sheet s { cell width: f64; cell max_width: f64; \
              out area: f64 := width require { \
-                 max_width: width <= max_width; \
+                 @max_width width <= max_width; \
              }; }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
@@ -961,7 +966,19 @@ mod tests {
         let sheet = parse(
             "sheet s { cell width: f64; \
              out area: f64 := width require { \
-                 bogus: width; \
+                 @bogus width; \
+             }; }",
+        );
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn unlabeled_requirement_with_non_bool_body_is_a_diagnostic() {
+        let sheet = parse(
+            "sheet s { cell width: f64; \
+             out area: f64 := width require { \
+                 width; \
              }; }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
@@ -998,14 +1015,14 @@ mod tests {
 
     #[test]
     fn filter_with_matching_types_has_no_diagnostic() {
-        let sheet = parse("sheet s { cell a: i32 = 1 filter clamp: _; }");
+        let sheet = parse("sheet s { cell a: i32 = 1 filter _; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
     }
 
     #[test]
     fn filter_with_matching_types_on_a_source_has_no_diagnostic() {
-        let sheet = parse("sheet s { source a: i32 = 1 filter clamp: _; }");
+        let sheet = parse("sheet s { source a: i32 = 1 filter _; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
     }
@@ -1013,7 +1030,7 @@ mod tests {
     #[test]
     fn filter_referencing_a_cell_has_no_diagnostic() {
         let sheet = parse(
-            "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter clamp: if _ > hi { hi } else { _ }; }",
+            "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter if _ > hi { hi } else { _ }; }",
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
@@ -1022,14 +1039,14 @@ mod tests {
     #[test]
     fn filter_body_type_mismatch_is_a_diagnostic() {
         // Body is `bool`-typed (a comparison), but `a` is declared `i32`.
-        let sheet = parse("sheet s { cell a: i32 = 1 filter f: _ > 0; }");
+        let sheet = parse("sheet s { cell a: i32 = 1 filter _ > 0; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn filter_without_underscore_is_a_diagnostic() {
-        let sheet = parse("sheet s { cell a: i32 = 1 filter f: 1; }");
+        let sheet = parse("sheet s { cell a: i32 = 1 filter 1; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
@@ -1038,8 +1055,7 @@ mod tests {
     fn filter_body_type_mismatch_on_an_out_is_a_diagnostic() {
         // Mirrors `filter_body_type_mismatch_is_a_diagnostic`, but for an `out`'s filter clause:
         // body is `bool`-typed (a comparison), but `area` is declared `i32`.
-        let sheet =
-            parse("sheet s { cell width: i32 = 1; out area: i32 := width filter f: _ > 0; }");
+        let sheet = parse("sheet s { cell width: i32 = 1; out area: i32 := width filter _ > 0; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
@@ -1047,7 +1063,7 @@ mod tests {
     #[test]
     fn filter_without_underscore_on_an_out_is_a_diagnostic() {
         // Mirrors `filter_without_underscore_is_a_diagnostic`, but for an `out`'s filter clause.
-        let sheet = parse("sheet s { cell width: i32 = 1; out area: i32 := width filter f: 1; }");
+        let sheet = parse("sheet s { cell width: i32 = 1; out area: i32 := width filter 1; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
@@ -1056,7 +1072,7 @@ mod tests {
     fn filter_body_type_mismatch_on_a_source_is_a_diagnostic() {
         // Mirrors `filter_body_type_mismatch_is_a_diagnostic`, but for a `source`'s filter
         // clause: body is `bool`-typed (a comparison), but `a` is declared `i32`.
-        let sheet = parse("sheet s { source a: i32 = 1 filter f: _ > 0; }");
+        let sheet = parse("sheet s { source a: i32 = 1 filter _ > 0; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
@@ -1065,7 +1081,7 @@ mod tests {
     fn filter_without_underscore_on_a_source_is_a_diagnostic() {
         // Mirrors `filter_without_underscore_is_a_diagnostic`, but for a `source`'s filter
         // clause.
-        let sheet = parse("sheet s { source a: i32 = 1 filter f: 1; }");
+        let sheet = parse("sheet s { source a: i32 = 1 filter 1; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
@@ -1074,7 +1090,7 @@ mod tests {
     fn filter_on_a_tuple_typed_cell_is_a_diagnostic() {
         // Mirrors the runtime parser's own rejection (`adam_lang::parser::AdamParser::
         // parse_cell_filter`) — a tuple-typed filtered cell isn't yet supported by either layer.
-        let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter f: (_.0, _.1); }");
+        let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter (_.0, _.1); }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
     }
@@ -1083,7 +1099,7 @@ mod tests {
     fn filter_references_underscore_nested_inside_a_call_has_no_missing_underscore_diagnostic() {
         // `_` appears only inside an `if`'s then-branch, not as the whole body or a bare
         // operand — exercises `expr_references_ident`'s `Expr::If` arm specifically.
-        let sheet = parse("sheet s { cell a: i32 = 1 filter f: if true { _ } else { 1 }; }");
+        let sheet = parse("sheet s { cell a: i32 = 1 filter if true { _ } else { 1 }; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
     }
@@ -1214,7 +1230,7 @@ mod tests {
 
     #[test]
     fn filter_range_inclusive_body_does_not_require_underscore() {
-        let sheet = parse("sheet s { cell a: i32 filter clamp: 0..=100; }");
+        let sheet = parse("sheet s { cell a: i32 filter 0..=100; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
     }

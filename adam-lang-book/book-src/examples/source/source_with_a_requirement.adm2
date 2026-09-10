@@ -1,5 +1,5 @@
 sheet s {
     source width: i32 = 1920 require {
-        positive: width > 0;
+        @positive width > 0;
     };
 }
