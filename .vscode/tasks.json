@@ -48,6 +48,19 @@
                 "panel": "dedicated"
             }
         },
+        {
+            "label": "worktree: prune branches",
+            "type": "shell",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/.vscode/scripts/prune-worktree-branches.ps1\"",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
         // ============ Begin Tasks ============
         {
             "label": "begin: serve (desktop)",
