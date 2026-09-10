@@ -256,13 +256,9 @@ pub struct SourceDecl {
     pub span: ExprSpan,
 }
 
-/// `cell_filter = "filter" identifier ":" expression.`
+/// `cell_filter = "filter" expression.`
 #[derive(Debug, Clone)]
 pub struct CellFilter {
-    /// The filter's declared name.
-    pub name: String,
-    /// The name token's span.
-    pub name_span: ExprSpan,
     /// The filter's body expression. `_` inside it denotes the candidate value being conformed;
     /// every other identifier that names an already-declared cell is a deduced dependency.
     pub body: cel_parser::Expr,
@@ -383,17 +379,17 @@ pub struct RequireBlock {
     pub span: ExprSpan,
 }
 
-/// `requirement = identifier ":" expression ";".`
+/// `requirement = [ "@" identifier ] expression ";".`
 ///
-/// `name` is a plain string label passed to `adam_rs::Sheet::add_requirement`, not a cell
-/// reference — it may coincide with a cell name declared elsewhere in the sheet but doesn't
-/// have to.
+/// `name`, when present, is a plain string label passed to `adam_rs::Sheet::add_requirement`,
+/// not a cell reference — it may coincide with a cell name declared elsewhere in the sheet but
+/// doesn't have to.
 #[derive(Debug, Clone)]
 pub struct RequirementDecl {
-    /// The requirement's declared name.
-    pub name: String,
-    /// The name token's span.
-    pub name_span: ExprSpan,
+    /// The requirement's declared label, if the `@identifier` marker was present.
+    pub name: Option<String>,
+    /// The `@identifier` marker's span, if present.
+    pub name_span: Option<ExprSpan>,
     /// The parsed requirement body expression; must type-check as `bool`.
     pub body: cel_parser::Expr,
     /// A leading comment immediately preceding this requirement, if recovered by
@@ -402,7 +398,7 @@ pub struct RequirementDecl {
     /// Whether a blank line preceded this requirement, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
-    /// The span of the whole `name: ...;` declaration.
+    /// The span of the whole `[ "@" identifier ] expr;` declaration.
     pub span: ExprSpan,
 }
 
@@ -756,8 +752,6 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: Some(CellFilter {
-                name: "clamp".to_string(),
-                name_span: span,
                 body: cel_parser::Expr::Ident {
                     name: "_".to_string(),
                     span,

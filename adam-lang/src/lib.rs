@@ -10,7 +10,7 @@
 //! sheet_item         = [ doc_comment ] (cell_decl | relationship_decl | conditional_decl | out_decl
 //!                        | source_decl).
 //! cell_decl          = "cell" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
-//! cell_filter        = "filter" identifier ":" expression.
+//! cell_filter        = "filter" expression.
 //! cell_type_init     = (":" type_expr ["=" expression]) | ("=" expression).
 //! source_decl        = "source" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
 //! type_expr          = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
@@ -22,7 +22,7 @@
 //! out_decl           = "out" identifier [":" type_expr] ":=" expression
 //!                        [ cell_filter ] [ require_block ] ";".
 //! require_block      = "require" "{" { requirement } "}".
-//! requirement        = identifier ":" expression ";".
+//! requirement        = [ "@" identifier ] expression ";".
 //! ```
 //!
 //! The design spec for `cell_decl` also calls for an optional trailing `":=" expression`
