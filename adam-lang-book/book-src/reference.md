@@ -212,7 +212,7 @@ Selected messages, verbatim:
 | `filter on a tuple-typed cell is not yet supported` | `filter` attached to a tuple-typed `cell` |
 | `output \`name\`: type mismatch: ...` | a `relationship` binding output's declared vs. actual type |
 | `output expression has arity N but M output(s) declared` | a destructuring binding's tuple arity mismatch |
-| `requirement [\`name\`: ]expected \`bool\`, got \`T\`` | a `require`ment body that isn't boolean — the `` `name`: `` segment appears only when the requirement is labeled |
+| `requirement[ \`name\`]: expected \`bool\`, got \`T\`` | a `require`ment body that isn't boolean — the `` `name` `` segment appears only when the requirement is labeled; the colon is always present |
 | `methods in a relationship must reference the same set of cells` | a relationship's methods have different `inputs ∪ outputs` sets |
 | `a method's outputs must be duplicate-free, and no two methods in a relationship may share an outputs set` | two methods in one relationship claim the same `outputs` set, or one method repeats a cell in its own `outputs` |
 
