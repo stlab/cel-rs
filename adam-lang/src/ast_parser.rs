@@ -281,7 +281,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `cell_filter = "filter" identifier ":" expression.`
+    /// `cell_filter = "filter" expression.`
     ///
     /// - Precondition: the `filter` keyword has already been consumed by the caller; `filter_start`
     ///   is its span.
@@ -290,13 +290,9 @@ impl AdamAstParser {
         cursor: &mut TokenCursor,
         filter_start: proc_macro2::Span,
     ) -> Result<ast::CellFilter> {
-        let (name, name_span) = cursor.consume_ident()?;
-        cursor.expect_punct(":")?;
         let body = self.parse_cel_expression(cursor)?;
         let body_end = body.span().end;
         Ok(ast::CellFilter {
-            name,
-            name_span: point(name_span),
             body,
             span: ast::ExprSpan {
                 start: filter_start,
@@ -564,16 +560,20 @@ impl AdamAstParser {
         })
     }
 
-    /// `requirement = identifier ":" expression ";".`
+    /// `requirement = [ "@" identifier ] expression ";".`
     fn parse_requirement(&mut self, cursor: &mut TokenCursor) -> Result<ast::RequirementDecl> {
         let decl_start = cursor.peek_span();
-        let (name, name_span) = cursor.consume_ident()?;
-        cursor.expect_punct(":")?;
+        let (name, name_span) = if cursor.consume_punct("@") {
+            let (name, span) = cursor.consume_ident()?;
+            (Some(name), Some(point(span)))
+        } else {
+            (None, None)
+        };
         let body = self.parse_cel_expression(cursor)?;
         let semi_span = cursor.expect_punct(";")?;
         Ok(ast::RequirementDecl {
             name,
-            name_span: point(name_span),
+            name_span,
             body,
             leading_comment: None,
             blank_line_before: false,
@@ -711,13 +711,12 @@ mod tests {
     #[test]
     fn parse_source_with_a_filter() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { source a: i32 = 1 filter clamp: _; }")
+            .parse_str("sheet s { source a: i32 = 1 filter _; }")
             .unwrap();
         let ast::SheetItem::Source(source) = &sheet.items[0] else {
             panic!("expected Source");
         };
         let filter = source.filter.as_ref().expect("filter present");
-        assert_eq!(filter.name, "clamp");
         assert!(matches!(&filter.body, Expr::Ident { name, .. } if name == "_"));
     }
 
@@ -1348,8 +1347,8 @@ mod tests {
                 r#"
             sheet s {
                 out area: f64 := width * height require {
-                    max_area: width * height <= max_area;
-                    max_width: width <= max_width;
+                    @max_area width * height <= max_area;
+                    @max_width width <= max_width;
                 };
             }
         "#,
@@ -1360,8 +1359,28 @@ mod tests {
         };
         let require = out.require.as_ref().expect("require block present");
         assert_eq!(require.requirements.len(), 2);
-        assert_eq!(require.requirements[0].name, "max_area");
-        assert_eq!(require.requirements[1].name, "max_width");
+        assert_eq!(require.requirements[0].name.as_deref(), Some("max_area"));
+        assert_eq!(require.requirements[1].name.as_deref(), Some("max_width"));
+    }
+
+    #[test]
+    fn parse_requirement_without_a_label_leaves_name_none() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+            sheet s {
+                out area: f64 := width * height require {
+                    width * height <= max_area;
+                };
+            }
+        "#,
+            )
+            .unwrap();
+        let ast::SheetItem::Out(out) = &sheet.items[0] else {
+            panic!("expected Out");
+        };
+        let require = out.require.as_ref().expect("require block present");
+        assert_eq!(require.requirements[0].name, None);
     }
 
     #[test]
@@ -1405,7 +1424,7 @@ mod tests {
     #[test]
     fn parse_cell_with_a_filter() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell a: i32 = 1 filter clamp: _; }")
+            .parse_str("sheet s { cell a: i32 = 1 filter _; }")
             .unwrap();
         let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
             panic!("expected Cell");
@@ -1415,20 +1434,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_cell_filter_records_its_name() {
-        let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell x: i32 = 0 filter clamp: 0..=10; }")
-            .unwrap();
-        let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
-            panic!("expected a cell decl");
-        };
-        assert_eq!(cell.filter.as_ref().unwrap().name, "clamp");
-    }
-
-    #[test]
     fn parse_cell_with_a_filter_referencing_a_cell() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter sum: _ + hi; }")
+            .parse_str("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter _ + hi; }")
             .unwrap();
         let ast::SheetItem::Cell(cell) = &sheet.items[1] else {
             panic!("expected Cell");
