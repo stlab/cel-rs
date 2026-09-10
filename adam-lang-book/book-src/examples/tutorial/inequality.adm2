@@ -1,7 +1,7 @@
 sheet inequality {
-    cell a = 10 filter clamp: 0..=100;
-    cell b = 20 filter clamp: 0..=100;
-    cell c = 30 filter clamp: 0..=100;
+    cell a = 10 filter 0..=100;
+    cell b = 20 filter 0..=100;
+    cell c = 30 filter 0..=100;
 
     relationship {
         a := min(a, b);

@@ -1,4 +1,4 @@
 sheet spring_back {
-    source max: i32 = 100 filter clamp: 0..=200;
-    source level: i32 = 50 filter clamp: 0..=max;
+    source max: i32 = 100 filter 0..=200;
+    source level: i32 = 50 filter 0..=max;
 }

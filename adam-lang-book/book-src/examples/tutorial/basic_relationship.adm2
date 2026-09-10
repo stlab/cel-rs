@@ -1,6 +1,6 @@
 sheet basic_relationship {
-    cell a: f64 filter clamp: 0.0..=200.0;
-    cell b = 2.0 filter clamp: 0.0..=100.0;
+    cell a: f64 filter 0.0..=200.0;
+    cell b = 2.0 filter 0.0..=100.0;
 
     relationship {
         a := b * 2.0;
