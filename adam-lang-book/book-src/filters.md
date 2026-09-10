@@ -3,7 +3,7 @@
 ## Grammar
 
 ```text
-cell_filter = "filter" identifier ":" expression.
+cell_filter = "filter" expression.
 ```
 
 A `filter` clause is optional and trails a `cell`, [`source`](source.md), or
@@ -12,14 +12,13 @@ A `filter` clause is optional and trails a `cell`, [`source`](source.md), or
 one reserved identifier: `_` always refers to the *candidate value being conformed* (of the
 filtered cell's own declared type), never a cell. `_` is reserved inside a filter expression
 only; outside one it's an ordinary identifier (or the [conditional](conditionals.md)
-default-branch token). The identifier before the `:` names the filter; it's a label surfaced
-through the host embedding API (see the [host embedding API](reference.md#the-host-embedding-api)), not a
-cell reference.
+default-branch token). A filter carries no name — a cell can have at most one, so nothing
+ever needs to distinguish "which filter."
 
 ```adam
-cell level: i32 = 50 filter clamp: 0..=100;             // a fixed range, named "clamp"
-cell level: i32 = 50 filter clamp: 0..=max;              // upper bound is another cell
-cell level: i32 = 50 filter clamp: clamp(_, 0, max);      // an arbitrary expression over `_`
+cell level: i32 = 50 filter 0..=100;             // a fixed range
+cell level: i32 = 50 filter 0..=max;             // upper bound is another cell
+cell level: i32 = 50 filter clamp(_, 0, max);    // an arbitrary expression over `_`
 ```
 
 A filter expression must reference `_` at least once (unless it's a range expression, see

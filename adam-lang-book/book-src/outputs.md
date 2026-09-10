@@ -5,7 +5,7 @@
 ```text
 out_decl    = "out" identifier [ ":" type_expr ] ":=" expression
                [ cell_filter ] [ "require" "{" { requirement } "}" ] ";".
-requirement = identifier ":" expression ";".
+requirement = [ "@" identifier ] expression ";".
 ```
 
 An `out` declares a new cell computed by exactly one expression: there's no alternative
@@ -54,9 +54,10 @@ other cells it needs:
 A failed requirement never stops the sheet from resolving, and never stops `area` from being
 computed and readable; a host can query which requirements are currently failing precisely
 because nothing else in the sheet notices a requirement failing on its own (see the
-[host embedding API](reference.md#the-host-embedding-api)). A requirement's `name` is just a
-label surfaced through that query; it happens to read naturally when it echoes a cell name
-(`not_too_big`, `width_max`), but it isn't a cell reference and doesn't have to match one.
+[host embedding API](reference.md#the-host-embedding-api)). A requirement's `@name` is
+optional — present only when an application wants to report *which* requirement failed; it
+happens to read naturally when it echoes a cell name (`@not_too_big`, `@width_max`), but it
+isn't a cell reference and doesn't have to match one.
 
 ## Multiple requirements
 
