@@ -1617,6 +1617,21 @@ fn cell_requirements_returns_requirement_ids_in_declaration_order() {
 }
 
 #[test]
+fn requirement_name_returns_none_for_a_live_unlabeled_requirement() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let out = sheet
+        .add_out(
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            vec![(None, Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
+        )
+        .unwrap();
+    let id = sheet.cell_requirements(out).unwrap()[0];
+    assert_eq!(sheet.requirement_name(id), None);
+}
+
+#[test]
 fn requirement_cell_and_inputs_return_correct_values() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);

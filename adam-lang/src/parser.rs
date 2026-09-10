@@ -3239,6 +3239,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_out_with_a_bare_identifier_unlabeled_requirement_is_enforced() {
+        let mut sheet = parser()
+            .parse_str(
+                r#"
+                sheet s {
+                    cell is_valid: bool = false;
+                    out area: i32 := 4 require {
+                        is_valid;
+                    };
+                }
+            "#,
+            )
+            .unwrap();
+        sheet.propagate().unwrap();
+        let output_id = *sheet.output_names.get("area").unwrap();
+        assert_eq!(sheet.violated_requirements(output_id).count(), 1);
+    }
+
+    #[test]
     fn parse_out_cell_referenced_elsewhere_succeeds() {
         // `out` cells are no longer terminal (see `adam_rs::CellKind`): referencing an `out`
         // cell as another relationship's input is legal.
