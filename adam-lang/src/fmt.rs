@@ -271,8 +271,6 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     }
     if let Some(filter) = &cell.filter {
         out.push_str(" filter ");
-        out.push_str(&filter.name);
-        out.push_str(": ");
         out.push_str(&cel_parser::format_expr(&filter.body));
     }
     if let Some(require) = &cell.require {
@@ -281,7 +279,7 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     out.push_str(";\n");
 }
 
-/// Writes one `name: ...;` requirement.
+/// Writes one `[ "@" identifier " " ] ...;` requirement.
 fn write_requirement(out: &mut String, req: &ast::RequirementDecl, depth: usize) {
     write_trivia(
         out,
@@ -290,8 +288,11 @@ fn write_requirement(out: &mut String, req: &ast::RequirementDecl, depth: usize)
         depth,
     );
     out.push_str(&indent(depth));
-    out.push_str(&req.name);
-    out.push_str(": ");
+    if let Some(name) = &req.name {
+        out.push('@');
+        out.push_str(name);
+        out.push(' ');
+    }
     out.push_str(&cel_parser::format_expr(&req.body));
     out.push_str(";\n");
 }
@@ -333,8 +334,6 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     out.push_str(&cel_parser::format_expr(&decl.initializer));
     if let Some(filter) = &decl.filter {
         out.push_str(" filter ");
-        out.push_str(&filter.name);
-        out.push_str(": ");
         out.push_str(&cel_parser::format_expr(&filter.body));
     }
     if let Some(require) = &decl.require {
@@ -366,8 +365,6 @@ fn write_source(out: &mut String, decl: &ast::SourceDecl, depth: usize) {
     }
     if let Some(filter) = &decl.filter {
         out.push_str(" filter ");
-        out.push_str(&filter.name);
-        out.push_str(": ");
         out.push_str(&cel_parser::format_expr(&filter.body));
     }
     if let Some(require) = &decl.require {
@@ -673,35 +670,35 @@ mod tests {
 
     #[test]
     fn formats_an_out_with_requirements_in_declaration_order() {
-        let source = "sheet s {\n    out area: f64 := width * height require {\n        max_area: width * height <= max_area;\n    };\n}";
-        let expected = "sheet s {\n    out area: f64 := width * height require {\n        max_area: width * height <= max_area;\n    };\n}\n";
+        let source = "sheet s {\n    out area: f64 := width * height require {\n        @max_area width * height <= max_area;\n    };\n}";
+        let expected = "sheet s {\n    out area: f64 := width * height require {\n        @max_area width * height <= max_area;\n    };\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn formats_a_cell_with_a_require_block() {
         let source =
-            "sheet s {\n    cell x: i32 = 5 require {\n        positive: x > 0;\n    };\n}";
+            "sheet s {\n    cell x: i32 = 5 require {\n        @positive x > 0;\n    };\n}";
         assert_eq!(format(source), format!("{source}\n"));
     }
 
     #[test]
     fn formats_a_source_with_a_require_block() {
         let source =
-            "sheet s {\n    source x: i32 = 5 require {\n        positive: x > 0;\n    };\n}";
+            "sheet s {\n    source x: i32 = 5 require {\n        @positive x > 0;\n    };\n}";
         assert_eq!(format(source), format!("{source}\n"));
     }
 
     #[test]
     fn formats_a_source_with_a_filter_clause() {
-        let source = "sheet s {\n    source x: i32 = 5 filter clamp: 0..=10;\n}";
+        let source = "sheet s {\n    source x: i32 = 5 filter 0..=10;\n}";
         assert_eq!(format(source), format!("{source}\n"));
     }
 
     #[test]
     fn formats_an_out_with_a_filter_clause() {
         let source =
-            "sheet s {\n    cell width: i32 = 4;\n    out area := width filter clamp: 0..=100;\n}";
+            "sheet s {\n    cell width: i32 = 4;\n    out area := width filter 0..=100;\n}";
         assert_eq!(format(source), format!("{source}\n"));
     }
 
@@ -869,8 +866,8 @@ mod tests {
 
     #[test]
     fn formats_a_trailing_comment_before_a_requires_closing_brace() {
-        let source = "sheet s {\n    out area: f64 := w require {\n        c: w <= 10.0;\n        // trailing\n    };\n}";
-        let expected = "sheet s {\n    out area: f64 := w require {\n        c: w <= 10.0;\n        // trailing\n    };\n}\n";
+        let source = "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0;\n        // trailing\n    };\n}";
+        let expected = "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0;\n        // trailing\n    };\n}\n";
         assert_eq!(format(source), expected);
     }
 
@@ -880,8 +877,8 @@ mod tests {
         // `cell`'s own `require` block — regression test for the comment being silently dropped
         // (never attached, so never written back out) because `attach_trivia` only recovered
         // require-block trivia for `SheetItem::Out`, not `SheetItem::Cell`/`SheetItem::Source`.
-        let source = "sheet s {\n    cell a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
-        let expected = "sheet s {\n    cell a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}\n";
+        let source = "sheet s {\n    cell a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}";
+        let expected = "sheet s {\n    cell a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}\n";
         assert_eq!(format(source), expected);
     }
 
@@ -889,8 +886,8 @@ mod tests {
     fn formats_a_trailing_comment_before_a_sources_requires_closing_brace() {
         // Mirrors `formats_a_trailing_comment_before_a_requires_closing_brace`, but for a
         // `source`'s own `require` block.
-        let source = "sheet s {\n    source a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
-        let expected = "sheet s {\n    source a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}\n";
+        let source = "sheet s {\n    source a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}";
+        let expected = "sheet s {\n    source a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}\n";
         assert_eq!(format(source), expected);
     }
 
@@ -905,36 +902,42 @@ mod tests {
     #[test]
     fn formats_a_cell_with_a_filter() {
         assert_eq!(
-            format("sheet s { cell a: i32 = 1 filter clamp: _; }"),
-            "sheet s {\n    cell a: i32 = 1 filter clamp: _;\n}\n"
+            format("sheet s { cell a: i32 = 1 filter _; }"),
+            "sheet s {\n    cell a: i32 = 1 filter _;\n}\n"
         );
     }
 
     #[test]
     fn formats_a_cell_with_a_filter_referencing_a_cell() {
         assert_eq!(
-            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter clamp: min(_, hi); }"),
-            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter clamp: min(_, hi);\n}\n"
+            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter min(_, hi); }"),
+            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter min(_, hi);\n}\n"
         );
     }
 
     #[test]
     fn format_is_idempotent_through_a_reparse_with_a_filter() {
-        let source = "sheet s {\n    cell a: i32 = 1 filter clamp: _;\n}";
+        let source = "sheet s {\n    cell a: i32 = 1 filter _;\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
     }
 
     #[test]
-    fn formats_a_named_filter() {
+    fn formats_a_filter() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell x: i32 = 0 filter clamp: 0..=10; }")
+            .parse_str("sheet s { cell x: i32 = 0 filter 0..=10; }")
             .unwrap();
         assert_eq!(
             format_sheet(&sheet),
-            "sheet s {\n    cell x: i32 = 0 filter clamp: 0..=10;\n}\n"
+            "sheet s {\n    cell x: i32 = 0 filter 0..=10;\n}\n"
         );
+    }
+
+    #[test]
+    fn formats_a_requirement_with_no_label() {
+        let source = "sheet s {\n    cell x: i32 = 5 require {\n        x > 0;\n    };\n}";
+        assert_eq!(format(source), format!("{source}\n"));
     }
 
     #[test]

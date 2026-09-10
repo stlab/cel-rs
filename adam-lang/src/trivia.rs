@@ -811,7 +811,7 @@ mod tests {
         // never-first-item limitation as every other sibling list (see the module doc's #52
         // link). A second requirement here lands the comment in a tracked gap between two
         // siblings instead, exercising the same attach-to-a-nested-requirement behavior.
-        let source = "sheet s {\n    out area: f64 := width * height require {\n        max_area: width * height <= max_area;\n        // second\n        c: width <= 10.0;\n    };\n}";
+        let source = "sheet s {\n    out area: f64 := width * height require {\n        @max_area width * height <= max_area;\n        // second\n        @c width <= 10.0;\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Out(out) = &sheet.items[0] else {
@@ -915,7 +915,7 @@ mod tests {
 
     #[test]
     fn recovers_a_trailing_comment_before_a_requires_closing_brace() {
-        let source = "sheet s {\n    out area: f64 := w require {\n        c: w <= 10.0;\n        // trailing\n    };\n}";
+        let source = "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0;\n        // trailing\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Out(out) = &sheet.items[0] else {
@@ -933,7 +933,7 @@ mod tests {
         // Mirrors `attaches_a_comment_to_a_requirement_inside_an_out_declaration`, but for a
         // `cell`'s own `require` block — `CellDecl` gained `require` alongside `out`'s, and its
         // trivia recovery must not be dropped on the floor the way it was before this fix.
-        let source = "sheet s {\n    cell a: i32 = 1 require {\n        r1: a > 0;\n        // second\n        r2: a < 10;\n    };\n}";
+        let source = "sheet s {\n    cell a: i32 = 1 require {\n        @r1 a > 0;\n        // second\n        @r2 a < 10;\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Cell(cell) = &sheet.items[0] else {
@@ -950,7 +950,7 @@ mod tests {
     fn recovers_a_trailing_comment_before_a_cells_requires_closing_brace() {
         // Mirrors `recovers_a_trailing_comment_before_a_requires_closing_brace`, but for a
         // `cell`'s own `require` block.
-        let source = "sheet s {\n    cell a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
+        let source = "sheet s {\n    cell a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Cell(cell) = &sheet.items[0] else {
@@ -967,7 +967,7 @@ mod tests {
     fn attaches_a_comment_to_a_requirement_inside_a_source_declaration() {
         // Mirrors `attaches_a_comment_to_a_requirement_inside_an_out_declaration`, but for a
         // `source`'s own `require` block.
-        let source = "sheet s {\n    source a: i32 = 1 require {\n        r1: a > 0;\n        // second\n        r2: a < 10;\n    };\n}";
+        let source = "sheet s {\n    source a: i32 = 1 require {\n        @r1 a > 0;\n        // second\n        @r2 a < 10;\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Source(source_decl) = &sheet.items[0] else {
@@ -984,7 +984,7 @@ mod tests {
     fn recovers_a_trailing_comment_before_a_sources_requires_closing_brace() {
         // Mirrors `recovers_a_trailing_comment_before_a_requires_closing_brace`, but for a
         // `source`'s own `require` block.
-        let source = "sheet s {\n    source a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
+        let source = "sheet s {\n    source a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Source(source_decl) = &sheet.items[0] else {
