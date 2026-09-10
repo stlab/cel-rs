@@ -1,0 +1,14 @@
+sheet constrain {
+    source constrain = false;
+    cell a = 5 filter clamp: 1..=100;
+    cell b = 10 filter clamp: 1..=100;
+
+    conditional constrain {
+        true => {
+            relationship {
+                a := b;
+                b := a;
+            }
+        }
+    }
+}

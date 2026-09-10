@@ -1,0 +1,9 @@
+sheet overlapping_outputs {
+    cell a: i32;
+    cell b: i32;
+
+    relationship {
+        a := b;
+        a := 2 * b;
+    }
+}

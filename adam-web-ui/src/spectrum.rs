@@ -292,11 +292,14 @@ pub fn SpSwitch(checked: bool, onclick: EventHandler<MouseEvent>, children: Elem
 
 /// A togglable checkbox for a `bool`-typed value.
 ///
-/// Maps to `<sp-checkbox>`. Setting `invalid` to `true` renders the SWC error state.
-/// Setting `disabled` to `true` renders the SWC disabled state. `onclick` fires on
-/// every toggle press, mirroring `SpSwitch`'s `checked`/`onclick` pattern — the caller
-/// owns the boolean state and re-renders `checked` from it rather than reading the new
-/// state off a native `change` event.
+/// Maps to `<sp-checkbox>`. `children` is the checkbox's own label, rendered as its
+/// light-DOM content (`<sp-checkbox>label</sp-checkbox>`) — SWC gives `sp-checkbox` no
+/// separate label slot, so a sibling field label would render disconnected from the
+/// control. Setting `invalid` to `true` renders the SWC error state. Setting `disabled`
+/// to `true` renders the SWC disabled state. `onclick` fires on every toggle press,
+/// mirroring `SpSwitch`'s `checked`/`onclick` pattern — the caller owns the boolean
+/// state and re-renders `checked` from it rather than reading the new state off a
+/// native `change` event.
 #[component]
 pub fn SpCheckbox(
     id: String,
@@ -304,6 +307,7 @@ pub fn SpCheckbox(
     invalid: bool,
     disabled: bool,
     onclick: EventHandler<MouseEvent>,
+    children: Element,
 ) -> Element {
     rsx! {
         sp-checkbox {
@@ -313,6 +317,7 @@ pub fn SpCheckbox(
             "checked": if checked { "true" },
             "invalid": if invalid { "true" },
             "disabled": if disabled { "true" },
+            {children}
         }
     }
 }

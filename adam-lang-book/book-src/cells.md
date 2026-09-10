@@ -1,6 +1,6 @@
-# Chapter 2: Sheets, Cells, and Types
+# Sheets, Cells, and Types
 
-## 2.1 Sheets
+## Sheets
 
 Every Adam source file is one sheet:
 
@@ -8,7 +8,7 @@ Every Adam source file is one sheet:
 sheet name {
     /* cell, relationship, conditional, and out declarations, in any order,
        except that each identifier must be declared before it is referenced —
-       see 2.6 below. */
+       see "Names and declaration order" below. */
 }
 ```
 
@@ -16,7 +16,7 @@ The sheet's own name (`name` above) is consumed by the parser and is not otherwi
 to `adam-rs`; it exists for readability and for host tooling, such as a language server or an
 example picker, to have something to display.
 
-## 2.2 Cell declarations
+## Cell declarations
 
 ```text
 cell_decl      = "cell" identifier cell_type_init [ cell_filter ] [ require_block ] ";".
@@ -26,25 +26,25 @@ cell_type_init = (":" type_expr ["=" expression]) | ("=" expression).
 A cell needs a type, an initial value, or both:
 
 ```adam
-cell width: i32;             // type only — needs a registered default (2.4)
+cell width: i32;             // type only — needs a registered default
 cell height: i32 = 1080;     // type and initializer
-cell area = 0;               // initializer only — type is inferred (2.3)
+cell area = 0;               // initializer only — type is inferred
 ```
 
 At least one of `: type_expr` / `= expression` must be present: `cell width;` alone is a
 syntax error ("expected `:` or `=` in cell declaration"). A `cell` may also carry an optional
 trailing `filter` clause and/or `require` block — a standing domain constraint and named
-boolean diagnostics, respectively, both covered in full in [Chapter 5](filters.md) and
-[Chapter 6](outputs.md#63-requirements-diagnostics-not-gates) (those two chapters introduce the
+boolean diagnostics, respectively, both covered in full in the [filters chapter](filters.md) and
+[requirements: diagnostics, not gates](outputs.md#requirements-diagnostics-not-gates) (those two chapters introduce the
 mechanisms via `out`, but both apply to a plain `cell` — and, `require` only, to a
 [`source`](source.md) cell — exactly the same way).
 
-A cell's initializer is evaluated **once**, eagerly, at parse time; it may reference literals
-and CEL operators, but not other cells (there's no "current sheet state" yet for it to read).
+A cell's initializer may reference literals and CEL operators, but not other cells: it's
+evaluated before the sheet has any state to read.
 To compute one cell from others, use a [`relationship`](relationships.md) or an
 [`out`](outputs.md) declaration instead.
 
-## 2.3 Built-in types and inference
+## Built-in types and inference
 
 Adam ships with the following types pre-registered, each with a `Default` value used when
 a cell declares a type but no initializer:
@@ -61,27 +61,27 @@ When a cell has an initializer but no `: type_expr` annotation, its type is infe
 initializer expression's own result type (an ordinary CEL literal-defaulting rule: an
 unsuffixed integer literal like `0` is `i32`, an unsuffixed float literal like `0.0` is `f64`;
 see `cel-parser`'s documentation for the full literal grammar). When both are present, they
-must agree exactly, or the sheet fails to parse with a "type mismatch: expected `T`, got `U`" error (Appendix A.9).
+must agree exactly, or the sheet fails to parse with a "type mismatch: expected `T`, got `U`" error (see [error messages](reference.md#error-messages)).
 
 A host application can also register additional Rust types under their own Adam type
 names; that's a Rust-level embedding concern, not something a sheet author does; see
-[Appendix A.4](reference.md#a4-the-type-registry).
+the [type registry](reference.md#the-type-registry).
 
-## 2.4 Cells with no default
+## Cells with no default
 
 A type registered without a `Default` (via the embedding API's `register_no_default`) can
 still be used for a cell, but only with an initializer; declaring one with a bare `: T` and no
 `= ...` fails to parse ("type `T` has no default; provide `= ...`"). Every built-in type in the
 table above has a default, so this only matters for a host-registered custom type.
 
-## 2.5 Tuple types
+## Tuple types
 
 ```text
 type_expr = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".
 ```
 
 A parenthesized type list is a tuple type. `()` is the empty tuple (an inert, zero-element
-value; see [Chapter 7](relationships.md) for where it's useful); `(T)` with no comma is plain
+value; see the [relationships chapter](relationships.md) for where it's useful); `(T)` with no comma is plain
 grouping, identical to `T` (types have no precedence to disambiguate, but the parentheses are
 accepted for symmetry with expression grammar); `(T,)` (trailing comma mandatory) is a
 genuine one-element tuple; `(T, U, ...)` is the general case:
@@ -95,7 +95,7 @@ type, `cel_runtime::DynamicSequence`; that's the type to `read`/`write` a tuple-
 from host code. Tuples nest: `(i32, (f64, String))` is a 2-tuple whose second element is itself
 a 2-tuple.
 
-## 2.6 Names and declaration order
+## Names and declaration order
 
 A cell's name must be unique across the whole sheet: `cell`s and [`out`](outputs.md)
 declarations share one namespace, so declaring `cell result: i32 = 0;` and later
@@ -104,4 +104,4 @@ declarations would be.
 
 Referencing a name before its declaration — as a `relationship` binding's output, a dependency
 inside any expression, a `conditional`'s match subject, or a `filter`'s dependency — is an
-"undeclared cell `name`" error (Appendix A.9).
+"undeclared cell `name`" error (see [error messages](reference.md#error-messages)).

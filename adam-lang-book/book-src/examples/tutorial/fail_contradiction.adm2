@@ -1,0 +1,11 @@
+sheet mismatched_method_cells {
+    cell a: i32;
+    cell b: i32;
+
+    relationship {
+        a := b;
+    }
+    relationship {
+        a := b * 2;
+    }
+}

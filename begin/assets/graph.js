@@ -2,14 +2,27 @@
   // Tunable layout constants (shared across every instance).
   var LINK_DISTANCE = 80;
   var CHARGE_STRENGTH = -300;
-  // Independent per-node pull toward the viewport center. forceCenter alone only
-  // recenters the *average* position of all nodes each tick -- a pure translation
-  // of the whole point cloud -- so it does nothing to restrain nodes that have no
-  // link (forceLink) holding them near anything else. Without this, a disconnected
-  // node or component drifts outward under charge repulsion alone until its
-  // residual velocity finally decays, often hundreds of pixels from the rest of
-  // the graph. This weak forceX/forceY gives every node its own restoring pull
-  // toward center so it settles at a finite distance instead.
+  // Independent per-node pull toward the viewport center. A disconnected node or
+  // component would otherwise drift outward under charge repulsion alone until its
+  // residual velocity finally decays, often hundreds of pixels from the rest of the
+  // graph. This weak forceX/forceY gives every node its own restoring pull toward
+  // center so it settles at a finite distance instead.
+  //
+  // This is deliberately NOT d3.forceCenter: forceCenter recenters the *average*
+  // position of all nodes by directly overwriting every node's x/y each tick, at
+  // full strength, uncapped by alpha decay -- and it does this unconditionally,
+  // ignoring fx/fy entirely. A pinned node's overwritten position gets discarded a
+  // moment later by the simulation's own fx/fy enforcement, but any node that is
+  // NOT pinned keeps whatever shift forceCenter just gave it, plus its usual
+  // velocity-based forces on top. If most of the graph is pinned away from the
+  // canvas center (e.g. every node but one dragged into a corner), forceCenter
+  // recomputes essentially the same large correction every tick and dumps all of
+  // it onto that one free node, compounding for as long as the simulation keeps
+  // ticking -- flinging it hundreds or thousands of pixels away. forceX/forceY
+  // avoid this entirely: they only ever adjust velocity (vx/vy), which the
+  // simulation's own fx/fy enforcement already handles correctly for pinned nodes,
+  // and their contribution is naturally scaled down by alpha like every other
+  // force.
   var CENTER_PULL_STRENGTH = 0.1;
   var CELL_W = 60;
   var CELL_H = 36;
@@ -292,10 +305,6 @@
       .attr("width", this.width)
       .attr("height", this.height)
       .attr("viewBox", [0, 0, this.width, this.height]);
-    this.simulation
-      .force("center")
-      .x(this.width / 2)
-      .y(this.height / 2);
     this.simulation.force("x").x(this.width / 2);
     this.simulation.force("y").y(this.height / 2);
     this.updateZoomConstraints();
@@ -392,7 +401,6 @@
           return d.kind === "Branch" ? 0 : CHARGE_STRENGTH;
         }),
       )
-      .force("center", d3.forceCenter(this.width / 2, this.height / 2))
       .force("x", d3.forceX(this.width / 2).strength(CENTER_PULL_STRENGTH))
       .force("y", d3.forceY(this.height / 2).strength(CENTER_PULL_STRENGTH))
       .force(
@@ -663,7 +671,7 @@
             : null;
         })
         .attr("marker-end", function (d) {
-          if (!data.arrows) return null;
+          if (!d.directed) return null;
           var srcId = typeof d.source === "object" ? d.source.id : d.source;
           var tgtId = typeof d.target === "object" ? d.target.id : d.target;
           if (isInactive(srcId) || isInactive(tgtId)) return null;

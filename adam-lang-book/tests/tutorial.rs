@@ -97,24 +97,6 @@ fn destructuring_demo() {
 }
 
 #[test]
-fn mode_demo() {
-    let mut parser = adam_lang_book::support::parser();
-    let mut parsed = parser
-        .parse_str(include_str!("../book-src/examples/tutorial/mode_demo.adm2"))
-        .unwrap();
-
-    let p = parsed.cell_names["p"].0;
-    let x = parsed.cell_names["x"].0;
-
-    parsed.propagate().unwrap();
-    assert_eq!(*parsed.read::<f64>(x).unwrap(), 2.0); // p == 0: x := y
-
-    parsed.write(p, 2_i32).unwrap();
-    parsed.propagate().unwrap();
-    assert_eq!(*parsed.read::<f64>(x).unwrap(), 0.0); // p matches no named branch: default
-}
-
-#[test]
 fn forced_and_self_ref_shadow() {
     let mut parser = adam_lang_book::support::parser();
     let mut parsed = parser

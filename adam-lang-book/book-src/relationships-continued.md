@@ -1,6 +1,6 @@
-# Chapter 8: Relationships Continued: Destructuring and Self-Referencing Methods
+# Relationships Continued: Destructuring and Self-Referencing Methods
 
-## 8.1 Destructuring bindings
+## Destructuring bindings
 
 A binding's left-hand side can name more than one output cell by parenthesizing it, in which
 case the right-hand side must be a tuple expression of matching arity, split element-wise:
@@ -14,16 +14,16 @@ own 1-tuple pattern) both destructure; a bare `a := ...` or the equivalent singl
 `(a) := ...` (mere grouping, no comma) instead binds the right-hand side's *whole* result
 (including a tuple-typed one) directly to the one named cell. Destructuring and direct-bind are
 otherwise governed by the same type-matching rules as any other binding: each output's declared
-type must structurally match what the expression actually produces, checked at parse time.
+type must structurally match what the expression actually produces.
 
-## 8.2 Self-referencing methods
+## Self-referencing methods
 
 A method's expression may reference the very cell it writes — a _self-referencing_ method —
-which [Chapter 7](relationships.md#73-the-rules-a-relationships-methods-must-satisfy) already
+which the [rules a relationship's methods must satisfy](relationships.md#the-rules-a-relationships-methods-must-satisfy) section already
 noted is explicitly allowed: a cell may appear in both a method's inputs and its own outputs.
 Each time the sheet resolves, a self-referencing method reads its own cell's *source* value —
-never a previous round's derived value — the same source/derived split
-[Chapter 5](filters.md#53-the-raw-value-is-never-lost) already introduced for filters:
+never a previous round's derived value — the same source/derived split the
+[raw value is never lost](filters.md#the-raw-value-is-never-lost) section already introduced for filters:
 
 ```adam
 {{#include examples/relationships-continued/self_referencing_method.adm2}}
@@ -33,7 +33,7 @@ Writing `level` above never applies the clamp itself — exactly like a filter, 
 happens live, the next time the sheet resolves, against `level`'s own raw value, and that raw
 value survives underneath the clamp forever.
 
-## 8.3 Self-referencing methods must be idempotent
+## Self-referencing methods must be idempotent
 
 A self-referencing method exists to correct its own cell into whatever set of values the
 relationship enforces. That only makes sense if reapplying the method to its own already-corrected

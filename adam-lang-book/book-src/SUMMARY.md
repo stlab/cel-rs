@@ -16,4 +16,4 @@
 
 ---
 
-- [Appendix A: Reference Manual](reference.md)
+- [Reference Manual](reference.md)
