@@ -522,11 +522,7 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v))])
             .unwrap();
         sheet
-            .add_filter(
-                y,
-                "clamp",
-                Filter::from_fn_0(|v: &i32| Ok((*v).clamp(0, 100))),
-            )
+            .add_filter(y, Filter::from_fn_0(|v: &i32| Ok((*v).clamp(0, 100))))
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
@@ -548,7 +544,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "bound",
                 Filter::from_fn_1(bound, |x: &i32, b: &i32| Ok((*x).min(*b))),
             )
             .unwrap();
@@ -585,7 +580,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "bound",
                 Filter::from_fn_1(bound, |x: &i32, b: &i32| Ok((*x).min(*b))),
             )
             .unwrap();
@@ -617,7 +611,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "bound",
                 Filter::from_fn_1(b, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
             )
             .unwrap();

@@ -579,7 +579,7 @@ impl Sheet {
         Ok(out_cell)
     }
 
-    /// Attaches `filter` to `cell` under `name`.
+    /// Attaches `filter` to `cell`.
     ///
     /// Never evaluates `filter`'s function — attaching a filter is not a fresh
     /// external input, so it never changes `cell`'s current effective value. The next
@@ -591,23 +591,14 @@ impl Sheet {
     ///
     /// - `Error::InvalidId` — `cell`, or one of `filter`'s argument cells, is not a
     ///   live cell in this sheet.
-    /// - `Error::InvalidFilter` — `name` is empty, `cell` already has a filter,
-    ///   `filter`'s own value type does not match `cell`'s registered type, or
-    ///   `filter`'s argument list names `cell` itself.
+    /// - `Error::InvalidFilter` — `cell` already has a filter, `filter`'s own value
+    ///   type does not match `cell`'s registered type, or `filter`'s argument list
+    ///   names `cell` itself.
     /// - `Error::TypeMismatch` — an argument cell's registered type does not match the
     ///   type `filter` declared for it.
     ///
     /// - Complexity: O(a) where a is the number of `filter`'s argument cells.
-    pub fn add_filter(
-        &mut self,
-        cell: CellId,
-        name: impl Into<String>,
-        mut filter: Filter,
-    ) -> Result<(), Error> {
-        let name = name.into();
-        if name.is_empty() {
-            return Err(Error::InvalidFilter);
-        }
+    pub fn add_filter(&mut self, cell: CellId, filter: Filter) -> Result<(), Error> {
         let cell_type = self.cells.get(cell).ok_or(Error::InvalidId)?.type_id;
         if self.cells[cell].filter.is_some() {
             return Err(Error::InvalidFilter);
@@ -629,19 +620,11 @@ impl Sheet {
             }
         }
 
-        filter.0.name = name;
         for &arg in &filter.0.args {
             self.filter_dependents.entry(arg).or_default().push(cell);
         }
         self.cells[cell].filter = Some(filter.0);
         Ok(())
-    }
-
-    /// Returns the name of `id`'s filter, if it has one.
-    ///
-    /// Returns `None` if `id` is not a live cell in this sheet, or has no filter.
-    pub fn filter_name(&self, id: CellId) -> Option<&str> {
-        self.cells.get(id)?.filter.as_ref().map(|f| f.name.as_str())
     }
 
     /// Returns the argument cells of `id`'s filter, in declaration order.
@@ -2888,11 +2871,7 @@ mod tests {
     #[test]
     fn add_filter_returns_invalid_id_for_missing_cell() {
         let mut sheet = Sheet::new();
-        let result = sheet.add_filter(
-            CellId::default(),
-            "test_filter",
-            Filter::from_fn_0(|x: &i32| Ok(*x)),
-        );
+        let result = sheet.add_filter(CellId::default(), Filter::from_fn_0(|x: &i32| Ok(*x)));
         assert!(matches!(result, Err(Error::InvalidId)));
     }
 
@@ -2901,11 +2880,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         // add_filter never evaluates the function against the current value: the raw
         // out-of-range value survives until the next propagate().
@@ -2917,11 +2892,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         assert_eq!(*sheet.read::<i32>(a).unwrap(), 500);
         sheet.propagate().unwrap();
@@ -2935,9 +2906,9 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
         sheet
-            .add_filter(a, "test_filter", Filter::from_fn_0(|x: &i32| Ok(*x)))
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
             .unwrap();
-        let result = sheet.add_filter(a, "test_filter", Filter::from_fn_0(|x: &i32| Ok(*x)));
+        let result = sheet.add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)));
         assert!(matches!(result, Err(Error::InvalidFilter)));
     }
 
@@ -2945,7 +2916,7 @@ mod tests {
     fn add_filter_returns_invalid_filter_for_mismatched_value_type() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
-        let result = sheet.add_filter(a, "test_filter", Filter::from_fn_0(|x: &f64| Ok(*x)));
+        let result = sheet.add_filter(a, Filter::from_fn_0(|x: &f64| Ok(*x)));
         assert!(matches!(result, Err(Error::InvalidFilter)));
     }
 
@@ -2955,7 +2926,6 @@ mod tests {
         let a = sheet.add_cell(5_i32);
         let result = sheet.add_filter(
             a,
-            "test_filter",
             Filter::from_fn_1(a, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
         );
         assert!(matches!(result, Err(Error::InvalidFilter)));
@@ -2967,7 +2937,6 @@ mod tests {
         let a = sheet.add_cell(5_i32);
         let result = sheet.add_filter(
             a,
-            "test_filter",
             Filter::from_fn_1(CellId::default(), |x: &i32, bound: &i32| {
                 Ok((*x).min(*bound))
             }),
@@ -2982,39 +2951,9 @@ mod tests {
         let bound = sheet.add_cell(1.0_f64); // wrong type: filter declares i32
         let result = sheet.add_filter(
             a,
-            "test_filter",
             Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
         );
         assert!(matches!(result, Err(Error::TypeMismatch { .. })));
-    }
-
-    #[test]
-    fn add_filter_stores_and_reports_its_name() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        sheet
-            .add_filter(
-                a,
-                "clamp",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 10))),
-            )
-            .unwrap();
-        assert_eq!(sheet.filter_name(a), Some("clamp"));
-    }
-
-    #[test]
-    fn filter_name_returns_none_for_an_unfiltered_cell() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        assert_eq!(sheet.filter_name(a), None);
-    }
-
-    #[test]
-    fn add_filter_returns_invalid_filter_for_an_empty_name() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        let result = sheet.add_filter(a, "", Filter::from_fn_0(|x: &i32| Ok(*x)));
-        assert!(matches!(result, Err(Error::InvalidFilter)));
     }
 
     #[test]
@@ -3023,11 +2962,7 @@ mod tests {
         let a = sheet.add_source(5_i32);
         assert!(
             sheet
-                .add_filter(
-                    a,
-                    "clamp",
-                    Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 10)))
-                )
+                .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 10))))
                 .is_ok()
         );
     }
@@ -3041,7 +2976,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_2([lo, hi], |x: &i32, lo: &i32, hi: &i32| {
                     Ok((*x).clamp(*lo, *hi))
                 }),
@@ -3068,11 +3002,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet.write(a, 500_i32).unwrap();
         // write() no longer runs the filter: the raw value stands until propagate().
@@ -3087,11 +3017,7 @@ mod tests {
         let a = sheet.add_cell(10_i32);
         let b = sheet.add_cell(0_i32);
         sheet
-            .add_filter(
-                b,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
@@ -3107,11 +3033,7 @@ mod tests {
         let a = sheet.add_cell(60_i32);
         let b = sheet.add_cell(0_i32);
         sheet
-            .add_filter(
-                b,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
@@ -3137,7 +3059,6 @@ mod tests {
         sheet
             .add_filter(
                 b,
-                "test_filter",
                 Filter::from_fn_0(|x: &i32| {
                     if *x == 0 {
                         Ok(*x)
@@ -3175,7 +3096,7 @@ mod tests {
                 Ok(Box::new(1.5_f64) as Box<dyn Any>)
             }
         });
-        sheet.add_filter(b, "test_filter", filter).unwrap();
+        sheet.add_filter(b, filter).unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
             .unwrap();
@@ -3193,11 +3114,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(60_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet.propagate().unwrap();
         assert!(sheet.last_filter_violations.is_empty());
@@ -3212,7 +3129,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
             )
             .unwrap();
@@ -3239,7 +3155,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, bnd: &i32| Ok((*v).min(*bnd))),
             )
             .unwrap();
@@ -3268,7 +3183,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
             )
             .unwrap();
@@ -3307,7 +3221,7 @@ mod tests {
                 }
             },
         );
-        sheet.add_filter(a, "test_filter", filter).unwrap();
+        sheet.add_filter(a, filter).unwrap();
 
         // trigger changes, causing reclamp where the filter returns wrong type
         sheet.write(trigger, 1_i32).unwrap();
@@ -3331,7 +3245,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, b: &i32| {
                     if *v <= *b {
                         Ok(*v)
@@ -3361,7 +3274,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
             )
             .unwrap();
@@ -3393,11 +3305,7 @@ mod tests {
         let a = sheet.add_cell(60_i32);
         let b = sheet.add_cell(0_i32);
         sheet
-            .add_filter(
-                b,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
@@ -3415,11 +3323,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(10_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet.propagate().unwrap();
         assert!(sheet.filter_violation_cells().is_empty());
@@ -3434,7 +3338,6 @@ mod tests {
         sheet
             .add_filter(
                 b,
-                "test_filter",
                 Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
             )
             .unwrap();
@@ -3463,7 +3366,6 @@ mod tests {
         sheet
             .add_filter(
                 b,
-                "test_filter",
                 Filter::from_fn_1(bound, |x: &i32, _bound: &i32| {
                     if *x == 0 {
                         Ok(*x)
@@ -3496,7 +3398,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
             )
             .unwrap();
@@ -3509,11 +3410,7 @@ mod tests {
         let bound = sheet.add_cell(10_i32);
         let a = sheet.add_cell(5_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|v: &i32| Ok((*v).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|v: &i32| Ok((*v).clamp(0, 100))))
             .unwrap();
         assert!(sheet.filter_dependents(bound).is_empty());
     }
@@ -3533,14 +3430,12 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, bd: &i32| Ok((*v).min(*bd))),
             )
             .unwrap();
         sheet
             .add_filter(
                 b,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, bd: &i32| Ok((*v).min(*bd))),
             )
             .unwrap();
@@ -3562,7 +3457,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         sheet
-            .add_filter(a, "test_filter", Filter::from_fn_0(|x: &i32| Ok(*x)))
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
             .unwrap();
         assert!(matches!(sheet.filter_kind(a), Some(FilterKind::Opaque)));
     }
@@ -3583,7 +3478,7 @@ mod tests {
                 ))
             },
         );
-        sheet.add_filter(a, "test_filter", filter).unwrap();
+        sheet.add_filter(a, filter).unwrap();
         assert!(matches!(
             sheet.filter_kind(a),
             Some(FilterKind::Range { .. })
@@ -3613,7 +3508,7 @@ mod tests {
                 ))
             },
         );
-        sheet.add_filter(a, "test_filter", filter).unwrap();
+        sheet.add_filter(a, filter).unwrap();
         assert_eq!(sheet.filter_range::<i32>(a), Some((0, 100)));
         sheet.write(hi, 10_i32).unwrap();
         assert_eq!(sheet.filter_range::<i32>(a), Some((0, 10)));
@@ -3649,7 +3544,7 @@ mod tests {
                 ))
             },
         );
-        sheet.add_filter(a, "test_filter", filter).unwrap();
+        sheet.add_filter(a, filter).unwrap();
         sheet.write(hi_source, 20_i32).unwrap();
         sheet.propagate().unwrap();
         assert_eq!(sheet.filter_range::<i32>(a), Some((0, 20)));
@@ -3660,7 +3555,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         sheet
-            .add_filter(a, "test_filter", Filter::from_fn_0(|x: &i32| Ok(*x)))
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
             .unwrap();
         assert!(sheet.filter_range::<i32>(a).is_none());
     }
@@ -3890,11 +3785,7 @@ mod tests {
         let out_cell = sheet
             .add_out(Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)), vec![])
             .unwrap();
-        let result = sheet.add_filter(
-            out_cell,
-            "clamp",
-            Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 10))),
-        );
+        let result = sheet.add_filter(out_cell, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 10))));
         assert!(result.is_ok());
     }
 
