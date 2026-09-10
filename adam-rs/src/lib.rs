@@ -35,8 +35,8 @@
 //!
 //! # Out cells and requirements
 //!
-//! An out cell is always derived by exactly one fixed writer method, with named
-//! requirements checked after every `propagate()`. Unlike an ordinary derived cell, an
+//! An out cell is always derived by exactly one fixed writer method, with optionally
+//! named requirements checked after every `propagate()`. Unlike an ordinary derived cell, an
 //! out cell can never be `write()`-ed or claimed as another method's output — but it
 //! remains an ordinary, freely-referenceable cell everywhere else (as another
 //! relationship's input, a conditional's match subject, and so on).
@@ -57,7 +57,7 @@
 //!     .add_out(
 //!         writer,
 //!         vec![(
-//!             "max_area",
+//!             Some("max_area"),
 //!             Requirement::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
 //!         )],
 //!     )

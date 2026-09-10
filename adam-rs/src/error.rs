@@ -107,7 +107,7 @@ pub enum Error {
     /// `InvalidCellKind`.)
     InvalidFilter,
 
-    /// An `add_requirement` call is structurally invalid: the name is empty, `cell`
+    /// An `add_requirement` call is structurally invalid: `name` is `Some` and `cell`
     /// already has a same-named requirement, or (on a `Cell`/`Source` kind cell)
     /// evaluating the requirement against current values returns `Ok(false)`.
     InvalidRequirement,
