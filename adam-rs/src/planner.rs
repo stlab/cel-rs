@@ -38,7 +38,7 @@ use slotmap::SlotMap;
 
 use crate::{
     cell::{CellData, CellId},
-    error::Error,
+    error::{Error, ErrorSite},
     relationship::{RelationshipData, RelationshipId},
 };
 
@@ -113,10 +113,19 @@ pub(crate) fn plan(
 ) -> Result<Plan, Error> {
     let (forced_outputs, alive) = forced_output_cells(relationships, active);
 
-    let assignment = release::resolve(cells, relationships, active).map_err(|e| match e {
-        ReleaseFailure::NoAssignment => Error::Conflict { sites: vec![] },
-        ReleaseFailure::NoAcyclicAssignment => Error::Cycle { sites: vec![] },
-    })?;
+    let assignment = match release::resolve(cells, relationships, active) {
+        Ok(a) => a,
+        Err(ReleaseFailure::NoAssignment) => {
+            return Err(Error::Conflict {
+                sites: conflict_sites(relationships, active),
+            });
+        }
+        Err(ReleaseFailure::NoAcyclicAssignment(cyclic)) => {
+            return Err(Error::Cycle {
+                sites: cycle_sites(&cyclic, relationships),
+            });
+        }
+    };
 
     let mut adj = build_digraph(&assignment, relationships);
     add_filter_edges(&mut adj, cells, &assignment);
@@ -165,6 +174,46 @@ pub(crate) fn plan(
         forced_outputs,
         forced_relationships,
     })
+}
+
+/// Maps a cyclic assignment to `Relationship`/`Cell` sites in loop order.
+///
+/// - Complexity: O(V + E) over the digraph induced by `assignment` (dominated by
+///   [`build_digraph`] and [`scc::tarjan_scc`]).
+fn cycle_sites(
+    assignment: &matching::Assignment,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+) -> Vec<ErrorSite> {
+    let adj = build_digraph(assignment, relationships);
+    let component = scc::tarjan_scc(&adj)
+        .into_iter()
+        .find(|c| c.len() > 1)
+        .unwrap_or_default();
+    trace::recover_cycle(&adj, &component)
+        .into_iter()
+        .map(node_to_site)
+        .collect()
+}
+
+/// Wraps [`trace::minimal_infeasible_set`] as `Relationship` sites.
+///
+/// - Complexity: see [`trace::minimal_infeasible_set`].
+fn conflict_sites(
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    active: &HashSet<RelationshipId>,
+) -> Vec<ErrorSite> {
+    trace::minimal_infeasible_set(relationships, active)
+        .into_iter()
+        .map(ErrorSite::Relationship)
+        .collect()
+}
+
+/// Maps a digraph `Node` to its `ErrorSite`.
+fn node_to_site(node: Node) -> ErrorSite {
+    match node {
+        Node::Relationship(r) => ErrorSite::Relationship(r),
+        Node::Cell(c) => ErrorSite::Cell(c),
+    }
 }
 
 /// Computes the cells that can never be a source under `active`, and which methods
@@ -619,5 +668,33 @@ mod tests {
         let active: HashSet<_> = sheet.relationships().collect();
         let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
         assert!(matches!(result, Err(Error::FilterCycle { .. })));
+    }
+
+    #[test]
+    fn cycle_error_names_the_relationships_in_loop_order() {
+        use crate::error::ErrorSite;
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(0_i32);
+        let y = sheet.add_cell(0_i32);
+        let r1 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(y, x, |v: &i32| Ok(*v + 1))])
+            .unwrap();
+        let r2 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v + 1))])
+            .unwrap();
+        let err = sheet.propagate().unwrap_err();
+        let sites = match &err {
+            Error::Cycle { sites } => sites.clone(),
+            other => panic!("{other:?}"),
+        };
+        let rels: std::collections::HashSet<_> = sites
+            .iter()
+            .filter_map(|s| match s {
+                ErrorSite::Relationship(r) => Some(*r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rels, [r1, r2].into_iter().collect());
+        assert!(sites.iter().any(|s| matches!(s, ErrorSite::Cell(_))));
     }
 }

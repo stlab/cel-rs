@@ -39,8 +39,10 @@ pub(crate) enum ReleaseFailure {
     /// relationships whose only methods both claim the same cell.
     NoAssignment,
     /// A method assignment exists, but every one of them is cyclic: a genuine
-    /// algebraic loop with no external input, regardless of cell strength.
-    NoAcyclicAssignment,
+    /// algebraic loop with no external input, regardless of cell strength. Carries
+    /// one such cyclic [`Assignment`] so the caller can reconstruct the offending
+    /// loop for error reporting.
+    NoAcyclicAssignment(Assignment),
 }
 
 /// Finds the strength-optimal acyclic assignment for `active`: an [`Assignment`] where
@@ -79,13 +81,10 @@ pub(crate) fn resolve(
 ) -> Result<Assignment, ReleaseFailure> {
     let mut released: HashSet<CellId> = HashSet::new();
     let Some(mut current) = Assignment::solve_acyclic(relationships, active, &released) else {
-        return Err(
-            if Assignment::solve(relationships, active, &released).is_some() {
-                ReleaseFailure::NoAcyclicAssignment
-            } else {
-                ReleaseFailure::NoAssignment
-            },
-        );
+        return Err(match Assignment::solve(relationships, active, &released) {
+            Some(cyclic) => ReleaseFailure::NoAcyclicAssignment(cyclic),
+            None => ReleaseFailure::NoAssignment,
+        });
     };
 
     let mut cells_sorted: Vec<CellId> = cells.keys().collect();
@@ -146,7 +145,7 @@ mod tests {
         let active: HashSet<_> = [r1, r2].into_iter().collect();
         assert!(matches!(
             resolve(&sheet.cells, &sheet.relationships, &active),
-            Err(ReleaseFailure::NoAcyclicAssignment)
+            Err(ReleaseFailure::NoAcyclicAssignment(_))
         ));
     }
 

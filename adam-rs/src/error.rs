@@ -44,16 +44,17 @@ pub enum Error {
 
     /// No valid method assignment exists (overconstrained).
     Conflict {
-        /// The relationships and/or cells implicated in the overconstraint. Populated
-        /// by the planner's set-reconstruction pass (Phase 2); empty until then.
+        /// A subset-minimal group of relationships that together admit no valid
+        /// method assignment: removing any member of the group makes the remainder
+        /// feasible. Every entry is `ErrorSite::Relationship`.
         sites: Vec<ErrorSite>,
     },
 
     /// The selected methods form a cycle.
     Cycle {
-        /// The relationships forming the cycle, in loop order, `sites[0]` first.
-        /// Populated by the planner's set-reconstruction pass (Phase 2); empty until
-        /// then.
+        /// The relationships and cells forming the cycle, in loop order, `sites[0]`
+        /// first: `Relationship`, `Cell`, `Relationship`, `Cell`, … alternating for
+        /// the length of the loop.
         sites: Vec<ErrorSite>,
     },
 
