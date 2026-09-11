@@ -214,6 +214,35 @@ convention): for `Cycle`, "this relationship writes cell `x`" / "which feeds …
 appears in only one method"; and so on. `MethodIndex` never appears in a post-parse error
 (the parser resolves it immediately), so `locate_error` treats it as unresolvable.
 
+Label synthesis is the same phrasing whether the error surfaces at parse time or at
+propagation time, so it lives in one free function keyed on the `Error` variant and the
+site index:
+
+```rust
+/// The human label for site `index` of `e`, given a `CellId → name` lookup.
+///
+/// - Precondition: `index < e.sites().len()`.
+fn site_label(e: &adam_rs::Error, index: usize, cell_name: &impl Fn(CellId) -> Option<String>) -> String
+```
+
+`locate_error` calls it for the runtime path; §4.1's build-time resolver calls it for the
+parse path. Only span resolution differs between the two, never the wording.
+
+### 4.1 Build-time site resolution
+
+`MismatchedMethodCells` and `DuplicateMethodOutputs` (and `InvalidConditional`) are raised
+by `add_relationship`/`add_conditional` *during parsing*, so they never reach `locate_error`
+— they surface as `ParseError`s (§5). Their sites still resolve, but against what the parser
+holds mid-parse rather than the finished tables: a `MethodIndex(i)` maps to the parallel
+per-binding span vector `parse_relationship_decl` already builds (§ the existing
+`spans: Vec<(Span, Span)>`), and a `Cell(c)` maps to the `cell_spans` accumulated so far
+(every cell a relationship references is declared before the relationship, so its span is
+already recorded). `Relationship(r)` maps to `relationship_spans` for the
+cross-referencing `InvalidConditional` cases. The parser resolves *every* site this way,
+producing a primary span plus secondary labelled spans, and attaches them to the
+`ParseError` (§5) so the build-time diagnostic shows the same multi-caret backtrace the
+runtime path does.
+
 ## 5. `cel-parser`: multi-span rendering
 
 `cel-parser`'s `error.rs` renders single-span diagnostics today
@@ -247,6 +276,21 @@ per `SpanLabel` — `AnnotationKind::Primary` for `labels[0]`, `AnnotationKind::
 the rest — each carrying its label text. `annotate-snippets` lays the carets out in source
 order and prints each label, producing the cycle backtrace. The existing single-span
 methods are untouched.
+
+`ParseError` (the build-time error type) gains an optional list of secondary labelled
+spans, defaulting to empty so every existing construction site is unaffected:
+
+```rust
+/// Attaches secondary labelled spans, rendered as extra carets alongside the primary.
+pub fn with_secondary(self, secondary: Vec<SpanLabel>) -> Self
+```
+
+`ParseError::format_rustc_style` renders through `format_multi_span` when `secondary` is
+non-empty (primary span as `labels[0]`, the secondaries after), and through the existing
+single-span path otherwise. This is what lets a parse-time `DuplicateMethodOutputs` or
+`MismatchedMethodCells` underline both methods and the differing cells. `adam-lsp` ignores
+the new field and keeps rendering the primary span only; surfacing secondaries as LSP
+related-information is a possible later enhancement, out of scope here.
 
 ## 6. `adam-web-ui`: `format_adam_error`
 
@@ -303,7 +347,13 @@ errors — only the build-time `ParseError`s, which already carry their own span
   differing cells. A successful parse populates `relationship_spans` and `cell_spans` with
   one entry per relationship and per cell.
 - `cel-parser`: `format_multi_span` output contains every label and underlines each span;
-  `Renderer::plain` output carries no ANSI escapes.
+  `Renderer::plain` output carries no ANSI escapes. A `ParseError::with_secondary` error's
+  `format_rustc_style` output underlines the primary and every secondary span; a plain
+  `ParseError` (no secondaries) renders exactly as before.
+- `adam-lang`: parsing a relationship with two methods sharing an output set returns a
+  `ParseError` whose rendered output underlines both bindings; parsing mismatched method
+  cells underlines the diverging binding, the baseline binding, and the differing cell
+  declarations.
 - `adam-web-ui`: a `Cycle` error renders a multi-line backtrace naming each relationship in
   the loop; an error whose sites do not resolve falls back to `Display`.
 
@@ -318,9 +368,11 @@ former `location()` callers:
 - `adam-rs/src/planner.rs` — `execute_plan`'s `MethodFailed`/`TypeMismatch` pass
   `vec![ErrorSite::Method(rel_id, method_idx)]`; the three planner errors are populated per
   §2.
-- `adam-lang/src/parser.rs` — `parse_relationship_decl`'s `Err` arm matches `e.sites()`
-  (resolving a leading `MethodIndex`) instead of `e.location()`; the two new span tables are
-  populated and moved into `ParsedSheet`.
+- `adam-lang/src/parser.rs` — `parse_relationship_decl`'s (and `parse_conditional_decl`'s)
+  `Err` arm resolves *all* of `e.sites()` (§4.1) into a primary span plus
+  `SpanLabel` secondaries and calls `ParseError::with_secondary`, replacing the old
+  `e.location()` single-span match; the two new span tables are populated and moved into
+  `ParsedSheet`.
 - `adam-web-ui/src/labels.rs` — `format_adam_error` and its helper are rewritten per §6; the
   `write_str` closures constructing `Error::MethodFailed { .. }` drop `location` for
   `sites: vec![]`.
