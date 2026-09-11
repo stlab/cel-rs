@@ -1,0 +1,12 @@
+sheet conditional_forced {
+    source constrain = false;
+    cell a = 5 filter 1..=100;
+
+    conditional constrain {
+        true => {
+            relationship {
+                a := 42;
+            }
+        }
+    }
+}

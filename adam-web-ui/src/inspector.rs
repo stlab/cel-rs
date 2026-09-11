@@ -137,6 +137,38 @@ fn format_filter_violation(label: &str, violation: &FilterViolation) -> String {
     }
 }
 
+/// Returns the message to show as a range-filtered cell's own invalid indicator.
+///
+/// `sp-slider` (unlike `SpNumberfield`/`SpCheckbox`/`SpTextfield`) has no `invalid` visual
+/// state of its own (see `SpSlider`'s doc comment), so this sibling `SpHelpText` is the only
+/// way a slider-rendered cell can surface a violation — every other control instead relies on
+/// its own `invalid` prop and only adds this same text as a supplementary detail.
+///
+/// Prefers, in order: a currently-violated `require` name attached to `id` (only possible when
+/// `id` is an out cell), then `id`'s own currently-violated filter, then a generic fallback
+/// naming `label` when `id` is flagged invalid for some other reason (e.g. it merely
+/// contributes to another cell's violated filter or requirement).
+///
+/// - Postcondition: `None` when `id` is in none of `status.invalid_outputs`,
+///   `status.invalid_contributors`, and has no currently-violated filter (`Sheet::filter_violation`).
+fn slider_invalid_message(
+    id: CellId,
+    label: &str,
+    sheet: &Sheet,
+    status: &OutputStatus,
+) -> Option<String> {
+    if let Some(names) = status.invalid_output_requirement_names.get(&id) {
+        return Some(names.clone());
+    }
+    if let Some(violation) = sheet.filter_violation(id) {
+        return Some(format_filter_violation(label, violation));
+    }
+    if status.invalid_outputs.contains(&id) || status.invalid_contributors.contains(&id) {
+        return Some(format!("`{label}` is invalid"));
+    }
+    None
+}
+
 /// A cell's Inspector display flags, derived from its own forced/error state and the
 /// sheet-wide out-cell status.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -420,6 +452,13 @@ fn CellRow(
             .cloned()
     });
 
+    // Only consumed by the slider branch below — `sp-slider` has no native `invalid` state,
+    // so it needs the full message (filter violation or generic fallback), not just a
+    // requirement name.
+    let slider_message = use_memo(move || {
+        slider_invalid_message(id, &label.read(), &sheet.read(), &output_status.read())
+    });
+
     // Sync input to the computed value whenever it changes, but not while the user
     // is actively editing — that would interrupt mid-value typing (e.g. "1." → "1").
     use_effect(move || {
@@ -477,24 +516,20 @@ fn CellRow(
                                 has_error.set(false);
                             },
                         }
-                        // `sp-slider` has no `negative-help-text` slot the way
-                        // `sp-number-field` does (see `SpSlider`'s doc comment), so a
-                        // failing `require` on a range-filtered out cell is surfaced as a
-                        // plain sibling `SpHelpText` instead of slotted content — its parent
-                        // here is a plain `div`, not a shadow host, so `slot` has no effect;
-                        // "negative-help-text" is passed anyway (rather than an empty string)
-                        // to match the name used for the same purpose in the non-range branch
-                        // below — never independently gated on `invalid` here, since
-                        // `violated_requirement_names` is already empty whenever `invalid`
-                        // is false for an output cell (see
-                        // `OutputStatus::invalid_output_requirement_names`). Names the
-                        // `require` currently failing on this out cell — a stopgap: a real
-                        // message (see `Requirement::from_fn_*`'s own
-                        // `require { @name expression; }` source) would need the sheet to
-                        // carry more than just a name, so this just surfaces the name a
-                        // sheet author already chose.
-                        if let Some(names) = violated_requirement_names.read().clone() {
-                            SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{names}" }
+                        // `sp-slider` has no `invalid` state or `negative-help-text` slot the
+                        // way `sp-number-field` does (see `SpSlider`'s doc comment), so any
+                        // violation on a range-filtered cell — a failing `require` on an out
+                        // cell, or the cell's own filter rejecting its forced value (see
+                        // `slider_invalid_message`) — is surfaced as a plain sibling
+                        // `SpHelpText` instead of slotted content — its parent here is a plain
+                        // `div`, not a shadow host, so `slot` has no effect; "negative-help-text"
+                        // is passed anyway (rather than an empty string) to match the name used
+                        // for the same purpose in the non-range branch below. `slider_message`
+                        // is `None` exactly when `flags.invalid` would be `false` for a non-slider
+                        // control (see `slider_invalid_message`'s postcondition), so this is
+                        // already gated on invalidity without needing to check `flags` directly.
+                        if let Some(msg) = slider_message.read().clone() {
+                            SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{msg}" }
                         }
                     }
                 }
@@ -943,6 +978,68 @@ mod tests {
     fn dummy_cell() -> CellId {
         let mut sheet = Sheet::new();
         sheet.add_cell(0_i32)
+    }
+
+    #[test]
+    fn slider_invalid_message_prefers_a_requirement_name_when_present() {
+        let sheet = Sheet::new();
+        let id = dummy_cell();
+        let status = status_full(true, &[], &[], &[], &[], &[], &[(id, "not_too_big")]);
+        assert_eq!(
+            slider_invalid_message(id, "a", &sheet, &status),
+            Some("not_too_big".to_string())
+        );
+    }
+
+    #[test]
+    fn slider_invalid_message_reports_a_filter_violation_when_no_requirement_name_applies() {
+        use adam_rs::{Filter, Method};
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0.0_f64);
+        let b = sheet.add_cell(0.0_f64);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))))
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, a, |v: &f64| Ok(*v))])
+            .unwrap();
+        sheet.write(b, -30.0_f64).unwrap();
+        sheet.propagate().unwrap();
+
+        let status = status(false, &[], &[], &[]);
+        let msg = slider_invalid_message(a, "a", &sheet, &status).unwrap();
+        assert!(msg.contains("does not conform"));
+    }
+
+    #[test]
+    fn slider_invalid_message_falls_back_to_a_generic_message_for_a_mere_contributor() {
+        let sheet = Sheet::new();
+        let id = dummy_cell();
+        let status = status(true, &[], &[id], &[]);
+        assert_eq!(
+            slider_invalid_message(id, "b", &sheet, &status),
+            Some("`b` is invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn slider_invalid_message_falls_back_to_a_generic_message_for_an_unnamed_invalid_output() {
+        let sheet = Sheet::new();
+        let id = dummy_cell();
+        let status = status(true, &[], &[], &[id]);
+        assert_eq!(
+            slider_invalid_message(id, "c", &sheet, &status),
+            Some("`c` is invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn slider_invalid_message_none_when_nothing_flags_the_cell() {
+        let sheet = Sheet::new();
+        let id = dummy_cell();
+        let status = status(false, &[], &[], &[]);
+        assert_eq!(slider_invalid_message(id, "d", &sheet, &status), None);
     }
 
     #[test]
