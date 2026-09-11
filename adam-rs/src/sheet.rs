@@ -218,7 +218,7 @@ impl Sheet {
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                 if cell.kind == CellKind::Source {
                     return Err(Error::InvalidCellKind {
-                        sites: vec![ErrorSite::MethodIndex(idx)],
+                        sites: vec![ErrorSite::MethodIndex(idx), ErrorSite::Cell(cell_id)],
                     });
                 }
                 if cell.type_id != declared {
@@ -2151,6 +2151,19 @@ mod tests {
             result.unwrap_err().sites().first().copied(),
             Some(ErrorSite::MethodIndex(0))
         );
+    }
+
+    #[test]
+    fn invalid_cell_kind_names_the_method_and_the_source_output_cell() {
+        let mut sheet = Sheet::new();
+        let s = sheet.add_source(0_i32); // Source-kind cell
+        // A Source-kind output is rejected.
+        let err = sheet
+            .add_relationship(vec![Method::from_fn_1_1(s, s, |x: &i32| Ok(*x))])
+            .unwrap_err();
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(0));
+        assert!(sites[1..].contains(&ErrorSite::Cell(s)));
     }
 
     #[test]
