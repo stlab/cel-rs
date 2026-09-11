@@ -27,11 +27,12 @@ pub(crate) fn recover_cycle(adj: &HashMap<Node, Vec<Node>>, component: &[Node]) 
     let mut stack: Vec<(Node, usize)> = vec![(start, 0)];
     while let Some(&mut (node, ref mut next)) = stack.last_mut() {
         if *next == 0 {
-            if on_path.contains(&node) {
-                // Found the loop: slice from the earlier occurrence.
-                let at = path.iter().position(|&n| n == node).unwrap();
-                return path[at..].to_vec();
-            }
+            // `node` is never in `on_path` here: the only ways a node lands on the
+            // stack are as `start` (checked against an empty `on_path`, just below)
+            // or via `stack.push((w, 0))` in the successor loop, which only happens
+            // after that same loop has already checked `!on_path.contains(&w)` and
+            // returned early otherwise -- so this frame is always seeing `node` for
+            // the first time.
             path.push(node);
             on_path.insert(node);
         }
@@ -45,7 +46,12 @@ pub(crate) fn recover_cycle(adj: &HashMap<Node, Vec<Node>>, component: &[Node]) 
             }
             if on_path.contains(&w) {
                 let at = path.iter().position(|&n| n == w).unwrap();
-                return path[at..].to_vec();
+                let cycle = path[at..].to_vec();
+                debug_assert!(
+                    !cycle.is_empty(),
+                    "recover_cycle: a located loop must be non-empty"
+                );
+                return cycle;
             }
             stack.push((w, 0));
             advanced = true;
@@ -71,6 +77,10 @@ pub(crate) fn minimal_infeasible_set(
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
 ) -> HashSet<RelationshipId> {
+    debug_assert!(
+        Assignment::solve(relationships, active, &HashSet::new()).is_none(),
+        "minimal_infeasible_set requires an infeasible `active`"
+    );
     let mut candidate = active.clone();
     // Deletion filtering: drop each relationship whose removal keeps the set infeasible.
     let members: Vec<RelationshipId> = active.iter().copied().collect();

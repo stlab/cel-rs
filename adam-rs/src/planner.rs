@@ -163,6 +163,12 @@ pub(crate) fn plan(
         .iter()
         .filter(|step| matches!(step, PlanStep::Method(..)))
         .count();
+    // Believed unreachable: every active relationship lands in its own singleton
+    // `tarjan_scc` component here, since the `FilterCycle` branch above already
+    // returned on any component of size > 1 -- so `method_count == active.len()`
+    // always holds and `active` is never actually infeasible when this branch runs.
+    // `minimal_infeasible_set`'s own `debug_assert!` guards that assumption in
+    // debug/test builds.
     if method_count != active.len() {
         return Err(Error::Conflict {
             sites: conflict_sites(relationships, active),
@@ -734,6 +740,11 @@ mod tests {
         };
         assert!(!sites.is_empty());
         assert!(sites.iter().any(|s| matches!(s, ErrorSite::Cell(_))));
+        assert!(
+            sites
+                .iter()
+                .any(|s| matches!(s, ErrorSite::Relationship(_)))
+        );
     }
 
     #[test]
