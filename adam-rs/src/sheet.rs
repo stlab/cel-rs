@@ -241,24 +241,44 @@ impl Sheet {
             .map(|m| m.inputs.iter().chain(m.outputs.iter()).copied().collect())
             .collect();
         if let Some(rel_idx) = cell_sets[1..].iter().position(|set| set != &cell_sets[0]) {
-            return Err(Error::MismatchedMethodCells {
-                sites: vec![ErrorSite::MethodIndex(rel_idx + 1)],
-            });
+            let diverging = rel_idx + 1;
+            let mut sites = vec![ErrorSite::MethodIndex(diverging), ErrorSite::MethodIndex(0)];
+            // Symmetric difference of the two cell sets, in a stable order.
+            for &c in cell_sets[diverging].symmetric_difference(&cell_sets[0]) {
+                sites.push(ErrorSite::Cell(c));
+            }
+            return Err(Error::MismatchedMethodCells { sites });
         }
 
         // A method's own outputs must be duplicate-free, and no two methods in a
         // relationship may claim the same output set: the planner's matching stage
         // treats a method's pure-output set as an indivisible claim, so two methods
         // sharing an output set would make that claim ambiguous.
-        let mut seen_output_sets: Vec<HashSet<CellId>> = Vec::with_capacity(methods.len());
+        let mut seen_output_sets: Vec<(usize, HashSet<CellId>)> = Vec::with_capacity(methods.len());
         for (idx, method) in methods.iter().enumerate() {
             let output_set: HashSet<CellId> = method.outputs.iter().copied().collect();
-            if output_set.len() != method.outputs.len() || seen_output_sets.contains(&output_set) {
-                return Err(Error::DuplicateMethodOutputs {
-                    sites: vec![ErrorSite::MethodIndex(idx)],
-                });
+            if output_set.len() != method.outputs.len() {
+                // A cell repeated within this method's own outputs.
+                let mut sites = vec![ErrorSite::MethodIndex(idx)];
+                let mut seen = HashSet::new();
+                for &o in &method.outputs {
+                    if !seen.insert(o) {
+                        sites.push(ErrorSite::Cell(o));
+                    }
+                }
+                return Err(Error::DuplicateMethodOutputs { sites });
             }
-            seen_output_sets.push(output_set);
+            if let Some((earlier, _)) = seen_output_sets.iter().find(|(_, s)| *s == output_set) {
+                let mut sites = vec![
+                    ErrorSite::MethodIndex(idx),
+                    ErrorSite::MethodIndex(*earlier),
+                ];
+                for &o in &method.outputs {
+                    sites.push(ErrorSite::Cell(o));
+                }
+                return Err(Error::DuplicateMethodOutputs { sites });
+            }
+            seen_output_sets.push((idx, output_set));
         }
 
         // Collect the union of all adjacent cells in insertion order, deduplicated.
@@ -2467,6 +2487,67 @@ mod tests {
             result.unwrap_err().sites().first().copied(),
             Some(ErrorSite::MethodIndex(0))
         );
+    }
+
+    #[test]
+    fn mismatched_method_cells_names_both_methods_and_the_differing_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // method 0 references {a,b}; method 1 references {a,c}: c (and b) diverge.
+        let err = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+                Method::from_fn_1_1(a, c, |x: &i32| Ok(*x)),
+            ])
+            .unwrap_err();
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(1));
+        assert_eq!(sites[1], ErrorSite::MethodIndex(0));
+        assert!(sites[2..].contains(&ErrorSite::Cell(c)));
+    }
+
+    #[test]
+    fn duplicate_output_set_across_methods_names_both_methods_and_the_shared_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        // both methods reference {a,b} and both output b.
+        let err = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x + 1)),
+            ])
+            .unwrap_err();
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(1));
+        assert_eq!(sites[1], ErrorSite::MethodIndex(0));
+        assert!(sites[2..].contains(&ErrorSite::Cell(b)));
+    }
+
+    #[test]
+    fn duplicate_cell_within_own_outputs_names_the_method_and_the_repeated_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let i32_ty = std::any::TypeId::of::<i32>();
+        // one method whose outputs name b twice.
+        let err = sheet
+            .add_relationship(vec![Method::new(
+                vec![a],
+                vec![b, b],
+                vec![i32_ty],
+                vec![i32_ty, i32_ty],
+                |args| {
+                    let v = *args[0].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(v), Box::new(v)])
+                },
+            )])
+            .unwrap_err();
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(0));
+        assert!(sites[1..].contains(&ErrorSite::Cell(b)));
     }
 
     #[test]
