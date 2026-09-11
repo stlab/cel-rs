@@ -341,7 +341,9 @@ impl Sheet {
             MatchSource::Cell(cell) => {
                 let cell_data = self.cells.get(*cell).ok_or(Error::InvalidId)?;
                 if cell_data.type_id != TypeId::of::<T>() {
-                    return Err(Error::InvalidConditional { sites: vec![] });
+                    return Err(Error::InvalidConditional {
+                        sites: vec![ErrorSite::Cell(*cell)],
+                    });
                 }
                 vec![*cell]
             }
@@ -414,10 +416,20 @@ impl Sheet {
                 .get(rel_id)
                 .ok_or(Error::InvalidConditional { sites: vec![] })?;
             if rel.adj.iter().any(|c| contributing_cells.contains(c)) && rel.methods.len() != 1 {
-                return Err(Error::InvalidConditional { sites: vec![] });
+                return Err(Error::InvalidConditional {
+                    sites: {
+                        let mut s = vec![ErrorSite::Relationship(rel_id)];
+                        if let Some(&c) = rel.adj.iter().find(|c| contributing_cells.contains(c)) {
+                            s.push(ErrorSite::Cell(c));
+                        }
+                        s
+                    },
+                });
             }
             if self.conditional_relationships.contains(&rel_id) {
-                return Err(Error::InvalidConditional { sites: vec![] });
+                return Err(Error::InvalidConditional {
+                    sites: vec![ErrorSite::Relationship(rel_id)],
+                });
             }
         }
 
@@ -432,7 +444,9 @@ impl Sheet {
         let mut seen: HashSet<RelationshipId> = HashSet::new();
         for &rel_id in &all_rels {
             if !seen.insert(rel_id) {
-                return Err(Error::InvalidConditional { sites: vec![] });
+                return Err(Error::InvalidConditional {
+                    sites: vec![ErrorSite::Relationship(rel_id)],
+                });
             }
         }
 
@@ -1942,6 +1956,27 @@ mod tests {
     }
 
     #[test]
+    fn invalid_conditional_multi_method_branch_names_the_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        // Relationship has two methods and involves `a` (the match cell).
+        let branch_rel = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+                Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
+            ])
+            .unwrap();
+        let result = sheet.add_conditional(
+            MatchExpr::cell(a),
+            vec![(vec![0_i32], vec![branch_rel])],
+            vec![],
+        );
+        let err = result.unwrap_err();
+        assert!(err.sites().contains(&ErrorSite::Relationship(branch_rel)));
+    }
+
+    #[test]
     fn add_conditional_returns_error_when_branch_rel_involves_cell_upstream_of_match_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
@@ -2098,6 +2133,33 @@ mod tests {
         let result =
             sheet.add_conditional(MatchExpr::cell(a), vec![(vec![1_i32], vec![rel])], vec![]);
         assert!(matches!(result, Err(Error::InvalidConditional { .. })));
+    }
+
+    #[test]
+    fn invalid_conditional_duplicate_relationship_names_that_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let dup_rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Add dup_rel to the first conditional.
+        sheet
+            .add_conditional(
+                MatchExpr::cell(a),
+                vec![(vec![0_i32], vec![dup_rel])],
+                vec![],
+            )
+            .unwrap();
+        // Try to add the same relationship to a second conditional.
+        let result = sheet.add_conditional(
+            MatchExpr::cell(a),
+            vec![(vec![1_i32], vec![dup_rel])],
+            vec![],
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::InvalidConditional { .. }));
+        assert!(err.sites().contains(&ErrorSite::Relationship(dup_rel)));
     }
 
     #[test]
