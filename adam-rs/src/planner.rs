@@ -47,6 +47,7 @@ mod matching;
 mod release;
 mod scc;
 mod seed;
+mod trace;
 
 use digraph::{Node, add_filter_edges, build_digraph};
 use matching::pure_outputs;
