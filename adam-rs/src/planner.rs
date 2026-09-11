@@ -113,8 +113,8 @@ pub(crate) fn plan(
     let (forced_outputs, alive) = forced_output_cells(relationships, active);
 
     let assignment = release::resolve(cells, relationships, active).map_err(|e| match e {
-        ReleaseFailure::NoAssignment => Error::Conflict,
-        ReleaseFailure::NoAcyclicAssignment => Error::Cycle,
+        ReleaseFailure::NoAssignment => Error::Conflict { sites: vec![] },
+        ReleaseFailure::NoAcyclicAssignment => Error::Cycle { sites: vec![] },
     })?;
 
     let mut adj = build_digraph(&assignment, relationships);
@@ -132,7 +132,7 @@ pub(crate) fn plan(
     let mut execution_order: Vec<PlanStep> = Vec::new();
     for component in components {
         if component.len() != 1 {
-            return Err(Error::FilterCycle);
+            return Err(Error::FilterCycle { sites: vec![] });
         }
         match component[0] {
             Node::Relationship(rel_id) => {
@@ -150,7 +150,7 @@ pub(crate) fn plan(
         .filter(|step| matches!(step, PlanStep::Method(..)))
         .count();
     if method_count != active.len() {
-        return Err(Error::Conflict);
+        return Err(Error::Conflict { sites: vec![] });
     }
 
     let forced_relationships: HashSet<RelationshipId> = alive
@@ -319,7 +319,7 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(b, out, |x: &i32| Ok(*x))])
             .unwrap();
 
-        assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
+        assert!(matches!(sheet.propagate(), Err(Error::Conflict { .. })));
     }
 
     #[test]
@@ -617,6 +617,6 @@ mod tests {
 
         let active: HashSet<_> = sheet.relationships().collect();
         let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
-        assert!(matches!(result, Err(Error::FilterCycle)));
+        assert!(matches!(result, Err(Error::FilterCycle { .. })));
     }
 }

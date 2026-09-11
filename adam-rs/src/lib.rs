@@ -163,7 +163,7 @@ pub mod sheet;
 
 pub use cell::{CellId, CellKind};
 pub use conditional::{ConditionalId, MatchExpr};
-pub use error::{Error, ErrorLocation};
+pub use error::{Error, ErrorSite};
 pub use filter::{Filter, FilterKind, FilterViolation};
 pub use relationship::{Method, RelationshipId};
 pub use requirement::{Requirement, RequirementId};

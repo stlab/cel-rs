@@ -448,7 +448,7 @@ fn mutually_dependent_relationships_return_cycle() {
         .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
         .unwrap();
 
-    assert!(matches!(sheet.propagate(), Err(Error::Cycle)));
+    assert!(matches!(sheet.propagate(), Err(Error::Cycle { .. })));
 }
 
 #[test]
@@ -1351,7 +1351,7 @@ fn mutually_dependent_relationships_with_no_external_input_remain_cycle() {
     sheet
         .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v + 1))])
         .unwrap();
-    assert!(matches!(sheet.propagate(), Err(Error::Cycle)));
+    assert!(matches!(sheet.propagate(), Err(Error::Cycle { .. })));
 }
 
 #[test]
