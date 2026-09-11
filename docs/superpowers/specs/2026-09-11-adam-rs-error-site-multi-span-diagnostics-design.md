@@ -274,6 +274,15 @@ The control flow:
    `SpanContext::format_rustc_style`. Two or more → `cel_parser::format_multi_span`, the
    backtrace.
 
+`begin` today shreds each parse result into separate `Signal<Sheet>`, `Signal<Labels>`,
+and `Signal<MethodSpans>` values threaded independently through its components. Since
+`format_adam_error` now needs all three span tables together, `begin` is changed to hold
+the whole `ParsedSheet` in one place (a `Signal<ParsedSheet>`, which derefs mutably to the
+live `Sheet` for writes, carrying the immutable span tables along unchanged), with `Labels`
+still derived from it. This keeps the parse's auxiliary information in one location instead
+of re-threading a growing list of side tables, and removes the standalone `MethodSpans`
+signal. The reparse/hot-reload paths set the new `ParsedSheet` in one assignment.
+
 `adam-lsp` needs no change: it never calls `propagate`, so it never observes these runtime
 errors — only the build-time `ParseError`s, which already carry their own spans.
 
