@@ -151,8 +151,9 @@ pub enum Error {
     /// so this is sound but incomplete: a different, equally-valid relationship
     /// assignment might have avoided the cycle. See issue #153.
     FilterCycle {
-        /// The relationships and/or cells forming the cycle. Populated by the
-        /// planner's set-reconstruction pass (Phase 2); empty until then.
+        /// The relationships and cells forming the cycle, in loop order, `sites[0]`
+        /// first, including the filtered `Cell` and the `Cell` → `Cell` edge from its
+        /// filter argument.
         sites: Vec<ErrorSite>,
     },
 }

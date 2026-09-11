@@ -142,7 +142,11 @@ pub(crate) fn plan(
     let mut execution_order: Vec<PlanStep> = Vec::new();
     for component in components {
         if component.len() != 1 {
-            return Err(Error::FilterCycle { sites: vec![] });
+            let sites = trace::recover_cycle(&adj, &component)
+                .into_iter()
+                .map(node_to_site)
+                .collect();
+            return Err(Error::FilterCycle { sites });
         }
         match component[0] {
             Node::Relationship(rel_id) => {
@@ -668,6 +672,33 @@ mod tests {
         let active: HashSet<_> = sheet.relationships().collect();
         let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
         assert!(matches!(result, Err(Error::FilterCycle { .. })));
+    }
+
+    #[test]
+    fn filter_cycle_error_names_its_members() {
+        use crate::error::ErrorSite;
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(b, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
+            )
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
+        let sites = match result {
+            Err(Error::FilterCycle { sites }) => sites,
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("expected FilterCycle error"),
+        };
+        assert!(!sites.is_empty());
+        assert!(sites.iter().any(|s| matches!(s, ErrorSite::Cell(_))));
     }
 
     #[test]
