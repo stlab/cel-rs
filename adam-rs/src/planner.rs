@@ -164,7 +164,9 @@ pub(crate) fn plan(
         .filter(|step| matches!(step, PlanStep::Method(..)))
         .count();
     if method_count != active.len() {
-        return Err(Error::Conflict { sites: vec![] });
+        return Err(Error::Conflict {
+            sites: conflict_sites(relationships, active),
+        });
     }
 
     let forced_relationships: HashSet<RelationshipId> = alive
@@ -374,6 +376,39 @@ mod tests {
             .unwrap();
 
         assert!(matches!(sheet.propagate(), Err(Error::Conflict { .. })));
+    }
+
+    #[test]
+    fn conflict_error_names_the_minimal_infeasible_set() {
+        // Two relationships both want to overwrite the same cell; only one method
+        // each, and both output the same cell -- the whole active set is the
+        // minimal infeasible set here.
+        use crate::error::ErrorSite;
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let out = sheet.add_cell(0_i32);
+
+        let r1 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, out, |x: &i32| Ok(*x))])
+            .unwrap();
+        let r2 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, out, |x: &i32| Ok(*x))])
+            .unwrap();
+
+        let err = sheet.propagate().unwrap_err();
+        let sites = match err {
+            Error::Conflict { sites } => sites,
+            other => panic!("{other:?}"),
+        };
+        let rels: std::collections::HashSet<_> = sites
+            .iter()
+            .filter_map(|s| match s {
+                ErrorSite::Relationship(r) => Some(*r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rels, [r1, r2].into_iter().collect());
     }
 
     #[test]
