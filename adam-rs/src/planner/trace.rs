@@ -3,7 +3,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use slotmap::SlotMap;
+
+use crate::relationship::{RelationshipData, RelationshipId};
+
 use super::digraph::Node;
+use super::matching::Assignment;
 
 /// Returns one simple cycle within `component`, as an ordered node list whose consecutive
 /// entries (wrapping from last to first) are edges of `adj`.
@@ -55,6 +60,30 @@ pub(crate) fn recover_cycle(adj: &HashMap<Node, Vec<Node>>, component: &[Node]) 
     Vec::new()
 }
 
+/// Returns a subset-minimal group of `active` relationships that has no valid method
+/// assignment (`Assignment::solve` returns `None`): removing any member of the result makes
+/// the remainder feasible.
+///
+/// - Precondition: `active` itself is infeasible under `Assignment::solve` with no cells
+///   forbidden.
+/// - Complexity: O(R) calls to `Assignment::solve`, each O(R²·M·K); cold error path only.
+pub(crate) fn minimal_infeasible_set(
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    active: &HashSet<RelationshipId>,
+) -> HashSet<RelationshipId> {
+    let mut candidate = active.clone();
+    // Deletion filtering: drop each relationship whose removal keeps the set infeasible.
+    let members: Vec<RelationshipId> = active.iter().copied().collect();
+    for r in members {
+        let mut without = candidate.clone();
+        without.remove(&r);
+        if Assignment::solve(relationships, &without, &HashSet::new()).is_none() {
+            candidate = without;
+        }
+    }
+    candidate
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +121,28 @@ mod tests {
             let to = cycle[(i + 1) % cycle.len()];
             assert!(adj[&from].contains(&to), "missing edge {from:?}->{to:?}");
         }
+    }
+
+    #[test]
+    fn minimal_infeasible_set_isolates_the_conflicting_pair() {
+        use crate::{Method, Sheet};
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let out = sheet.add_cell(0_i32);
+        let free = sheet.add_cell(0_i32);
+        // r1 and r2 both must claim `out` (infeasible together); r3 is unrelated (claims free).
+        let r1 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, out, |x: &i32| Ok(*x))])
+            .unwrap();
+        let r2 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, out, |x: &i32| Ok(*x))])
+            .unwrap();
+        let r3 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, free, |x: &i32| Ok(*x))])
+            .unwrap();
+        let active: std::collections::HashSet<_> = [r1, r2, r3].into_iter().collect();
+        let set = minimal_infeasible_set(&sheet.relationships, &active);
+        assert_eq!(set, [r1, r2].into_iter().collect());
     }
 }
