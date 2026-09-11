@@ -1,0 +1,9 @@
+sheet filter_diagnostic {
+    cell width: i32 filter 0..=100;
+    cell height = 150 filter 0..=200;
+
+    relationship {
+        width := height;
+        height := width;
+    }
+}

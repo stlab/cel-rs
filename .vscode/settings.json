@@ -10,5 +10,6 @@
         "concatenative",
         "Peekable"
     ],
+    "cSpell.useGitignore": false,
     "rust-analyzer.cargo.features": ["playground"]
 }

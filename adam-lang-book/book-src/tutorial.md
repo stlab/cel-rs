@@ -1,17 +1,17 @@
 # A Tutorial Introduction
 
-Adam programs are called _sheets_, a term borrowed from spreasheets. This chapter is an informal
-tour of every construct Adam has; later chapters go back over the same ground in more detail, and
-the [reference manual](reference.md) provides a full specification.
+Adam programs are called _sheets_, a term borrowed from spreadsheets. This chapter is an informal
+tour of Adam; later chapters go over the same ground in more detail, and the [reference
+manual](reference.md) provides a full specification.
 
 An Adam sheet declares the relationships among a set of properties called _cells_. These
-relationships are maintained when edits occur, providing complex behaviors without having to
-imperatively code how events are handled.
+relationships are maintained when edits occur, providing correct behaviors for user interfaces and
+scripting without having to code complex event handling logic.
 
-Every source fragment below is the complete description used to geenrate the UI, UI behavior, and
+Every source fragment below is the complete description used to generate the UI, UI behavior, and
 graph visualization. The UI is live, so you can change the values and explore the behavior. Within
-an application, a sheet instance is typically bound to a UI construct or scripting system with human
-readable text lables, instead of cell identifiers.
+an application, a sheet instance is typically bound to a UI construct or scripting system with human-
+readable text labels, instead of cell identifiers.
 
 ## A first sheet
 
@@ -28,7 +28,7 @@ initial value). A `source` cell is like a spreadsheet's value cell: it holds a v
 it.
 
 A sheet's body is a sequence of declarations. A sheet describes a _graph_ of cells and the
-constraints between them. The graph for `hello` is just the two, unconnected, cells.
+constraints between them. The graph for `hello` is just the two unconnected cells.
 
 <graph sheet="first_sheet">
 
@@ -55,14 +55,14 @@ _method_.
 {{#include examples/tutorial/basic_output.adm2}}
 ```
 
-The method on the out cell can reference other cells in the sheet and the calculation is reapplied
+The method on the out cell can reference other cells in the sheet, and the calculation is reapplied
 when those values change. In the graph representation, the method is a relationship and drawn as a
 circle between the cells. The heavy arrows and border around the out cell indicate that the value is
 _forced_ by the relationship. A forced cell's value is not editable.
 
 <graph sheet="basic_output">
 
-See the [outputs and requirements chapter](outputs.md) for the full treatment.
+See the [outputs chapter](outputs.md) for the full treatment.
 
 ## Cells and Relationships
 
@@ -79,7 +79,7 @@ as:
 
 For any active `relationship`, exactly one method is selected to execute. The method chosen is based
 on the _strength_ of the cells. Cells that have been written more recently have a higher strength.
-The initial strength of the cells is determined by the declaration order. Cells declared later have
+The declaration order determines the cells' initial strength. Cells declared later have
 a higher strength.
 
 In the graph, you can see the flow change as you write `a` or `b`.
@@ -108,7 +108,7 @@ This example also demonstrates two additional features.
 You can see the effect of the second behavior by sliding `a` to `100` which will pull `b` and `c` to
 `100` and then slide `a` back to `0`. `b` and `c` will return to their prior values.
 
-In the [relationships chapter](relationships.md) you will see relationships are not limited in their
+In the [relationships chapter](relationships.md), you will see relationships are not limited in their
 arity (you can have n-way relationships with each method solving for 1 or more cells).
 
 ## Conditionals
@@ -120,61 +120,44 @@ _match subject_, then activates whichever branch's literal equals the current ma
 {{#include examples/tutorial/constrain.adm2}}
 ```
 
-Only the active branch's relationships participate. The `_` branch, if present, catches any value
-none of the named branches list, and must be written last. If no branch is matched, the conditional
+Only the active branch participates. The `_` branch, if present, catches any value
+not in the named branches list, and must be written last. If no branch is matched, the conditional
 has no effect.
 
 <graph sheet="constrain">
 
-See the [conditionals chapter](conditionals.md) for branch types, tuple match subjects.
-
-Some branches offer the solver no choice at all. A relationship with exactly one method is _forced_:
-there's no alternative binding to try, so its output cell is claimed every round regardless of
-strength, unlike the freely-chosen roles in the earlier [triangle](#cells-and-relationships). A host
-UI commonly disables the editable widget for a forced cell, since writing it would have no lasting
-effect once the sheet re-resolves.
+A conditional relationship may force a cell value, in this case any source cell value is preserved
+and restored when the conditional is removed. The UI for a forced cell value will typically disable
+the control.
 
 ```adam
-{{#include examples/tutorial/forced_and_self_ref_shadow.adm2}}
+{{#include examples/tutorial/conditional_forced.adm2}}
 ```
 
-With `mode == 0` (the declared default), `range_bounds`'s relationship has two self-referencing
-methods, `low := min(low, high)` and `high := max(low, high)`: a relationship exactly like the
-earlier [triangle](#cells-and-relationships), where either cell could end up derived, decided by
-strength, and never both at once. Declared first, `low` is staler, so the solver derives it: `low :=
-min(4, 9)`, which happens to equal `low`'s own current value, so nothing visibly changes. `high`'s
-own `max` method is never invoked at all this round; `high` is simply an ordinary, unclaimed source,
-reporting its own untouched value, `9`.
+## Requirements
 
-Writing `high` to `42` and switching to `mode == 1` activates a relationship with a single method,
-`low := high`: forced. `low` is claimed every round this branch is active, so it now reads back
-`42`, `high`'s current value, no matter what strength would otherwise prefer. But `low`'s own
-underlying raw value, its _source_, is untouched by any of this: it's still `4`, exactly where it
-started, _shadowed_ by the forced derived value the same way a filter's correction shadows a cell's
-raw value in the [Filters](#filters) section; a derived value never destroys the source underneath
-it, whichever mechanism produced that derived value.
+Filters on source cells were introduced in the above [[Filters]] section. For an out cell or a cell
+in an out role, violating a filter will trigger a diagnostic.
 
-Switching back to `mode == 0` reactivates the two-method relationship, and strength has changed in
-the meantime: `high` was just written, so it's freshest now, and `low`, never itself explicitly
-written, is stalest, so the solver again derives `low`. It derives it from each cell's own _source_,
-not from the stale forced value `low` was shadowing a moment ago: `low := min(4, 42)`, using `low`'s
-untouched source `4` and `high`'s actual current value `42`, giving `low = 4` and leaving `high =
-42` alone as a source. The `42` `low` displayed while forced belonged to the now-inactive `mode ==
-1` relationship, and simply stopped existing the moment that relationship stopped being selected.
+```adam
+{{#include examples/tutorial/requirements_filter_diagnostic.adm2}}
+```
 
-Writing `low` to `100` promotes it to freshest, flipping the two-method relationship's choice: now
-`high := max(low, high)` is the one selected instead, deriving `high` and leaving `low` as the
-source: `high` reads `100`, pulled up to match. Either binding can fire; which one does is
-strength's call, never both at once.
+A cell may also have one or more requirements. For source cell or when a cell is writable, the requirements act are a boolean expression that act as a filter rejecting any input that doesn't satisfy the requirements.
 
-Adam's comment and doc-comment syntax is covered in the [lexical conventions
-chapter](lexical-conventions.md), not here.
+For an out cell, violating a requirement will trigger a diagnostic. Requirements have an optional name that can be associated with a message explaining the issue.
+
+```adam
+{{#include examples/tutorial/area_with_requirement.adm2}}
+```
+
+<!-- This section disabled - it will be relocated to another chapter.
 
 ### Relationship Rules
 
 Every relationship's methods must satisfy a set of rules:
 
-- Every method's \\(inputs \cup outputs\\) must be exactly the same set of cells as every other
+- Every method's \\(inputs \cup outputs\\) must be the same set of cells as every other
   method's in the same relationship.
 
 ```adam
@@ -221,27 +204,7 @@ into whatever set the relationship enforces, and if reapplying it to its own alr
 output would change the value again, the "correction" was never well-defined in the first place. The
 solver never checks this; it's on the sheet author.
 
-## Requirements
-
-An `out` declaration (or a `cell`, or a `source`) can carry named `require`ments: boolean checks
-re-evaluated and reported each time the sheet resolves, never enforced by rejecting a write or
-blocking resolution:
-
-```adam
-{{#include examples/tutorial/area_with_requirement.adm2}}
-```
-
-A failed requirement never stops the sheet from resolving, and never stops `area` from being
-computed and readable: it's a diagnostic, not a gate, exactly the way the [Filters](#filters)
-section's filter corrects a value rather than rejecting it. A host queries which requirements are
-currently failing after each resolve.
-
-Two facts here generalize past this one example. `require` isn't limited to `out`: the same block
-can trail a `source` declaration too; see [cell declarations](cells.md#cell-declarations) and
-[source cells](source.md). And `filter` isn't limited to plain cells, either: the same clause can
-trail an `out` declaration; see [a filter on an output cell](filters.md#a-filter-on-an-output-cell).
-See [requirements: diagnostics, not gates](outputs.md#requirements-diagnostics-not-gates) for the
-full rules governing requirements.
+-->
 
 ## Where to go next
 
