@@ -9,13 +9,21 @@
 //! previous round's `derived` value instead re-introduces a shrinking accumulator.
 //!
 //! Seedfill computes the right value structurally, without the planner ever comparing
-//! two values: `X`'s seed is what `X` would settle to under every relationship incident
-//! to it *except* its own claimant, evaluated from `source` values. In the `a<=b<=c`
-//! chain, `b`'s claimant (the `b<=c` relationship) is set aside and `b` is seeded by the
-//! `a<=b` relationship's `b`-producing method (`b := max(a, b)`), giving `b`'s aspiration
-//! from `a`; the claimant then tightens it. Because the seed is rebuilt from `source`
-//! every round, it is never stale and never accumulates -- see
+//! candidate values: `X`'s seed is what `X` would settle to under every relationship
+//! incident to it *except* its own claimant, evaluated from `source` values. In the
+//! `a<=b<=c` chain, `b`'s claimant (the `b<=c` relationship) is set aside and `b` is
+//! seeded by the `a<=b` relationship's `b`-producing method (`b := max(a, b)`), giving
+//! `b`'s aspiration from `a`; the claimant then tightens it. Because the seed is rebuilt
+//! from `source` every round, it is never stale and never accumulates -- see
 //! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`.
+//!
+//! One sibling fold is gated by relative *strength* (a cheap field comparison, not a
+//! candidate-value comparison): when `a<=b`'s claimant this round is itself `a` (not
+//! `b`), folding `a<=b`'s `b`-producing method to seed some other cell `x` would use `a`'s
+//! `source` as if it were authoritative -- but if `a` was written *before* `x`, `a`'s
+//! `source` is exactly the stale declaration this module exists to avoid re-introducing.
+//! `compute_seed` skips such a fold unless the self-referenced input genuinely outranks
+//! `x` in strength; see its doc comment.
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -90,6 +98,21 @@ pub(crate) fn build_seeds(
 /// `visiting` guards against a cyclic seed dependency (a cell reachable from itself
 /// through the incident-relationship graph): a cell already on the stack contributes its
 /// `source` value rather than recursing forever.
+///
+/// A sibling method is skipped (contributes nothing) when `x` itself holds a live
+/// explicit strength (a `write()`/`add_cell` not yet superseded by a later claim) *and*
+/// some other input `y` to that method is claimed this round, self-referencingly, by
+/// that same sibling relationship, with `y`'s strength not exceeding `x`'s. Folding that
+/// method would use `y`'s stale `source` to override `x`'s own explicit edit even though
+/// `y` is not the stronger party, and the relationship's own chosen method this round
+/// already computes `y` from `x` (not the reverse). Gating on `x`'s *own* strength being
+/// explicit (rather than comparing `y` against whatever value `x` currently holds,
+/// explicit or not) matters because a purely derived `x` has no live explicit edit to
+/// protect, and its post-round strength is only an execution-order tie-break, not a
+/// genuine priority signal -- treating it as one here would incorrectly suppress the
+/// aspiration fold for the ordinary case this module exists to handle. This is the same
+/// relative-strength test `release::resolve` uses elsewhere, not a comparison of
+/// candidate values.
 fn compute_seed(
     x: CellId,
     claimant: &HashMap<CellId, RelationshipId>,
@@ -136,6 +159,17 @@ fn compute_seed(
     let mut accumulated: Option<Box<dyn Any>> = None;
     for &(rel_id, method_idx) in &sibling_methods {
         let method = &relationships[rel_id].methods[method_idx];
+
+        let has_weaker_self_referenced_input = cells[x].has_explicit_strength()
+            && method.inputs.iter().any(|&input| {
+                input != x
+                    && claimant.get(&input) == Some(&rel_id)
+                    && cells[input].strength <= cells[x].strength
+            });
+        if has_weaker_self_referenced_input {
+            continue;
+        }
+
         let produced = {
             let inputs: Vec<&dyn Any> = method
                 .inputs
