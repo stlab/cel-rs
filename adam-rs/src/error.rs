@@ -105,8 +105,11 @@ pub enum Error {
     /// relationship appears in more than one conditional branch, a branch key's type does
     /// not match the cell's registered type, or a branch has no keys.
     InvalidConditional {
-        /// The match cell or implicated relationship(s), when known. Empty for the
-        /// match-subject type-mismatch cases (see `add_conditional`'s doc comment).
+        /// Empty for the expression-output type-mismatch case; the match-cell
+        /// type-mismatch case names the cell (`sites = [Cell(match_cell)]`). The
+        /// duplicate-relationship and multi-method-branch cases name the offending
+        /// relationship(s) (and, for the multi-method case, the contributing cell).
+        /// Empty for the missing-relationship and empty-branch-keys cases.
         sites: Vec<ErrorSite>,
     },
 
