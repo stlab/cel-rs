@@ -42,12 +42,14 @@ fn area_with_requirement() {
     parsed.propagate().unwrap();
 
     let output = parsed.output_names["area"];
-    assert!(parsed.cell_requirements_valid(output)); // 10 * 20 == 200 <= 300
+    assert!(parsed.cell_requirements_valid(output)); // 10 * 10 == 100 <= 1000
 
     let width = parsed.cell_names["width"].0;
-    parsed.write(width, 50_i32).unwrap();
+    let height = parsed.cell_names["height"].0;
+    parsed.write(width, 100_i32).unwrap();
+    parsed.write(height, 100_i32).unwrap();
     parsed.propagate().unwrap();
-    assert!(!parsed.cell_requirements_valid(output)); // 50 * 20 == 1000 > 300
+    assert!(!parsed.cell_requirements_valid(output)); // 100 * 100 == 10000 > 1000
 }
 
 #[test]
