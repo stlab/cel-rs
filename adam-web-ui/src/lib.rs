@@ -11,7 +11,7 @@ mod inspector;
 pub mod labels;
 pub mod spectrum;
 
-pub use build::{BuildOutcome, MethodSpans, build_sheet};
+pub use build::{BuildOutcome, build_sheet};
 pub use graph::{
     GraphData, GraphDrive, GraphView, LinkData, LinkKind, NodeData, NodeKind, graph_drive_script,
     to_graph_data,

@@ -2,14 +2,7 @@
 //! diagnostic instead of a bare error.
 
 use crate::labels::{Labels, Renderer, format_adam_error, labels_from_cell_names};
-use adam_lang::{AdamParser, TypeRegistry};
-use adam_rs::{RelationshipId, Sheet};
-use cel_parser::SourceSpan;
-use std::collections::HashMap;
-
-/// Source spans for every relationship method, keyed by `(RelationshipId, method_idx)`,
-/// used to resolve an [`adam_rs::ErrorLocation::Method`] back to its declaration site.
-pub type MethodSpans = HashMap<(RelationshipId, usize), SourceSpan>;
+use adam_lang::{AdamParser, ParsedSheet, TypeRegistry};
 
 /// The result of parsing and building a sheet from adam-lang source.
 ///
@@ -19,9 +12,7 @@ pub type MethodSpans = HashMap<(RelationshipId, usize), SourceSpan>;
 /// propagate failures during cell edits.
 pub struct BuildOutcome {
     /// The built sheet and its UI labels, if parsing succeeded.
-    pub sheet_labels: Option<(Sheet, Labels)>,
-    /// Source spans for every relationship method, keyed by `(RelationshipId, method_idx)`.
-    pub method_spans: Option<MethodSpans>,
+    pub sheet_labels: Option<(ParsedSheet, Labels)>,
     /// A formatted rustc-style diagnostic, if parsing or propagation failed.
     pub error: Option<String>,
 }
@@ -55,7 +46,6 @@ pub fn build_sheet(source: &str, file_name: &str, renderer: &Renderer) -> BuildO
             let msg = e.format_rustc_style(source, file_name, 1, renderer);
             return BuildOutcome {
                 sheet_labels: None,
-                method_spans: None,
                 error: Some(msg),
             };
         }
@@ -65,16 +55,14 @@ pub fn build_sheet(source: &str, file_name: &str, renderer: &Renderer) -> BuildO
         Ok(()) => {
             parsed.clear_changed();
             BuildOutcome {
-                sheet_labels: Some((parsed.sheet, labels)),
-                method_spans: Some(parsed.method_spans),
+                sheet_labels: Some((parsed, labels)),
                 error: None,
             }
         }
         Err(e) => {
-            let msg = format_adam_error(&e, &parsed.method_spans, source, file_name, renderer);
+            let msg = format_adam_error(&e, &parsed, source, file_name, renderer);
             BuildOutcome {
-                sheet_labels: Some((parsed.sheet, labels)),
-                method_spans: Some(parsed.method_spans),
+                sheet_labels: Some((parsed, labels)),
                 error: Some(msg),
             }
         }
@@ -143,5 +131,22 @@ mod tests {
             !msg.contains('\u{1b}'),
             "expected no ANSI escapes, got: {msg}"
         );
+    }
+
+    #[test]
+    fn build_sheet_cycle_names_both_relationships_bindings_in_the_backtrace() {
+        // Two relationships forming an algebraic loop with no external source for
+        // either cell: `x` needs `y` and `y` needs `x`, so `propagate` can't pick a
+        // valid method assignment and returns a multi-span `Error::Cycle` backtrace
+        // naming both bindings.
+        let source = "sheet s { cell x: i32 = 0; cell y: i32 = 0; \
+            relationship { x := y + 1i32; } relationship { y := x + 1i32; } }";
+        let outcome = build_sheet(source, "test.adm2", &Renderer::plain());
+        assert!(
+            outcome.sheet_labels.is_some(),
+            "sheet should still be built after a propagate error"
+        );
+        let msg = outcome.error.expect("expected a cycle error message");
+        assert!(msg.contains("x :=") && msg.contains("y :="), "{msg}");
     }
 }

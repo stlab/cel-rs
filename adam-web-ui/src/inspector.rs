@@ -1,9 +1,9 @@
 //! [`SheetInspector`] — a live, editable list of a sheet's cells with a write form.
 
+use adam_lang::ParsedSheet;
 use adam_rs::{CellId, FilterViolation, Sheet};
 use dioxus::prelude::*;
 
-use crate::build::MethodSpans;
 use crate::labels::{Labels, Renderer, format_adam_error, format_rounded};
 use crate::spectrum::{
     SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpHelpText, SpNumberfield, SpSlider,
@@ -262,38 +262,38 @@ fn clamped_away(typed: &str, actual: &str) -> bool {
 }
 
 /// The source context needed to format an evaluation error into a rustc-style diagnostic:
-/// the current source text and name, plus the relationship-method spans that resolve an
-/// [`adam_rs::ErrorLocation::Method`] back to its declaration site.
+/// the current source text and name, plus the parsed sheet whose span tables resolve an
+/// `adam_rs::Error`'s sites back to their declaration locations.
 #[derive(Clone, Copy)]
 struct ErrorContext {
     source_text: Memo<String>,
     source_name: Memo<String>,
-    method_spans: Signal<MethodSpans>,
+    parsed: Signal<ParsedSheet>,
 }
 
-/// Parses `val` for `id` via its `Labels` metadata, writes it to `sheet`, and propagates the
+/// Parses `val` for `id` via its `Labels` metadata, writes it to `parsed`, and propagates the
 /// sheet's constraints, updating `has_error` and reporting any error — or, on success, any
 /// currently-violated filter — to `crate::diagnostics`.
 ///
 /// - Postcondition: `has_error` is `true` on parse or propagation failure, or when a range
 ///   filter clamped `val` away from what was typed (see [`clamped_away`]); `false` otherwise.
 fn write_and_propagate(
-    mut sheet: Signal<Sheet>,
+    mut parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
     id: CellId,
     val: &str,
     mut has_error: Signal<bool>,
     errors: ErrorContext,
 ) {
-    let mut sheet_w = sheet.write();
+    let mut parsed_w = parsed.write();
     let labels_r = labels.read();
     let Some(meta) = labels_r.cells.get(&id) else {
         return;
     };
-    let write_result = (meta.write_str)(&mut sheet_w, val);
+    let write_result = (meta.write_str)(&mut parsed_w, val);
     drop(labels_r);
     let propagate_result = match write_result {
-        Ok(()) => sheet_w.propagate(),
+        Ok(()) => parsed_w.propagate(),
         Err(e) => Err(e),
     };
     match propagate_result {
@@ -302,10 +302,10 @@ fn write_and_propagate(
             let clamped = labels_r
                 .cells
                 .get(&id)
-                .is_some_and(|m| clamped_away(val, &(m.display)(&sheet_w)));
+                .is_some_and(|m| clamped_away(val, &(m.display)(&parsed_w)));
             has_error.set(clamped);
-            for violated_id in sheet_w.filter_violated_cells().collect::<Vec<_>>() {
-                let Some(violation) = sheet_w.filter_violation(violated_id) else {
+            for violated_id in parsed_w.filter_violated_cells().collect::<Vec<_>>() {
+                let Some(violation) = parsed_w.filter_violation(violated_id) else {
                     continue;
                 };
                 let label = labels_r
@@ -317,10 +317,15 @@ fn write_and_propagate(
             }
         }
         Err(e) => {
+            // Drop the write guard before reading `errors.parsed` (the same signal) again
+            // below — `format_adam_error` needs `&ParsedSheet` to locate `e`'s sites, and
+            // the write guard and a fresh read both borrowing the same signal at once would
+            // panic.
+            drop(parsed_w);
             has_error.set(true);
             crate::diagnostics::report_error(&format_adam_error(
                 &e,
-                &errors.method_spans.read(),
+                &errors.parsed.read(),
                 &errors.source_text.read(),
                 &errors.source_name.read(),
                 &Renderer::styled(),
@@ -341,14 +346,13 @@ fn write_and_propagate(
 /// syncs back to the computed value on blur, keeping non-edited cells up to date.
 #[component]
 pub fn SheetInspector(
-    sheet: Signal<Sheet>,
+    parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
-    method_spans: Signal<MethodSpans>,
     source_text: Memo<String>,
     source_name: Memo<String>,
 ) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
-    let output_status = use_memo(move || compute_output_status(&sheet.read()));
+    let output_status = use_memo(move || compute_output_status(&parsed.read()));
 
     rsx! {
         div {
@@ -356,7 +360,7 @@ pub fn SheetInspector(
             SpHeading { "Cells" }
             SpDivider {}
             for id in ids {
-                CellRow { key: "{id:?}", id, sheet, labels, method_spans, source_text, source_name, output_status }
+                CellRow { key: "{id:?}", id, parsed, labels, source_text, source_name, output_status }
             }
         }
     }
@@ -365,9 +369,8 @@ pub fn SheetInspector(
 #[component]
 fn CellRow(
     id: CellId,
-    sheet: Signal<Sheet>,
+    parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
-    method_spans: Signal<MethodSpans>,
     source_text: Memo<String>,
     source_name: Memo<String>,
     output_status: Memo<OutputStatus>,
@@ -382,7 +385,7 @@ fn CellRow(
     });
 
     let value = use_memo(move || {
-        let s = sheet.read();
+        let s = parsed.read();
         let l = labels.read();
         l.cells
             .get(&id)
@@ -414,7 +417,7 @@ fn CellRow(
             .cells
             .get(&id)
             .and_then(|m| m.range.as_ref())
-            .map(|f| f(&sheet.read()))
+            .map(|f| f(&parsed.read()))
     });
 
     let is_integer = use_memo(move || {
@@ -426,7 +429,7 @@ fn CellRow(
             .unwrap_or(false)
     });
 
-    let forced = use_memo(move || sheet.read().is_forced(id));
+    let forced = use_memo(move || parsed.read().is_forced(id));
 
     let mut input = use_signal(|| value.peek().clone());
     let mut is_focused = use_signal(|| false);
@@ -435,7 +438,7 @@ fn CellRow(
     let errors = ErrorContext {
         source_text,
         source_name,
-        method_spans,
+        parsed,
     };
 
     let flags =
@@ -456,7 +459,7 @@ fn CellRow(
     // so it needs the full message (filter violation or generic fallback), not just a
     // requirement name.
     let slider_message = use_memo(move || {
-        slider_invalid_message(id, &label.read(), &sheet.read(), &output_status.read())
+        slider_invalid_message(id, &label.read(), &parsed.read(), &output_status.read())
     });
 
     // Sync input to the computed value whenever it changes, but not while the user
@@ -507,7 +510,7 @@ fn CellRow(
                                     ));
                                     let Ok(val) = eval.recv::<String>().await else { return; };
                                     input.set(val.clone());
-                                    write_and_propagate(sheet, labels, id, &val, has_error, errors);
+                                    write_and_propagate(parsed, labels, id, &val, has_error, errors);
                                 });
                             },
                             onfocus: move |_| is_focused.set(true),
@@ -545,7 +548,7 @@ fn CellRow(
                     disabled: flags.read().disabled,
                     onclick: move |_| {
                         let next = toggled_bool_value(&value.peek());
-                        write_and_propagate(sheet, labels, id, next, has_error, errors);
+                        write_and_propagate(parsed, labels, id, next, has_error, errors);
                         // `sp-checkbox` toggles its own shadow-DOM `checked` state
                         // natively in response to the click, before this handler runs
                         // and independent of the `checked` prop below. If the write above
@@ -642,7 +645,7 @@ fn CellRow(
                                     return;
                                 }
                                 input.set(val.to_string());
-                                write_and_propagate(sheet, labels, id, val, has_error, errors);
+                                write_and_propagate(parsed, labels, id, val, has_error, errors);
                             });
                         },
                         onfocus: move |_| is_focused.set(true),
@@ -690,7 +693,7 @@ fn CellRow(
                                     return;
                                 }
                                 input.set(val.clone());
-                                write_and_propagate(sheet, labels, id, &val, has_error, errors);
+                                write_and_propagate(parsed, labels, id, &val, has_error, errors);
                             });
                         },
                         onfocus: move |_| is_focused.set(true),
