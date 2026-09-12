@@ -80,6 +80,53 @@ impl std::fmt::Debug for ParsedSheet {
     }
 }
 
+impl ParsedSheet {
+    /// Resolves each of `e`'s `ErrorSite`s to a source span and a human label, primary first.
+    ///
+    /// Sites whose span is not recorded are skipped, so the result may be shorter than
+    /// `e.sites()`; empty when none resolves (the caller then falls back to `Display`).
+    ///
+    /// - Complexity: O(s) in the number of sites.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use adam_lang::{AdamParser, TypeRegistry};
+    /// use cel_parser::OpLookup;
+    ///
+    /// let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+    /// let mut parsed = parser
+    ///     .parse_str("sheet s { cell x: i32 = 0; cell y: i32 = 0; relationship { x := y + 1; } }")
+    ///     .unwrap();
+    /// if let Err(e) = parsed.propagate() {
+    ///     let located = parsed.locate_error(&e);
+    ///     assert!(located.is_empty() || !located[0].1.is_empty());
+    /// }
+    /// ```
+    pub fn locate_error(&self, e: &adam_rs::Error) -> Vec<(SourceSpan, String)> {
+        let by_id: HashMap<CellId, String> = self
+            .cell_names
+            .iter()
+            .map(|(n, (id, _))| (*id, n.clone()))
+            .collect();
+        let name = |id: CellId| by_id.get(&id).cloned();
+        let mut out = Vec::new();
+        for (i, site) in e.sites().iter().enumerate() {
+            let span = match site {
+                ErrorSite::Method(r, idx) => self.method_spans.get(&(*r, *idx)).copied(),
+                ErrorSite::Relationship(r) => self.relationship_spans.get(r).copied(),
+                ErrorSite::Cell(c) => self.cell_spans.get(c).copied(),
+                ErrorSite::MethodIndex(_) => None,
+                _ => None,
+            };
+            if let Some(span) = span {
+                out.push((span, crate::error_labels::site_label(e, i, &name)));
+            }
+        }
+        out
+    }
+}
+
 impl std::ops::Deref for ParsedSheet {
     type Target = Sheet;
 
@@ -2289,6 +2336,26 @@ mod tests {
         for (_, (id, _)) in &parsed.cell_names {
             assert!(parsed.cell_spans.contains_key(id));
         }
+    }
+
+    #[test]
+    fn locate_error_resolves_a_cycle_to_multiple_ordered_spans() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let mut parsed = parser
+            .parse_str(
+                "sheet s { cell x: i32 = 0; cell y: i32 = 0; relationship { x := y + 1i32; } \
+                 relationship { y := x + 1i32; } }",
+            )
+            .unwrap();
+        let err = parsed.propagate().unwrap_err();
+        assert!(matches!(err, adam_rs::Error::Cycle { .. }));
+        let located = parsed.locate_error(&err);
+        // both relationship blocks resolve to spans
+        let rel_spans = located.len();
+        assert!(
+            rel_spans >= 2,
+            "expected >=2 spans, got {rel_spans}: {located:?}"
+        );
     }
 
     #[test]
