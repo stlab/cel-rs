@@ -304,6 +304,10 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
 /// `Display` message; exactly one renders a single-caret diagnostic; two or more render
 /// a multi-span backtrace (e.g. every relationship binding in a cycle), primary site
 /// first.
+///
+/// - Complexity: O(n) in the length of `source`, plus O(s) in the number of `e`'s sites —
+///   `ParsedSheet::locate_error` and, on the multi-span path, `cel_parser::format_multi_span`
+///   both re-scan `source` to render the annotated snippet.
 pub fn format_adam_error(
     e: &Error,
     parsed: &adam_lang::ParsedSheet,

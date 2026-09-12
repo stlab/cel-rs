@@ -25,6 +25,30 @@ fn empty_parsed_sheet() -> ParsedSheet {
         .expect("the empty sheet source always parses")
 }
 
+/// The example [`App`] loads on launch, absent any other selection.
+///
+/// Named explicitly rather than left to `available_examples().first()`'s alphabetical order:
+/// a purely alphabetical pick lets any future example hijack the launch default merely by
+/// having a filename that happens to sort first (as `cycle.adm2` — an intentionally-broken
+/// demonstration of the multi-span cycle diagnostic — otherwise would, sorting before every
+/// other bundled example). `diamond` is a normal, fully-working example, matching this
+/// project's existing default before `cycle.adm2` was added.
+const DEFAULT_EXAMPLE_NAME: &str = "diamond";
+
+/// Chooses which of `names` (`available_examples()`'s sorted output) [`App`] should load on
+/// launch: [`DEFAULT_EXAMPLE_NAME`] when it's present among `names`, else `names`'s
+/// alphabetically-first entry, so a stripped-down build missing the designated default still
+/// launches into *something* rather than an empty sheet.
+///
+/// - Postcondition: returns `String::new()` only when `names` is empty.
+fn pick_default_example_name(names: &[String]) -> String {
+    if names.iter().any(|n| n == DEFAULT_EXAMPLE_NAME) {
+        DEFAULT_EXAMPLE_NAME.to_string()
+    } else {
+        names.first().cloned().unwrap_or_default()
+    }
+}
+
 /// Root component: Spectrum theme wrapper with an examples picker, the graph, and
 /// the SheetInspector filling the viewport. `begin` ships with several example
 /// property models (`begin/examples/*.adm2` — see
@@ -55,7 +79,7 @@ pub fn App() -> Element {
         responder.respond(response);
     });
 
-    let initial_example_name = available_examples().first().cloned().unwrap_or_default();
+    let initial_example_name = pick_default_example_name(&available_examples());
     let (initial_parsed, initial_labels, initial_active_source) =
         load_example(&initial_example_name);
     let parsed = use_signal(|| initial_parsed);
@@ -756,13 +780,34 @@ mod tests {
 
     #[test]
     fn load_example_unknown_name_falls_back_to_empty_sheet() {
-        let (sheet, labels, active) = load_example("does_not_exist");
-        assert_eq!(sheet.cells().count(), 0);
+        let (parsed, labels, active) = load_example("does_not_exist");
+        assert_eq!(parsed.cells().count(), 0);
         assert_eq!(labels.cells.len(), 0);
         assert_eq!(
             active.name, "does_not_exist",
             "name must be preserved on failure so hot-reload keeps targeting the right file"
         );
+    }
+
+    #[test]
+    fn pick_default_example_name_prefers_the_designated_default_when_present() {
+        let names = vec![
+            "cycle".to_string(),
+            "diamond".to_string(),
+            "toy_example".to_string(),
+        ];
+        assert_eq!(pick_default_example_name(&names), "diamond");
+    }
+
+    #[test]
+    fn pick_default_example_name_falls_back_to_the_first_name_when_default_absent() {
+        let names = vec!["cycle".to_string(), "toy_example".to_string()];
+        assert_eq!(pick_default_example_name(&names), "cycle");
+    }
+
+    #[test]
+    fn pick_default_example_name_is_empty_when_names_is_empty() {
+        assert_eq!(pick_default_example_name(&[]), "");
     }
 
     #[test]

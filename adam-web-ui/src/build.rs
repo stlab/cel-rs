@@ -1,4 +1,4 @@
-//! Parses adam-lang source into a live [`adam_rs::Sheet`], formatting any failure as a
+//! Parses adam-lang source into a live [`adam_lang::ParsedSheet`], formatting any failure as a
 //! diagnostic instead of a bare error.
 
 use crate::labels::{Labels, Renderer, format_adam_error, labels_from_cell_names};
@@ -11,7 +11,7 @@ use adam_lang::{AdamParser, ParsedSheet, TypeRegistry};
 /// the formatted error, matching how [`crate::SheetInspector`] already tolerates
 /// propagate failures during cell edits.
 pub struct BuildOutcome {
-    /// The built sheet and its UI labels, if parsing succeeded.
+    /// The built [`ParsedSheet`] and its UI labels, if parsing succeeded.
     pub sheet_labels: Option<(ParsedSheet, Labels)>,
     /// A formatted rustc-style diagnostic, if parsing or propagation failed.
     pub error: Option<String>,
