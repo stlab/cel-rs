@@ -58,23 +58,18 @@ impl AdamAstParser {
     /// Recovery is reliable for syntax errors adam-lang's own grammar detects directly (malformed
     /// `cell` declarations; `relationship`/`conditional`/`binding` structure outside their CEL
     /// expression bodies, including a malformed `type_expr`'s own dangling `(`/`)`) and for CEL
-    /// expression errors that don't leave an unbalanced delimiter of a kind CEL also uses for its
-    /// own internal grouping. It is **not** guaranteed when a CEL expression's failure leaves a
-    /// dangling, unmatched delimiter of a kind CEL reuses for its own internal structure — e.g. an
-    /// `if`/`else` expression's braces, which are the same `Delimiter::Brace` kind adam-lang uses
-    /// for its own `relationship`/`conditional` blocks (`if a { }` is one such case), or a
-    /// tuple/group literal's parens, the same `Delimiter::Parenthesis` kind `type_expr` uses
-    /// (`(+)` is one such case). In that narrower case recovery may abort the entire parse
-    /// (returning `Err`) rather than isolating the one malformed item; see
-    /// `TokenCursor::skip_to_recovery_point`'s doc comment for why a kind-based fix can't close
-    /// this in general, and the tracking issue for the general fix.
+    /// expression errors, including one that leaves a dangling, unmatched delimiter of a kind CEL
+    /// reuses for its own internal grouping — e.g. an `if`/`else` expression's braces, the same
+    /// `Delimiter::Brace` kind adam-lang uses for its own `relationship`/`conditional` blocks
+    /// (`if a { }` is one such case), or a tuple/group literal's or call's parens, the same
+    /// `Delimiter::Parenthesis` kind `type_expr` uses (`(+)` is one such case): see
+    /// `TokenCursor::absorb_unbalanced_delimiters`.
     ///
     /// # Errors
     ///
     /// Returns `Err` for structural errors outside any sheet item (e.g. a missing `sheet`
     /// keyword, missing sheet name, missing top-level braces, or trailing tokens after the
-    /// sheet closes) — these can't be attributed to a single recoverable item. Also returns `Err`
-    /// in the known-limitation case described above.
+    /// sheet closes) — these can't be attributed to a single recoverable item.
     pub fn parse_str(&mut self, source: &str) -> Result<ast::Sheet> {
         use std::str::FromStr;
         let stream = proc_macro2::TokenStream::from_str(source)
@@ -602,6 +597,7 @@ impl AdamAstParser {
         self.cel.set_lex_tokens(tokens);
         let result = self.cel.parse_expression_ast();
         cursor.set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
+        cursor.absorb_unbalanced_delimiters(self.cel.unbalanced_delimiter_count());
         result
     }
 }
@@ -1204,113 +1200,86 @@ mod tests {
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
-    /// Documents a KNOWN, accepted limitation of coarse error recovery, *reintroduced* by giving
-    /// `Delimiter::Parenthesis` the same depth-tracking treatment `Delimiter::Brace`/
-    /// `Delimiter::Bracket` already have in `skip_to_recovery_point`. That change is required so a
-    /// malformed `type_expr`'s own dangling paren unwinds `TokenCursor::depth` correctly (see
-    /// `malformed_tuple_type_recovers_at_the_next_sheet_item`) — `type_expr` is the first
-    /// adam-lang-grammar production to use parens, so its own unmatched `(`/`)` must be tracked
-    /// exactly like a malformed `relationship`/`conditional` block's brace. Previously this
-    /// exact scenario recovered cleanly: `Delimiter::Parenthesis` was deliberately treated as
-    /// depth-neutral during recovery, safe *only* because CEL owned every paren back then, so a
-    /// dangling one could never be mistaken for an adam-lang-tracked one. Now that `type_expr` also
-    /// uses parens at the adam-lang-grammar level, `skip_to_recovery_point` can no longer tell "a
-    /// stray paren CEL left dangling" apart from "a real adam-lang-tracked paren" by delimiter kind
-    /// alone — the same ambiguity `Delimiter::Brace` already has (see
-    /// `recovery_known_limitation_if_expr_dangling_brace_aborts_whole_parse`). A malformed CEL
+    /// Regression test for <https://github.com/stlab/cel-rs/issues/43>: a malformed CEL
     /// expression like `(+)` causes the embedded CEL sub-parser to consume the opening `(` (via
-    /// `is_tuple_or_group`) but fail before consuming the matching `)`, since it never went through
-    /// `TokenCursor` (see `TokenCursor::depth`'s own docs); that leftover, untracked `)` is now
-    /// mistaken by `skip_to_recovery_point` for the enclosing `relationship`'s own paren-tracked
-    /// nesting closing, mis-stopping recovery one delimiter early and aborting the whole parse with
-    /// `Err` rather than isolating just this one malformed item. Fixing this in general requires
-    /// `cel_parser`'s `Parser<C>` to report back exactly what it left unbalanced on a failed parse —
-    /// out of scope here; see the tracking issue for the general fix:
-    /// <https://github.com/stlab/cel-rs/issues/43>.
+    /// `is_tuple_or_group`) but fail before consuming the matching `)`, since it never went
+    /// through `TokenCursor` (see `TokenCursor::depth`'s own docs). Previously this dangling `)`
+    /// was indistinguishable, by delimiter kind alone, from the enclosing `relationship`'s own
+    /// paren-tracked nesting, so `skip_to_recovery_point` mis-stopped one delimiter early and
+    /// aborted the whole parse with `Err` instead of isolating just this one malformed item. Now
+    /// `cel_parser::Parser::unbalanced_delimiter_count` reports the dangling `)` back to
+    /// `TokenCursor::absorb_unbalanced_delimiters`, so recovery correctly unwinds through it and
+    /// isolates just the malformed `relationship` item.
     #[test]
-    fn recovery_known_limitation_cel_dangling_paren_aborts_whole_parse() {
-        let result = AdamAstParser::new().parse_str(
-            r#"
+    fn recovery_cel_dangling_paren_recovers_at_sheet_item_level() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
                 sheet s {
                     cell good_before: i32 = 1;
                     relationship { b := (+); }
                     cell good_after: i32 = 2;
                 }
             "#,
-        );
-        assert!(
-            result.is_err(),
-            "expected the whole parse to abort with Err (known limitation); got {result:?}"
-        );
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
-    /// Documents a KNOWN, accepted limitation of coarse error recovery — this test is not
-    /// "passing by accident"; it pins down today's actual (still-buggy) behavior so a future fix
-    /// has a concrete regression test to flip from "documents the bug" to "documents the fix."
-    ///
-    /// Like `recovery_known_limitation_cel_dangling_paren_aborts_whole_parse` (a dangling `)` left
-    /// by a failed CEL sub-expression), a dangling `}` left by a failed CEL `if`-expression cannot
-    /// be fixed by the same kind-based approach: `is_if_expression` consumes the then-branch's
-    /// opening `{` directly (bypassing `TokenCursor`, exactly like the paren case) but fails
-    /// before consuming the matching `}` when the then-branch itself fails to parse (here, an
-    /// empty `{ }`). Because CEL's `if`/`else` grammar reuses `Delimiter::Brace` — the same kind
-    /// adam-lang's own `relationship`/`conditional` blocks use — `skip_to_recovery_point`
-    /// cannot tell "a stray brace CEL left dangling" apart from "a real adam-lang-tracked brace" by
-    /// delimiter kind alone (`Delimiter::Parenthesis` now shares this exact ambiguity too, since
-    /// `type_expr` started using parens at the adam-lang-grammar level; only `Delimiter::None`,
-    /// never used by adam-lang's own grammar, remains safely depth-neutral). The stray `}` here is
-    /// mistaken for the `relationship`'s own closing brace, so recovery stops one brace early and
-    /// the whole parse aborts with `Err` instead of isolating just this one item.
-    ///
-    /// Fixing this in general requires `cel_parser`'s `Parser<C>` to report back exactly what
-    /// delimiters it left unbalanced on a failed parse — a larger, cross-crate API change out of
-    /// scope for this recovery feature. See the tracking issue for the general fix:
-    /// <https://github.com/stlab/cel-rs/issues/43>.
+    /// Regression test for <https://github.com/stlab/cel-rs/issues/43>: a dangling `}` left by a
+    /// failed CEL `if`-expression. `is_if_expression` consumes the then-branch's opening `{`
+    /// directly (bypassing `TokenCursor`, exactly like the paren case above) but fails before
+    /// consuming the matching `}` when the then-branch itself fails to parse (here, an empty
+    /// `{ }`). Because CEL's `if`/`else` grammar reuses `Delimiter::Brace` — the same kind
+    /// adam-lang's own `relationship`/`conditional` blocks use — this dangling `}` was previously
+    /// mistaken for the `relationship`'s own closing brace, one delimiter early. Now
+    /// `TokenCursor::absorb_unbalanced_delimiters` accounts for it, so recovery isolates just the
+    /// malformed `relationship` item.
     #[test]
-    fn recovery_known_limitation_if_expr_dangling_brace_aborts_whole_parse() {
-        let result = AdamAstParser::new().parse_str(
-            r#"
+    fn recovery_if_expr_dangling_brace_recovers_at_sheet_item_level() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
                 sheet s {
                     cell good_before: i32 = 1;
                     relationship { b := if a { }; }
                     cell good_after: i32 = 2;
                 }
             "#,
-        );
-        assert!(
-            result.is_err(),
-            "expected the whole parse to abort with Err (known limitation); got {result:?}"
-        );
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
-    /// A variant of the same known limitation (see
-    /// `recovery_known_limitation_if_expr_dangling_brace_aborts_whole_parse`): here the CEL
+    /// A variant of `recovery_if_expr_dangling_brace_recovers_at_sheet_item_level`: here the CEL
     /// sub-expression fails on a bare `+` (no valid expression follows it), which the failed
     /// `is_or_expression` call doesn't consume — so the very next token `skip_to_recovery_point`
     /// sees is a keyword-shaped identifier (`cell`) written just after it. Because that
     /// identifier is encountered while `depth` is still elevated (still inside the
-    /// `relationship`'s own brace, not yet unwound), the `at_or_below_target` guard on
-    /// the `cell`/`relationship`/`conditional` stopping check doesn't fire for it, so it's
-    /// swallowed as ordinary garbage rather than treated as a boundary.
-    ///
-    /// This does not corrupt the result or panic, and it does not silently drop a *subsequent,
-    /// well-formed* sheet item either: the swallow only ever consumes tokens up to the next real
-    /// adam-lang-tracked brace, at which point recovery hits the exact same dangling-brace
-    /// mis-stop as the sibling test above and the whole parse aborts with `Err` — never `Ok`
-    /// with a gap. Pinned here because the failure path differs (garbage-swallow before the
-    /// mis-stop, rather than mis-stop directly), even though the externally observable outcome
-    /// is the same accepted limitation tracked in
-    /// <https://github.com/stlab/cel-rs/issues/43>.
+    /// `relationship`'s own brace, not yet unwound, plus the dangling brace's now-absorbed depth),
+    /// the `at_or_below_target` guard on the `cell`/`relationship`/`conditional` stopping check
+    /// doesn't fire for it, so it's swallowed as ordinary garbage rather than treated as a
+    /// boundary — recovery then continues past it and still isolates just the malformed
+    /// `relationship` item once it reaches the (now correctly tracked) dangling `}`.
     #[test]
-    fn recovery_known_limitation_keyword_shaped_garbage_still_aborts_cleanly() {
-        let result = AdamAstParser::new().parse_str(
-            "sheet s { relationship { b := if a { + cell good: i32 = 1; }; } cell trailing: i32 = 2; }",
-        );
-        assert!(
-            result.is_err(),
-            "expected the whole parse to abort with Err (known limitation), not a corrupted \
-             Ok result; got {result:?}"
-        );
+    fn recovery_keyword_shaped_garbage_inside_dangling_brace_recovers_cleanly() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                "sheet s { relationship { b := if a { + cell good: i32 = 1; }; } cell trailing: i32 = 2; }",
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 2);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Cell(_)));
     }
 
     #[test]
