@@ -6,6 +6,7 @@
 
 use annotate_snippets::{AnnotationKind, Group, Level, Renderer, Snippet};
 use proc_macro2::LineColumn;
+use std::str::FromStr;
 
 /// Source region as start/end line and column.
 ///
@@ -238,25 +239,95 @@ pub fn format_multi_span(
     renderer.render(&report)
 }
 
+/// Returns the closing delimiter character that pairs with opening bracket `open`.
+///
+/// - Precondition: `open` is one of `(`, `[`, `{`.
+fn matching_close(open: char) -> char {
+    match open {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        _ => {
+            debug_assert!(false, "`open` must be one of `(`, `[`, `{{`");
+            open
+        }
+    }
+}
+
+/// Finds the innermost bracket delimiter still open at the point where an unmatched or
+/// mismatched closing delimiter appears at `close_span` in `source`.
+///
+/// `close_span` is the first lex failure in `source`, so everything before it lexed as a
+/// self-contained run of valid tokens: literals and comments already closed, and nested
+/// bracket groups already balanced. The only way that prefix can itself fail to lex on its
+/// own is an unclosed group, and `proc_macro2` reports the position of its innermost
+/// still-open delimiter — exactly the opener `close_span`'s delimiter failed to match.
+///
+/// Returns `None` when the prefix lexes cleanly (no opener at all to match).
+///
+/// - Complexity: O(n) in `source`'s length (re-lexes the prefix before `close_span`).
+fn innermost_open_delimiter(
+    source: &str,
+    close_span: proc_macro2::Span,
+) -> Option<(char, proc_macro2::Span)> {
+    let close_start = span_to_byte_range(source, SourceSpan::from_proc_macro2(close_span)).start;
+    let prefix_err = proc_macro2::TokenStream::from_str(&source[..close_start]).err()?;
+    let open_span = prefix_err.span();
+    let open_start = span_to_byte_range(source, SourceSpan::from_proc_macro2(open_span)).start;
+    match source[open_start..].chars().next()? {
+        ch @ ('(' | '[' | '{') => Some((ch, open_span)),
+        _ => None,
+    }
+}
+
 /// Classifies a lex failure by inspecting the character at `span`'s start in `source`.
+///
+/// Returns the message plus an optional secondary label: for a closing delimiter that
+/// doesn't match (or has no) currently-open opener, the secondary points back at the
+/// unmatched opener when one exists.
 ///
 /// Returns `None` when the span doesn't resolve to a character (e.g. it points past the end of
 /// `source`), so the caller can fall back to a generic message.
-fn lex_failure_message(source: &str, span: proc_macro2::Span) -> Option<String> {
+fn lex_failure_message(
+    source: &str,
+    span: proc_macro2::Span,
+) -> Option<(String, Option<SpanLabel>)> {
     let byte_range = span_to_byte_range(source, SourceSpan::from_proc_macro2(span));
     let rest = &source[byte_range.start..];
     Some(match rest.chars().next()? {
-        '(' => "unclosed delimiter `(`: expected a matching `)`".to_string(),
-        '[' => "unclosed delimiter `[`: expected a matching `]`".to_string(),
-        '{' => "unclosed delimiter `{`: expected a matching `}`".to_string(),
-        ')' => "unexpected closing delimiter `)`".to_string(),
-        ']' => "unexpected closing delimiter `]`".to_string(),
-        '}' => "unexpected closing delimiter `}`".to_string(),
-        '"' => "unterminated string literal".to_string(),
-        '\'' => "invalid or unterminated character literal".to_string(),
-        '`' => "invalid character `` ` ``".to_string(),
-        '/' if rest.starts_with("/*") => "unterminated block comment".to_string(),
-        ch => format!("invalid character `{ch}`"),
+        '(' => (
+            "unclosed delimiter `(`: expected a matching `)`".to_string(),
+            None,
+        ),
+        '[' => (
+            "unclosed delimiter `[`: expected a matching `]`".to_string(),
+            None,
+        ),
+        '{' => (
+            "unclosed delimiter `{`: expected a matching `}`".to_string(),
+            None,
+        ),
+        ch @ (')' | ']' | '}') => match innermost_open_delimiter(source, span) {
+            Some((open_ch, open_span)) => (
+                format!(
+                    "mismatched closing delimiter: found `{ch}`, expected `{}`",
+                    matching_close(open_ch)
+                ),
+                Some(SpanLabel {
+                    span: SourceSpan::from_proc_macro2(open_span),
+                    label: format!("unclosed delimiter `{open_ch}`"),
+                }),
+            ),
+            None => (format!("unexpected closing delimiter `{ch}`"), None),
+        },
+        '"' => ("unterminated string literal".to_string(), None),
+        '\'' => (
+            "invalid or unterminated character literal".to_string(),
+            None,
+        ),
+        '`' => ("invalid character `` ` ``".to_string(), None),
+        '/' if rest.starts_with("/*") => ("unterminated block comment".to_string(), None),
+        ch => (format!("invalid character `{ch}`"), None),
     })
 }
 
@@ -499,8 +570,13 @@ impl ParseError {
     /// ```
     pub fn from_lex_error(source: &str, err: proc_macro2::LexError) -> Self {
         let span = err.span();
-        let message = lex_failure_message(source, span).unwrap_or_else(|| err.to_string());
-        ParseError::new(message, span)
+        match lex_failure_message(source, span) {
+            Some((message, Some(secondary))) => {
+                ParseError::new(message, span).with_secondary(vec![secondary])
+            }
+            Some((message, None)) => ParseError::new(message, span),
+            None => ParseError::new(err.to_string(), span),
+        }
     }
 
     /// Formats this error in rustc diagnostic style with source context.
@@ -818,11 +894,54 @@ mod tests {
     }
 
     #[test]
-    fn from_lex_error_mismatched_delimiter_reports_actual_closer() {
+    fn from_lex_error_mismatched_delimiter_names_found_and_expected() {
         let source = "(1 + 2]";
         let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
         let e = ParseError::from_lex_error(source, lex_err);
-        assert_eq!(e.message(), "unexpected closing delimiter `]`");
+        assert_eq!(
+            e.message(),
+            "mismatched closing delimiter: found `]`, expected `)`"
+        );
+        let out = e.format_rustc_style(source, "t.cel", 1, &Renderer::plain());
+        assert!(
+            out.contains("unclosed delimiter `(`"),
+            "expected a secondary annotation on the unclosed `(`:\n{out}"
+        );
+    }
+
+    #[test]
+    fn from_lex_error_mismatched_delimiter_issue_77_example() {
+        // From issue #77: the real problem is the unclosed `(`, not the `}` the lex error
+        // itself points at.
+        let source = "{a: (1 + 2}";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(
+            e.message(),
+            "mismatched closing delimiter: found `}`, expected `)`"
+        );
+        let out = e.format_rustc_style(source, "t.cel", 1, &Renderer::plain());
+        assert!(
+            out.contains("unclosed delimiter `(`"),
+            "expected a secondary annotation on the unclosed `(`:\n{out}"
+        );
+    }
+
+    #[test]
+    fn from_lex_error_mismatched_delimiter_reports_innermost_opener() {
+        // Innermost open delimiter is `{`, not the outer `[` or `(`.
+        let source = "([{1)]}";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(
+            e.message(),
+            "mismatched closing delimiter: found `)`, expected `}`"
+        );
+        let out = e.format_rustc_style(source, "t.cel", 1, &Renderer::plain());
+        assert!(
+            out.contains("unclosed delimiter `{`"),
+            "expected a secondary annotation on the unclosed `{{`:\n{out}"
+        );
     }
 
     #[test]
