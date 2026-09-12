@@ -379,6 +379,7 @@ pub struct ParseError {
     message: String,
     span: proc_macro2::Span,
     end_span: Option<proc_macro2::Span>,
+    secondary: Vec<SpanLabel>,
 }
 
 impl ParseError {
@@ -398,6 +399,7 @@ impl ParseError {
             message: message.into(),
             span,
             end_span: None,
+            secondary: Vec::new(),
         }
     }
 
@@ -429,6 +431,7 @@ impl ParseError {
             message: message.into(),
             span: start,
             end_span: Some(end),
+            secondary: Vec::new(),
         }
     }
 
@@ -451,6 +454,25 @@ impl ParseError {
     /// `None` for errors created with [`new`](Self::new).
     pub fn end_span(&self) -> Option<proc_macro2::Span> {
         self.end_span
+    }
+
+    /// Attaches secondary labelled spans, rendered as extra carets alongside the primary.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use proc_macro2::Span;
+    /// use cel_parser::{ParseError, SourceSpan, SpanLabel};
+    ///
+    /// let e = ParseError::new("bad", Span::call_site()).with_secondary(vec![SpanLabel {
+    ///     span: SourceSpan::new(1, 4, 1, 7),
+    ///     label: "also here".into(),
+    /// }]);
+    /// assert_eq!(e.message(), "bad");
+    /// ```
+    pub fn with_secondary(mut self, secondary: Vec<SpanLabel>) -> Self {
+        self.secondary = secondary;
+        self
     }
 
     /// Converts a lex failure (e.g. from `proc_macro2::TokenStream::from_str`) into a
@@ -512,6 +534,21 @@ impl ParseError {
             start: self.span.start(),
             end: self.end_span.unwrap_or(self.span).end(),
         };
+        if !self.secondary.is_empty() {
+            let mut labels = vec![SpanLabel {
+                span: source_span,
+                label: String::new(),
+            }];
+            labels.extend(self.secondary.iter().cloned());
+            return format_multi_span(
+                &self.message,
+                &labels,
+                source_code,
+                filename,
+                start_line,
+                renderer,
+            );
+        }
         let byte_range = span_to_byte_range(source_code, source_span);
         let report = [
             Group::with_title(Level::ERROR.primary_title(self.message.as_str())).element(
@@ -950,6 +987,28 @@ mod tests {
             &Renderer::plain(),
         );
         assert_eq!(output, "something went wrong");
+    }
+
+    #[test]
+    fn parse_error_with_secondary_renders_all_spans() {
+        let source = "aaa bbb";
+        let e = ParseError::new_range("bad", Span::call_site(), Span::call_site()).with_secondary(
+            vec![SpanLabel {
+                span: SourceSpan::new(1, 4, 1, 7),
+                label: "also here".into(),
+            }],
+        );
+        // primary span is call_site (line 1 col 0..0); secondary underlines "bbb".
+        let out = e.format_rustc_style(source, "t.cel", 1, &Renderer::plain());
+        assert!(out.contains("bad"), "{out}");
+        assert!(out.contains("also here"), "{out}");
+    }
+
+    #[test]
+    fn parse_error_without_secondary_renders_single_span_as_before() {
+        let e = ParseError::new("bad", Span::call_site());
+        let out = e.format_rustc_style("10 + 20 30", "t.cel", 1, &Renderer::plain());
+        assert!(out.contains("error: bad"), "{out}");
     }
 
     #[test]
