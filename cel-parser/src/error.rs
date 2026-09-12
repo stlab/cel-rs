@@ -188,6 +188,56 @@ pub(crate) fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Ra
     start_byte..end_byte
 }
 
+/// One labelled span in a multi-span diagnostic.
+#[derive(Clone, Debug)]
+pub struct SpanLabel {
+    /// The source region to underline.
+    pub span: SourceSpan,
+    /// The label printed beside the caret.
+    pub label: String,
+}
+
+/// Renders `title` with several labelled annotations over `source_code`, the first as the
+/// primary caret and the rest as secondary context, in rustc style.
+///
+/// - Precondition: `labels` is non-empty.
+/// - Complexity: O(n) in `source_code`'s length plus the number of labels.
+///
+/// # Examples
+///
+/// ```rust
+/// use annotate_snippets::Renderer;
+/// use cel_parser::{SourceSpan, SpanLabel, format_multi_span};
+///
+/// let labels = vec![SpanLabel { span: SourceSpan::new(1, 0, 1, 1), label: "here".into() }];
+/// let out = format_multi_span("oops", &labels, "x", "f.adm2", 1, &Renderer::plain());
+/// assert!(out.contains("oops"));
+/// ```
+pub fn format_multi_span(
+    title: &str,
+    labels: &[SpanLabel],
+    source_code: &str,
+    filename: &str,
+    start_line: u32,
+    renderer: &Renderer,
+) -> String {
+    debug_assert!(!labels.is_empty(), "`labels` must be non-empty");
+    let mut snippet = Snippet::source(source_code)
+        .path(filename)
+        .line_start(start_line as usize);
+    for (i, l) in labels.iter().enumerate() {
+        let range = span_to_byte_range(source_code, l.span);
+        let kind = if i == 0 {
+            AnnotationKind::Primary
+        } else {
+            AnnotationKind::Context
+        };
+        snippet = snippet.annotation(kind.span(range).label(l.label.as_str()));
+    }
+    let report = [Group::with_title(Level::ERROR.primary_title(title)).element(snippet)];
+    renderer.render(&report)
+}
+
 /// Classifies a lex failure by inspecting the character at `span`'s start in `source`.
 ///
 /// Returns `None` when the span doesn't resolve to a character (e.g. it points past the end of
@@ -900,6 +950,26 @@ mod tests {
             &Renderer::plain(),
         );
         assert_eq!(output, "something went wrong");
+    }
+
+    #[test]
+    fn format_multi_span_underlines_every_span_and_prints_labels() {
+        let source = "aaa bbb ccc";
+        let labels = vec![
+            SpanLabel {
+                span: SourceSpan::new(1, 0, 1, 3),
+                label: "first".into(),
+            },
+            SpanLabel {
+                span: SourceSpan::new(1, 8, 1, 11),
+                label: "third".into(),
+            },
+        ];
+        let out = format_multi_span("mismatch", &labels, source, "t.adm2", 1, &Renderer::plain());
+        assert!(out.contains("mismatch"), "{out}");
+        assert!(out.contains("first"), "{out}");
+        assert!(out.contains("third"), "{out}");
+        assert!(!out.contains('\u{1b}'), "plain renderer has no ANSI: {out}");
     }
 
     #[test]

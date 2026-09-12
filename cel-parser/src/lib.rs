@@ -103,7 +103,9 @@ pub mod parser_context;
 pub mod ty;
 
 pub use ast::{AstContext, ClosureParam, ClosureParamTypeExpr, Expr, ExprSpan, Literal, LogicalOp};
-pub use error::{CELError, FormatRustcStyle, ParseError, SourceSpan, SpanContext};
+pub use error::{
+    CELError, FormatRustcStyle, ParseError, SourceSpan, SpanContext, SpanLabel, format_multi_span,
+};
 pub use fmt::format_expr;
 pub use op_table::{OpLookup, OperandTypes, builtin_operand_types};
 pub use parser_context::{DynSegmentContext, ParserContext};
