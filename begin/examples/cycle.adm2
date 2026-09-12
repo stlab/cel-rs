@@ -1,0 +1,15 @@
+// Two relationships forming an algebraic loop with no external source for either cell:
+// `x` needs `y` and `y` needs `x`, so `propagate` can't pick a valid method assignment and
+// returns a multi-span `Error::Cycle` backtrace naming both bindings. Demonstrates the
+// Inspector's multi-span diagnostic rendering (see `adam_web_ui::format_adam_error`).
+sheet cycle {
+    cell x: i32 = 0;
+    cell y: i32 = 0;
+
+    relationship {
+        x := y + 1i32;
+    }
+    relationship {
+        y := x + 1i32;
+    }
+}
