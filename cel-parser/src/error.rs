@@ -505,9 +505,11 @@ impl ParseError {
 
     /// Formats this error in rustc diagnostic style with source context.
     ///
-    /// Identical contract to [`CELError::format_rustc_style`]; prefer calling
-    /// this directly on a `ParseError` rather than converting to `CELError`
-    /// first when you have the source text at hand.
+    /// Identical contract to [`CELError::format_rustc_style`] when no secondary spans are
+    /// attached; prefer calling this directly on a `ParseError` rather than converting to
+    /// `CELError` first when you have the source text at hand. When secondaries have been
+    /// added via [`with_secondary`](Self::with_secondary), renders a multi-span diagnostic
+    /// (the primary span plus one context caret per secondary) via [`format_multi_span`].
     ///
     /// # Examples
     ///
