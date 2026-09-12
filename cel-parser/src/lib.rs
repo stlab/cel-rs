@@ -437,6 +437,12 @@ pub struct Parser<C: ParserContext> {
     context: C,
     op_lookup: OpLookup,
     last_span: Span,
+    /// Net count of `Delimiter::Brace`/`Delimiter::Bracket`/`Delimiter::Parenthesis` tokens
+    /// consumed since the last [`set_tokens`](Self::set_tokens)/
+    /// [`set_lex_tokens`](Self::set_lex_tokens) call that remain unmatched: incremented for an
+    /// `OpenDelim`, decremented for a `CloseDelim`. See
+    /// [`unbalanced_delimiter_count`](Self::unbalanced_delimiter_count).
+    unbalanced_delimiters: i32,
 }
 
 /// A recursive descent parser that executes directly into a [`DynSegment`].
@@ -461,6 +467,7 @@ impl<C: ParserContext> Parser<C> {
             context: C::new_context(),
             op_lookup,
             last_span: Span::call_site(),
+            unbalanced_delimiters: 0,
         }
     }
 
@@ -472,6 +479,7 @@ impl<C: ParserContext> Parser<C> {
         self.tokens = Some(LexLexer::new(tokens).peekable());
         self.context = C::new_context();
         self.last_span = Span::call_site();
+        self.unbalanced_delimiters = 0;
     }
 
     /// Sets the token stream from an existing [`LexLexer`] iterator for inline expression parsing.
@@ -483,6 +491,30 @@ impl<C: ParserContext> Parser<C> {
         self.tokens = Some(tokens);
         self.context = C::new_context();
         self.last_span = Span::call_site();
+        self.unbalanced_delimiters = 0;
+    }
+
+    /// Returns the net number of opening delimiters this parser has consumed since the last
+    /// [`set_tokens`](Self::set_tokens)/[`set_lex_tokens`](Self::set_lex_tokens) call, that
+    /// remain unmatched by a corresponding closing delimiter.
+    ///
+    /// Always `0` after a successful top-level parse: every delimiter this grammar opens (an
+    /// `if`-expression's branch braces, a tuple/group literal's or call's parens), it also
+    /// closes. Positive after a parse that returned `Err` from partway through a production that
+    /// had already consumed one or more opening delimiters before failing — e.g. an
+    /// `if`-expression whose then-branch fails to parse consumes the branch's opening `{` before
+    /// erroring out, never reaching the matching `}`.
+    ///
+    /// An embedding caller that shares its own token stream with this parser (via
+    /// [`set_lex_tokens`](Self::set_lex_tokens)/[`take_lex_tokens`](Self::take_lex_tokens)), and
+    /// tracks its own nesting depth over that same stream, cannot otherwise tell a delimiter this
+    /// parser left dangling apart from one still genuinely open in the caller's own grammar,
+    /// since both use the same `Delimiter` kinds. Reading this count immediately after reclaiming
+    /// the stream — regardless of whether the parse succeeded or failed — and folding it into the
+    /// caller's own depth counter keeps that counter consistent with the physical nesting left
+    /// behind in the stream.
+    pub fn unbalanced_delimiter_count(&self) -> i32 {
+        self.unbalanced_delimiters
     }
 
     /// Parses one `expression` from the current token stream and returns the built context.
@@ -624,18 +656,35 @@ impl<C: ParserContext> Parser<C> {
 
     /// Advances past the current token, recording its span in `last_span`.
     ///
+    /// - Postcondition: [`unbalanced_delimiter_count`](Self::unbalanced_delimiter_count) is
+    ///   incremented if the consumed token is an `OpenDelim`, decremented if it is a
+    ///   `CloseDelim` (of `Delimiter::Brace`, `Delimiter::Bracket`, or `Delimiter::Parenthesis`;
+    ///   `Delimiter::None` never appears in a token stream this parser is given, since it only
+    ///   ever arises from `proc_macro2`'s macro-hygiene groups, not from parsing source text).
+    ///
     /// # Panics
     ///
     /// Panics if no token stream has been set or if there is no current token.
     fn advance(&mut self) {
         use lex_lexer::HasSpan;
-        self.last_span = self
+        let token = self
             .tokens
             .as_mut()
             .expect("tokens set")
             .next()
-            .expect("token required to advance")
-            .span();
+            .expect("token required to advance");
+        match &token {
+            Token::OpenDelim {
+                delimiter: Delimiter::Brace | Delimiter::Bracket | Delimiter::Parenthesis,
+                ..
+            } => self.unbalanced_delimiters += 1,
+            Token::CloseDelim {
+                delimiter: Delimiter::Brace | Delimiter::Bracket | Delimiter::Parenthesis,
+                ..
+            } => self.unbalanced_delimiters -= 1,
+            _ => {}
+        }
+        self.last_span = token.span();
     }
 
     /// Returns the span of the next token without consuming it, or `None` if exhausted.
@@ -1887,6 +1936,50 @@ mod tests {
         // The nested context has its own, independently-evaluated result.
         assert_eq!(nested.into_inner().call0::<i32>()?, 3);
         Ok(())
+    }
+
+    #[test]
+    fn unbalanced_delimiter_count_is_zero_before_any_parse() {
+        let parser = CELParser::new(OpLookup::new());
+        assert_eq!(parser.unbalanced_delimiter_count(), 0);
+    }
+
+    #[test]
+    fn unbalanced_delimiter_count_is_zero_after_a_successful_parse() {
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.parse_str("(1 + 2)").unwrap();
+        assert_eq!(parser.unbalanced_delimiter_count(), 0);
+    }
+
+    #[test]
+    fn unbalanced_delimiter_count_reports_a_brace_left_dangling_by_a_failed_if_expression() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = match parser.parse_str("if true { }") {
+            Err(e) => e,
+            Ok(_) => panic!("an empty then-branch must fail to parse"),
+        };
+        assert!(err.message().contains("then-branch"));
+        assert_eq!(parser.unbalanced_delimiter_count(), 1);
+    }
+
+    #[test]
+    fn unbalanced_delimiter_count_reports_a_paren_left_dangling_by_a_failed_tuple_literal() {
+        let mut parser = CELParser::new(OpLookup::new());
+        if parser.parse_str("(+)").is_ok() {
+            panic!("`+` alone cannot start an expression");
+        }
+        assert_eq!(parser.unbalanced_delimiter_count(), 1);
+    }
+
+    #[test]
+    fn unbalanced_delimiter_count_resets_when_a_new_parse_begins() {
+        let mut parser = CELParser::new(OpLookup::new());
+        if parser.parse_str("(+)").is_ok() {
+            panic!("`+` alone cannot start an expression");
+        }
+        assert_eq!(parser.unbalanced_delimiter_count(), 1);
+        parser.parse_str("1 + 2").unwrap();
+        assert_eq!(parser.unbalanced_delimiter_count(), 0);
     }
 
     #[test]
