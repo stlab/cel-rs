@@ -15,6 +15,7 @@ name = "adam-lang"
 version = "0.1.0"
 dependencies = [
  "adam-rs",
+ "annotate-snippets",
  "anyhow",
  "cel-parser",
  "cel-runtime",

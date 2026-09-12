@@ -885,6 +885,9 @@ impl AdamParser {
     /// - Postcondition: on success, `ctx.method_spans` gains one entry per parsed binding,
     ///   keyed by `(rel_id, binding_index)`, mapping to that binding's source span, and
     ///   `ctx.relationship_spans` gains one entry mapping `rel_id` to the whole block's span.
+    /// - Postcondition: on failure, the returned error's span covers the first binding it
+    ///   implicates (or the whole block, if none), with every other resolvable
+    ///   binding/cell attached as a secondary label (see `error_labels::site_label`).
     fn parse_relationship_decl(&mut self, ctx: &mut ParseContext) -> Result<RelationshipId> {
         let block_start = ctx.peek_span();
         ctx.is_keyword("relationship"); // consume
@@ -912,17 +915,43 @@ impl AdamParser {
                 Ok(rel_id)
             }
             Err(e) => {
-                // Minimal `ErrorLocation` → `ErrorSite` compile fix: single-span behavior,
-                // matching the pre-`ErrorSite` primary-location resolution. Upgraded to a
-                // multi-span diagnostic (secondary labels for every other resolvable site) in
-                // a later commit.
-                let (start, end) = match e.sites().first() {
-                    Some(ErrorSite::MethodIndex(i)) => {
-                        spans.get(*i).copied().unwrap_or((block_start, close_span))
-                    }
-                    _ => (block_start, close_span),
-                };
-                Err(ParseError::new_range(e.to_string(), start, end))
+                let by_id: HashMap<CellId, String> = ctx
+                    .cell_names
+                    .iter()
+                    .map(|(n, (id, _))| (*id, n.clone()))
+                    .collect();
+                let name = |id: CellId| by_id.get(&id).cloned();
+
+                // The primary site is the first binding this error implicates (if any); every
+                // other resolvable site (another binding, or a cell recorded so far) becomes a
+                // secondary label. Falls back to the whole block when no site resolves — e.g.
+                // `InvalidMethod` for an empty relationship body carries no sites at all.
+                let primary_idx = e.sites().iter().find_map(|s| match s {
+                    ErrorSite::MethodIndex(i) => Some(*i),
+                    _ => None,
+                });
+                let (start, end) = primary_idx
+                    .and_then(|i| spans.get(i).copied())
+                    .unwrap_or((block_start, close_span));
+                let secondary: Vec<cel_parser::SpanLabel> = e
+                    .sites()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, s)| {
+                        let sp = match s {
+                            ErrorSite::MethodIndex(idx) if Some(*idx) != primary_idx => spans
+                                .get(*idx)
+                                .map(|(st, en)| SourceSpan::from_proc_macro2_range(*st, *en)),
+                            ErrorSite::Cell(c) => ctx.cell_spans.get(c).copied(),
+                            _ => None,
+                        }?;
+                        Some(cel_parser::SpanLabel {
+                            span: sp,
+                            label: crate::error_labels::site_label(&e, i, &name),
+                        })
+                    })
+                    .collect();
+                Err(ParseError::new_range(e.to_string(), start, end).with_secondary(secondary))
             }
         }
     }
@@ -2356,6 +2385,21 @@ mod tests {
             rel_spans >= 2,
             "expected >=2 spans, got {rel_spans}: {located:?}"
         );
+    }
+
+    #[test]
+    fn duplicate_output_set_error_underlines_both_bindings() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let source =
+            "sheet s { cell a: i32 = 0; cell b: i32; relationship { b := a; b := a + 1i32; } }";
+        let err = parser.parse_str(source).unwrap_err();
+        let out =
+            err.format_rustc_style(source, "t.adm2", 1, &annotate_snippets::Renderer::plain());
+        // Primary caret on the later binding, secondary carets on the earlier binding and the
+        // shared output cell's own declaration.
+        assert!(out.contains("outputs"), "{out}"); // message text
+        assert!(out.contains("collides with this earlier method"), "{out}");
+        assert!(out.contains("shared output cell `b`"), "{out}");
     }
 
     #[test]
