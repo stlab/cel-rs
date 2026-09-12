@@ -82,6 +82,10 @@ pub enum SheetItem {
         /// A leading `///` doc comment immediately preceding this item, if recovered by
         /// [`crate::AdamAstParser`] before parsing failed.
         doc_comment: Option<String>,
+        /// A `//`/`/* */` comment on the same source line as this item's own last token, if
+        /// recovered by [`crate::trivia::attach_trivia`]. Distinct from `leading_comment`, which
+        /// precedes an item on its own line. See <https://github.com/stlab/cel-rs/issues/59>.
+        trailing_line_comment: Option<Comment>,
         /// Whether the gap before this item contained a blank line, if recovered by
         /// [`crate::trivia::attach_trivia`].
         blank_line_before: bool,
@@ -112,6 +116,22 @@ impl SheetItem {
             SheetItem::Error {
                 leading_comment, ..
             } => *leading_comment = Some(comment),
+        }
+    }
+
+    /// Sets a `//`/`/* */` comment recovered on the same source line as this item's own last
+    /// token. See <https://github.com/stlab/cel-rs/issues/59>.
+    pub(crate) fn set_trailing_line_comment(&mut self, comment: Comment) {
+        match self {
+            SheetItem::Cell(c) => c.trailing_line_comment = Some(comment),
+            SheetItem::Relationship(r) => r.trailing_line_comment = Some(comment),
+            SheetItem::Conditional(c) => c.trailing_line_comment = Some(comment),
+            SheetItem::Out(o) => o.trailing_line_comment = Some(comment),
+            SheetItem::Source(s) => s.trailing_line_comment = Some(comment),
+            SheetItem::Error {
+                trailing_line_comment,
+                ..
+            } => *trailing_line_comment = Some(comment),
         }
     }
 
@@ -215,6 +235,10 @@ pub struct CellDecl {
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
     /// [`crate::AdamAstParser`].
     pub doc_comment: Option<String>,
+    /// A `//`/`/* */` comment on the same source line as this declaration's own last token, if
+    /// recovered by [`crate::trivia::attach_trivia`]. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -249,6 +273,10 @@ pub struct SourceDecl {
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
     /// [`crate::AdamAstParser`].
     pub doc_comment: Option<String>,
+    /// A `//`/`/* */` comment on the same source line as this declaration's own last token, if
+    /// recovered by [`crate::trivia::attach_trivia`]. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -276,6 +304,10 @@ pub struct RelationshipDecl {
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
     /// [`crate::AdamAstParser`].
     pub doc_comment: Option<String>,
+    /// A `//`/`/* */` comment on the same source line as this declaration's own closing `}`, if
+    /// recovered. Distinct from `trailing_comment`, which precedes this declaration's own
+    /// closing `}` on an earlier line. See <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this declaration, if recovered.
     pub blank_line_before: bool,
     /// A trailing comment immediately preceding this declaration's own closing `}`, if
@@ -321,6 +353,10 @@ pub struct BindingDecl {
     /// A leading comment immediately preceding this binding, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
+    /// A `//`/`/* */` comment on the same source line as this binding's own last token, if
+    /// recovered by [`crate::trivia::attach_trivia`]. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this binding, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -354,6 +390,10 @@ pub struct OutDecl {
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
     /// [`crate::AdamAstParser`].
     pub doc_comment: Option<String>,
+    /// A `//`/`/* */` comment on the same source line as this declaration's own last token, if
+    /// recovered by [`crate::trivia::attach_trivia`]. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -395,6 +435,10 @@ pub struct RequirementDecl {
     /// A leading comment immediately preceding this requirement, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
+    /// A `//`/`/* */` comment on the same source line as this requirement's own last token, if
+    /// recovered by [`crate::trivia::attach_trivia`]. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this requirement, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -417,6 +461,10 @@ pub struct ConditionalDecl {
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
     /// [`crate::AdamAstParser`].
     pub doc_comment: Option<String>,
+    /// A `//`/`/* */` comment on the same source line as this declaration's own closing `}`, if
+    /// recovered. Distinct from `trailing_comment`, which precedes this declaration's own
+    /// closing `}` on an earlier line. See <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this declaration, if recovered.
     pub blank_line_before: bool,
     /// A trailing comment immediately preceding this declaration's own closing `}`, if
@@ -441,6 +489,10 @@ pub struct DefaultBranch {
     /// A trailing comment immediately preceding this branch's own closing `}`, if recovered.
     /// See <https://github.com/stlab/cel-rs/issues/52>.
     pub trailing_comment: Option<Comment>,
+    /// A `//`/`/* */` comment on the same source line as this branch's own closing `}` (between
+    /// it and the enclosing conditional's own closing `}`), if recovered. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this branch's own closing `}`, if recovered.
     pub blank_line_before_close: bool,
     /// The span of this branch's own opening `{`, used to recover trailing trivia when
@@ -469,6 +521,10 @@ pub struct ConditionalBranch {
     /// A leading comment immediately preceding this branch, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
+    /// A `//`/`/* */` comment on the same source line as this branch's own closing `}`, if
+    /// recovered. Distinct from `trailing_comment`, which precedes this branch's own closing
+    /// `}` on an earlier line. See <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this branch, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -509,6 +565,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         });
@@ -522,6 +579,7 @@ mod tests {
             bindings: Vec::new(),
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             trailing_comment: None,
             blank_line_before_close: false,
@@ -543,6 +601,7 @@ mod tests {
             default: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             trailing_comment: None,
             blank_line_before_close: false,
@@ -559,6 +618,7 @@ mod tests {
             span,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
         };
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
@@ -576,6 +636,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         });
@@ -595,6 +656,7 @@ mod tests {
             span,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
         };
         item.set_leading_comment(Comment::Line("hi".to_string()));
@@ -620,6 +682,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         });
@@ -645,6 +708,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         });
@@ -666,6 +730,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         });
@@ -710,6 +775,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         };
@@ -734,6 +800,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         };
@@ -761,6 +828,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         };

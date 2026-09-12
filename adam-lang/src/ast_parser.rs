@@ -130,6 +130,7 @@ impl AdamAstParser {
                         },
                         leading_comment: None,
                         doc_comment: doc.map(|(text, _)| text),
+                        trailing_line_comment: None,
                         blank_line_before: false,
                     });
                 }
@@ -223,6 +224,7 @@ impl AdamAstParser {
             require,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
@@ -273,6 +275,7 @@ impl AdamAstParser {
             require,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
@@ -378,6 +381,7 @@ impl AdamAstParser {
             bindings,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             trailing_comment: None,
             blank_line_before_close: false,
@@ -401,6 +405,7 @@ impl AdamAstParser {
             destructure,
             body,
             leading_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
@@ -430,6 +435,7 @@ impl AdamAstParser {
                 default = Some(ast::DefaultBranch {
                     relationships,
                     trailing_comment: None,
+                    trailing_line_comment: None,
                     blank_line_before_close: false,
                     open_brace_span: point(branch_open),
                     span: ast::ExprSpan {
@@ -451,6 +457,7 @@ impl AdamAstParser {
                 literal_span: point(lit_span),
                 relationships,
                 leading_comment: None,
+                trailing_line_comment: None,
                 blank_line_before: false,
                 trailing_comment: None,
                 blank_line_before_close: false,
@@ -468,6 +475,7 @@ impl AdamAstParser {
             default,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             trailing_comment: None,
             blank_line_before_close: false,
@@ -530,6 +538,7 @@ impl AdamAstParser {
             require,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
@@ -576,6 +585,7 @@ impl AdamAstParser {
             name_span,
             body,
             leading_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
