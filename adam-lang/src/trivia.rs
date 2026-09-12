@@ -525,11 +525,16 @@ fn line_column_to_byte(source: &str, line_starts: &[usize], pos: LineColumn) -> 
 fn analyze_gap(gap: &str) -> (Option<crate::ast::Comment>, bool, bool) {
     use crate::ast::Comment;
     let mut lines: Vec<&str> = gap.lines().collect();
-    // `gap` ends exactly where the following item's first token begins. When that token isn't
-    // at column 0, `lines()`'s final entry is only the leading whitespace before it on its own
-    // line, not a blank source line — drop that fragment before scanning for a trailing comment
-    // run so a real blank line (a genuine empty entry from `lines()`) still breaks the run.
-    if !gap.ends_with('\n') {
+    // `gap` ends exactly where the following item's first token begins. When that token isn't at
+    // column 0 and its own line is otherwise blank up to that point, `lines()`'s final entry is
+    // only leading whitespace, not a blank source line — drop that fragment before scanning for a
+    // trailing comment run so a real blank line (a genuine empty entry from `lines()`) still
+    // breaks the run. But when the gap has no newline at all (the previous item, an intervening
+    // comment, and the next item all share one physical line — see
+    // <https://github.com/stlab/cel-rs/pull/202>'s review), this same final entry is the *entire*
+    // gap, not just trailing indentation, so a non-whitespace fragment (a same-line `/* */`
+    // comment) must be kept for the scan below rather than discarded unseen.
+    if !gap.ends_with('\n') && lines.last().is_some_and(|line| line.trim().is_empty()) {
         lines.pop();
     }
     let mut comment = None;
@@ -1213,6 +1218,23 @@ mod tests {
             Some(crate::ast::Comment::Line("note".to_string()))
         );
         assert_eq!(sheet.trailing_comment, None);
+    }
+
+    #[test]
+    fn same_line_gap_with_no_newline_still_recovers_a_block_comment() {
+        // PR #202 review: when both items and the comment share one physical line with no
+        // newline anywhere in the gap, the old unconditional "drop the final fragment" logic
+        // popped the whole gap (comment included) before the comment scanner ever ran.
+        let source = "sheet s {\n    cell a: i32 = 1; /* note */ cell b: i32 = 2;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Cell(a) = &sheet.items[0] else {
+            panic!("expected Cell");
+        };
+        assert_eq!(
+            a.trailing_line_comment,
+            Some(crate::ast::Comment::Block("note".to_string()))
+        );
     }
 
     #[test]

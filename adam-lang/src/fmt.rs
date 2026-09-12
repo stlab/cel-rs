@@ -1037,6 +1037,16 @@ mod tests {
     }
 
     #[test]
+    fn formats_a_same_line_block_comment_when_the_gap_has_no_newline_at_all() {
+        // PR #202 review: previously the trailing `/* note */` was silently dropped, since
+        // items+comment sharing one physical line with no `\n` anywhere in the gap fell into
+        // the "drop the final fragment" path before the comment scanner ever ran.
+        let source = "sheet s {\n    cell a: i32 = 1; /* note */ cell b: i32 = 2;\n}";
+        let expected = "sheet s {\n    cell a: i32 = 1; /* note */\n    cell b: i32 = 2;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
     fn formats_a_same_line_trailing_comment_before_a_conditional_branchs_own_closing_brace() {
         let source = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship { b := a; } // note\n        }\n    }\n}";
         let expected = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship {\n                b := a;\n            } // note\n        }\n    }\n}\n";
