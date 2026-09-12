@@ -1,18 +1,25 @@
 //! The `Error` type returned by all fallible operations in this crate.
 
+use crate::cell::CellId;
 use crate::relationship::RelationshipId;
 use std::any::TypeId;
 
-/// Identifies which sheet component an error originates from, for translating back to a
-/// source location.
+/// Identifies a single sheet component an error implicates, for translating back to a
+/// source location. An `Error`'s `sites()` is an ordered list of these: the primary
+/// culprit first, followed by related context (e.g. the other method(s) and cell(s)
+/// involved in a structural conflict, or the remaining members of a cycle).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ErrorLocation {
+pub enum ErrorSite {
     /// Index into the `methods` `Vec` passed to `add_relationship`, before any
     /// `RelationshipId` exists for it.
     MethodIndex(usize),
     /// A method within an already-registered relationship.
     Method(RelationshipId, usize),
+    /// A relationship as a whole (no single method within it is implicated).
+    Relationship(RelationshipId),
+    /// A single cell.
+    Cell(CellId),
 }
 
 /// Errors returned by `Sheet` operations and propagation.
@@ -28,26 +35,37 @@ pub enum Error {
         expected: TypeId,
         /// The TypeId of the value or declaration supplied by the caller.
         found: TypeId,
-        /// The method this mismatch was detected in, if known.
-        location: Option<ErrorLocation>,
+        /// The method this mismatch was detected in, if known. Empty when unknown.
+        sites: Vec<ErrorSite>,
     },
 
     /// A `CellId` or `RelationshipId` was not found in the sheet.
     InvalidId,
 
     /// No valid method assignment exists (overconstrained).
-    Conflict,
+    Conflict {
+        /// A subset-minimal group of relationships that together admit no valid
+        /// method assignment: removing any member of the group makes the remainder
+        /// feasible. Every entry is `ErrorSite::Relationship`.
+        sites: Vec<ErrorSite>,
+    },
 
     /// The selected methods form a cycle.
-    Cycle,
+    Cycle {
+        /// The cycle's members in loop-traversal order, alternating `Relationship` and
+        /// `Cell` entries for the length of the loop. Either kind may be `sites[0]`:
+        /// the loop is reported starting at the first node revisited during recovery,
+        /// which is not necessarily a `Relationship`.
+        sites: Vec<ErrorSite>,
+    },
 
     /// A method's function returned an error during execution.
     MethodFailed {
         /// The underlying error the method's function (or a requirement's/conditional's
         /// expression function) returned.
         error: anyhow::Error,
-        /// The method this failure originated from, if known.
-        location: Option<ErrorLocation>,
+        /// The method this failure originated from, if known. Empty when unknown.
+        sites: Vec<ErrorSite>,
     },
 
     /// A method is structurally invalid (e.g. the outputs list is empty, a
@@ -56,26 +74,31 @@ pub enum Error {
     /// not an error: it defines a fixed point (a constant) rather than a derivation.
     InvalidMethod {
         /// The method (by index within the `Vec` passed to `add_relationship`) that's
-        /// invalid, if known — `None` when `methods` itself is empty.
-        location: Option<ErrorLocation>,
+        /// invalid, if known. Empty when `methods` itself is empty.
+        sites: Vec<ErrorSite>,
     },
 
     /// Two methods in the same relationship have `inputs ∪ outputs` sets that don't
     /// match. Every method in a relationship must reference exactly the same set of
     /// cells.
     MismatchedMethodCells {
-        /// The first method (by index within the `Vec` passed to `add_relationship`) whose
-        /// cell set diverges from method 0's, if known. Method 0 is the baseline every other
-        /// method's cell set is compared against, so it is never itself the reported index.
-        location: Option<ErrorLocation>,
+        /// `sites[0]` is the first method (by index within the `Vec` passed to
+        /// `add_relationship`) whose cell set diverges from method 0's; `sites[1]` is
+        /// always `MethodIndex(0)`, the baseline every other method's cell set is
+        /// compared against; further entries are the cells in the symmetric
+        /// difference of the two methods' cell sets.
+        sites: Vec<ErrorSite>,
     },
 
     /// A method's own `outputs` list names a cell more than once, or two methods in
     /// the same relationship have identical `outputs` sets.
     DuplicateMethodOutputs {
-        /// The method (by index within the `Vec` passed to `add_relationship`) whose output
-        /// set collided, if known.
-        location: Option<ErrorLocation>,
+        /// `sites[0]` is the method (by index within the `Vec` passed to
+        /// `add_relationship`) whose output set collided. For a method's own outputs
+        /// repeating a cell, further entries are the repeated cell(s). For two methods
+        /// sharing an output set, `sites[1]` is the earlier method's index and further
+        /// entries are the shared output cell(s).
+        sites: Vec<ErrorSite>,
     },
 
     /// A conditional is structurally invalid: the cell was not found, a referenced
@@ -83,7 +106,14 @@ pub enum Error {
     /// cell or any of its unconditional upstream contributors has more than one method, a
     /// relationship appears in more than one conditional branch, a branch key's type does
     /// not match the cell's registered type, or a branch has no keys.
-    InvalidConditional,
+    InvalidConditional {
+        /// Empty for the expression-output type-mismatch case; the match-cell
+        /// type-mismatch case names the cell (`sites = [Cell(match_cell)]`). The
+        /// duplicate-relationship and multi-method-branch cases name the offending
+        /// relationship(s) (and, for the multi-method case, the contributing cell).
+        /// Empty for the missing-relationship and empty-branch-keys cases.
+        sites: Vec<ErrorSite>,
+    },
 
     /// An `add_out` call is structurally invalid: the writer method does not have
     /// exactly one output cell.
@@ -94,9 +124,11 @@ pub enum Error {
     /// cell that is already `Source`/`Out` kind or already claimed as another method's
     /// output.
     InvalidCellKind {
-        /// The method (by index within the `Vec` passed to `add_relationship`) whose output
-        /// cell has the wrong kind, if the error originated there.
-        location: Option<ErrorLocation>,
+        /// `sites[0]` is the method (by index within the `Vec` passed to
+        /// `add_relationship`) whose output cell has the wrong kind, if the error
+        /// originated there; `sites[1]` is that offending cell. Empty when the error
+        /// did not originate from `add_relationship`.
+        sites: Vec<ErrorSite>,
     },
 
     /// An `add_filter` call is structurally invalid: the cell already has a filter,
@@ -119,7 +151,13 @@ pub enum Error {
     /// relationship-only subgraph is acyclic but has no visibility into filter edges,
     /// so this is sound but incomplete: a different, equally-valid relationship
     /// assignment might have avoided the cycle. See issue #153.
-    FilterCycle,
+    FilterCycle {
+        /// The cycle's members in loop-traversal order, alternating `Relationship` and
+        /// `Cell` entries (either kind may be `sites[0]`, for the same reason as
+        /// `Cycle::sites`), including the filtered `Cell` and the `Cell` → `Cell` edge
+        /// from its filter argument.
+        sites: Vec<ErrorSite>,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -131,8 +169,8 @@ impl std::fmt::Display for Error {
                 write!(f, "type mismatch: expected {expected:?}, found {found:?}")
             }
             Error::InvalidId => write!(f, "invalid cell or relationship id"),
-            Error::Conflict => write!(f, "no valid method assignment (overconstrained)"),
-            Error::Cycle => write!(f, "selected methods form a cycle"),
+            Error::Conflict { .. } => write!(f, "no valid method assignment (overconstrained)"),
+            Error::Cycle { .. } => write!(f, "selected methods form a cycle"),
             Error::MethodFailed { error, .. } => write!(f, "method execution failed: {error}"),
             Error::InvalidMethod { .. } => write!(f, "method is structurally invalid"),
             Error::MismatchedMethodCells { .. } => write!(
@@ -144,14 +182,14 @@ impl std::fmt::Display for Error {
                 "a method's outputs must be duplicate-free, and no two methods in a \
                  relationship may share an outputs set"
             ),
-            Error::InvalidConditional => write!(f, "conditional is structurally invalid"),
+            Error::InvalidConditional { .. } => write!(f, "conditional is structurally invalid"),
             Error::InvalidOutput => write!(f, "output is structurally invalid"),
             Error::InvalidCellKind { .. } => {
                 write!(f, "cell's kind does not permit this operation")
             }
             Error::InvalidFilter => write!(f, "filter is structurally invalid"),
             Error::InvalidRequirement => write!(f, "requirement is structurally invalid"),
-            Error::FilterCycle => write!(
+            Error::FilterCycle { .. } => write!(
                 f,
                 "a filter's argument dependency closes a cycle with the selected methods"
             ),
@@ -171,19 +209,24 @@ impl std::error::Error for Error {
 }
 
 impl Error {
-    /// Returns the sheet component (relationship method) this error originates from, if
-    /// known. `None` for variants that never track a location, or when a location
-    /// legitimately doesn't apply to this occurrence (e.g. `add_relationship(vec![])`'s
-    /// `InvalidMethod`).
-    pub fn location(&self) -> Option<ErrorLocation> {
+    /// The source components this error implicates, primary first.
+    ///
+    /// `sites[0]` is the primary culprit; further entries are ordered related context
+    /// (for a cycle, the remaining members in loop order). Empty for variants that never
+    /// track a site, or when none applies to this occurrence.
+    pub fn sites(&self) -> &[ErrorSite] {
         match self {
-            Error::TypeMismatch { location, .. } => *location,
-            Error::MismatchedMethodCells { location } => *location,
-            Error::DuplicateMethodOutputs { location } => *location,
-            Error::InvalidMethod { location } => *location,
-            Error::InvalidCellKind { location } => *location,
-            Error::MethodFailed { location, .. } => *location,
-            _ => None,
+            Error::TypeMismatch { sites, .. }
+            | Error::MethodFailed { sites, .. }
+            | Error::InvalidMethod { sites }
+            | Error::MismatchedMethodCells { sites }
+            | Error::DuplicateMethodOutputs { sites }
+            | Error::InvalidCellKind { sites }
+            | Error::Conflict { sites }
+            | Error::Cycle { sites }
+            | Error::FilterCycle { sites }
+            | Error::InvalidConditional { sites } => sites,
+            _ => &[],
         }
     }
 }
@@ -200,7 +243,7 @@ mod tests {
         let e = Error::TypeMismatch {
             expected,
             found,
-            location: None,
+            sites: vec![],
         };
         match e {
             Error::TypeMismatch {
@@ -220,7 +263,7 @@ mod tests {
         let err = Error::TypeMismatch {
             expected: TypeId::of::<i32>(),
             found: TypeId::of::<f64>(),
-            location: None,
+            sites: vec![],
         };
         assert!(err.to_string().contains("type mismatch"));
     }
@@ -232,19 +275,23 @@ mod tests {
 
     #[test]
     fn conflict_display_contains_overconstrained() {
-        assert!(Error::Conflict.to_string().contains("overconstrained"));
+        assert!(
+            Error::Conflict { sites: vec![] }
+                .to_string()
+                .contains("overconstrained")
+        );
     }
 
     #[test]
     fn cycle_display_contains_cycle() {
-        assert!(Error::Cycle.to_string().contains("cycle"));
+        assert!(Error::Cycle { sites: vec![] }.to_string().contains("cycle"));
     }
 
     #[test]
     fn method_failed_display_contains_source_message() {
         let err = Error::MethodFailed {
             error: anyhow::anyhow!("division by zero"),
-            location: None,
+            sites: vec![],
         };
         assert!(err.to_string().contains("division by zero"));
     }
@@ -252,7 +299,7 @@ mod tests {
     #[test]
     fn invalid_method_display_contains_invalid() {
         assert!(
-            Error::InvalidMethod { location: None }
+            Error::InvalidMethod { sites: vec![] }
                 .to_string()
                 .contains("invalid")
         );
@@ -262,14 +309,14 @@ mod tests {
     fn error_implements_std_error() {
         fn takes_error(_: &dyn std::error::Error) {}
         takes_error(&Error::InvalidId);
-        takes_error(&Error::Conflict);
+        takes_error(&Error::Conflict { sites: vec![] });
     }
 
     #[test]
     fn method_failed_source_returns_some() {
         let err = Error::MethodFailed {
             error: anyhow::anyhow!("inner"),
-            location: None,
+            sites: vec![],
         };
         assert!(std::error::Error::source(&err).is_some());
     }
@@ -277,29 +324,29 @@ mod tests {
     #[test]
     fn non_method_failed_variants_have_no_source() {
         assert!(std::error::Error::source(&Error::InvalidId).is_none());
-        assert!(std::error::Error::source(&Error::Conflict).is_none());
-        assert!(std::error::Error::source(&Error::Cycle).is_none());
-        assert!(std::error::Error::source(&Error::InvalidMethod { location: None }).is_none());
+        assert!(std::error::Error::source(&Error::Conflict { sites: vec![] }).is_none());
+        assert!(std::error::Error::source(&Error::Cycle { sites: vec![] }).is_none());
+        assert!(std::error::Error::source(&Error::InvalidMethod { sites: vec![] }).is_none());
         assert!(
             std::error::Error::source(&Error::TypeMismatch {
                 expected: std::any::TypeId::of::<i32>(),
                 found: std::any::TypeId::of::<f64>(),
-                location: None,
+                sites: vec![],
             })
             .is_none()
         );
         assert!(
-            std::error::Error::source(&Error::MismatchedMethodCells { location: None }).is_none()
+            std::error::Error::source(&Error::MismatchedMethodCells { sites: vec![] }).is_none()
         );
         assert!(
-            std::error::Error::source(&Error::DuplicateMethodOutputs { location: None }).is_none()
+            std::error::Error::source(&Error::DuplicateMethodOutputs { sites: vec![] }).is_none()
         );
     }
 
     #[test]
     fn invalid_conditional_display_contains_conditional() {
         assert!(
-            Error::InvalidConditional
+            Error::InvalidConditional { sites: vec![] }
                 .to_string()
                 .contains("conditional")
         );
@@ -307,13 +354,13 @@ mod tests {
 
     #[test]
     fn invalid_conditional_has_no_source() {
-        assert!(std::error::Error::source(&Error::InvalidConditional).is_none());
+        assert!(std::error::Error::source(&Error::InvalidConditional { sites: vec![] }).is_none());
     }
 
     #[test]
     fn mismatched_method_cells_display_contains_cells() {
         assert!(
-            Error::MismatchedMethodCells { location: None }
+            Error::MismatchedMethodCells { sites: vec![] }
                 .to_string()
                 .contains("cells")
         );
@@ -322,7 +369,7 @@ mod tests {
     #[test]
     fn duplicate_method_outputs_display_contains_outputs() {
         assert!(
-            Error::DuplicateMethodOutputs { location: None }
+            Error::DuplicateMethodOutputs { sites: vec![] }
                 .to_string()
                 .contains("outputs")
         );
@@ -341,7 +388,7 @@ mod tests {
     #[test]
     fn invalid_cell_kind_display_contains_kind() {
         assert!(
-            Error::InvalidCellKind { location: None }
+            Error::InvalidCellKind { sites: vec![] }
                 .to_string()
                 .contains("kind")
         );
@@ -353,7 +400,7 @@ mod tests {
     #[test]
     fn invalid_cell_kind_display_does_not_mention_terminal() {
         assert!(
-            !Error::InvalidCellKind { location: None }
+            !Error::InvalidCellKind { sites: vec![] }
                 .to_string()
                 .contains("terminal")
         );
@@ -361,7 +408,7 @@ mod tests {
 
     #[test]
     fn invalid_cell_kind_has_no_source() {
-        assert!(std::error::Error::source(&Error::InvalidCellKind { location: None }).is_none());
+        assert!(std::error::Error::source(&Error::InvalidCellKind { sites: vec![] }).is_none());
     }
 
     #[test]
@@ -390,26 +437,40 @@ mod tests {
 
     #[test]
     fn filter_cycle_display_contains_cycle() {
-        assert!(Error::FilterCycle.to_string().contains("cycle"));
+        assert!(
+            Error::FilterCycle { sites: vec![] }
+                .to_string()
+                .contains("cycle")
+        );
     }
 
     #[test]
     fn filter_cycle_has_no_source() {
-        assert!(std::error::Error::source(&Error::FilterCycle).is_none());
+        assert!(std::error::Error::source(&Error::FilterCycle { sites: vec![] }).is_none());
     }
 
     #[test]
-    fn error_location_variants_are_distinct() {
-        let a = ErrorLocation::MethodIndex(0);
-        let b = ErrorLocation::MethodIndex(1);
-        let c = ErrorLocation::Method(RelationshipId::default(), 0);
+    fn error_site_variants_are_distinct() {
+        let a = ErrorSite::MethodIndex(0);
+        let b = ErrorSite::Method(RelationshipId::default(), 0);
+        let c = ErrorSite::Relationship(RelationshipId::default());
         assert_ne!(a, b);
-        assert_ne!(a, c);
-        assert_eq!(a, ErrorLocation::MethodIndex(0));
+        assert_ne!(b, c);
+        assert_eq!(a, ErrorSite::MethodIndex(0));
     }
 
     #[test]
-    fn location_is_none_for_a_locationless_variant() {
-        assert_eq!(Error::InvalidId.location(), None);
+    fn sites_is_empty_for_a_siteless_variant() {
+        assert!(Error::InvalidId.sites().is_empty());
+    }
+
+    #[test]
+    fn sites_returns_the_recorded_site() {
+        let rid = RelationshipId::default();
+        let e = Error::MethodFailed {
+            error: anyhow::anyhow!("x"),
+            sites: vec![ErrorSite::Method(rid, 2)],
+        };
+        assert_eq!(e.sites(), &[ErrorSite::Method(rid, 2)]);
     }
 }

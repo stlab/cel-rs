@@ -66,6 +66,7 @@
 
 pub mod ast;
 mod ast_parser;
+mod error_labels;
 mod fmt;
 mod parser;
 mod token_cursor;

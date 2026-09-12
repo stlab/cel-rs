@@ -1,6 +1,7 @@
 //! Root [`App`] component.
 
-use adam_rs::Sheet;
+use adam_lang::{AdamParser, ParsedSheet, TypeRegistry};
+use cel_parser::OpLookup;
 use dioxus::prelude::*;
 
 use crate::example_source::{ActiveSource, SourceOrigin, available_examples, load_example_source};
@@ -13,7 +14,40 @@ use adam_web_ui::spectrum::{
     SpSideNavItem, SpSwitch, SpTheme,
 };
 use adam_web_ui::to_graph_data;
-use adam_web_ui::{MethodSpans, Renderer, build_sheet};
+use adam_web_ui::{Renderer, build_sheet};
+
+/// Returns an empty `ParsedSheet` (no cells, no relationships): the fallback used when
+/// loading a source fails outright (an unreadable file, an unknown example name) and there
+/// is no previously-built sheet to fall back to instead.
+fn empty_parsed_sheet() -> ParsedSheet {
+    AdamParser::new(TypeRegistry::new(), OpLookup::new())
+        .parse_str("sheet s {}")
+        .expect("the empty sheet source always parses")
+}
+
+/// The example [`App`] loads on launch, absent any other selection.
+///
+/// Named explicitly rather than left to `available_examples().first()`'s alphabetical order:
+/// a purely alphabetical pick lets any future example hijack the launch default merely by
+/// having a filename that happens to sort first (as `cycle.adm2` — an intentionally-broken
+/// demonstration of the multi-span cycle diagnostic — otherwise would, sorting before every
+/// other bundled example). `diamond` is a normal, fully-working example, matching this
+/// project's existing default before `cycle.adm2` was added.
+const DEFAULT_EXAMPLE_NAME: &str = "diamond";
+
+/// Chooses which of `names` (`available_examples()`'s sorted output) [`App`] should load on
+/// launch: [`DEFAULT_EXAMPLE_NAME`] when it's present among `names`, else `names`'s
+/// alphabetically-first entry, so a stripped-down build missing the designated default still
+/// launches into *something* rather than an empty sheet.
+///
+/// - Postcondition: returns `String::new()` only when `names` is empty.
+fn pick_default_example_name(names: &[String]) -> String {
+    if names.iter().any(|n| n == DEFAULT_EXAMPLE_NAME) {
+        DEFAULT_EXAMPLE_NAME.to_string()
+    } else {
+        names.first().cloned().unwrap_or_default()
+    }
+}
 
 /// Root component: Spectrum theme wrapper with an examples picker, the graph, and
 /// the SheetInspector filling the viewport. `begin` ships with several example
@@ -45,12 +79,11 @@ pub fn App() -> Element {
         responder.respond(response);
     });
 
-    let initial_example_name = available_examples().first().cloned().unwrap_or_default();
-    let (initial_sheet, initial_labels, initial_method_spans, initial_active_source) =
+    let initial_example_name = pick_default_example_name(&available_examples());
+    let (initial_parsed, initial_labels, initial_active_source) =
         load_example(&initial_example_name);
-    let sheet = use_signal(|| initial_sheet);
+    let parsed = use_signal(|| initial_parsed);
     let labels = use_signal(|| initial_labels);
-    let method_spans: Signal<MethodSpans> = use_signal(|| initial_method_spans);
     let active_source = use_signal(|| initial_active_source);
     let example_names = use_signal(available_examples);
 
@@ -79,9 +112,8 @@ pub fn App() -> Element {
     // `T` (it compares by the underlying slot's identity, not `T`'s value).
     #[cfg(feature = "desktop")]
     let reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>> = {
-        let mut sheet = sheet;
+        let mut parsed = parsed;
         let mut labels = labels;
-        let mut method_spans = method_spans;
         let mut active_source = active_source;
         let mut example_names = example_names;
         let mut examples_watcher_slot = examples_watcher_slot;
@@ -119,12 +151,9 @@ pub fn App() -> Element {
                         }
                     };
                     let outcome = build_sheet(&source, &current.file_name(), &Renderer::styled());
-                    if let Some((new_sheet, new_labels)) = outcome.sheet_labels {
-                        sheet.set(new_sheet);
+                    if let Some((new_parsed, new_labels)) = outcome.sheet_labels {
+                        parsed.set(new_parsed);
                         labels.set(new_labels);
-                        if let Some(new_method_spans) = outcome.method_spans {
-                            method_spans.set(new_method_spans);
-                        }
                         active_source.set(ActiveSource {
                             text: source,
                             ..current
@@ -184,7 +213,7 @@ pub fn App() -> Element {
         })
     };
 
-    let graph_data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
+    let graph_data = use_memo(move || to_graph_data(&parsed.read(), &labels.read()));
     // Identifies which source the current graph_data snapshot belongs to —
     // stable across a hot-reload of the *same* file (so an in-place edit
     // keeps the graph's live layout), but distinct whenever a different example
@@ -236,9 +265,8 @@ pub fn App() -> Element {
     #[cfg(feature = "desktop")]
     let open_file_controls = rsx! {
         OpenFileControls {
-            sheet,
+            parsed,
             labels,
-            method_spans,
             active_source,
             reload_tx,
             watcher_slot,
@@ -247,9 +275,8 @@ pub fn App() -> Element {
     #[cfg(not(feature = "desktop"))]
     let open_file_controls = rsx! {
         OpenFileControls {
-            sheet,
+            parsed,
             labels,
-            method_spans,
             active_source,
             refresh_handle,
         }
@@ -315,7 +342,7 @@ pub fn App() -> Element {
                 }
                 div {
                     style: "flex: 1; display: flex; overflow: hidden; min-height: 0;",
-                    ExamplesPicker { sheet, labels, method_spans, active_source, example_names, on_select: on_example_selected }
+                    ExamplesPicker { parsed, labels, active_source, example_names, on_select: on_example_selected }
                     // Positioned wrapper so `GraphLegend` (position: absolute) overlays the
                     // graph. The legend lives here in `begin`, not inside the shared
                     // `GraphView`, so the book's live graphs render without it.
@@ -324,7 +351,7 @@ pub fn App() -> Element {
                         GraphView { graph_id, data: graph_data, source_id }
                         GraphLegend {}
                     }
-                    SheetInspector { sheet, labels, method_spans, source_text, source_name }
+                    SheetInspector { parsed, labels, source_text, source_name }
                 }
             }
         }
@@ -344,7 +371,7 @@ pub fn App() -> Element {
 ///
 /// - Complexity: O(n) in the length of the example's source, plus the cost
 ///   of one `build_sheet` parse/propagate.
-fn load_example(name: &str) -> (Sheet, Labels, MethodSpans, ActiveSource) {
+fn load_example(name: &str) -> (ParsedSheet, Labels, ActiveSource) {
     match load_example_source(name) {
         Ok(source) => {
             let outcome = build_sheet(
@@ -361,26 +388,15 @@ fn load_example(name: &str) -> (Sheet, Labels, MethodSpans, ActiveSource) {
                 origin: SourceOrigin::Example,
             };
             match outcome.sheet_labels {
-                Some((sheet, labels)) => (
-                    sheet,
-                    labels,
-                    outcome.method_spans.unwrap_or_default(),
-                    active_source,
-                ),
-                None => (
-                    Sheet::new(),
-                    Labels::new(),
-                    std::collections::HashMap::new(),
-                    active_source,
-                ),
+                Some((parsed, labels)) => (parsed, labels, active_source),
+                None => (empty_parsed_sheet(), Labels::new(), active_source),
             }
         }
         Err(err) => {
             adam_web_ui::diagnostics::report_error(&err);
             (
-                Sheet::new(),
+                empty_parsed_sheet(),
                 Labels::new(),
-                std::collections::HashMap::new(),
                 ActiveSource {
                     name: name.to_string(),
                     text: String::new(),
@@ -408,7 +424,7 @@ fn load_example(name: &str) -> (Sheet, Labels, MethodSpans, ActiveSource) {
 /// - Complexity: O(n) in the size of the file at `path`, plus the cost of
 ///   one `build_sheet` parse/propagate.
 #[cfg(feature = "desktop")]
-fn load_opened(path: std::path::PathBuf) -> (Option<(Sheet, Labels, MethodSpans)>, ActiveSource) {
+fn load_opened(path: std::path::PathBuf) -> (Option<(ParsedSheet, Labels)>, ActiveSource) {
     let file_name = path.display().to_string();
     let name = path
         .file_name()
@@ -425,12 +441,7 @@ fn load_opened(path: std::path::PathBuf) -> (Option<(Sheet, Labels, MethodSpans)
                 text: source,
                 origin: SourceOrigin::Opened(path.into_os_string()),
             };
-            (
-                outcome.sheet_labels.map(|(sheet, labels)| {
-                    (sheet, labels, outcome.method_spans.unwrap_or_default())
-                }),
-                active_source,
-            )
+            (outcome.sheet_labels, active_source)
         }
         Err(err) => {
             eprintln!("{err}");
@@ -458,9 +469,8 @@ fn load_opened(path: std::path::PathBuf) -> (Option<(Sheet, Labels, MethodSpans)
 #[cfg(feature = "desktop")]
 #[component]
 fn OpenFileControls(
-    sheet: Signal<Sheet>,
+    parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
-    method_spans: Signal<MethodSpans>,
     active_source: Signal<ActiveSource>,
     reload_tx: Signal<futures_channel::mpsc::UnboundedSender<()>>,
     mut watcher_slot: Signal<Option<notify::RecommendedWatcher>>,
@@ -470,9 +480,8 @@ fn OpenFileControls(
             compact: true,
             SpActionButton {
                 onclick: move |_| {
-                    let mut sheet = sheet;
+                    let mut parsed = parsed;
                     let mut labels = labels;
-                    let mut method_spans = method_spans;
                     let mut active_source = active_source;
                     let reload_tx = reload_tx.read().clone();
                     spawn(async move {
@@ -480,10 +489,9 @@ fn OpenFileControls(
                             return;
                         };
                         let (new_sheet_labels, new_active) = load_opened(path.clone());
-                        if let Some((new_sheet, new_labels, new_method_spans)) = new_sheet_labels {
-                            sheet.set(new_sheet);
+                        if let Some((new_parsed, new_labels)) = new_sheet_labels {
+                            parsed.set(new_parsed);
                             labels.set(new_labels);
-                            method_spans.set(new_method_spans);
                         }
                         active_source.set(new_active);
                         match crate::open_file::spawn_watch(path, move || {
@@ -524,7 +532,7 @@ fn OpenFileControls(
 #[cfg(not(feature = "desktop"))]
 fn load_from_payload(
     payload: crate::open_file::OpenedFilePayload,
-) -> (Option<(Sheet, Labels, MethodSpans)>, ActiveSource) {
+) -> (Option<(ParsedSheet, Labels)>, ActiveSource) {
     let outcome = build_sheet(&payload.text, &payload.name, &Renderer::styled());
     if let Some(err) = &outcome.error {
         adam_web_ui::diagnostics::report_error(err);
@@ -534,12 +542,7 @@ fn load_from_payload(
         text: payload.text,
         origin: SourceOrigin::Opened(payload.name.into()),
     };
-    (
-        outcome
-            .sheet_labels
-            .map(|(sheet, labels)| (sheet, labels, outcome.method_spans.unwrap_or_default())),
-        active_source,
-    )
+    (outcome.sheet_labels, active_source)
 }
 
 /// "Open…"/"Refresh" controls for the web build: "Open…" always calls
@@ -550,9 +553,8 @@ fn load_from_payload(
 #[cfg(not(feature = "desktop"))]
 #[component]
 fn OpenFileControls(
-    sheet: Signal<Sheet>,
+    parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
-    method_spans: Signal<MethodSpans>,
     active_source: Signal<ActiveSource>,
     mut refresh_handle: Signal<Option<u32>>,
 ) -> Element {
@@ -561,9 +563,8 @@ fn OpenFileControls(
             compact: true,
             SpActionButton {
                 onclick: move |_| {
-                    let mut sheet = sheet;
+                    let mut parsed = parsed;
                     let mut labels = labels;
-                    let mut method_spans = method_spans;
                     let mut active_source = active_source;
                     let mut refresh_handle = refresh_handle;
                     spawn(async move {
@@ -587,10 +588,9 @@ fn OpenFileControls(
                         };
                         refresh_handle.set(payload.id);
                         let (new_sheet_labels, new_active) = load_from_payload(payload);
-                        if let Some((new_sheet, new_labels, new_method_spans)) = new_sheet_labels {
-                            sheet.set(new_sheet);
+                        if let Some((new_parsed, new_labels)) = new_sheet_labels {
+                            parsed.set(new_parsed);
                             labels.set(new_labels);
-                            method_spans.set(new_method_spans);
                         }
                         active_source.set(new_active);
                     });
@@ -600,9 +600,8 @@ fn OpenFileControls(
             if let Some(id) = *refresh_handle.read() {
                 SpActionButton {
                     onclick: move |_| {
-                        let mut sheet = sheet;
+                        let mut parsed = parsed;
                         let mut labels = labels;
-                        let mut method_spans = method_spans;
                         let mut active_source = active_source;
                         spawn(async move {
                             let script = crate::open_file::refresh_script(id);
@@ -625,10 +624,9 @@ fn OpenFileControls(
                                 }
                             };
                             let (new_sheet_labels, new_active) = load_from_payload(payload);
-                            if let Some((new_sheet, new_labels, new_method_spans)) = new_sheet_labels {
-                                sheet.set(new_sheet);
+                            if let Some((new_parsed, new_labels)) = new_sheet_labels {
+                                parsed.set(new_parsed);
                                 labels.set(new_labels);
-                                method_spans.set(new_method_spans);
                             }
                             active_source.set(new_active);
                         });
@@ -644,7 +642,7 @@ fn OpenFileControls(
 }
 
 /// Sidebar panel listing every example from `example_names`; clicking one
-/// loads it into `sheet`/`labels`/`active_source`, highlighting whichever
+/// loads it into `parsed`/`labels`/`active_source`, highlighting whichever
 /// name matches `active_source`'s current value, then calls `on_select` —
 /// on desktop, `App` uses this to clear any watcher left over from a
 /// previously opened file (see `App`'s `on_example_selected`). Scrolls
@@ -652,9 +650,8 @@ fn OpenFileControls(
 /// grow arbitrarily without crowding the rest of the window.
 #[component]
 fn ExamplesPicker(
-    sheet: Signal<Sheet>,
+    parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
-    method_spans: Signal<MethodSpans>,
     active_source: Signal<ActiveSource>,
     example_names: Signal<Vec<String>>,
     on_select: Callback<()>,
@@ -684,16 +681,14 @@ fn ExamplesPicker(
                         value: name.clone(),
                         selected: is_example_active && name == current,
                         onclick: {
-                            let mut sheet = sheet;
+                            let mut parsed = parsed;
                             let mut labels = labels;
-                            let mut method_spans = method_spans;
                             let mut active_source = active_source;
                             let name = name.clone();
                             move |_| {
-                                let (new_sheet, new_labels, new_method_spans, new_active_source) = load_example(&name);
-                                sheet.set(new_sheet);
+                                let (new_parsed, new_labels, new_active_source) = load_example(&name);
+                                parsed.set(new_parsed);
                                 labels.set(new_labels);
-                                method_spans.set(new_method_spans);
                                 active_source.set(new_active_source);
                                 on_select.call(());
                             }
@@ -785,13 +780,34 @@ mod tests {
 
     #[test]
     fn load_example_unknown_name_falls_back_to_empty_sheet() {
-        let (sheet, labels, _, active) = load_example("does_not_exist");
-        assert_eq!(sheet.cells().count(), 0);
+        let (parsed, labels, active) = load_example("does_not_exist");
+        assert_eq!(parsed.cells().count(), 0);
         assert_eq!(labels.cells.len(), 0);
         assert_eq!(
             active.name, "does_not_exist",
             "name must be preserved on failure so hot-reload keeps targeting the right file"
         );
+    }
+
+    #[test]
+    fn pick_default_example_name_prefers_the_designated_default_when_present() {
+        let names = vec![
+            "cycle".to_string(),
+            "diamond".to_string(),
+            "toy_example".to_string(),
+        ];
+        assert_eq!(pick_default_example_name(&names), "diamond");
+    }
+
+    #[test]
+    fn pick_default_example_name_falls_back_to_the_first_name_when_default_absent() {
+        let names = vec!["cycle".to_string(), "toy_example".to_string()];
+        assert_eq!(pick_default_example_name(&names), "cycle");
+    }
+
+    #[test]
+    fn pick_default_example_name_is_empty_when_names_is_empty() {
+        assert_eq!(pick_default_example_name(&[]), "");
     }
 
     #[test]

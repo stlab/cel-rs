@@ -39,7 +39,7 @@ enum Change {
 
 /// One method chosen per active relationship, and which relationship currently claims
 /// each output cell (self-referencing outputs included).
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub(crate) struct Assignment {
     pub(crate) chosen: HashMap<RelationshipId, usize>,
     pub(crate) claimed: HashMap<CellId, RelationshipId>,

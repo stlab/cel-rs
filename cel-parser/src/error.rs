@@ -188,6 +188,56 @@ pub(crate) fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Ra
     start_byte..end_byte
 }
 
+/// One labelled span in a multi-span diagnostic.
+#[derive(Clone, Debug)]
+pub struct SpanLabel {
+    /// The source region to underline.
+    pub span: SourceSpan,
+    /// The label printed beside the caret.
+    pub label: String,
+}
+
+/// Renders `title` with several labelled annotations over `source_code`, the first as the
+/// primary caret and the rest as secondary context, in rustc style.
+///
+/// - Precondition: `labels` is non-empty.
+/// - Complexity: O(n) in `source_code`'s length plus the number of labels.
+///
+/// # Examples
+///
+/// ```rust
+/// use annotate_snippets::Renderer;
+/// use cel_parser::{SourceSpan, SpanLabel, format_multi_span};
+///
+/// let labels = vec![SpanLabel { span: SourceSpan::new(1, 0, 1, 1), label: "here".into() }];
+/// let out = format_multi_span("oops", &labels, "x", "f.adm2", 1, &Renderer::plain());
+/// assert!(out.contains("oops"));
+/// ```
+pub fn format_multi_span(
+    title: &str,
+    labels: &[SpanLabel],
+    source_code: &str,
+    filename: &str,
+    start_line: u32,
+    renderer: &Renderer,
+) -> String {
+    debug_assert!(!labels.is_empty(), "`labels` must be non-empty");
+    let mut snippet = Snippet::source(source_code)
+        .path(filename)
+        .line_start(start_line as usize);
+    for (i, l) in labels.iter().enumerate() {
+        let range = span_to_byte_range(source_code, l.span);
+        let kind = if i == 0 {
+            AnnotationKind::Primary
+        } else {
+            AnnotationKind::Context
+        };
+        snippet = snippet.annotation(kind.span(range).label(l.label.as_str()));
+    }
+    let report = [Group::with_title(Level::ERROR.primary_title(title)).element(snippet)];
+    renderer.render(&report)
+}
+
 /// Classifies a lex failure by inspecting the character at `span`'s start in `source`.
 ///
 /// Returns `None` when the span doesn't resolve to a character (e.g. it points past the end of
@@ -329,6 +379,7 @@ pub struct ParseError {
     message: String,
     span: proc_macro2::Span,
     end_span: Option<proc_macro2::Span>,
+    secondary: Vec<SpanLabel>,
 }
 
 impl ParseError {
@@ -348,6 +399,7 @@ impl ParseError {
             message: message.into(),
             span,
             end_span: None,
+            secondary: Vec::new(),
         }
     }
 
@@ -379,6 +431,7 @@ impl ParseError {
             message: message.into(),
             span: start,
             end_span: Some(end),
+            secondary: Vec::new(),
         }
     }
 
@@ -401,6 +454,25 @@ impl ParseError {
     /// `None` for errors created with [`new`](Self::new).
     pub fn end_span(&self) -> Option<proc_macro2::Span> {
         self.end_span
+    }
+
+    /// Attaches secondary labelled spans, rendered as extra carets alongside the primary.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use proc_macro2::Span;
+    /// use cel_parser::{ParseError, SourceSpan, SpanLabel};
+    ///
+    /// let e = ParseError::new("bad", Span::call_site()).with_secondary(vec![SpanLabel {
+    ///     span: SourceSpan::new(1, 4, 1, 7),
+    ///     label: "also here".into(),
+    /// }]);
+    /// assert_eq!(e.message(), "bad");
+    /// ```
+    pub fn with_secondary(mut self, secondary: Vec<SpanLabel>) -> Self {
+        self.secondary = secondary;
+        self
     }
 
     /// Converts a lex failure (e.g. from `proc_macro2::TokenStream::from_str`) into a
@@ -433,9 +505,11 @@ impl ParseError {
 
     /// Formats this error in rustc diagnostic style with source context.
     ///
-    /// Identical contract to [`CELError::format_rustc_style`]; prefer calling
-    /// this directly on a `ParseError` rather than converting to `CELError`
-    /// first when you have the source text at hand.
+    /// Identical contract to [`CELError::format_rustc_style`] when no secondary spans are
+    /// attached; prefer calling this directly on a `ParseError` rather than converting to
+    /// `CELError` first when you have the source text at hand. When secondaries have been
+    /// added via [`with_secondary`](Self::with_secondary), renders a multi-span diagnostic
+    /// (the primary span plus one context caret per secondary) via [`format_multi_span`].
     ///
     /// # Examples
     ///
@@ -462,6 +536,21 @@ impl ParseError {
             start: self.span.start(),
             end: self.end_span.unwrap_or(self.span).end(),
         };
+        if !self.secondary.is_empty() {
+            let mut labels = vec![SpanLabel {
+                span: source_span,
+                label: String::new(),
+            }];
+            labels.extend(self.secondary.iter().cloned());
+            return format_multi_span(
+                &self.message,
+                &labels,
+                source_code,
+                filename,
+                start_line,
+                renderer,
+            );
+        }
         let byte_range = span_to_byte_range(source_code, source_span);
         let report = [
             Group::with_title(Level::ERROR.primary_title(self.message.as_str())).element(
@@ -900,6 +989,48 @@ mod tests {
             &Renderer::plain(),
         );
         assert_eq!(output, "something went wrong");
+    }
+
+    #[test]
+    fn parse_error_with_secondary_renders_all_spans() {
+        let source = "aaa bbb";
+        let e = ParseError::new_range("bad", Span::call_site(), Span::call_site()).with_secondary(
+            vec![SpanLabel {
+                span: SourceSpan::new(1, 4, 1, 7),
+                label: "also here".into(),
+            }],
+        );
+        // primary span is call_site (line 1 col 0..0); secondary underlines "bbb".
+        let out = e.format_rustc_style(source, "t.cel", 1, &Renderer::plain());
+        assert!(out.contains("bad"), "{out}");
+        assert!(out.contains("also here"), "{out}");
+    }
+
+    #[test]
+    fn parse_error_without_secondary_renders_single_span_as_before() {
+        let e = ParseError::new("bad", Span::call_site());
+        let out = e.format_rustc_style("10 + 20 30", "t.cel", 1, &Renderer::plain());
+        assert!(out.contains("error: bad"), "{out}");
+    }
+
+    #[test]
+    fn format_multi_span_underlines_every_span_and_prints_labels() {
+        let source = "aaa bbb ccc";
+        let labels = vec![
+            SpanLabel {
+                span: SourceSpan::new(1, 0, 1, 3),
+                label: "first".into(),
+            },
+            SpanLabel {
+                span: SourceSpan::new(1, 8, 1, 11),
+                label: "third".into(),
+            },
+        ];
+        let out = format_multi_span("mismatch", &labels, source, "t.adm2", 1, &Renderer::plain());
+        assert!(out.contains("mismatch"), "{out}");
+        assert!(out.contains("first"), "{out}");
+        assert!(out.contains("third"), "{out}");
+        assert!(!out.contains('\u{1b}'), "plain renderer has no ANSI: {out}");
     }
 
     #[test]

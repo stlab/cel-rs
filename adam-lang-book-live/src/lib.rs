@@ -28,12 +28,13 @@ struct RootProps {
 /// is a browser element, not a terminal, so ANSI escape codes would show as literal garbage
 /// text rather than color.
 ///
-/// `outcome` is a plain call rather than a `use_hook` because `BuildOutcome` holds a `Sheet`,
-/// which cannot be `Clone` (it owns type-erased cell values) and `use_hook` requires its state
-/// to be. `sheet` and `labels` still end up seeded exactly once: `use_signal`'s initializer
-/// closure only ever fires on this component's first render, and props never change after
-/// [`mount`] constructs them, so no later render (should one ever occur; this component holds
-/// no subscriptions of its own that would trigger one) can replace already-mounted state.
+/// `outcome` is a plain call rather than a `use_hook` because `BuildOutcome` holds a
+/// `ParsedSheet`, which cannot be `Clone` (it owns type-erased cell values) and `use_hook`
+/// requires its state to be. `parsed` and `labels` still end up seeded exactly once:
+/// `use_signal`'s initializer closure only ever fires on this component's first render, and
+/// props never change after [`mount`] constructs them, so no later render (should one ever
+/// occur; this component holds no subscriptions of its own that would trigger one) can replace
+/// already-mounted state.
 ///
 /// Caution: the `use_signal` calls below live inside a `match` arm on `outcome.sheet_labels`,
 /// which is only sound because `build_sheet` is deterministic over an unchanging `props` — the
@@ -54,13 +55,12 @@ fn Root(props: RootProps) -> Element {
     });
 
     let inner = match outcome.sheet_labels {
-        Some((sheet, labels)) => {
-            let sheet = use_signal(|| sheet);
+        Some((parsed, labels)) => {
+            let parsed = use_signal(|| parsed);
             let labels = use_signal(|| labels);
-            let method_spans = use_signal(|| outcome.method_spans.clone().unwrap_or_default());
             let error = outcome.error.clone();
 
-            let data = use_memo(move || to_graph_data(&sheet.read(), &labels.read()));
+            let data = use_memo(move || to_graph_data(&parsed.read(), &labels.read()));
             let graph_ids = props.graph_ids.clone();
             let mut first_drive = use_signal(|| true);
             // The first-run `init` call relies on the bootstrap having already loaded
@@ -93,7 +93,7 @@ fn Root(props: RootProps) -> Element {
             });
 
             rsx! {
-                SheetInspector { sheet, labels, method_spans, source_text, source_name }
+                SheetInspector { parsed, labels, source_text, source_name }
                 if let Some(err) = error {
                     pre { class: "adam-live-error", "{err}" }
                 }
