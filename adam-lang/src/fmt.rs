@@ -100,6 +100,54 @@ fn write_trailing_trivia(
     }
 }
 
+/// Terminates a declaration's own output line with `terminator` (`;` or `}`), appending its
+/// same-line `trailing_line_comment` inline first when present — a `//` comment always ends the
+/// line it's on, and a `/* */` comment stays inline with what precedes it, so both are written
+/// before the newline rather than after it. See <https://github.com/stlab/cel-rs/issues/59>.
+fn write_line_end(
+    out: &mut String,
+    terminator: &str,
+    trailing_line_comment: Option<&ast::Comment>,
+    depth: usize,
+) {
+    out.push_str(terminator);
+    match trailing_line_comment {
+        Some(ast::Comment::Line(text)) => {
+            out.push(' ');
+            let mut lines = text.split('\n');
+            if let Some(first) = lines.next() {
+                out.push_str("// ");
+                out.push_str(first);
+                out.push('\n');
+            }
+            for line in lines {
+                out.push_str(&indent(depth));
+                out.push_str("// ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        Some(ast::Comment::Block(text)) => {
+            out.push(' ');
+            if text.contains('\n') {
+                out.push_str("/*\n");
+                for line in text.split('\n') {
+                    out.push_str(&indent(depth + 1));
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                out.push_str(&indent(depth));
+                out.push_str("*/\n");
+            } else {
+                out.push_str("/* ");
+                out.push_str(text);
+                out.push_str(" */\n");
+            }
+        }
+        None => out.push('\n'),
+    }
+}
+
 /// Re-emits a literal's exact original text via its span, falling back to an empty string when
 /// none is recoverable — mirrors `cel_parser::fmt`'s identical fallback (see the module doc for
 /// why no `Literal` value is needed here).
@@ -139,7 +187,7 @@ fn write_binding(out: &mut String, binding: &ast::BindingDecl, depth: usize) {
     }
     out.push_str(" := ");
     out.push_str(&cel_parser::format_expr(&binding.body));
-    out.push_str(";\n");
+    write_line_end(out, ";", binding.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one `relationship { ... }` declaration and its bindings, in declaration order.
@@ -163,7 +211,7 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
         depth + 1,
     );
     out.push_str(&indent(depth));
-    out.push_str("}\n");
+    write_line_end(out, "}", rel.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes a `{ ... }` block of relationships, shared by both a named conditional branch and the
@@ -173,6 +221,7 @@ fn write_branch_relationships(
     relationships: &[ast::RelationshipDecl],
     trailing_comment: Option<&ast::Comment>,
     blank_line_before_close: bool,
+    line_trailing_comment: Option<&ast::Comment>,
     depth: usize,
 ) {
     out.push_str("{\n");
@@ -181,7 +230,7 @@ fn write_branch_relationships(
     }
     write_trailing_trivia(out, blank_line_before_close, trailing_comment, depth + 1);
     out.push_str(&indent(depth));
-    out.push_str("}\n");
+    write_line_end(out, "}", line_trailing_comment, depth);
 }
 
 /// Writes one `literal_pattern => { ... }` conditional branch, re-emitting the match literal via
@@ -205,6 +254,7 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
         &branch.relationships,
         branch.trailing_comment.as_ref(),
         branch.blank_line_before_close,
+        branch.trailing_line_comment.as_ref(),
         depth,
     );
 }
@@ -234,6 +284,7 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
             &default.relationships,
             default.trailing_comment.as_ref(),
             default.blank_line_before_close,
+            default.trailing_line_comment.as_ref(),
             depth + 1,
         );
     }
@@ -244,7 +295,7 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
         depth + 1,
     );
     out.push_str(&indent(depth));
-    out.push_str("}\n");
+    write_line_end(out, "}", cond.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one `cell name[: type][ = initializer][ filter body][ require { ... }];` declaration,
@@ -276,7 +327,7 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     if let Some(require) = &cell.require {
         write_require_clause(out, require, depth);
     }
-    out.push_str(";\n");
+    write_line_end(out, ";", cell.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one `[ "@" identifier " " ] ...;` requirement.
@@ -294,7 +345,7 @@ fn write_requirement(out: &mut String, req: &ast::RequirementDecl, depth: usize)
         out.push(' ');
     }
     out.push_str(&cel_parser::format_expr(&req.body));
-    out.push_str(";\n");
+    write_line_end(out, ";", req.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one ` require { ... }` clause (no trailing `;`) — shared by [`write_cell`],
@@ -339,7 +390,7 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
     if let Some(require) = &decl.require {
         write_require_clause(out, require, depth);
     }
-    out.push_str(";\n");
+    write_line_end(out, ";", decl.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one `source name[: type][ = initializer][ filter body][ require { ... }];` declaration.
@@ -370,7 +421,7 @@ fn write_source(out: &mut String, decl: &ast::SourceDecl, depth: usize) {
     if let Some(require) = &decl.require {
         write_require_clause(out, require, depth);
     }
-    out.push_str(";\n");
+    write_line_end(out, ";", decl.trailing_line_comment.as_ref(), depth);
 }
 
 /// Dispatches to the writer for one top-level sheet item.
@@ -739,11 +790,9 @@ mod tests {
         // A comment immediately after the sheet's opening `{` (before its first item) falls into
         // the untracked gap from issue #52 (see trivia.rs's module doc) — unrelated to this
         // change — so a preceding cell is included here to land the comment in a tracked gap.
-        // The comment also needs its own source line: when a comment and its neighboring items
-        // all share one physical line, `analyze_gap`'s same-line-fragment handling (pre-existing,
-        // also unrelated to this change) can't distinguish trailing whitespace from a same-line
-        // comment. What this test is actually checking is that a `/* */` comment round-trips as
-        // `/* */`, not `//`.
+        // The comment is on its own source line so it attaches as `x`'s leading comment, not `a`'s
+        // same-line trailing comment (see issue #59) — what this test is actually checking is that
+        // a `/* */` leading comment round-trips as `/* */`, not `//`.
         let source =
             "sheet s {\n    cell a: i32 = 1;\n    /* the total */\n    cell x: i32 = 1;\n}";
         let expected =
@@ -962,5 +1011,49 @@ mod tests {
             format_source("sheet s { cell x unknown_syntax }"),
             Err(FormatSourceError::Recovered(_))
         ));
+    }
+
+    // Issue #59: a same-line trailing `//`/`/* */` comment stays on the declaration it trails,
+    // instead of migrating onto its own line before the next declaration.
+
+    #[test]
+    fn formats_a_same_line_trailing_line_comment_on_a_cell() {
+        let source =
+            "sheet s {\n    cell a: f64 = 2.0; // end of line comment\n    cell b: f64 = 3.0;\n}";
+        let expected =
+            "sheet s {\n    cell a: f64 = 2.0; // end of line comment\n    cell b: f64 = 3.0;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_block_comment_on_a_cell() {
+        let source = "sheet s {\n    cell a: f64 = 2.0; /* note */\n    cell b: f64 = 3.0;\n}";
+        let expected = "sheet s {\n    cell a: f64 = 2.0; /* note */\n    cell b: f64 = 3.0;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_on_the_last_item_before_the_sheets_closing_brace() {
+        let source = "sheet s {\n    cell a: i32 = 1; // note\n}";
+        let expected = "sheet s {\n    cell a: i32 = 1; // note\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_on_a_binding() {
+        let source =
+            "sheet s {\n    relationship {\n        b := a; // note\n        a := b;\n    }\n}";
+        let expected =
+            "sheet s {\n    relationship {\n        b := a; // note\n        a := b;\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn same_line_trailing_comment_formatting_is_idempotent_through_a_reparse() {
+        let source =
+            "sheet s {\n    cell a: f64 = 2.0; // end of line comment\n    cell b: f64 = 3.0;\n}";
+        let once = format(source);
+        let twice = format(&once);
+        assert_eq!(once, twice);
     }
 }
