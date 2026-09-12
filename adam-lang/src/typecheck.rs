@@ -192,59 +192,16 @@ fn declared_cell_types(
     (map, shapes)
 }
 
-/// Checks whether `lit` is compatible with `declared`, mirroring `adam_lang::parser`'s
-/// `parse_literal_as` — the function adam-lang's real `cell_decl` grammar actually uses once a cell
-/// has a `: type_name` annotation. `parse_literal_as` parses the literal's digits/value directly
-/// against the declared type, ignoring any suffix on the literal itself (unlike
-/// `infer_and_parse_literal`, used only when no annotation is present, which defaults an
-/// unsuffixed integer to `i32` and an unsuffixed float to `f64`) — so any integer-typed literal
-/// (`lit`'s own suffix, or lack of one already resolved to `i32` by `AstContext`, doesn't
-/// matter — every integer-width variant is treated as one undifferentiated "integer literal"
-/// category, exactly as `parse_literal_as`'s suffix-ignoring behavior implies) is valid for *any*
-/// declared numeric type (`parse_literal_as` accepts it via `parse_int_literal`, which covers
-/// every integer width and both float types), and a float-typed literal is valid only for
-/// `f32`/`f64`. `declared == Ty::Any` (an unregistered custom type) always matches — not
-/// statically checked.
+/// Checks whether `lit` is compatible with `declared`, mirroring `adam_lang::parser`'s real
+/// `cell_decl` grammar: `lit`'s own default-inferred type ([`Ty::from_literal`] — an unsuffixed
+/// integer literal is `i32`, an unsuffixed float literal is `f64`; a suffixed literal keeps its
+/// own suffix type) must equal `declared` exactly, with no coercion between int widths or between
+/// int and float. `declared == Ty::Any` (an unregistered custom type) always matches — not
+/// statically checked. A char/byte-string/C-string/unit literal ([`Ty::from_literal`] maps these
+/// to [`Ty::Any`]) never equals a concrete `declared` type, so it mismatches every registered
+/// type, as adam-lang's real parser has no rule accepting one there.
 fn literal_matches_declared_ty(lit: &Literal, declared: Ty) -> bool {
-    if declared == Ty::Any {
-        return true;
-    }
-    match lit {
-        Literal::I8(_)
-        | Literal::I16(_)
-        | Literal::I32(_)
-        | Literal::I64(_)
-        | Literal::I128(_)
-        | Literal::Isize(_)
-        | Literal::U8(_)
-        | Literal::U16(_)
-        | Literal::U32(_)
-        | Literal::U64(_)
-        | Literal::U128(_)
-        | Literal::Usize(_) => matches!(
-            declared,
-            Ty::I8
-                | Ty::I16
-                | Ty::I32
-                | Ty::I64
-                | Ty::I128
-                | Ty::Isize
-                | Ty::U8
-                | Ty::U16
-                | Ty::U32
-                | Ty::U64
-                | Ty::U128
-                | Ty::Usize
-                | Ty::F32
-                | Ty::F64
-        ),
-        Literal::F32(_) | Literal::F64(_) => matches!(declared, Ty::F32 | Ty::F64),
-        Literal::Bool(_) => declared == Ty::Bool,
-        Literal::Str(_) => declared == Ty::String,
-        // char/byte-string/C-string/unit: parse_literal_as has no arm for these against any
-        // registered type, so adam-lang's runtime rejects them unconditionally.
-        _ => false,
-    }
+    declared == Ty::Any || Ty::from_literal(lit) == declared
 }
 
 /// Checks whether `expr` structurally matches `shape`, recursively: a `TypeShape::Named` leaf
@@ -780,22 +737,31 @@ mod tests {
     }
 
     #[test]
-    fn cell_initializer_unsuffixed_int_literal_matches_a_declared_unsigned_type() {
-        // adam_lang::parser's real cell_decl grammar parses an annotated initializer via
-        // parse_literal_as(entry, lit, span) — it parses the literal's digits directly as the
-        // declared type, ignoring the literal's own (absent) suffix. `cell x: u32 = 1;` is valid,
-        // accepted adam-lang; the checker must not falsely flag it.
+    fn cell_initializer_unsuffixed_int_literal_mismatched_with_a_declared_unsigned_type_is_a_diagnostic()
+     {
+        // adam_lang::parser's real cell_decl grammar requires the initializer's inferred type to
+        // equal the declared type exactly, no int-width coercion. An unsuffixed integer literal
+        // always infers as `i32`, so it mismatches a `u32` annotation; `cell x: u32 = 1;` is
+        // rejected by the real parser, and the checker must flag it too.
         let sheet = parse("sheet s { cell x: u32 = 1; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
-        assert!(diags.is_empty());
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn cell_initializer_unsuffixed_int_literal_mismatched_with_a_declared_float_type_is_a_diagnostic()
+     {
+        // Same exact-type rule as above, but across the int/float boundary: an unsuffixed integer
+        // literal infers as `i32`, never as `f64`, so no int-to-float coercion is allowed either.
+        let sheet = parse("sheet s { cell x: f64 = 1; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn cell_initializer_char_literal_against_any_registered_type_is_a_diagnostic() {
-        // parse_literal_as has no arm for a char literal against any registered type — adam-lang's
-        // runtime rejects `cell x: i32 = 'a';` unconditionally, so the checker must too (same root
-        // cause as the unsuffixed-int case above: the check must consult the declared type, not
-        // infer the literal's type independently).
+        // adam-lang's real parser has no rule accepting a char literal against any registered
+        // type, so the checker must flag it too.
         let sheet = parse("sheet s { cell x: i32 = 'a'; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
