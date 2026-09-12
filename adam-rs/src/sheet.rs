@@ -258,11 +258,13 @@ impl Sheet {
         for (idx, method) in methods.iter().enumerate() {
             let output_set: HashSet<CellId> = method.outputs.iter().copied().collect();
             if output_set.len() != method.outputs.len() {
-                // A cell repeated within this method's own outputs.
+                // A cell repeated within this method's own outputs. Report each
+                // distinct repeated cell once, no matter how many times it repeats.
                 let mut sites = vec![ErrorSite::MethodIndex(idx)];
                 let mut seen = HashSet::new();
+                let mut reported = HashSet::new();
                 for &o in &method.outputs {
-                    if !seen.insert(o) {
+                    if !seen.insert(o) && reported.insert(o) {
                         sites.push(ErrorSite::Cell(o));
                     }
                 }
@@ -2623,6 +2625,38 @@ mod tests {
         let sites = err.sites();
         assert_eq!(sites[0], ErrorSite::MethodIndex(0));
         assert!(sites[1..].contains(&ErrorSite::Cell(b)));
+    }
+
+    #[test]
+    fn duplicate_cell_repeated_three_times_reports_cell_once() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let i32_ty = std::any::TypeId::of::<i32>();
+        // one method whose outputs name b three times.
+        let err = sheet
+            .add_relationship(vec![Method::new(
+                vec![a],
+                vec![b, b, b],
+                vec![i32_ty],
+                vec![i32_ty, i32_ty, i32_ty],
+                |args| {
+                    let v = *args[0].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(v), Box::new(v), Box::new(v)])
+                },
+            )])
+            .unwrap_err();
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(0));
+        let cell_sites: Vec<_> = sites[1..]
+            .iter()
+            .filter(|&&s| s == ErrorSite::Cell(b))
+            .collect();
+        assert_eq!(
+            cell_sites.len(),
+            1,
+            "expected exactly one Cell(b) site for a triple repeat, got {sites:?}"
+        );
     }
 
     #[test]

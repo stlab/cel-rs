@@ -15,7 +15,10 @@ use super::matching::Assignment;
 ///
 /// - Precondition: `component`'s nodes contain at least one cycle reachable within the set
 ///   (true for any strongly connected component of size > 1).
-/// - Complexity: O(V + E) over the nodes and edges induced by `component`.
+/// - Complexity: worst case superlinear in the size of `component`. This iterative DFS
+///   tracks only an `on_path` set, not a global visited/dead-end set, so a node's subtree
+///   can be re-explored after backtracking. Acceptable because this runs only on the cold
+///   error path, over a single small strongly connected component of the planner digraph.
 pub(crate) fn recover_cycle(adj: &HashMap<Node, Vec<Node>>, component: &[Node]) -> Vec<Node> {
     let members: HashSet<Node> = component.iter().copied().collect();
     let start = match component.first() {
@@ -48,8 +51,9 @@ pub(crate) fn recover_cycle(adj: &HashMap<Node, Vec<Node>>, component: &[Node]) 
                 let at = path.iter().position(|&n| n == w).unwrap();
                 let cycle = path[at..].to_vec();
                 debug_assert!(
-                    !cycle.is_empty(),
-                    "recover_cycle: a located loop must be non-empty"
+                    cycle.len() >= 2,
+                    "recover_cycle: a real cycle in a bipartite relationship/cell digraph has \
+                     no self-loops, so a located loop must have at least 2 members"
                 );
                 return cycle;
             }

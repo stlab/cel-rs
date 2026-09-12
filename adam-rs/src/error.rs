@@ -52,9 +52,10 @@ pub enum Error {
 
     /// The selected methods form a cycle.
     Cycle {
-        /// The relationships and cells forming the cycle, in loop order, `sites[0]`
-        /// first: `Relationship`, `Cell`, `Relationship`, `Cell`, … alternating for
-        /// the length of the loop.
+        /// The cycle's members in loop-traversal order, alternating `Relationship` and
+        /// `Cell` entries for the length of the loop. Either kind may be `sites[0]`:
+        /// the loop is reported starting at the first node revisited during recovery,
+        /// which is not necessarily a `Relationship`.
         sites: Vec<ErrorSite>,
     },
 
@@ -151,9 +152,10 @@ pub enum Error {
     /// so this is sound but incomplete: a different, equally-valid relationship
     /// assignment might have avoided the cycle. See issue #153.
     FilterCycle {
-        /// The relationships and cells forming the cycle, in loop order, `sites[0]`
-        /// first, including the filtered `Cell` and the `Cell` → `Cell` edge from its
-        /// filter argument.
+        /// The cycle's members in loop-traversal order, alternating `Relationship` and
+        /// `Cell` entries (either kind may be `sites[0]`, for the same reason as
+        /// `Cycle::sites`), including the filtered `Cell` and the `Cell` → `Cell` edge
+        /// from its filter argument.
         sites: Vec<ErrorSite>,
     },
 }
