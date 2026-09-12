@@ -95,13 +95,19 @@ impl ParsedSheet {
     /// use cel_parser::OpLookup;
     ///
     /// let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+    /// // Two relationships forming an algebraic loop with no external source for either
+    /// // cell: `x` needs `y` and `y` needs `x`, so `propagate` can't pick a valid method
+    /// // assignment and returns `Error::Cycle`.
     /// let mut parsed = parser
-    ///     .parse_str("sheet s { cell x: i32 = 0; cell y: i32 = 0; relationship { x := y + 1; } }")
+    ///     .parse_str(
+    ///         "sheet s { cell x: i32 = 0; cell y: i32 = 0; \
+    ///          relationship { x := y + 1i32; } relationship { y := x + 1i32; } }",
+    ///     )
     ///     .unwrap();
-    /// if let Err(e) = parsed.propagate() {
-    ///     let located = parsed.locate_error(&e);
-    ///     assert!(located.is_empty() || !located[0].1.is_empty());
-    /// }
+    /// let e = parsed.propagate().unwrap_err();
+    /// let located = parsed.locate_error(&e);
+    /// assert!(!located.is_empty());
+    /// assert!(!located[0].1.is_empty());
     /// ```
     pub fn locate_error(&self, e: &adam_rs::Error) -> Vec<(SourceSpan, String)> {
         let by_id: HashMap<CellId, String> = self
@@ -922,14 +928,23 @@ impl AdamParser {
                     .collect();
                 let name = |id: CellId| by_id.get(&id).cloned();
 
-                // The primary site is the first binding this error implicates (if any); every
-                // other resolvable site (another binding, or a cell recorded so far) becomes a
+                // The primary site is the first binding this error implicates; every other
+                // resolvable site (another binding, or a cell recorded so far) becomes a
                 // secondary label. Falls back to the whole block when no site resolves — e.g.
                 // `InvalidMethod` for an empty relationship body carries no sites at all.
-                let primary_idx = e.sites().iter().find_map(|s| match s {
-                    ErrorSite::MethodIndex(i) => Some(*i),
+                //
+                // Resolved strictly from `sites().first()`, not by scanning for the first
+                // `MethodIndex` anywhere in the list: every `Error` variant `add_relationship`
+                // can return leads with a `MethodIndex` identifying the primary offending
+                // binding (see `Sheet::add_relationship`'s `sites` construction, in
+                // adam-rs/src/sheet.rs). Making that dependence explicit means a future variant
+                // that leads with some other site kind fails safe here (falls back to the whole
+                // block) instead of this code silently treating a later, unrelated `MethodIndex`
+                // site as primary.
+                let primary_idx = match e.sites().first() {
+                    Some(ErrorSite::MethodIndex(i)) => Some(*i),
                     _ => None,
-                });
+                };
                 let (start, end) = primary_idx
                     .and_then(|i| spans.get(i).copied())
                     .unwrap_or((block_start, close_span));
@@ -2432,7 +2447,10 @@ mod tests {
         // shared output cell's own declaration.
         assert!(out.contains("outputs"), "{out}"); // message text
         assert!(out.contains("collides with this earlier method"), "{out}");
-        assert!(out.contains("shared output cell `b`"), "{out}");
+        assert!(
+            out.contains("output cell `b` is claimed more than once"),
+            "{out}"
+        );
     }
 
     #[test]

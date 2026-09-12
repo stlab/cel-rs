@@ -50,13 +50,24 @@ pub(crate) fn site_label(
             _ => generic_site_label(site, cell_name),
         },
 
-        Error::DuplicateMethodOutputs { .. } => match (index, site) {
-            (0, _) => "this method's output set".to_string(),
-            (1, _) => "collides with this earlier method".to_string(),
-            (_, ErrorSite::Cell(c)) => match cell_name(*c) {
-                Some(name) => format!("shared output cell `{name}`"),
-                None => "shared output cell".to_string(),
+        // Two site shapes share this variant: self-duplicate (a method's own outputs list
+        // repeats a cell) is `[Method/MethodIndex, Cell(repeated output)]`; cross-method
+        // (two methods claim the same output set) is `[Method(later), Method(earlier),
+        // Cell(shared)…]`. A `Cell` site always means "this cell is claimed more than
+        // once", in *both* shapes — checking it before the numeric-index arms below is
+        // what keeps the self-duplicate case (whose `sites[1]` is a `Cell`, not the
+        // earlier method) from being mislabelled as "collides with this earlier method".
+        Error::DuplicateMethodOutputs { .. } => match site {
+            ErrorSite::Cell(c) => match cell_name(*c) {
+                Some(name) => format!("output cell `{name}` is claimed more than once"),
+                None => "this output cell is claimed more than once".to_string(),
             },
+            ErrorSite::MethodIndex(_) | ErrorSite::Method(..) if index == 0 => {
+                "this method's output set".to_string()
+            }
+            ErrorSite::MethodIndex(_) | ErrorSite::Method(..) if index == 1 => {
+                "collides with this earlier method".to_string()
+            }
             _ => generic_site_label(site, cell_name),
         },
 
@@ -146,6 +157,31 @@ mod tests {
         assert!(site_label(&e, 0, &name).to_lowercase().contains("output"));
         assert!(site_label(&e, 1, &name).to_lowercase().contains("earlier"));
         assert!(site_label(&e, 2, &name).contains("out"));
+    }
+
+    // Regression test for the self-duplicate shape of `DuplicateMethodOutputs`: a method's own
+    // `outputs` list repeats a cell (e.g. `relationship { (b, b) := (a, a2); }`), which
+    // `Sheet::add_relationship` reports as `sites: vec![MethodIndex(idx), Cell(o)]` -- only two
+    // sites, with `sites[1]` a `Cell`, not a second method. Labelling `index == 1` by raw
+    // position (as the cross-method case does) would wrongly print "collides with this earlier
+    // method" onto the cell caret, even though there is no earlier method here.
+    #[test]
+    fn site_label_describes_duplicate_method_outputs_self_duplicate() {
+        let e = adam_rs::Error::DuplicateMethodOutputs {
+            sites: vec![
+                adam_rs::ErrorSite::MethodIndex(0),
+                adam_rs::ErrorSite::Cell(adam_rs::CellId::default()),
+            ],
+        };
+        let name = |_id| Some("b".to_string());
+        let l0 = site_label(&e, 0, &name);
+        let l1 = site_label(&e, 1, &name);
+        assert!(l0.to_lowercase().contains("output"));
+        assert!(l1.contains("b"));
+        assert!(
+            !l1.to_lowercase()
+                .contains("collides with this earlier method")
+        );
     }
 
     #[test]
