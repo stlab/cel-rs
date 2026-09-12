@@ -19,14 +19,24 @@ fn indent(depth: usize) -> String {
     "    ".repeat(depth)
 }
 
-/// Writes one recovered `Comment` at `depth`'s indentation: a `Comment::Line` as one `// ` line
-/// per stored line; a `Comment::Block` as `/* text */` on one line when its text has no internal
-/// `\n`, or a multi-line `/*`/`*/`-delimited block (one line per stored line, indented one level
-/// past `depth`) when it does.
-fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
+/// Writes `comment`'s text starting at the current write position — its first line gets no
+/// leading indent or prefix of its own, so the caller positions the cursor first (either after
+/// its own `indent(depth)`, for a comment on its own line, or inline after a declaration's own
+/// terminator) — continuing any further lines at `depth`'s indentation, and always ending with a
+/// newline: a `Comment::Line` as one `// ` line per stored line; a `Comment::Block` as
+/// `/* text */` on one line when its text has no internal `\n`, or a multi-line `/*`/`*/`-
+/// delimited block (one line per stored line, indented one level past `depth`) when it does.
+/// Shared by [`write_comment`] and [`write_line_end`].
+fn write_comment_inline(out: &mut String, comment: &ast::Comment, depth: usize) {
     match comment {
         ast::Comment::Line(text) => {
-            for line in text.split('\n') {
+            let mut lines = text.split('\n');
+            if let Some(first) = lines.next() {
+                out.push_str("// ");
+                out.push_str(first);
+                out.push('\n');
+            }
+            for line in lines {
                 out.push_str(&indent(depth));
                 out.push_str("// ");
                 out.push_str(line);
@@ -34,7 +44,6 @@ fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
             }
         }
         ast::Comment::Block(text) => {
-            out.push_str(&indent(depth));
             if text.contains('\n') {
                 out.push_str("/*\n");
                 for line in text.split('\n') {
@@ -51,6 +60,13 @@ fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
             }
         }
     }
+}
+
+/// Writes one recovered `Comment` on its own line at `depth`'s indentation, via
+/// [`write_comment_inline`].
+fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
+    out.push_str(&indent(depth));
+    write_comment_inline(out, comment, depth);
 }
 
 /// Writes `doc_comment`'s lines (if present) as one `marker` line per stored line, at `depth`'s
@@ -112,37 +128,9 @@ fn write_line_end(
 ) {
     out.push_str(terminator);
     match trailing_line_comment {
-        Some(ast::Comment::Line(text)) => {
+        Some(comment) => {
             out.push(' ');
-            let mut lines = text.split('\n');
-            if let Some(first) = lines.next() {
-                out.push_str("// ");
-                out.push_str(first);
-                out.push('\n');
-            }
-            for line in lines {
-                out.push_str(&indent(depth));
-                out.push_str("// ");
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-        Some(ast::Comment::Block(text)) => {
-            out.push(' ');
-            if text.contains('\n') {
-                out.push_str("/*\n");
-                for line in text.split('\n') {
-                    out.push_str(&indent(depth + 1));
-                    out.push_str(line);
-                    out.push('\n');
-                }
-                out.push_str(&indent(depth));
-                out.push_str("*/\n");
-            } else {
-                out.push_str("/* ");
-                out.push_str(text);
-                out.push_str(" */\n");
-            }
+            write_comment_inline(out, comment, depth);
         }
         None => out.push('\n'),
     }
@@ -1045,6 +1033,44 @@ mod tests {
             "sheet s {\n    relationship {\n        b := a; // note\n        a := b;\n    }\n}";
         let expected =
             "sheet s {\n    relationship {\n        b := a; // note\n        a := b;\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_before_a_conditional_branchs_own_closing_brace() {
+        let source = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship { b := a; } // note\n        }\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship {\n                b := a;\n            } // note\n        }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_before_a_default_arms_own_closing_brace() {
+        let source = "sheet s {\n    conditional m {\n        _ => {\n            relationship { b := a; } // note\n        }\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        _ => {\n            relationship {\n                b := a;\n            } // note\n        }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_before_a_conditionals_own_closing_brace_with_only_branches()
+     {
+        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { b := a; } } // note\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship {\n                b := a;\n            }\n        } // note\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_before_a_conditionals_own_closing_brace_with_a_default()
+    {
+        let source = "sheet s {\n    conditional m {\n        _ => { relationship { b := a; } } // note\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        _ => {\n            relationship {\n                b := a;\n            }\n        } // note\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_before_a_requires_closing_brace() {
+        let source =
+            "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0; // note\n    };\n}";
+        let expected = "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0; // note\n    };\n}\n";
         assert_eq!(format(source), expected);
     }
 

@@ -25,6 +25,16 @@
 //! `OutDecl`'s `require` block, when present, uses the standard [`attach_trailing`] path
 //! directly, like any other container).
 //! See <https://github.com/stlab/cel-rs/issues/52>.
+//!
+//! A `//`/`/* */` comment ending or beginning on the same source line as an adjacent node's own
+//! first/last token — rather than on a fresh line of its own — attaches as that adjacent node's
+//! own `trailing_line_comment` instead of the following node's `leading_comment`; see
+//! [`analyze_gap`]'s `same_line` result and <https://github.com/stlab/cel-rs/issues/59>. This
+//! reuses the same node-to-node gaps described above, so it covers every sibling list and
+//! closing-brace gap this module already tracks, but goes no further: a comment written *inside*
+//! a CEL expression body (between two sub-expression tokens, with no adam-lang-tracked node
+//! boundary between them) is invisible to this whole gap-scanning mechanism and is silently
+//! dropped on reformat — see <https://github.com/stlab/cel-rs/issues/201>.
 
 use proc_macro2::LineColumn;
 
@@ -1219,5 +1229,89 @@ mod tests {
             Some(crate::ast::Comment::Line("note".to_string()))
         );
         assert_eq!(rel.trailing_comment, None);
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_conditional_branchs_own_closing_brace_attaches_to_the_last_relationship()
+     {
+        let source = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship { b := a; } // note\n        }\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        assert_eq!(
+            cond.branches[0].relationships[0].trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(cond.branches[0].trailing_comment, None);
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_default_arms_own_closing_brace_attaches_to_the_last_relationship()
+     {
+        let source = "sheet s {\n    conditional m {\n        _ => {\n            relationship { b := a; } // note\n        }\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        let default = cond.default.as_ref().expect("default branch present");
+        assert_eq!(
+            default.relationships[0].trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(default.trailing_comment, None);
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_conditionals_own_closing_brace_with_only_branches_attaches_to_the_last_branch()
+     {
+        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { b := a; } } // note\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        assert_eq!(
+            cond.branches[0].trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(cond.trailing_comment, None);
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_conditionals_own_closing_brace_with_a_default_attaches_to_the_default()
+     {
+        let source = "sheet s {\n    conditional m {\n        _ => { relationship { b := a; } } // note\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        let default = cond.default.as_ref().expect("default branch present");
+        assert_eq!(
+            default.trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(cond.trailing_comment, None);
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_requires_closing_brace_attaches_to_the_last_requirement()
+     {
+        let source =
+            "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0; // note\n    };\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Out(out) = &sheet.items[0] else {
+            panic!("expected Out");
+        };
+        let require = out.require.as_ref().expect("require block present");
+        assert_eq!(
+            require.requirements[0].trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(require.trailing_comment, None);
     }
 }
