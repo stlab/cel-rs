@@ -1325,7 +1325,7 @@ impl AdamParser {
                     })?
                     .add_conditional_fn;
                 add_cond_fn(&mut ctx.sheet, match_expr, branches, default_rel_ids)
-                    .map_err(|e| ParseError::new(e.to_string(), match_span))?;
+                    .map_err(|e| Self::conditional_error(ctx, match_span, e))?;
             }
             TypeShape::Tuple(_) => {
                 let typed_branches: Vec<(Vec<cel_runtime::DynamicSequence>, Vec<RelationshipId>)> =
@@ -1345,11 +1345,44 @@ impl AdamParser {
                         typed_branches,
                         default_rel_ids,
                     )
-                    .map_err(|e| ParseError::new(e.to_string(), match_span))?;
+                    .map_err(|e| Self::conditional_error(ctx, match_span, e))?;
             }
         }
 
         Ok(())
+    }
+
+    /// Turns an `add_conditional`/`add_cond_fn` failure into a `ParseError`: `match_span` (the
+    /// conditional's own match-subject expression — the most specific span available at this
+    /// point in parsing) is the primary site, and every one of `e`'s `Relationship`/`Cell`
+    /// sites that resolves against `ctx`'s span tables becomes a secondary label.
+    ///
+    /// - Complexity: O(s) in the number of `e`'s sites.
+    fn conditional_error(ctx: &ParseContext, match_span: Span, e: adam_rs::Error) -> ParseError {
+        let by_id: HashMap<CellId, String> = ctx
+            .cell_names
+            .iter()
+            .map(|(n, (id, _))| (*id, n.clone()))
+            .collect();
+        let name = |id: CellId| by_id.get(&id).cloned();
+        let secondary: Vec<cel_parser::SpanLabel> = e
+            .sites()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let sp = match s {
+                    ErrorSite::Relationship(r) => ctx.relationship_spans.get(r).copied(),
+                    ErrorSite::Cell(c) => ctx.cell_spans.get(c).copied(),
+                    _ => None,
+                }?;
+                Some(cel_parser::SpanLabel {
+                    span: sp,
+                    label: crate::error_labels::site_label(&e, i, &name),
+                })
+            })
+            .collect();
+        let message = e.to_string();
+        ParseError::new(message, match_span).with_secondary(secondary)
     }
 
     /// Parses one `conditional_branch`/`default_branch`'s shared body: `"{" { relationship_decl }
@@ -3579,6 +3612,34 @@ mod tests {
         let source = "sheet s {\n    cell mode: i32 = 0;\n    cell other: i32 = 0;\n\n    conditional mode {\n        0i32 => {\n            relationship {\n                mode := other;\n                other := mode;\n            }\n        }\n    }\n}";
         let err = parser.parse_str(source).unwrap_err();
         assert_eq!(err.span().start().line, 5);
+    }
+
+    // NOTE on coverage: `add_conditional`'s other `InvalidConditional` case with a
+    // `Relationship`-only site list -- the same relationship reused across two branches (or a
+    // branch and the default) -- is not reachable through adam-lang's own grammar today.
+    // `parse_branch_relationships` calls `parse_relationship_decl`, which always creates a
+    // *fresh* `RelationshipId` on `add_relationship`; adam-lang has no syntax for a `relationship`
+    // to be *named* and then referenced again from a second branch. That case is exercised
+    // directly against `Sheet::add_conditional` in
+    // `add_conditional_returns_invalid_conditional_for_duplicate_relationship_across_branches`
+    // (adam-rs/src/sheet.rs); it stays untested at the adam-lang parser level until adam-lang
+    // grows named/referenceable relationships (tracked as a follow-up, not blocking this task).
+    #[test]
+    fn conditional_invalid_relationship_and_cell_sites_render_as_secondary_labels() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        // Same structural error as the test above (a multi-method branch relationship sharing
+        // the match cell `mode`): this time asserting on the *rendered* diagnostic, to confirm
+        // the offending relationship's own block and the shared cell's declaration are attached
+        // as secondary spans, not just that the primary span moved off the sheet line.
+        let source = "sheet s {\n    cell mode: i32 = 0;\n    cell other: i32 = 0;\n\n    conditional mode {\n        0i32 => {\n            relationship {\n                mode := other;\n                other := mode;\n            }\n        }\n    }\n}";
+        let err = parser.parse_str(source).unwrap_err();
+        let out =
+            err.format_rustc_style(source, "t.adm2", 1, &annotate_snippets::Renderer::plain());
+        assert!(
+            out.contains("this relationship makes the conditional invalid"),
+            "{out}"
+        );
+        assert!(out.contains("cell `mode`"), "{out}");
     }
 
     #[test]
