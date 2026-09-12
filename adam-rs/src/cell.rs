@@ -67,6 +67,12 @@ impl CellData {
     pub(crate) fn effective(&self) -> &dyn Any {
         self.derived.as_deref().unwrap_or(self.source.as_ref())
     }
+
+    /// Returns whether `strength` reflects a live explicit `write()`/`add_cell` (bit 63
+    /// set) rather than a strength assigned by the post-round derived-strength pass.
+    pub(crate) fn has_explicit_strength(&self) -> bool {
+        self.strength & (1u64 << 63) != 0
+    }
 }
 
 #[cfg(test)]

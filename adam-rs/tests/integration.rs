@@ -2364,3 +2364,48 @@ fn issue_182_inequality_chain_has_no_spring_back_hysteresis_when_dragging_a_boun
         assert_eq!(*sheet.read::<i32>(c).unwrap(), c_val);
     }
 }
+
+#[test]
+fn issue_182_inequality_chain_writing_the_middle_cell_then_an_untouched_endpoint_keeps_its_edit() {
+    // a<=b<=c again, but this time the *middle* cell is written directly, unlike every
+    // other issue_182 case above (which only ever writes the two endpoints). write(a,
+    // 100) drags the whole chain up to 100; write(b, 50) then correctly pulls a down to
+    // meet it (b now outranks a's stale write). The regression: a third write to c --
+    // even to its already-current value of 100 -- must not resurrect a's stale strength
+    // and drag b back up to 100. b's higher-strength edit must still stand.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(42_i32);
+    let c = sheet.add_cell(100_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+    sheet.write(a, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+
+    sheet.write(b, 50_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 50);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 50);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+
+    sheet.write(c, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 50);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 50);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+}
