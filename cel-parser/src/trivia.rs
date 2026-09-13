@@ -10,8 +10,9 @@ use proc_macro2::LineColumn;
 /// formatter can reproduce it instead of normalizing every comment to one style.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Comment {
-    /// A single `// text` line, its leading `//` and surrounding whitespace stripped. A
-    /// multi-line block recovered as `Line` (consecutive `//` lines) joins them with `\n`.
+    /// A line comment's text — its `//` and surrounding whitespace stripped. A producer that
+    /// merges a run of consecutive `//` lines (e.g. adam-lang's trivia recovery) stores them
+    /// joined with `\n`; cel-parser's `scan_gap` emits one `Line` per `//` line.
     Line(String),
     /// A `/* text */` block comment (single- or multi-line), inner text `\n`-joined with the
     /// `/*`/`*/` delimiters and per-line indentation stripped.
@@ -110,6 +111,10 @@ pub fn line_start_byte_offsets(source: &str) -> Vec<usize> {
 ///
 /// - Complexity: O(k) in `pos.column`.
 pub fn line_column_to_byte(source: &str, line_starts: &[usize], pos: LineColumn) -> usize {
+    debug_assert!(
+        pos.line >= 1 && pos.line - 1 < line_starts.len(),
+        "pos.line out of range for line_starts"
+    );
     let line_start = line_starts[pos.line - 1];
     line_start
         + source[line_start..]
@@ -177,6 +182,13 @@ mod tests {
         let pieces = scan_gap(" /* a */ /* b */ + ", &["+"]);
         assert_eq!(comments(pieces.clone()).len(), 2);
         assert!(matches!(pieces[2], GapPiece::Punct("+")));
+    }
+
+    #[test]
+    fn two_consecutive_line_comments_are_two_pieces() {
+        let pieces = scan_gap(" // a\n // b\n + ", &["+"]);
+        assert_eq!(comments(pieces.clone()).len(), 2);
+        assert!(matches!(pieces.last(), Some(GapPiece::Punct("+"))));
     }
 
     #[test]
