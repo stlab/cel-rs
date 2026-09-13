@@ -256,7 +256,7 @@ pub enum Comment {
 /// One element of a scanned gap: either a recovered comment or one of the literal tokens the
 /// caller declared it expected to find there.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum GapPiece {
+pub enum GapPiece {
     /// A comment found in the gap.
     Comment(Comment),
     /// One expected literal token (an operator symbol, delimiter, comma, or keyword).
@@ -273,7 +273,7 @@ pub(crate) enum GapPiece {
 ///   real source re-synthesizes its separators).
 ///
 /// - Complexity: O(n) in `gap.len()`.
-pub(crate) fn scan_gap(gap: &str, expected: &[&'static str]) -> Vec<GapPiece> {
+pub fn scan_gap(gap: &str, expected: &[&'static str]) -> Vec<GapPiece> {
     let mut pieces = Vec::new();
     let mut next = 0usize;
     let mut rest = gap;
@@ -324,7 +324,7 @@ fn normalize_block(inner: &str) -> String {
 /// of 1-based line `line` (matching [`proc_macro2::LineColumn::line`]'s convention).
 ///
 /// - Complexity: O(n) in `source.len()`.
-pub(crate) fn line_start_byte_offsets(source: &str) -> Vec<usize> {
+pub fn line_start_byte_offsets(source: &str) -> Vec<usize> {
     let mut offsets = vec![0usize];
     let mut byte = 0usize;
     for line in source.split_inclusive('\n') {
@@ -340,7 +340,7 @@ pub(crate) fn line_start_byte_offsets(source: &str) -> Vec<usize> {
 /// - Precondition: `line_starts` was built from exactly `source`, and `pos.line - 1` is in range.
 ///
 /// - Complexity: O(k) in `pos.column`.
-pub(crate) fn line_column_to_byte(source: &str, line_starts: &[usize], pos: LineColumn) -> usize {
+pub fn line_column_to_byte(source: &str, line_starts: &[usize], pos: LineColumn) -> usize {
     let line_start = line_starts[pos.line - 1];
     line_start
         + source[line_start..]
@@ -657,11 +657,14 @@ unchanged — this isolates the mechanical ripple from the behavioral change.
 - Modify: `cel-parser/src/fmt.rs` (signatures of `format_expr`, `format_at`, `render`; all internal
   recursion; the doctest; the crate's own `#[cfg(test)]` call sites)
 - Modify: `adam-lang/src/fmt.rs` (every `cel_parser::format_expr(x)` → `cel_parser::format_expr(x, source, depth)`)
-- Modify: `ez-adam/src/codegen/ast_builder.rs` (3 call sites → pass `""`, `0`)
+- Modify: `ez-adam/src/codegen/ast_builder.rs` (3 `format_expr` call sites → pass `""`, `0`)
+- Modify: `ez-adam/src/codegen/mod.rs` (the `format_sheet` call site → pass `""`)
 
 **Interfaces:**
 - Produces: `pub fn format_expr(expr: &Expr, source: &str, depth: usize) -> String`, consumed by
   Tasks 4–9 (cel-parser) and Task 10/11 (adam-lang).
+- Produces: `pub fn format_sheet(sheet: &ast::Sheet, source: &str) -> String` (adam-lang),
+  consumed by adam-lang's own tests and `ez-adam/src/codegen/mod.rs`.
 
 - [ ] **Step 1: Change the three signatures in `cel-parser/src/fmt.rs`**
 
@@ -778,6 +781,12 @@ and the two direct `format_sheet(&sheet)` test calls (`formats_a_filter`,
 
 Its 3 `cel_parser::format_expr(&x)` calls format hand-built `Expr`s with synthetic spans. Change
 each to `cel_parser::format_expr(&x, "", 0)`.
+
+Also update `ez-adam/src/codegen/mod.rs`'s single `adam_lang::format_sheet(&build_sheet(doc)?)`
+call site (line ~151) to `adam_lang::format_sheet(&build_sheet(doc)?, "")` — `build_sheet` builds
+the sheet programmatically from a `Document`, so there is no original source text; passing `""`
+means no intra-declaration comments are recovered (there are none in a hand-built sheet), and
+output is identical to today.
 
 - [ ] **Step 5: Build and run the full affected test suites**
 
@@ -1653,18 +1662,16 @@ EOF
 - Produces: `adam_lang::ast::Comment` now aliases `cel_parser::Comment` (every existing
   `ast::Comment::Line`/`Block` use keeps compiling).
 
-Note: `line_start_byte_offsets`/`line_column_to_byte` are `pub(crate)` in `cel_parser::trivia`, so
-`adam-lang` (a separate crate) cannot import them directly. Make them `pub` in `cel_parser::trivia`
-(promote from `pub(crate)` — update Task 1's implementation note: they must be `pub`, not
-`pub(crate)`, because adam-lang consumes them). `scan_gap`/`GapPiece` also need to be `pub` for
-Task 11's adam-lang use. Revise Task 1 accordingly if not already `pub`.
+Note: `scan_gap`, `GapPiece`, `line_start_byte_offsets`, and `line_column_to_byte` were declared
+`pub` in `cel_parser::trivia` in Task 1 (so adam-lang, a separate crate, can import them). This
+task only consumes them; no visibility change is needed.
 
-- [ ] **Step 1: Promote the primitives to `pub` in `cel_parser::trivia`**
+- [ ] **Step 1: Confirm the primitives are `pub` and reachable from adam-lang**
 
-In `cel-parser/src/trivia.rs`, change `pub(crate) enum GapPiece`, `pub(crate) fn scan_gap`,
-`pub(crate) fn line_start_byte_offsets`, `pub(crate) fn line_column_to_byte` to `pub`. In
-`cel-parser/src/lib.rs`, they're reachable as `cel_parser::trivia::*`. Run `cargo build -p
-cel-parser` to confirm still clean.
+In `cel-parser/src/trivia.rs`, confirm `GapPiece`, `scan_gap`, `line_start_byte_offsets`, and
+`line_column_to_byte` are declared `pub` (they should be, from Task 1). Confirm they're reachable
+as `cel_parser::trivia::*`. If any is still `pub(crate)`, promote it to `pub` and run `cargo build
+-p cel-parser` to confirm clean. (Expected: no change needed.)
 
 - [ ] **Step 2: Replace `Comment` in `adam-lang/src/ast.rs`**
 
