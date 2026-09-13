@@ -48,8 +48,6 @@ enum Spacing {
     /// A single space on each side of the token: `a + b`.
     Around,
     /// No surrounding spaces: `a..b`, or a bare delimiter.
-    // Wired into the range-family arms in a later task (#201); unused outside tests until then.
-    #[allow(dead_code)]
     None,
     /// The token then one space: `a, b`.
     // Wired into comma-separated arms (tuple/call args) in a later task (#201); unused outside
@@ -93,12 +91,10 @@ fn emit_gap(pieces: &[GapPiece], spacing: Spacing, depth: usize) -> String {
                 }
             }
             GapPiece::Comment(Comment::Block(text)) => {
-                // Separate from whatever came before with exactly one space, unless the previous
-                // piece already left a trailing space, or this is the very first piece under a
-                // spacing mode with no inherent leading space of its own.
-                if out.ends_with(' ') {
-                    // already separated
-                } else if !out.is_empty() || matches!(spacing, Spacing::Around) {
+                // Separate from whatever came before (or, when this is the first piece, from the
+                // already-rendered operand this gap is appended to) with exactly one space,
+                // unless the previous piece already left a trailing space.
+                if !out.ends_with(' ') {
                     out.push(' ');
                 }
                 out.push_str("/* ");
@@ -194,6 +190,15 @@ fn binary_op_token(name: &str) -> &'static str {
     }
 }
 
+/// Returns the `'static` source spelling of a unary operator name (`"-"` or `"!"`).
+fn unary_op_token(name: &str) -> &'static str {
+    match name {
+        "-" => "-",
+        "!" => "!",
+        other => unreachable!("unary_op_token called with unknown operator `{other}`"),
+    }
+}
+
 /// Renders a closure parameter's unresolved type expression, e.g. `"i32"` or `"(i32, f64)"`.
 ///
 /// - Complexity: O(n) in the number of (nested) tuple elements in the type expression.
@@ -254,12 +259,15 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             // `nested_comparison_needs_parens_on_both_sides`).
             ("..".to_string(), Level::RANGE)
         }
-        Expr::Op { name, operands, .. }
-            if operands.len() == 1
-                && matches!(
-                    name.as_str(),
-                    "range_from" | "range_to" | "range_to_inclusive"
-                ) =>
+        Expr::Op {
+            name,
+            operands,
+            span,
+        } if operands.len() == 1
+            && matches!(
+                name.as_str(),
+                "range_from" | "range_to" | "range_to_inclusive"
+            ) =>
         {
             // Range's own endpoints are always `or_expression`s (never chained further range
             // expressions — see `is_range_expression`'s doc comment), so an operand only needs
@@ -267,35 +275,71 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             // `Level::COMPARISON` gets below.
             let operand_s = format_at(&operands[0], source, depth, Level::RANGE.tighter());
             let text = match name.as_str() {
-                "range_from" => format!("{operand_s}.."),
-                "range_to" => format!("..{operand_s}"),
-                "range_to_inclusive" => format!("..={operand_s}"),
+                "range_from" => {
+                    let pieces = gap_between(source, operands[0].span().end, span.end, &[".."]);
+                    format!("{operand_s}{}", emit_gap(&pieces, Spacing::None, depth))
+                }
+                "range_to" => {
+                    // `span.start` is the `".."` token's own span; a `gap_between` call always
+                    // scans strictly *after* its `prev_end` argument's end, so `".."` itself can
+                    // never appear inside the scanned gap here (unlike the operand-then-operator
+                    // arms below, where the operator genuinely sits inside the scanned range) —
+                    // it's rendered directly instead, and only a comment is scanned for.
+                    let pieces = gap_between(source, span.start, operands[0].span().start, &[]);
+                    format!("..{}{operand_s}", emit_gap(&pieces, Spacing::None, depth))
+                }
+                "range_to_inclusive" => {
+                    let pieces = gap_between(source, span.start, operands[0].span().start, &[]);
+                    format!("..={}{operand_s}", emit_gap(&pieces, Spacing::None, depth))
+                }
                 _ => unreachable!("guarded by the outer match arm"),
             };
             (text, Level::RANGE)
         }
-        Expr::Op { name, operands, .. } if operands.len() == 1 => {
+        Expr::Op {
+            name,
+            operands,
+            span,
+        } if operands.len() == 1 => {
             let operand_s = format_at(&operands[0], source, depth, Level::UNARY);
-            // A bare "-"/"!" glued directly onto an operand that itself starts with "-"/"!"
-            // would re-tokenize as one run of punctuation; a single space disambiguates.
-            let sep = if operand_s.starts_with('-') || operand_s.starts_with('!') {
+            let op_static = unary_op_token(name);
+            // Same reasoning as the `range_to`/`range_to_inclusive` arm above: the operator
+            // precedes the operand, so it can never appear inside the scanned gap; only a
+            // comment is scanned for, and the operator is rendered directly.
+            let pieces = gap_between(source, span.start, operands[0].span().start, &[]);
+            // Preserve the existing "- -1" disambiguating space when there are no comments.
+            let default_sep = if operand_s.starts_with('-') || operand_s.starts_with('!') {
                 " "
             } else {
                 ""
             };
-            (format!("{name}{sep}{operand_s}"), Level::UNARY)
+            let gap = if pieces.iter().any(|p| matches!(p, GapPiece::Comment(_))) {
+                emit_gap(&pieces, Spacing::None, depth)
+            } else {
+                default_sep.to_string()
+            };
+            (format!("{op_static}{gap}{operand_s}"), Level::UNARY)
         }
         Expr::Op { name, operands, .. } if name == "range" || name == "range_inclusive" => {
             // Same non-chaining reasoning as the arity-1 range arm above: both endpoints render
             // strictly tighter than Range.
             let lhs_s = format_at(&operands[0], source, depth, Level::RANGE.tighter());
             let rhs_s = format_at(&operands[1], source, depth, Level::RANGE.tighter());
-            let op_str = if name == "range_inclusive" {
+            let op_static: &'static str = if name == "range_inclusive" {
                 "..="
             } else {
                 ".."
             };
-            (format!("{lhs_s}{op_str}{rhs_s}"), Level::RANGE)
+            let pieces = gap_between(
+                source,
+                operands[0].span().end,
+                operands[1].span().start,
+                &[op_static],
+            );
+            (
+                format!("{lhs_s}{}{rhs_s}", emit_gap(&pieces, Spacing::None, depth)),
+                Level::RANGE,
+            )
         }
         Expr::Op { name, operands, .. } => {
             let level = binary_op_level(name);
@@ -326,13 +370,23 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             )
         }
         Expr::Cast {
-            expr, type_name, ..
+            expr,
+            type_name,
+            span,
         } => {
             // Left-associative, like multiplicative/additive: the operand only needs to be at
             // least as tight as Cast itself, so a chain like `x as i32 as f64` reprints without
             // extra parens.
             let expr_s = format_at(expr, source, depth, Level::CAST);
-            (format!("{expr_s} as {type_name}"), Level::CAST)
+            // The type name has no span of its own, so the gap scanned here runs from the operand's
+            // end through the whole cast node's end (which includes both `as` and the type name);
+            // only `"as"` is expected inside it, and the type name is appended afterward.
+            let pieces = gap_between(source, expr.span().end, span.end, &["as"]);
+            let gap = emit_gap(&pieces, Spacing::Around, depth);
+            (
+                format!("{expr_s}{} {type_name}", gap.trim_end()),
+                Level::CAST,
+            )
         }
         Expr::Apply { callee, args, .. } => {
             let callee_s = format_at(callee, source, depth, Level::POSTFIX);
@@ -759,5 +813,27 @@ mod tests {
     #[test]
     fn a_comment_free_binary_op_still_prints_on_one_line() {
         assert_eq!(fmt("1i32 + 2i32 * 3i32"), "1i32 + 2i32 * 3i32");
+    }
+
+    #[test]
+    fn a_comment_after_unary_minus_is_preserved() {
+        assert_eq!(fmt("- /* neg */ 1i32"), "- /* neg */ 1i32");
+    }
+
+    #[test]
+    fn a_comment_around_a_cast_operator_is_preserved() {
+        assert_eq!(fmt("x /* c */ as i32"), "x /* c */ as i32");
+    }
+
+    #[test]
+    fn a_comment_inside_a_range_is_preserved() {
+        assert_eq!(fmt("1i32 /* r */ ..5i32"), "1i32 /* r */ ..5i32");
+    }
+
+    #[test]
+    fn comment_free_unary_cast_and_range_are_unchanged() {
+        assert_eq!(fmt("-1i32"), "-1i32");
+        assert_eq!(fmt("x as i32"), "x as i32");
+        assert_eq!(fmt("1i32..5i32"), "1i32..5i32");
     }
 }
