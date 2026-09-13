@@ -6,6 +6,7 @@
 //! original notation (`1920.0` vs `1920.0f64`, a byte literal's spelling) round-trips.
 
 use crate::ast::{Expr, LogicalOp};
+use crate::trivia::{Comment, GapPiece};
 
 /// Binding-strength level, loosest first, mirroring `lib.rs`'s grammar chain from
 /// `range_expression` (via `expression = range_expression`) through `primary_expression`.
@@ -32,6 +33,84 @@ impl Level {
     fn tighter(self) -> Level {
         Level(self.0 + 1)
     }
+}
+
+/// 4 spaces per nesting level (mirrors `adam-lang::fmt::indent`).
+fn indent(depth: usize) -> String {
+    "    ".repeat(depth)
+}
+
+/// How a gap's expected `Punct` tokens are spaced against their operands.
+#[derive(Clone, Copy)]
+enum Spacing {
+    /// A single space on each side of the token: `a + b`.
+    Around,
+    /// No surrounding spaces: `a..b`, or a bare delimiter.
+    None,
+    /// The token then one space: `a, b`.
+    CommaAfter,
+}
+
+/// Renders the pieces of one scanned gap into the text that goes *between* two already-rendered
+/// operands. A `Comment::Block` is inlined space-separated; a `Comment::Line` ends its line and
+/// resumes at `indent(depth + 1)` (the wrap continuation), since a `//` comment runs to
+/// end-of-line. A `Punct` is spaced per `spacing`.
+///
+/// - Postcondition: the returned string starts and ends exactly as `spacing` dictates for the
+///   comment-free case (e.g. `Spacing::Around` with a lone `Punct` returns `" + "`), so a
+///   comment-free gap reprints identically to the pre-`scan_gap` formatter.
+///
+/// - Complexity: O(n) in `pieces.len()` plus their text lengths.
+fn emit_gap(pieces: &[GapPiece], spacing: Spacing, depth: usize) -> String {
+    let cont = indent(depth + 1);
+    let mut out = String::new();
+    for piece in pieces {
+        match piece {
+            GapPiece::Punct(tok) => {
+                match spacing {
+                    Spacing::Around => {
+                        // Skip the leading space only when the previous piece already left one
+                        // (a block comment's trailing `" */ "`, or a line comment's continuation
+                        // indent) — otherwise this token opens the gap and needs its own.
+                        if !out.ends_with(' ') {
+                            out.push(' ');
+                        }
+                        out.push_str(tok);
+                        out.push(' ');
+                    }
+                    Spacing::None => out.push_str(tok),
+                    Spacing::CommaAfter => {
+                        out.push_str(tok);
+                        out.push(' ');
+                    }
+                }
+            }
+            GapPiece::Comment(Comment::Block(text)) => {
+                // Separate from whatever came before with exactly one space, unless the previous
+                // piece already left a trailing space, or this is the very first piece under a
+                // spacing mode with no inherent leading space of its own.
+                if out.ends_with(' ') {
+                    // already separated
+                } else if !out.is_empty() || matches!(spacing, Spacing::Around) {
+                    out.push(' ');
+                }
+                out.push_str("/* ");
+                out.push_str(text);
+                out.push_str(" */ ");
+            }
+            GapPiece::Comment(Comment::Line(text)) => {
+                // A `//` comment runs to end of line, so anything after it must start on the next
+                // line; drop any trailing space this gap had accumulated before appending it.
+                let trimmed_len = out.trim_end().len();
+                out.truncate(trimmed_len);
+                out.push_str(" // ");
+                out.push_str(text);
+                out.push('\n');
+                out.push_str(&cont);
+            }
+        }
+    }
+    out
 }
 
 /// Returns the binding-strength level of a binary (two-operand) operator.
@@ -536,5 +615,52 @@ mod tests {
             format_expr(&parse("1i32 + 2i32..3i32 * 4i32")),
             "1i32 + 2i32..3i32 * 4i32"
         );
+    }
+
+    #[test]
+    fn emit_gap_around_a_plain_operator_uses_single_spaces() {
+        let pieces = vec![GapPiece::Punct("+")];
+        assert_eq!(emit_gap(&pieces, Spacing::Around, 0), " + ");
+    }
+
+    #[test]
+    fn emit_gap_none_spacing_glues_a_range_operator() {
+        let pieces = vec![GapPiece::Punct("..")];
+        assert_eq!(emit_gap(&pieces, Spacing::None, 0), "..");
+    }
+
+    #[test]
+    fn emit_gap_comma_after_puts_one_trailing_space() {
+        let pieces = vec![GapPiece::Punct(",")];
+        assert_eq!(emit_gap(&pieces, Spacing::CommaAfter, 0), ", ");
+    }
+
+    #[test]
+    fn emit_gap_inlines_a_block_comment_before_an_operator() {
+        let pieces = vec![
+            GapPiece::Comment(Comment::Block("a".to_string())),
+            GapPiece::Punct("+"),
+        ];
+        assert_eq!(emit_gap(&pieces, Spacing::Around, 0), " /* a */ + ");
+    }
+
+    #[test]
+    fn emit_gap_inlines_a_block_comment_after_an_operator() {
+        let pieces = vec![
+            GapPiece::Punct("+"),
+            GapPiece::Comment(Comment::Block("b".to_string())),
+        ];
+        assert_eq!(emit_gap(&pieces, Spacing::Around, 0), " + /* b */ ");
+    }
+
+    #[test]
+    fn emit_gap_wraps_after_a_line_comment_to_the_continuation_indent() {
+        let pieces = vec![
+            GapPiece::Punct("+"),
+            GapPiece::Comment(Comment::Line("why".to_string())),
+        ];
+        // depth 0 => continuation at depth 1 (4 spaces). The operator keeps its leading space; the
+        // line comment ends the line, and the next operand resumes at the continuation indent.
+        assert_eq!(emit_gap(&pieces, Spacing::Around, 0), " + // why\n    ");
     }
 }
