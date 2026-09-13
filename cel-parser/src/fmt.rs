@@ -6,7 +6,7 @@
 //! original notation (`1920.0` vs `1920.0f64`, a byte literal's spelling) round-trips.
 
 use crate::ast::{Expr, LogicalOp};
-use crate::trivia::{Comment, GapPiece};
+use crate::trivia::{Comment, GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap};
 
 /// Binding-strength level, loosest first, mirroring `lib.rs`'s grammar chain from
 /// `range_expression` (via `expression = range_expression`) through `primary_expression`.
@@ -38,22 +38,23 @@ impl Level {
 /// 4 spaces per nesting level (mirrors `adam-lang::fmt::indent`).
 ///
 /// - Complexity: O(depth).
-// Wired into render in a later task (#201); unused outside tests until then.
-#[allow(dead_code)]
 fn indent(depth: usize) -> String {
     "    ".repeat(depth)
 }
 
 /// How a gap's expected `Punct` tokens are spaced against their operands.
-// Wired into render in a later task (#201); unused outside tests until then.
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum Spacing {
     /// A single space on each side of the token: `a + b`.
     Around,
     /// No surrounding spaces: `a..b`, or a bare delimiter.
+    // Wired into the range-family arms in a later task (#201); unused outside tests until then.
+    #[allow(dead_code)]
     None,
     /// The token then one space: `a, b`.
+    // Wired into comma-separated arms (tuple/call args) in a later task (#201); unused outside
+    // tests until then.
+    #[allow(dead_code)]
     CommaAfter,
 }
 
@@ -67,8 +68,6 @@ enum Spacing {
 ///   comment-free gap reprints identically to the pre-`scan_gap` formatter.
 ///
 /// - Complexity: O(n) in `pieces.len()` plus their text lengths.
-// Wired into render in a later task (#201); unused outside tests until then.
-#[allow(dead_code)]
 fn emit_gap(pieces: &[GapPiece], spacing: Spacing, depth: usize) -> String {
     let cont = indent(depth + 1);
     let mut out = String::new();
@@ -147,6 +146,52 @@ fn binary_op_level(name: &str) -> Level {
 /// module doc).
 fn render_literal(span: crate::ExprSpan) -> String {
     span.start.source_text().unwrap_or_default()
+}
+
+/// Scans the source gap between two adjacent AST positions for comments interleaved with
+/// `expected` tokens. Returns just the expected tokens (no comments) when `source` is empty or the
+/// positions don't resolve within it (a hand-built `Expr`), so a source-less format still works.
+///
+/// - Complexity: O(n) in the gap's length.
+fn gap_between(
+    source: &str,
+    prev_end: proc_macro2::Span,
+    next_start: proc_macro2::Span,
+    expected: &[&'static str],
+) -> Vec<GapPiece> {
+    if source.is_empty() {
+        return scan_gap("", expected);
+    }
+    let line_starts = line_start_byte_offsets(source);
+    let start = line_column_to_byte(source, &line_starts, prev_end.end());
+    let end = line_column_to_byte(source, &line_starts, next_start.start());
+    let gap = source.get(start..end).unwrap_or("");
+    scan_gap(gap, expected)
+}
+
+/// Returns the `'static` source spelling of a binary operator name, for `scan_gap`'s expected-token
+/// list (which needs `&'static str`). The spelling equals `name` for every binary operator this
+/// formatter's `binary_op_level` accepts.
+fn binary_op_token(name: &str) -> &'static str {
+    match name {
+        "|" => "|",
+        "^" => "^",
+        "&" => "&",
+        "<<" => "<<",
+        ">>" => ">>",
+        "+" => "+",
+        "-" => "-",
+        "*" => "*",
+        "/" => "/",
+        "%" => "%",
+        "==" => "==",
+        "!=" => "!=",
+        "<" => "<",
+        ">" => ">",
+        "<=" => "<=",
+        ">=" => ">=",
+        other => unreachable!("binary_op_token called with unknown operator `{other}`"),
+    }
 }
 
 /// Renders a closure parameter's unresolved type expression, e.g. `"i32"` or `"(i32, f64)"`.
@@ -264,7 +309,21 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             };
             let lhs_s = format_at(&operands[0], source, depth, lhs_min);
             let rhs_s = format_at(&operands[1], source, depth, rhs_min);
-            (format!("{lhs_s} {name} {rhs_s}"), level)
+            // The operator token itself has no span; it lives in the gap between the two operands.
+            let op_static = binary_op_token(name);
+            let pieces = gap_between(
+                source,
+                operands[0].span().end,
+                operands[1].span().start,
+                &[op_static],
+            );
+            (
+                format!(
+                    "{lhs_s}{}{rhs_s}",
+                    emit_gap(&pieces, Spacing::Around, depth)
+                ),
+                level,
+            )
         }
         Expr::Cast {
             expr, type_name, ..
@@ -671,5 +730,34 @@ mod tests {
         // depth 0 => continuation at depth 1 (4 spaces). The operator keeps its leading space; the
         // line comment ends the line, and the next operand resumes at the continuation indent.
         assert_eq!(emit_gap(&pieces, Spacing::Around, 0), " + // why\n    ");
+    }
+
+    #[test]
+    fn a_block_comment_before_a_binary_operator_is_preserved() {
+        let source = "1i32 /* a */ + 2i32";
+        assert_eq!(fmt(source), "1i32 /* a */ + 2i32");
+    }
+
+    #[test]
+    fn a_block_comment_after_a_binary_operator_is_preserved() {
+        let source = "1i32 + /* b */ 2i32";
+        assert_eq!(fmt(source), "1i32 + /* b */ 2i32");
+    }
+
+    #[test]
+    fn comments_on_both_sides_of_a_binary_operator_are_preserved() {
+        let source = "1i32 /* a */ + /* b */ 2i32";
+        assert_eq!(fmt(source), "1i32 /* a */ + /* b */ 2i32");
+    }
+
+    #[test]
+    fn a_line_comment_after_a_binary_operator_wraps_the_expression() {
+        let source = "1i32 +\n    // why 2\n    2i32";
+        assert_eq!(fmt(source), "1i32 + // why 2\n    2i32");
+    }
+
+    #[test]
+    fn a_comment_free_binary_op_still_prints_on_one_line() {
+        assert_eq!(fmt("1i32 + 2i32 * 3i32"), "1i32 + 2i32 * 3i32");
     }
 }
