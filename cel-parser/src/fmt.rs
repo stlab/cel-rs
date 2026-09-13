@@ -36,11 +36,15 @@ impl Level {
 }
 
 /// 4 spaces per nesting level (mirrors `adam-lang::fmt::indent`).
+// Wired into render in a later task (#201); unused outside tests until then.
+#[allow(dead_code)]
 fn indent(depth: usize) -> String {
     "    ".repeat(depth)
 }
 
 /// How a gap's expected `Punct` tokens are spaced against their operands.
+// Wired into render in a later task (#201); unused outside tests until then.
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum Spacing {
     /// A single space on each side of the token: `a + b`.
@@ -61,6 +65,8 @@ enum Spacing {
 ///   comment-free gap reprints identically to the pre-`scan_gap` formatter.
 ///
 /// - Complexity: O(n) in `pieces.len()` plus their text lengths.
+// Wired into render in a later task (#201); unused outside tests until then.
+#[allow(dead_code)]
 fn emit_gap(pieces: &[GapPiece], spacing: Spacing, depth: usize) -> String {
     let cont = indent(depth + 1);
     let mut out = String::new();
