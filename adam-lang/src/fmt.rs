@@ -154,20 +154,23 @@ fn point_span(span: proc_macro2::Span) -> ast::ExprSpan {
 }
 
 /// Renders the comments (if any) in the source gap between two adam-lang declaration positions,
-/// inlined block-style, for a gap that otherwise contains only `expected` — the fixed literal
-/// tokens (e.g. `"="`, `":="`) the caller itself emits and that may separate two comments in the
-/// gap (a comment can precede *and* follow the `=` in `cell a: i32 = /* p */ 1;` vs.
-/// `cell a: i32 /* t */ = 1;`) — passed through to [`cel_parser::trivia::scan_gap`] so it can walk
-/// past them rather than stopping at the first one. Returns `""` when the gap has no comments (the
-/// common case), so a comment-free declaration prints exactly as before. `//` line comments inside
-/// a declaration are recovered as inline blocks are — a declaration is already `;`-terminated on
-/// its own line, so a mid-declaration `//` is rare; recover it losslessly by emitting it and
-/// continuing.
+/// for a gap that otherwise contains only `expected` — the fixed literal tokens (e.g. `"="`,
+/// `":="`) the caller itself emits and that may separate two comments in the gap (a comment can
+/// precede *and* follow the `=` in `cell a: i32 = /* p */ 1;` vs. `cell a: i32 /* t */ = 1;`) —
+/// passed through to [`cel_parser::trivia::scan_gap`] so it can walk past them rather than
+/// stopping at the first one. Returns `""` when the gap has no comments (the common case), so a
+/// comment-free declaration prints exactly as before. A `Comment::Block` stays inline with what
+/// precedes it. A `Comment::Line` runs to end of line, so whatever the caller appends after this
+/// gap's text (the declaration's own continuation: `=`, `:=`, `;`, ...) must start on a fresh
+/// line — this ends the gap's text with a newline plus `indent(depth + 1)`, mirroring
+/// `cel_parser::fmt::emit_gap`'s own line-wrap convention for the same reason. `depth` is the
+/// caller's own indent depth (the declaration's, not the gap's).
 fn emit_decl_gap(
     source: &str,
     prev_end: ast::ExprSpan,
     next_start: ast::ExprSpan,
     expected: &[&'static str],
+    depth: usize,
 ) -> String {
     use cel_parser::trivia::{GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap};
     if source.is_empty() {
@@ -182,7 +185,9 @@ fn emit_decl_gap(
     let mut out = String::new();
     for piece in scan_gap(gap, expected) {
         if let GapPiece::Comment(comment) = piece {
-            out.push(' ');
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
             match comment {
                 cel_parser::Comment::Block(text) => {
                     out.push_str("/* ");
@@ -192,6 +197,8 @@ fn emit_decl_gap(
                 cel_parser::Comment::Line(text) => {
                     out.push_str("// ");
                     out.push_str(&text);
+                    out.push('\n');
+                    out.push_str(&indent(depth + 1));
                 }
             }
         }
@@ -237,6 +244,7 @@ fn write_binding(out: &mut String, source: &str, binding: &ast::BindingDecl, dep
         binding.body.span(),
         point_span(binding.span.end),
         &[],
+        depth,
     ));
     write_line_end(out, ";", binding.trailing_line_comment.as_ref(), depth);
 }
@@ -375,6 +383,7 @@ fn write_cell(out: &mut String, source: &str, cell: &ast::CellDecl, depth: usize
                 type_expr.span(),
                 expr.span(),
                 &["="],
+                depth,
             ));
         }
     }
@@ -387,6 +396,7 @@ fn write_cell(out: &mut String, source: &str, cell: &ast::CellDecl, depth: usize
             expr.span(),
             point_span(cell.span.end),
             &[],
+            depth,
         ));
     }
     if let Some(filter) = &cell.filter {
@@ -454,6 +464,7 @@ fn write_out(out: &mut String, source: &str, decl: &ast::OutDecl, depth: usize) 
             type_expr.span(),
             decl.initializer.span(),
             &[":="],
+            depth,
         ));
     }
     out.push_str(" := ");
@@ -464,6 +475,7 @@ fn write_out(out: &mut String, source: &str, decl: &ast::OutDecl, depth: usize) 
         decl.initializer.span(),
         point_span(decl.span.end),
         &[],
+        depth,
     ));
     if let Some(filter) = &decl.filter {
         out.push_str(" filter ");
@@ -497,6 +509,7 @@ fn write_source(out: &mut String, source: &str, decl: &ast::SourceDecl, depth: u
                 type_expr.span(),
                 expr.span(),
                 &["="],
+                depth,
             ));
         }
     }
@@ -509,6 +522,7 @@ fn write_source(out: &mut String, source: &str, decl: &ast::SourceDecl, depth: u
             expr.span(),
             point_span(decl.span.end),
             &[],
+            depth,
         ));
     }
     if let Some(filter) = &decl.filter {
@@ -1245,5 +1259,31 @@ mod tests {
         // And formatting is idempotent.
         let twice = format_source(&once).unwrap();
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn preserves_a_line_comment_between_a_cell_initializer_and_its_semicolon() {
+        // A `//` comment forces a line wrap; the terminating `;` must land on the continuation
+        // line, not get glued onto the comment's own line, which would comment the `;` out and
+        // make the output fail to reparse.
+        let source = "sheet s {\n    cell a: i32 = 1 // c\n    ;\n}";
+        let once = format_source(source).unwrap();
+        assert!(once.contains("// c"), "comment must survive: {once:?}");
+        assert!(
+            once.trim_end().ends_with('}'),
+            "the sheet's own closing brace must not have been commented out: {once:?}"
+        );
+        // Must still reparse (a stray `;` swallowed into the comment would fail this).
+        let twice = format_source(&once).unwrap();
+        assert_eq!(once, twice, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn preserves_a_line_comment_between_a_type_and_the_equals() {
+        let source = "sheet s {\n    cell a: i32 // c\n    = 1;\n}";
+        let once = format_source(source).unwrap();
+        assert!(once.contains("// c"), "comment must survive: {once:?}");
+        let twice = format_source(&once).unwrap();
+        assert_eq!(once, twice, "formatting must be idempotent");
     }
 }

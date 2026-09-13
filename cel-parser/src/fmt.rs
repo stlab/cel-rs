@@ -142,8 +142,12 @@ fn render_literal(span: crate::ExprSpan) -> String {
 }
 
 /// Scans the source gap between two adjacent AST positions for comments interleaved with
-/// `expected` tokens. Returns just the expected tokens (no comments) when `source` is empty or the
-/// positions don't resolve within it (a hand-built `Expr`), so a source-less format still works.
+/// `expected` tokens. Returns just the expected tokens (no comments) when `source` is empty (a
+/// hand-built `Expr`), so a source-less format still works.
+///
+/// - Precondition: when `source` is non-empty, it is the exact text `expr` was parsed from —
+///   `prev_end`/`next_start` must resolve within it (checked by `line_column_to_byte`'s own
+///   `debug_assert!`).
 ///
 /// - Complexity: O(n) in the gap's length.
 fn gap_between(
@@ -257,6 +261,18 @@ fn glue_after_open(gap: &str, open: &'static str) -> String {
 /// Symmetric to [`glue_after_open`]: strips the one space [`emit_gap`] pads after a comment that
 /// immediately precedes `close`, so a trailing comment glues directly to the closing delimiter.
 fn glue_before_close(gap: &str, close: &'static str) -> String {
+    if let Some((_, last_line)) = gap.rsplit_once('\n') {
+        // `gap` wrapped after a `//` comment; `last_line` is the continuation line `emit_gap`
+        // started with its own indent. When that line holds nothing but indentation before
+        // `close` (no block comment glued onto the same line), those spaces are the
+        // continuation's own indent, not `emit_gap`'s one-space comment padding — leave them
+        // alone instead of stripping one as if it were the padding space.
+        if let Some(rest) = last_line.strip_suffix(close)
+            && rest.chars().all(|c| c == ' ')
+        {
+            return gap.to_string();
+        }
+    }
     match gap.strip_suffix(&format!(" {close}")) {
         Some(rest) => format!("{rest}{close}"),
         None => gap.to_string(),
@@ -497,10 +513,19 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             // only `"as"` is expected inside it, and the type name is appended afterward.
             let pieces = gap_between(source, expr.span().end, span.end, &["as"]);
             let gap = emit_gap(&pieces, Spacing::Around, depth);
-            (
-                format!("{expr_s}{} {type_name}", gap.trim_end()),
-                Level::CAST,
-            )
+            // A `//` comment in this gap made `emit_gap` end it with a line wrap (`\n` + the
+            // continuation indent) rather than the usual trailing space; `type_name` must continue
+            // right there; trimming it (as the comment-free/block-comment path below does) would
+            // glue `type_name` onto the comment's own line and comment it out.
+            let has_line_comment = pieces
+                .iter()
+                .any(|p| matches!(p, GapPiece::Comment(Comment::Line(_))));
+            let text = if has_line_comment {
+                format!("{expr_s}{gap}{type_name}")
+            } else {
+                format!("{expr_s}{} {type_name}", gap.trim_end())
+            };
+            (text, Level::CAST)
         }
         Expr::Apply { callee, args, span } => {
             let callee_s = format_at(callee, source, depth, Level::POSTFIX);
@@ -647,7 +672,16 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 .filter(|p| matches!(p, GapPiece::Comment(_)))
                 .collect();
             let gap = emit_gap(&comments, Spacing::None, depth);
-            let sep = if gap.trim().is_empty() {
+            // A `//` comment among `comments` made `emit_gap` end `gap` with a line wrap (`\n` +
+            // continuation indent); the body must continue right there, so `gap` is used verbatim
+            // (already correctly spaced/wrapped) rather than trimmed — trimming would collapse the
+            // wrap and glue the body onto the comment's own line, commenting it out.
+            let has_line_comment = comments
+                .iter()
+                .any(|p| matches!(p, GapPiece::Comment(Comment::Line(_))));
+            let sep = if has_line_comment {
+                gap
+            } else if gap.trim().is_empty() {
                 " ".to_string()
             } else {
                 format!(" {} ", gap.trim())
@@ -971,6 +1005,19 @@ mod tests {
     }
 
     #[test]
+    fn a_line_comment_before_a_closure_body_wraps_the_expression() {
+        // A `//` comment forces a line wrap; the body must land on the continuation line, not get
+        // glued onto the comment's own line (which would comment it out and make the output
+        // non-reparseable).
+        let source = "|x: i32| // c\n x + 1i32";
+        let once = fmt(source);
+        assert!(once.contains("// c"), "comment must survive: {once:?}");
+        assert!(once.contains("x + 1i32"), "body must survive: {once:?}");
+        let twice = format_expr(&parse(&once), &once, 0);
+        assert_eq!(once, twice, "formatting must be idempotent");
+    }
+
+    #[test]
     fn range_inclusive_reprints_without_spaces() {
         assert_eq!(fmt("1i32..=5i32"), "1i32..=5i32");
     }
@@ -1111,6 +1158,19 @@ mod tests {
         assert_eq!(fmt("-1i32"), "-1i32");
         assert_eq!(fmt("x as i32"), "x as i32");
         assert_eq!(fmt("1i32..5i32"), "1i32..5i32");
+    }
+
+    #[test]
+    fn a_line_comment_after_a_cast_operator_wraps_the_expression() {
+        // A `//` comment forces a line wrap; `i32` must land on the continuation line, not get
+        // glued onto the comment's own line (which would comment it out and make the output
+        // non-reparseable).
+        let source = "x as // c\n i32";
+        let once = fmt(source);
+        assert!(once.contains("// c"), "comment must survive: {once:?}");
+        assert!(once.contains("i32"), "type name must survive: {once:?}");
+        let twice = format_expr(&parse(&once), &once, 0);
+        assert_eq!(once, twice, "formatting must be idempotent");
     }
 
     #[test]
