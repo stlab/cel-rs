@@ -314,6 +314,15 @@ fn render_closure_param_type(type_expr: &crate::ClosureParamTypeExpr) -> String 
     }
 }
 
+/// Returns the end position of a closure parameter's declared type expression — the boundary
+/// right before the header's closing `|`.
+fn closure_param_type_end(type_expr: &crate::ClosureParamTypeExpr) -> proc_macro2::Span {
+    match type_expr {
+        crate::ClosureParamTypeExpr::Named(_, span) => span.end,
+        crate::ClosureParamTypeExpr::Tuple(_, span) => span.end,
+    }
+}
+
 /// Renders `expr` on its own, returning its text alongside its binding-strength level, so the
 /// caller ([`format_at`]) can decide whether the context it's being placed in requires parens.
 ///
@@ -604,19 +613,46 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             }
             (text, Level::PRIMARY)
         }
-        Expr::Closure { params, body, .. } => {
+        Expr::Closure { params, body, span } => {
+            // `ClosureParam`s carry `name`/`name_span`/`type_expr`, not `Expr` nodes, and the
+            // header's `|`/`|` delimiters have no span of their own, so the header text is
+            // synthesized from `params` rather than re-scanned token-by-token. Only the gap
+            // between the header's closing `|` and the body is recovered precisely (the
+            // #201-style case, and the most common one): for a non-empty parameter list it's
+            // scanned from the last parameter's declared type's end (expecting the closing `|`);
+            // for an empty list, `span.start` already covers the merged `||` token, so the scan
+            // starts right after it with no further token expected. A comment written *inside*
+            // the parameter list, e.g. `|x: i32 /* c */, y: i32| body`, is a documented,
+            // lossless-but-not-position-perfect limitation: it isn't scanned for at all here (only
+            // the last parameter's post-type gap is), so it would need its own per-parameter gap
+            // recovery to attach at its exact source spot.
             let body_s = format_at(body, source, depth, Level::OR);
-            let text = if params.is_empty() {
-                format!("|| {body_s}")
+            let header = if params.is_empty() {
+                "||".to_string()
             } else {
                 let params_s = params
                     .iter()
                     .map(|p| format!("{}: {}", p.name, render_closure_param_type(&p.type_expr)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("|{params_s}| {body_s}")
+                format!("|{params_s}|")
             };
-            (text, Level::PRIMARY)
+            let (tail_start, expected): (proc_macro2::Span, &[&'static str]) = match params.last() {
+                Some(last) => (closure_param_type_end(&last.type_expr), &["|"]),
+                None => (span.start, &[]),
+            };
+            let pieces = gap_between(source, tail_start, body.span().start, expected);
+            let comments: Vec<GapPiece> = pieces
+                .into_iter()
+                .filter(|p| matches!(p, GapPiece::Comment(_)))
+                .collect();
+            let gap = emit_gap(&comments, Spacing::None, depth);
+            let sep = if gap.trim().is_empty() {
+                " ".to_string()
+            } else {
+                format!(" {} ", gap.trim())
+            };
+            (format!("{header}{sep}{body_s}"), Level::PRIMARY)
         }
     }
 }
@@ -920,6 +956,21 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_before_a_closure_body_is_preserved() {
+        assert_eq!(
+            fmt("|x: i32| /* b */ x + 1i32"),
+            "|x: i32| /* b */ x + 1i32"
+        );
+    }
+
+    #[test]
+    fn comment_free_closures_are_unchanged() {
+        assert_eq!(fmt("|x: i32| x + 1i32"), "|x: i32| x + 1i32");
+        assert_eq!(fmt("|| 1i32"), "|| 1i32");
+        assert_eq!(fmt("|x: i32, y: i32| x + y"), "|x: i32, y: i32| x + y");
+    }
+
+    #[test]
     fn range_inclusive_reprints_without_spaces() {
         assert_eq!(fmt("1i32..=5i32"), "1i32..=5i32");
     }
@@ -1060,5 +1111,34 @@ mod tests {
         assert_eq!(fmt("-1i32"), "-1i32");
         assert_eq!(fmt("x as i32"), "x as i32");
         assert_eq!(fmt("1i32..5i32"), "1i32..5i32");
+    }
+
+    #[test]
+    fn issue_201_line_comment_inside_an_expression_round_trips() {
+        // The exact repro from stlab/cel-rs#201.
+        let source = "1i32 +\n    // why 2\n    2i32";
+        let once = fmt(source);
+        assert!(once.contains("// why 2"), "comment must survive: {once:?}");
+        let twice = format_expr(&parse(&once), &once, 0);
+        assert_eq!(once, twice, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn the_full_inline_comment_example_round_trips() {
+        // From the design discussion: block comments on both operands and around the operator,
+        // plus a trailing line comment. The leading `/* p */` and trailing `/* r */` sit outside
+        // the expression's own span (before its first token, after its last), which the design
+        // doc explicitly carves out of `format_expr`'s scope: "`Expr`'s own outer boundary ... is
+        // not `format_expr`'s to own ... that boundary belongs to whatever embeds the expression"
+        // (adam-lang's Part A2, not yet implemented) -- so only the two in-scope, inter-operand
+        // comments are expected to survive here.
+        let source = "/* p */ 1i32 /* q */ + // hello\n2i32 /* r */";
+        let once = fmt(source);
+        assert!(
+            once.contains("/* q */") && once.contains("// hello"),
+            "the in-scope operand/operator comments survive: {once:?}"
+        );
+        let twice = format_expr(&parse(&once), &once, 0);
+        assert_eq!(once, twice);
     }
 }
