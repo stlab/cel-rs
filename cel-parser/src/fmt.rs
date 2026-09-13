@@ -168,7 +168,10 @@ fn render_closure_param_type(type_expr: &crate::ClosureParamTypeExpr) -> String 
 
 /// Renders `expr` on its own, returning its text alongside its binding-strength level, so the
 /// caller ([`format_at`]) can decide whether the context it's being placed in requires parens.
-fn render(expr: &Expr) -> (String, Level) {
+///
+/// `source` is the text `expr` was parsed from (or `""` for a hand-built `Expr`); `depth` is the
+/// indent level for `//`-comment wrap continuations. Neither is used to change emission yet.
+fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
     match expr {
         Expr::Literal { span, .. } => (render_literal(*span), Level::PRIMARY),
         // `AstContext::apply_op` records every arity-0 operator as a plain `Expr::Ident` (see
@@ -194,8 +197,8 @@ fn render(expr: &Expr) -> (String, Level) {
                 LogicalOp::Or => "||",
                 LogicalOp::And => "&&",
             };
-            let lhs_s = format_at(lhs, level);
-            let rhs_s = format_at(rhs, level.tighter());
+            let lhs_s = format_at(lhs, source, depth, level);
+            let rhs_s = format_at(rhs, source, depth, level.tighter());
             (format!("{lhs_s} {op_str} {rhs_s}"), level)
         }
         Expr::Op { operands, .. } if operands.is_empty() => {
@@ -217,7 +220,7 @@ fn render(expr: &Expr) -> (String, Level) {
             // expressions — see `is_range_expression`'s doc comment), so an operand only needs
             // rendering strictly tighter than Range itself, the same non-chaining treatment
             // `Level::COMPARISON` gets below.
-            let operand_s = format_at(&operands[0], Level::RANGE.tighter());
+            let operand_s = format_at(&operands[0], source, depth, Level::RANGE.tighter());
             let text = match name.as_str() {
                 "range_from" => format!("{operand_s}.."),
                 "range_to" => format!("..{operand_s}"),
@@ -227,7 +230,7 @@ fn render(expr: &Expr) -> (String, Level) {
             (text, Level::RANGE)
         }
         Expr::Op { name, operands, .. } if operands.len() == 1 => {
-            let operand_s = format_at(&operands[0], Level::UNARY);
+            let operand_s = format_at(&operands[0], source, depth, Level::UNARY);
             // A bare "-"/"!" glued directly onto an operand that itself starts with "-"/"!"
             // would re-tokenize as one run of punctuation; a single space disambiguates.
             let sep = if operand_s.starts_with('-') || operand_s.starts_with('!') {
@@ -240,8 +243,8 @@ fn render(expr: &Expr) -> (String, Level) {
         Expr::Op { name, operands, .. } if name == "range" || name == "range_inclusive" => {
             // Same non-chaining reasoning as the arity-1 range arm above: both endpoints render
             // strictly tighter than Range.
-            let lhs_s = format_at(&operands[0], Level::RANGE.tighter());
-            let rhs_s = format_at(&operands[1], Level::RANGE.tighter());
+            let lhs_s = format_at(&operands[0], source, depth, Level::RANGE.tighter());
+            let rhs_s = format_at(&operands[1], source, depth, Level::RANGE.tighter());
             let op_str = if name == "range_inclusive" {
                 "..="
             } else {
@@ -259,8 +262,8 @@ fn render(expr: &Expr) -> (String, Level) {
             } else {
                 (level, level.tighter())
             };
-            let lhs_s = format_at(&operands[0], lhs_min);
-            let rhs_s = format_at(&operands[1], rhs_min);
+            let lhs_s = format_at(&operands[0], source, depth, lhs_min);
+            let rhs_s = format_at(&operands[1], source, depth, rhs_min);
             (format!("{lhs_s} {name} {rhs_s}"), level)
         }
         Expr::Cast {
@@ -269,14 +272,14 @@ fn render(expr: &Expr) -> (String, Level) {
             // Left-associative, like multiplicative/additive: the operand only needs to be at
             // least as tight as Cast itself, so a chain like `x as i32 as f64` reprints without
             // extra parens.
-            let expr_s = format_at(expr, Level::CAST);
+            let expr_s = format_at(expr, source, depth, Level::CAST);
             (format!("{expr_s} as {type_name}"), Level::CAST)
         }
         Expr::Apply { callee, args, .. } => {
-            let callee_s = format_at(callee, Level::POSTFIX);
+            let callee_s = format_at(callee, source, depth, Level::POSTFIX);
             let args_s = args
                 .iter()
-                .map(|a| format_at(a, Level::OR))
+                .map(|a| format_at(a, source, depth, Level::OR))
                 .collect::<Vec<_>>()
                 .join(", ");
             (format!("{callee_s}({args_s})"), Level::POSTFIX)
@@ -284,7 +287,7 @@ fn render(expr: &Expr) -> (String, Level) {
         Expr::Tuple { elements, .. } => {
             let inner = elements
                 .iter()
-                .map(|e| format_at(e, Level::OR))
+                .map(|e| format_at(e, source, depth, Level::OR))
                 .collect::<Vec<_>>()
                 .join(", ");
             let text = if elements.len() == 1 {
@@ -295,7 +298,11 @@ fn render(expr: &Expr) -> (String, Level) {
             (text, Level::PRIMARY)
         }
         Expr::TupleIndex { base, index, .. } => (
-            format!("{}.{}", format_at(base, Level::POSTFIX), index),
+            format!(
+                "{}.{}",
+                format_at(base, source, depth, Level::POSTFIX),
+                index
+            ),
             Level::POSTFIX,
         ),
         Expr::If {
@@ -304,22 +311,22 @@ fn render(expr: &Expr) -> (String, Level) {
             else_branch,
             ..
         } => {
-            let cond_s = format_at(cond, Level::OR);
-            let then_s = format_at(then_branch, Level::OR);
+            let cond_s = format_at(cond, source, depth, Level::OR);
+            let then_s = format_at(then_branch, source, depth, Level::OR);
             let mut text = format!("if {cond_s} {{ {then_s} }}");
             if let Some(else_branch) = else_branch {
                 if matches!(else_branch.as_ref(), Expr::If { .. }) {
-                    let (else_s, _) = render(else_branch);
+                    let (else_s, _) = render(else_branch, source, depth);
                     text.push_str(&format!(" else {else_s}"));
                 } else {
-                    let else_s = format_at(else_branch, Level::OR);
+                    let else_s = format_at(else_branch, source, depth, Level::OR);
                     text.push_str(&format!(" else {{ {else_s} }}"));
                 }
             }
             (text, Level::PRIMARY)
         }
         Expr::Closure { params, body, .. } => {
-            let body_s = format_at(body, Level::OR);
+            let body_s = format_at(body, source, depth, Level::OR);
             let text = if params.is_empty() {
                 format!("|| {body_s}")
             } else {
@@ -336,8 +343,10 @@ fn render(expr: &Expr) -> (String, Level) {
 }
 
 /// Renders `expr`, wrapping it in parens if its own level is looser than `min_level` requires.
-fn format_at(expr: &Expr, min_level: Level) -> String {
-    let (text, level) = render(expr);
+///
+/// `source` and `depth` are forwarded to [`render`] unchanged; see its doc comment.
+fn format_at(expr: &Expr, source: &str, depth: usize, min_level: Level) -> String {
+    let (text, level) = render(expr, source, depth);
     if level < min_level {
         format!("({text})")
     } else {
@@ -347,6 +356,9 @@ fn format_at(expr: &Expr, min_level: Level) -> String {
 
 /// Pretty-prints `expr` back to CEL source text — see the module doc for the printing rules.
 ///
+/// `source` is the text `expr` was parsed from (or `""` for a hand-built `Expr`); `depth` is the
+/// indent level for `//`-comment wrap continuations.
+///
 /// # Examples
 ///
 /// ```
@@ -354,10 +366,10 @@ fn format_at(expr: &Expr, min_level: Level) -> String {
 ///
 /// let mut parser = Parser::<AstContext>::new(OpLookup::new());
 /// let expr = parser.parse_str_ast("(1i32 + 2i32) * 3i32").unwrap();
-/// assert_eq!(format_expr(&expr), "(1i32 + 2i32) * 3i32");
+/// assert_eq!(format_expr(&expr, "(1i32 + 2i32) * 3i32", 0), "(1i32 + 2i32) * 3i32");
 /// ```
-pub fn format_expr(expr: &Expr) -> String {
-    format_at(expr, Level::RANGE)
+pub fn format_expr(expr: &Expr, source: &str, depth: usize) -> String {
+    format_at(expr, source, depth, Level::RANGE)
 }
 
 #[cfg(test)]
@@ -371,22 +383,23 @@ mod tests {
             .unwrap()
     }
 
+    fn fmt(source: &str) -> String {
+        format_expr(&parse(source), source, 0)
+    }
+
     #[test]
     fn additive_and_multiplicative_reprint_without_extra_parens() {
-        let expr = parse("1i32 + 2i32 * 3i32");
-        assert_eq!(format_expr(&expr), "1i32 + 2i32 * 3i32");
+        assert_eq!(fmt("1i32 + 2i32 * 3i32"), "1i32 + 2i32 * 3i32");
     }
 
     #[test]
     fn explicit_grouping_that_changes_precedence_keeps_its_parens() {
-        let expr = parse("(1i32 + 2i32) * 3i32");
-        assert_eq!(format_expr(&expr), "(1i32 + 2i32) * 3i32");
+        assert_eq!(fmt("(1i32 + 2i32) * 3i32"), "(1i32 + 2i32) * 3i32");
     }
 
     #[test]
     fn left_associative_chain_at_the_same_precedence_has_no_parens() {
-        let expr = parse("1i32 - 2i32 - 3i32");
-        assert_eq!(format_expr(&expr), "1i32 - 2i32 - 3i32");
+        assert_eq!(fmt("1i32 - 2i32 - 3i32"), "1i32 - 2i32 - 3i32");
     }
 
     #[test]
@@ -419,7 +432,7 @@ mod tests {
             ],
             span: point(),
         };
-        assert_eq!(format_expr(&expr), "a - (b - c)");
+        assert_eq!(format_expr(&expr, "", 0), "a - (b - c)");
     }
 
     #[test]
@@ -452,50 +465,50 @@ mod tests {
                 end: proc_macro2::Span::call_site(),
             },
         };
-        assert_eq!(format_expr(&expr), "(a == b) == c");
+        assert_eq!(format_expr(&expr, "", 0), "(a == b) == c");
     }
 
     #[test]
     fn literal_notation_is_preserved_exactly() {
-        assert_eq!(format_expr(&parse("1920.0")), "1920.0");
-        assert_eq!(format_expr(&parse("1920.0f64")), "1920.0f64");
-        assert_eq!(format_expr(&parse("1i32")), "1i32");
+        assert_eq!(fmt("1920.0"), "1920.0");
+        assert_eq!(fmt("1920.0f64"), "1920.0f64");
+        assert_eq!(fmt("1i32"), "1i32");
     }
 
     #[test]
     fn unary_minus_of_a_binary_expression_needs_parens() {
-        assert_eq!(format_expr(&parse("-(1i32 + 2i32)")), "-(1i32 + 2i32)");
+        assert_eq!(fmt("-(1i32 + 2i32)"), "-(1i32 + 2i32)");
     }
 
     #[test]
     fn double_unary_minus_keeps_a_separating_space() {
-        assert_eq!(format_expr(&parse("- -1i32")), "- -1i32");
+        assert_eq!(fmt("- -1i32"), "- -1i32");
     }
 
     #[test]
     fn cast_chain_reprints_without_extra_parens() {
-        assert_eq!(format_expr(&parse("x as i32 as f64")), "x as i32 as f64");
+        assert_eq!(fmt("x as i32 as f64"), "x as i32 as f64");
     }
 
     #[test]
     fn unary_minus_before_a_cast_needs_no_parens() {
         // Matches Rust: `-x as f64` parses as `(-x) as f64` - unary already binds tighter than
         // Cast, so the printer doesn't need to add parens to preserve that grouping.
-        assert_eq!(format_expr(&parse("-x as f64")), "-x as f64");
+        assert_eq!(fmt("-x as f64"), "-x as f64");
     }
 
     #[test]
     fn explicit_grouping_before_a_cast_keeps_its_parens() {
         // `as` binds tighter than `+`, so without parens `(a + b) as i32` would reprint as
         // `a + b as i32` - a different expression (`a + (b as i32)`). The parens must survive.
-        assert_eq!(format_expr(&parse("(a + b) as i32")), "(a + b) as i32");
+        assert_eq!(fmt("(a + b) as i32"), "(a + b) as i32");
     }
 
     #[test]
     fn cast_operand_of_an_additive_expression_needs_no_parens() {
         // `a + b as i32` already parses as `a + (b as i32)` (`as` binds tighter than `+`), so no
         // parens are needed around the cast when reprinting.
-        assert_eq!(format_expr(&parse("a + b as i32")), "a + b as i32");
+        assert_eq!(fmt("a + b as i32"), "a + b as i32");
     }
 
     #[test]
@@ -503,28 +516,28 @@ mod tests {
         // `(x as i32) * y` parses to the exact same tree as `x as i32 * y` (cast already binds
         // tighter than `*`), so the now-redundant parens are dropped on reprint - matching the
         // module doc's "parens added only where required, not exhaustively".
-        assert_eq!(format_expr(&parse("(x as i32) * y")), "x as i32 * y");
+        assert_eq!(fmt("(x as i32) * y"), "x as i32 * y");
     }
 
     #[test]
     fn one_tuple_keeps_its_trailing_comma() {
-        assert_eq!(format_expr(&parse("(1i32,)")), "(1i32,)");
+        assert_eq!(fmt("(1i32,)"), "(1i32,)");
     }
 
     #[test]
     fn multi_element_tuple_has_no_trailing_comma() {
-        assert_eq!(format_expr(&parse("(1i32, 2i32)")), "(1i32, 2i32)");
+        assert_eq!(fmt("(1i32, 2i32)"), "(1i32, 2i32)");
     }
 
     #[test]
     fn if_without_else_omits_the_else_clause() {
-        assert_eq!(format_expr(&parse("if true { 1i32 }")), "if true { 1i32 }");
+        assert_eq!(fmt("if true { 1i32 }"), "if true { 1i32 }");
     }
 
     #[test]
     fn if_else_reprints_both_branches() {
         assert_eq!(
-            format_expr(&parse("if true { 1i32 } else { 2i32 }")),
+            fmt("if true { 1i32 } else { 2i32 }"),
             "if true { 1i32 } else { 2i32 }"
         );
     }
@@ -532,79 +545,70 @@ mod tests {
     #[test]
     fn else_if_chain_has_no_braces_around_the_nested_if() {
         let source = "if true { 1i32 } else if false { 2i32 } else { 3i32 }";
-        assert_eq!(format_expr(&parse(source)), source);
+        assert_eq!(fmt(source), source);
     }
 
     #[test]
     fn logical_or_and_and_are_not_desugared_and_need_no_extra_parens() {
-        assert_eq!(format_expr(&parse("a || b && c")), "a || b && c");
+        assert_eq!(fmt("a || b && c"), "a || b && c");
     }
 
     #[test]
     fn format_is_idempotent_through_a_reparse() {
         let source = "(1i32 + 2i32) * 3i32 - -4i32";
-        let once = format_expr(&parse(source));
-        let twice = format_expr(&parse(&once));
+        let once = fmt(source);
+        let twice = format_expr(&parse(&once), &once, 0);
         assert_eq!(once, twice);
     }
 
     #[test]
     fn closure_with_one_param_reprints_with_its_type() {
-        assert_eq!(
-            format_expr(&parse("|x: i32| x + 1i32")),
-            "|x: i32| x + 1i32"
-        );
+        assert_eq!(fmt("|x: i32| x + 1i32"), "|x: i32| x + 1i32");
     }
 
     #[test]
     fn closure_with_no_params_reprints_with_double_pipe() {
-        assert_eq!(format_expr(&parse("|| 1i32")), "|| 1i32");
+        assert_eq!(fmt("|| 1i32"), "|| 1i32");
     }
 
     #[test]
     fn closure_with_multiple_params_joins_them_with_commas() {
-        assert_eq!(
-            format_expr(&parse("|x: i32, y: i32| x + y")),
-            "|x: i32, y: i32| x + y"
-        );
+        assert_eq!(fmt("|x: i32, y: i32| x + y"), "|x: i32, y: i32| x + y");
     }
 
     #[test]
     fn closure_with_a_tuple_typed_param_reprints_the_tuple_type() {
-        assert_eq!(
-            format_expr(&parse("|x: (i32, f64)| x.0")),
-            "|x: (i32, f64)| x.0"
-        );
+        assert_eq!(fmt("|x: (i32, f64)| x.0"), "|x: (i32, f64)| x.0");
     }
 
     #[test]
     fn range_inclusive_reprints_without_spaces() {
-        assert_eq!(format_expr(&parse("1i32..=5i32")), "1i32..=5i32");
+        assert_eq!(fmt("1i32..=5i32"), "1i32..=5i32");
     }
 
     #[test]
     fn range_reprints_without_spaces() {
-        assert_eq!(format_expr(&parse("1i32..5i32")), "1i32..5i32");
+        assert_eq!(fmt("1i32..5i32"), "1i32..5i32");
     }
 
     #[test]
     fn range_from_reprints_without_spaces() {
-        assert_eq!(format_expr(&parse("1i32..")), "1i32..");
+        assert_eq!(fmt("1i32.."), "1i32..");
     }
 
     #[test]
     fn range_to_reprints_without_spaces() {
-        assert_eq!(format_expr(&parse("..5i32")), "..5i32");
+        assert_eq!(fmt("..5i32"), "..5i32");
     }
 
     #[test]
     fn range_to_inclusive_reprints_without_spaces() {
-        assert_eq!(format_expr(&parse("..=5i32")), "..=5i32");
+        assert_eq!(fmt("..=5i32"), "..=5i32");
     }
 
     #[test]
     fn range_full_reprints_as_two_dots() {
-        assert_eq!(format_expr(&parse("..")), "..");
+        assert_eq!(fmt(".."), "..");
     }
 
     #[test]
@@ -612,17 +616,14 @@ mod tests {
         // From `is_range_expression`'s own doc comment: `a == b..c == d` parses as
         // `(a == b)..(c == d)` -- comparison already binds tighter than range, so the printer
         // doesn't need parens to preserve that grouping.
-        assert_eq!(format_expr(&parse("a == b..c == d")), "a == b..c == d");
+        assert_eq!(fmt("a == b..c == d"), "a == b..c == d");
     }
 
     #[test]
     fn range_endpoints_that_are_arithmetic_need_no_parens() {
         // From the same doc comment: `1 + 2..3 * 4` parses as `(1 + 2)..(3 * 4)` -- arithmetic
         // binds well inside range's own endpoints, so no parens are needed on reprint either.
-        assert_eq!(
-            format_expr(&parse("1i32 + 2i32..3i32 * 4i32")),
-            "1i32 + 2i32..3i32 * 4i32"
-        );
+        assert_eq!(fmt("1i32 + 2i32..3i32 * 4i32"), "1i32 + 2i32..3i32 * 4i32");
     }
 
     #[test]

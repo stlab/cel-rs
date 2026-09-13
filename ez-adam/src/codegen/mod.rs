@@ -148,7 +148,7 @@ impl std::error::Error for ExportError {
 /// - Complexity: O(n) in the total number of cells, relationship groups,
 ///   and conditional-group branches.
 pub fn generate_adm2(doc: &Document) -> Result<String, ExportError> {
-    Ok(adam_lang::format_sheet(&build_sheet(doc)?))
+    Ok(adam_lang::format_sheet(&build_sheet(doc)?, ""))
 }
 
 /// Builds the `adam_lang::ast::Sheet` [`generate_adm2`] renders for `doc`.

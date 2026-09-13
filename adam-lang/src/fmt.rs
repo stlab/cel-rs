@@ -145,7 +145,7 @@ fn source_text_or_empty(span: ast::ExprSpan) -> String {
 
 /// Writes one `a := ...;` / `(a, b) := ...;` binding, delegating its body to
 /// [`cel_parser::format_expr`].
-fn write_binding(out: &mut String, binding: &ast::BindingDecl, depth: usize) {
+fn write_binding(out: &mut String, source: &str, binding: &ast::BindingDecl, depth: usize) {
     write_trivia(
         out,
         binding.blank_line_before,
@@ -174,12 +174,12 @@ fn write_binding(out: &mut String, binding: &ast::BindingDecl, depth: usize) {
         out.push_str(&binding.outputs[0].0);
     }
     out.push_str(" := ");
-    out.push_str(&cel_parser::format_expr(&binding.body));
+    out.push_str(&cel_parser::format_expr(&binding.body, source, depth));
     write_line_end(out, ";", binding.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one `relationship { ... }` declaration and its bindings, in declaration order.
-fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usize) {
+fn write_relationship(out: &mut String, source: &str, rel: &ast::RelationshipDecl, depth: usize) {
     write_trivia(
         out,
         rel.blank_line_before,
@@ -190,7 +190,7 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
     out.push_str(&indent(depth));
     out.push_str("relationship {\n");
     for binding in &rel.bindings {
-        write_binding(out, binding, depth + 1);
+        write_binding(out, source, binding, depth + 1);
     }
     write_trailing_trivia(
         out,
@@ -206,6 +206,7 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
 /// default (`_ =>`) arm.
 fn write_branch_relationships(
     out: &mut String,
+    source: &str,
     relationships: &[ast::RelationshipDecl],
     trailing_comment: Option<&ast::Comment>,
     blank_line_before_close: bool,
@@ -214,7 +215,7 @@ fn write_branch_relationships(
 ) {
     out.push_str("{\n");
     for rel in relationships {
-        write_relationship(out, rel, depth + 1);
+        write_relationship(out, source, rel, depth + 1);
     }
     write_trailing_trivia(out, blank_line_before_close, trailing_comment, depth + 1);
     out.push_str(&indent(depth));
@@ -224,7 +225,7 @@ fn write_branch_relationships(
 /// Writes one `literal_pattern => { ... }` conditional branch, re-emitting the match literal via
 /// its span rather than the (unused) `Literal` value, with a leading `-` when
 /// [`ast::ConditionalBranch::negated`].
-fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize) {
+fn write_branch(out: &mut String, source: &str, branch: &ast::ConditionalBranch, depth: usize) {
     write_trivia(
         out,
         branch.blank_line_before,
@@ -239,6 +240,7 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
     out.push_str(" => ");
     write_branch_relationships(
         out,
+        source,
         &branch.relationships,
         branch.trailing_comment.as_ref(),
         branch.blank_line_before_close,
@@ -249,7 +251,7 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
 
 /// Writes one `conditional <expr> { ... }` declaration: its branches in declaration
 /// order (dispatching on the match-subject expression), followed by its optional `_ => { ... }` default arm.
-fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize) {
+fn write_conditional(out: &mut String, source: &str, cond: &ast::ConditionalDecl, depth: usize) {
     write_trivia(
         out,
         cond.blank_line_before,
@@ -259,16 +261,17 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     write_doc_comment(out, "///", cond.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("conditional ");
-    out.push_str(&cel_parser::format_expr(&cond.match_expr));
+    out.push_str(&cel_parser::format_expr(&cond.match_expr, source, depth));
     out.push_str(" {\n");
     for branch in &cond.branches {
-        write_branch(out, branch, depth + 1);
+        write_branch(out, source, branch, depth + 1);
     }
     if let Some(default) = &cond.default {
         out.push_str(&indent(depth + 1));
         out.push_str("_ => ");
         write_branch_relationships(
             out,
+            source,
             &default.relationships,
             default.trailing_comment.as_ref(),
             default.blank_line_before_close,
@@ -289,7 +292,7 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
 /// Writes one `cell name[: type][ = initializer][ filter body][ require { ... }];` declaration,
 /// delegating its type annotation to [`source_text_or_empty`] via `TypeExpr::span()` and its
 /// initializer/filter body to [`cel_parser::format_expr`].
-fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
+fn write_cell(out: &mut String, source: &str, cell: &ast::CellDecl, depth: usize) {
     write_trivia(
         out,
         cell.blank_line_before,
@@ -306,20 +309,20 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
     }
     if let Some(expr) = &cell.initializer {
         out.push_str(" = ");
-        out.push_str(&cel_parser::format_expr(expr));
+        out.push_str(&cel_parser::format_expr(expr, source, depth));
     }
     if let Some(filter) = &cell.filter {
         out.push_str(" filter ");
-        out.push_str(&cel_parser::format_expr(&filter.body));
+        out.push_str(&cel_parser::format_expr(&filter.body, source, depth));
     }
     if let Some(require) = &cell.require {
-        write_require_clause(out, require, depth);
+        write_require_clause(out, source, require, depth);
     }
     write_line_end(out, ";", cell.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one `[ "@" identifier " " ] ...;` requirement.
-fn write_requirement(out: &mut String, req: &ast::RequirementDecl, depth: usize) {
+fn write_requirement(out: &mut String, source: &str, req: &ast::RequirementDecl, depth: usize) {
     write_trivia(
         out,
         req.blank_line_before,
@@ -332,16 +335,16 @@ fn write_requirement(out: &mut String, req: &ast::RequirementDecl, depth: usize)
         out.push_str(name);
         out.push(' ');
     }
-    out.push_str(&cel_parser::format_expr(&req.body));
+    out.push_str(&cel_parser::format_expr(&req.body, source, depth));
     write_line_end(out, ";", req.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one ` require { ... }` clause (no trailing `;`) — shared by [`write_cell`],
 /// [`write_source`], and [`write_out`].
-fn write_require_clause(out: &mut String, require: &ast::RequireBlock, depth: usize) {
+fn write_require_clause(out: &mut String, source: &str, require: &ast::RequireBlock, depth: usize) {
     out.push_str(" require {\n");
     for req in &require.requirements {
-        write_requirement(out, req, depth + 1);
+        write_requirement(out, source, req, depth + 1);
     }
     write_trailing_trivia(
         out,
@@ -354,7 +357,7 @@ fn write_require_clause(out: &mut String, require: &ast::RequireBlock, depth: us
 }
 
 /// Writes one `out name[: type] := ...[ filter body][ require { ... } ];` declaration.
-fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
+fn write_out(out: &mut String, source: &str, decl: &ast::OutDecl, depth: usize) {
     write_trivia(
         out,
         decl.blank_line_before,
@@ -370,20 +373,20 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
         out.push_str(&source_text_or_empty(type_expr.span()));
     }
     out.push_str(" := ");
-    out.push_str(&cel_parser::format_expr(&decl.initializer));
+    out.push_str(&cel_parser::format_expr(&decl.initializer, source, depth));
     if let Some(filter) = &decl.filter {
         out.push_str(" filter ");
-        out.push_str(&cel_parser::format_expr(&filter.body));
+        out.push_str(&cel_parser::format_expr(&filter.body, source, depth));
     }
     if let Some(require) = &decl.require {
-        write_require_clause(out, require, depth);
+        write_require_clause(out, source, require, depth);
     }
     write_line_end(out, ";", decl.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one `source name[: type][ = initializer][ filter body][ require { ... }];` declaration.
 /// Mirrors [`write_cell`] exactly.
-fn write_source(out: &mut String, decl: &ast::SourceDecl, depth: usize) {
+fn write_source(out: &mut String, source: &str, decl: &ast::SourceDecl, depth: usize) {
     write_trivia(
         out,
         decl.blank_line_before,
@@ -400,14 +403,14 @@ fn write_source(out: &mut String, decl: &ast::SourceDecl, depth: usize) {
     }
     if let Some(expr) = &decl.initializer {
         out.push_str(" = ");
-        out.push_str(&cel_parser::format_expr(expr));
+        out.push_str(&cel_parser::format_expr(expr, source, depth));
     }
     if let Some(filter) = &decl.filter {
         out.push_str(" filter ");
-        out.push_str(&cel_parser::format_expr(&filter.body));
+        out.push_str(&cel_parser::format_expr(&filter.body, source, depth));
     }
     if let Some(require) = &decl.require {
-        write_require_clause(out, require, depth);
+        write_require_clause(out, source, require, depth);
     }
     write_line_end(out, ";", decl.trailing_line_comment.as_ref(), depth);
 }
@@ -416,13 +419,13 @@ fn write_source(out: &mut String, decl: &ast::SourceDecl, depth: usize) {
 ///
 /// - Precondition: `item` is not `SheetItem::Error` — [`format_sheet`]'s own precondition
 ///   (`sheet.errors.is_empty()`) guarantees no `Error` item ever reaches this function.
-fn write_sheet_item(out: &mut String, item: &ast::SheetItem, depth: usize) {
+fn write_sheet_item(out: &mut String, source: &str, item: &ast::SheetItem, depth: usize) {
     match item {
-        ast::SheetItem::Cell(cell) => write_cell(out, cell, depth),
-        ast::SheetItem::Relationship(rel) => write_relationship(out, rel, depth),
-        ast::SheetItem::Conditional(cond) => write_conditional(out, cond, depth),
-        ast::SheetItem::Out(out_decl) => write_out(out, out_decl, depth),
-        ast::SheetItem::Source(decl) => write_source(out, decl, depth),
+        ast::SheetItem::Cell(cell) => write_cell(out, source, cell, depth),
+        ast::SheetItem::Relationship(rel) => write_relationship(out, source, rel, depth),
+        ast::SheetItem::Conditional(cond) => write_conditional(out, source, cond, depth),
+        ast::SheetItem::Out(out_decl) => write_out(out, source, out_decl, depth),
+        ast::SheetItem::Source(decl) => write_source(out, source, decl, depth),
         ast::SheetItem::Error { .. } => {
             unreachable!("format_sheet is only called on a sheet with no recorded syntax errors")
         }
@@ -431,6 +434,9 @@ fn write_sheet_item(out: &mut String, item: &ast::SheetItem, depth: usize) {
 
 /// Pretty-prints `sheet` back to adam-lang source text — see the module doc for the printing
 /// rules.
+///
+/// `source` is the text `sheet` was parsed from (or `""` for a programmatically built `Sheet`);
+/// it's forwarded to [`cel_parser::format_expr`] for every embedded expression.
 ///
 /// - Precondition: `sheet` has no recorded syntax errors (`sheet.errors.is_empty()`) — a sheet
 ///   with a `SheetItem::Error` placeholder cannot be printed back to valid source.
@@ -443,9 +449,9 @@ fn write_sheet_item(out: &mut String, item: &ast::SheetItem, depth: usize) {
 /// let source = "sheet s { cell x: i32 = 1; }";
 /// let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
 /// attach_trivia(source, &mut sheet);
-/// assert_eq!(format_sheet(&sheet), "sheet s {\n    cell x: i32 = 1;\n}\n");
+/// assert_eq!(format_sheet(&sheet, source), "sheet s {\n    cell x: i32 = 1;\n}\n");
 /// ```
-pub fn format_sheet(sheet: &ast::Sheet) -> String {
+pub fn format_sheet(sheet: &ast::Sheet, source: &str) -> String {
     debug_assert!(
         sheet.errors.is_empty(),
         "format_sheet's precondition: no recorded syntax errors"
@@ -455,7 +461,7 @@ pub fn format_sheet(sheet: &ast::Sheet) -> String {
     write_doc_comment(&mut out, "//!", sheet.doc_comment.as_deref(), 0);
     out.push_str(&format!("sheet {} {{\n", sheet.name));
     for item in &sheet.items {
-        write_sheet_item(&mut out, item, 1);
+        write_sheet_item(&mut out, source, item, 1);
     }
     write_trailing_trivia(
         &mut out,
@@ -524,7 +530,7 @@ pub fn format_source(source: &str) -> Result<String, FormatSourceError> {
         return Err(FormatSourceError::Recovered(sheet.errors));
     }
     crate::attach_trivia(source, &mut sheet);
-    Ok(format_sheet(&sheet))
+    Ok(format_sheet(&sheet, source))
 }
 
 #[cfg(test)]
@@ -535,7 +541,7 @@ mod tests {
     fn format(source: &str) -> String {
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         crate::attach_trivia(source, &mut sheet);
-        format_sheet(&sheet)
+        format_sheet(&sheet, source)
     }
 
     #[test]
@@ -962,11 +968,10 @@ mod tests {
 
     #[test]
     fn formats_a_filter() {
-        let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell x: i32 = 0 filter 0..=10; }")
-            .unwrap();
+        let source = "sheet s { cell x: i32 = 0 filter 0..=10; }";
+        let sheet = AdamAstParser::new().parse_str(source).unwrap();
         assert_eq!(
-            format_sheet(&sheet),
+            format_sheet(&sheet, source),
             "sheet s {\n    cell x: i32 = 0 filter 0..=10;\n}\n"
         );
     }
