@@ -36,6 +36,8 @@ impl Level {
 }
 
 /// 4 spaces per nesting level (mirrors `adam-lang::fmt::indent`).
+///
+/// - Complexity: O(depth).
 // Wired into render in a later task (#201); unused outside tests until then.
 #[allow(dead_code)]
 fn indent(depth: usize) -> String {
