@@ -50,9 +50,6 @@ enum Spacing {
     /// No surrounding spaces: `a..b`, or a bare delimiter.
     None,
     /// The token then one space: `a, b`.
-    // Wired into comma-separated arms (tuple/call args) in a later task (#201); unused outside
-    // tests until then.
-    #[allow(dead_code)]
     CommaAfter,
 }
 
@@ -163,6 +160,107 @@ fn gap_between(
     let end = line_column_to_byte(source, &line_starts, next_start.start());
     let gap = source.get(start..end).unwrap_or("");
     scan_gap(gap, expected)
+}
+
+/// Renders a comma-separated element list with per-gap comment recovery: the gap before the first
+/// element (after `bounds.0`, the opening delimiter's position, e.g. a `(`), each inter-element
+/// `,` gap, and the gap after the last element (before `bounds.1`, the position right past the
+/// closing delimiter, e.g. a `)`). `delims` is `(open, close)`, the delimiter tokens. When
+/// `trailing_comma` is set (a 1-tuple), a `,` is emitted after the sole element.
+///
+/// `bounds` holds raw [`proc_macro2::LineColumn`] positions (not `Span`s, unlike [`gap_between`]'s
+/// `prev_end`/`next_start`) because `Expr::Apply`'s and `Expr::Tuple`'s own recorded delimiter
+/// span covers the *whole* `(...)` group rather than a single delimiter character:
+/// `AstContext::apply_op`'s `"()"` arm and `is_tuple_or_group` both capture `self.last_span` from
+/// a `Token::CloseDelim`, and `lex_lexer`'s flattening gives every `OpenDelim`/`CloseDelim` the
+/// *enclosing `Group`'s* span (see `LexLexer::next`), so a group span's `.start()` lands on `(`
+/// and its `.end()` lands just past `)` regardless of which delimiter "produced" it. Resolving
+/// which of `.start()`/`.end()` is the right boundary is the caller's job (it knows whether it's
+/// holding a whole-group span or an ordinary leaf span, e.g. a callee's own end); this helper just
+/// consumes the two positions it's given.
+///
+/// - Complexity: O(n) in the number of elements plus their gap lengths.
+fn emit_list(
+    source: &str,
+    depth: usize,
+    delims: (&'static str, &'static str),
+    bounds: (proc_macro2::LineColumn, proc_macro2::LineColumn),
+    elements: &[Expr],
+    trailing_comma: bool,
+) -> String {
+    let (open, close) = delims;
+    let (open_pos, close_pos) = bounds;
+    // Scans the raw gap between two already-resolved positions, mirroring `gap_between` but
+    // taking `LineColumn`s directly instead of deriving them from a fixed `prev_end.end()` /
+    // `next_start.start()` pairing (which doesn't fit `open_pos`/`close_pos`; see above).
+    let scan = |from: proc_macro2::LineColumn,
+                to: proc_macro2::LineColumn,
+                expected: &[&'static str]|
+     -> Vec<GapPiece> {
+        if source.is_empty() {
+            return scan_gap("", expected);
+        }
+        let line_starts = line_start_byte_offsets(source);
+        let start = line_column_to_byte(source, &line_starts, from);
+        let end = line_column_to_byte(source, &line_starts, to);
+        let gap = source.get(start..end).unwrap_or("");
+        scan_gap(gap, expected)
+    };
+
+    if elements.is_empty() {
+        // Whole gap between the delimiters: `open`, comments, `close`.
+        let pieces = scan(open_pos, close_pos, &[open, close]);
+        let whole = emit_gap(&pieces, Spacing::None, depth);
+        return glue_before_close(&glue_after_open(&whole, open), close);
+    }
+    // Opening delimiter + any comment before the first element. `emit_gap`'s comment rendering
+    // always pads a leading space before a comment that opens a gap, which is right when the gap
+    // follows an already-rendered operand (`x /* c */ as i32`) but wrong right after a delimiter
+    // -- `glue_after_open` corrects it back to `f(/* a */ 1i32)`.
+    let pre = scan(open_pos, elements[0].span().start.start(), &[open]);
+    let mut out = glue_after_open(&emit_gap(&pre, Spacing::None, depth), open);
+    for (i, el) in elements.iter().enumerate() {
+        out.push_str(&format_at(el, source, depth, Level::OR));
+        if i + 1 < elements.len() {
+            let pieces = gap_between(source, el.span().end, elements[i + 1].span().start, &[","]);
+            out.push_str(&emit_gap(&pieces, Spacing::CommaAfter, depth));
+        }
+    }
+    if trailing_comma {
+        out.push(',');
+    }
+    // Any comment before the closing delimiter, then the delimiter; symmetric to the opening gap
+    // above (`glue_before_close` drops the trailing space before `)` a comment would otherwise
+    // leave: `f(1i32 /* end */)`, not `f(1i32 /* end */ )`).
+    let post = scan(
+        elements[elements.len() - 1].span().end.end(),
+        close_pos,
+        &[close],
+    );
+    out.push_str(&glue_before_close(
+        &emit_gap(&post, Spacing::None, depth),
+        close,
+    ));
+    out
+}
+
+/// Strips the one space [`emit_gap`] pads before a comment that immediately opens a gap, when
+/// that gap begins right after `open` — appropriate between an operand and an operator, but not
+/// right after an opening delimiter, which glues directly to a following comment.
+fn glue_after_open(gap: &str, open: &'static str) -> String {
+    match gap.strip_prefix(&format!("{open} ")) {
+        Some(rest) => format!("{open}{rest}"),
+        None => gap.to_string(),
+    }
+}
+
+/// Symmetric to [`glue_after_open`]: strips the one space [`emit_gap`] pads after a comment that
+/// immediately precedes `close`, so a trailing comment glues directly to the closing delimiter.
+fn glue_before_close(gap: &str, close: &'static str) -> String {
+    match gap.strip_suffix(&format!(" {close}")) {
+        Some(rest) => format!("{rest}{close}"),
+        None => gap.to_string(),
+    }
 }
 
 /// Returns the `'static` source spelling of a binary operator name, for `scan_gap`'s expected-token
@@ -395,27 +493,35 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 Level::CAST,
             )
         }
-        Expr::Apply { callee, args, .. } => {
+        Expr::Apply { callee, args, span } => {
             let callee_s = format_at(callee, source, depth, Level::POSTFIX);
-            let args_s = args
-                .iter()
-                .map(|a| format_at(a, source, depth, Level::OR))
-                .collect::<Vec<_>>()
-                .join(", ");
-            (format!("{callee_s}({args_s})"), Level::POSTFIX)
+            // `callee.span().end` is a genuine leaf position (right after the callee, i.e. right
+            // before `(`); `span.end` is the call's own recorded end, which -- per `emit_list`'s
+            // doc comment -- is the whole `(...)` group's span, so its `.end()` (not `.start()`)
+            // is the position right after `)`.
+            let list = emit_list(
+                source,
+                depth,
+                ("(", ")"),
+                (callee.span().end.end(), span.end.end()),
+                args,
+                false,
+            );
+            (format!("{callee_s}{list}"), Level::POSTFIX)
         }
-        Expr::Tuple { elements, .. } => {
-            let inner = elements
-                .iter()
-                .map(|e| format_at(e, source, depth, Level::OR))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let text = if elements.len() == 1 {
-                format!("({inner},)")
-            } else {
-                format!("({inner})")
-            };
-            (text, Level::PRIMARY)
+        Expr::Tuple { elements, span } => {
+            // `span.start` and `span.end` are both the same whole-group span here (see
+            // `emit_list`'s doc comment): `.start()` is the position of `(`, `.end()` the
+            // position right after `)`.
+            let list = emit_list(
+                source,
+                depth,
+                ("(", ")"),
+                (span.start.start(), span.end.end()),
+                elements,
+                elements.len() == 1,
+            );
+            (list, Level::PRIMARY)
         }
         Expr::TupleIndex { base, index, .. } => (
             format!(
@@ -647,6 +753,32 @@ mod tests {
     #[test]
     fn multi_element_tuple_has_no_trailing_comma() {
         assert_eq!(fmt("(1i32, 2i32)"), "(1i32, 2i32)");
+    }
+
+    #[test]
+    fn comments_in_a_call_argument_list_are_preserved() {
+        assert_eq!(
+            fmt("f(/* a */ 1i32, /* b */ 2i32)"),
+            "f(/* a */ 1i32, /* b */ 2i32)"
+        );
+    }
+
+    #[test]
+    fn a_comment_before_a_closing_call_paren_is_preserved() {
+        assert_eq!(fmt("f(1i32 /* end */)"), "f(1i32 /* end */)");
+    }
+
+    #[test]
+    fn comments_in_a_tuple_are_preserved() {
+        assert_eq!(fmt("(1i32, /* mid */ 2i32)"), "(1i32, /* mid */ 2i32)");
+    }
+
+    #[test]
+    fn comment_free_calls_and_tuples_are_unchanged() {
+        assert_eq!(fmt("f(1i32, 2i32)"), "f(1i32, 2i32)");
+        assert_eq!(fmt("(1i32, 2i32)"), "(1i32, 2i32)");
+        assert_eq!(fmt("(1i32,)"), "(1i32,)");
+        assert_eq!(fmt("(1i32, 2i32).1"), "(1i32, 2i32).1");
     }
 
     #[test]
