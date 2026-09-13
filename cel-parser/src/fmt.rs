@@ -535,18 +535,71 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             cond,
             then_branch,
             else_branch,
-            ..
+            span,
         } => {
+            // `if` <cond> `{` <then_branch> `}` [ `else` ( `{` <else_branch> `}` | <else-if> ) ].
+            // None of `if`/`{`/`}`/`else` carry their own span (each is a fixed keyword/delimiter
+            // consumed structurally by the parser, never recorded as its own node), so every gap
+            // between two real spans is scanned for its expected fixed token(s) alongside any
+            // interleaved comment. `Spacing::Around` is used throughout (rather than `None`) so
+            // that a gap holding more than one fixed token (`"}"`, `"else"`, and — for a braced
+            // else — `"{"`) still gets a single space between each token and the next, matching
+            // the pre-`scan_gap` literal `" } else { "` spacing exactly in the comment-free case.
             let cond_s = format_at(cond, source, depth, Level::OR);
             let then_s = format_at(then_branch, source, depth, Level::OR);
-            let mut text = format!("if {cond_s} {{ {then_s} }}");
-            if let Some(else_branch) = else_branch {
-                if matches!(else_branch.as_ref(), Expr::If { .. }) {
-                    let (else_s, _) = render(else_branch, source, depth);
-                    text.push_str(&format!(" else {else_s}"));
-                } else {
-                    let else_s = format_at(else_branch, source, depth, Level::OR);
-                    text.push_str(&format!(" else {{ {else_s} }}"));
+            let if_gap = gap_between(source, span.start, cond.span().start, &["if"]);
+            let open_gap = gap_between(source, cond.span().end, then_branch.span().start, &["{"]);
+            let mut text = String::new();
+            // Only the very first gap is `trim_start`'d: it opens the whole node's text, so any
+            // leading space `Spacing::Around` would otherwise add before `"if"` must be dropped.
+            text.push_str(emit_gap(&if_gap, Spacing::Around, depth).trim_start());
+            text.push_str(&cond_s);
+            text.push_str(&emit_gap(&open_gap, Spacing::Around, depth));
+            text.push_str(&then_s);
+            match else_branch {
+                None => {
+                    // No `else`: the gap between the then-branch and the node's own end holds
+                    // just the closing `}` (plus any comment before it).
+                    let close_gap = gap_between(source, then_branch.span().end, span.end, &["}"]);
+                    // `trim_end`'d because this is the node's last piece of text: a trailing
+                    // space here would otherwise survive into the caller's output (or, wrapped in
+                    // parens by `format_at`, land right before the close-paren).
+                    text.push_str(emit_gap(&close_gap, Spacing::Around, depth).trim_end());
+                }
+                Some(else_branch) => {
+                    let is_chain = matches!(else_branch.as_ref(), Expr::If { .. });
+                    // An `else if` chain has no braces of its own around the nested `if`; a plain
+                    // `else` block does.
+                    let expected: &[&'static str] = if is_chain {
+                        &["}", "else"]
+                    } else {
+                        &["}", "else", "{"]
+                    };
+                    // One scan across the whole then-branch-to-else-branch gap (rather than one
+                    // scan per token) so a comment sitting anywhere in it -- before `}`, between
+                    // `}` and `else`, or between `else` and `{` -- is recovered in source order.
+                    let else_gap = gap_between(
+                        source,
+                        then_branch.span().end,
+                        else_branch.span().start,
+                        expected,
+                    );
+                    text.push_str(&emit_gap(&else_gap, Spacing::Around, depth));
+                    if is_chain {
+                        // The nested `if` recurses through `render`, which lays out its own
+                        // `if`/`{`/`}`/`else` gaps (including its own trailing `trim_end`), so
+                        // nothing further is appended here.
+                        let (else_s, _) = render(else_branch, source, depth);
+                        text.push_str(&else_s);
+                    } else {
+                        let else_s = format_at(else_branch, source, depth, Level::OR);
+                        text.push_str(&else_s);
+                        let final_close_gap =
+                            gap_between(source, else_branch.span().end, span.end, &["}"]);
+                        text.push_str(
+                            emit_gap(&final_close_gap, Spacing::Around, depth).trim_end(),
+                        );
+                    }
                 }
             }
             (text, Level::PRIMARY)
@@ -798,6 +851,28 @@ mod tests {
     fn else_if_chain_has_no_braces_around_the_nested_if() {
         let source = "if true { 1i32 } else if false { 2i32 } else { 3i32 }";
         assert_eq!(fmt(source), source);
+    }
+
+    #[test]
+    fn a_comment_after_if_condition_is_preserved() {
+        assert_eq!(fmt("if a /* c */ { 1i32 }"), "if a /* c */ { 1i32 }");
+    }
+
+    #[test]
+    fn a_comment_before_else_is_preserved() {
+        assert_eq!(
+            fmt("if a { 1i32 } /* e */ else { 2i32 }"),
+            "if a { 1i32 } /* e */ else { 2i32 }"
+        );
+    }
+
+    #[test]
+    fn comment_free_if_else_is_unchanged() {
+        assert_eq!(
+            fmt("if true { 1i32 } else { 2i32 }"),
+            "if true { 1i32 } else { 2i32 }"
+        );
+        assert_eq!(fmt("if true { 1i32 }"), "if true { 1i32 }");
     }
 
     #[test]
