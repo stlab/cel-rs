@@ -243,13 +243,20 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 LogicalOp::Or => Level::OR,
                 LogicalOp::And => Level::AND,
             };
-            let op_str = match op {
+            let op_static: &'static str = match op {
                 LogicalOp::Or => "||",
                 LogicalOp::And => "&&",
             };
             let lhs_s = format_at(lhs, source, depth, level);
             let rhs_s = format_at(rhs, source, depth, level.tighter());
-            (format!("{lhs_s} {op_str} {rhs_s}"), level)
+            let pieces = gap_between(source, lhs.span().end, rhs.span().start, &[op_static]);
+            (
+                format!(
+                    "{lhs_s}{}{rhs_s}",
+                    emit_gap(&pieces, Spacing::Around, depth)
+                ),
+                level,
+            )
         }
         Expr::Op { operands, .. } if operands.is_empty() => {
             // Defensive only: a real parse never produces an arity-0 `Expr::Op` (see the
@@ -663,6 +670,17 @@ mod tests {
 
     #[test]
     fn logical_or_and_and_are_not_desugared_and_need_no_extra_parens() {
+        assert_eq!(fmt("a || b && c"), "a || b && c");
+    }
+
+    #[test]
+    fn a_comment_around_a_logical_operator_is_preserved() {
+        assert_eq!(fmt("a /* x */ || b"), "a /* x */ || b");
+        assert_eq!(fmt("a && /* y */ b"), "a && /* y */ b");
+    }
+
+    #[test]
+    fn comment_free_logical_is_unchanged() {
         assert_eq!(fmt("a || b && c"), "a || b && c");
     }
 
