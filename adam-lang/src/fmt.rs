@@ -296,7 +296,17 @@ fn write_relationship(out: &mut String, source: &str, rel: &ast::RelationshipDec
     );
     write_doc_comment(out, "///", rel.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
-    out.push_str("relationship {\n");
+    out.push_str("relationship");
+    // Comment between the `relationship` keyword and its `{` (the keyword's own span starts at
+    // `rel.span.start`; scan from just past it to the block's `{`).
+    out.push_str(&emit_decl_gap(
+        source,
+        point_span(rel.span.start),
+        rel.open_brace_span,
+        &[],
+        depth,
+    ));
+    out.push_str(" {\n");
     for binding in &rel.bindings {
         write_binding(out, source, binding, depth + 1);
     }
@@ -345,7 +355,15 @@ fn write_branch(out: &mut String, source: &str, branch: &ast::ConditionalBranch,
         out.push('-');
     }
     out.push_str(&source_text_or_empty(branch.literal_span));
-    out.push_str(" => ");
+    // One gap from the literal through the `=>` to the branch body's `{`, recovering comments on
+    // either side of `=>` in source order.
+    out.push_str(&emit_decl_gap(
+        source,
+        branch.literal_span,
+        branch.open_brace_span,
+        &["=>"],
+        depth,
+    ));
     write_branch_relationships(
         out,
         source,
@@ -370,13 +388,29 @@ fn write_conditional(out: &mut String, source: &str, cond: &ast::ConditionalDecl
     out.push_str(&indent(depth));
     out.push_str("conditional ");
     out.push_str(&cel_parser::format_expr(&cond.match_expr, source, depth));
+    // Comment between the match subject and the conditional's own `{`.
+    out.push_str(&emit_decl_gap(
+        source,
+        cond.match_expr.span(),
+        cond.open_brace_span,
+        &[],
+        depth,
+    ));
     out.push_str(" {\n");
     for branch in &cond.branches {
         write_branch(out, source, branch, depth + 1);
     }
     if let Some(default) = &cond.default {
         out.push_str(&indent(depth + 1));
-        out.push_str("_ => ");
+        out.push('_');
+        // One gap from `_` through `=>` to the default body's `{`, recovering comments around `=>`.
+        out.push_str(&emit_decl_gap(
+            source,
+            point_span(default.span.start),
+            default.open_brace_span,
+            &["=>"],
+            depth + 1,
+        ));
         write_branch_relationships(
             out,
             source,
@@ -457,14 +491,30 @@ fn write_cell_clauses(
 ) {
     let mut prev = initializer_span.or(type_span).unwrap_or(name_span);
     if let Some(filter) = filter {
-        out.push_str(&emit_decl_gap(source, prev, filter.span, &[], depth));
-        out.push_str(" filter ");
+        // One gap from the previous segment through the `filter` keyword to the filter body,
+        // recovering comments on either side of `filter` in source order.
+        out.push_str(&emit_decl_gap(
+            source,
+            prev,
+            filter.body.span(),
+            &["filter"],
+            depth,
+        ));
         out.push_str(&cel_parser::format_expr(&filter.body, source, depth));
         prev = filter.body.span();
     }
     if let Some(require) = require {
-        out.push_str(&emit_decl_gap(source, prev, require.span, &[], depth));
-        write_require_clause(out, source, require, depth);
+        // One gap from the previous segment through the `require` keyword to the block's `{`,
+        // recovering comments on either side of `require` (the keyword itself has no stored span,
+        // but it lies inside this gap).
+        out.push_str(&emit_decl_gap(
+            source,
+            prev,
+            require.open_brace_span,
+            &["require"],
+            depth,
+        ));
+        write_require_block(out, source, require, depth);
         prev = require.span;
     }
     // Comment between the last segment and the terminating `;`.
@@ -489,16 +539,28 @@ fn write_requirement(out: &mut String, source: &str, req: &ast::RequirementDecl,
     if let Some(name) = &req.name {
         out.push('@');
         out.push_str(name);
+        // Recover any comment between the `@label` and the body (e.g. `@c /* keep */ w <= 10`).
+        if let Some(name_span) = req.name_span {
+            out.push_str(&emit_decl_gap(
+                source,
+                name_span,
+                req.body.span(),
+                &[],
+                depth,
+            ));
+        }
         out.push(' ');
     }
     out.push_str(&cel_parser::format_expr(&req.body, source, depth));
     write_line_end(out, ";", req.trailing_line_comment.as_ref(), depth);
 }
 
-/// Writes one ` require { ... }` clause (no trailing `;`) — shared by [`write_cell`],
-/// [`write_source`], and [`write_out`].
-fn write_require_clause(out: &mut String, source: &str, require: &ast::RequireBlock, depth: usize) {
-    out.push_str(" require {\n");
+/// Writes one `require` block's `{ ... }` body (no `require` keyword, no trailing `;`) — the
+/// caller emits the `require` keyword (and any comments around it) via [`emit_decl_gap`] so a
+/// comment between `require` and its `{` is preserved. Shared by [`write_cell`], [`write_source`],
+/// and [`write_out`].
+fn write_require_block(out: &mut String, source: &str, require: &ast::RequireBlock, depth: usize) {
+    out.push_str("{\n");
     for req in &require.requirements {
         write_requirement(out, source, req, depth + 1);
     }
@@ -1387,5 +1449,64 @@ mod tests {
         let source = "sheet s {\n    out area: f64 := w /* keep */ require {\n        @c w <= 10.0;\n    };\n}";
         let once = format_source(source).unwrap();
         assert!(once.contains("/* keep */"), "comment dropped: {once:?}");
+    }
+
+    /// Every keyword-to-body gap must preserve a comment and stay idempotent — one case per
+    /// hardcoded token the declaration formatter reprints (`filter`, `require`, `=>`, the `@label`,
+    /// the conditional subject's `{`, and the `relationship` keyword's `{`). See PR #207 review.
+    fn assert_comment_survives_and_is_idempotent(source: &str) {
+        let once = format_source(source).unwrap();
+        assert!(once.contains("/* keep */"), "comment dropped: {once:?}");
+        let twice = format_source(&once).unwrap();
+        assert_eq!(once, twice, "formatting must be idempotent: {once:?}");
+    }
+
+    #[test]
+    fn preserves_a_comment_between_the_filter_keyword_and_body() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    cell a: i32 = 1 filter /* keep */ 0..=10;\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_the_require_keyword_and_brace() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    out area: f64 := w require /* keep */ {\n        @c w <= 10.0;\n    };\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_a_branch_literal_and_the_fat_arrow() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    conditional p {\n        0i32 /* keep */ => { relationship { b := a; } }\n    }\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_the_fat_arrow_and_a_branch_body() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    conditional p {\n        0i32 => /* keep */ { relationship { b := a; } }\n    }\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_a_requirement_label_and_body() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    out area: f64 := w require {\n        @c /* keep */ w <= 10.0;\n    };\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_a_conditional_subject_and_its_brace() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    conditional p /* keep */ {\n        0i32 => { relationship { b := a; } }\n    }\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_the_relationship_keyword_and_its_brace() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    relationship /* keep */ {\n        b := a;\n    }\n}",
+        );
     }
 }
