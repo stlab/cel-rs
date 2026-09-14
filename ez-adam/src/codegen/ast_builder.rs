@@ -572,7 +572,7 @@ mod tests {
         let filter = decl.filter.expect("expected a filter clause");
         assert!(matches!(filter.body, cel_parser::Expr::Apply { .. }));
         assert_eq!(
-            cel_parser::format_expr(&filter.body),
+            cel_parser::format_expr(&filter.body, "", 0),
             "clamp(_, 0i64, 100i64)"
         );
     }
@@ -628,7 +628,7 @@ mod tests {
         let decl = build_cell_decl(&cell).expect("i64::MAX clamp bound should export cleanly");
         let filter = decl.filter.expect("expected a filter clause");
         assert_eq!(
-            cel_parser::format_expr(&filter.body),
+            cel_parser::format_expr(&filter.body, "", 0),
             format!("min(_, {}i64)", i64::MAX)
         );
     }
@@ -757,7 +757,7 @@ mod tests {
         // combination is empty and contributes no decl.
         assert_eq!(decls.len(), 1);
         assert_eq!(
-            cel_parser::format_expr(&decls[0].match_expr),
+            cel_parser::format_expr(&decls[0].match_expr, "", 0),
             "constrain_proportions && lock_aspect"
         );
         assert_eq!(decls[0].branches.len(), 1);

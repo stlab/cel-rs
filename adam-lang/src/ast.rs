@@ -9,17 +9,7 @@
 pub use cel_parser::ExprSpan;
 use cel_parser::lex_lexer::Literal;
 
-/// A recovered `//`/`/* */` comment, remembering which delimiter style the source used so the
-/// formatter can reproduce it instead of normalizing everything to `//`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Comment {
-    /// One or more consecutive `// text` lines, joined by `\n`, each with its leading `//`/space
-    /// stripped.
-    Line(String),
-    /// A single `/* text */` block comment (single- or multi-line), its inner text joined by
-    /// `\n` with the opening `/*`/closing `*/` and per-line indentation stripped.
-    Block(String),
-}
+pub use cel_parser::Comment;
 
 /// A parsed adam-lang sheet declaration, with source spans on every node.
 ///

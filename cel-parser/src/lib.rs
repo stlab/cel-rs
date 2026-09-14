@@ -100,6 +100,7 @@ mod fmt;
 pub mod lex_lexer;
 pub mod op_table;
 pub mod parser_context;
+pub mod trivia;
 pub mod ty;
 
 pub use ast::{AstContext, ClosureParam, ClosureParamTypeExpr, Expr, ExprSpan, Literal, LogicalOp};
@@ -110,6 +111,7 @@ pub use fmt::format_expr;
 pub use op_table::{OpLookup, OperandTypes, builtin_operand_types};
 pub use parser_context::{DynSegmentContext, ParserContext};
 pub use proc_macro2::LineColumn;
+pub use trivia::Comment;
 pub use ty::Ty;
 
 use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};

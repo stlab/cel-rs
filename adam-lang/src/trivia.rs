@@ -36,6 +36,7 @@
 //! boundary between them) is invisible to this whole gap-scanning mechanism and is silently
 //! dropped on reformat — see <https://github.com/stlab/cel-rs/issues/201>.
 
+use cel_parser::trivia::{line_column_to_byte, line_start_byte_offsets};
 use proc_macro2::LineColumn;
 
 use crate::ast::{
@@ -477,39 +478,6 @@ fn attach_gaps<T: TriviaTarget>(source: &str, line_starts: &[usize], items: &mut
             }
         }
     }
-}
-
-/// Returns the byte offset of the start of each line in `source`: `result[line - 1]` is the
-/// start of 1-based line `line` (matching [`proc_macro2::LineColumn::line`]'s convention).
-///
-/// - Complexity: O(n) in the length of `source`.
-fn line_start_byte_offsets(source: &str) -> Vec<usize> {
-    let mut offsets = vec![0usize];
-    let mut byte = 0usize;
-    for line in source.split_inclusive('\n') {
-        byte += line.len();
-        offsets.push(byte);
-    }
-    offsets
-}
-
-/// Converts a [`LineColumn`] (1-based line, 0-based character column) to a byte offset in
-/// `source`, using `line_starts` (from [`line_start_byte_offsets`]) instead of rescanning
-/// `source` from byte 0.
-///
-/// - Precondition: `line_starts` was built from exactly `source`, and `pos` was recorded
-///   against `source` (so `pos.line - 1` is in range).
-///
-/// - Complexity: O(k), where k is `pos.column` — bounded by that one line's length, not the
-///   whole of `source`.
-fn line_column_to_byte(source: &str, line_starts: &[usize], pos: LineColumn) -> usize {
-    let line_start = line_starts[pos.line - 1];
-    line_start
-        + source[line_start..]
-            .chars()
-            .take(pos.column)
-            .map(char::len_utf8)
-            .sum::<usize>()
 }
 
 /// Analyzes one gap between two consecutive items: the maximal trailing run of `//` line
