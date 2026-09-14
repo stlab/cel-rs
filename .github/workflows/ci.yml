@@ -76,6 +76,9 @@ jobs:
     - name: Run tests for workspace (excluding begin app)
       run: cargo test --workspace --exclude begin --verbose -- --nocapture
 
+    - name: Run tests for begin app (renderer-agnostic)
+      run: cargo test -p begin --no-default-features --verbose -- --nocapture
+
     - name: Clippy workspace (excluding begin app)
       run: cargo clippy --workspace --exclude begin --all-targets -- -D warnings
 
