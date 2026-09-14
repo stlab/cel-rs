@@ -31,12 +31,12 @@
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
 //! postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." unsuffixed_integer }.
 //! primary_expression = literal | identifier | tuple_or_group | if_expression | closure_expression.
-//! tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".
-//! if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].
+//! tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".
+//! if_expression = "if" expression "{" expression "}" [ "else" ( "{" expression "}" | if_expression ) ].
 //! closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression.
 //! closure_param = identifier ":" closure_type_expression.
 //! closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")".
-//! parameter_list = or_expression { "," or_expression }.
+//! parameter_list = expression { "," expression }.
 //!
 //! literal_pattern = ["-"] literal.
 //! ```
@@ -1375,24 +1375,24 @@ impl<C: ParserContext> Parser<C> {
         Ok(())
     }
 
-    /// `parameter_list = or_expression { "," or_expression }.`
+    /// `parameter_list = expression { "," expression }.`
     ///
-    /// Always parses at least one `or_expression` — callers that need to allow zero
+    /// Always parses at least one `expression` — callers that need to allow zero
     /// arguments (`postfix_expression`'s `"(" [ parameter_list ] ")"`) check for that
     /// possibility themselves before calling, rather than `parameter_list` swallowing it.
     ///
     /// Returns the argument count.
     ///
     /// # Errors
-    /// Returns an error if the first token can't start an `or_expression`, or if a comma
+    /// Returns an error if the first token can't start an `expression`, or if a comma
     /// isn't followed by one.
     fn parameter_list(&mut self) -> Result<usize> {
-        if !self.is_or_expression()? {
+        if !self.is_expression()? {
             return Err(self.error_at("expected expression"));
         }
         let mut count = 1;
         while self.is_punctuation(",") {
-            if !self.is_or_expression()? {
+            if !self.is_expression()? {
                 return Err(self.error_at("expected expression after comma"));
             }
             count += 1;
@@ -1456,7 +1456,7 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".`
+    /// `tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".`
     ///
     /// `()` parses as unit, `(expr)` as grouping, `(expr,)` as a 1-tuple, and
     /// `(expr, expr, ...)` as an n-tuple.
@@ -1485,7 +1485,7 @@ impl<C: ParserContext> Parser<C> {
             return Ok(true);
         }
         let ambient_start = self.context.current_stack_offset();
-        if !self.is_or_expression()? {
+        if !self.is_expression()? {
             return Err(self.error_at("expected expression"));
         }
         if matches!(
@@ -1517,7 +1517,7 @@ impl<C: ParserContext> Parser<C> {
             return Ok(true);
         }
         loop {
-            if !self.is_or_expression()? {
+            if !self.is_expression()? {
                 return Err(self.error_at("expected expression after ','"));
             }
             count += 1;
@@ -1626,7 +1626,7 @@ impl<C: ParserContext> Parser<C> {
                 Ok(true)
             });
 
-        let body_result = self.parse_nested_context(|p| p.is_or_expression());
+        let body_result = self.parse_nested_context(|p| p.is_expression());
         self.op_lookup.pop_scope();
         self.op_lookup.restore_scopes(isolated);
         let body = body_result?;
@@ -1703,7 +1703,7 @@ impl<C: ParserContext> Parser<C> {
         ))
     }
 
-    /// `if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].`
+    /// `if_expression = "if" expression "{" expression "}" [ "else" ( "{" expression "}" | if_expression ) ].`
     ///
     /// - Precondition: The `if` keyword has already been consumed by the caller; `if_span` is
     ///   its span.
@@ -1716,7 +1716,7 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
     fn is_if_expression(&mut self, if_span: Span) -> Result<bool> {
-        if !self.is_or_expression()? {
+        if !self.is_expression()? {
             return Err(self.error_at("expected condition after `if`"));
         }
         match self.peek_token() {
@@ -1730,7 +1730,7 @@ impl<C: ParserContext> Parser<C> {
         }
         let mut then_fragment = self.context.new_fragment();
         std::mem::swap(&mut self.context, &mut then_fragment);
-        if !self.is_or_expression()? {
+        if !self.is_expression()? {
             return Err(self.error_at("expected expression in then-branch"));
         }
         std::mem::swap(&mut self.context, &mut then_fragment);
@@ -1765,7 +1765,7 @@ impl<C: ParserContext> Parser<C> {
                 }
                 let mut fragment = self.context.new_fragment();
                 std::mem::swap(&mut self.context, &mut fragment);
-                if !self.is_or_expression()? {
+                if !self.is_expression()? {
                     return Err(self.error_at("expected expression in else-branch"));
                 }
                 std::mem::swap(&mut self.context, &mut fragment);
@@ -3520,6 +3520,58 @@ mod tests {
              not `Range<i32>` (which would mean `..` grabbed only `5i32` and `==` applied afterward \
              to an already-built range) — got: {message}"
         );
+    }
+
+    #[test]
+    fn parameter_list_accepts_a_range_expression() -> anyhow::Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                ("()", 2) => {
+                    segment.op2(|_callee: i32, arg: std::ops::Range<i32>| arg)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
+        let mut parser = CELParser::new(lookup);
+        let mut segment = parser
+            .parse_str("f(1i32..5i32)")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(segment.call0::<std::ops::Range<i32>>()?, 1i32..5i32);
+        Ok(())
+    }
+
+    #[test]
+    fn tuple_or_group_accepts_a_range_expression() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(1i32..5i32)").unwrap();
+        assert_eq!(seg.call0::<std::ops::Range<i32>>().unwrap(), 1i32..5i32);
+        Ok(())
+    }
+
+    #[test]
+    fn if_expression_branches_accept_range_expressions() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("if true { 1i32..5i32 } else { 2i32..6i32 }")
+            .unwrap();
+        assert_eq!(seg.call0::<std::ops::Range<i32>>().unwrap(), 1i32..5i32);
+    }
+
+    #[test]
+    fn closure_body_accepts_a_range_expression() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("|| 1i32..5i32")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let closure: cel_runtime::DynClosure = segment.call0()?;
+        assert_eq!(closure.call::<std::ops::Range<i32>>(&[])?, 1i32..5i32);
+        Ok(())
     }
 }
 
