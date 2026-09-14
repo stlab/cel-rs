@@ -153,18 +153,26 @@ fn point_span(span: proc_macro2::Span) -> ast::ExprSpan {
     }
 }
 
-/// Renders the comments (if any) in the source gap between two adam-lang declaration positions,
-/// for a gap that otherwise contains only `expected` — the fixed literal tokens (e.g. `"="`,
-/// `":="`) the caller itself emits and that may separate two comments in the gap (a comment can
-/// precede *and* follow the `=` in `cell a: i32 = /* p */ 1;` vs. `cell a: i32 /* t */ = 1;`) —
-/// passed through to [`cel_parser::trivia::scan_gap`] so it can walk past them rather than
-/// stopping at the first one. Returns `""` when the gap has no comments (the common case), so a
-/// comment-free declaration prints exactly as before. A `Comment::Block` stays inline with what
-/// precedes it. A `Comment::Line` runs to end of line, so whatever the caller appends after this
-/// gap's text (the declaration's own continuation: `=`, `:=`, `;`, ...) must start on a fresh
-/// line — this ends the gap's text with a newline plus `indent(depth + 1)`, mirroring
-/// `cel_parser::fmt::emit_gap`'s own line-wrap convention for the same reason. `depth` is the
-/// caller's own indent depth (the declaration's, not the gap's).
+/// Renders the source gap between two adam-lang declaration positions — any comments it holds,
+/// interleaved *in source order* with `expected`, the fixed literal tokens (e.g. `"="`, `":="`)
+/// the grammar guarantees appear there. Passing the operator through [`cel_parser::trivia::scan_gap`]
+/// (rather than having the caller append it afterward) is what preserves ordering: a comment that
+/// follows the `=` in `cell a: i32 = /* p */ 1;` stays after it, and one on each side of it
+/// (`cell a: i32 /* before */ = /* after */ 1;`) keeps its position relative to the operator.
+///
+/// Spacing mirrors `cel_parser::fmt::emit_gap`'s `Around` convention: an `expected` token is
+/// rendered space-separated, a `Comment::Block` stays inline, and a `Comment::Line` (which runs to
+/// end of line) wraps — ending the gap with a newline plus `indent(depth + 1)` so whatever the
+/// caller appends next starts on a fresh line rather than being swallowed into the comment.
+///
+/// - Postcondition: an *operator* gap (`expected` non-empty) always emits every `expected` token,
+///   even when `source` is empty or the positions don't resolve (a hand-built declaration with
+///   synthetic spans still gets its `=`/`:=`), and ends with a separating space so the caller's
+///   next token (the initializer) is not glued on. A *comment-only* gap (`expected` empty) returns
+///   `""` when it holds no comments, and never adds a trailing space, so the caller appends its own
+///   terminator (`;`) or keyword directly.
+///
+/// `depth` is the caller's own indent depth (the declaration's, not the gap's).
 fn emit_decl_gap(
     source: &str,
     prev_end: ast::ExprSpan,
@@ -173,35 +181,52 @@ fn emit_decl_gap(
     depth: usize,
 ) -> String {
     use cel_parser::trivia::{GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap};
-    if source.is_empty() {
-        return String::new();
-    }
-    let line_starts = line_start_byte_offsets(source);
-    let start = line_column_to_byte(source, &line_starts, prev_end.end.end());
-    let end = line_column_to_byte(source, &line_starts, next_start.start.start());
-    let Some(gap) = source.get(start..end) else {
-        return String::new();
+    // `scan_gap` re-synthesizes every `expected` token even on an empty or non-resolving gap, so a
+    // hand-built declaration (empty `source`) still renders its operator.
+    let pieces = if source.is_empty() {
+        scan_gap("", expected)
+    } else {
+        let line_starts = line_start_byte_offsets(source);
+        let start = line_column_to_byte(source, &line_starts, prev_end.end.end());
+        let end = line_column_to_byte(source, &line_starts, next_start.start.start());
+        match source.get(start..end) {
+            Some(gap) => scan_gap(gap, expected),
+            None => scan_gap("", expected),
+        }
     };
     let mut out = String::new();
-    for piece in scan_gap(gap, expected) {
-        if let GapPiece::Comment(comment) = piece {
-            if !out.ends_with(' ') {
+    for piece in pieces {
+        match piece {
+            GapPiece::Punct(tok) => {
+                if !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push_str(tok);
                 out.push(' ');
             }
-            match comment {
-                cel_parser::Comment::Block(text) => {
-                    out.push_str("/* ");
-                    out.push_str(&text);
-                    out.push_str(" */");
+            GapPiece::Comment(cel_parser::Comment::Block(text)) => {
+                if !out.ends_with(' ') {
+                    out.push(' ');
                 }
-                cel_parser::Comment::Line(text) => {
-                    out.push_str("// ");
-                    out.push_str(&text);
-                    out.push('\n');
-                    out.push_str(&indent(depth + 1));
+                out.push_str("/* ");
+                out.push_str(&text);
+                out.push_str(" */");
+            }
+            GapPiece::Comment(cel_parser::Comment::Line(text)) => {
+                if !out.ends_with(' ') {
+                    out.push(' ');
                 }
+                out.push_str("// ");
+                out.push_str(&text);
+                out.push('\n');
+                out.push_str(&indent(depth + 1));
             }
         }
+    }
+    // An operator gap must end separated from the initializer the caller appends next; a
+    // comment-only gap must not (its terminator/keyword is appended with its own leading space).
+    if !expected.is_empty() && !out.is_empty() && !out.ends_with(' ') {
+        out.push(' ');
     }
     out
 }
@@ -236,7 +261,19 @@ fn write_binding(out: &mut String, source: &str, binding: &ast::BindingDecl, dep
         );
         out.push_str(&binding.outputs[0].0);
     }
-    out.push_str(" := ");
+    // `:=` gap, rendered in-position so a comment on either side of it keeps its order.
+    let op_start = binding
+        .outputs
+        .last()
+        .map(|(_, span)| *span)
+        .unwrap_or(binding.span);
+    out.push_str(&emit_decl_gap(
+        source,
+        op_start,
+        binding.body.span(),
+        &[":="],
+        depth,
+    ));
     out.push_str(&cel_parser::format_expr(&binding.body, source, depth));
     // Comment between the binding's body and its terminating `;`.
     out.push_str(&emit_decl_gap(
@@ -377,36 +414,67 @@ fn write_cell(out: &mut String, source: &str, cell: &ast::CellDecl, depth: usize
     if let Some(type_expr) = &cell.type_name {
         out.push_str(": ");
         out.push_str(&source_text_or_empty(type_expr.span()));
-        if let Some(expr) = &cell.initializer {
-            out.push_str(&emit_decl_gap(
-                source,
-                type_expr.span(),
-                expr.span(),
-                &["="],
-                depth,
-            ));
-        }
     }
+    // `=` gap, rendered in-position so comments keep their order relative to the operator.
     if let Some(expr) = &cell.initializer {
-        out.push_str(" = ");
+        let op_start = cell
+            .type_name
+            .as_ref()
+            .map(ast::TypeExpr::span)
+            .unwrap_or(cell.name_span);
+        out.push_str(&emit_decl_gap(source, op_start, expr.span(), &["="], depth));
         out.push_str(&cel_parser::format_expr(expr, source, depth));
-        // Comment between the initializer and whatever terminates the declaration.
-        out.push_str(&emit_decl_gap(
-            source,
-            expr.span(),
-            point_span(cell.span.end),
-            &[],
-            depth,
-        ));
     }
-    if let Some(filter) = &cell.filter {
+    write_cell_clauses(
+        out,
+        source,
+        depth,
+        cell.initializer.as_ref().map(cel_parser::Expr::span),
+        cell.type_name.as_ref().map(ast::TypeExpr::span),
+        cell.name_span,
+        cell.filter.as_ref(),
+        cell.require.as_ref(),
+        cell.span.end,
+    );
+    write_line_end(out, ";", cell.trailing_line_comment.as_ref(), depth);
+}
+
+/// Writes a declaration's optional `filter`/`require` clauses and recovers any comment in each gap
+/// between adjacent segments (initializer → `filter` → `require` → `;`), shared by [`write_cell`],
+/// [`write_source`], and [`write_out`]. `prev_*` give the end span of whichever of
+/// initializer/type/name precedes the clauses; `terminator` is the declaration's own `;` span.
+#[allow(clippy::too_many_arguments)]
+fn write_cell_clauses(
+    out: &mut String,
+    source: &str,
+    depth: usize,
+    initializer_span: Option<ast::ExprSpan>,
+    type_span: Option<ast::ExprSpan>,
+    name_span: ast::ExprSpan,
+    filter: Option<&ast::CellFilter>,
+    require: Option<&ast::RequireBlock>,
+    terminator: proc_macro2::Span,
+) {
+    let mut prev = initializer_span.or(type_span).unwrap_or(name_span);
+    if let Some(filter) = filter {
+        out.push_str(&emit_decl_gap(source, prev, filter.span, &[], depth));
         out.push_str(" filter ");
         out.push_str(&cel_parser::format_expr(&filter.body, source, depth));
+        prev = filter.body.span();
     }
-    if let Some(require) = &cell.require {
+    if let Some(require) = require {
+        out.push_str(&emit_decl_gap(source, prev, require.span, &[], depth));
         write_require_clause(out, source, require, depth);
+        prev = require.span;
     }
-    write_line_end(out, ";", cell.trailing_line_comment.as_ref(), depth);
+    // Comment between the last segment and the terminating `;`.
+    out.push_str(&emit_decl_gap(
+        source,
+        prev,
+        point_span(terminator),
+        &[],
+        depth,
+    ));
 }
 
 /// Writes one `[ "@" identifier " " ] ...;` requirement.
@@ -459,31 +527,32 @@ fn write_out(out: &mut String, source: &str, decl: &ast::OutDecl, depth: usize) 
     if let Some(type_expr) = &decl.type_name {
         out.push_str(": ");
         out.push_str(&source_text_or_empty(type_expr.span()));
-        out.push_str(&emit_decl_gap(
-            source,
-            type_expr.span(),
-            decl.initializer.span(),
-            &[":="],
-            depth,
-        ));
     }
-    out.push_str(" := ");
-    out.push_str(&cel_parser::format_expr(&decl.initializer, source, depth));
-    // Comment between the initializer and whatever terminates the declaration.
+    // `:=` gap, rendered in-position so comments keep their order relative to the operator.
+    let op_start = decl
+        .type_name
+        .as_ref()
+        .map(ast::TypeExpr::span)
+        .unwrap_or(decl.name_span);
     out.push_str(&emit_decl_gap(
         source,
+        op_start,
         decl.initializer.span(),
-        point_span(decl.span.end),
-        &[],
+        &[":="],
         depth,
     ));
-    if let Some(filter) = &decl.filter {
-        out.push_str(" filter ");
-        out.push_str(&cel_parser::format_expr(&filter.body, source, depth));
-    }
-    if let Some(require) = &decl.require {
-        write_require_clause(out, source, require, depth);
-    }
+    out.push_str(&cel_parser::format_expr(&decl.initializer, source, depth));
+    write_cell_clauses(
+        out,
+        source,
+        depth,
+        Some(decl.initializer.span()),
+        decl.type_name.as_ref().map(ast::TypeExpr::span),
+        decl.name_span,
+        decl.filter.as_ref(),
+        decl.require.as_ref(),
+        decl.span.end,
+    );
     write_line_end(out, ";", decl.trailing_line_comment.as_ref(), depth);
 }
 
@@ -503,35 +572,28 @@ fn write_source(out: &mut String, source: &str, decl: &ast::SourceDecl, depth: u
     if let Some(type_expr) = &decl.type_name {
         out.push_str(": ");
         out.push_str(&source_text_or_empty(type_expr.span()));
-        if let Some(expr) = &decl.initializer {
-            out.push_str(&emit_decl_gap(
-                source,
-                type_expr.span(),
-                expr.span(),
-                &["="],
-                depth,
-            ));
-        }
     }
+    // `=` gap, rendered in-position so comments keep their order relative to the operator.
     if let Some(expr) = &decl.initializer {
-        out.push_str(" = ");
+        let op_start = decl
+            .type_name
+            .as_ref()
+            .map(ast::TypeExpr::span)
+            .unwrap_or(decl.name_span);
+        out.push_str(&emit_decl_gap(source, op_start, expr.span(), &["="], depth));
         out.push_str(&cel_parser::format_expr(expr, source, depth));
-        // Comment between the initializer and whatever terminates the declaration.
-        out.push_str(&emit_decl_gap(
-            source,
-            expr.span(),
-            point_span(decl.span.end),
-            &[],
-            depth,
-        ));
     }
-    if let Some(filter) = &decl.filter {
-        out.push_str(" filter ");
-        out.push_str(&cel_parser::format_expr(&filter.body, source, depth));
-    }
-    if let Some(require) = &decl.require {
-        write_require_clause(out, source, require, depth);
-    }
+    write_cell_clauses(
+        out,
+        source,
+        depth,
+        decl.initializer.as_ref().map(cel_parser::Expr::span),
+        decl.type_name.as_ref().map(ast::TypeExpr::span),
+        decl.name_span,
+        decl.filter.as_ref(),
+        decl.require.as_ref(),
+        decl.span.end,
+    );
     write_line_end(out, ";", decl.trailing_line_comment.as_ref(), depth);
 }
 
@@ -1285,5 +1347,45 @@ mod tests {
         assert!(once.contains("// c"), "comment must survive: {once:?}");
         let twice = format_source(&once).unwrap();
         assert_eq!(once, twice, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn preserves_comment_order_after_the_equals() {
+        let source = "sheet s {\n    cell a: i32 = /* after */ 1;\n}";
+        let once = format_source(source).unwrap();
+        let eq = once.find('=').expect("has =");
+        let c = once.find("/* after */").expect("comment survives");
+        assert!(c > eq, "comment must stay AFTER the =, got: {once:?}");
+    }
+
+    #[test]
+    fn preserves_comment_order_around_the_equals() {
+        let source = "sheet s {\n    cell a: i32 /* before */ = /* after */ 1;\n}";
+        let once = format_source(source).unwrap();
+        let before = once.find("/* before */").expect("before survives");
+        let eq = once.find('=').expect("has =");
+        let after = once.find("/* after */").expect("after survives");
+        assert!(before < eq && eq < after, "order lost: {once:?}");
+    }
+
+    #[test]
+    fn preserves_a_comment_before_the_filter_keyword() {
+        let source = "sheet s {\n    cell a: i32 = 1 /* keep */ filter 0..=10;\n}";
+        let once = format_source(source).unwrap();
+        assert!(once.contains("/* keep */"), "comment dropped: {once:?}");
+    }
+
+    #[test]
+    fn preserves_a_comment_after_the_filter_body() {
+        let source = "sheet s {\n    cell a: i32 = 1 filter 0..=10 /* keep */;\n}";
+        let once = format_source(source).unwrap();
+        assert!(once.contains("/* keep */"), "comment dropped: {once:?}");
+    }
+
+    #[test]
+    fn preserves_a_comment_before_the_require_keyword() {
+        let source = "sheet s {\n    out area: f64 := w /* keep */ require {\n        @c w <= 10.0;\n    };\n}";
+        let once = format_source(source).unwrap();
+        assert!(once.contains("/* keep */"), "comment dropped: {once:?}");
     }
 }
