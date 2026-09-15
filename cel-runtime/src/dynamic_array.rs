@@ -39,7 +39,7 @@
 
 use crate::dyn_segment::{RawDropper, raw_dropper_for};
 use std::alloc::{Layout, dealloc};
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::fmt;
 use std::mem::{ManuallyDrop, align_of, size_of};
@@ -445,10 +445,11 @@ impl DynamicArray {
     /// Takes ownership of a concrete vector without moving or reallocating its elements.
     ///
     /// # Errors
-    /// Returns [`ArrayBuildErrorKind::MissingNestedElementType`] for `Vec<DynamicArray>`; nested
-    /// descriptor inference is added by the later recursive-descriptor task.
+    /// Returns [`ArrayBuildErrorKind::MissingNestedElementType`] for an empty
+    /// `Vec<DynamicArray>`. Returns [`ArrayBuildErrorKind::HeterogeneousNestedElement`] when
+    /// `Vec<DynamicArray>` contains arrays with different element descriptors.
     ///
-    /// - Complexity: O(1).
+    /// - Complexity: O(n) for `Vec<DynamicArray>`; O(1) otherwise.
     ///
     /// # Examples
     ///
@@ -460,21 +461,23 @@ impl DynamicArray {
     /// assert_eq!(array.len(), 2);
     /// ```
     pub fn try_from_vec<T: 'static>(values: Vec<T>) -> Result<Self, ArrayBuildError<T>> {
-        let element = match ArrayElementType::leaf::<T>() {
+        let element = match Self::inferred_element_type(&values) {
             Ok(element) => element,
             Err(kind) => return Err(ArrayBuildError::new(kind, values)),
         };
-        Self::try_from_vec_with_element_type(values, element)
+        Ok(Self::from_validated_vec(values, element))
     }
 
     /// Takes ownership of a vector after checking an explicit element descriptor.
     ///
     /// # Errors
     /// Returns [`ArrayBuildErrorKind::DescriptorTypeMismatch`] when `element` describes a concrete
-    /// type other than `T`. Returns [`ArrayBuildErrorKind::MissingNestedElementType`] for
-    /// `Vec<DynamicArray>`; recursive validation is added by the later nested-descriptor task.
+    /// type other than `T`. Returns [`ArrayBuildErrorKind::MissingNestedElementType`] when a
+    /// `Vec<DynamicArray>` descriptor omits its nested element descriptor. Returns
+    /// [`ArrayBuildErrorKind::HeterogeneousNestedElement`] when `Vec<DynamicArray>` contains an
+    /// array whose descriptor differs from the supplied nested descriptor.
     ///
-    /// - Complexity: O(1).
+    /// - Complexity: O(n) for `Vec<DynamicArray>`; O(1) otherwise.
     ///
     /// # Examples
     ///
@@ -499,21 +502,97 @@ impl DynamicArray {
             ));
         }
         if TypeId::of::<T>() == TypeId::of::<DynamicArray>() {
-            return Err(ArrayBuildError::new(
-                ArrayBuildErrorKind::MissingNestedElementType,
-                values,
-            ));
+            let Some(expected) = element.nested() else {
+                return Err(ArrayBuildError::new(
+                    ArrayBuildErrorKind::MissingNestedElementType,
+                    values,
+                ));
+            };
+            if let Err(kind) = Self::validate_nested_elements(&values, expected) {
+                return Err(ArrayBuildError::new(kind, values));
+            }
         }
 
+        Ok(Self::from_validated_vec(values, element))
+    }
+
+    /// Returns the inferred element descriptor for `values`.
+    ///
+    /// # Errors
+    /// Returns [`ArrayBuildErrorKind::MissingNestedElementType`] when `values` is an empty
+    /// `Vec<DynamicArray>`. Returns [`ArrayBuildErrorKind::HeterogeneousNestedElement`] when a
+    /// nested element descriptor differs from the first descriptor.
+    ///
+    /// - Complexity: O(n) for `Vec<DynamicArray>`; O(1) otherwise.
+    fn inferred_element_type<T: 'static>(
+        values: &[T],
+    ) -> Result<ArrayElementType, ArrayBuildErrorKind> {
+        if TypeId::of::<T>() != TypeId::of::<DynamicArray>() {
+            return ArrayElementType::leaf::<T>();
+        }
+
+        let Some(first) = values.first() else {
+            return Err(ArrayBuildErrorKind::MissingNestedElementType);
+        };
+        let expected = Self::nested_element(first)
+            .expect("TypeId equality guarantees DynamicArray downcast")
+            .element_type()
+            .clone();
+        Self::validate_nested_elements(values, &expected)?;
+        Ok(ArrayElementType::array_of(expected))
+    }
+
+    /// Checks that every nested array element has `expected` as its descriptor.
+    ///
+    /// # Errors
+    /// Returns [`ArrayBuildErrorKind::HeterogeneousNestedElement`] at the first index whose
+    /// descriptor differs from `expected`.
+    ///
+    /// - Precondition: `T` is exactly [`DynamicArray`].
+    /// - Complexity: O(n).
+    fn validate_nested_elements<T: 'static>(
+        values: &[T],
+        expected: &ArrayElementType,
+    ) -> Result<(), ArrayBuildErrorKind> {
+        for (index, value) in values.iter().enumerate() {
+            let found = Self::nested_element(value)
+                .expect("TypeId equality guarantees DynamicArray downcast")
+                .element_type();
+            if found != expected {
+                return Err(ArrayBuildErrorKind::HeterogeneousNestedElement {
+                    index,
+                    expected: expected.display_name(),
+                    found: found.display_name(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns `value` as a nested dynamic-array element when `T` is exactly [`DynamicArray`].
+    ///
+    /// - Complexity: O(1).
+    fn nested_element<T: 'static>(value: &T) -> Option<&DynamicArray> {
+        if TypeId::of::<T>() != TypeId::of::<DynamicArray>() {
+            return None;
+        }
+        let value = value as &dyn Any;
+        value.downcast_ref::<DynamicArray>()
+    }
+
+    /// Takes ownership of a vector that has already been checked against `element`.
+    ///
+    /// - Precondition: `element` matches `T` and every nested descriptor in `values`.
+    ///
+    /// - Complexity: O(1).
+    fn from_validated_vec<T: 'static>(values: Vec<T>, element: ArrayElementType) -> Self {
         let mut values = ManuallyDrop::new(values);
         let ptr = NonNull::new(values.as_mut_ptr().cast::<u8>())
             .expect("Vec::as_mut_ptr returns a non-null pointer");
         let len = values.len();
         let capacity = values.capacity();
-        Ok(
-            unsafe { Self::try_from_raw_parts(ptr, len, capacity, element) }
-                .expect("Vec raw parts satisfy DynamicArray invariants"),
-        )
+        unsafe { Self::try_from_raw_parts(ptr, len, capacity, element) }
+            .expect("Vec raw parts satisfy DynamicArray invariants")
     }
 
     /// Takes ownership of raw vector-compatible parts after checking layout invariants.
@@ -730,6 +809,7 @@ impl Drop for DynamicArray {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::any::TypeId;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -790,9 +870,8 @@ mod tests {
 
     #[test]
     fn mutable_nested_slice_rejection_reports_dedicated_error_kind() {
-        let element = ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap());
-        let ptr = NonNull::<DynamicArray>::dangling().cast::<u8>();
-        let mut array = unsafe { DynamicArray::try_from_raw_parts(ptr, 0, 0, element).unwrap() };
+        let inner = DynamicArray::try_from_vec(vec![1i32]).unwrap();
+        let mut array = DynamicArray::try_from_vec(vec![inner]).unwrap();
 
         let error = array.try_as_mut_slice::<DynamicArray>().unwrap_err();
 
@@ -802,6 +881,54 @@ mod tests {
         ));
         assert_eq!(error.expected(), None);
         assert_eq!(error.found(), None);
+    }
+
+    #[test]
+    fn nested_vec_round_trip_preserves_outer_and_inner_allocations() {
+        let left = DynamicArray::try_from_vec(vec![0i32]).unwrap();
+        let right = DynamicArray::try_from_vec(vec![1i32]).unwrap();
+        let outer_values = vec![left, right];
+        let outer_ptr = outer_values.as_ptr();
+
+        let outer = DynamicArray::try_from_vec(outer_values).unwrap();
+        let inner = outer.element_type().nested().unwrap();
+        assert_eq!(inner.type_id(), TypeId::of::<i32>());
+
+        let values = outer.try_into_vec::<DynamicArray>().unwrap();
+        assert_eq!(values.as_ptr(), outer_ptr);
+        assert_eq!(values[0].try_as_slice::<i32>().unwrap(), &[0]);
+        assert_eq!(values[1].try_as_slice::<i32>().unwrap(), &[1]);
+    }
+
+    #[test]
+    fn heterogeneous_nested_vec_is_returned_on_error() {
+        let values = vec![
+            DynamicArray::try_from_vec(vec![0i32]).unwrap(),
+            DynamicArray::try_from_vec(vec![1f64]).unwrap(),
+        ];
+
+        let error = DynamicArray::try_from_vec(values).unwrap_err();
+
+        assert!(matches!(
+            error.kind(),
+            ArrayBuildErrorKind::HeterogeneousNestedElement {
+                index: 1,
+                expected,
+                found,
+            } if expected == "i32" && found == "f64"
+        ));
+        assert_eq!(error.into_vec().len(), 2);
+    }
+
+    #[test]
+    fn empty_nested_vec_uses_an_explicit_inner_type() {
+        let element = ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap());
+
+        let array =
+            DynamicArray::try_from_vec_with_element_type(Vec::<DynamicArray>::new(), element)
+                .unwrap();
+
+        assert!(array.try_into_vec::<DynamicArray>().unwrap().is_empty());
     }
 
     #[test]
