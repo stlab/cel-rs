@@ -22,7 +22,7 @@ values and are tracked by [#213](https://github.com/stlab/cel-rs/issues/213).
 
 ## Goals
 
-- Parse and format non-empty Rust-style array literals, including a trailing comma.
+- Parse and format non-empty Rust-style array literals without trailing commas.
 - Build the same array AST through `AstContext` and executable array values through
   `DynSegmentContext`.
 - Require every element to have the same complete runtime type shape.
@@ -77,7 +77,7 @@ primary_expression = literal
                    | if_expression
                    | closure_expression.
 
-array_expression = "[" expression { "," expression } [","] "]".
+array_expression = "[" expression { "," expression } "]".
 ```
 
 Examples:
@@ -86,13 +86,16 @@ Examples:
 [0]
 [0, 1, 2, 3]
 [f(), g(), h()]
-[0, 1,]
 [[0], [1]]
 ```
 
 `[]` is recognized as an array literal and rejected with a targeted diagnostic that explains that
 an element type cannot yet be inferred and references the future context-typing work represented
 by #212. This is preferable to treating `[]` as an unrelated syntax error.
+
+A comma always requires another expression. Trailing commas are intentionally unsupported so the
+production remains Wirth-style LL(1), consistent with the parser's existing tuple and parameter
+list grammar.
 
 Add:
 
@@ -104,9 +107,7 @@ Expr::Array {
 ```
 
 `AstContext` records the elements in source order. The CEL formatter emits bracket syntax and
-preserves its established trivia/comment behavior. Whether it preserves an optional trailing comma
-exactly follows the formatter's existing source-aware conventions rather than being encoded as
-semantic AST state.
+preserves its established trivia/comment behavior.
 
 ## Runtime Representation
 
@@ -367,7 +368,8 @@ Tests derive from the public grammar and API contracts.
 
 ### `cel-parser`
 
-- `[0]`, `[0, 1, 2, 3]`, and `[0, 1,]` parse and evaluate.
+- `[0]` and `[0, 1, 2, 3]` parse and evaluate.
+- `[0, 1,]` reports that an expression must follow the final comma.
 - `[f(), g(), h()]` succeeds for equal registered return types and fails at the first mismatch.
 - `[1, 2.0]` reports a heterogeneous-element diagnostic.
 - `[]` reports the dedicated unsupported-empty-array diagnostic.
@@ -375,7 +377,7 @@ Tests derive from the public grammar and API contracts.
 - `[[0], [1.0]]` and mismatched nesting depths fail with recursive type diagnostics.
 - Tuple-valued elements report the dedicated #213 diagnostic.
 - AST shape and spans are correct for scalar and nested arrays.
-- Formatting emits bracket syntax and remains stable around comments and trailing commas.
+- Formatting emits bracket syntax and remains stable around comments.
 - Array expressions work in every value-producing grammar position already routed through
   `expression`, including call arguments, tuple elements, condition branches, and closure bodies.
 
@@ -404,7 +406,7 @@ flat shaped array.
 ## Acceptance Criteria
 
 1. Shared CEL grammar, AST, formatter, and direct `DynSegment` compilation support non-empty array
-   literals with optional trailing commas.
+   literals while preserving Wirth-style LL(1) parsing; trailing commas are rejected.
 2. Every array literal is homogeneous by complete recursive runtime type shape.
 3. `DynamicArray` supports zero-copy ownership transfer to and from `Vec<T>` for concrete
    `'static` element types.
