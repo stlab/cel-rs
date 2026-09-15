@@ -318,15 +318,25 @@ impl<T> fmt::Display for ArrayBuildError<T> {
 
 impl<T: 'static> std::error::Error for ArrayBuildError<T> {}
 
-/// Reports a requested element type that differs from a [`DynamicArray`]'s descriptor.
+/// Reports a typed access that a [`DynamicArray`] descriptor rejects.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ArrayTypeError {
-    expected: Cow<'static, str>,
-    found: Cow<'static, str>,
+pub enum ArrayTypeError {
+    /// The requested element type differs from the stored descriptor.
+    TypeMismatch {
+        /// Requested type name.
+        expected: Cow<'static, str>,
+        /// Stored element type name.
+        found: Cow<'static, str>,
+    },
+    /// Mutable typed access requested an array whose elements are themselves arrays.
+    NestedMutableAccess {
+        /// Stored recursive array element name.
+        element: Cow<'static, str>,
+    },
 }
 
 impl ArrayTypeError {
-    /// Returns the requested type name.
+    /// Returns the requested type name for a type mismatch.
     ///
     /// # Examples
     ///
@@ -337,13 +347,16 @@ impl ArrayTypeError {
     ///     .unwrap()
     ///     .try_into_vec::<u32>()
     ///     .unwrap_err();
-    /// assert_eq!(error.expected(), "u32");
+    /// assert_eq!(error.expected(), Some("u32"));
     /// ```
-    pub fn expected(&self) -> &str {
-        &self.expected
+    pub fn expected(&self) -> Option<&str> {
+        match self {
+            Self::TypeMismatch { expected, .. } => Some(expected),
+            Self::NestedMutableAccess { .. } => None,
+        }
     }
 
-    /// Returns the stored element type name.
+    /// Returns the stored element type name for a type mismatch.
     ///
     /// # Examples
     ///
@@ -354,15 +367,38 @@ impl ArrayTypeError {
     ///     .unwrap()
     ///     .try_into_vec::<u32>()
     ///     .unwrap_err();
-    /// assert_eq!(error.found(), "i32");
+    /// assert_eq!(error.found(), Some("i32"));
     /// ```
-    pub fn found(&self) -> &str {
-        &self.found
+    pub fn found(&self) -> Option<&str> {
+        match self {
+            Self::TypeMismatch { found, .. } => Some(found),
+            Self::NestedMutableAccess { .. } => None,
+        }
+    }
+
+    /// Returns the stored recursive element name for a nested mutable-access rejection.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    ///
+    /// let error = DynamicArray::try_from_vec(vec![1i32])
+    ///     .unwrap()
+    ///     .try_into_vec::<u32>()
+    ///     .unwrap_err();
+    /// assert_eq!(error.nested_mutable_element(), None);
+    /// ```
+    pub fn nested_mutable_element(&self) -> Option<&str> {
+        match self {
+            Self::TypeMismatch { .. } => None,
+            Self::NestedMutableAccess { element } => Some(element),
+        }
     }
 
     /// Returns a mismatch between requested `T` and `found`.
     fn for_requested<T: 'static>(found: Cow<'static, str>) -> Self {
-        Self {
+        Self::TypeMismatch {
             expected: Cow::Borrowed(std::any::type_name::<T>()),
             found,
         }
@@ -371,11 +407,16 @@ impl ArrayTypeError {
 
 impl fmt::Display for ArrayTypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "array element type mismatch: expected {}, found {}",
-            self.expected, self.found
-        )
+        match self {
+            Self::TypeMismatch { expected, found } => write!(
+                f,
+                "array element type mismatch: expected {expected}, found {found}"
+            ),
+            Self::NestedMutableAccess { element } => write!(
+                f,
+                "nested array element {element} does not allow mutable slice access"
+            ),
+        }
     }
 }
 
@@ -589,9 +630,8 @@ impl DynamicArray {
             ));
         }
         if self.element.nested.is_some() {
-            return Err(ArrayTypeError {
-                expected: Cow::Borrowed("leaf element"),
-                found: self.element.display_name(),
+            return Err(ArrayTypeError::NestedMutableAccess {
+                element: self.element.display_name(),
             });
         }
         Ok(unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr().cast::<T>(), self.len) })
@@ -749,6 +789,22 @@ mod tests {
     }
 
     #[test]
+    fn mutable_nested_slice_rejection_reports_dedicated_error_kind() {
+        let element = ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap());
+        let ptr = NonNull::<DynamicArray>::dangling().cast::<u8>();
+        let mut array = unsafe { DynamicArray::try_from_raw_parts(ptr, 0, 0, element).unwrap() };
+
+        let error = array.try_as_mut_slice::<DynamicArray>().unwrap_err();
+
+        assert!(matches!(
+            error,
+            ArrayTypeError::NestedMutableAccess { ref element } if element == "[i32]"
+        ));
+        assert_eq!(error.expected(), None);
+        assert_eq!(error.found(), None);
+    }
+
+    #[test]
     fn aligned_element_slice_preserves_vec_alignment() {
         let array = DynamicArray::try_from_vec(vec![Aligned(7)]).unwrap();
         let values = array.try_as_slice::<Aligned>().unwrap();
@@ -788,8 +844,12 @@ mod tests {
         let array = DynamicArray::try_from_vec(vec![CountedDrop(drops.clone())]).unwrap();
         let error = array.try_into_vec::<u32>().unwrap_err();
 
-        assert_eq!(error.expected(), "u32");
-        assert!(error.found().ends_with("CountedDrop"));
+        assert_eq!(error.expected(), Some("u32"));
+        assert!(
+            error
+                .found()
+                .is_some_and(|found| found.ends_with("CountedDrop"))
+        );
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
