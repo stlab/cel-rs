@@ -1,0 +1,836 @@
+//! Owned, homogeneous arrays that erase a `Vec<T>` allocation behind runtime type metadata.
+//!
+//! A `DynamicArray` preserves the allocation owned by a concrete `Vec<T>` while storing the
+//! element type as metadata. Callers can recover the original vector only after requesting the
+//! same concrete element type:
+//!
+//! ```rust
+//! use cel_runtime::DynamicArray;
+//!
+//! let mut values = Vec::with_capacity(4);
+//! values.extend([1i32, 2]);
+//! let capacity = values.capacity();
+//!
+//! let array = DynamicArray::try_from_vec(values).unwrap();
+//! assert_eq!(array.len(), 2);
+//!
+//! let values = array.try_into_vec::<i32>().unwrap();
+//! assert_eq!(values, vec![1, 2]);
+//! assert_eq!(values.capacity(), capacity);
+//! ```
+//!
+//! Borrowed access performs the same runtime type check:
+//!
+//! ```rust
+//! use cel_runtime::DynamicArray;
+//!
+//! let array = DynamicArray::try_from_vec(vec!["a", "b"]).unwrap();
+//! assert_eq!(array.try_as_slice::<&'static str>().unwrap(), &["a", "b"]);
+//! ```
+//!
+//! Mismatched element requests return a type error and never cast the allocation:
+//!
+//! ```rust
+//! use cel_runtime::DynamicArray;
+//!
+//! let array = DynamicArray::try_from_vec(vec![1i32]).unwrap();
+//! assert!(array.try_into_vec::<u32>().is_err());
+//! ```
+
+use crate::dyn_segment::{RawDropper, raw_dropper_for};
+use std::alloc::{Layout, dealloc};
+use std::any::TypeId;
+use std::borrow::Cow;
+use std::fmt;
+use std::mem::{ManuallyDrop, align_of, size_of};
+use std::ptr::NonNull;
+use std::slice;
+
+/// Describes the concrete element type and recursive array metadata for a [`DynamicArray`].
+#[derive(Clone)]
+pub struct ArrayElementType {
+    type_id: TypeId,
+    type_name: Cow<'static, str>,
+    size: usize,
+    align: usize,
+    drop: RawDropper,
+    nested: Option<Box<ArrayElementType>>,
+}
+
+impl ArrayElementType {
+    /// Returns the descriptor for a non-array leaf element type.
+    ///
+    /// # Errors
+    /// Returns [`ArrayBuildErrorKind::MissingNestedElementType`] for `DynamicArray`, because an
+    /// array element descriptor must include its nested element descriptor.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::ArrayElementType;
+    /// use std::any::TypeId;
+    ///
+    /// let element = ArrayElementType::leaf::<i32>().unwrap();
+    /// assert_eq!(element.type_id(), TypeId::of::<i32>());
+    /// ```
+    pub fn leaf<T: 'static>() -> Result<Self, ArrayBuildErrorKind> {
+        if TypeId::of::<T>() == TypeId::of::<DynamicArray>() {
+            return Err(ArrayBuildErrorKind::MissingNestedElementType);
+        }
+        Ok(Self {
+            type_id: TypeId::of::<T>(),
+            type_name: Cow::Borrowed(std::any::type_name::<T>()),
+            size: size_of::<T>(),
+            align: align_of::<T>(),
+            drop: raw_dropper_for::<T>(),
+            nested: None,
+        })
+    }
+
+    /// Returns the descriptor for a nested `DynamicArray` element.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{ArrayElementType, DynamicArray};
+    /// use std::any::TypeId;
+    ///
+    /// let element = ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap());
+    /// assert_eq!(element.type_id(), TypeId::of::<DynamicArray>());
+    /// assert_eq!(element.nested().unwrap().type_id(), TypeId::of::<i32>());
+    /// ```
+    pub fn array_of(element: ArrayElementType) -> Self {
+        Self {
+            type_id: TypeId::of::<DynamicArray>(),
+            type_name: Cow::Borrowed(std::any::type_name::<DynamicArray>()),
+            size: size_of::<DynamicArray>(),
+            align: align_of::<DynamicArray>(),
+            drop: raw_dropper_for::<DynamicArray>(),
+            nested: Some(Box::new(element)),
+        }
+    }
+
+    /// Returns the concrete Rust [`TypeId`] stored by this descriptor.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::ArrayElementType;
+    /// use std::any::TypeId;
+    ///
+    /// let element = ArrayElementType::leaf::<i32>().unwrap();
+    /// assert_eq!(element.type_id(), TypeId::of::<i32>());
+    /// ```
+    pub fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    /// Returns the human-readable concrete type name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::ArrayElementType;
+    ///
+    /// let element = ArrayElementType::leaf::<i32>().unwrap();
+    /// assert_eq!(element.type_name(), "i32");
+    /// ```
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    /// Returns the element size in bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::ArrayElementType;
+    ///
+    /// let element = ArrayElementType::leaf::<i32>().unwrap();
+    /// assert_eq!(element.size(), std::mem::size_of::<i32>());
+    /// ```
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Returns the element alignment in bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::ArrayElementType;
+    ///
+    /// let element = ArrayElementType::leaf::<i32>().unwrap();
+    /// assert_eq!(element.align(), std::mem::align_of::<i32>());
+    /// ```
+    pub fn align(&self) -> usize {
+        self.align
+    }
+
+    /// Returns the nested element descriptor for array elements.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::ArrayElementType;
+    ///
+    /// let element = ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap());
+    /// assert_eq!(element.nested().unwrap().type_name(), "i32");
+    /// ```
+    pub fn nested(&self) -> Option<&ArrayElementType> {
+        self.nested.as_deref()
+    }
+
+    /// Returns the recursive name used in type mismatch diagnostics.
+    ///
+    /// - Complexity: O(depth).
+    fn display_name(&self) -> Cow<'static, str> {
+        match &self.nested {
+            Some(nested) => Cow::Owned(format!("[{}]", nested.display_name())),
+            None => self.type_name.clone(),
+        }
+    }
+}
+
+impl PartialEq for ArrayElementType {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_id == other.type_id && self.nested == other.nested
+    }
+}
+
+impl Eq for ArrayElementType {}
+
+impl fmt::Debug for ArrayElementType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ArrayElementType")
+            .field("type_name", &self.type_name)
+            .field("size", &self.size)
+            .field("align", &self.align)
+            .field("nested", &self.nested)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Describes why a concrete vector could not become a [`DynamicArray`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArrayBuildErrorKind {
+    /// A `Vec<DynamicArray>` construction did not provide a nested element descriptor.
+    MissingNestedElementType,
+    /// A nested array element's descriptor differs from the expected descriptor.
+    HeterogeneousNestedElement {
+        /// Index of the element with a mismatched descriptor.
+        index: usize,
+        /// Expected recursive element name.
+        expected: Cow<'static, str>,
+        /// Found recursive element name.
+        found: Cow<'static, str>,
+    },
+    /// The supplied descriptor's concrete type differs from the vector element type.
+    DescriptorTypeMismatch {
+        /// Expected descriptor type name.
+        expected: Cow<'static, str>,
+        /// Found vector element type name.
+        found: Cow<'static, str>,
+    },
+}
+
+impl fmt::Display for ArrayBuildErrorKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingNestedElementType => {
+                f.write_str("missing nested element type for DynamicArray elements")
+            }
+            Self::HeterogeneousNestedElement {
+                index,
+                expected,
+                found,
+            } => write!(
+                f,
+                "nested array element {index} has type {found}, expected {expected}"
+            ),
+            Self::DescriptorTypeMismatch { expected, found } => {
+                write!(
+                    f,
+                    "descriptor type {expected} does not match vector element type {found}"
+                )
+            }
+        }
+    }
+}
+
+/// Preserves a vector that could not become a [`DynamicArray`].
+pub struct ArrayBuildError<T> {
+    kind: ArrayBuildErrorKind,
+    values: Vec<T>,
+}
+
+impl<T> ArrayBuildError<T> {
+    /// Returns the construction failure reason.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{ArrayBuildErrorKind, DynamicArray};
+    ///
+    /// let error = DynamicArray::try_from_vec(Vec::<DynamicArray>::new()).unwrap_err();
+    /// assert_eq!(error.kind(), &ArrayBuildErrorKind::MissingNestedElementType);
+    /// ```
+    pub fn kind(&self) -> &ArrayBuildErrorKind {
+        &self.kind
+    }
+
+    /// Returns ownership of the original vector.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    ///
+    /// let values = Vec::<DynamicArray>::new();
+    /// let error = DynamicArray::try_from_vec(values).unwrap_err();
+    /// assert!(error.into_vec().is_empty());
+    /// ```
+    pub fn into_vec(self) -> Vec<T> {
+        self.values
+    }
+
+    /// Returns a construction error that preserves `values`.
+    fn new(kind: ArrayBuildErrorKind, values: Vec<T>) -> Self {
+        Self { kind, values }
+    }
+}
+
+impl<T> fmt::Debug for ArrayBuildError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ArrayBuildError")
+            .field("kind", &self.kind)
+            .field("len", &self.values.len())
+            .field("capacity", &self.values.capacity())
+            .finish()
+    }
+}
+
+impl<T> fmt::Display for ArrayBuildError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "failed to build DynamicArray: {}", self.kind)
+    }
+}
+
+impl<T: 'static> std::error::Error for ArrayBuildError<T> {}
+
+/// Reports a requested element type that differs from a [`DynamicArray`]'s descriptor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArrayTypeError {
+    expected: Cow<'static, str>,
+    found: Cow<'static, str>,
+}
+
+impl ArrayTypeError {
+    /// Returns the requested type name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    ///
+    /// let error = DynamicArray::try_from_vec(vec![1i32])
+    ///     .unwrap()
+    ///     .try_into_vec::<u32>()
+    ///     .unwrap_err();
+    /// assert_eq!(error.expected(), "u32");
+    /// ```
+    pub fn expected(&self) -> &str {
+        &self.expected
+    }
+
+    /// Returns the stored element type name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    ///
+    /// let error = DynamicArray::try_from_vec(vec![1i32])
+    ///     .unwrap()
+    ///     .try_into_vec::<u32>()
+    ///     .unwrap_err();
+    /// assert_eq!(error.found(), "i32");
+    /// ```
+    pub fn found(&self) -> &str {
+        &self.found
+    }
+
+    /// Returns a mismatch between requested `T` and `found`.
+    fn for_requested<T: 'static>(found: Cow<'static, str>) -> Self {
+        Self {
+            expected: Cow::Borrowed(std::any::type_name::<T>()),
+            found,
+        }
+    }
+}
+
+impl fmt::Display for ArrayTypeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "array element type mismatch: expected {}, found {}",
+            self.expected, self.found
+        )
+    }
+}
+
+impl std::error::Error for ArrayTypeError {}
+
+/// Returns the allocation layout for non-empty storage of non-zero-sized elements.
+///
+/// - Complexity: O(1).
+fn allocated_layout(element: &ArrayElementType, capacity: usize) -> Option<Layout> {
+    if element.size == 0 || capacity == 0 {
+        return None;
+    }
+    let bytes = element.size.checked_mul(capacity)?;
+    Layout::from_size_align(bytes, element.align).ok()
+}
+
+/// Owns a homogeneous, type-erased, `Vec`-compatible allocation.
+pub struct DynamicArray {
+    ptr: NonNull<u8>,
+    len: usize,
+    capacity: usize,
+    element: ArrayElementType,
+}
+
+impl DynamicArray {
+    /// Takes ownership of a concrete vector without moving or reallocating its elements.
+    ///
+    /// # Errors
+    /// Returns [`ArrayBuildErrorKind::MissingNestedElementType`] for `Vec<DynamicArray>`; nested
+    /// descriptor inference is added by the later recursive-descriptor task.
+    ///
+    /// - Complexity: O(1).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    ///
+    /// let values = vec![1i32, 2];
+    /// let array = DynamicArray::try_from_vec(values).unwrap();
+    /// assert_eq!(array.len(), 2);
+    /// ```
+    pub fn try_from_vec<T: 'static>(values: Vec<T>) -> Result<Self, ArrayBuildError<T>> {
+        let element = match ArrayElementType::leaf::<T>() {
+            Ok(element) => element,
+            Err(kind) => return Err(ArrayBuildError::new(kind, values)),
+        };
+        Self::try_from_vec_with_element_type(values, element)
+    }
+
+    /// Takes ownership of a vector after checking an explicit element descriptor.
+    ///
+    /// # Errors
+    /// Returns [`ArrayBuildErrorKind::DescriptorTypeMismatch`] when `element` describes a concrete
+    /// type other than `T`. Returns [`ArrayBuildErrorKind::MissingNestedElementType`] for
+    /// `Vec<DynamicArray>`; recursive validation is added by the later nested-descriptor task.
+    ///
+    /// - Complexity: O(1).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{ArrayElementType, DynamicArray};
+    ///
+    /// let element = ArrayElementType::leaf::<i32>().unwrap();
+    /// let array = DynamicArray::try_from_vec_with_element_type(vec![1i32], element).unwrap();
+    /// assert_eq!(array.try_as_slice::<i32>().unwrap(), &[1]);
+    /// ```
+    pub fn try_from_vec_with_element_type<T: 'static>(
+        values: Vec<T>,
+        element: ArrayElementType,
+    ) -> Result<Self, ArrayBuildError<T>> {
+        if TypeId::of::<T>() != element.type_id {
+            return Err(ArrayBuildError::new(
+                ArrayBuildErrorKind::DescriptorTypeMismatch {
+                    expected: element.display_name(),
+                    found: Cow::Borrowed(std::any::type_name::<T>()),
+                },
+                values,
+            ));
+        }
+        if TypeId::of::<T>() == TypeId::of::<DynamicArray>() {
+            return Err(ArrayBuildError::new(
+                ArrayBuildErrorKind::MissingNestedElementType,
+                values,
+            ));
+        }
+
+        let mut values = ManuallyDrop::new(values);
+        let ptr = NonNull::new(values.as_mut_ptr().cast::<u8>())
+            .expect("Vec::as_mut_ptr returns a non-null pointer");
+        let len = values.len();
+        let capacity = values.capacity();
+        Ok(
+            unsafe { Self::try_from_raw_parts(ptr, len, capacity, element) }
+                .expect("Vec raw parts satisfy DynamicArray invariants"),
+        )
+    }
+
+    /// Takes ownership of raw vector-compatible parts after checking layout invariants.
+    ///
+    /// Returns `None` when `len > capacity`, `ptr` is not aligned for `element`, or the allocation
+    /// layout for `capacity` elements overflows.
+    ///
+    /// - Complexity: O(1).
+    ///
+    /// # Safety
+    /// `ptr` must be the allocation pointer for `capacity` elements with `element`'s size and
+    /// alignment, and the first `len` elements must be live values that can be dropped by
+    /// `element`'s dropper with an empty associated-type slice. Ownership of those elements and
+    /// the allocation transfers to the returned `DynamicArray`.
+    pub(crate) unsafe fn try_from_raw_parts(
+        ptr: NonNull<u8>,
+        len: usize,
+        capacity: usize,
+        element: ArrayElementType,
+    ) -> Option<Self> {
+        if element.align == 0
+            || !element.align.is_power_of_two()
+            || len > capacity
+            || !(ptr.as_ptr() as usize).is_multiple_of(element.align)
+        {
+            return None;
+        }
+        if element.size != 0 && capacity != 0 && allocated_layout(&element, capacity).is_none() {
+            return None;
+        }
+        Some(Self {
+            ptr,
+            len,
+            capacity,
+            element,
+        })
+    }
+
+    /// Converts this array back into a concrete vector after checking the element type.
+    ///
+    /// # Errors
+    /// Returns [`ArrayTypeError`] when `T` differs from the stored concrete element type. The array
+    /// is dropped on error without casting the allocation.
+    ///
+    /// - Complexity: O(1).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    ///
+    /// let array = DynamicArray::try_from_vec(vec![1i32]).unwrap();
+    /// assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![1]);
+    /// ```
+    pub fn try_into_vec<T: 'static>(self) -> Result<Vec<T>, ArrayTypeError> {
+        if TypeId::of::<T>() != self.element.type_id {
+            return Err(ArrayTypeError::for_requested::<T>(
+                self.element.display_name(),
+            ));
+        }
+
+        let this = ManuallyDrop::new(self);
+        let len = this.len;
+        let capacity = this.capacity;
+        let ptr = this.ptr.as_ptr().cast::<T>();
+        Ok(unsafe { Vec::from_raw_parts(ptr, len, capacity) })
+    }
+
+    /// Returns a typed shared slice after checking the concrete element type.
+    ///
+    /// # Errors
+    /// Returns [`ArrayTypeError`] when `T` differs from the stored concrete element type.
+    ///
+    /// - Complexity: O(1).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    ///
+    /// let array = DynamicArray::try_from_vec(vec![1i32, 2]).unwrap();
+    /// assert_eq!(array.try_as_slice::<i32>().unwrap(), &[1, 2]);
+    /// ```
+    pub fn try_as_slice<T: 'static>(&self) -> Result<&[T], ArrayTypeError> {
+        if TypeId::of::<T>() != self.element.type_id {
+            return Err(ArrayTypeError::for_requested::<T>(
+                self.element.display_name(),
+            ));
+        }
+        Ok(unsafe { slice::from_raw_parts(self.ptr.as_ptr().cast::<T>(), self.len) })
+    }
+
+    /// Returns a typed mutable slice for leaf element arrays.
+    ///
+    /// # Errors
+    /// Returns [`ArrayTypeError`] when `T` differs from the stored concrete element type or when
+    /// the stored element type is a nested array whose recursive descriptor must be protected.
+    ///
+    /// - Complexity: O(1).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    ///
+    /// let mut array = DynamicArray::try_from_vec(vec![1i32, 2]).unwrap();
+    /// array.try_as_mut_slice::<i32>().unwrap()[0] = 3;
+    /// assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![3, 2]);
+    /// ```
+    pub fn try_as_mut_slice<T: 'static>(&mut self) -> Result<&mut [T], ArrayTypeError> {
+        if TypeId::of::<T>() != self.element.type_id {
+            return Err(ArrayTypeError::for_requested::<T>(
+                self.element.display_name(),
+            ));
+        }
+        if self.element.nested.is_some() {
+            return Err(ArrayTypeError {
+                expected: Cow::Borrowed("leaf element"),
+                found: self.element.display_name(),
+            });
+        }
+        Ok(unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr().cast::<T>(), self.len) })
+    }
+
+    /// Returns the number of live elements.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    ///
+    /// let array = DynamicArray::try_from_vec(vec![1i32, 2]).unwrap();
+    /// assert_eq!(array.len(), 2);
+    /// ```
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns the stored vector capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    ///
+    /// let values = Vec::<i32>::with_capacity(8);
+    /// let array = DynamicArray::try_from_vec(values).unwrap();
+    /// assert_eq!(array.capacity(), 8);
+    /// ```
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns whether the array contains no elements.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    ///
+    /// let array = DynamicArray::try_from_vec(Vec::<i32>::new()).unwrap();
+    /// assert!(array.is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns the stored element descriptor.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::DynamicArray;
+    /// use std::any::TypeId;
+    ///
+    /// let array = DynamicArray::try_from_vec(vec![1i32]).unwrap();
+    /// assert_eq!(array.element_type().type_id(), TypeId::of::<i32>());
+    /// ```
+    pub fn element_type(&self) -> &ArrayElementType {
+        &self.element
+    }
+}
+
+impl fmt::Debug for DynamicArray {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DynamicArray")
+            .field("len", &self.len)
+            .field("capacity", &self.capacity)
+            .field("element", &self.element)
+            .finish()
+    }
+}
+
+impl Drop for DynamicArray {
+    fn drop(&mut self) {
+        let base = self.ptr.as_ptr();
+        for index in (0..self.len).rev() {
+            let ptr = if self.element.size == 0 {
+                base
+            } else {
+                let offset = index
+                    .checked_mul(self.element.size)
+                    .expect("DynamicArray element offset fits in usize");
+                unsafe { base.add(offset) }
+            };
+            unsafe { (self.element.drop)(ptr, &[]) };
+        }
+
+        if let Some(layout) = allocated_layout(&self.element, self.capacity) {
+            unsafe { dealloc(base, layout) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct NoTraits(u32);
+
+    struct CountedDrop(Arc<AtomicUsize>);
+
+    impl Drop for CountedDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    static ZST_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+    struct DroppingZst;
+
+    impl Drop for DroppingZst {
+        fn drop(&mut self) {
+            ZST_DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[repr(align(64))]
+    struct Aligned(u8);
+
+    #[test]
+    fn vec_round_trip_preserves_allocation_and_capacity() {
+        let mut values = Vec::with_capacity(8);
+        values.extend([NoTraits(1), NoTraits(2)]);
+        let ptr = values.as_ptr();
+        let capacity = values.capacity();
+
+        let array = DynamicArray::try_from_vec(values).unwrap();
+        assert_eq!(array.len(), 2);
+        assert_eq!(array.capacity(), capacity);
+
+        let values = array.try_into_vec::<NoTraits>().unwrap();
+        assert_eq!(values.as_ptr(), ptr);
+        assert_eq!(values.capacity(), capacity);
+        assert_eq!(values[0].0, 1);
+        assert_eq!(values[1].0, 2);
+    }
+
+    #[test]
+    fn typed_slice_access_checks_the_element_type() {
+        let array = DynamicArray::try_from_vec(vec![1i32, 2]).unwrap();
+        assert_eq!(array.try_as_slice::<i32>().unwrap(), &[1, 2]);
+        assert!(array.try_as_slice::<u32>().is_err());
+    }
+
+    #[test]
+    fn mutable_leaf_slice_updates_the_owned_values() {
+        let mut array = DynamicArray::try_from_vec(vec![1i32, 2]).unwrap();
+        array.try_as_mut_slice::<i32>().unwrap()[1] = 9;
+        assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![1, 9]);
+    }
+
+    #[test]
+    fn aligned_element_slice_preserves_vec_alignment() {
+        let array = DynamicArray::try_from_vec(vec![Aligned(7)]).unwrap();
+        let values = array.try_as_slice::<Aligned>().unwrap();
+        assert_eq!(values.as_ptr() as usize % 64, 0);
+        assert_eq!(values[0].0, 7);
+    }
+
+    #[test]
+    fn drop_destroys_each_element_once() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        {
+            let _array = DynamicArray::try_from_vec(vec![
+                CountedDrop(drops.clone()),
+                CountedDrop(drops.clone()),
+            ])
+            .unwrap();
+            assert_eq!(drops.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn zst_drop_runs_for_each_live_element() {
+        ZST_DROPS.store(0, Ordering::SeqCst);
+        {
+            let array =
+                DynamicArray::try_from_vec(vec![DroppingZst, DroppingZst, DroppingZst]).unwrap();
+            assert_eq!(array.len(), 3);
+            assert_eq!(array.capacity(), usize::MAX);
+        }
+        assert_eq!(ZST_DROPS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn mismatched_vec_extraction_drops_without_casting() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let array = DynamicArray::try_from_vec(vec![CountedDrop(drops.clone())]).unwrap();
+        let error = array.try_into_vec::<u32>().unwrap_err();
+
+        assert_eq!(error.expected(), "u32");
+        assert!(error.found().ends_with("CountedDrop"));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn empty_vec_round_trip_preserves_length_and_capacity() {
+        let values = Vec::<i32>::new();
+        let ptr = values.as_ptr();
+        let array = DynamicArray::try_from_vec(values).unwrap();
+
+        assert!(array.is_empty());
+        assert_eq!(array.capacity(), 0);
+
+        let values = array.try_into_vec::<i32>().unwrap();
+        assert_eq!(values.as_ptr(), ptr);
+        assert!(values.is_empty());
+        assert_eq!(values.capacity(), 0);
+    }
+
+    #[test]
+    fn leaf_dynamic_array_descriptor_requires_nested_element_type() {
+        assert_eq!(
+            ArrayElementType::leaf::<DynamicArray>(),
+            Err(ArrayBuildErrorKind::MissingNestedElementType)
+        );
+    }
+
+    #[test]
+    fn explicit_descriptor_must_match_the_vector_element_type() {
+        let error = DynamicArray::try_from_vec_with_element_type(
+            vec![1i32],
+            ArrayElementType::leaf::<u32>().unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error.kind(),
+            ArrayBuildErrorKind::DescriptorTypeMismatch {
+                expected,
+                found,
+            } if expected == "u32" && found == "i32"
+        ));
+        assert_eq!(error.into_vec(), vec![1]);
+    }
+}
