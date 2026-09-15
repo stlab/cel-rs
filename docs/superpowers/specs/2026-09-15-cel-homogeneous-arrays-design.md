@@ -136,7 +136,7 @@ pub struct ArrayElementType {
     type_name: Cow<'static, str>,
     size: usize,
     align: usize,
-    drop: unsafe fn(*mut u8),
+    drop: RawDropper,
     nested_array_element: Option<Box<ArrayElementType>>,
 }
 ```
@@ -151,6 +151,11 @@ Constructing that case therefore requires an explicit inner descriptor. `ArrayEl
 opaque, cloneable public value with safe constructors for a leaf `T` and for `array_of(inner)`;
 callers cannot provide raw size, alignment, or drop glue. Raw descriptor construction remains
 crate-private or unsafe.
+
+The drop field reuses `dyn_segment::RawDropper`, whose second argument describes nested tuple
+children. Initial array elements are either leaves or concrete `DynamicArray` values, so that
+argument is empty; reusing the existing signature lets `DynSegment` transfer its registered
+dropper without trying to synthesize a new monomorphized function from a runtime `TypeId`.
 
 The initial descriptor deliberately carries no mandatory clone, equality, or element-debug
 function. This keeps construction available for every `'static` Rust type. Capabilities required
