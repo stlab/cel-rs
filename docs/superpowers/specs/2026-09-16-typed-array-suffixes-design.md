@@ -18,8 +18,10 @@ Extend the existing homogeneous CEL array literals with an optional expression t
 Non-empty arrays without an annotation retain their current inference behavior. An empty array
 requires an annotation because it has no element expression from which to infer a runtime descriptor.
 The annotation names the complete array type, not merely its element type. Its type expression is
-recursive, so `[i32]` is an array of `i32`, `[[i32]]` is an array of arrays, and `[(i32, f64)]`
-is an array of tuples. Whitespace around `:` is accepted.
+recursive, so `[i32]` is an array of `i32` and `[[i32]]` is an array of arrays. Tuple type
+expressions remain part of the reusable type grammar, but tuple-valued array elements remain
+rejected by the existing runtime limitation tracked in issue #213. Whitespace around `:` is
+accepted.
 
 ## Boundaries and data flow
 
@@ -118,8 +120,9 @@ Add contract tests covering:
 - annotation mismatch, unknown type leaves, missing empty-array annotations, and malformed trailing
   tokens;
 - custom `TypeRegistry` types in non-empty and empty arrays;
-- nested array and tuple annotations (`[]: [[i32]]`, `[]: [(i32, f64)]`) and recursive descriptor
-  mismatch;
+- nested array annotations (`[]: [[i32]]`) and recursive descriptor mismatch;
+- reusable tuple type-expression parsing plus a clear rejection for tuple-valued array elements
+  until issue #213 is implemented;
 - AST shape, type diagnostics, and formatter round trips;
 - zero-copy conversion and empty-array capacity/layout invariants through the existing runtime
   tests.
