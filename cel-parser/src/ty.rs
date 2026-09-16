@@ -533,14 +533,36 @@ fn check_array(
         return (Ty::Array(Box::new(unified)), diagnostics);
     };
 
-    let (declared_ty, mut annotation_diags) =
+    let (resolved_annotation, declared_ty, mut annotation_diags) =
         check_array_annotation(type_annotation, annotation_span, resolve_type);
     diagnostics.append(&mut annotation_diags);
-    let Ty::Array(declared_element_ty) = &declared_ty else {
+    let (
+        Some(ResolvedType::Array {
+            element: declared_element_resolved,
+        }),
+        Ty::Array(declared_element_ty),
+    ) = (&resolved_annotation, &declared_ty)
+    else {
         return (Ty::Array(Box::new(Ty::Any)), diagnostics);
     };
 
     for (element, actual_ty) in elements.iter().zip(&element_tys) {
+        if let Some((expected, actual)) = exact_array_annotation_mismatch(
+            element,
+            declared_element_resolved,
+            resolve_ident,
+            resolve_type,
+        ) {
+            diagnostics.push(ParseError::new_range(
+                format!(
+                    "array elements must match the annotation exactly: expected `{}`, found `{}`",
+                    expected, actual
+                ),
+                element.span().start,
+                element.span().end,
+            ));
+            break;
+        }
         if !declared_element_ty.unifies_with(actual_ty) {
             diagnostics.push(ParseError::new_range(
                 format!(
@@ -557,21 +579,80 @@ fn check_array(
     (declared_ty, diagnostics)
 }
 
+/// Resolves one array annotation to both its recursive descriptor tree and its best-effort `Ty`.
+///
+/// # Errors
+///
+/// Returns one diagnostic when the annotation names an unknown type, does not name a complete
+/// array type, or names tuple-valued array elements.
 fn check_array_annotation(
     type_annotation: &TypeExpr,
     annotation_span: Option<ExprSpan>,
     resolve_type: &dyn TypeResolver,
-) -> (Ty, Vec<ParseError>) {
+) -> (Option<ResolvedType>, Ty, Vec<ParseError>) {
     let resolved = match type_annotation.resolve(resolve_type) {
         Ok(resolved) => resolved,
-        Err(err) => return (Ty::Array(Box::new(Ty::Any)), vec![err]),
+        Err(err) => return (None, Ty::Array(Box::new(Ty::Any)), vec![err]),
     };
     match resolved_type_to_array_ty(
         &resolved,
         annotation_span.unwrap_or_else(|| type_annotation.span()),
     ) {
-        Ok(array_ty) => (array_ty, Vec::new()),
-        Err(err) => (Ty::Array(Box::new(Ty::Any)), vec![err]),
+        Ok(array_ty) => (Some(resolved), array_ty, Vec::new()),
+        Err(err) => (Some(resolved), Ty::Array(Box::new(Ty::Any)), vec![err]),
+    }
+}
+
+/// Returns the first exact mismatch between `expr` and an array annotation element type erased by
+/// [`Ty::Any`].
+///
+/// Built-in leaves continue to use ordinary [`Ty`] unification; this helper is only the narrow
+/// fallback for custom leaves whose `TypeId` the minimal `Ty` model cannot preserve.
+///
+/// - Complexity: O(n) in the number of nodes visited before the first mismatch (or the full
+///   nested array on success).
+fn exact_array_annotation_mismatch(
+    expr: &Expr,
+    expected: &ResolvedType,
+    resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
+) -> Option<(String, String)> {
+    if !resolved_type_contains_erased_custom_leaf(expected) {
+        return None;
+    }
+    match expected {
+        ResolvedType::Scalar(leaf) => {
+            let actual = check_expr_with_type_resolver(expr, resolve_ident, resolve_type).0;
+            let actual_type_id = actual.type_id()?;
+            (actual_type_id != leaf.type_id())
+                .then(|| (leaf.type_name().to_string(), actual.name().into_owned()))
+        }
+        ResolvedType::Array { element } => match expr {
+            Expr::Array { elements, .. } => elements.iter().find_map(|element_expr| {
+                exact_array_annotation_mismatch(element_expr, element, resolve_ident, resolve_type)
+            }),
+            _ => {
+                let actual = check_expr_with_type_resolver(expr, resolve_ident, resolve_type).0;
+                match actual {
+                    Ty::Array(_) | Ty::Any => None,
+                    _ => Some((expected.display_name(), actual.name().into_owned())),
+                }
+            }
+        },
+        ResolvedType::Tuple { .. } => None,
+    }
+}
+
+/// Returns whether `resolved` contains any scalar leaf that collapses to [`Ty::Any`].
+///
+/// - Complexity: O(n) in the number of nodes in `resolved`.
+fn resolved_type_contains_erased_custom_leaf(resolved: &ResolvedType) -> bool {
+    match resolved {
+        ResolvedType::Scalar(leaf) => Ty::from_type_id(leaf.type_id()) == Ty::Any,
+        ResolvedType::Array { element } => resolved_type_contains_erased_custom_leaf(element),
+        ResolvedType::Tuple { elements } => elements
+            .iter()
+            .any(resolved_type_contains_erased_custom_leaf),
     }
 }
 
@@ -1480,6 +1561,37 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert!(
             diags[0].message().contains("expected `f64`, found `i32`"),
+            "got: {}",
+            diags[0].message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_reports_exact_custom_element_type_mismatches() {
+        #[derive(Clone)]
+        struct Custom;
+
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[0]: [Custom]")
+            .expect("source parses");
+        let (ty, diags) = check_expr_with_type_resolver(
+            &expr,
+            &any_resolver,
+            &[(
+                "Custom",
+                crate::ResolvedLeafType::new(
+                    "Custom",
+                    cel_runtime::ArrayElementType::leaf::<Custom>().unwrap(),
+                ),
+            )],
+        );
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0]
+                .message()
+                .contains("expected `Custom`, found `i32`"),
             "got: {}",
             diags[0].message()
         );

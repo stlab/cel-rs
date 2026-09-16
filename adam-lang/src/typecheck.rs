@@ -846,6 +846,23 @@ mod tests {
     }
 
     #[test]
+    fn custom_array_annotations_reject_exact_scalar_type_mismatches() {
+        let sheet = parse("sheet s { out values := [1]: [Custom]; }");
+        let mut registry = TypeRegistry::new();
+        registry.register_no_default::<Custom>("Custom");
+
+        let diagnostics = check_sheet(&sheet, &registry);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(
+            diagnostics[0]
+                .message()
+                .contains("expected `Custom`, found `i32`"),
+            "got: {}",
+            diagnostics[0].message()
+        );
+    }
+
+    #[test]
     fn unknown_custom_array_annotation_type_is_reported() {
         let sheet = parse("sheet s { out values := []: [Missing]; }");
         let diagnostics = check_sheet(&sheet, &TypeRegistry::new());

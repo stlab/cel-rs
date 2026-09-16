@@ -53,3 +53,34 @@
 
 - This task intentionally does **not** generalize Adam declared cell/output type annotations to array-shaped `TypeShape`s; it threads registry-backed CEL resolution through Adam expression parsing/checking without redesigning Adam's sheet type model.
 - If a follow-up wants first-class array-typed Adam cells/outs, that likely needs separate Adam-side storage/equality design work beyond this resolver adaptation task.
+
+## Review Fix: exact custom-leaf mismatches in deferred Adam type checking
+
+### Review finding
+
+- Deferred Adam checking still erased registered custom scalar leaves to `Ty::Any`, so `[1]: [Custom]` passed static checking instead of reporting an exact mismatch.
+
+### RED
+
+- Added `adam-lang::typecheck::tests::custom_array_annotations_reject_exact_scalar_type_mismatches`.
+- Verified the failure before the fix with:
+  - `cargo test -p adam-lang custom_array_annotations_reject_exact_scalar_type_mismatches -- --nocapture`
+- Observed RED:
+  - `assertion \`left == right\` failed: []`
+  - `left: 0`
+  - `right: 1`
+
+### Fix
+
+- Kept the existing generic resolver boundary and Adam registry threading intact.
+- Added a narrow recursive validation path in `cel-parser::ty::check_array` that reuses the resolved annotation tree when it contains custom leaves otherwise erased to `Ty::Any`.
+- The extra check now rejects exact mismatches such as `[1]: [Custom]` while leaving valid custom annotations and recursive arrays accepted.
+- Added `cel-parser::ty::tests::typed_array_annotation_reports_exact_custom_element_type_mismatches` to lock the parser-layer behavior directly.
+
+### Verification
+
+- `cargo fmt --all`
+- `cargo test -p adam-lang typed_array -- --nocapture`
+- `cargo test -p adam-lang custom_array_annotations -- --nocapture`
+- `cargo test -p cel-parser typed_array_annotation -- --nocapture`
+- `cargo test -p cel-parser resolve_type_expr_uses_a_custom_registry_resolver_recursively -- --nocapture`
