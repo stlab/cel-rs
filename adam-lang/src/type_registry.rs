@@ -567,43 +567,34 @@ impl TypeRegistry {
     }
 
     /// Builds one `AssociatedType` entry describing `shape`: a leaf's own registered layout for
-    /// `TypeShape::Named`, or a nested tuple's layout (computed recursively via
-    /// `cel_runtime::layout_associated` over its own children) for `TypeShape::Tuple`.
+    /// `TypeShape::Named`, or a nested tuple's own recursively-laid-out elements (via
+    /// `cel_runtime::ValueType::tuple`) for `TypeShape::Tuple`.
     ///
     /// - Precondition: every leaf `TypeId` reachable from `shape` is registered.
     ///
     /// - Postcondition: the returned entry's `offset` is always 0; the caller
     ///   (`associated_prototype`) lays out sibling entries via `cel_runtime::layout_associated`.
     fn one_associated(&self, shape: &TypeShape) -> cel_runtime::AssociatedType {
-        match shape {
+        let value_type = match shape {
             TypeShape::Named(type_id) => {
                 let entry = self
                     .entry_by_type_id(*type_id)
                     .expect("one_associated: type registered");
-                cel_runtime::AssociatedType {
-                    type_id: *type_id,
-                    type_name: std::borrow::Cow::Owned(entry.type_name.to_string()),
-                    offset: 0,
-                    size: entry.size,
-                    align: entry.align,
-                    dropper: entry.raw_dropper,
-                    associated: Vec::new(),
-                }
+                cel_runtime::ValueType::leaf_from_parts(
+                    *type_id,
+                    std::borrow::Cow::Owned(entry.type_name.to_string()),
+                    entry.size,
+                    entry.align,
+                    entry.raw_dropper,
+                )
             }
-            TypeShape::Tuple(elements) => {
-                let mut associated: Vec<_> =
-                    elements.iter().map(|e| self.one_associated(e)).collect();
-                let (size, align) = cel_runtime::layout_associated(&mut associated);
-                cel_runtime::AssociatedType {
-                    type_id: TypeId::of::<cel_runtime::DynTuple>(),
-                    type_name: std::borrow::Cow::Borrowed("tuple"),
-                    offset: 0,
-                    size,
-                    align,
-                    dropper: cel_runtime::drop_tuple,
-                    associated,
-                }
-            }
+            TypeShape::Tuple(elements) => cel_runtime::ValueType::tuple(
+                elements.iter().map(|e| self.one_associated(e)).collect(),
+            ),
+        };
+        cel_runtime::AssociatedType {
+            offset: 0,
+            value_type,
         }
     }
 
@@ -988,8 +979,8 @@ mod tests {
         ]);
         let prototype = reg.associated_prototype(&shape);
         assert_eq!(prototype.len(), 2);
-        assert_eq!(prototype[0].type_id, TypeId::of::<i32>());
-        assert_eq!(prototype[1].type_id, TypeId::of::<f64>());
+        assert_eq!(prototype[0].value_type.type_id, TypeId::of::<i32>());
+        assert_eq!(prototype[1].value_type.type_id, TypeId::of::<f64>());
         assert_eq!(prototype[1].offset, 8); // i32 at [0,4); f64 aligned up to 8
     }
 
@@ -1005,8 +996,18 @@ mod tests {
         ]);
         let prototype = reg.associated_prototype(&shape);
         assert_eq!(prototype.len(), 2);
-        assert_eq!(prototype[1].type_id, TypeId::of::<cel_runtime::DynTuple>());
-        assert_eq!(prototype[1].associated.len(), 2);
+        assert_eq!(
+            prototype[1].value_type.type_id,
+            TypeId::of::<cel_runtime::DynTuple>()
+        );
+        assert_eq!(
+            prototype[1]
+                .value_type
+                .tuple_elements()
+                .expect("nested tuple")
+                .len(),
+            2
+        );
     }
 
     #[test]

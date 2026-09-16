@@ -27,7 +27,7 @@
 //!   or masking the shift count (release).
 
 use anyhow::{Result, anyhow};
-use cel_runtime::{DynSegment, DynTuple};
+use cel_runtime::DynSegment;
 use once_cell::sync::Lazy;
 use phf::phf_map;
 use std::any::TypeId;
@@ -1483,8 +1483,8 @@ impl BuiltinScope {
         for sig in signatures {
             let arity = sig.arity as usize;
             let matches = arity == stack_infos.len()
-                && stack_infos[0].type_id == sig.lhs_type_id()
-                && (arity < 2 || stack_infos[1].type_id == sig.rhs_type_id());
+                && stack_infos[0].value_type.type_id == sig.lhs_type_id()
+                && (arity < 2 || stack_infos[1].value_type.type_id == sig.rhs_type_id());
             if matches {
                 (sig.op_fn)(segment, span)?;
                 return Ok(true);
@@ -1531,7 +1531,7 @@ fn round_scope(
         }
         ("()", 2) => {
             let top = segment.peek_stack_infos(2);
-            if top.len() != 2 || top[0].type_id != TypeId::of::<RoundFn>() {
+            if top.len() != 2 || top[0].value_type.type_id != TypeId::of::<RoundFn>() {
                 return Ok(false);
             }
             segment.op2(|_callee: RoundFn, x: f64| x.round())?;
@@ -1642,18 +1642,22 @@ impl OpLookup {
                 continue;
             }
             let tuple_info = &stack_infos[sig.tuple_operand_index];
-            let shape_matches = tuple_info.type_id == TypeId::of::<DynTuple>()
-                && tuple_info.associated.len() == sig.shape.len()
-                && tuple_info
-                    .associated
-                    .iter()
-                    .zip(&sig.shape)
-                    .all(|(a, t)| a.type_id == *t);
+            let shape_matches = tuple_info
+                .value_type
+                .tuple_elements()
+                .is_some_and(|elements| {
+                    elements.len() == sig.shape.len()
+                        && elements
+                            .iter()
+                            .zip(&sig.shape)
+                            .all(|(a, t)| a.value_type.type_id == *t)
+                });
             if !shape_matches {
                 continue;
             }
             let others_match = stack_infos.iter().enumerate().all(|(i, info)| {
-                i == sig.tuple_operand_index || sig.operand_type_ids.get(i) == Some(&info.type_id)
+                i == sig.tuple_operand_index
+                    || sig.operand_type_ids.get(i) == Some(&info.value_type.type_id)
             });
             if others_match {
                 (sig.op_fn)(segment, span)?;
@@ -1880,7 +1884,7 @@ impl OpLookup {
                 type_names.push_str(", ");
             }
             type_names.push('`');
-            type_names.push_str(info.type_name.as_ref());
+            type_names.push_str(info.value_type.type_name.as_ref());
             type_names.push('`');
         }
         Err(crate::ParseError::new_range(
@@ -1945,7 +1949,7 @@ impl OpLookup {
                 end,
             ));
         };
-        let source_type_id = operand.type_id;
+        let source_type_id = operand.value_type.type_id;
         for sig in signatures {
             if sig.source_type_id() == source_type_id {
                 (sig.op_fn)(segment, source_span).map_err(|e| {
@@ -1955,7 +1959,10 @@ impl OpLookup {
             }
         }
         Err(crate::ParseError::new_range(
-            format!("no cast from `{}` to `{type_name}`", operand.type_name),
+            format!(
+                "no cast from `{}` to `{type_name}`",
+                operand.value_type.type_name
+            ),
             start,
             end,
         ))
@@ -2127,7 +2134,9 @@ mod tests {
         lookup.push_scope(|name, segment, num_operands, _span| {
             let matches = {
                 let top = segment.peek_stack_infos(num_operands);
-                name == "double" && top.len() == 1 && top[0].type_id == TypeId::of::<u32>()
+                name == "double"
+                    && top.len() == 1
+                    && top[0].value_type.type_id == TypeId::of::<u32>()
             };
             if matches {
                 segment.op1(|a: u32| a * 2)?;
@@ -2158,7 +2167,7 @@ mod tests {
         lookup.push_scope(|name, segment, num_operands, _span| {
             let matches = {
                 let top = segment.peek_stack_infos(num_operands);
-                name == "+" && top.len() == 2 && top[0].type_id == TypeId::of::<u32>()
+                name == "+" && top.len() == 2 && top[0].value_type.type_id == TypeId::of::<u32>()
             };
             if matches {
                 segment.op2(|_a: u32, _b: u32| 100u32)?;
@@ -2622,7 +2631,7 @@ mod tests {
         lookup.push_scope(|name, segment, num_operands, _span| {
             let matches = {
                 let top = segment.peek_stack_infos(num_operands);
-                name == "+" && top.len() == 2 && top[0].type_id == TypeId::of::<u32>()
+                name == "+" && top.len() == 2 && top[0].value_type.type_id == TypeId::of::<u32>()
             };
             if matches {
                 segment.op2(|_a: u32, _b: u32| 100u32)?;

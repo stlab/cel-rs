@@ -358,33 +358,27 @@ impl ClosureParamType {
 }
 
 /// Builds a fresh `AssociatedType` prototype list from resolved closure parameter element
-/// types, for [`cel_runtime::DynSegment::push_arg_as_dynamic_sequence_tuple`] — leaf
-/// `size`/`align` are the scalar's real values (that method's own precondition), while a nested
-/// tuple's are placeholders (`push_arg_as_dynamic_sequence_tuple` recomputes them recursively
-/// from `associated`).
+/// types, for [`cel_runtime::DynSegment::push_arg_as_dynamic_sequence_tuple`] — each leaf
+/// carries the scalar's own registered layout, and each nested tuple carries its own
+/// recursively-built elements (whose layout that method recomputes).
 ///
 /// - Complexity: O(n) in the total (nested) element count.
 fn elements_to_associated(elements: &[ClosureParamType]) -> Vec<cel_runtime::AssociatedType> {
     elements
         .iter()
-        .map(|ty| match ty {
-            ClosureParamType::Scalar(s) => cel_runtime::AssociatedType {
-                type_id: s.type_id,
-                type_name: std::borrow::Cow::Borrowed(s.type_name),
-                offset: 0,
-                size: s.size,
-                align: s.align,
-                dropper: s.dropper,
-                associated: Vec::new(),
-            },
-            ClosureParamType::Tuple(nested) => cel_runtime::AssociatedType {
-                type_id: TypeId::of::<cel_runtime::DynTuple>(),
-                type_name: std::borrow::Cow::Borrowed("tuple"),
-                offset: 0,
-                size: 0,
-                align: 1,
-                dropper: cel_runtime::drop_tuple,
-                associated: elements_to_associated(nested),
+        .map(|ty| cel_runtime::AssociatedType {
+            offset: 0,
+            value_type: match ty {
+                ClosureParamType::Scalar(s) => cel_runtime::ValueType::leaf_from_parts(
+                    s.type_id,
+                    std::borrow::Cow::Borrowed(s.type_name),
+                    s.size,
+                    s.align,
+                    s.dropper,
+                ),
+                ClosureParamType::Tuple(nested) => {
+                    cel_runtime::ValueType::tuple(elements_to_associated(nested))
+                }
             },
         })
         .collect()
@@ -640,7 +634,7 @@ impl<C: ParserContext> Parser<C> {
     /// lookup.push_scope(|name, segment, num_operands, _span| {
     ///     let matches = {
     ///         let top = segment.peek_stack_infos(num_operands);
-    ///         name == "+" && top.len() == 2 && top[0].type_id == TypeId::of::<i32>()
+    ///         name == "+" && top.len() == 2 && top[0].value_type.type_id == TypeId::of::<i32>()
     ///     };
     ///     if matches {
     ///         segment.op2(|a: i32, b: i32| a + b + 1)?; // Custom addition

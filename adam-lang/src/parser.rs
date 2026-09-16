@@ -636,7 +636,11 @@ impl AdamParser {
     /// unregistered leaf type at any nesting depth (tuple case).
     fn eval_segment_boxed(&self, mut segment: DynSegment) -> Result<(TypeShape, Box<dyn Any>)> {
         if segment.peek_tuple_arity().is_some() {
-            let associated = segment.peek_stack_infos(1)[0].associated.clone();
+            let associated = segment.peek_stack_infos(1)[0]
+                .value_type
+                .tuple_elements()
+                .map(<[_]>::to_vec)
+                .unwrap_or_default();
             let shape = self
                 .shape_of_associated(&associated)
                 .map_err(|msg| ParseError::new(msg, Span::call_site()))?;
@@ -706,13 +710,13 @@ impl AdamParser {
         let elements = associated
             .iter()
             .map(|elem| {
-                if elem.type_id == TypeId::of::<cel_runtime::DynTuple>() {
-                    self.shape_of_associated(&elem.associated)
+                if let Some(children) = elem.value_type.tuple_elements() {
+                    self.shape_of_associated(children)
                 } else {
                     self.types
-                        .entry_by_type_id(elem.type_id)
+                        .entry_by_type_id(elem.value_type.type_id)
                         .map(|entry| TypeShape::Named(entry.type_id))
-                        .ok_or_else(|| format!("unregistered type `{}`", elem.type_name))
+                        .ok_or_else(|| format!("unregistered type `{}`", elem.value_type.type_name))
                 }
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1225,7 +1229,11 @@ impl AdamParser {
             .collect();
 
         if segment.peek_tuple_arity().is_some() {
-            let associated = segment.peek_stack_infos(1)[0].associated.clone();
+            let associated = segment.peek_stack_infos(1)[0]
+                .value_type
+                .tuple_elements()
+                .map(<[_]>::to_vec)
+                .unwrap_or_default();
             let shape = self
                 .shape_of_associated(&associated)
                 .map_err(|msg| ParseError::new(msg, match_span))?;
@@ -1448,7 +1456,11 @@ impl AdamParser {
         // `Method` built below on every `Sheet::propagate` — so only its *shape* is inferred
         // here, from stack info, never actually executed.
         let actual_shape = if segment.peek_tuple_arity().is_some() {
-            let associated = segment.peek_stack_infos(1)[0].associated.clone();
+            let associated = segment.peek_stack_infos(1)[0]
+                .value_type
+                .tuple_elements()
+                .map(<[_]>::to_vec)
+                .unwrap_or_default();
             self.shape_of_associated(&associated)
                 .map_err(|msg| ctx.err_at(msg))?
         } else {
@@ -1666,11 +1678,14 @@ impl AdamParser {
                 TypeShape::Tuple(_) => {
                     let stack_info = segment.peek_stack_infos(1).first();
                     let matches = stack_info.is_some_and(|info| {
-                        tuple_shape_matches_associated(out_shape, &info.associated)
+                        info.value_type.tuple_elements().is_some_and(|elements| {
+                            tuple_shape_matches_associated(out_shape, elements)
+                        })
                     });
                     if !matches {
                         let actual = stack_info
-                            .and_then(|info| self.shape_of_associated(&info.associated).ok())
+                            .and_then(|info| info.value_type.tuple_elements())
+                            .and_then(|elements| self.shape_of_associated(elements).ok())
                             .map(|s| self.types.display_name(&s))
                             .unwrap_or_else(|| "a non-matching value".to_string());
                         return Err(ctx.err_at(format!(
@@ -1691,7 +1706,11 @@ impl AdamParser {
                     outputs.len()
                 )));
             }
-            let associated = segment.peek_stack_infos(1)[0].associated.clone();
+            let associated = segment.peek_stack_infos(1)[0]
+                .value_type
+                .tuple_elements()
+                .map(<[_]>::to_vec)
+                .unwrap_or_default();
             let mut extractors = Vec::with_capacity(outputs.len());
             for (i, ((out_name, _, out_shape), elem)) in outputs.iter().zip(&associated).enumerate()
             {
@@ -1699,7 +1718,7 @@ impl AdamParser {
                     return Err(ctx.err_at(format!(
                         "output {i} `{out_name}`: type mismatch: expected `{}`, got `{}`",
                         self.types.display_name(out_shape),
-                        elem.type_name
+                        elem.value_type.type_name
                     )));
                 }
                 extractors.push(match out_shape {
@@ -1765,11 +1784,11 @@ enum InputPush {
 /// `shape` — the base case `tuple_shape_matches_associated` recurses into.
 fn element_shape_matches(shape: &TypeShape, a: &cel_runtime::AssociatedType) -> bool {
     match shape {
-        TypeShape::Named(type_id) => a.type_id == *type_id,
-        TypeShape::Tuple(_) => {
-            a.type_id == TypeId::of::<cel_runtime::DynTuple>()
-                && tuple_shape_matches_associated(shape, &a.associated)
-        }
+        TypeShape::Named(type_id) => a.value_type.type_id == *type_id,
+        TypeShape::Tuple(_) => a
+            .value_type
+            .tuple_elements()
+            .is_some_and(|children| tuple_shape_matches_associated(shape, children)),
     }
 }
 
