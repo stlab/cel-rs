@@ -2,7 +2,12 @@
 //!
 //! This crate exists so the static mdBook can point at a real Rust package
 //! whose examples compile against [`cel_parser`] and [`cel_runtime`]. The
-//! first release of the book is intentionally static: it documents the
+//! checked examples in `tests/examples.rs` are executable companions to the
+//! prose: they verify the concrete parser and runtime behavior that the book
+//! describes, and they must not present unsupported CEL dialect features as if
+//! they were implemented here.
+//!
+//! The first release of the book is intentionally static: it documents the
 //! implementation in this repository and compiles checked snippets, but it
 //! does not ship a live evaluator or any custom mdBook preprocessor.
 //!
