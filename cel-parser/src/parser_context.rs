@@ -306,6 +306,9 @@ impl ParserContext for DynSegmentContext {
     ) -> crate::Result<()> {
         self.0
             .make_array(n, ambient_start)
+            // The error spans the whole `[...]` literal: `DynSegment::make_array` names the
+            // offending element's index only in its message text, with no structured index to map
+            // back to that element's own span (see https://github.com/stlab/cel-rs/issues/215).
             .map_err(|e| crate::ParseError::new_range(e.to_string(), start, end))
     }
 

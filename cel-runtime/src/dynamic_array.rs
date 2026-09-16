@@ -119,8 +119,17 @@ impl ArrayElementType {
     /// element's layout only at runtime.
     ///
     /// - Precondition: `size`, `align`, and `drop` are those of the single Rust type identified
-    ///   by `type_id`, and `type_id` is not [`DynamicArray`]'s — an array element descriptor is
-    ///   built by [`array_of`](Self::array_of) so its nested descriptor travels with it.
+    ///   by `type_id`.
+    ///
+    /// # Panics
+    ///
+    /// Panics, in every build profile, if `type_id` is [`DynamicArray`]'s — an array element
+    /// descriptor is built by [`array_of`](Self::array_of) so its nested descriptor travels with
+    /// it, and a leaf descriptor claiming the array marker would describe elements as
+    /// `DynamicArray` values with no element type of their own (the same malformed state
+    /// [`leaf`](Self::leaf) refuses to build). This check is unconditional, matching
+    /// [`ValueType::leaf_from_parts`](crate::ValueType::leaf_from_parts), because the resulting
+    /// descriptor governs how element bytes are interpreted.
     pub(crate) fn leaf_from_parts(
         type_id: TypeId,
         type_name: Cow<'static, str>,
@@ -133,7 +142,7 @@ impl ArrayElementType {
             size.is_multiple_of(align),
             "size must be a multiple of align"
         );
-        debug_assert!(
+        assert!(
             type_id != TypeId::of::<DynamicArray>(),
             "a leaf element descriptor must not claim the array marker TypeId"
         );
@@ -1286,6 +1295,21 @@ mod tests {
         assert_eq!(
             ArrayElementType::leaf::<DynamicArray>(),
             Err(ArrayBuildErrorKind::MissingNestedElementType)
+        );
+    }
+
+    /// The erased constructor rejects the same marker id [`ArrayElementType::leaf`] refuses, in
+    /// every build profile: a leaf descriptor claiming it would hand out element views over
+    /// values of another type.
+    #[test]
+    #[should_panic(expected = "a leaf element descriptor must not claim the array marker TypeId")]
+    fn leaf_from_parts_rejects_the_array_marker_type() {
+        let _ = ArrayElementType::leaf_from_parts(
+            TypeId::of::<DynamicArray>(),
+            Cow::Borrowed("DynamicArray"),
+            size_of::<DynamicArray>(),
+            align_of::<DynamicArray>(),
+            raw_dropper_for::<DynamicArray>(),
         );
     }
 

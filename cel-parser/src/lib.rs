@@ -107,6 +107,19 @@
 //! assert_eq!(rows[0].try_as_slice::<i32>().unwrap(), &[0]);
 //! ```
 //!
+//! ### Known limitations
+//!
+//! - An empty literal (`[]`) is a parse error: with no element there is nothing to infer the
+//!   array's element type from (<https://github.com/stlab/cel-rs/issues/212>).
+//! - A CEL tuple cannot be an array element, so `[(0i32, 1i32)]` is rejected: a tuple is a
+//!   stack-layout pseudo-value with no concrete Rust element representation
+//!   (<https://github.com/stlab/cel-rs/issues/213>).
+//! - A type-mismatch diagnostic from the compiling path ([`CELParser`], which type-checks
+//!   elements against their compiled runtime types) spans the whole `[...]` literal and names the
+//!   offending element only in its message text (`array element 1 has type ...`). The static
+//!   [`ty::check_expr`] checker, which runs over an [`AstContext`] tree instead, already reports
+//!   the offending element's own span (<https://github.com/stlab/cel-rs/issues/215>).
+//!
 //! ## Error Formatting
 //!
 //! ```rust
@@ -4006,6 +4019,44 @@ mod tests {
         assert!(message.contains("array element 2"), "got: {message}");
         assert!(message.contains("Fahrenheit"), "got: {message}");
         assert!(message.contains("Celsius"), "got: {message}");
+    }
+
+    #[test]
+    fn static_check_and_execution_agree_on_a_nested_custom_typed_array() -> anyhow::Result<()> {
+        const SOURCE: &str = "[[f(), g()], [h()]]";
+
+        // The static checker sees only the AST, where `Celsius` — a host-registered type with no
+        // `Ty` variant — infers as `Ty::Any`, so the literal infers as an array of arrays of it:
+        // an under-approximation of the runtime type, reported without diagnostics.
+        let mut ast_parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = ast_parser
+            .parse_str_ast(SOURCE)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let (ty, diagnostics) = ty::check_expr(&expr, &|_name| Ty::Any);
+        let messages: Vec<String> = diagnostics
+            .iter()
+            .map(|d| d.message().to_string())
+            .collect();
+        assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::Any)))));
+
+        // The same source, compiled and executed, produces the value the checker accepted.
+        let mut parser = CELParser::new(temperature_lookup(true));
+        let mut segment = parser
+            .parse_str(SOURCE)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        let mut rows: Vec<Vec<i32>> = Vec::new();
+        for row in array.try_into_vec::<cel_runtime::DynamicArray>()? {
+            rows.push(
+                row.try_into_vec::<Celsius>()?
+                    .into_iter()
+                    .map(|c| c.0)
+                    .collect(),
+            );
+        }
+        assert_eq!(rows, vec![vec![0, 1], vec![2]]);
+        Ok(())
     }
 }
 

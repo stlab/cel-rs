@@ -110,9 +110,10 @@ pub struct ValueType {
 impl ValueType {
     /// Returns the leaf type describing `T`.
     ///
-    /// - Precondition: `T` is neither [`DynTuple`] nor [`DynamicArray`] — those mark aggregates,
-    ///   whose values are built by [`tuple`](Self::tuple) and [`array`](Self::array) so that the
-    ///   aggregate's own shape travels with its `TypeId`.
+    /// # Panics
+    ///
+    /// Panics, in every build profile, if `T` is [`DynTuple`] or [`DynamicArray`] — see
+    /// [`leaf_from_parts`](Self::leaf_from_parts), which performs the check.
     ///
     /// # Examples
     ///
@@ -141,9 +142,17 @@ impl ValueType {
     /// - Precondition: `size`, `align`, and `raw_dropper` are those of the single Rust type
     ///   identified by `type_id` (e.g. taken from [`raw_dropper_for`] for that same type).
     ///
-    /// - Precondition: `type_id` is neither [`DynTuple`]'s nor [`DynamicArray`]'s — those mark
-    ///   aggregates, whose values are built by [`tuple`](Self::tuple) and [`array`](Self::array)
-    ///   so that the aggregate's own shape travels with its `TypeId`.
+    /// # Panics
+    ///
+    /// Panics, in every build profile, if `type_id` is [`DynTuple`]'s or [`DynamicArray`]'s —
+    /// those mark aggregates, whose values are built by [`tuple`](Self::tuple) and
+    /// [`array`](Self::array) so that the aggregate's own shape travels with its `TypeId`. This
+    /// one check is unconditional rather than a debug-only precondition because every public
+    /// operation that pushes a result type (e.g. [`DynSegment::op0`]) reaches it with a host-chosen
+    /// type: a [`ValueKind::Leaf`] carrying an aggregate marker would report
+    /// [`same_shape`](Self::same_shape) for two unrelated aggregate types and would yield an
+    /// element descriptor with no nested element type, so accepting one silently is a soundness
+    /// hazard rather than ordinary unspecified behavior.
     ///
     /// # Examples
     ///
@@ -173,7 +182,7 @@ impl ValueType {
             size.is_multiple_of(align),
             "size must be a multiple of align"
         );
-        debug_assert!(
+        assert!(
             type_id != TypeId::of::<DynTuple>() && type_id != TypeId::of::<DynamicArray>(),
             "a leaf value type must not claim an aggregate marker TypeId"
         );
@@ -2464,14 +2473,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
     #[should_panic(expected = "a leaf value type must not claim an aggregate marker TypeId")]
     fn leaf_rejects_the_array_marker_type() {
         let _ = ValueType::leaf::<DynamicArray>();
     }
 
     #[test]
-    #[cfg(debug_assertions)]
     #[should_panic(expected = "a leaf value type must not claim an aggregate marker TypeId")]
     fn leaf_from_parts_rejects_the_tuple_marker_type() {
         let _ = ValueType::leaf_from_parts(
@@ -2507,6 +2514,16 @@ mod tests {
             4,
             raw_dropper_for::<i32>(),
         );
+    }
+
+    /// The aggregate-marker check is reachable from the public op API — an op returning a
+    /// `DynamicArray` would otherwise register an array value as an opaque leaf — so it must
+    /// fire in every build profile, not only where `debug_assert!` is compiled in.
+    #[test]
+    #[should_panic(expected = "a leaf value type must not claim an aggregate marker TypeId")]
+    fn op0_rejects_an_array_typed_result() {
+        let mut segment = DynSegment::new::<()>();
+        segment.op0(|| DynamicArray::try_from_vec(vec![1i32]).expect("i32 is a valid element"));
     }
 
     #[test]
