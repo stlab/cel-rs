@@ -48,6 +48,10 @@
 //! and need Rust's own `LiteralPattern` rule: a bare literal, or one directly negated by a
 //! leading `-` (no `!`, no chained `--`, no arbitrary unary/postfix operand) — see
 //! <https://doc.rust-lang.org/reference/patterns.html#literal-patterns>.
+//! `type_expr` is the reusable recursive type grammar used by array type ascriptions:
+//! bare names resolve through the configured [`TypeResolver`], bracketed forms compose nested
+//! array types (`[i32]`, `[[i32]]`), and tuple syntax is preserved for future typed CEL surfaces
+//! even though tuple-valued array elements remain explicitly unsupported today.
 //!
 //! # Examples
 //!
@@ -98,6 +102,27 @@
 //! assert!(CELParser::new(OpLookup::new()).parse_str("[1i32, 2.0f64]").is_err());
 //! ```
 //!
+//! Hosts may also resolve custom registry-backed leaf names by constructing the parser with
+//! [`CELParser::with_type_resolver`]:
+//!
+//! ```rust
+//! use cel_parser::{CELParser, OpLookup, ResolvedLeafType};
+//! use cel_runtime::{ArrayElementType, DynamicArray};
+//!
+//! #[derive(Clone)]
+//! struct Custom;
+//!
+//! let resolver = [(
+//!     "Custom",
+//!     ResolvedLeafType::new("Custom", ArrayElementType::leaf::<Custom>().unwrap()),
+//! )];
+//! let mut segment = CELParser::with_type_resolver(OpLookup::new(), resolver)
+//!     .parse_str("[]: [Custom]")
+//!     .unwrap();
+//! let array: DynamicArray = segment.call0().unwrap();
+//! assert!(array.try_into_vec::<Custom>().unwrap().is_empty());
+//! ```
+//!
 //! Nested literals are recursively typed rank-one arrays, so each inner value is itself a
 //! `DynamicArray`:
 //!
@@ -116,8 +141,9 @@
 //!
 //! - An unannotated empty literal (`[]`) is a parse error: with no element there is nothing to
 //!   infer the array's element type from (<https://github.com/stlab/cel-rs/issues/212>).
-//! - A CEL tuple cannot be an array element, so `[(0i32, 1i32)]` is rejected: a tuple is a
-//!   stack-layout pseudo-value with no concrete Rust element representation
+//! - A CEL tuple cannot be an array element, so both `[(0i32, 1i32)]` and `[]: [(i32, i32)]`
+//!   are rejected with the explicit tuple-array diagnostic: a tuple is a stack-layout
+//!   pseudo-value with no concrete Rust element representation
 //!   (<https://github.com/stlab/cel-rs/issues/213>).
 //! - A type-mismatch diagnostic from the compiling path ([`CELParser`], which type-checks
 //!   elements against their compiled runtime types) spans the whole `[...]` literal and names the

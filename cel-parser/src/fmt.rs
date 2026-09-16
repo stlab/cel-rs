@@ -4,6 +4,11 @@
 //! length — see the design doc's "Line wrapping" decision). Literal leaves are re-emitted via
 //! [`proc_macro2::Span::source_text`] rather than synthesized from [`crate::Literal`], so exact
 //! original notation (`1920.0` vs `1920.0f64`, a byte literal's spelling) round-trips.
+//!
+//! Typed arrays round-trip with their postfix `: Type` ascriptions, including recursive array
+//! types such as `[]: [[i32]]` and reusable tuple syntax such as `[]: [(i32, f64)]`. The
+//! formatter preserves that syntax even though tuple-valued array elements remain semantically
+//! unsupported today (issue #213).
 
 use crate::ast::{Expr, LogicalOp};
 use crate::trivia::{Comment, GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap};
@@ -345,6 +350,10 @@ fn render_closure_param_type(type_expr: &crate::ClosureParamTypeExpr) -> String 
 }
 
 /// Renders one unresolved array-annotation type expression.
+///
+/// Named leaves are emitted verbatim, so built-in names and host-registered custom names format
+/// identically. Recursive arrays keep their bracket nesting, and tuple type expressions keep the
+/// same reusable syntax the parser accepts for future typed CEL surfaces.
 ///
 /// - Complexity: O(n) in the number of nodes in `type_expr`.
 fn render_type_expr(type_expr: &crate::TypeExpr) -> String {

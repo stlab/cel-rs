@@ -36,7 +36,12 @@
 //! CEL expression grammar), as well as `literal_pattern` (a bare literal, optionally negated by
 //! a leading `-`, matching Rust's own `LiteralPattern` rule — CEL has no constant-expression
 //! syntax in pattern position), are defined by `cel_parser` — see that crate's own
-//! [`# Grammar`](../cel_parser/index.html#grammar) section.
+//! [`# Grammar`](../cel_parser/index.html#grammar) section. That embedded CEL grammar now includes
+//! postfix array type ascriptions such as `[left, right]: [Custom]` and `[]: [[i32]]`. The
+//! ascription names the complete array type, resolves leaf names through the active
+//! [`TypeRegistry`], and reuses recursive tuple/array type syntax. Tuple-valued array elements
+//! remain explicitly unsupported, so `[]: [(i32, f64)]` still reports the existing issue #213
+//! diagnostic.
 //!
 //! A `cell_filter`'s `expression` names no explicit parameter list: `_` always refers to the
 //! candidate value being conformed (of the filtered cell's own declared type), and every other
@@ -62,6 +67,56 @@
 //!         cell area:   f64;
 //!     }
 //! "#).unwrap();
+//! ```
+//!
+//! Registered Adam types are also visible inside embedded CEL array ascriptions:
+//!
+//! ```rust
+//! use adam_lang::{AdamParser, TypeRegistry};
+//! use cel_parser::OpLookup;
+//! use cel_runtime::DynamicArray;
+//!
+//! #[derive(Clone, Debug, PartialEq)]
+//! struct Custom(i32);
+//!
+//! #[derive(Clone)]
+//! struct CountFn;
+//!
+//! let mut lookup = OpLookup::new();
+//! lookup.push_scope(|name, segment, arity, _span| match (name, arity) {
+//!     ("left", 0) => {
+//!         segment.op0(|| Custom(1));
+//!         Ok(true)
+//!     }
+//!     ("right", 0) => {
+//!         segment.op0(|| Custom(2));
+//!         Ok(true)
+//!     }
+//!     ("count", 0) => {
+//!         segment.op0(|| CountFn);
+//!         Ok(true)
+//!     }
+//!     ("()", 2) => {
+//!         segment.op2(|_callee: CountFn, values: DynamicArray| values.len() as i32)?;
+//!         Ok(true)
+//!     }
+//!     _ => Ok(false),
+//! });
+//!
+//! let mut types = TypeRegistry::new();
+//! types.register_no_default::<Custom>("Custom");
+//! let mut parser = AdamParser::new(types, lookup);
+//! let parsed = parser.parse_str(
+//!     "sheet s { \
+//!         cell values: i32 = count([left, right]: [Custom]); \
+//!         cell empty: i32 = count([]: [Custom]); \
+//!     }",
+//! ).unwrap();
+//!
+//! let (values, _) = parsed.cell_names["values"];
+//! assert_eq!(*parsed.read::<i32>(values).unwrap(), 2);
+//! let (empty, _) = parsed.cell_names["empty"];
+//! assert_eq!(*parsed.read::<i32>(empty).unwrap(), 0);
 //! ```
 
 pub mod ast;

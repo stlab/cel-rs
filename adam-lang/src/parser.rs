@@ -2085,6 +2085,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_cell_initializer_rejects_tuple_typed_array_annotations() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let err = parser
+            .parse_str("sheet s { cell values = []: [(i32, f64)]; }")
+            .expect_err("tuple-valued array annotations must remain unsupported");
+
+        assert!(
+            err.message()
+                .contains("tuple-valued array elements are not supported"),
+            "got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("issues/213"),
+            "the diagnostic must reference the tuple-array issue, got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
     fn parse_source_decl_registers_a_source_kind_cell() {
         let sheet = parser()
             .parse_str("sheet s { source width: i32 = 4; }")
