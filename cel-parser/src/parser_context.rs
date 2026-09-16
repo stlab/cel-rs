@@ -111,6 +111,23 @@ pub trait ParserContext: Sized {
         end: Span,
     ) -> crate::Result<()>;
 
+    /// Combines the last `n` emitted values into a single array value, optionally validated
+    /// against an explicitly resolved array descriptor.
+    ///
+    /// `array_type` names the complete array type when present; `None` preserves ordinary
+    /// unannotated inference.
+    fn make_annotated_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        array_type: Option<crate::ResolvedArrayType>,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        let _ = array_type;
+        self.make_array(n, ambient_start, start, end)
+    }
+
     /// Returns the arity of the tuple currently on top, or `None` if the top value isn't a
     /// tuple.
     fn peek_tuple_arity(&self) -> Option<usize>;
@@ -312,6 +329,23 @@ impl ParserContext for DynSegmentContext {
             .map_err(|e| crate::ParseError::new_range(e.to_string(), start, end))
     }
 
+    fn make_annotated_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        array_type: Option<crate::ResolvedArrayType>,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        match array_type {
+            Some(array_type) => self
+                .0
+                .make_typed_array(n, ambient_start, array_type.into_element_type())
+                .map_err(|e| crate::ParseError::new_range(e.to_string(), start, end)),
+            None => self.make_array(n, ambient_start, start, end),
+        }
+    }
+
     fn peek_tuple_arity(&self) -> Option<usize> {
         self.0.peek_tuple_arity()
     }
@@ -437,6 +471,37 @@ mod tests {
             "got: {}",
             err.message()
         );
+    }
+
+    #[test]
+    fn make_annotated_array_with_none_preserves_unannotated_array_inference() {
+        let mut ctx = DynSegmentContext::new_context();
+        let ambient_start = ctx.current_stack_offset();
+        ctx.push_literal(1i32, Span::call_site());
+        ctx.push_literal(2i32, Span::call_site());
+        ctx.make_annotated_array(2, ambient_start, None, Span::call_site(), Span::call_site())
+            .unwrap();
+        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
+        assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn make_annotated_array_with_a_resolved_descriptor_collects_a_typed_empty_array() {
+        let mut ctx = DynSegmentContext::new_context();
+        let ambient_start = ctx.current_stack_offset();
+        let array_type = crate::ResolvedArrayType::from_element_type(
+            cel_runtime::ArrayElementType::leaf::<i32>().unwrap(),
+        );
+        ctx.make_annotated_array(
+            0,
+            ambient_start,
+            Some(array_type),
+            Span::call_site(),
+            Span::call_site(),
+        )
+        .unwrap();
+        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
+        assert!(array.try_into_vec::<i32>().unwrap().is_empty());
     }
 
     #[test]

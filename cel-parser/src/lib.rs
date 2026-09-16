@@ -150,6 +150,7 @@ pub mod op_table;
 pub mod parser_context;
 pub mod trivia;
 pub mod ty;
+pub mod type_expr;
 
 pub use ast::{AstContext, ClosureParam, ClosureParamTypeExpr, Expr, ExprSpan, Literal, LogicalOp};
 pub use error::{
@@ -161,6 +162,7 @@ pub use parser_context::{DynSegmentContext, ParserContext};
 pub use proc_macro2::LineColumn;
 pub use trivia::Comment;
 pub use ty::Ty;
+pub use type_expr::{ResolvedArrayType, ResolvedLeafType, ResolvedType, TypeExpr, TypeResolver};
 
 use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};
 
@@ -170,6 +172,7 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, ParseError>;
@@ -480,6 +483,7 @@ pub struct Parser<C: ParserContext> {
     tokens: Option<Peekable<LexLexer>>,
     context: C,
     op_lookup: OpLookup,
+    type_resolver: Arc<dyn TypeResolver>,
     last_span: Span,
     /// Net count of `Delimiter::Brace`/`Delimiter::Bracket`/`Delimiter::Parenthesis` tokens
     /// consumed since the last [`set_tokens`](Self::set_tokens)/
@@ -506,13 +510,50 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// * `op_lookup` - Operation lookup for resolving operators and identifiers
     pub fn new(op_lookup: OpLookup) -> Self {
+        Self::with_shared_type_resolver(op_lookup, type_expr::default_type_resolver())
+    }
+
+    /// Creates a new CEL parser with the given operation lookup and leaf type resolver.
+    ///
+    /// Existing callers that need only the built-in CEL scalar types should continue to use
+    /// [`new`](Self::new); this constructor is for hosts that want additional named CEL types
+    /// without coupling `cel-parser` to their own registry implementation.
+    pub fn with_type_resolver<R>(op_lookup: OpLookup, type_resolver: R) -> Self
+    where
+        R: TypeResolver + 'static,
+    {
+        Self::with_shared_type_resolver(op_lookup, Arc::new(type_resolver))
+    }
+
+    fn with_shared_type_resolver(
+        op_lookup: OpLookup,
+        type_resolver: Arc<dyn TypeResolver>,
+    ) -> Self {
         Parser {
             tokens: None,
             context: C::new_context(),
             op_lookup,
+            type_resolver,
             last_span: Span::call_site(),
             unbalanced_delimiters: 0,
         }
+    }
+
+    /// Replaces this parser's named-type resolver.
+    pub fn set_type_resolver<R>(&mut self, type_resolver: R)
+    where
+        R: TypeResolver + 'static,
+    {
+        self.type_resolver = Arc::new(type_resolver);
+    }
+
+    /// Resolves `expr` through this parser's configured leaf type resolver.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if some named leaf in `expr` is not recognized.
+    pub fn resolve_type_expr(&self, expr: &TypeExpr) -> Result<ResolvedType> {
+        expr.resolve(self.type_resolver.as_ref())
     }
 
     /// Sets the token stream for parsing, resetting internal state.
@@ -660,6 +701,44 @@ impl<C: ParserContext> Parser<C> {
     pub fn parse_str_ctx(&mut self, s: &str) -> Result<C> {
         let input = TokenStream::from_str(s).map_err(|e| ParseError::from_lex_error(s, e))?;
         self.parse_tokens_ctx(input.into_iter())
+    }
+
+    /// Parses one complete `type_expr` from the current token stream.
+    ///
+    /// Unlike [`parse_type_expr_str`](Self::parse_type_expr_str), this method does not require
+    /// ownership of the whole source string; it consumes only as many tokens as the type
+    /// expression itself needs from the current stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input does not contain a valid complete type expression.
+    pub fn parse_type_expr(&mut self) -> Result<TypeExpr> {
+        let expr = self.parse_type_expression()?;
+        if self.peek_token().is_some() {
+            return Err(self.error_at("unexpected token"));
+        }
+        Ok(expr)
+    }
+
+    /// Parses one complete `type_expr` from `tokens`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `tokens` does not contain a valid complete type expression.
+    pub fn parse_type_expr_tokens(&mut self, tokens: TokenStreamIter) -> Result<TypeExpr> {
+        self.set_tokens(tokens);
+        self.parse_type_expr()
+    }
+
+    /// Parses one complete `type_expr` from `s`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on lex failure or if `s` does not contain a valid complete type
+    /// expression.
+    pub fn parse_type_expr_str(&mut self, s: &str) -> Result<TypeExpr> {
+        let input = TokenStream::from_str(s).map_err(|e| ParseError::from_lex_error(s, e))?;
+        self.parse_type_expr_tokens(input.into_iter())
     }
 
     /// Returns a mutable reference to the operation lookup.
@@ -1659,6 +1738,107 @@ impl<C: ParserContext> Parser<C> {
         self.context
             .make_array(count, ambient_start, open_span, self.last_span)?;
         Ok(true)
+    }
+
+    /// `type_expr = identifier | "[" type_expr "]" | "(" [ type_expr ["," [ type_expr {
+    /// "," type_expr } ]] ] ")" .`
+    ///
+    /// `()` is the empty tuple type (0 elements); `(T)` is grouping (same as bare `T`); `(T,)`
+    /// is a 1-element tuple; `(T, U, ...)` is n-element, no trailing comma. `[T]` names an
+    /// array type whose elements have type `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a named leaf is missing, if an array or tuple element list is
+    /// malformed, or if a closing `]`/`)` is missing.
+    fn parse_type_expression(&mut self) -> Result<TypeExpr> {
+        if let Some(Token::Identifier(_)) = self.peek_token() {
+            let name = self.expect_identifier("expected a type name")?;
+            let span = ExprSpan {
+                start: self.last_span,
+                end: self.last_span,
+            };
+            return Ok(TypeExpr::Named { name, span });
+        }
+
+        if matches!(
+            self.peek_token(),
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Bracket,
+                ..
+            })
+        ) {
+            let open_span = self
+                .peek_span()
+                .expect("array type expression requires an opening '[' token");
+            self.advance();
+            if self.is_close_bracket() {
+                return Err(ParseError::new_range(
+                    "expected a type expression after '['".to_string(),
+                    open_span,
+                    self.last_span,
+                ));
+            }
+            let element = self.parse_type_expression()?;
+            if !self.is_close_bracket() {
+                return Err(self.error_at("expected closing ']' after array type expression"));
+            }
+            return Ok(TypeExpr::Array {
+                element: Box::new(element),
+                span: ExprSpan {
+                    start: open_span,
+                    end: self.last_span,
+                },
+            });
+        }
+
+        if !self.is_open_paren() {
+            return Err(self.error_at("expected a type name, '[' or '('"));
+        }
+        let open_span = self.last_span;
+        if self.is_close_paren() {
+            return Ok(TypeExpr::Tuple {
+                elements: Vec::new(),
+                span: ExprSpan {
+                    start: open_span,
+                    end: self.last_span,
+                },
+            });
+        }
+
+        let first = self.parse_type_expression()?;
+        if self.is_close_paren() {
+            return Ok(first);
+        }
+        if !self.is_punctuation(",") {
+            return Err(self.error_at("expected ',' or closing ')'"));
+        }
+        if self.is_close_paren() {
+            return Ok(TypeExpr::Tuple {
+                elements: vec![first],
+                span: ExprSpan {
+                    start: open_span,
+                    end: self.last_span,
+                },
+            });
+        }
+        let mut elements = vec![first];
+        loop {
+            elements.push(self.parse_type_expression()?);
+            if self.is_close_paren() {
+                break;
+            }
+            if !self.is_punctuation(",") {
+                return Err(self.error_at("expected ',' or closing ')'"));
+            }
+        }
+        Ok(TypeExpr::Tuple {
+            elements,
+            span: ExprSpan {
+                start: open_span,
+                end: self.last_span,
+            },
+        })
     }
 
     /// `closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression .`
