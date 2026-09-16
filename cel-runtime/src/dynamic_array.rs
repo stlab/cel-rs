@@ -184,7 +184,7 @@ impl ArrayElementType {
     /// Returns the recursive name used in type mismatch diagnostics.
     ///
     /// - Complexity: O(depth).
-    fn display_name(&self) -> Cow<'static, str> {
+    pub(crate) fn display_name(&self) -> Cow<'static, str> {
         match &self.nested {
             Some(nested) => Cow::Owned(format!("[{}]", nested.display_name())),
             None => self.type_name.clone(),

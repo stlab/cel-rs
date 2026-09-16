@@ -979,8 +979,8 @@ mod tests {
         ]);
         let prototype = reg.associated_prototype(&shape);
         assert_eq!(prototype.len(), 2);
-        assert_eq!(prototype[0].value_type.type_id, TypeId::of::<i32>());
-        assert_eq!(prototype[1].value_type.type_id, TypeId::of::<f64>());
+        assert_eq!(prototype[0].value_type.type_id(), TypeId::of::<i32>());
+        assert_eq!(prototype[1].value_type.type_id(), TypeId::of::<f64>());
         assert_eq!(prototype[1].offset, 8); // i32 at [0,4); f64 aligned up to 8
     }
 
@@ -997,7 +997,7 @@ mod tests {
         let prototype = reg.associated_prototype(&shape);
         assert_eq!(prototype.len(), 2);
         assert_eq!(
-            prototype[1].value_type.type_id,
+            prototype[1].value_type.type_id(),
             TypeId::of::<cel_runtime::DynTuple>()
         );
         assert_eq!(

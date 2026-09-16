@@ -83,24 +83,34 @@ pub enum ValueKind {
 /// Physical metadata describes the bytes; `kind` describes what those bytes mean. The two are
 /// deliberately separate: an array and a tuple of arrays share neither shape nor layout rules,
 /// but every array has the same physical layout regardless of its element type.
+///
+/// Every field is private and set only by a validating constructor ([`leaf`](Self::leaf),
+/// [`leaf_from_parts`](Self::leaf_from_parts), [`tuple`](Self::tuple), [`array`](Self::array)),
+/// so a `ValueType`'s layout, dropper, and kind always agree — the invariant
+/// [`same_shape`](Self::same_shape) relies on when it reports that two equal shapes have
+/// identical layout.
 #[derive(Clone, Debug)]
 pub struct ValueType {
     /// Runtime type id of the value's concrete Rust representation.
-    pub type_id: TypeId,
+    type_id: TypeId,
     /// Human-readable name for error reporting (borrowed when from `type_name::<T>()`).
-    pub type_name: Cow<'static, str>,
+    type_name: Cow<'static, str>,
     /// Size in bytes of the value.
-    pub size: usize,
+    size: usize,
     /// Required alignment in bytes of the value.
-    pub align: usize,
+    align: usize,
     /// In-place dropper for the value, callable at its own start address.
-    pub(crate) raw_dropper: RawDropper,
+    raw_dropper: RawDropper,
     /// Semantic shape of the value.
-    pub kind: ValueKind,
+    kind: ValueKind,
 }
 
 impl ValueType {
     /// Returns the leaf type describing `T`.
+    ///
+    /// - Precondition: `T` is neither [`DynTuple`] nor [`DynamicArray`] — those mark aggregates,
+    ///   whose values are built by [`tuple`](Self::tuple) and [`array`](Self::array) so that the
+    ///   aggregate's own shape travels with its `TypeId`.
     ///
     /// # Examples
     ///
@@ -109,19 +119,18 @@ impl ValueType {
     /// use std::any::TypeId;
     ///
     /// let leaf = ValueType::leaf::<i32>();
-    /// assert_eq!(leaf.type_id, TypeId::of::<i32>());
-    /// assert_eq!(leaf.size, size_of::<i32>());
+    /// assert_eq!(leaf.type_id(), TypeId::of::<i32>());
+    /// assert_eq!(leaf.size(), size_of::<i32>());
     /// ```
     #[must_use]
     pub fn leaf<T: 'static>() -> Self {
-        ValueType {
-            type_id: TypeId::of::<T>(),
-            type_name: Cow::Borrowed(std::any::type_name::<T>()),
-            size: size_of::<T>(),
-            align: align_of::<T>(),
-            raw_dropper: raw_dropper_for::<T>(),
-            kind: ValueKind::Leaf,
-        }
+        Self::leaf_from_parts(
+            TypeId::of::<T>(),
+            Cow::Borrowed(std::any::type_name::<T>()),
+            size_of::<T>(),
+            align_of::<T>(),
+            raw_dropper_for::<T>(),
+        )
     }
 
     /// Returns the leaf type described by already-erased metadata, for a caller that resolves a
@@ -129,6 +138,10 @@ impl ValueType {
     ///
     /// - Precondition: `size`, `align`, and `raw_dropper` are those of the single Rust type
     ///   identified by `type_id` (e.g. taken from [`raw_dropper_for`] for that same type).
+    ///
+    /// - Precondition: `type_id` is neither [`DynTuple`]'s nor [`DynamicArray`]'s — those mark
+    ///   aggregates, whose values are built by [`tuple`](Self::tuple) and [`array`](Self::array)
+    ///   so that the aggregate's own shape travels with its `TypeId`.
     ///
     /// # Examples
     ///
@@ -143,7 +156,7 @@ impl ValueType {
     ///     align_of::<i32>(),
     ///     raw_dropper_for::<i32>(),
     /// );
-    /// assert_eq!(leaf.type_id, TypeId::of::<i32>());
+    /// assert_eq!(leaf.type_id(), TypeId::of::<i32>());
     /// ```
     #[must_use]
     pub fn leaf_from_parts(
@@ -153,6 +166,15 @@ impl ValueType {
         align: usize,
         raw_dropper: RawDropper,
     ) -> Self {
+        debug_assert!(align.is_power_of_two(), "align must be a power of two");
+        debug_assert!(
+            size.is_multiple_of(align),
+            "size must be a multiple of align"
+        );
+        debug_assert!(
+            type_id != TypeId::of::<DynTuple>() && type_id != TypeId::of::<DynamicArray>(),
+            "a leaf value type must not claim an aggregate marker TypeId"
+        );
         ValueType {
             type_id,
             type_name,
@@ -178,7 +200,7 @@ impl ValueType {
     ///     AssociatedType { offset: 0, value_type: ValueType::leaf::<i32>() },
     ///     AssociatedType { offset: 0, value_type: ValueType::leaf::<f64>() },
     /// ]);
-    /// assert_eq!(tuple.size, 16);
+    /// assert_eq!(tuple.size(), 16);
     /// assert_eq!(tuple.tuple_elements().unwrap()[1].offset, 8);
     /// ```
     #[must_use]
@@ -194,7 +216,10 @@ impl ValueType {
         }
     }
 
-    /// Returns the array type whose elements all have shape `element`.
+    /// Returns the array type whose elements all have shape `element`, named for diagnostics by
+    /// that element (e.g. `[i32]`) rather than by the erased `DynamicArray` representation.
+    ///
+    /// - Complexity: O(depth) in the element's array nesting depth.
     ///
     /// # Examples
     ///
@@ -203,15 +228,95 @@ impl ValueType {
     /// use std::any::TypeId;
     ///
     /// let array = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
-    /// assert_eq!(array.type_id, TypeId::of::<DynamicArray>());
+    /// assert_eq!(array.type_id(), TypeId::of::<DynamicArray>());
+    /// assert_eq!(array.type_name(), "[i32]");
     /// assert_eq!(array.array_element().unwrap().type_id(), TypeId::of::<i32>());
     /// ```
     #[must_use]
     pub fn array(element: ArrayElementType) -> Self {
         ValueType {
+            type_id: TypeId::of::<DynamicArray>(),
+            type_name: Cow::Owned(format!("[{}]", element.display_name())),
+            size: size_of::<DynamicArray>(),
+            align: align_of::<DynamicArray>(),
+            raw_dropper: raw_dropper_for::<DynamicArray>(),
             kind: ValueKind::Array(element),
-            ..ValueType::leaf::<DynamicArray>()
         }
+    }
+
+    /// Returns the `TypeId` of this value's concrete Rust representation — the aggregate marker
+    /// ([`DynTuple`] or [`DynamicArray`]) for a tuple or array, not an element type.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{DynamicArray, ArrayElementType, ValueType};
+    /// use std::any::TypeId;
+    ///
+    /// assert_eq!(ValueType::leaf::<i32>().type_id(), TypeId::of::<i32>());
+    /// let array = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
+    /// assert_eq!(array.type_id(), TypeId::of::<DynamicArray>());
+    /// ```
+    #[must_use]
+    pub fn type_id(&self) -> TypeId {
+        self.type_id
+    }
+
+    /// Returns this value's human-readable type name, for diagnostics.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::ValueType;
+    ///
+    /// assert_eq!(ValueType::leaf::<i32>().type_name(), "i32");
+    /// ```
+    #[must_use]
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    /// Returns this value's size in bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::ValueType;
+    ///
+    /// assert_eq!(ValueType::leaf::<i32>().size(), size_of::<i32>());
+    /// ```
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// Returns this value's required alignment in bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::ValueType;
+    ///
+    /// assert_eq!(ValueType::leaf::<i32>().align(), align_of::<i32>());
+    /// ```
+    #[must_use]
+    pub fn align(&self) -> usize {
+        self.align
+    }
+
+    /// Returns this value's semantic shape.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{ValueKind, ValueType};
+    ///
+    /// assert!(matches!(ValueType::leaf::<i32>().kind(), ValueKind::Leaf));
+    /// assert!(matches!(ValueType::tuple(Vec::new()).kind(), ValueKind::Tuple(_)));
+    /// ```
+    #[must_use]
+    pub fn kind(&self) -> &ValueKind {
+        &self.kind
     }
 
     /// Returns this tuple's ordered elements, or `None` for a non-tuple value.
@@ -255,6 +360,19 @@ impl ValueType {
     /// empty slice for a leaf or array (whose droppers ignore the argument).
     pub(crate) fn dropper_children(&self) -> &[AssociatedType] {
         self.tuple_elements().unwrap_or(&[])
+    }
+
+    /// Returns a copy of this type that describes the same bytes but drops nothing, for a region
+    /// whose value has already been moved out and so must not be dropped again.
+    ///
+    /// This is the one deliberate exception to the rule that a `ValueType`'s dropper matches its
+    /// type: layout, `TypeId`, and [`ValueKind`] still describe the original value, so offsets
+    /// and shape comparisons stay correct while the cleanup pass skips the moved-out bytes.
+    pub(crate) fn with_dropper_suppressed(&self) -> ValueType {
+        ValueType {
+            raw_dropper: |_ptr, _associated| {},
+            ..self.clone()
+        }
     }
 
     /// Returns whether `self` and `other` denote the same semantic type: the same `TypeId` for
@@ -333,12 +451,27 @@ pub fn raw_dropper_for<T: 'static>() -> RawDropper {
     |ptr, _associated| unsafe { std::ptr::drop_in_place(ptr.cast::<T>()) }
 }
 
-/// Computes each element's on-stack byte offset in place — the same convention
-/// [`DynSegment::make_tuple`] already uses: place at this element's own alignment, then pad up to the running max
-/// alignment seen so far (matching `CStackList`'s nested layout). Each element's `size` and
-/// `align` must already be set; `offset` is overwritten. Returns `(total_size, max_align)`.
+/// Computes each element's on-stack byte offset in place — the one authoritative tuple layout
+/// routine, used by [`ValueType::tuple`] (and through it by [`DynSegment::make_tuple`]): place
+/// at this element's own alignment, then pad up to the running max alignment seen so far
+/// (matching `CStackList`'s nested layout). Each element's `size` and `align` must already be
+/// set; `offset` is overwritten. Returns `(total_size, max_align)`.
 ///
 /// - Complexity: O(n).
+///
+/// # Examples
+///
+/// ```rust
+/// use cel_runtime::{AssociatedType, ValueType, layout_associated};
+///
+/// let mut elements = vec![
+///     AssociatedType { offset: 0, value_type: ValueType::leaf::<u8>() },
+///     AssociatedType { offset: 0, value_type: ValueType::leaf::<u64>() },
+/// ];
+/// assert_eq!(layout_associated(&mut elements), (16, 8));
+/// assert_eq!(elements[0].offset, 0);
+/// assert_eq!(elements[1].offset, 8);
+/// ```
 pub fn layout_associated(elements: &mut [AssociatedType]) -> (usize, usize) {
     let mut offset = 0usize;
     let mut max_align = 1usize;
@@ -369,6 +502,26 @@ pub fn layout_associated(elements: &mut [AssociatedType]) -> (usize, usize) {
 ///   nesting level).
 ///
 /// - Complexity: O(n) in the total (nested) element count.
+///
+/// # Examples
+///
+/// ```rust
+/// use cel_runtime::{AssociatedType, ValueType, layout_associated_recursive};
+///
+/// let mut elements = vec![
+///     AssociatedType { offset: 0, value_type: ValueType::leaf::<u8>() },
+///     AssociatedType {
+///         offset: 0,
+///         value_type: ValueType::tuple(vec![
+///             AssociatedType { offset: 0, value_type: ValueType::leaf::<u32>() },
+///             AssociatedType { offset: 0, value_type: ValueType::leaf::<u32>() },
+///         ]),
+///     },
+/// ];
+/// // The nested tuple occupies 8 bytes at alignment 4, so it starts at offset 4.
+/// assert_eq!(layout_associated_recursive(&mut elements), (12, 4));
+/// assert_eq!(elements[1].offset, 4);
+/// ```
 pub fn layout_associated_recursive(elements: &mut [AssociatedType]) -> (usize, usize) {
     for elem in elements.iter_mut() {
         if let ValueKind::Tuple(children) = &mut elem.value_type.kind {
@@ -677,42 +830,33 @@ impl DynSegment {
         let start = self.stack_ids.len() - n;
         let elems: Vec<StackInfo> = self.stack_ids.drain(start..).collect();
 
+        // ambient_offset tracks where each element already sits on the ambient
+        // RawStack from ordinary sequential pushes — a plain flat layout,
+        // unrelated to the tuple's own (CStackList-matching) layout, which
+        // `ValueType::tuple` computes below.
         let mut ambient_offset = ambient_start;
-        let mut offset = 0usize;
-        let mut tuple_align = 1usize;
         let mut src_offsets = Vec::with_capacity(n);
         let mut associated = Vec::with_capacity(n);
         for elem in elems {
-            // ambient_offset tracks where this element already sits on the
-            // ambient RawStack from ordinary sequential pushes — a plain
-            // flat layout, unrelated to CStackList's nested convention.
             ambient_offset = align_index(elem.value_type.align, ambient_offset);
             src_offsets.push(ambient_offset);
             ambient_offset += elem.value_type.size;
 
-            // offset tracks the element's position in the tuple's canonical
-            // (CStackList-matching) layout: place at this element's own
-            // alignment, then pad up to the running max alignment so far.
-            offset = align_index(elem.value_type.align, offset);
-            tuple_align = tuple_align.max(elem.value_type.align);
-
-            let size = elem.value_type.size;
             associated.push(AssociatedType {
-                offset,
+                offset: 0,
                 value_type: elem.value_type,
             });
-
-            offset += size;
-            offset = align_index(tuple_align, offset);
         }
-        // The last iteration's rounding already used the full tuple_align
-        // (tuple_align has accumulated every element's alignment by then),
-        // so `offset` is already the tuple's correct total size.
-        let total_size = offset;
-        let dest_base = align_index(tuple_align, ambient_start);
 
-        let dest_offsets: Vec<usize> = associated.iter().map(|a| a.offset).collect();
-        let sizes: Vec<usize> = associated.iter().map(|a| a.value_type.size).collect();
+        let value_type = ValueType::tuple(associated);
+        let total_size = value_type.size;
+        let dest_base = align_index(value_type.align, ambient_start);
+
+        let elements = value_type
+            .tuple_elements()
+            .expect("ValueType::tuple produces a tuple");
+        let dest_offsets: Vec<usize> = elements.iter().map(|a| a.offset).collect();
+        let sizes: Vec<usize> = elements.iter().map(|a| a.value_type.size).collect();
 
         self.segment.raw0_(move |stack| {
             unsafe {
@@ -730,14 +874,7 @@ impl DynSegment {
 
         self.stack_ids.push(StackInfo {
             padding: dest_base != ambient_start,
-            value_type: ValueType {
-                type_id: TypeId::of::<DynTuple>(),
-                type_name: Cow::Borrowed(std::any::type_name::<DynTuple>()),
-                size: total_size,
-                align: tuple_align,
-                raw_dropper: drop_tuple,
-                kind: ValueKind::Tuple(associated),
-            },
+            value_type,
         });
     }
 
@@ -753,18 +890,14 @@ impl DynSegment {
             .stack_ids
             .pop()
             .expect("tuple_index requires a value on the stack");
-        let associated = match info.value_type.kind {
-            ValueKind::Tuple(elements) => elements,
-            _ => {
-                debug_assert!(false, "tuple_index requires a tuple on top of the stack");
-                Vec::new()
-            }
+        let tuple_padding = info.padding;
+        let tuple_size = info.value_type.size;
+        let ValueKind::Tuple(associated) = info.value_type.kind else {
+            unreachable!("tuple_index requires a tuple on top of the stack");
         };
         debug_assert!(index < associated.len(), "tuple_index out of range");
 
         let target = associated[index].clone();
-        let tuple_padding = info.padding;
-        let tuple_size = info.value_type.size;
 
         // The tuple's own leading pad becomes dead space once torn down to
         // one element, so the extracted element gets its own padding flag:
@@ -995,17 +1128,19 @@ impl DynSegment {
     pub fn push_arg_as_dynamic_sequence_tuple(
         &mut self,
         index: usize,
-        mut associated: Vec<AssociatedType>,
+        associated: Vec<AssociatedType>,
     ) {
-        // layout_associated is a flat, single-level computation: it trusts each
-        // element's `size`/`align` as already correct. A nested tuple element's *real* footprint
-        // is only known once its own elements have been laid out, so that must happen first,
-        // bottom-up, overwriting the nested element's `size`/`align` before this level's own
-        // offsets (and total size) are computed from them. Skipping this step would let a nested
-        // tuple's declared placeholder `size` (however small) survive into this level's
-        // `total_size`, under-reserving the stack space the write below actually needs for the
-        // nested region — a buffer overrun, not just a wrong offset.
-        let (total_size, tuple_align) = layout_associated_recursive(&mut associated);
+        // `ValueType::tuple` lays `associated` out through the same routine every other tuple
+        // goes through, recursively: a nested tuple element's *real* footprint is only known
+        // once its own elements have been laid out, so that happens first, bottom-up,
+        // overwriting the nested element's `size`/`align` before this level's own offsets (and
+        // total size) are computed from them. Skipping this step would let a nested tuple's
+        // declared placeholder `size` (however small) survive into this level's `total_size`,
+        // under-reserving the stack space the write below actually needs for the nested region —
+        // a buffer overrun, not just a wrong offset.
+        let value_type = ValueType::tuple(associated);
+        let total_size = value_type.size;
+        let tuple_align = value_type.align;
         // raw0_ (unlike raw0/push_op0) does not fold its own return-type alignment into the
         // segment's `base_alignment`, and this op's write target has no return-type alignment to
         // fold in anyway — the tuple's alignment is only known from `associated`. Without this,
@@ -1016,7 +1151,10 @@ impl DynSegment {
         let ambient_start = self.current_stack_offset();
         let dest_base = align_index(tuple_align, ambient_start);
 
-        let write_shape = associated.clone();
+        let write_shape = value_type
+            .tuple_elements()
+            .expect("ValueType::tuple produces a tuple")
+            .to_vec();
         self.segment.raw0_(move |stack| {
             CALL_DYN_PTR.with(|ptr_cell| {
                 CALL_DYN_LEN.with(|len_cell| -> anyhow::Result<()> {
@@ -1048,14 +1186,7 @@ impl DynSegment {
 
         self.stack_ids.push(StackInfo {
             padding: dest_base != ambient_start,
-            value_type: ValueType {
-                type_id: TypeId::of::<DynTuple>(),
-                type_name: Cow::Borrowed(std::any::type_name::<DynTuple>()),
-                size: total_size,
-                align: tuple_align,
-                raw_dropper: drop_tuple,
-                kind: ValueKind::Tuple(associated),
-            },
+            value_type,
         });
     }
 }
@@ -1736,7 +1867,10 @@ impl DynSegment {
             .collect();
         // `L`'s own size/align are the tuple's: `ValueType::tuple` lays the elements out with
         // the same natural-alignment, declaration-order convention `L` itself uses.
-        info.value_type = ValueType::tuple(elements);
+        let value_type = ValueType::tuple(elements);
+        debug_assert_eq!(value_type.size, size_of::<L>());
+        debug_assert_eq!(value_type.align, align_of::<L>());
+        info.value_type = value_type;
     }
 }
 
@@ -2033,11 +2167,7 @@ impl DynSegment {
                 DynExtractor::Scalar(..) => elem.clone(),
                 DynExtractor::Tuple(_) => AssociatedType {
                     offset: elem.offset,
-                    value_type: ValueType {
-                        raw_dropper: |_ptr, _associated| {},
-                        kind: ValueKind::Leaf,
-                        ..elem.value_type.clone()
-                    },
+                    value_type: elem.value_type.with_dropper_suppressed(),
                 },
             })
             .collect();
@@ -2155,6 +2285,72 @@ mod tests {
             ValueType::array(ArrayElementType::leaf::<f64>().unwrap()),
         ]);
         assert!(!with_i32.same_shape(&with_f64));
+    }
+
+    #[test]
+    fn array_value_types_are_named_for_their_element_type() {
+        let flat = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
+        assert_eq!(flat.type_name(), "[i32]");
+
+        let nested = ValueType::array(ArrayElementType::array_of(
+            ArrayElementType::leaf::<i32>().unwrap(),
+        ));
+        assert_eq!(nested.type_name(), "[[i32]]");
+    }
+
+    #[test]
+    fn array_value_types_carry_the_dynamic_array_layout() {
+        let array = ValueType::array(ArrayElementType::leaf::<i32>().unwrap());
+        assert_eq!(array.type_id(), TypeId::of::<DynamicArray>());
+        assert_eq!(array.size(), size_of::<DynamicArray>());
+        assert_eq!(array.align(), align_of::<DynamicArray>());
+        assert!(matches!(array.kind(), ValueKind::Array(_)));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a leaf value type must not claim an aggregate marker TypeId")]
+    fn leaf_rejects_the_array_marker_type() {
+        let _ = ValueType::leaf::<DynamicArray>();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "a leaf value type must not claim an aggregate marker TypeId")]
+    fn leaf_from_parts_rejects_the_tuple_marker_type() {
+        let _ = ValueType::leaf_from_parts(
+            TypeId::of::<DynTuple>(),
+            Cow::Borrowed("DynTuple"),
+            0,
+            1,
+            raw_dropper_for::<DynTuple>(),
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "align must be a power of two")]
+    fn leaf_from_parts_rejects_a_non_power_of_two_alignment() {
+        let _ = ValueType::leaf_from_parts(
+            TypeId::of::<i32>(),
+            Cow::Borrowed("i32"),
+            6,
+            3,
+            raw_dropper_for::<i32>(),
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "size must be a multiple of align")]
+    fn leaf_from_parts_rejects_a_size_that_is_not_a_multiple_of_align() {
+        let _ = ValueType::leaf_from_parts(
+            TypeId::of::<i32>(),
+            Cow::Borrowed("i32"),
+            3,
+            4,
+            raw_dropper_for::<i32>(),
+        );
     }
 
     #[test]
@@ -3181,9 +3377,9 @@ mod tests {
         let mut seg = DynSegment::new::<()>();
         seg.op0(|| 7u32);
         let infos = seg.peek_stack_infos(1);
-        assert_eq!(infos[0].value_type.size, size_of::<u32>());
-        assert_eq!(infos[0].value_type.align, align_of::<u32>());
-        assert!(matches!(infos[0].value_type.kind, ValueKind::Leaf));
+        assert_eq!(infos[0].value_type.size(), size_of::<u32>());
+        assert_eq!(infos[0].value_type.align(), align_of::<u32>());
+        assert!(matches!(infos[0].value_type.kind(), ValueKind::Leaf));
     }
 
     #[test]
@@ -3193,9 +3389,9 @@ mod tests {
             value_type: ValueType::leaf::<u32>(),
         };
         assert_eq!(a.offset, 4);
-        assert_eq!(a.value_type.size, 4);
-        assert_eq!(a.value_type.align, 4);
-        assert_eq!(a.value_type.type_id, TypeId::of::<u32>());
+        assert_eq!(a.value_type.size(), 4);
+        assert_eq!(a.value_type.align(), 4);
+        assert_eq!(a.value_type.type_id(), TypeId::of::<u32>());
     }
 
     #[test]

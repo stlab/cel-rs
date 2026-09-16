@@ -634,7 +634,7 @@ impl<C: ParserContext> Parser<C> {
     /// lookup.push_scope(|name, segment, num_operands, _span| {
     ///     let matches = {
     ///         let top = segment.peek_stack_infos(num_operands);
-    ///         name == "+" && top.len() == 2 && top[0].value_type.type_id == TypeId::of::<i32>()
+    ///         name == "+" && top.len() == 2 && top[0].value_type.type_id() == TypeId::of::<i32>()
     ///     };
     ///     if matches {
     ///         segment.op2(|a: i32, b: i32| a + b + 1)?; // Custom addition

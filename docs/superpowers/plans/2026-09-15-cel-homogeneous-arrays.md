@@ -393,12 +393,12 @@ pub enum ValueKind {
 
 #[derive(Clone, Debug)]
 pub struct ValueType {
-    pub type_id: TypeId,
-    pub type_name: Cow<'static, str>,
-    pub size: usize,
-    pub align: usize,
-    pub(crate) raw_dropper: RawDropper,
-    pub kind: ValueKind,
+    type_id: TypeId,
+    type_name: Cow<'static, str>,
+    size: usize,
+    align: usize,
+    raw_dropper: RawDropper,
+    kind: ValueKind,
 }
 
 #[derive(Clone, Debug)]
@@ -416,6 +416,11 @@ pub struct StackInfo {
 Implement `ValueType::same_shape` recursively. A leaf compares `TypeId`; a tuple compares ordered
 children recursively; an array compares its recursive `ArrayElementType`. Keep physical
 size/alignment/drop metadata available without deriving semantic identity from byte layout.
+
+`ValueType`'s fields are private: values are built only through the validating constructors
+`ValueType::leaf`, `leaf_from_parts`, `tuple`, and `array`, and read through the
+`type_id()`/`type_name()`/`size()`/`align()`/`kind()` accessors, so layout, dropper, and kind can
+never disagree.
 
 - [ ] **Step 4: Migrate tuple runtime code without behavior changes**
 

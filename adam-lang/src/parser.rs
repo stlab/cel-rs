@@ -714,9 +714,11 @@ impl AdamParser {
                     self.shape_of_associated(children)
                 } else {
                     self.types
-                        .entry_by_type_id(elem.value_type.type_id)
+                        .entry_by_type_id(elem.value_type.type_id())
                         .map(|entry| TypeShape::Named(entry.type_id))
-                        .ok_or_else(|| format!("unregistered type `{}`", elem.value_type.type_name))
+                        .ok_or_else(|| {
+                            format!("unregistered type `{}`", elem.value_type.type_name())
+                        })
                 }
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1718,7 +1720,7 @@ impl AdamParser {
                     return Err(ctx.err_at(format!(
                         "output {i} `{out_name}`: type mismatch: expected `{}`, got `{}`",
                         self.types.display_name(out_shape),
-                        elem.value_type.type_name
+                        elem.value_type.type_name()
                     )));
                 }
                 extractors.push(match out_shape {
@@ -1784,7 +1786,7 @@ enum InputPush {
 /// `shape` — the base case `tuple_shape_matches_associated` recurses into.
 fn element_shape_matches(shape: &TypeShape, a: &cel_runtime::AssociatedType) -> bool {
     match shape {
-        TypeShape::Named(type_id) => a.value_type.type_id == *type_id,
+        TypeShape::Named(type_id) => a.value_type.type_id() == *type_id,
         TypeShape::Tuple(_) => a
             .value_type
             .tuple_elements()
