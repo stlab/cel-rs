@@ -3962,6 +3962,17 @@ mod tests {
     }
 
     #[test]
+    fn typed_array_annotation_evaluates_to_the_declared_f64_type() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[1.0, 42.5]: [f64]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<f64>()?, vec![1.0, 42.5]);
+        Ok(())
+    }
+
+    #[test]
     fn typed_array_annotation_constructs_a_typed_empty_array() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
         let mut segment = parser

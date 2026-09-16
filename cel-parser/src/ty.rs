@@ -425,10 +425,12 @@ pub fn check_expr_with_type_resolver(
         Expr::Array {
             elements,
             type_annotation,
+            annotation_span,
             ..
         } => check_array(
             elements,
             type_annotation.as_ref(),
+            *annotation_span,
             resolve_ident,
             resolve_type,
         ),
@@ -495,6 +497,7 @@ pub fn check_expr_with_type_resolver(
 fn check_array(
     elements: &[Expr],
     type_annotation: Option<&TypeExpr>,
+    annotation_span: Option<ExprSpan>,
     resolve_ident: &dyn Fn(&str) -> Ty,
     resolve_type: &dyn TypeResolver,
 ) -> (Ty, Vec<ParseError>) {
@@ -530,7 +533,8 @@ fn check_array(
         return (Ty::Array(Box::new(unified)), diagnostics);
     };
 
-    let (declared_ty, mut annotation_diags) = check_array_annotation(type_annotation, resolve_type);
+    let (declared_ty, mut annotation_diags) =
+        check_array_annotation(type_annotation, annotation_span, resolve_type);
     diagnostics.append(&mut annotation_diags);
     let Ty::Array(declared_element_ty) = &declared_ty else {
         return (Ty::Array(Box::new(Ty::Any)), diagnostics);
@@ -555,13 +559,17 @@ fn check_array(
 
 fn check_array_annotation(
     type_annotation: &TypeExpr,
+    annotation_span: Option<ExprSpan>,
     resolve_type: &dyn TypeResolver,
 ) -> (Ty, Vec<ParseError>) {
     let resolved = match type_annotation.resolve(resolve_type) {
         Ok(resolved) => resolved,
         Err(err) => return (Ty::Array(Box::new(Ty::Any)), vec![err]),
     };
-    match resolved_type_to_array_ty(&resolved, type_annotation.span()) {
+    match resolved_type_to_array_ty(
+        &resolved,
+        annotation_span.unwrap_or_else(|| type_annotation.span()),
+    ) {
         Ok(array_ty) => (array_ty, Vec::new()),
         Err(err) => (Ty::Array(Box::new(Ty::Any)), vec![err]),
     }
@@ -1475,6 +1483,28 @@ mod tests {
             "got: {}",
             diags[0].message()
         );
+    }
+
+    #[test]
+    fn typed_array_annotation_diagnostics_are_anchored_at_the_annotation_span() {
+        let source = "[0]: i32";
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser.parse_str_ast(source).expect("source parses");
+        let (_, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0]
+                .message()
+                .contains("array annotations must name a complete array type"),
+            "got: {}",
+            diags[0].message()
+        );
+        let start = diags[0].span().start();
+        let end = diags[0]
+            .end_span()
+            .expect("annotation diagnostics span a range")
+            .end();
+        assert_eq!(&source[start.column..end.column], ": i32");
     }
 
     #[test]

@@ -1238,6 +1238,24 @@ mod tests {
     }
 
     #[test]
+    fn typed_array_literal_preserves_the_exact_annotation_span() {
+        let source = "[1.0, 42.5]: [f64]";
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast(source).unwrap();
+        let Expr::Array {
+            type_annotation: Some(_),
+            annotation_span: Some(annotation_span),
+            ..
+        } = expr
+        else {
+            panic!("expected Array");
+        };
+        let start = annotation_span.start.start();
+        let end = annotation_span.end.end();
+        assert_eq!(&source[start.column..end.column], ": [f64]");
+    }
+
+    #[test]
     fn array_literals_build_nodes_in_call_argument_and_tuple_positions() {
         let mut parser = Parser::<AstContext>::new(OpLookup::new());
         let expr = parser.parse_str_ast("f([1i32], (2i32, [3i32]))").unwrap();

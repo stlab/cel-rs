@@ -63,3 +63,20 @@ Initial RED command:
 ## Concerns
 - No functional concerns for Task 3.
 - `git diff --check` reports line-ending warnings from the current checkout (`LF` -> `CRLF` on future Git writes), but there are no whitespace or patch-application problems.
+
+## Review follow-up fixes
+- Added formatter idempotence coverage for an annotated float array: parsing `[1.0, 42.5]: [f64]`, formatting it, reparsing the formatted output, and asserting the second format pass is identical.
+- Added runtime execution coverage for the positive `f64` annotation case `[1.0, 42.5]: [f64]`.
+- Added AST span coverage proving the preserved `annotation_span` slices exactly `: [f64]`.
+- Added type-check diagnostic coverage for `[0]: i32`, which exposed a real bug: array-annotation diagnostics were anchored only at the type expression (`i32`) instead of the full annotation span (`: i32`).
+- Fixed that bug by threading `Expr::Array::annotation_span` into type-checking so array-annotation diagnostics emitted by `cel-parser::ty` underline the full annotation ascription.
+
+### Review follow-up verification
+- RED: `cargo test -p cel-parser typed_array --quiet`
+  - FAILED only at `ty::tests::typed_array_annotation_diagnostics_are_anchored_at_the_annotation_span`, showing the diagnostic span covered `i32` instead of `: i32`.
+- GREEN: `cargo test -p cel-parser typed_array --quiet`
+  - PASS after routing `annotation_span` through array type-checking.
+- `cargo fmt --all`
+  - PASS.
+- Final verification: `cargo test -p cel-parser typed_array --quiet`
+  - PASS (`18` focused typed-array tests).

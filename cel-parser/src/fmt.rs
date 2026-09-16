@@ -1053,6 +1053,14 @@ mod tests {
     }
 
     #[test]
+    fn typed_array_annotation_round_trips_through_reparse() {
+        let source = "[1.0, 42.5]: [f64]";
+        let once = fmt(source);
+        let twice = format_expr(&parse(&once), &once, 0);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
     fn closure_with_one_param_reprints_with_its_type() {
         assert_eq!(fmt("|x: i32| x + 1i32"), "|x: i32| x + 1i32");
     }
