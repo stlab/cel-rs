@@ -23,6 +23,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use adam_rs::{CellId, ConditionalId, MatchExpr, RelationshipId, Sheet};
+use cel_parser::{ResolvedLeafType, TypeResolver};
 use cel_runtime::{BoxExtractor, DynSegment};
 
 /// The identity of a declared adam-lang cell type. Every distinct tuple *shape* erases to the
@@ -65,6 +66,7 @@ pub type AddConditionalFn = fn(
 /// range's own `TypeId` — populated in [`TypeRegistry::new`] for exactly the primitives
 /// `cel-parser`'s `..=` operator supports (`cel_parser::op_table`'s `RANGE_INCLUSIVE_SIGNATURES`).
 #[allow(clippy::type_complexity)] // `clamp_fn`/`bounds_fn` are inherently multi-argument fn pointers.
+#[derive(Clone)]
 pub(crate) struct RangeEntry {
     /// `T`'s own `TypeId` — compared against a filtered cell's declared type by the caller.
     pub(crate) element_type_id: TypeId,
@@ -81,6 +83,7 @@ pub(crate) struct RangeEntry {
 }
 
 /// Metadata for a single type registered in a [`TypeRegistry`].
+#[derive(Clone)]
 pub struct TypeEntry {
     /// Runtime type identity.
     pub type_id: TypeId,
@@ -104,6 +107,8 @@ pub struct TypeEntry {
     pub default_fn: Option<fn() -> Box<dyn Any>>,
     /// Calls `Sheet::add_conditional::<T>` with type-erased branch keys.
     pub add_conditional_fn: AddConditionalFn,
+    /// Builds the runtime array-element descriptor for this leaf type.
+    pub element_type_fn: fn() -> cel_runtime::ArrayElementType,
     /// Size in bytes of a value of this type.
     pub size: usize,
     /// Required alignment in bytes of a value of this type.
@@ -134,6 +139,7 @@ pub struct TypeEntry {
 /// assert!(reg.get("i32").is_some());
 /// assert!(reg.get("unknown").is_none());
 /// ```
+#[derive(Clone)]
 pub struct TypeRegistry {
     by_name: HashMap<String, TypeEntry>,
     by_type_id: HashMap<TypeId, String>,
@@ -200,6 +206,10 @@ fn call_dyn_impl<T: 'static + Clone>(
     Ok(Box::new(seg.call_dyn::<T>(inputs)?))
 }
 
+fn array_element_type_impl<T: 'static>() -> cel_runtime::ArrayElementType {
+    cel_runtime::ArrayElementType::leaf::<T>().expect("registered leaf type is not DynamicArray")
+}
+
 /// Evaluates `seg` (producing a `RangeInclusive<T>`) against `value` prepended to `args`, then
 /// clamps `value` into the resulting bounds. For [`RangeEntry::clamp_fn`].
 fn range_clamp_impl<T: Clone + PartialOrd + 'static>(
@@ -250,6 +260,28 @@ unsafe fn extract_box_impl<T: Clone + 'static>(ptr: *const u8) -> Box<dyn Any> {
 }
 
 impl TypeRegistry {
+    /// Builds a CEL-facing resolver snapshot from this registry's registered leaf types.
+    ///
+    /// The returned resolver owns only the name-to-descriptor metadata CEL needs for typed array
+    /// annotations, keeping sheet construction and other Adam-specific function pointers out of
+    /// `cel-parser`.
+    ///
+    /// - Complexity: O(n) in the number of registered leaf types.
+    #[must_use]
+    pub fn cel_type_resolver(&self) -> RegistryTypeResolver {
+        let by_name = self
+            .by_name
+            .iter()
+            .map(|(name, entry)| {
+                (
+                    name.clone(),
+                    ResolvedLeafType::new(name.clone(), (entry.element_type_fn)()),
+                )
+            })
+            .collect();
+        RegistryTypeResolver { by_name }
+    }
+
     /// Creates a registry pre-populated with all built-in CEL/Rust primitive types.
     ///
     /// Registered types: `i8`, `i16`, `i32`, `i64`, `i128`, `isize`,
@@ -327,6 +359,7 @@ impl TypeRegistry {
                 extract_box_fn: extract_box_impl::<T>,
                 default_fn: Some(|| Box::new(T::default()) as Box<dyn Any>),
                 add_conditional_fn: add_conditional_impl::<T>,
+                element_type_fn: array_element_type_impl::<T>,
                 size: std::mem::size_of::<T>(),
                 align: std::mem::align_of::<T>(),
                 raw_dropper: cel_runtime::raw_dropper_for::<T>(),
@@ -378,6 +411,7 @@ impl TypeRegistry {
                 extract_box_fn: extract_box_impl::<T>,
                 default_fn: None,
                 add_conditional_fn: add_conditional_impl::<T>,
+                element_type_fn: array_element_type_impl::<T>,
                 size: std::mem::size_of::<T>(),
                 align: std::mem::align_of::<T>(),
                 raw_dropper: cel_runtime::raw_dropper_for::<T>(),
@@ -483,8 +517,9 @@ impl TypeRegistry {
     pub fn display_name(&self, shape: &TypeShape) -> String {
         match shape {
             TypeShape::Named(type_id) => self
-                .entry_by_type_id(*type_id)
-                .map(|e| e.type_name.to_string())
+                .by_type_id
+                .get(type_id)
+                .cloned()
                 .unwrap_or_else(|| "?".to_string()),
             TypeShape::Tuple(elements) => {
                 let parts: Vec<String> = elements.iter().map(|e| self.display_name(e)).collect();
@@ -677,6 +712,18 @@ impl TypeRegistry {
     }
 }
 
+/// A CEL-facing snapshot of one [`TypeRegistry`]'s registered leaf types.
+#[derive(Clone, Default)]
+pub struct RegistryTypeResolver {
+    by_name: HashMap<String, ResolvedLeafType>,
+}
+
+impl TypeResolver for RegistryTypeResolver {
+    fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType> {
+        self.by_name.get(name).cloned()
+    }
+}
+
 impl Default for TypeRegistry {
     /// Returns `TypeRegistry::new()`.
     fn default() -> Self {
@@ -737,6 +784,23 @@ mod tests {
         reg.register_no_default::<NoDefault>("no_default");
         let entry = reg.get("no_default").expect("registered");
         assert!(entry.default_fn.is_none());
+    }
+
+    #[test]
+    fn cel_type_resolver_uses_registered_leaf_names() {
+        #[derive(PartialEq, Clone, Debug)]
+        struct Custom(i32);
+
+        let mut reg = TypeRegistry::new();
+        reg.register_no_default::<Custom>("Custom");
+
+        let resolver = reg.cel_type_resolver();
+        let leaf = resolver
+            .resolve_named_type("Custom")
+            .expect("custom leaf registered");
+
+        assert_eq!(leaf.type_id(), TypeId::of::<Custom>());
+        assert_eq!(leaf.type_name(), "Custom");
     }
 
     #[test]
@@ -945,10 +1009,7 @@ mod tests {
                 TypeShape::Named(TypeId::of::<String>()),
             ]),
         ]);
-        assert_eq!(
-            reg.display_name(&shape),
-            "(i32, (f64, alloc::string::String))"
-        );
+        assert_eq!(reg.display_name(&shape), "(i32, (f64, String))");
     }
 
     #[test]

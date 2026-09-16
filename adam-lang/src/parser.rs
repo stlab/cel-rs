@@ -211,12 +211,12 @@ impl AdamParser {
     /// `op_lookup` is forwarded to the embedded [`CELParser`] when compiling method
     /// body expressions. See
     /// [`OpLookup::push_library_scope`](cel_parser::OpLookup::push_library_scope) for how to
-    /// install a function library (e.g. `cel-std`) before parsing.
+    /// install a function library (e.g. `cel-std`) before parsing. The embedded CEL parser also
+    /// receives a snapshot of `types`' registered scalar leaf names so typed array annotations
+    /// such as `[]: [Custom]` resolve custom Adam types during direct parsing.
     pub fn new(types: TypeRegistry, op_lookup: OpLookup) -> Self {
-        AdamParser {
-            types,
-            cel: CELParser::new(op_lookup),
-        }
+        let cel = CELParser::with_type_resolver(op_lookup, types.cel_type_resolver());
+        AdamParser { types, cel }
     }
 
     /// Returns a mutable reference to the embedded CEL operation lookup.
@@ -1963,9 +1963,40 @@ mod tests {
     use super::*;
     use crate::TypeRegistry;
     use cel_parser::OpLookup;
+    use cel_runtime::DynamicArray;
 
     fn parser() -> AdamParser {
         AdamParser::new(TypeRegistry::new(), OpLookup::new())
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Custom(i32);
+
+    #[derive(Clone)]
+    struct CountFn;
+
+    fn custom_lookup() -> OpLookup {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, arity, _span| match name {
+            "left" if arity == 0 => {
+                segment.op0(|| Custom(1));
+                Ok(true)
+            }
+            "right" if arity == 0 => {
+                segment.op0(|| Custom(2));
+                Ok(true)
+            }
+            "count" if arity == 0 => {
+                segment.op0(|| CountFn);
+                Ok(true)
+            }
+            "()" if arity == 2 => {
+                segment.op2(|_callee: CountFn, array: DynamicArray| array.len() as i32)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        });
+        lookup
     }
 
     #[test]
@@ -2011,6 +2042,46 @@ mod tests {
         let mut p = AdamParser::new(reg, OpLookup::new());
         let result = p.parse_str("sheet s { cell x: NoDef; }");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_cell_initializer_supports_registry_typed_arrays() {
+        let mut reg = TypeRegistry::new();
+        reg.register_no_default::<Custom>("Custom");
+        let mut parser = AdamParser::new(reg, custom_lookup());
+
+        let parsed = parser
+            .parse_str(
+                "sheet s { \
+                    cell values: i32 = count([left, right]: [Custom]); \
+                    cell empty: i32 = count([]: [Custom]); \
+                    cell nested: i32 = count([[]: [Custom]]: [[Custom]]); \
+                }",
+            )
+            .unwrap();
+
+        let (values_id, _) = parsed.cell_names["values"];
+        assert_eq!(*parsed.read::<i32>(values_id).unwrap(), 2);
+
+        let (empty_id, _) = parsed.cell_names["empty"];
+        assert_eq!(*parsed.read::<i32>(empty_id).unwrap(), 0);
+
+        let (nested_id, _) = parsed.cell_names["nested"];
+        assert_eq!(*parsed.read::<i32>(nested_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_cell_initializer_rejects_unknown_registry_typed_arrays() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), custom_lookup());
+        let err = parser
+            .parse_str("sheet s { cell values = []: [Custom]; }")
+            .expect_err("unknown custom array annotations must fail");
+
+        assert!(
+            err.message().contains("unknown type `Custom`"),
+            "got: {}",
+            err.message()
+        );
     }
 
     #[test]
