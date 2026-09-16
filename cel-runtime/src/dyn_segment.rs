@@ -1,5 +1,7 @@
 use crate::c_stack_list::{CNil, CStackList, IntoCStackList};
-use crate::dynamic_array::{ArrayElementType, DynamicArray};
+use crate::dynamic_array::{
+    ArrayElementType, DynamicArray, DynamicArrayBuilder, check_array_capacity,
+};
 use crate::dynamic_sequence::{
     DynamicSequence, ElementCloner, ElementDebug, ElementDropper, ElementEq, SequenceElement,
     SequenceList, TupleSequence, element_cloner_for, element_debug_for, element_dropper_for,
@@ -360,6 +362,26 @@ impl ValueType {
     /// empty slice for a leaf or array (whose droppers ignore the argument).
     pub(crate) fn dropper_children(&self) -> &[AssociatedType] {
         self.tuple_elements().unwrap_or(&[])
+    }
+
+    /// Returns the descriptor an array whose elements all have this value's shape would carry,
+    /// or `None` for a tuple value — a CEL tuple is a stack-layout pseudo-value with no concrete
+    /// Rust element representation yet (see
+    /// <https://github.com/stlab/cel-rs/issues/213>).
+    ///
+    /// - Complexity: O(depth) in this value's array nesting depth.
+    pub(crate) fn as_array_element(&self) -> Option<ArrayElementType> {
+        match &self.kind {
+            ValueKind::Leaf => Some(ArrayElementType::leaf_from_parts(
+                self.type_id,
+                self.type_name.clone(),
+                self.size,
+                self.align,
+                self.raw_dropper,
+            )),
+            ValueKind::Array(element) => Some(ArrayElementType::array_of(element.clone())),
+            ValueKind::Tuple(_) => None,
+        }
     }
 
     /// Returns a copy of this type that describes the same bytes but drops nothing, for a region
@@ -878,9 +900,137 @@ impl DynSegment {
         });
     }
 
-    /// Extracts element `index` from the tuple on top of the stack, replacing
-    /// the whole tuple with just that element's value.
+    /// Collapses the top `n` stack values (pushed starting at byte offset `ambient_start`, e.g.
+    /// via [`current_stack_offset`](Self::current_stack_offset) captured before parsing the first
+    /// element) into one [`DynamicArray`] value owning all of them.
     ///
+    /// Every element must have the same complete semantic shape, compared by
+    /// [`ValueType::same_shape`], so the resulting array carries exactly one element descriptor;
+    /// nested arrays are compared recursively, so `[[0], [1.0]]` is rejected. At execution time
+    /// each element's bytes move — once, without running its destructor — from the stack into one
+    /// exact-capacity allocation that a later `Vec<T>` conversion can adopt without reallocating.
+    ///
+    /// - Precondition: at least `n` values are on the stack, pushed contiguously starting at
+    ///   `ambient_start` with no other values interleaved.
+    ///
+    /// # Errors
+    /// Returns an error, leaving the segment exactly as it was, when `n` is zero (an empty array
+    /// literal has no inferable element type; see
+    /// <https://github.com/stlab/cel-rs/issues/212>), when the stack holds fewer than `n` values,
+    /// when an element is a CEL tuple (see <https://github.com/stlab/cel-rs/issues/213>), when
+    /// two elements have different shapes, or when the array's storage layout would overflow.
+    ///
+    /// - Complexity: O(n) in the total (nested) element count.
+    pub fn make_array(&mut self, n: usize, ambient_start: usize) -> Result<()> {
+        ensure!(
+            n != 0,
+            "an empty array literal has no inferable element type; \
+             see https://github.com/stlab/cel-rs/issues/212"
+        );
+        ensure!(
+            n <= self.stack_ids.len(),
+            "make_array: expected {n} array element(s) on the stack, found {}",
+            self.stack_ids.len()
+        );
+
+        // Validate before touching any state: a rejected literal must leave this segment (and
+        // the ops that produced its elements) exactly as it found them.
+        let start = self.stack_ids.len() - n;
+        let expected = &self.stack_ids[start].value_type;
+        let element = expected
+            .as_array_element()
+            .ok_or_else(|| Self::tuple_element_error(0))?;
+        for (offset, info) in self.stack_ids[start + 1..].iter().enumerate() {
+            let index = offset + 1;
+            ensure!(
+                !matches!(info.value_type.kind(), ValueKind::Tuple(_)),
+                Self::tuple_element_error(index)
+            );
+            ensure!(
+                expected.same_shape(&info.value_type),
+                "array element {index} has type {}, expected {}",
+                info.value_type.type_name(),
+                expected.type_name()
+            );
+        }
+        check_array_capacity(&element, n)?;
+
+        // Every element has the same shape, so they sit on the ambient stack at a fixed stride:
+        // the first is placed at the element alignment, and each element's size is a multiple of
+        // that alignment, so no interior padding separates them.
+        let element_size = element.size();
+        let first_offset = align_index(element.align(), ambient_start);
+        debug_assert!(element_size.is_multiple_of(element.align()));
+        // Captured while the elements are still on the parse-time stack, so the (unreachable,
+        // since `check_array_capacity` already passed) allocation-failure path below drops every
+        // value the evaluation had produced instead of abandoning them.
+        let unwind = self.capture_unwind();
+        self.stack_ids.truncate(start);
+
+        let value_type = ValueType::array(element.clone());
+        let dest_base = align_index(value_type.align, ambient_start);
+        let padding = dest_base != ambient_start;
+        // raw0_ (unlike raw0/push_op0) does not fold its own result alignment into the segment's
+        // `base_alignment`, so a `RawStack` allocated for a later call could be aligned only for
+        // the (possibly less-aligned) element type, leaving the pushed array misaligned.
+        self.segment.update_base_alignment(value_type.align);
+
+        self.segment.raw0_(move |stack| {
+            // A fresh allocation per execution: a segment may be called repeatedly, and each
+            // call's array must own its own storage.
+            let mut builder = match DynamicArrayBuilder::with_capacity(element.clone(), n) {
+                Ok(builder) => builder,
+                Err(error) => return Self::unwind_on_err(&unwind, stack, Err(error.into())),
+            };
+            let mut offset = first_offset;
+            for _ in 0..n {
+                // Safety: `offset` is element `i`'s live, properly aligned value on the ambient
+                // stack (the precondition on `ambient_start`), and `push_bytes` moves out of it
+                // exactly once; the bytes it vacates are released below without being dropped,
+                // so each element is owned by the builder from here on. Byte moves cannot
+                // panic, so the builder's initialized prefix always matches the elements it has
+                // actually taken: if anything did unwind, it would drop exactly those and free
+                // its allocation, leaving the still-untransferred stack bytes to the ordinary
+                // (drop-free) teardown of the raw stack rather than double-dropping them.
+                unsafe {
+                    stack.read_at(offset, |src| {
+                        builder.push_bytes(src.cast::<MaybeUninit<u8>>());
+                    });
+                }
+                offset += element_size;
+            }
+            // Safety: every value at or above `ambient_start` was moved into the builder, so no
+            // live value remains there. Truncating the whole region at once is exactly the
+            // reverse-order removal of those values (nothing is left behind between them), and
+            // it strips the first element's leading pad too.
+            unsafe { stack.truncate_to(ambient_start, false) };
+
+            let array = builder.finish();
+            let pushed_padding = stack.push(array);
+            debug_assert_eq!(
+                pushed_padding, padding,
+                "the collected array's padding must match the parse-time prediction"
+            );
+            Ok(())
+        });
+
+        self.stack_ids.push(StackInfo {
+            padding,
+            value_type,
+        });
+        Ok(())
+    }
+
+    /// Returns the error reporting that array element `index` is a CEL tuple.
+    fn tuple_element_error(index: usize) -> anyhow::Error {
+        anyhow!(
+            "array element {index} is a tuple; CEL tuples cannot yet be array elements, \
+             see https://github.com/stlab/cel-rs/issues/213"
+        )
+    }
+
+    /// Extracts element `index` from the tuple on top of the stack, replacing
+    /// the whole tuple with just that element's value.    ///
     /// - Precondition: the top-of-stack value is a tuple with at least
     ///   `index + 1` elements.
     ///
@@ -3821,6 +3971,336 @@ mod tests {
         let b: i32 = seg_b.call_dyn(&[&seq as &dyn Any])?;
 
         assert_eq!((a, b), (1, 2));
+        Ok(())
+    }
+
+    /// An element type with no derived traits at all, to prove array collection needs none.
+    #[derive(Debug, PartialEq)]
+    struct NoTraits(u32);
+
+    #[repr(align(64))]
+    #[derive(Debug, PartialEq)]
+    struct OverAligned(u64);
+
+    static ZST_ELEMENT_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+    /// A zero-sized element whose destructor must still run once per collected element.
+    struct ZstWithDrop;
+
+    impl Drop for ZstWithDrop {
+        fn drop(&mut self) {
+            ZST_ELEMENT_DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn make_array_collects_homogeneous_values() -> anyhow::Result<()> {
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.just(0i32);
+        segment.just(1i32);
+        segment.just(2i32);
+        segment.make_array(3, start)?;
+
+        let array: DynamicArray = segment.call0()?;
+        assert_eq!(array.len(), 3);
+        assert_eq!(array.capacity(), 3);
+        assert_eq!(array.try_into_vec::<i32>()?, vec![0, 1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn make_array_rejects_mismatched_values_before_execution() {
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.just(0i32);
+        segment.just(1f64);
+
+        let error = segment.make_array(2, start).unwrap_err().to_string();
+
+        assert!(error.contains("element 1"), "{error}");
+        assert!(error.contains("i32") && error.contains("f64"), "{error}");
+    }
+
+    #[test]
+    fn make_array_rejects_an_empty_element_list() {
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+
+        let error = segment.make_array(0, start).unwrap_err().to_string();
+
+        assert!(error.contains("212"), "{error}");
+    }
+
+    #[test]
+    fn make_array_rejects_more_elements_than_the_stack_holds() {
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.just(0i32);
+
+        assert!(segment.make_array(2, start).is_err());
+    }
+
+    #[test]
+    fn make_array_collects_values_of_a_type_without_clone() -> anyhow::Result<()> {
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.op0(|| NoTraits(1));
+        segment.op0(|| NoTraits(2));
+        segment.make_array(2, start)?;
+
+        let array: DynamicArray = segment.call0()?;
+        assert_eq!(
+            array.try_into_vec::<NoTraits>()?,
+            vec![NoTraits(1), NoTraits(2)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn make_array_preserves_over_aligned_elements() -> anyhow::Result<()> {
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.op0(|| OverAligned(1));
+        segment.op0(|| OverAligned(2));
+        segment.make_array(2, start)?;
+
+        let array: DynamicArray = segment.call0()?;
+        let values = array.try_as_slice::<OverAligned>()?;
+        assert!(
+            (values.as_ptr() as usize).is_multiple_of(align_of::<OverAligned>()),
+            "collected storage must satisfy the element's alignment"
+        );
+        assert_eq!(values, &[OverAligned(1), OverAligned(2)]);
+        Ok(())
+    }
+
+    #[test]
+    fn make_array_drops_each_collected_element_exactly_once() -> anyhow::Result<()> {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        for _ in 0..3 {
+            let tracker = DropCounter(drop_count.clone());
+            segment.op0(move || tracker.clone());
+        }
+        segment.make_array(3, start)?;
+
+        let array: DynamicArray = segment.call0()?;
+        assert_eq!(array.len(), 3);
+        assert_eq!(drop_count.load(Ordering::SeqCst), 0);
+
+        drop(array);
+        assert_eq!(drop_count.load(Ordering::SeqCst), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn make_array_rejection_leaves_the_segment_usable() -> anyhow::Result<()> {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let tracker = DropCounter(drop_count.clone());
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.op0(move || tracker.clone());
+        segment.op0(|| 1f64);
+        let offset_before = segment.current_stack_offset();
+
+        assert!(segment.make_array(2, start).is_err());
+        assert_eq!(
+            segment.current_stack_offset(),
+            offset_before,
+            "a rejected make_array must not change the parse-time stack"
+        );
+
+        segment.op2(|counted: DropCounter, value: f64| {
+            drop(counted);
+            value
+        })?;
+        assert_eq!(segment.call0::<f64>()?, 1.0);
+        assert_eq!(
+            drop_count.load(Ordering::SeqCst),
+            1,
+            "the one produced element must be dropped exactly once"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn make_array_unwinds_already_produced_elements_when_an_element_fails() -> anyhow::Result<()> {
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        for _ in 0..2 {
+            let tracker = DropCounter(drop_count.clone());
+            segment.op0(move || tracker.clone());
+        }
+        segment.op0r(|| -> Result<DropCounter> { Err(anyhow!("element failed")) });
+        segment.make_array(3, start)?;
+
+        let result = segment.call0::<DynamicArray>();
+        assert!(result.is_err());
+        assert_eq!(
+            drop_count.load(Ordering::SeqCst),
+            2,
+            "each already-produced element is dropped exactly once"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn make_array_collects_zero_sized_elements_with_drop_glue() -> anyhow::Result<()> {
+        ZST_ELEMENT_DROPS.store(0, Ordering::SeqCst);
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.op0(|| ZstWithDrop);
+        segment.op0(|| ZstWithDrop);
+        segment.op0(|| ZstWithDrop);
+        segment.make_array(3, start)?;
+
+        let array: DynamicArray = segment.call0()?;
+        assert_eq!(array.len(), 3);
+        assert_eq!(ZST_ELEMENT_DROPS.load(Ordering::SeqCst), 0);
+
+        drop(array);
+        assert_eq!(ZST_ELEMENT_DROPS.load(Ordering::SeqCst), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn make_array_collects_elements_above_other_stack_values() -> anyhow::Result<()> {
+        let mut segment = DynSegment::new::<()>();
+        segment.just(9u8);
+        let start = segment.current_stack_offset();
+        segment.just(1i32);
+        segment.just(2i32);
+        segment.make_array(2, start)?;
+        segment.op2(|head: u8, array: DynamicArray| {
+            (
+                head,
+                array.try_into_vec::<i32>().expect("collected i32 elements"),
+            )
+        })?;
+
+        let (head, values) = segment.call0::<(u8, Vec<i32>)>()?;
+        assert_eq!(head, 9);
+        assert_eq!(values, vec![1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn make_array_collects_nested_arrays() -> anyhow::Result<()> {
+        let mut segment = DynSegment::new::<()>();
+        let outer_start = segment.current_stack_offset();
+        let first_start = segment.current_stack_offset();
+        segment.just(0i32);
+        segment.just(1i32);
+        segment.make_array(2, first_start)?;
+        let second_start = segment.current_stack_offset();
+        segment.just(2i32);
+        segment.make_array(1, second_start)?;
+        segment.make_array(2, outer_start)?;
+
+        let array: DynamicArray = segment.call0()?;
+        let inner = array.try_into_vec::<DynamicArray>()?;
+        assert_eq!(inner.len(), 2);
+        assert_eq!(inner[0].try_as_slice::<i32>()?, &[0, 1]);
+        assert_eq!(inner[1].try_as_slice::<i32>()?, &[2]);
+        Ok(())
+    }
+
+    #[test]
+    fn make_array_rejects_mismatched_nested_element_types() -> anyhow::Result<()> {
+        let mut segment = DynSegment::new::<()>();
+        let outer_start = segment.current_stack_offset();
+        let first_start = segment.current_stack_offset();
+        segment.just(0i32);
+        segment.make_array(1, first_start)?;
+        let second_start = segment.current_stack_offset();
+        segment.just(1f64);
+        segment.make_array(1, second_start)?;
+
+        let error = segment.make_array(2, outer_start).unwrap_err().to_string();
+
+        assert!(error.contains("element 1"), "{error}");
+        assert!(
+            error.contains("[i32]") && error.contains("[f64]"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn make_array_rejects_mismatched_nesting_depth() -> anyhow::Result<()> {
+        let mut segment = DynSegment::new::<()>();
+        let outer_start = segment.current_stack_offset();
+        let flat_start = segment.current_stack_offset();
+        segment.just(0i32);
+        segment.make_array(1, flat_start)?;
+        let nested_start = segment.current_stack_offset();
+        let inner_start = segment.current_stack_offset();
+        segment.just(1i32);
+        segment.make_array(1, inner_start)?;
+        segment.make_array(1, nested_start)?;
+
+        let error = segment.make_array(2, outer_start).unwrap_err().to_string();
+
+        assert!(error.contains("element 1"), "{error}");
+        assert!(
+            error.contains("[i32]") && error.contains("[[i32]]"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn make_array_rejects_a_leading_tuple_element() {
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        let tuple_start = segment.current_stack_offset();
+        segment.just(0i32);
+        segment.just(1i32);
+        segment.make_tuple(2, tuple_start);
+
+        let error = segment.make_array(1, start).unwrap_err().to_string();
+
+        assert!(error.contains("element 0"), "{error}");
+        assert!(error.contains("213"), "{error}");
+    }
+
+    #[test]
+    fn make_array_rejects_a_trailing_tuple_element() {
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.just(0i32);
+        let tuple_start = segment.current_stack_offset();
+        segment.just(1i32);
+        segment.just(2i32);
+        segment.make_tuple(2, tuple_start);
+
+        let error = segment.make_array(2, start).unwrap_err().to_string();
+
+        assert!(error.contains("element 1"), "{error}");
+        assert!(error.contains("213"), "{error}");
+    }
+
+    #[test]
+    fn make_array_is_repeatable() -> anyhow::Result<()> {
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.just(1i32);
+        segment.just(2i32);
+        segment.make_array(2, start)?;
+
+        let first: DynamicArray = segment.call_dyn(&[])?;
+        let second: DynamicArray = segment.call_dyn(&[])?;
+
+        assert_eq!(first.try_as_slice::<i32>()?, &[1, 2]);
+        assert_eq!(second.try_as_slice::<i32>()?, &[1, 2]);
+        assert_ne!(
+            first.try_as_slice::<i32>()?.as_ptr(),
+            second.try_as_slice::<i32>()?.as_ptr(),
+            "each execution must own its own allocation"
+        );
         Ok(())
     }
 }

@@ -38,11 +38,11 @@
 //! ```
 
 use crate::dyn_segment::{RawDropper, raw_dropper_for};
-use std::alloc::{Layout, dealloc};
+use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::fmt;
-use std::mem::{ManuallyDrop, align_of, size_of};
+use std::mem::{ManuallyDrop, MaybeUninit, align_of, size_of};
 use std::ptr::NonNull;
 use std::slice;
 
@@ -85,6 +85,39 @@ impl ArrayElementType {
             drop: raw_dropper_for::<T>(),
             nested: None,
         })
+    }
+
+    /// Returns the descriptor for a leaf element described by already-erased metadata, for a
+    /// caller (such as [`DynSegment::make_array`](crate::DynSegment::make_array)) that knows an
+    /// element's layout only at runtime.
+    ///
+    /// - Precondition: `size`, `align`, and `drop` are those of the single Rust type identified
+    ///   by `type_id`, and `type_id` is not [`DynamicArray`]'s — an array element descriptor is
+    ///   built by [`array_of`](Self::array_of) so its nested descriptor travels with it.
+    pub(crate) fn leaf_from_parts(
+        type_id: TypeId,
+        type_name: Cow<'static, str>,
+        size: usize,
+        align: usize,
+        drop: RawDropper,
+    ) -> Self {
+        debug_assert!(align.is_power_of_two(), "align must be a power of two");
+        debug_assert!(
+            size.is_multiple_of(align),
+            "size must be a multiple of align"
+        );
+        debug_assert!(
+            type_id != TypeId::of::<DynamicArray>(),
+            "a leaf element descriptor must not claim the array marker TypeId"
+        );
+        Self {
+            type_id,
+            type_name,
+            size,
+            align,
+            drop,
+            nested: None,
+        }
     }
 
     /// Returns the descriptor for a nested `DynamicArray` element.
@@ -422,15 +455,236 @@ impl fmt::Display for ArrayTypeError {
 
 impl std::error::Error for ArrayTypeError {}
 
+/// Reports array storage whose byte size cannot be represented as a valid allocation [`Layout`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ArrayLayoutError {
+    /// Recursive element name, for diagnostics.
+    element: Cow<'static, str>,
+    /// Requested element count.
+    capacity: usize,
+}
+
+impl fmt::Display for ArrayLayoutError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "array storage for {} elements of type {} cannot be represented safely",
+            self.capacity, self.element
+        )
+    }
+}
+
+impl std::error::Error for ArrayLayoutError {}
+
+/// Returns the allocation layout for `capacity` elements, or `None` when the storage needs no
+/// allocation (a zero-sized element type, or zero capacity).
+///
+/// # Errors
+/// Returns [`ArrayLayoutError`] when `size * capacity` overflows `usize` or exceeds the largest
+/// object a [`Layout`] can describe.
+///
+/// - Complexity: O(1).
+fn checked_array_layout(
+    element: &ArrayElementType,
+    capacity: usize,
+) -> Result<Option<Layout>, ArrayLayoutError> {
+    if element.size == 0 || capacity == 0 {
+        return Ok(None);
+    }
+    let overflow = || ArrayLayoutError {
+        element: element.display_name(),
+        capacity,
+    };
+    let bytes = element.size.checked_mul(capacity).ok_or_else(overflow)?;
+    Layout::from_size_align(bytes, element.align)
+        .map(Some)
+        .map_err(|_| overflow())
+}
+
+/// Checks that storage for `capacity` elements can be allocated, without allocating it.
+///
+/// This lets a caller that will build the array later (an array literal's parse-time validation,
+/// for instance) reject an unrepresentable size before it commits to the construction.
+///
+/// # Errors
+/// Returns [`ArrayLayoutError`] under exactly the conditions
+/// [`DynamicArrayBuilder::with_capacity`] would.
+///
+/// - Complexity: O(1).
+pub(crate) fn check_array_capacity(
+    element: &ArrayElementType,
+    capacity: usize,
+) -> Result<(), ArrayLayoutError> {
+    checked_array_layout(element, capacity).map(|_| ())
+}
+
 /// Returns the allocation layout for non-empty storage of non-zero-sized elements.
+///
+/// - Precondition: `capacity` elements of `element` were allocated successfully, so their layout
+///   is known to be representable.
 ///
 /// - Complexity: O(1).
 fn allocated_layout(element: &ArrayElementType, capacity: usize) -> Option<Layout> {
-    if element.size == 0 || capacity == 0 {
-        return None;
+    checked_array_layout(element, capacity)
+        .expect("a live array's own capacity has a representable layout")
+}
+
+/// Returns the non-null, suitably aligned pointer used for storage that owns no allocation.
+///
+/// - Complexity: O(1).
+fn dangling_for(element: &ArrayElementType) -> NonNull<u8> {
+    debug_assert!(element.align.is_power_of_two());
+    NonNull::new(std::ptr::without_provenance_mut(element.align))
+        .expect("a non-zero alignment is a non-null address")
+}
+
+/// Owns one exact-capacity array allocation while its elements are moved into it one at a time.
+///
+/// The builder is the guard the collection of an array literal runs under: it tracks the
+/// initialized prefix, so dropping it partway through a transfer drops exactly the elements
+/// already moved in — never uninitialized storage — and always frees the allocation.
+///
+/// # Examples
+///
+/// ```ignore
+/// let mut builder = DynamicArrayBuilder::with_capacity(element, 2)?;
+/// unsafe { builder.push_bytes(first) };
+/// unsafe { builder.push_bytes(second) };
+/// let array = builder.finish();
+/// ```
+pub(crate) struct DynamicArrayBuilder {
+    ptr: NonNull<u8>,
+    /// Number of element slots reserved by the allocation.
+    capacity: usize,
+    /// Number of leading slots already initialized.
+    len: usize,
+    element: ArrayElementType,
+}
+
+impl DynamicArrayBuilder {
+    /// Returns a builder owning uninitialized storage for exactly `capacity` elements.
+    ///
+    /// # Errors
+    /// Returns [`ArrayLayoutError`] when storage for `capacity` elements cannot be described by a
+    /// valid [`Layout`]. Ordinary allocation failure follows Rust's global allocation-error
+    /// behavior.
+    ///
+    /// - Postcondition: the returned builder holds no initialized element.
+    ///
+    /// - Complexity: O(1).
+    pub(crate) fn with_capacity(
+        element: ArrayElementType,
+        capacity: usize,
+    ) -> Result<Self, ArrayLayoutError> {
+        let ptr = match checked_array_layout(&element, capacity)? {
+            // Safety: `layout` has non-zero size, so `alloc` is called correctly; a null result
+            // is the documented allocation failure, reported through `handle_alloc_error`.
+            Some(layout) => {
+                NonNull::new(unsafe { alloc(layout) }).unwrap_or_else(|| handle_alloc_error(layout))
+            }
+            None => dangling_for(&element),
+        };
+        Ok(Self {
+            ptr,
+            capacity,
+            len: 0,
+            element,
+        })
     }
-    let bytes = element.size.checked_mul(capacity)?;
-    Layout::from_size_align(bytes, element.align).ok()
+
+    /// Moves one element's bytes out of `src` into the next uninitialized slot, taking ownership
+    /// of that element.
+    ///
+    /// A zero-sized element copies nothing: only the count of owned elements grows, which is what
+    /// later runs its drop glue exactly once per element.
+    ///
+    /// - Precondition: fewer than `capacity` elements have been pushed.
+    /// - Postcondition: the builder owns one more element than before.
+    ///
+    /// - Complexity: O(1) in the element's size.
+    ///
+    /// # Safety
+    /// `src` must be valid for reads of the element type's size and must hold a live value of
+    /// that type. Ownership of that value transfers to the builder: the caller must not drop it
+    /// (or let anything else drop it) afterward.
+    pub(crate) unsafe fn push_bytes(&mut self, src: *const MaybeUninit<u8>) {
+        debug_assert!(self.len < self.capacity, "builder capacity exceeded");
+        if self.element.size != 0 {
+            let offset = self.len * self.element.size;
+            // Safety: `offset + size` stays within the allocation because `len < capacity` and
+            // the allocation holds `capacity * size` bytes; `src` is valid for `size` reads per
+            // this function's contract, and a fresh allocation cannot overlap it.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src,
+                    self.ptr.as_ptr().add(offset).cast::<MaybeUninit<u8>>(),
+                    self.element.size,
+                );
+            }
+        }
+        self.len += 1;
+    }
+
+    /// Returns the [`Vec`]-compatible capacity for the storage this builder owns.
+    ///
+    /// - Complexity: O(1).
+    fn vec_capacity(&self) -> usize {
+        if self.element.size == 0 {
+            usize::MAX
+        } else {
+            self.capacity
+        }
+    }
+
+    /// Returns the array owning every element transferred into this builder so far.
+    ///
+    /// - Postcondition: the result's length is the number of pushed elements and its capacity is
+    ///   the requested capacity, so it converts to a `Vec<T>` without reallocating.
+    ///
+    /// - Complexity: O(1).
+    pub(crate) fn finish(self) -> DynamicArray {
+        let this = ManuallyDrop::new(self);
+        // Safety: `this` is never dropped, so moving `element` out of it by value leaves no
+        // second owner of the descriptor's heap data.
+        let element = unsafe { std::ptr::read(&this.element) };
+        // Safety: the allocation holds `capacity` slots of `element`'s layout, its first `len`
+        // slots were initialized by `push_bytes`, and ownership of both transfers here.
+        unsafe {
+            DynamicArray::try_from_raw_parts(this.ptr, this.len, this.vec_capacity(), element)
+        }
+        .expect("builder storage satisfies DynamicArray's invariants")
+    }
+}
+
+impl fmt::Debug for DynamicArrayBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DynamicArrayBuilder")
+            .field("len", &self.len)
+            .field("capacity", &self.capacity)
+            .field("element", &self.element)
+            .finish()
+    }
+}
+
+impl Drop for DynamicArrayBuilder {
+    fn drop(&mut self) {
+        // Handing the initialized prefix to a `DynamicArray` reuses its destructor: exactly the
+        // `len` live elements are dropped, in reverse order, and the allocation is freed with
+        // the layout its capacity implies.
+        let prefix = unsafe {
+            DynamicArray::try_from_raw_parts(
+                self.ptr,
+                self.len,
+                self.vec_capacity(),
+                self.element.clone(),
+            )
+        };
+        debug_assert!(
+            prefix.is_some(),
+            "builder storage satisfies DynamicArray's invariants"
+        );
+        drop(prefix);
+    }
 }
 
 /// Owns a homogeneous, type-erased, `Vec`-compatible allocation.
@@ -620,7 +874,7 @@ impl DynamicArray {
         {
             return None;
         }
-        if element.size != 0 && capacity != 0 && allocated_layout(&element, capacity).is_none() {
+        if checked_array_layout(&element, capacity).is_err() {
             return None;
         }
         Some(Self {
@@ -654,10 +908,15 @@ impl DynamicArray {
             ));
         }
 
-        let this = ManuallyDrop::new(self);
+        let mut this = ManuallyDrop::new(self);
         let len = this.len;
         let capacity = this.capacity;
         let ptr = this.ptr.as_ptr().cast::<T>();
+        // Suppressing this array's `Drop` keeps its elements and their allocation alive for the
+        // vector, but the element descriptor is metadata, not part of that allocation: a nested
+        // array's descriptor owns a boxed inner descriptor that nothing else would ever free.
+        // Safety: `this` is never dropped, so this is the descriptor's only destruction.
+        unsafe { std::ptr::drop_in_place(&raw mut this.element) };
         Ok(unsafe { Vec::from_raw_parts(ptr, len, capacity) })
     }
 
@@ -1019,5 +1278,86 @@ mod tests {
             } if expected == "u32" && found == "i32"
         ));
         assert_eq!(error.into_vec(), vec![1]);
+    }
+
+    /// Returns a pointer to `value`'s bytes, for a builder transfer that must not also drop it.
+    fn moved_bytes<T>(value: &ManuallyDrop<T>) -> *const MaybeUninit<u8> {
+        (&raw const **value).cast::<MaybeUninit<u8>>()
+    }
+
+    #[test]
+    fn builder_finish_owns_every_transferred_element() {
+        let mut builder =
+            DynamicArrayBuilder::with_capacity(ArrayElementType::leaf::<i32>().unwrap(), 3)
+                .unwrap();
+        for value in 0i32..3 {
+            let value = ManuallyDrop::new(value);
+            unsafe { builder.push_bytes(moved_bytes(&value)) };
+        }
+
+        let array = builder.finish();
+
+        assert_eq!(array.capacity(), 3);
+        assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn builder_drops_only_its_initialized_prefix() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut builder =
+            DynamicArrayBuilder::with_capacity(ArrayElementType::leaf::<CountedDrop>().unwrap(), 4)
+                .unwrap();
+        for _ in 0..2 {
+            let value = ManuallyDrop::new(CountedDrop(drops.clone()));
+            unsafe { builder.push_bytes(moved_bytes(&value)) };
+        }
+
+        drop(builder);
+
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn builder_finishes_zero_sized_elements_without_allocating() {
+        ZST_DROPS.store(0, Ordering::SeqCst);
+        let mut builder =
+            DynamicArrayBuilder::with_capacity(ArrayElementType::leaf::<DroppingZst>().unwrap(), 3)
+                .unwrap();
+        for _ in 0..3 {
+            let value = ManuallyDrop::new(DroppingZst);
+            unsafe { builder.push_bytes(moved_bytes(&value)) };
+        }
+
+        let array = builder.finish();
+        assert_eq!(array.len(), 3);
+        assert_eq!(array.capacity(), usize::MAX);
+        assert_eq!(ZST_DROPS.load(Ordering::SeqCst), 0);
+
+        drop(array);
+        assert_eq!(ZST_DROPS.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn builder_rejects_a_capacity_whose_layout_overflows() {
+        let error = DynamicArrayBuilder::with_capacity(
+            ArrayElementType::leaf::<[u8; 1024]>().unwrap(),
+            usize::MAX / 512,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("[u8; 1024]"), "{error}");
+    }
+
+    #[test]
+    fn checked_array_capacity_accepts_a_representable_layout() {
+        assert!(check_array_capacity(&ArrayElementType::leaf::<i32>().unwrap(), 4).is_ok());
+        assert!(
+            check_array_capacity(
+                &ArrayElementType::leaf::<DroppingZst>().unwrap(),
+                usize::MAX
+            )
+            .is_ok(),
+            "zero-sized elements never allocate, so no capacity overflows"
+        );
     }
 }
