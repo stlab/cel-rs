@@ -271,7 +271,9 @@ impl Ty {
     /// load-bearing property that lets unannotated cells and custom host types produce zero
     /// false-positive diagnostics.
     ///
-    /// - Complexity: O(d) in the smaller of the two types' array nesting depths.
+    /// - Complexity: O(d) in the array nesting depth of the unified type, which is at least the
+    ///   depth of the deeper of the two operands — a [`Ty::Any`] operand still clones the other
+    ///   side's full nested structure.
     ///
     /// # Examples
     ///
@@ -293,7 +295,9 @@ impl Ty {
     ///
     /// - Postcondition: `self.unify(other).is_some() == self.unifies_with(other)`, and the result
     ///   (when `Some`) unifies with both `self` and `other`.
-    /// - Complexity: O(d) in the smaller of the two types' array nesting depths.
+    /// - Complexity: O(d) in the array nesting depth of the result, which is at least the depth
+    ///   of the deeper of the two operands — a [`Ty::Any`] operand still clones the other side's
+    ///   full nested structure.
     ///
     /// # Examples
     ///
@@ -1246,6 +1250,55 @@ mod tests {
         let (_, diags) = check_expr(&expr, &any_resolver);
         assert_eq!(diags.len(), 1, "one diagnostic per array literal");
         assert!(diags[0].message().contains("found `f64`"), "the first one");
+    }
+
+    #[test]
+    fn a_conflicting_elements_diagnostic_is_anchored_at_that_element() {
+        // Every other array test builds spans with `Span::call_site()`, where "this element's
+        // span", "the whole literal's span", and "some other element's span" are all
+        // indistinguishable. Parsing real source (proc-macro2's `span-locations` feature is on)
+        // gives each token its own line/column, making the anchoring observable: the conflict is
+        // reported at the element on line 4, not at the enclosing `[`...`]` starting on line 1,
+        // and not at a fixed earlier position such as line 2 or 3.
+        let source = "[\n    1i32,\n    2i32,\n    3.0f64,\n    4i32\n]";
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser.parse_str_ast(source).expect("source parses");
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0].message().contains("expected `i32`, found `f64`"),
+            "got: {}",
+            diags[0].message()
+        );
+        let start = diags[0].span().start();
+        let end = diags[0]
+            .end_span()
+            .expect("the conflict diagnostic spans a range")
+            .end();
+        assert_eq!(start.line, 4, "anchored at the conflicting element's line");
+        assert_eq!(start.column, 4, "at the element, not the enclosing group");
+        assert_eq!(end.line, 4);
+        assert_eq!(end.column, 4 + "3.0f64".len());
+    }
+
+    #[test]
+    fn a_conflict_inside_a_nested_array_does_not_cascade_to_the_outer_literal() {
+        // `[[1i32, 2.0f64], [3i32, 4i32]]`: the inner `[1i32, 2.0f64]` conflicts and falls back
+        // to `Array(Any)`, which still unifies with the valid inner array's `Array(i32)` - so the
+        // outer fold stays silent and the outer literal keeps the concrete nested element type.
+        let expr = array(vec![
+            array(vec![lit_i32(1), lit_f64(2.0)]),
+            array(vec![lit_i32(3), lit_i32(4)]),
+        ]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(diags.len(), 1, "only the inner conflict is reported");
+        assert!(
+            diags[0].message().contains("expected `i32`, found `f64`"),
+            "got: {}",
+            diags[0].message()
+        );
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))));
     }
 
     #[test]
