@@ -916,6 +916,78 @@ mod tests {
         assert!(!Ty::I32.unifies_with(&Ty::Bool));
     }
 
+    /// Every concrete (non-[`Ty::Array`], non-[`Ty::Any`]) variant, in declaration order.
+    fn concrete_tys() -> [Ty; 16] {
+        [
+            Ty::I8,
+            Ty::I16,
+            Ty::I32,
+            Ty::I64,
+            Ty::I128,
+            Ty::Isize,
+            Ty::U8,
+            Ty::U16,
+            Ty::U32,
+            Ty::U64,
+            Ty::U128,
+            Ty::Usize,
+            Ty::F32,
+            Ty::F64,
+            Ty::Bool,
+            Ty::String,
+        ]
+    }
+
+    #[test]
+    fn every_builtin_scalar_table_agrees_on_the_same_names_and_types() {
+        use crate::op_table::{BUILTIN_SCALAR_NAMES, builtin_scalar_type};
+        use crate::type_expr::TypeResolver;
+
+        for ty in concrete_tys() {
+            let name = ty.name();
+            let expected_id = ty.type_id().expect("a concrete Ty has a TypeId");
+            assert!(
+                BUILTIN_SCALAR_NAMES.contains(&&*name),
+                "`{name}` must be one of the built-in scalar names"
+            );
+            assert_eq!(
+                Ty::from_name(&name),
+                Some(ty.clone()),
+                "`{name}` must round-trip through Ty::from_name"
+            );
+            let scalar = builtin_scalar_type(&name)
+                .unwrap_or_else(|| panic!("`{name}` must resolve as a built-in scalar"));
+            assert_eq!(scalar.type_id, expected_id);
+            assert_eq!(scalar.type_name, name);
+            let leaf = BuiltinTypeResolver
+                .resolve_named_type(&name)
+                .unwrap_or_else(|| panic!("`{name}` must resolve as a CEL leaf type"));
+            assert_eq!(leaf.type_id(), expected_id);
+            assert_eq!(leaf.type_name(), name);
+            assert_eq!(leaf.element_type().type_id(), expected_id);
+            assert_eq!(
+                leaf.element_type().type_name(),
+                name,
+                "the runtime element descriptor must carry the source-level name"
+            );
+            assert_eq!(leaf.element_type().size(), scalar.size);
+            assert_eq!(leaf.element_type().align(), scalar.align);
+        }
+    }
+
+    #[test]
+    fn every_builtin_scalar_name_has_a_concrete_ty() {
+        use crate::op_table::BUILTIN_SCALAR_NAMES;
+
+        let ty_names: Vec<Cow<'static, str>> = concrete_tys().iter().map(Ty::name).collect();
+        for name in BUILTIN_SCALAR_NAMES {
+            assert!(
+                ty_names.iter().any(|ty_name| ty_name == name),
+                "the built-in scalar `{name}` has no concrete Ty variant"
+            );
+        }
+    }
+
     #[test]
     fn name_is_distinct_per_type() {
         let names: Vec<Cow<'static, str>> = [

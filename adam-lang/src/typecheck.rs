@@ -1,6 +1,7 @@
 //! A best-effort static type checker over [`crate::ast::Sheet`] trees, built on
-//! [`cel_parser::ty::check_expr_with_type_resolver`]. Checks each `cell`'s initializer against its `:
-//! type_name` annotation (a `source`'s initializer is checked identically — a `source` shares
+//! [`cel_parser::ty::check_expr_with_type_resolver`]. Checks each `cell`'s literal or
+//! tuple-shaped initializer against its `: type_name` annotation (a `source`'s initializer is
+//! checked identically — a `source` shares
 //! `cell`'s exact shape, including its optional `filter` clause), each `relationship`/`conditional`
 //! binding's body against its declared outputs (arity: does the body actually produce as many
 //! values as declared; and per-output type), and each `out`'s initializer body against its optional
@@ -382,8 +383,10 @@ fn expr_matches_shape(
 /// Checks one `cell`'s or `source`'s initializer against its `: type_expr` annotation. A no-op if
 /// either half is absent, or if the annotation names a type `registry` doesn't recognize.
 /// Dispatches to [`expr_matches_shape`] for a tuple-shaped annotation (recursively,
-/// element-wise); otherwise falls back to the original literal/scalar check, since a non-tuple
-/// initializer that isn't a bare literal fails to constant-fold in the real parser anyway.
+/// element-wise). A scalar annotation cross-checks only a bare literal initializer (adam-lang's
+/// exact-type, no-coercion literal rule); any other scalar initializer is only checked for its
+/// own internal diagnostics — including a CEL typed-array annotation mismatch inside its body —
+/// and never against the annotation itself, which the real parser reports from the folded value.
 ///
 /// Takes `type_name`/`initializer` directly (rather than a whole `&CellDecl`) so both
 /// `SheetItem::Cell` and `SheetItem::Source` — which share this same shape but aren't the same
@@ -422,20 +425,13 @@ fn check_cell_initializer(
         return;
     }
     let resolve = |_: &str| Ty::Any;
-    let (actual, body_diags) = check_expr_with_type_resolver(expr, &resolve, resolve_type);
+    // Scope-preserving: a non-literal scalar initializer gets its own body diagnostics (an
+    // operator mismatch, a CEL typed-array annotation mismatch) reported, but is deliberately
+    // *not* cross-checked against the annotation here — the real parser constant-folds it and
+    // reports its own `cell ...: type mismatch` for that, and a second, differently worded
+    // diagnostic from this checker would only duplicate it.
+    let (_, body_diags) = check_expr_with_type_resolver(expr, &resolve, resolve_type);
     diagnostics.extend(body_diags);
-    let declared = shape_to_ty(&shape);
-    if !declared.unifies_with(&actual) {
-        diagnostics.push(ParseError::new_range(
-            format!(
-                "expression produces `{}`, but `{}` was expected",
-                actual.name(),
-                declared.name()
-            ),
-            expr.span().start,
-            expr.span().end,
-        ));
-    }
 }
 
 /// The expected `TypeShape` for a filtered cell's own declared/inferred shape (`_`'s type inside
@@ -925,6 +921,30 @@ mod tests {
         let sheet = parse("sheet s { cell x: i32 = 5 require { @positive x; }; }");
         let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn cell_initializer_non_literal_expression_is_not_cross_checked() {
+        // A non-literal scalar initializer is left to the real parser, which constant-folds it
+        // and reports its own `cell ...: type mismatch`. The checker must not add a second,
+        // differently-worded diagnostic here.
+        let sheet = parse("sheet s { cell x: f64 = 1 + 2; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let messages: Vec<&str> = diags.iter().map(cel_parser::ParseError::message).collect();
+        assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
+    }
+
+    #[test]
+    fn cell_initializer_array_annotation_diagnostics_still_surface() {
+        // The initializer's own body diagnostics (here, a CEL typed-array annotation mismatch)
+        // must still be reported even though the initializer isn't a bare literal.
+        let sheet = parse("sheet s { cell x: f64 = [0, 1]: [f64]; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let messages: Vec<&str> = diags.iter().map(cel_parser::ParseError::message).collect();
+        assert_eq!(
+            messages,
+            vec!["array elements must match the annotation exactly: expected `f64`, found `i32`"]
+        );
     }
 
     #[test]

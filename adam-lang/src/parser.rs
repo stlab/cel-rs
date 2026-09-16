@@ -697,6 +697,35 @@ impl AdamParser {
         Ok((shape, cell_id))
     }
 
+    /// Returns the DSL name `self.types` registered `type_id` under, or `"?"` when it is
+    /// unregistered.
+    ///
+    /// Keeps an "expected"/"got" pair in one naming scheme: `TypeRegistry::display_name` renders
+    /// the expected side from registered names, while a live value's `ValueType::type_name` is a
+    /// Rust type path (`alloc::string::String` for the type registered as `String`).
+    fn registered_type_name(&self, type_id: TypeId) -> &str {
+        self.types.registered_name(type_id).unwrap_or("?")
+    }
+
+    /// Returns one live tuple element's type name in the same registered naming scheme
+    /// [`TypeRegistry::display_name`] uses, recursing into nested tuples. Falls back to the
+    /// value's own Rust type path for an unregistered leaf, which has no registered name.
+    ///
+    /// - Complexity: O(n) in the number of (nested) elements.
+    fn associated_display_name(&self, elem: &cel_runtime::AssociatedType) -> String {
+        match elem.value_type.tuple_elements() {
+            Some(children) => self
+                .shape_of_associated(children)
+                .map(|shape| self.types.display_name(&shape))
+                .unwrap_or_else(|_| elem.value_type.type_name().to_string()),
+            None => self
+                .types
+                .registered_name(elem.value_type.type_id())
+                .unwrap_or_else(|| elem.value_type.type_name())
+                .to_string(),
+        }
+    }
+
     /// Recursively converts a live tuple's `AssociatedType` shape into a `TypeShape`, by looking
     /// up each leaf's `TypeId` against `self.types`.
     ///
@@ -1648,11 +1677,7 @@ impl AdamParser {
                     })?;
                     if actual_type_id != *out_type_id {
                         let expected = self.types.display_name(out_shape);
-                        let got = self
-                            .types
-                            .entry_by_type_id(actual_type_id)
-                            .map(|e| e.type_name.to_string())
-                            .unwrap_or_else(|| "?".to_string());
+                        let got = self.registered_type_name(actual_type_id);
                         return Err(ctx.err_at(format!(
                             "output `{out_name}`: type mismatch: expected `{expected}`, got `{got}`"
                         )));
@@ -1720,7 +1745,7 @@ impl AdamParser {
                     return Err(ctx.err_at(format!(
                         "output {i} `{out_name}`: type mismatch: expected `{}`, got `{}`",
                         self.types.display_name(out_shape),
-                        elem.value_type.type_name()
+                        self.associated_display_name(elem)
                     )));
                 }
                 extractors.push(match out_shape {
@@ -2875,6 +2900,42 @@ mod tests {
         let err = result.expect_err("expected Err");
         let msg = err.message().to_lowercase();
         assert!(msg.contains("arity"), "{msg}");
+    }
+
+    #[test]
+    fn parse_method_output_type_mismatch_names_the_registered_type() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell a: String = "x";
+                cell x: i32;
+                relationship { x := a; }
+            }
+        "#,
+        );
+        let err = result.expect_err("a String body for an i32 output must be an error");
+        let msg = err.message();
+        assert!(msg.contains("got `String`"), "{msg}");
+        assert!(!msg.contains("::"), "no Rust type path may leak: {msg}");
+    }
+
+    #[test]
+    fn parse_method_destructured_output_type_mismatch_names_the_registered_type() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell a: String = "x";
+                cell b: i32 = 1;
+                cell x: i32;
+                cell y: i32;
+                relationship { (x, y) := (a, b); }
+            }
+        "#,
+        );
+        let err = result.expect_err("a String tuple element for an i32 output must be an error");
+        let msg = err.message();
+        assert!(msg.contains("got `String`"), "{msg}");
+        assert!(!msg.contains("::"), "no Rust type path may leak: {msg}");
     }
 
     #[test]

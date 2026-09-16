@@ -208,6 +208,31 @@ impl ArrayElementType {
         &self.type_name
     }
 
+    /// Returns this descriptor with `type_name` as the name diagnostics report for its own type.
+    ///
+    /// [`leaf`](Self::leaf) records `std::any::type_name::<T>()`, a Rust type path. A host that
+    /// resolves a source-level annotation (`[]: [Celsius]`) uses this to keep the name the source
+    /// actually wrote in later runtime mismatch diagnostics. Only this descriptor's own name
+    /// changes: an array descriptor renders its diagnostics name recursively from its nested
+    /// element, so renaming an [`array_of`](Self::array_of) descriptor has no visible effect.
+    ///
+    /// - Postcondition: the returned descriptor's identity, layout, and drop hook are unchanged,
+    ///   so it stays interchangeable with the descriptor it was built from.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::ArrayElementType;
+    ///
+    /// let element = ArrayElementType::leaf::<String>().unwrap().with_type_name("String");
+    /// assert_eq!(element.type_name(), "String");
+    /// ```
+    #[must_use]
+    pub fn with_type_name(mut self, type_name: impl Into<Cow<'static, str>>) -> Self {
+        self.type_name = type_name.into();
+        self
+    }
+
     /// Returns the element size in bytes.
     ///
     /// # Examples
@@ -1308,6 +1333,32 @@ mod tests {
         assert_eq!(array.capacity(), 0);
         assert_eq!(array.element_type(), &element);
         assert!(array.try_into_vec::<DroppingZst>().unwrap().is_empty());
+    }
+
+    #[test]
+    fn with_type_name_renames_a_leaf_without_changing_its_identity() {
+        let element = ArrayElementType::leaf::<String>()
+            .unwrap()
+            .with_type_name("String");
+
+        assert_eq!(element.type_name(), "String");
+        assert_eq!(element.type_id(), TypeId::of::<String>());
+        assert_eq!(element.size(), std::mem::size_of::<String>());
+        assert_eq!(element.align(), std::mem::align_of::<String>());
+        assert!(
+            element.same_shape_layout_and_ownership(&ArrayElementType::leaf::<String>().unwrap())
+        );
+    }
+
+    #[test]
+    fn with_type_name_on_a_leaf_is_visible_through_a_nested_descriptor() {
+        let element = ArrayElementType::array_of(
+            ArrayElementType::leaf::<String>()
+                .unwrap()
+                .with_type_name("String"),
+        );
+
+        assert_eq!(element.display_name(), "[String]");
     }
 
     #[test]

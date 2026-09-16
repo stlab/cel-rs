@@ -116,36 +116,16 @@ pub(crate) struct BuiltinTypeResolver;
 
 impl TypeResolver for BuiltinTypeResolver {
     fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType> {
-        let element_type = builtin_array_element_type(name)?;
         let builtin = op_table::builtin_scalar_type(name)?;
-        Some(ResolvedLeafType::new(builtin.type_name, element_type))
+        Some(ResolvedLeafType::new(
+            builtin.type_name,
+            (builtin.element_type)(),
+        ))
     }
 }
 
 pub(crate) fn default_type_resolver() -> Arc<dyn TypeResolver> {
     Arc::new(BuiltinTypeResolver)
-}
-
-fn builtin_array_element_type(name: &str) -> Option<ArrayElementType> {
-    Some(match name {
-        "u8" => ArrayElementType::leaf::<u8>().unwrap(),
-        "u16" => ArrayElementType::leaf::<u16>().unwrap(),
-        "u32" => ArrayElementType::leaf::<u32>().unwrap(),
-        "u64" => ArrayElementType::leaf::<u64>().unwrap(),
-        "u128" => ArrayElementType::leaf::<u128>().unwrap(),
-        "usize" => ArrayElementType::leaf::<usize>().unwrap(),
-        "i8" => ArrayElementType::leaf::<i8>().unwrap(),
-        "i16" => ArrayElementType::leaf::<i16>().unwrap(),
-        "i32" => ArrayElementType::leaf::<i32>().unwrap(),
-        "i64" => ArrayElementType::leaf::<i64>().unwrap(),
-        "i128" => ArrayElementType::leaf::<i128>().unwrap(),
-        "isize" => ArrayElementType::leaf::<isize>().unwrap(),
-        "f32" => ArrayElementType::leaf::<f32>().unwrap(),
-        "f64" => ArrayElementType::leaf::<f64>().unwrap(),
-        "bool" => ArrayElementType::leaf::<bool>().unwrap(),
-        "String" => ArrayElementType::leaf::<String>().unwrap(),
-        _ => return None,
-    })
 }
 
 /// One resolved scalar leaf type.
@@ -162,13 +142,19 @@ pub struct ResolvedLeafType {
 impl ResolvedLeafType {
     /// Creates one resolved leaf from a user-facing type name and runtime element descriptor.
     ///
-    /// - Postcondition: the returned leaf's [`type_id`](Self::type_id) matches `element_type`.
+    /// The descriptor adopts `type_name`, so a runtime mismatch diagnostic against this leaf
+    /// reports the name the source annotation (or the host's registry) uses rather than
+    /// [`ArrayElementType::leaf`]'s Rust type path.
+    ///
+    /// - Postcondition: the returned leaf's [`type_id`](Self::type_id) matches `element_type`,
+    ///   and its [`element_type`](Self::element_type) reports `type_name`.
     #[must_use]
     pub fn new(type_name: impl Into<Cow<'static, str>>, element_type: ArrayElementType) -> Self {
+        let type_name = type_name.into();
         Self {
             type_id: element_type.type_id(),
-            type_name: type_name.into(),
-            element_type,
+            element_type: element_type.with_type_name(type_name.clone()),
+            type_name,
         }
     }
 

@@ -512,15 +512,29 @@ impl TypeRegistry {
         }
     }
 
+    /// Returns the DSL name `type_id` was registered under, or `None` if it is unregistered.
+    ///
+    /// This is the name every diagnostic should use for a live value's type: a `TypeEntry`'s own
+    /// `type_name` is the Rust type path (`alloc::string::String`), not the registered name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use adam_lang::TypeRegistry;
+    /// let reg = TypeRegistry::new();
+    /// assert_eq!(reg.registered_name(std::any::TypeId::of::<String>()), Some("String"));
+    /// assert_eq!(reg.registered_name(std::any::TypeId::of::<Vec<u8>>()), None);
+    /// ```
+    #[must_use]
+    pub fn registered_name(&self, type_id: TypeId) -> Option<&str> {
+        self.by_type_id.get(&type_id).map(String::as_str)
+    }
+
     /// Formats `shape` recursively, e.g. `"(i32, (f64, String))"`, for error messages.
     #[must_use]
     pub fn display_name(&self, shape: &TypeShape) -> String {
         match shape {
-            TypeShape::Named(type_id) => self
-                .by_type_id
-                .get(type_id)
-                .cloned()
-                .unwrap_or_else(|| "?".to_string()),
+            TypeShape::Named(type_id) => self.registered_name(*type_id).unwrap_or("?").to_string(),
             TypeShape::Tuple(elements) => {
                 let parts: Vec<String> = elements.iter().map(|e| self.display_name(e)).collect();
                 format!("({})", parts.join(", "))

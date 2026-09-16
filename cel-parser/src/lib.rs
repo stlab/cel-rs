@@ -4175,6 +4175,49 @@ mod tests {
     }
 
     #[test]
+    fn typed_array_annotation_rejects_a_recursive_element_type_mismatch() {
+        // The annotation's mismatch is one level below the outer array: the values are nested
+        // `i32` arrays, the annotation names nested `f64` arrays.
+        let err = array_parse_error("[[0, 1]]: [[f64]]");
+        assert!(
+            err.message().contains("expected [f64]"),
+            "got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("type [i32]"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_mismatch_names_the_registered_type_not_its_rust_path() {
+        let resolver = [(
+            "Celsius",
+            ResolvedLeafType::new(
+                "Celsius",
+                cel_runtime::ArrayElementType::leaf::<Celsius>().unwrap(),
+            ),
+        )];
+        let mut parser = CELParser::with_type_resolver(OpLookup::new(), resolver);
+        let err = match parser.parse_str("[0]: [Celsius]") {
+            Err(e) => e,
+            Ok(_) => panic!("expected `[0]: [Celsius]` to reject its `i32` element"),
+        };
+        assert!(
+            err.message().contains("expected Celsius"),
+            "the registered annotation name must survive into the diagnostic, got: {}",
+            err.message()
+        );
+        assert!(
+            !err.message().contains("::"),
+            "no Rust type path may leak into the diagnostic, got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
     fn typed_array_annotation_rejects_an_unknown_type_name() {
         let err = array_parse_error("[0]: [Nope]");
         assert!(
