@@ -291,8 +291,10 @@ impl ResolvedArrayType {
 #[cfg(test)]
 mod tests {
     use std::any::TypeId;
+    use std::str::FromStr;
 
     use cel_runtime::ArrayElementType;
+    use proc_macro2::TokenStream;
 
     use crate::{CELParser, OpLookup};
 
@@ -314,6 +316,46 @@ mod tests {
             }
             other => panic!("expected a named type expression, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_type_expr_consumes_one_prefix_and_leaves_following_tokens() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let input = TokenStream::from_str("[i32] [f64]").unwrap();
+        parser.set_tokens(input.into_iter());
+
+        let first = parser.parse_type_expr().unwrap();
+        let second = parser.parse_type_expr().unwrap();
+
+        match first {
+            TypeExpr::Array { element, .. } => match *element {
+                TypeExpr::Named { name, .. } => assert_eq!(name, "i32"),
+                other => panic!("expected the first element type to be named, got {other:?}"),
+            },
+            other => panic!("expected the first prefix to be an array type, got {other:?}"),
+        }
+
+        match second {
+            TypeExpr::Array { element, .. } => match *element {
+                TypeExpr::Named { name, .. } => assert_eq!(name, "f64"),
+                other => panic!("expected the second element type to be named, got {other:?}"),
+            },
+            other => panic!("expected the second prefix to be an array type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_type_expr_str_still_rejects_trailing_tokens() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = parser
+            .parse_type_expr_str("[i32] [f64]")
+            .expect_err("whole-input helpers must reject trailing tokens");
+
+        assert!(
+            err.message().contains("unexpected token"),
+            "got: {}",
+            err.message()
+        );
     }
 
     #[test]
@@ -340,8 +382,17 @@ mod tests {
     #[test]
     fn parse_tuple_type_exprs_and_reuse_them_inside_array_syntax() {
         let mut parser = CELParser::new(OpLookup::new());
+        let grouped = parser.parse_type_expr_str("([i32])").unwrap();
         let tuple = parser.parse_type_expr_str("(i32, f64)").unwrap();
         let array = parser.parse_type_expr_str("[(i32, f64)]").unwrap();
+
+        match grouped {
+            TypeExpr::Array { span, .. } => {
+                assert_eq!(span.start.source_text().as_deref(), Some("([i32])"));
+                assert_eq!(span.end.source_text().as_deref(), Some("([i32])"));
+            }
+            other => panic!("expected grouped array syntax to stay an array type, got {other:?}"),
+        }
 
         match tuple {
             TypeExpr::Tuple { elements, span } => {

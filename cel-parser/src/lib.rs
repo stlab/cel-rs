@@ -711,13 +711,9 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the input does not contain a valid complete type expression.
+    /// Returns an error if the current token stream does not begin with a valid type expression.
     pub fn parse_type_expr(&mut self) -> Result<TypeExpr> {
-        let expr = self.parse_type_expression()?;
-        if self.peek_token().is_some() {
-            return Err(self.error_at("unexpected token"));
-        }
-        Ok(expr)
+        self.parse_type_expression()
     }
 
     /// Parses one complete `type_expr` from `tokens`.
@@ -727,7 +723,11 @@ impl<C: ParserContext> Parser<C> {
     /// Returns an error if `tokens` does not contain a valid complete type expression.
     pub fn parse_type_expr_tokens(&mut self, tokens: TokenStreamIter) -> Result<TypeExpr> {
         self.set_tokens(tokens);
-        self.parse_type_expr()
+        let expr = self.parse_type_expr()?;
+        if self.peek_token().is_some() {
+            return Err(self.error_at("unexpected token"));
+        }
+        Ok(expr)
     }
 
     /// Parses one complete `type_expr` from `s`.
@@ -1808,7 +1808,15 @@ impl<C: ParserContext> Parser<C> {
 
         let first = self.parse_type_expression()?;
         if self.is_close_paren() {
-            return Ok(first);
+            let span = ExprSpan {
+                start: open_span,
+                end: self.last_span,
+            };
+            return Ok(match first {
+                TypeExpr::Named { name, .. } => TypeExpr::Named { name, span },
+                TypeExpr::Array { element, .. } => TypeExpr::Array { element, span },
+                TypeExpr::Tuple { elements, .. } => TypeExpr::Tuple { elements, span },
+            });
         }
         if !self.is_punctuation(",") {
             return Err(self.error_at("expected ',' or closing ')'"));

@@ -57,3 +57,29 @@ Implemented only Task 2 from `docs/superpowers/plans/2026-09-16-typed-array-anno
 ## Concerns
 - Built-in leaf resolution currently duplicates the built-in scalar-name match once for cast/closure metadata and once for array element descriptors. A later cleanup may want to consolidate those tables without broadening Task 2 scope.
 - Task 2 intentionally stops short of threading unresolved type annotations into `AstContext` or parsing `: type_expr` after arrays; Task 3 must connect the new reusable grammar to array expressions and AST storage.
+
+## Task 2 review follow-up
+Addressed the Task 2 review findings in `cel-parser` without widening scope beyond the reviewed API surface.
+
+### Fixes
+- Made `CELParser::parse_type_expr` match its public contract: it now parses exactly one leading `type_expr` from the current token stream and leaves any following tokens untouched.
+- Preserved whole-input helper behavior by keeping `parse_type_expr_tokens` and `parse_type_expr_str` strict: both now reject trailing tokens after the first parsed type expression.
+- Preserved the outer source span for parenthesized grouping such as `([i32])`, so grouped `TypeExpr`s keep the full parenthesized span instead of collapsing to the inner node's span.
+
+### Regression tests
+- Added a failing-first test proving `parse_type_expr` can parse two adjacent type-expression prefixes from one token stream.
+- Added a failing-first test proving `parse_type_expr_str` still rejects trailing tokens for whole-input parsing.
+- Extended the tuple/array type-expression test to assert that grouped array syntax preserves the outer parenthesized span.
+
+### Review-fix verification
+#### RED
+- `cargo test -p cel-parser type_expr -- --nocapture`
+  - Failed as expected before the fix:
+    - `parse_type_expr_consumes_one_prefix_and_leaves_following_tokens` errored with `unexpected token`.
+    - `parse_tuple_type_exprs_and_reuse_them_inside_array_syntax` showed the grouped span collapsed from `([i32])` to `[i32]`.
+
+#### GREEN
+- `cargo test -p cel-parser type_expr -- --nocapture`
+  - Passed: 8 tests.
+- `cargo fmt --all && cargo test -p cel-parser type_expr -- --nocapture`
+  - Formatting succeeded and the same 8 focused `type_expr` tests passed again afterward.
