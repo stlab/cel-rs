@@ -39,7 +39,7 @@ use crate::type_registry::TypeShape;
 pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
     let mut diagnostics = Vec::new();
     let (cell_types, shapes) = declared_cell_types(sheet, registry);
-    let resolve = |name: &str| -> Ty { cell_types.get(name).copied().unwrap_or(Ty::Any) };
+    let resolve = |name: &str| -> Ty { cell_types.get(name).cloned().unwrap_or(Ty::Any) };
     for item in &sheet.items {
         match item {
             SheetItem::Cell(cell) => {
@@ -173,7 +173,7 @@ fn declared_cell_types(
             _ => {}
         }
     }
-    let resolve_cells = |name: &str| -> Ty { map.get(name).copied().unwrap_or(Ty::Any) };
+    let resolve_cells = |name: &str| -> Ty { map.get(name).cloned().unwrap_or(Ty::Any) };
     let mut out_types = std::collections::HashMap::new();
     for item in &sheet.items {
         if let SheetItem::Out(out_decl) = item {
@@ -200,8 +200,8 @@ fn declared_cell_types(
 /// statically checked. A char/byte-string/C-string/unit literal ([`Ty::from_literal`] maps these
 /// to [`Ty::Any`]) never equals a concrete `declared` type, so it mismatches every registered
 /// type, as adam-lang's real parser has no rule accepting one there.
-fn literal_matches_declared_ty(lit: &Literal, declared: Ty) -> bool {
-    declared == Ty::Any || Ty::from_literal(lit) == declared
+fn literal_matches_declared_ty(lit: &Literal, declared: &Ty) -> bool {
+    *declared == Ty::Any || Ty::from_literal(lit) == *declared
 }
 
 /// Checks whether `expr` structurally matches `shape`, recursively: a `TypeShape::Named` leaf
@@ -340,7 +340,7 @@ fn check_cell_initializer(
             None => return,
         },
     );
-    if !literal_matches_declared_ty(literal, declared) {
+    if !literal_matches_declared_ty(literal, &declared) {
         diagnostics.push(ParseError::new_range(
             format!("literal cannot be used as type `{}`", declared.name()),
             lit_span.start,
@@ -463,7 +463,13 @@ fn check_filter(
     }
 
     let own_ty = resolve(name);
-    let body_resolve = |ident: &str| -> Ty { if ident == "_" { own_ty } else { resolve(ident) } };
+    let body_resolve = |ident: &str| -> Ty {
+        if ident == "_" {
+            own_ty.clone()
+        } else {
+            resolve(ident)
+        }
+    };
 
     match shape {
         Some(TypeShape::Tuple(_)) => unreachable!("handled above"),
