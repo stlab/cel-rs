@@ -344,6 +344,28 @@ fn render_closure_param_type(type_expr: &crate::ClosureParamTypeExpr) -> String 
     }
 }
 
+/// Renders one unresolved array-annotation type expression.
+///
+/// - Complexity: O(n) in the number of nodes in `type_expr`.
+fn render_type_expr(type_expr: &crate::TypeExpr) -> String {
+    match type_expr {
+        crate::TypeExpr::Named { name, .. } => name.clone(),
+        crate::TypeExpr::Array { element, .. } => format!("[{}]", render_type_expr(element)),
+        crate::TypeExpr::Tuple { elements, .. } => {
+            let inner = elements
+                .iter()
+                .map(render_type_expr)
+                .collect::<Vec<_>>()
+                .join(", ");
+            match elements.len() {
+                0 => "()".to_string(),
+                1 => format!("({inner},)"),
+                _ => format!("({inner})"),
+            }
+        }
+    }
+}
+
 /// Returns the end position of a closure parameter's declared type expression — the boundary
 /// right before the header's closing `|`.
 fn closure_param_type_end(type_expr: &crate::ClosureParamTypeExpr) -> proc_macro2::Span {
@@ -571,19 +593,31 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             );
             (list, Level::PRIMARY)
         }
-        Expr::Array { elements, span } => {
-            // `span.start` and `span.end` are both the same whole-group span here (see
-            // `emit_list`'s doc comment): `.start()` is the position of `[`, `.end()` the
-            // position right after `]`. Array literals never take a trailing comma (the grammar
-            // is LL(1) and rejects one outright), unlike the one-tuple special case above.
-            let list = emit_list(
+        Expr::Array {
+            elements,
+            annotation_span,
+            type_annotation,
+            span,
+        } => {
+            // `span.start` is the `[` token. The closing `]` sits either at `span.end` for an
+            // unannotated array or immediately before `annotation_span` when a `: Type`
+            // ascription follows. Array literals never take a trailing comma (the grammar is
+            // LL(1) and rejects one outright), unlike the one-tuple special case above.
+            let close_pos = annotation_span
+                .map(|annotation_span| annotation_span.start.start())
+                .unwrap_or_else(|| span.end.end());
+            let mut list = emit_list(
                 source,
                 depth,
                 ("[", "]"),
-                (span.start.start(), span.end.end()),
+                (span.start.start(), close_pos),
                 elements,
                 false,
             );
+            if let Some(type_annotation) = type_annotation {
+                list.push_str(": ");
+                list.push_str(&render_type_expr(type_annotation));
+            }
             (list, Level::PRIMARY)
         }
         Expr::TupleIndex { base, index, .. } => (
@@ -911,6 +945,12 @@ mod tests {
     fn arrays_format_with_brackets_and_normalized_commas() {
         assert_eq!(fmt("[1i32,2i32]"), "[1i32, 2i32]");
         assert_eq!(fmt("[[1i32], [2i32]]"), "[[1i32], [2i32]]");
+    }
+
+    #[test]
+    fn typed_arrays_format_with_a_type_ascription() {
+        assert_eq!(fmt("[1i32,2i32]:[i32]"), "[1i32, 2i32]: [i32]");
+        assert_eq!(fmt("[]:[[i32]]"), "[]: [[i32]]");
     }
 
     #[test]

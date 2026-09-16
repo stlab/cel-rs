@@ -9,8 +9,10 @@
 use cel_runtime::DynSegment;
 use proc_macro2::Span;
 
+use crate::ExprSpan;
 use crate::ast::ClosureParam;
 use crate::op_table::OpLookup;
+use crate::type_expr::TypeExpr;
 
 /// The pluggable target a grammar production emits into.
 ///
@@ -111,20 +113,25 @@ pub trait ParserContext: Sized {
         end: Span,
     ) -> crate::Result<()>;
 
-    /// Combines the last `n` emitted values into a single array value, optionally validated
-    /// against an explicitly resolved array descriptor.
+    /// Combines the last `n` emitted values into a single array value, optionally carrying an
+    /// unresolved type annotation that may be resolved on demand.
     ///
-    /// `array_type` names the complete array type when present; `None` preserves ordinary
-    /// unannotated inference.
+    /// `type_annotation` names the complete array type when present; `None` preserves ordinary
+    /// unannotated inference. `resolve_array_type` resolves that syntax only when an
+    /// implementation needs runtime array metadata immediately (e.g. [`DynSegmentContext`]);
+    /// implementations that defer semantic checking (e.g. [`crate::ast::AstContext`]) may ignore
+    /// it and record the syntax unchanged.
     fn make_annotated_array(
         &mut self,
         n: usize,
         ambient_start: usize,
-        array_type: Option<crate::ResolvedArrayType>,
+        resolve_array_type: &mut dyn FnMut(&TypeExpr) -> crate::Result<crate::ResolvedArrayType>,
+        type_annotation: Option<TypeExpr>,
+        _annotation_span: Option<ExprSpan>,
         start: Span,
         end: Span,
     ) -> crate::Result<()> {
-        let _ = array_type;
+        let _ = (resolve_array_type, type_annotation);
         self.make_array(n, ambient_start, start, end)
     }
 
@@ -333,14 +340,20 @@ impl ParserContext for DynSegmentContext {
         &mut self,
         n: usize,
         ambient_start: usize,
-        array_type: Option<crate::ResolvedArrayType>,
+        resolve_array_type: &mut dyn FnMut(&TypeExpr) -> crate::Result<crate::ResolvedArrayType>,
+        type_annotation: Option<TypeExpr>,
+        _annotation_span: Option<ExprSpan>,
         start: Span,
         end: Span,
     ) -> crate::Result<()> {
-        match array_type {
-            Some(array_type) => self
+        match type_annotation {
+            Some(type_annotation) => self
                 .0
-                .make_typed_array(n, ambient_start, array_type.into_element_type())
+                .make_typed_array(
+                    n,
+                    ambient_start,
+                    resolve_array_type(&type_annotation)?.into_element_type(),
+                )
                 .map_err(|e| crate::ParseError::new_range(e.to_string(), start, end)),
             None => self.make_array(n, ambient_start, start, end),
         }
@@ -479,8 +492,16 @@ mod tests {
         let ambient_start = ctx.current_stack_offset();
         ctx.push_literal(1i32, Span::call_site());
         ctx.push_literal(2i32, Span::call_site());
-        ctx.make_annotated_array(2, ambient_start, None, Span::call_site(), Span::call_site())
-            .unwrap();
+        ctx.make_annotated_array(
+            2,
+            ambient_start,
+            &mut |_| unreachable!("unannotated arrays do not resolve a declared type"),
+            None,
+            None,
+            Span::call_site(),
+            Span::call_site(),
+        )
+        .unwrap();
         let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
         assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![1, 2]);
     }
@@ -489,13 +510,32 @@ mod tests {
     fn make_annotated_array_with_a_resolved_descriptor_collects_a_typed_empty_array() {
         let mut ctx = DynSegmentContext::new_context();
         let ambient_start = ctx.current_stack_offset();
-        let array_type = crate::ResolvedArrayType::from_element_type(
-            cel_runtime::ArrayElementType::leaf::<i32>().unwrap(),
-        );
+        let annotation = TypeExpr::Array {
+            element: Box::new(TypeExpr::Named {
+                name: "i32".to_string(),
+                span: ExprSpan {
+                    start: Span::call_site(),
+                    end: Span::call_site(),
+                },
+            }),
+            span: ExprSpan {
+                start: Span::call_site(),
+                end: Span::call_site(),
+            },
+        };
         ctx.make_annotated_array(
             0,
             ambient_start,
-            Some(array_type),
+            &mut |_| {
+                Ok(crate::ResolvedArrayType::from_element_type(
+                    cel_runtime::ArrayElementType::leaf::<i32>().unwrap(),
+                ))
+            },
+            Some(annotation),
+            Some(ExprSpan {
+                start: Span::call_site(),
+                end: Span::call_site(),
+            }),
             Span::call_site(),
             Span::call_site(),
         )

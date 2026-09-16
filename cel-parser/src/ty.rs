@@ -9,6 +9,7 @@ use std::any::TypeId;
 use std::borrow::Cow;
 
 use crate::op_table::{builtin_operand_types, cast_source_types};
+use crate::type_expr::{BuiltinTypeResolver, ResolvedType, TypeExpr, TypeResolver};
 use crate::{Expr, ExprSpan, Literal, ParseError};
 
 /// A static type: one of the built-in primitives, a homogeneous array of one of those, or
@@ -357,6 +358,41 @@ impl Ty {
 /// assert!(diagnostics.is_empty());
 /// ```
 pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<ParseError>) {
+    check_expr_with_type_resolver(expr, resolve_ident, &BuiltinTypeResolver)
+}
+
+/// Infers `expr`'s type using both an identifier resolver and a named-type resolver for array
+/// annotations.
+///
+/// This is the same checker as [`check_expr`], but callers that support custom named CEL types
+/// may override the built-in type resolver used for array annotations.
+///
+/// - Complexity: O(n) in the number of nodes in `expr`.
+///
+/// # Examples
+///
+/// ```rust
+/// use cel_parser::{AstContext, OpLookup, Parser, Ty};
+/// use cel_parser::ty::check_expr_with_type_resolver;
+///
+/// let mut parser = Parser::<AstContext>::new(OpLookup::new());
+/// let expr = parser.parse_str_ast("[]: [i32]").unwrap();
+/// let (ty, diagnostics) =
+///     check_expr_with_type_resolver(&expr, &|_name| Ty::Any, &[(
+///         "i32",
+///         cel_parser::ResolvedLeafType::new(
+///             "i32",
+///             cel_runtime::ArrayElementType::leaf::<i32>().unwrap(),
+///         ),
+///     )]);
+/// assert_eq!(ty, Ty::Array(Box::new(Ty::I32)));
+/// assert!(diagnostics.is_empty());
+/// ```
+pub fn check_expr_with_type_resolver(
+    expr: &Expr,
+    resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
+) -> (Ty, Vec<ParseError>) {
     match expr {
         Expr::Literal { value, .. } => (Ty::from_literal(value), Vec::new()),
         Expr::Ident { name, .. } => (resolve_ident(name), Vec::new()),
@@ -364,40 +400,61 @@ pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<P
             name,
             operands,
             span,
-        } => check_op(name, operands, *span, resolve_ident),
-        Expr::Logical { lhs, rhs, span, .. } => check_logical(lhs, rhs, *span, resolve_ident),
+        } => check_op(name, operands, *span, resolve_ident, resolve_type),
+        Expr::Logical { lhs, rhs, span, .. } => {
+            check_logical(lhs, rhs, *span, resolve_ident, resolve_type)
+        }
         Expr::Apply { callee, args, .. } => {
-            let mut diagnostics = check_expr(callee, resolve_ident).1;
+            let mut diagnostics =
+                check_expr_with_type_resolver(callee, resolve_ident, resolve_type).1;
             for arg in args {
-                diagnostics.extend(check_expr(arg, resolve_ident).1);
+                diagnostics
+                    .extend(check_expr_with_type_resolver(arg, resolve_ident, resolve_type).1);
             }
             (Ty::Any, diagnostics)
         }
         Expr::Tuple { elements, .. } => {
             let mut diagnostics = Vec::new();
             for element in elements {
-                diagnostics.extend(check_expr(element, resolve_ident).1);
+                diagnostics
+                    .extend(check_expr_with_type_resolver(element, resolve_ident, resolve_type).1);
             }
             (Ty::Any, diagnostics)
         }
         // An array literal's own type is `Array` of its elements' unified type; see `check_array`.
-        Expr::Array { elements, .. } => check_array(elements, resolve_ident),
-        Expr::TupleIndex { base, .. } => (Ty::Any, check_expr(base, resolve_ident).1),
+        Expr::Array {
+            elements,
+            type_annotation,
+            ..
+        } => check_array(
+            elements,
+            type_annotation.as_ref(),
+            resolve_ident,
+            resolve_type,
+        ),
+        Expr::TupleIndex { base, .. } => (
+            Ty::Any,
+            check_expr_with_type_resolver(base, resolve_ident, resolve_type).1,
+        ),
         Expr::Cast {
             expr,
             type_name,
             span,
-        } => check_cast(expr, type_name, *span, resolve_ident),
+        } => check_cast(expr, type_name, *span, resolve_ident, resolve_type),
         Expr::If {
             cond,
             then_branch,
             else_branch,
             ..
         } => {
-            let mut diagnostics = check_expr(cond, resolve_ident).1;
-            diagnostics.extend(check_expr(then_branch, resolve_ident).1);
+            let mut diagnostics =
+                check_expr_with_type_resolver(cond, resolve_ident, resolve_type).1;
+            diagnostics
+                .extend(check_expr_with_type_resolver(then_branch, resolve_ident, resolve_type).1);
             if let Some(else_branch) = else_branch {
-                diagnostics.extend(check_expr(else_branch, resolve_ident).1);
+                diagnostics.extend(
+                    check_expr_with_type_resolver(else_branch, resolve_ident, resolve_type).1,
+                );
             }
             (Ty::Any, diagnostics)
         }
@@ -409,7 +466,8 @@ pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<P
                     resolve_ident(name)
                 }
             };
-            let (_, diagnostics) = check_expr(body, &resolve_with_params);
+            let (_, diagnostics) =
+                check_expr_with_type_resolver(body, &resolve_with_params, resolve_type);
             (Ty::Any, diagnostics)
         }
     }
@@ -434,35 +492,110 @@ pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<P
 /// - Postcondition: the returned type is always a [`Ty::Array`].
 /// - Complexity: O(n · d) where n is the number of elements and d is their array nesting depth,
 ///   plus the cost of checking each element (see [`check_expr`]'s own complexity note).
-fn check_array(elements: &[Expr], resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<ParseError>) {
+fn check_array(
+    elements: &[Expr],
+    type_annotation: Option<&TypeExpr>,
+    resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
+) -> (Ty, Vec<ParseError>) {
     let mut diagnostics = Vec::new();
     let element_tys: Vec<Ty> = elements
         .iter()
         .map(|element| {
-            let (ty, element_diags) = check_expr(element, resolve_ident);
+            let (ty, element_diags) =
+                check_expr_with_type_resolver(element, resolve_ident, resolve_type);
             diagnostics.extend(element_diags);
             ty
         })
         .collect();
-    let mut unified = Ty::Any;
-    for (element, ty) in elements.iter().zip(&element_tys) {
-        match unified.unify(ty) {
-            Some(merged) => unified = merged,
-            None => {
-                diagnostics.push(ParseError::new_range(
-                    format!(
-                        "array elements must share one type: expected `{}`, found `{}`",
-                        unified.name(),
-                        ty.name()
-                    ),
-                    element.span().start,
-                    element.span().end,
-                ));
-                return (Ty::Array(Box::new(Ty::Any)), diagnostics);
+    let Some(type_annotation) = type_annotation else {
+        let mut unified = Ty::Any;
+        for (element, ty) in elements.iter().zip(&element_tys) {
+            match unified.unify(ty) {
+                Some(merged) => unified = merged,
+                None => {
+                    diagnostics.push(ParseError::new_range(
+                        format!(
+                            "array elements must share one type: expected `{}`, found `{}`",
+                            unified.name(),
+                            ty.name()
+                        ),
+                        element.span().start,
+                        element.span().end,
+                    ));
+                    return (Ty::Array(Box::new(Ty::Any)), diagnostics);
+                }
             }
         }
+        return (Ty::Array(Box::new(unified)), diagnostics);
+    };
+
+    let (declared_ty, mut annotation_diags) = check_array_annotation(type_annotation, resolve_type);
+    diagnostics.append(&mut annotation_diags);
+    let Ty::Array(declared_element_ty) = &declared_ty else {
+        return (Ty::Array(Box::new(Ty::Any)), diagnostics);
+    };
+
+    for (element, actual_ty) in elements.iter().zip(&element_tys) {
+        if !declared_element_ty.unifies_with(actual_ty) {
+            diagnostics.push(ParseError::new_range(
+                format!(
+                    "array elements must match the annotation exactly: expected `{}`, found `{}`",
+                    declared_element_ty.name(),
+                    actual_ty.name()
+                ),
+                element.span().start,
+                element.span().end,
+            ));
+            break;
+        }
     }
-    (Ty::Array(Box::new(unified)), diagnostics)
+    (declared_ty, diagnostics)
+}
+
+fn check_array_annotation(
+    type_annotation: &TypeExpr,
+    resolve_type: &dyn TypeResolver,
+) -> (Ty, Vec<ParseError>) {
+    let resolved = match type_annotation.resolve(resolve_type) {
+        Ok(resolved) => resolved,
+        Err(err) => return (Ty::Array(Box::new(Ty::Any)), vec![err]),
+    };
+    match resolved_type_to_array_ty(&resolved, type_annotation.span()) {
+        Ok(array_ty) => (array_ty, Vec::new()),
+        Err(err) => (Ty::Array(Box::new(Ty::Any)), vec![err]),
+    }
+}
+
+fn resolved_type_to_array_ty(resolved: &ResolvedType, span: ExprSpan) -> crate::Result<Ty> {
+    match resolved {
+        ResolvedType::Array { element } => Ok(Ty::Array(Box::new(resolved_type_to_element_ty(
+            element, span,
+        )?))),
+        other => Err(ParseError::new_range(
+            format!(
+                "array annotations must name a complete array type, found `{}`",
+                other.display_name()
+            ),
+            span.start,
+            span.end,
+        )),
+    }
+}
+
+fn resolved_type_to_element_ty(resolved: &ResolvedType, span: ExprSpan) -> crate::Result<Ty> {
+    match resolved {
+        ResolvedType::Scalar(leaf) => Ok(Ty::from_type_id(leaf.type_id())),
+        ResolvedType::Array { element } => {
+            Ok(Ty::Array(Box::new(resolved_type_to_element_ty(element, span)?)))
+        }
+        ResolvedType::Tuple { .. } => Err(ParseError::new_range(
+            "tuple-valued array elements are not supported; see https://github.com/stlab/cel-rs/issues/213"
+                .to_string(),
+            span.start,
+            span.end,
+        )),
+    }
 }
 
 /// Checks an [`Expr::Op`] node: infers each operand, then (only if every operand resolved to a
@@ -477,12 +610,14 @@ fn check_op(
     operands: &[Expr],
     span: ExprSpan,
     resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
 ) -> (Ty, Vec<ParseError>) {
     let mut diagnostics = Vec::new();
     let operand_tys: Vec<Ty> = operands
         .iter()
         .map(|operand| {
-            let (ty, operand_diags) = check_expr(operand, resolve_ident);
+            let (ty, operand_diags) =
+                check_expr_with_type_resolver(operand, resolve_ident, resolve_type);
             diagnostics.extend(operand_diags);
             ty
         })
@@ -555,8 +690,10 @@ fn check_cast(
     type_name: &str,
     span: ExprSpan,
     resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
 ) -> (Ty, Vec<ParseError>) {
-    let (expr_ty, mut diagnostics) = check_expr(expr, resolve_ident);
+    let (expr_ty, mut diagnostics) =
+        check_expr_with_type_resolver(expr, resolve_ident, resolve_type);
     let Some(target_ty) = Ty::from_name(type_name) else {
         diagnostics.push(ParseError::new_range(
             format!("unknown type `{type_name}`"),
@@ -585,9 +722,10 @@ fn check_logical(
     rhs: &Expr,
     span: ExprSpan,
     resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
 ) -> (Ty, Vec<ParseError>) {
-    let (lhs_ty, mut diagnostics) = check_expr(lhs, resolve_ident);
-    let (rhs_ty, rhs_diags) = check_expr(rhs, resolve_ident);
+    let (lhs_ty, mut diagnostics) = check_expr_with_type_resolver(lhs, resolve_ident, resolve_type);
+    let (rhs_ty, rhs_diags) = check_expr_with_type_resolver(rhs, resolve_ident, resolve_type);
     diagnostics.extend(rhs_diags);
     for (side, ty) in [("left", lhs_ty), ("right", rhs_ty)] {
         if !ty.unifies_with(&Ty::Bool) {
@@ -763,6 +901,8 @@ mod tests {
     fn array(elements: Vec<Expr>) -> Expr {
         Expr::Array {
             elements,
+            type_annotation: None,
+            annotation_span: None,
             span: point(proc_macro2::Span::call_site()),
         }
     }
@@ -1299,6 +1439,58 @@ mod tests {
             diags[0].message()
         );
         assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))));
+    }
+
+    #[test]
+    fn typed_array_annotation_returns_the_declared_array_type() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[0, 1]: [i32]")
+            .expect("source parses");
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::I32)));
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    }
+
+    #[test]
+    fn typed_empty_array_annotation_returns_the_declared_nested_array_type() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser.parse_str_ast("[]: [[i32]]").expect("source parses");
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))));
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    }
+
+    #[test]
+    fn typed_array_annotation_reports_exact_element_type_mismatches() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[0, 1]: [f64]")
+            .expect("source parses");
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::F64)));
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0].message().contains("expected `f64`, found `i32`"),
+            "got: {}",
+            diags[0].message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_rejects_tuple_array_element_types() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[]: [(i32, f64)]")
+            .expect("source parses");
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0].message().contains("tuple"),
+            "got: {}",
+            diags[0].message()
+        );
     }
 
     #[test]

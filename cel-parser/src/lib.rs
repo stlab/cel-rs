@@ -33,7 +33,7 @@
 //! primary_expression = literal | identifier | tuple_or_group | array_expression
 //!                    | if_expression | closure_expression.
 //! tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".
-//! array_expression = "[" expression { "," expression } "]".
+//! array_expression = "[" [ expression { "," expression } ] "]" [ ":" type_expr ].
 //! if_expression = "if" expression "{" expression "}" [ "else" ( "{" expression "}" | if_expression ) ].
 //! closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression.
 //! closure_param = identifier ":" closure_type_expression.
@@ -76,11 +76,12 @@
 //!
 //! ## Array Literals
 //!
-//! A non-empty `[...]` literal evaluates to one [`cel_runtime::DynamicArray`] owning every
-//! element. Elements must share one complete recursive runtime type — a heterogeneous literal
-//! such as `[1i32, 2.0f64]`, an untyped empty literal `[]`, or a trailing comma is a parse
-//! error — and the evaluated array converts to the corresponding `Vec<T>` without moving or
-//! reallocating its elements:
+//! A `[...]` literal evaluates to one [`cel_runtime::DynamicArray`] owning every element.
+//! Unannotated non-empty arrays keep their existing inference, while a typed empty array uses a
+//! postfix annotation naming the complete array type. Elements must share one complete recursive
+//! runtime type — a heterogeneous literal such as `[1i32, 2.0f64]`, an unannotated empty literal
+//! `[]`, or a trailing comma is a parse error — and the evaluated array converts to the
+//! corresponding `Vec<T>` without moving or reallocating its elements:
 //!
 //! ```rust
 //! use cel_parser::{CELParser, OpLookup};
@@ -89,6 +90,10 @@
 //! let mut segment = CELParser::new(OpLookup::new()).parse_str("[0, 1, 2]").unwrap();
 //! let array: DynamicArray = segment.call0().unwrap();
 //! assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1, 2]);
+//!
+//! let mut segment = CELParser::new(OpLookup::new()).parse_str("[]: [i32]").unwrap();
+//! let array: DynamicArray = segment.call0().unwrap();
+//! assert!(array.try_into_vec::<i32>().unwrap().is_empty());
 //!
 //! assert!(CELParser::new(OpLookup::new()).parse_str("[1i32, 2.0f64]").is_err());
 //! ```
@@ -109,8 +114,8 @@
 //!
 //! ### Known limitations
 //!
-//! - An empty literal (`[]`) is a parse error: with no element there is nothing to infer the
-//!   array's element type from (<https://github.com/stlab/cel-rs/issues/212>).
+//! - An unannotated empty literal (`[]`) is a parse error: with no element there is nothing to
+//!   infer the array's element type from (<https://github.com/stlab/cel-rs/issues/212>).
 //! - A CEL tuple cannot be an array element, so `[(0i32, 1i32)]` is rejected: a tuple is a
 //!   stack-layout pseudo-value with no concrete Rust element representation
 //!   (<https://github.com/stlab/cel-rs/issues/213>).
@@ -1685,7 +1690,7 @@ impl<C: ParserContext> Parser<C> {
         Ok(true)
     }
 
-    /// `array_expression = "[" expression { "," expression } "]".`
+    /// `array_expression = "[" [ expression { "," expression } ] "]" [ ":" type_expr ] .`
     ///
     /// Every comma requires another element, so the production stays Wirth-style LL(1) — each
     /// decision is made by inspecting exactly the current token — and a trailing comma
@@ -1696,10 +1701,11 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// # Errors
     ///
-    /// Returns an error if the literal is empty (`[]` has no inferable element type; see
-    /// <https://github.com/stlab/cel-rs/issues/212>), if an element expression is missing or
-    /// malformed, if a comma or the closing `]` is missing, or if the context this emits into
-    /// rejects the collected elements (e.g. heterogeneous element types).
+    /// Returns an error if the literal is empty and unannotated (`[]` has no inferable element
+    /// type; see <https://github.com/stlab/cel-rs/issues/212>), if an element expression is
+    /// missing or malformed, if a comma or the closing `]` is missing, if the type annotation is
+    /// malformed or names a non-array type, or if the context this emits into rejects the
+    /// collected elements (e.g. heterogeneous element types).
     ///
     /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
     fn is_array_expression(&mut self) -> Result<bool> {
@@ -1707,7 +1713,43 @@ impl<C: ParserContext> Parser<C> {
             .peek_span()
             .expect("array_expression requires an opening '[' token");
         self.advance();
-        if self.is_close_bracket() {
+        let ambient_start = self.context.current_stack_offset();
+        let mut count = 0usize;
+        if !self.is_close_bracket() {
+            if !self.is_expression()? {
+                return Err(self.error_at("expected expression"));
+            }
+            count = 1;
+            loop {
+                if self.is_close_bracket() {
+                    break;
+                }
+                if !self.is_punctuation(",") {
+                    return Err(self.error_at("expected ',' or closing ']'"));
+                }
+                // A comma always requires another element: `]` here (a trailing comma) can't
+                // start an `expression`, so this is where `[0i32,]` is rejected.
+                if !self.is_expression()? {
+                    return Err(self.error_at("expected expression after ','"));
+                }
+                count += 1;
+            }
+        }
+
+        let mut type_annotation = None;
+        let mut annotation_span = None;
+        if self.is_punctuation(":") {
+            let colon_span = self.last_span;
+            let annotation = self.parse_type_expression()?;
+            let annotation_end = annotation.span().end;
+            annotation_span = Some(ExprSpan {
+                start: colon_span,
+                end: annotation_end,
+            });
+            type_annotation = Some(annotation);
+        }
+
+        if count == 0 && type_annotation.is_none() {
             return Err(ParseError::new_range(
                 "an empty array literal has no inferable element type; \
                  see https://github.com/stlab/cel-rs/issues/212"
@@ -1716,27 +1758,21 @@ impl<C: ParserContext> Parser<C> {
                 self.last_span,
             ));
         }
-        let ambient_start = self.context.current_stack_offset();
-        if !self.is_expression()? {
-            return Err(self.error_at("expected expression"));
-        }
-        let mut count = 1;
-        loop {
-            if self.is_close_bracket() {
-                break;
-            }
-            if !self.is_punctuation(",") {
-                return Err(self.error_at("expected ',' or closing ']'"));
-            }
-            // A comma always requires another element: `]` here (a trailing comma) can't start an
-            // `expression`, so this is where `[0i32,]` is rejected.
-            if !self.is_expression()? {
-                return Err(self.error_at("expected expression after ','"));
-            }
-            count += 1;
-        }
-        self.context
-            .make_array(count, ambient_start, open_span, self.last_span)?;
+
+        let type_resolver = Arc::clone(&self.type_resolver);
+        let mut resolve_array_type = |type_expr: &TypeExpr| {
+            let resolved = type_expr.resolve(type_resolver.as_ref())?;
+            ResolvedArrayType::from_resolved_type(resolved, type_expr.span())
+        };
+        self.context.make_annotated_array(
+            count,
+            ambient_start,
+            &mut resolve_array_type,
+            type_annotation,
+            annotation_span,
+            open_span,
+            self.last_span,
+        )?;
         Ok(true)
     }
 
@@ -3904,6 +3940,54 @@ mod tests {
     }
 
     #[test]
+    fn typed_array_annotation_preserves_unsuffixed_non_empty_inference() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[0, 1]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![0, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_annotation_evaluates_to_the_declared_scalar_type() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[0, 1]: [i32]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![0, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_annotation_constructs_a_typed_empty_array() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[]: [i32]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert!(array.try_into_vec::<i32>()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_annotation_constructs_a_nested_typed_empty_array() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[]: [[i32]]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert!(
+            array
+                .try_into_vec::<cel_runtime::DynamicArray>()?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn single_element_array_literal_needs_no_trailing_comma() -> anyhow::Result<()> {
         let mut parser = CELParser::new(OpLookup::new());
         let mut segment = parser
@@ -4014,6 +4098,49 @@ mod tests {
         assert!(
             err.message().contains("array element 1"),
             "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_rejects_an_exact_element_type_mismatch() {
+        let err = array_parse_error("[0, 1]: [f64]");
+        assert!(
+            err.message().contains("expected f64"),
+            "got: {}",
+            err.message()
+        );
+        assert!(err.message().contains("type i32"), "got: {}", err.message());
+    }
+
+    #[test]
+    fn typed_array_annotation_rejects_an_unknown_type_name() {
+        let err = array_parse_error("[0]: [Nope]");
+        assert!(
+            err.message().contains("unknown type `Nope`"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_requires_a_complete_array_type() {
+        let err = array_parse_error("[0]: i32");
+        assert!(
+            err.message()
+                .contains("array annotations must name a complete array type"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_keeps_tuple_type_syntax_but_rejects_tuple_array_elements() {
+        let err = array_parse_error("[]: [(i32, f64)]");
+        assert!(err.message().contains("tuple"), "got: {}", err.message());
+        assert!(
+            err.message().contains("issues/213"),
+            "the diagnostic must reference the tuple-element issue, got: {}",
             err.message()
         );
     }
