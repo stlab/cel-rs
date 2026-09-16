@@ -598,15 +598,15 @@ impl DynamicArrayBuilder {
     /// A zero-sized element copies nothing: only the count of owned elements grows, which is what
     /// later runs its drop glue exactly once per element.
     ///
-    /// - Precondition: fewer than `capacity` elements have been pushed.
     /// - Postcondition: the builder owns one more element than before.
     ///
     /// - Complexity: O(1) in the element's size.
     ///
     /// # Safety
-    /// `src` must be valid for reads of the element type's size and must hold a live value of
-    /// that type. Ownership of that value transfers to the builder: the caller must not drop it
-    /// (or let anything else drop it) afterward.
+    /// Fewer than `capacity` elements must have been pushed; pushing beyond that writes past the
+    /// end of the builder's allocation. `src` must be valid for reads of the element type's size
+    /// and must hold a live value of that type. Ownership of that value transfers to the builder:
+    /// the caller must not drop it (or let anything else drop it) afterward.
     pub(crate) unsafe fn push_bytes(&mut self, src: *const MaybeUninit<u8>) {
         debug_assert!(self.len < self.capacity, "builder capacity exceeded");
         if self.element.size != 0 {

@@ -936,6 +936,11 @@ impl DynSegment {
         // Validate before touching any state: a rejected literal must leave this segment (and
         // the ops that produced its elements) exactly as it found them.
         let start = self.stack_ids.len() - n;
+        debug_assert_eq!(
+            ambient_start,
+            self.stack_offset_after(start),
+            "ambient_start must equal the stack offset where the array elements begin"
+        );
         let expected = &self.stack_ids[start].value_type;
         let element = expected
             .as_array_element()
@@ -1030,7 +1035,8 @@ impl DynSegment {
     }
 
     /// Extracts element `index` from the tuple on top of the stack, replacing
-    /// the whole tuple with just that element's value.    ///
+    /// the whole tuple with just that element's value.
+    ///
     /// - Precondition: the top-of-stack value is a tuple with at least
     ///   `index + 1` elements.
     ///
