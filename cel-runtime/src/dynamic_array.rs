@@ -259,6 +259,24 @@ impl ArrayElementType {
             None => self.type_name.clone(),
         }
     }
+
+    /// Returns whether `self` and `other` describe the same recursive element shape and layout.
+    ///
+    /// This is stricter than [`PartialEq`]: it compares the stored size and alignment in addition
+    /// to the recursive type marker, so a runtime-resolved descriptor must agree with the bytes a
+    /// collected value actually occupies before the two can be treated as interchangeable.
+    ///
+    /// - Complexity: O(depth).
+    pub(crate) fn same_shape_and_layout(&self, other: &Self) -> bool {
+        self.type_id == other.type_id
+            && self.size == other.size
+            && self.align == other.align
+            && match (&self.nested, &other.nested) {
+                (Some(left), Some(right)) => left.same_shape_and_layout(right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 impl PartialEq for ArrayElementType {
@@ -758,6 +776,33 @@ impl DynamicArray {
         Ok(Self::from_validated_vec(values, element))
     }
 
+    /// Returns an empty array carrying `element` as its runtime descriptor.
+    ///
+    /// The returned array owns no element allocation. It exists for contexts such as typed empty
+    /// CEL array literals, where the element descriptor is known but no element value exists from
+    /// which to infer one.
+    ///
+    /// - Postcondition: the result has length and capacity zero.
+    /// - Complexity: O(1).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{ArrayElementType, DynamicArray};
+    ///
+    /// let element = ArrayElementType::leaf::<i32>().unwrap();
+    /// let array = DynamicArray::empty_with_element_type(element.clone());
+    ///
+    /// assert!(array.is_empty());
+    /// assert_eq!(array.element_type(), &element);
+    /// ```
+    #[must_use]
+    pub fn empty_with_element_type(element: ArrayElementType) -> Self {
+        let ptr = dangling_for(&element);
+        unsafe { Self::try_from_raw_parts(ptr, 0, 0, element) }
+            .expect("an empty typed array satisfies DynamicArray's invariants")
+    }
+
     /// Takes ownership of a vector after checking an explicit element descriptor.
     ///
     /// # Errors
@@ -1224,6 +1269,42 @@ mod tests {
                 .unwrap();
 
         assert!(array.try_into_vec::<DynamicArray>().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_with_element_type_preserves_leaf_descriptor() {
+        let element = ArrayElementType::leaf::<i32>().unwrap();
+
+        let array = DynamicArray::empty_with_element_type(element.clone());
+
+        assert!(array.is_empty());
+        assert_eq!(array.capacity(), 0);
+        assert_eq!(array.element_type(), &element);
+        assert!(array.try_into_vec::<i32>().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_with_element_type_preserves_nested_descriptor() {
+        let element = ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap());
+
+        let array = DynamicArray::empty_with_element_type(element.clone());
+
+        assert!(array.is_empty());
+        assert_eq!(array.capacity(), 0);
+        assert_eq!(array.element_type(), &element);
+        assert!(array.try_into_vec::<DynamicArray>().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_with_element_type_preserves_zero_sized_leaf_descriptor() {
+        let element = ArrayElementType::leaf::<DroppingZst>().unwrap();
+
+        let array = DynamicArray::empty_with_element_type(element.clone());
+
+        assert!(array.is_empty());
+        assert_eq!(array.capacity(), 0);
+        assert_eq!(array.element_type(), &element);
+        assert!(array.try_into_vec::<DroppingZst>().unwrap().is_empty());
     }
 
     #[test]
