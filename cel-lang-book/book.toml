@@ -1,0 +1,13 @@
+[book]
+title = "The CEL Language"
+description = "A static tutorial and reference book for the CEL implementation in cel-parser and cel-runtime"
+authors = ["stlab"]
+language = "en"
+src = "book-src"
+
+[build]
+build-dir = "book-dist"
+
+[output.html]
+git-repository-url = "https://github.com/stlab/cel-rs"
+edit-url-template = "https://github.com/stlab/cel-rs/edit/main/cel-lang-book/{path}"

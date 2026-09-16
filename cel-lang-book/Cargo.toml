@@ -1,0 +1,12 @@
+[package]
+name = "cel-lang-book"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cel-parser = { path = "../cel-parser" }
+cel-runtime = { path = "../cel-runtime" }
+
+[lints]
+workspace = true
