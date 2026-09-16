@@ -552,6 +552,12 @@ impl ParserContext for AstContext {
             n,
             "make_annotated_array splits off exactly n elements"
         );
+        let annotation = crate::parser_context::AnnotatedArray::new(
+            _resolve_array_type,
+            type_annotation,
+            annotation_span,
+        );
+        let (type_annotation, annotation_span) = annotation.into_parts();
         self.values.push(Expr::Array {
             elements,
             type_annotation,

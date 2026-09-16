@@ -14,6 +14,46 @@ use crate::ast::ClosureParam;
 use crate::op_table::OpLookup;
 use crate::type_expr::TypeExpr;
 
+/// Bundles the optional type-ascription inputs for array construction.
+pub(crate) struct AnnotatedArray<'a> {
+    resolve_array_type: &'a mut dyn FnMut(&TypeExpr) -> crate::Result<crate::ResolvedArrayType>,
+    type_annotation: Option<TypeExpr>,
+    annotation_span: Option<ExprSpan>,
+}
+
+impl<'a> AnnotatedArray<'a> {
+    /// Creates a bundle from the parsed array annotation inputs.
+    pub(crate) fn new(
+        resolve_array_type: &'a mut dyn FnMut(&TypeExpr) -> crate::Result<crate::ResolvedArrayType>,
+        type_annotation: Option<TypeExpr>,
+        annotation_span: Option<ExprSpan>,
+    ) -> Self {
+        Self {
+            resolve_array_type,
+            type_annotation,
+            annotation_span,
+        }
+    }
+
+    /// Resolves the declared array element metadata when a type ascription is present.
+    pub(crate) fn resolve_element_type(
+        &mut self,
+    ) -> crate::Result<Option<cel_runtime::ArrayElementType>> {
+        self.type_annotation
+            .as_ref()
+            .map(|type_annotation| {
+                (self.resolve_array_type)(type_annotation)
+                    .map(|resolved| resolved.into_element_type())
+            })
+            .transpose()
+    }
+
+    /// Returns the parsed syntax-level annotation inputs unchanged.
+    pub(crate) fn into_parts(self) -> (Option<TypeExpr>, Option<ExprSpan>) {
+        (self.type_annotation, self.annotation_span)
+    }
+}
+
 /// The pluggable target a grammar production emits into.
 ///
 /// Each method mirrors one operation the grammar in `lib.rs` needs. Implementations decide what
@@ -121,6 +161,10 @@ pub trait ParserContext: Sized {
     /// implementation needs runtime array metadata immediately (e.g. [`DynSegmentContext`]);
     /// implementations that defer semantic checking (e.g. [`crate::ast::AstContext`]) may ignore
     /// it and record the syntax unchanged.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "ParserContext keeps this public compatibility shim while implementations bundle annotation details internally"
+    )]
     fn make_annotated_array(
         &mut self,
         n: usize,
@@ -131,7 +175,8 @@ pub trait ParserContext: Sized {
         start: Span,
         end: Span,
     ) -> crate::Result<()> {
-        let _ = (resolve_array_type, type_annotation);
+        let _annotation =
+            AnnotatedArray::new(resolve_array_type, type_annotation, _annotation_span);
         self.make_array(n, ambient_start, start, end)
     }
 
@@ -342,18 +387,16 @@ impl ParserContext for DynSegmentContext {
         ambient_start: usize,
         resolve_array_type: &mut dyn FnMut(&TypeExpr) -> crate::Result<crate::ResolvedArrayType>,
         type_annotation: Option<TypeExpr>,
-        _annotation_span: Option<ExprSpan>,
+        annotation_span: Option<ExprSpan>,
         start: Span,
         end: Span,
     ) -> crate::Result<()> {
-        match type_annotation {
-            Some(type_annotation) => self
+        let mut annotation =
+            AnnotatedArray::new(resolve_array_type, type_annotation, annotation_span);
+        match annotation.resolve_element_type()? {
+            Some(element_type) => self
                 .0
-                .make_typed_array(
-                    n,
-                    ambient_start,
-                    resolve_array_type(&type_annotation)?.into_element_type(),
-                )
+                .make_typed_array(n, ambient_start, element_type)
                 .map_err(|e| crate::ParseError::new_range(e.to_string(), start, end)),
             None => self.make_array(n, ambient_start, start, end),
         }
