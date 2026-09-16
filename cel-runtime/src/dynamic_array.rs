@@ -285,22 +285,27 @@ impl ArrayElementType {
         }
     }
 
-    /// Returns whether `self` and `other` describe the same recursive element shape, layout, and
-    /// drop ownership.
+    /// Returns whether `self` and `other` describe the same recursive element shape and layout.
     ///
-    /// This is stricter than [`PartialEq`]: it compares the stored size, alignment, and drop hook
-    /// in addition to the recursive type marker, so a runtime-resolved descriptor must agree with
-    /// both the bytes a collected value occupies and the way those bytes are later destroyed
-    /// before the two can be treated as interchangeable.
+    /// This is stricter than [`PartialEq`]: it compares the stored size and alignment in addition
+    /// to the recursive type marker, so a runtime-resolved descriptor must agree with the bytes a
+    /// collected value occupies before the two can be treated as interchangeable.
+    ///
+    /// Drop hooks are deliberately *not* compared by address. Every constructor
+    /// ([`leaf`](Self::leaf), [`array_of`](Self::array_of)) derives the hook from the same type
+    /// the `TypeId` names, and [`leaf_from_parts`](Self::leaf_from_parts) requires its caller to
+    /// do the same, so equal `TypeId`s already imply equivalent drop ownership. Function-pointer
+    /// identity does not: the same `raw_dropper_for::<T>` instantiated in two crates (or two
+    /// codegen units) may have two addresses, which would reject a perfectly valid host-resolved
+    /// descriptor.
     ///
     /// - Complexity: O(depth).
-    pub(crate) fn same_shape_layout_and_ownership(&self, other: &Self) -> bool {
+    pub(crate) fn same_shape_and_layout(&self, other: &Self) -> bool {
         self.type_id == other.type_id
             && self.size == other.size
             && self.align == other.align
-            && std::ptr::fn_addr_eq(self.drop, other.drop)
             && match (&self.nested, &other.nested) {
-                (Some(left), Some(right)) => left.same_shape_layout_and_ownership(right),
+                (Some(left), Some(right)) => left.same_shape_and_layout(right),
                 (None, None) => true,
                 _ => false,
             }
@@ -1345,8 +1350,43 @@ mod tests {
         assert_eq!(element.type_id(), TypeId::of::<String>());
         assert_eq!(element.size(), std::mem::size_of::<String>());
         assert_eq!(element.align(), std::mem::align_of::<String>());
+        assert!(element.same_shape_and_layout(&ArrayElementType::leaf::<String>().unwrap()));
+    }
+
+    /// Drops a `String` in place through a distinct function item, standing in for the separate
+    /// `raw_dropper_for::<String>` instantiation another crate would supply.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`RawDropper`]: `ptr` points to a live, aligned `String`.
+    unsafe fn drop_string_through_another_instantiation(
+        ptr: *mut u8,
+        associated: &[crate::AssociatedType],
+    ) {
+        // SAFETY: the caller upholds `RawDropper`'s contract for `String`, which is exactly what
+        // `raw_dropper_for::<String>()` requires.
+        unsafe { raw_dropper_for::<String>()(ptr, associated) }
+    }
+
+    /// A host that resolves `[Celsius]` through its own registry builds the descriptor in its own
+    /// crate, so its `raw_dropper_for::<T>` instantiation need not share an address with the one
+    /// the collected values carry. Descriptor acceptance must not depend on that address.
+    #[test]
+    fn descriptors_for_one_type_match_across_distinct_dropper_instantiations() {
+        let direct = ArrayElementType::leaf::<String>().unwrap();
+        let indirect = ArrayElementType::leaf_from_parts(
+            TypeId::of::<String>(),
+            Cow::Borrowed("Celsius"),
+            std::mem::size_of::<String>(),
+            std::mem::align_of::<String>(),
+            drop_string_through_another_instantiation,
+        );
+
+        assert!(direct.same_shape_and_layout(&indirect));
+        assert!(indirect.same_shape_and_layout(&direct));
         assert!(
-            element.same_shape_layout_and_ownership(&ArrayElementType::leaf::<String>().unwrap())
+            ArrayElementType::array_of(direct)
+                .same_shape_and_layout(&ArrayElementType::array_of(indirect))
         );
     }
 

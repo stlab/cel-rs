@@ -234,6 +234,19 @@ pub struct ResolvedArrayType {
 
 impl ResolvedArrayType {
     /// Creates a resolved array type from its already-resolved element descriptor.
+    ///
+    /// - Postcondition: [`element_type`](Self::element_type) returns `element_type` unchanged, so
+    ///   the result describes an array whose elements have exactly that type.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::ResolvedArrayType;
+    /// use cel_runtime::ArrayElementType;
+    ///
+    /// let array = ResolvedArrayType::from_element_type(ArrayElementType::leaf::<i32>().unwrap());
+    /// assert_eq!(array.element_type().type_name(), "i32");
+    /// ```
     #[must_use]
     pub fn from_element_type(element_type: ArrayElementType) -> Self {
         Self { element_type }

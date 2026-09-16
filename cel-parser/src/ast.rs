@@ -540,9 +540,7 @@ impl ParserContext for AstContext {
         &mut self,
         n: usize,
         ambient_start: usize,
-        _resolve_array_type: &mut dyn FnMut(&TypeExpr) -> crate::Result<crate::ResolvedArrayType>,
-        type_annotation: Option<TypeExpr>,
-        annotation_span: Option<ExprSpan>,
+        annotation: crate::parser_context::AnnotatedArray<'_>,
         start: Span,
         end: Span,
     ) -> crate::Result<()> {
@@ -551,11 +549,6 @@ impl ParserContext for AstContext {
             elements.len(),
             n,
             "make_annotated_array splits off exactly n elements"
-        );
-        let annotation = crate::parser_context::AnnotatedArray::new(
-            _resolve_array_type,
-            type_annotation,
-            annotation_span,
         );
         let (type_annotation, annotation_span) = annotation.into_parts();
         self.values.push(Expr::Array {

@@ -573,6 +573,26 @@ impl<C: ParserContext> Parser<C> {
     /// Existing callers that need only the built-in CEL scalar types should continue to use
     /// [`new`](Self::new); this constructor is for hosts that want additional named CEL types
     /// without coupling `cel-parser` to their own registry implementation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{CELParser, OpLookup, ResolvedLeafType};
+    /// use cel_runtime::ArrayElementType;
+    ///
+    /// #[derive(Clone)]
+    /// struct Celsius(i32);
+    ///
+    /// let resolver = [(
+    ///     "Celsius",
+    ///     ResolvedLeafType::new("Celsius", ArrayElementType::leaf::<Celsius>().unwrap()),
+    /// )];
+    /// let mut segment = CELParser::with_type_resolver(OpLookup::new(), resolver)
+    ///     .parse_str("[]: [Celsius]")
+    ///     .unwrap();
+    /// let array: cel_runtime::DynamicArray = segment.call0().unwrap();
+    /// assert!(array.try_into_vec::<Celsius>().unwrap().is_empty());
+    /// ```
     pub fn with_type_resolver<R>(op_lookup: OpLookup, type_resolver: R) -> Self
     where
         R: TypeResolver + 'static,
@@ -595,6 +615,28 @@ impl<C: ParserContext> Parser<C> {
     }
 
     /// Replaces this parser's named-type resolver.
+    ///
+    /// Every subsequent parse resolves annotation type names through `type_resolver` instead of
+    /// the one this parser was built with.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{CELParser, OpLookup, ResolvedLeafType};
+    /// use cel_runtime::ArrayElementType;
+    ///
+    /// #[derive(Clone)]
+    /// struct Celsius(i32);
+    ///
+    /// let mut parser = CELParser::new(OpLookup::new());
+    /// assert!(parser.parse_str("[]: [Celsius]").is_err());
+    ///
+    /// parser.set_type_resolver([(
+    ///     "Celsius",
+    ///     ResolvedLeafType::new("Celsius", ArrayElementType::leaf::<Celsius>().unwrap()),
+    /// )]);
+    /// assert!(parser.parse_str("[]: [Celsius]").is_ok());
+    /// ```
     pub fn set_type_resolver<R>(&mut self, type_resolver: R)
     where
         R: TypeResolver + 'static,
@@ -1817,9 +1859,11 @@ impl<C: ParserContext> Parser<C> {
         self.context.make_annotated_array(
             count,
             ambient_start,
-            &mut resolve_array_type,
-            type_annotation,
-            annotation_span,
+            parser_context::AnnotatedArray::new(
+                &mut resolve_array_type,
+                type_annotation,
+                annotation_span,
+            ),
             open_span,
             self.last_span,
         )?;
@@ -4213,6 +4257,46 @@ mod tests {
         assert!(
             !err.message().contains("::"),
             "no Rust type path may leak into the diagnostic, got: {}",
+            err.message()
+        );
+    }
+
+    /// The runtime rejects a nested literal whose own annotation names a different custom element
+    /// type — the mismatch `ty::check_expr` must also report statically.
+    #[test]
+    fn typed_array_annotation_rejects_a_nested_custom_element_type_mismatch() {
+        #[derive(Clone)]
+        struct CustomB;
+
+        let resolver = [
+            (
+                "Celsius",
+                ResolvedLeafType::new(
+                    "Celsius",
+                    cel_runtime::ArrayElementType::leaf::<Celsius>().unwrap(),
+                ),
+            ),
+            (
+                "CustomB",
+                ResolvedLeafType::new(
+                    "CustomB",
+                    cel_runtime::ArrayElementType::leaf::<CustomB>().unwrap(),
+                ),
+            ),
+        ];
+        let mut parser = CELParser::with_type_resolver(OpLookup::new(), resolver);
+        let err = match parser.parse_str("[[]: [Celsius]]: [[CustomB]]") {
+            Err(e) => e,
+            Ok(_) => panic!("expected the inner annotation to conflict with the outer one"),
+        };
+        assert!(
+            err.message().contains("expected [CustomB]"),
+            "got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("[Celsius]"),
+            "got: {}",
             err.message()
         );
     }

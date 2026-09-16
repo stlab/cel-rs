@@ -607,7 +607,9 @@ fn check_array_annotation(
 /// [`Ty::Any`].
 ///
 /// Built-in leaves continue to use ordinary [`Ty`] unification; this helper is only the narrow
-/// fallback for custom leaves whose `TypeId` the minimal `Ty` model cannot preserve.
+/// fallback for custom leaves whose `TypeId` the minimal `Ty` model cannot preserve. A nested
+/// array literal carrying its own annotation is compared against that declared type directly, so
+/// an annotated empty literal (which has no elements to infer from) is still checked.
 ///
 /// - Complexity: O(n) in the number of nodes visited before the first mismatch (or the full
 ///   nested array on success).
@@ -628,9 +630,30 @@ fn exact_array_annotation_mismatch(
                 .then(|| (leaf.type_name().to_string(), actual.name().into_owned()))
         }
         ResolvedType::Array { element } => match expr {
-            Expr::Array { elements, .. } => elements.iter().find_map(|element_expr| {
-                exact_array_annotation_mismatch(element_expr, element, resolve_ident, resolve_type)
-            }),
+            Expr::Array {
+                elements,
+                type_annotation,
+                ..
+            } => {
+                // A nested literal's own annotation declares its complete type, so it is what the
+                // enclosing annotation must agree with — an empty annotated literal has no
+                // elements left to compare, and a non-empty one would otherwise be checked only
+                // against its elements.
+                if let Some(type_annotation) = type_annotation
+                    && let Ok(declared) = type_annotation.resolve(resolve_type)
+                    && !resolved_types_match(expected, &declared)
+                {
+                    return Some((expected.display_name(), declared.display_name()));
+                }
+                elements.iter().find_map(|element_expr| {
+                    exact_array_annotation_mismatch(
+                        element_expr,
+                        element,
+                        resolve_ident,
+                        resolve_type,
+                    )
+                })
+            }
             _ => {
                 let actual = check_expr_with_type_resolver(expr, resolve_ident, resolve_type).0;
                 match actual {
@@ -640,6 +663,32 @@ fn exact_array_annotation_mismatch(
             }
         },
         ResolvedType::Tuple { .. } => None,
+    }
+}
+
+/// Returns whether two resolved types denote the same type: the same leaf `TypeId`s in the same
+/// recursive shape, whatever names they were resolved from.
+///
+/// This is the exact comparison [`Ty`] cannot make, since every custom leaf erases to
+/// [`Ty::Any`].
+///
+/// - Complexity: O(n) in the number of nodes in the smaller type tree.
+fn resolved_types_match(expected: &ResolvedType, actual: &ResolvedType) -> bool {
+    match (expected, actual) {
+        (ResolvedType::Scalar(expected), ResolvedType::Scalar(actual)) => {
+            expected.type_id() == actual.type_id()
+        }
+        (ResolvedType::Array { element: expected }, ResolvedType::Array { element: actual }) => {
+            resolved_types_match(expected, actual)
+        }
+        (ResolvedType::Tuple { elements: expected }, ResolvedType::Tuple { elements: actual }) => {
+            expected.len() == actual.len()
+                && expected
+                    .iter()
+                    .zip(actual)
+                    .all(|(expected, actual)| resolved_types_match(expected, actual))
+        }
+        _ => false,
     }
 }
 
@@ -1667,6 +1716,68 @@ mod tests {
             "got: {}",
             diags[0].message()
         );
+    }
+
+    /// A nested literal's own annotation is part of what it means: `[[]: [CustomA]]` is an array
+    /// of `[CustomA]`, which the runtime rejects against `[[CustomB]]`. Custom leaves both erase
+    /// to [`Ty::Any`], so the declared inner annotation is the only thing left to compare.
+    #[test]
+    fn nested_annotated_array_reports_a_custom_element_mismatch() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[[]: [CustomA]]: [[CustomB]]")
+            .expect("source parses");
+        let (ty, diags) =
+            check_expr_with_type_resolver(&expr, &any_resolver, &custom_ab_resolver());
+
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::Any)))));
+        assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+        assert!(
+            diags[0]
+                .message()
+                .contains("expected `[CustomB]`, found `[CustomA]`"),
+            "got: {}",
+            diags[0].message()
+        );
+    }
+
+    /// The same nesting with agreeing annotations is accepted with no diagnostic.
+    #[test]
+    fn nested_annotated_array_accepts_a_matching_custom_element_annotation() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[[]: [CustomA]]: [[CustomA]]")
+            .expect("source parses");
+        let (ty, diags) =
+            check_expr_with_type_resolver(&expr, &any_resolver, &custom_ab_resolver());
+
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::Any)))));
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    }
+
+    /// A resolver registering two distinct custom leaf types, both of which erase to [`Ty::Any`].
+    fn custom_ab_resolver() -> [(&'static str, crate::ResolvedLeafType); 2] {
+        #[derive(Clone)]
+        struct CustomA;
+        #[derive(Clone)]
+        struct CustomB;
+
+        [
+            (
+                "CustomA",
+                crate::ResolvedLeafType::new(
+                    "CustomA",
+                    cel_runtime::ArrayElementType::leaf::<CustomA>().unwrap(),
+                ),
+            ),
+            (
+                "CustomB",
+                crate::ResolvedLeafType::new(
+                    "CustomB",
+                    cel_runtime::ArrayElementType::leaf::<CustomB>().unwrap(),
+                ),
+            ),
+        ]
     }
 
     #[test]

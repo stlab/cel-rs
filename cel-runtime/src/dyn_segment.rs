@@ -943,7 +943,7 @@ impl DynSegment {
     ///
     /// When `n` is zero, this emits a typed empty array that carries `element` without inferring
     /// it from any value. When `n` is non-zero, every collected value must have exactly
-    /// `element`'s recursive shape, layout, and drop ownership.
+    /// `element`'s recursive shape and layout.
     ///
     /// - Precondition: at least `n` values are on the stack, pushed contiguously starting at
     ///   `ambient_start` with no other values interleaved.
@@ -1007,7 +1007,7 @@ impl DynSegment {
                         .as_array_element()
                         .expect("non-tuple values have array element descriptors");
                     ensure!(
-                        element.same_shape_layout_and_ownership(&found),
+                        element.same_shape_and_layout(&found),
                         "array element {index} has type {}, expected {}",
                         info.value_type.type_name(),
                         element.display_name()
@@ -4444,48 +4444,45 @@ mod tests {
         assert!(error.contains("i32") && error.contains("u32"), "{error}");
     }
 
+    /// Drops a `String` in place through a distinct function item, standing in for the separate
+    /// `raw_dropper_for::<String>` instantiation another crate would supply.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`RawDropper`]: `ptr` points to a live, aligned `String`.
+    unsafe fn drop_string_through_another_instantiation(
+        ptr: *mut u8,
+        associated: &[AssociatedType],
+    ) {
+        // SAFETY: the caller upholds `RawDropper`'s contract for `String`, which is exactly what
+        // `raw_dropper_for::<String>()` requires.
+        unsafe { raw_dropper_for::<String>()(ptr, associated) }
+    }
+
+    /// A host resolving a source-level annotation (`[]: [Celsius]`) builds its descriptor in its
+    /// own crate, with its own `raw_dropper_for::<T>` instantiation and its own source-level type
+    /// name. Such a descriptor describes the same values and must be accepted.
     #[test]
-    fn make_typed_array_rejects_a_descriptor_whose_drop_hook_owns_a_different_type() {
-        #[derive(Clone)]
-        struct RightDrop(Arc<AtomicUsize>);
-
-        impl Drop for RightDrop {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        #[derive(Clone)]
-        struct WrongDrop(Arc<AtomicUsize>);
-
-        impl Drop for WrongDrop {
-            fn drop(&mut self) {
-                self.0.fetch_add(100, Ordering::SeqCst);
-            }
-        }
-
+    fn make_typed_array_accepts_a_host_resolved_descriptor_for_the_same_type() -> anyhow::Result<()>
+    {
         let mut segment = DynSegment::new::<()>();
         let start = segment.current_stack_offset();
-        segment.just(RightDrop(Arc::new(AtomicUsize::new(0))));
+        segment.just("20".to_string());
+        segment.just("21".to_string());
 
-        let forged = ArrayElementType::leaf_from_parts(
-            TypeId::of::<RightDrop>(),
-            Cow::Borrowed("forged RightDrop"),
-            std::mem::size_of::<RightDrop>(),
-            std::mem::align_of::<RightDrop>(),
-            raw_dropper_for::<WrongDrop>(),
+        let host_resolved = ArrayElementType::leaf_from_parts(
+            TypeId::of::<String>(),
+            Cow::Borrowed("Celsius"),
+            std::mem::size_of::<String>(),
+            std::mem::align_of::<String>(),
+            drop_string_through_another_instantiation,
         );
 
-        let error = segment
-            .make_typed_array(1, start, forged)
-            .unwrap_err()
-            .to_string();
+        segment.make_typed_array(2, start, host_resolved)?;
 
-        assert!(error.contains("element 0"), "{error}");
-        assert!(
-            error.contains("RightDrop") && error.contains("forged RightDrop"),
-            "{error}"
-        );
+        let array: DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<String>()?, vec!["20", "21"]);
+        Ok(())
     }
 
     #[test]
