@@ -780,6 +780,22 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
+    /// Consumes and returns `true` if the next token is a closing bracket `]`.
+    fn is_close_bracket(&mut self) -> bool {
+        if matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Bracket,
+                ..
+            })
+        ) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
     /// `expression = range_expression.`
     pub fn is_expression(&mut self) -> Result<bool> {
         self.is_range_expression()
@@ -1396,11 +1412,12 @@ impl<C: ParserContext> Parser<C> {
         Ok(count)
     }
 
-    /// `primary_expression = literal | identifier | tuple_or_group | if_expression |
-    /// closure_expression.`
+    /// `primary_expression = literal | identifier | tuple_or_group | array_expression |
+    /// if_expression | closure_expression.`
     ///
     /// Dispatches to [`is_if_expression`](Self::is_if_expression) when the `if` keyword is seen,
-    /// to [`is_tuple_or_group`](Self::is_tuple_or_group) when `(` is seen, and to
+    /// to [`is_tuple_or_group`](Self::is_tuple_or_group) when `(` is seen, to
+    /// [`is_array_expression`](Self::is_array_expression) when `[` is seen, and to
     /// [`is_closure_expression`](Self::is_closure_expression) when `|` or `||` is seen.
     ///
     /// A zero-parameter closure's opening and closing pipes (`||`) have nothing between them to
@@ -1414,6 +1431,7 @@ impl<C: ParserContext> Parser<C> {
     /// - A literal value cannot be parsed (e.g., integer out of range).
     /// - An identifier is not found in the op lookup table.
     /// - A tuple-or-group expression fails to parse.
+    /// - An array literal fails to parse or is rejected by the context it emits into.
     /// - An `if` expression fails to parse.
     /// - A closure expression fails to parse.
     fn is_primary_expression(&mut self) -> Result<bool> {
@@ -1448,6 +1466,10 @@ impl<C: ParserContext> Parser<C> {
                 delimiter: Delimiter::Parenthesis,
                 ..
             }) => self.is_tuple_or_group(),
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Bracket,
+                ..
+            }) => self.is_array_expression(),
             _ => Ok(false),
         }
     }
@@ -1533,6 +1555,61 @@ impl<C: ParserContext> Parser<C> {
         }
         self.context
             .make_tuple(count, ambient_start, open_span, self.last_span);
+        Ok(true)
+    }
+
+    /// `array_expression = "[" expression { "," expression } "]".`
+    ///
+    /// Every comma requires another element, so the production stays Wirth-style LL(1) — each
+    /// decision is made by inspecting exactly the current token — and a trailing comma
+    /// (`[0i32,]`) is a parse error, unlike the 1-tuple form `(0i32,)` where the comma is what
+    /// distinguishes a tuple from a grouping.
+    ///
+    /// - Precondition: The next token is `Token::OpenDelim` with `Delimiter::Bracket`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the literal is empty (`[]` has no inferable element type; see
+    /// <https://github.com/stlab/cel-rs/issues/212>), if an element expression is missing or
+    /// malformed, if a comma or the closing `]` is missing, or if the context this emits into
+    /// rejects the collected elements (e.g. heterogeneous element types).
+    ///
+    /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
+    fn is_array_expression(&mut self) -> Result<bool> {
+        let open_span = self
+            .peek_span()
+            .expect("array_expression requires an opening '[' token");
+        self.advance();
+        if self.is_close_bracket() {
+            return Err(ParseError::new_range(
+                "an empty array literal has no inferable element type; \
+                 see https://github.com/stlab/cel-rs/issues/212"
+                    .to_string(),
+                open_span,
+                self.last_span,
+            ));
+        }
+        let ambient_start = self.context.current_stack_offset();
+        if !self.is_expression()? {
+            return Err(self.error_at("expected expression"));
+        }
+        let mut count = 1;
+        loop {
+            if self.is_close_bracket() {
+                break;
+            }
+            if !self.is_punctuation(",") {
+                return Err(self.error_at("expected ',' or closing ']'"));
+            }
+            // A comma always requires another element: `]` here (a trailing comma) can't start an
+            // `expression`, so this is where `[0i32,]` is rejected.
+            if !self.is_expression()? {
+                return Err(self.error_at("expected expression after ','"));
+            }
+            count += 1;
+        }
+        self.context
+            .make_array(count, ambient_start, open_span, self.last_span)?;
         Ok(true)
     }
 
@@ -3567,6 +3644,204 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let closure: cel_runtime::DynClosure = segment.call0()?;
         assert_eq!(closure.call::<std::ops::Range<i32>>(&[])?, 1i32..5i32);
+        Ok(())
+    }
+
+    /// Returns the [`ParseError`] the runtime-executing parser must produce for `source`.
+    fn array_parse_error(source: &str) -> ParseError {
+        let mut parser = CELParser::new(OpLookup::new());
+        match parser.parse_str(source) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a parse error for `{source}`"),
+        }
+    }
+
+    #[test]
+    fn array_literal_evaluates_to_its_elements_in_source_order() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[0i32, 1i32, 2i32]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![0, 1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn single_element_array_literal_needs_no_trailing_comma() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[7i32]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![7]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_elements_can_be_arbitrary_expressions() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[1i32 + 2i32, if true { 4i32 } else { 5i32 }]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![3, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_array_literal_is_rejected_with_a_dedicated_diagnostic() {
+        let err = array_parse_error("[]");
+        assert!(
+            err.message().contains("empty array"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn array_literal_rejects_a_trailing_comma() {
+        let err = array_parse_error("[0i32,]");
+        assert!(
+            err.message().contains("expected expression after ','"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn array_literal_requires_a_comma_between_elements() {
+        let err = array_parse_error("[0i32 1i32]");
+        assert!(
+            err.message().contains("expected ',' or closing ']'"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn array_literal_rejects_a_mismatched_element_naming_its_index() {
+        let err = array_parse_error("[0i32, 1.0f64]");
+        assert!(
+            err.message().contains("array element 1"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn array_literal_rejects_a_tuple_element() {
+        let err = array_parse_error("[(0i32, 1i32)]");
+        assert!(err.message().contains("tuple"), "got: {}", err.message());
+    }
+
+    #[test]
+    fn nested_array_literal_evaluates_to_an_array_of_arrays() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[[0i32], [1i32]]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        let inner = array.try_into_vec::<cel_runtime::DynamicArray>()?;
+        assert_eq!(inner.len(), 2);
+        let mut values = Vec::new();
+        for element in inner {
+            values.extend(element.try_into_vec::<i32>()?);
+        }
+        assert_eq!(values, vec![0, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_array_literal_rejects_a_recursive_element_mismatch() {
+        let err = array_parse_error("[[0i32], [1.0f64]]");
+        assert!(
+            err.message().contains("array element 1"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn nested_array_literal_rejects_a_depth_mismatch() {
+        let err = array_parse_error("[[0i32], [[1i32]]]");
+        assert!(
+            err.message().contains("array element 1"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn array_literal_is_accepted_as_a_call_argument() -> anyhow::Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("len", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                ("()", 2) => {
+                    segment.op2(|_callee: i32, arg: cel_runtime::DynamicArray| arg.len() as i32)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
+        let mut parser = CELParser::new(lookup);
+        let mut segment = parser
+            .parse_str("len([1i32, 2i32, 3i32])")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(segment.call0::<i32>()?, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn array_literal_is_accepted_as_a_tuple_element() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("([1i32, 2i32], 3i32).0")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_literal_is_accepted_inside_an_if_branch() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("if true { [1i32, 2i32] } else { [3i32, 4i32] }")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_literal_is_accepted_as_a_closure_body() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("|x: i32| [x, x]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let closure: cel_runtime::DynClosure = segment.call0()?;
+        let x = 5i32;
+        let array = closure.call::<cel_runtime::DynamicArray>(&[&x])?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![5, 5]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_ambient_start_is_correct_after_a_sibling_expression() -> anyhow::Result<()> {
+        // Regression guard mirroring `tuple_ambient_start_correct_after_sibling_expression`: a
+        // fully-evaluated sibling value earlier on the stack must not shift where the array
+        // literal believes its elements begin.
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("([0u8, 1u8], (2u8, 3u64).0).0")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<u8>()?, vec![0, 1]);
         Ok(())
     }
 }

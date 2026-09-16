@@ -312,6 +312,16 @@ pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<P
             }
             (Ty::Any, diagnostics)
         }
+        // Placeholder arm keeping `check_expr` exhaustive: every element is still checked and its
+        // diagnostics retained, but the literal's own type is reported as `Ty::Any` because `Ty`
+        // has no array case yet. Replaced when recursive array types are added.
+        Expr::Array { elements, .. } => {
+            let mut diagnostics = Vec::new();
+            for element in elements {
+                diagnostics.extend(check_expr(element, resolve_ident).1);
+            }
+            (Ty::Any, diagnostics)
+        }
         Expr::TupleIndex { base, .. } => (Ty::Any, check_expr(base, resolve_ident).1),
         Expr::Cast {
             expr,

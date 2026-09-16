@@ -388,6 +388,7 @@ fn expr_references_ident(expr: &Expr, name: &str) -> bool {
                 || args.iter().any(|e| expr_references_ident(e, name))
         }
         Expr::Tuple { elements, .. } => elements.iter().any(|e| expr_references_ident(e, name)),
+        Expr::Array { elements, .. } => elements.iter().any(|e| expr_references_ident(e, name)),
         Expr::TupleIndex { base, .. } => expr_references_ident(base, name),
         Expr::If {
             cond,

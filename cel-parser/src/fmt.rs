@@ -557,6 +557,17 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             );
             (list, Level::PRIMARY)
         }
+        // Placeholder arm keeping `render` exhaustive: array literals are emitted as a plain
+        // comma-separated list, without the comment/trivia handling the other list-shaped forms
+        // get from `emit_list`. Replaced when array formatting proper is implemented.
+        Expr::Array { elements, .. } => {
+            let inner = elements
+                .iter()
+                .map(|element| format_at(element, source, depth, Level::RANGE))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (format!("[{inner}]"), Level::PRIMARY)
+        }
         Expr::TupleIndex { base, index, .. } => (
             format!(
                 "{}.{}",
