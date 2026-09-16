@@ -5,11 +5,12 @@
 Everywhere Adam's grammar calls for `expression` (a cell initializer, a relationship
 binding's right-hand side, a conditional's match subject or branch literal, an `out`
 declaration's body, a `require`ment, a filter's body), the expression itself is parsed and
-evaluated by `cel-parser`/`cel-runtime`, not by Adam. Literals, arithmetic and comparison
-operators, `if`/`else`, `as` casts, ranges (`lo..=hi`), function calls, and closures are all
-CEL, and are documented by `cel-parser`'s own crate documentation, not here. This chapter
-covers only what Adam does *around* an expression: deciding which cells it may read, and
-what it does with the value it produces.
+evaluated by `cel-parser`/`cel-runtime`, not by Adam. The standalone CEL
+[reference manual](../cel-book/reference.html) and its book root
+[here](../cel-book/index.html) document literals, arithmetic and comparison operators,
+`if`/`else`, `as` casts, ranges (`lo..=hi`), function calls, and closures. This chapter covers
+only what Adam does *around* an expression: deciding which cells it may read, and what it does
+with the value it produces.
 
 ## No standard library of its own
 

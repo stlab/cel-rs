@@ -8,3 +8,4 @@
 - [Collections](collections.md)
 - [Casts and closures](casts-and-closures.md)
 - [Lexical conventions](lexical-conventions.md)
+- [Reference Manual](reference.md)
