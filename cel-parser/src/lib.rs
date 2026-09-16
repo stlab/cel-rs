@@ -30,8 +30,10 @@
 //! cast_expression = unary_expression { "as" identifier }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
 //! postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." unsuffixed_integer }.
-//! primary_expression = literal | identifier | tuple_or_group | if_expression | closure_expression.
+//! primary_expression = literal | identifier | tuple_or_group | array_expression
+//!                    | if_expression | closure_expression.
 //! tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".
+//! array_expression = "[" expression { "," expression } "]".
 //! if_expression = "if" expression "{" expression "}" [ "else" ( "{" expression "}" | if_expression ) ].
 //! closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression.
 //! closure_param = identifier ":" closure_type_expression.
@@ -70,6 +72,39 @@
 //! let mut parser = CELParser::new(OpLookup::new());
 //! let result = parser.parse_tokens(input.into_iter());
 //! assert!(result.is_ok());
+//! ```
+//!
+//! ## Array Literals
+//!
+//! A non-empty `[...]` literal evaluates to one [`cel_runtime::DynamicArray`] owning every
+//! element. Elements must share one complete recursive runtime type — a heterogeneous literal
+//! such as `[1i32, 2.0f64]`, an untyped empty literal `[]`, or a trailing comma is a parse
+//! error — and the evaluated array converts to the corresponding `Vec<T>` without moving or
+//! reallocating its elements:
+//!
+//! ```rust
+//! use cel_parser::{CELParser, OpLookup};
+//! use cel_runtime::DynamicArray;
+//!
+//! let mut segment = CELParser::new(OpLookup::new()).parse_str("[0, 1, 2]").unwrap();
+//! let array: DynamicArray = segment.call0().unwrap();
+//! assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1, 2]);
+//!
+//! assert!(CELParser::new(OpLookup::new()).parse_str("[1i32, 2.0f64]").is_err());
+//! ```
+//!
+//! Nested literals are recursively typed rank-one arrays, so each inner value is itself a
+//! `DynamicArray`:
+//!
+//! ```rust
+//! use cel_parser::{CELParser, OpLookup};
+//! use cel_runtime::DynamicArray;
+//!
+//! let mut segment = CELParser::new(OpLookup::new()).parse_str("[[0], [1]]").unwrap();
+//! let array: DynamicArray = segment.call0().unwrap();
+//! let rows = array.try_into_vec::<DynamicArray>().unwrap();
+//! assert_eq!(rows.len(), 2);
+//! assert_eq!(rows[0].try_as_slice::<i32>().unwrap(), &[0]);
 //! ```
 //!
 //! ## Error Formatting
@@ -3697,6 +3732,11 @@ mod tests {
             "got: {}",
             err.message()
         );
+        assert!(
+            err.message().contains("issues/212"),
+            "the diagnostic must reference the contextual-typing issue, got: {}",
+            err.message()
+        );
     }
 
     #[test]
@@ -3733,6 +3773,11 @@ mod tests {
     fn array_literal_rejects_a_tuple_element() {
         let err = array_parse_error("[(0i32, 1i32)]");
         assert!(err.message().contains("tuple"), "got: {}", err.message());
+        assert!(
+            err.message().contains("issues/213"),
+            "the diagnostic must reference the tuple-element issue, got: {}",
+            err.message()
+        );
     }
 
     #[test]
@@ -3846,6 +3891,121 @@ mod tests {
         let array: cel_runtime::DynamicArray = segment.call0()?;
         assert_eq!(array.try_into_vec::<i32>()?, vec![3, 4]);
         Ok(())
+    }
+
+    /// A custom element type implementing no trait beyond `'static` — not `Copy`, `Clone`,
+    /// `Debug`, or `PartialEq` — so an array of it exercises the minimum element bound.
+    struct Celsius(i32);
+
+    /// A second custom element type, distinct from [`Celsius`], so one call in an otherwise
+    /// homogeneous literal can return a different type.
+    struct Fahrenheit(i32);
+
+    /// The unapplied nullary function `f`.
+    struct FName;
+
+    /// The unapplied nullary function `g`.
+    struct GName;
+
+    /// The unapplied nullary function `h`.
+    struct HName;
+
+    /// Returns an [`OpLookup`] resolving the nullary calls `f()`, `g()`, and `h()`, where `f`
+    /// and `g` return [`Celsius`] values and `h` returns a [`Celsius`] when `homogeneous` and a
+    /// [`Fahrenheit`] otherwise.
+    fn temperature_lookup(homogeneous: bool) -> OpLookup {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(
+            move |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| FName);
+                    Ok(true)
+                }
+                ("g", 0) => {
+                    segment.op0(|| GName);
+                    Ok(true)
+                }
+                ("h", 0) => {
+                    segment.op0(|| HName);
+                    Ok(true)
+                }
+                ("()", 1) => {
+                    let Some(callee) = segment
+                        .peek_stack_infos(1)
+                        .first()
+                        .map(|i| i.value_type.type_id())
+                    else {
+                        return Ok(false);
+                    };
+                    if callee == TypeId::of::<FName>() {
+                        segment.op1(|_: FName| Celsius(0))?;
+                    } else if callee == TypeId::of::<GName>() {
+                        segment.op1(|_: GName| Celsius(1))?;
+                    } else if callee == TypeId::of::<HName>() {
+                        if homogeneous {
+                            segment.op1(|_: HName| Celsius(2))?;
+                        } else {
+                            segment.op1(|_: HName| Fahrenheit(2))?;
+                        }
+                    } else {
+                        return Ok(false);
+                    }
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
+        lookup
+    }
+
+    #[test]
+    fn array_literal_of_calls_returning_a_custom_type_converts_to_its_vector() -> anyhow::Result<()>
+    {
+        let mut parser = CELParser::new(temperature_lookup(true));
+        let mut segment = parser
+            .parse_str("[f(), g(), h()]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        let degrees: Vec<i32> = array
+            .try_into_vec::<Celsius>()?
+            .into_iter()
+            .map(|c| c.0)
+            .collect();
+        assert_eq!(degrees, vec![0, 1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_literal_of_one_custom_typed_call_evaluates_to_that_type() -> anyhow::Result<()> {
+        // The same registration the mismatch test below uses: `h` alone is a perfectly good
+        // array element, so that test's failure is about element homogeneity, not about `h`.
+        let mut parser = CELParser::new(temperature_lookup(false));
+        let mut segment = parser
+            .parse_str("[h()]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        let degrees: Vec<i32> = array
+            .try_into_vec::<Fahrenheit>()?
+            .into_iter()
+            .map(|f| f.0)
+            .collect();
+        assert_eq!(degrees, vec![2]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_literal_of_calls_rejects_a_mismatched_return_type_before_execution() {
+        // `parse_str` compiles the literal, so a mismatch is reported here — the segment is
+        // never built and therefore never executed.
+        let mut parser = CELParser::new(temperature_lookup(false));
+        let err = match parser.parse_str("[f(), g(), h()]") {
+            Err(e) => e,
+            Ok(_) => panic!("expected `[f(), g(), h()]` with a mismatched `h` to fail"),
+        };
+        let message = err.message();
+        assert!(message.contains("array element 2"), "got: {message}");
+        assert!(message.contains("Fahrenheit"), "got: {message}");
+        assert!(message.contains("Celsius"), "got: {message}");
     }
 }
 

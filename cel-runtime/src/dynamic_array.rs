@@ -36,6 +36,33 @@
 //! let array = DynamicArray::try_from_vec(vec![1i32]).unwrap();
 //! assert!(array.try_into_vec::<u32>().is_err());
 //! ```
+//!
+//! An array whose elements are themselves arrays is a recursively typed rank-one array — its
+//! concrete element type is `DynamicArray`, and each inner array independently owns a `Vec<T>`
+//! allocation. Every element must share the same complete recursive type, so the outer
+//! descriptor stays accurate:
+//!
+//! ```rust
+//! use cel_runtime::DynamicArray;
+//!
+//! let rows = vec![
+//!     DynamicArray::try_from_vec(vec![0i32]).unwrap(),
+//!     DynamicArray::try_from_vec(vec![1i32]).unwrap(),
+//! ];
+//! let nested = DynamicArray::try_from_vec(rows).unwrap();
+//! let rows = nested.try_into_vec::<DynamicArray>().unwrap();
+//! assert_eq!(rows[1].try_as_slice::<i32>().unwrap(), &[1]);
+//!
+//! // Inner element types must agree.
+//! let mixed = vec![
+//!     DynamicArray::try_from_vec(vec![0i32]).unwrap(),
+//!     DynamicArray::try_from_vec(vec![1.0f64]).unwrap(),
+//! ];
+//! assert!(DynamicArray::try_from_vec(mixed).is_err());
+//! ```
+//!
+//! `cel-parser` array literals (`[0, 1, 2]`, `[[0], [1]]`) compile to operations that collect
+//! their evaluated elements into exactly these values.
 
 use crate::dyn_segment::{RawDropper, raw_dropper_for};
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
