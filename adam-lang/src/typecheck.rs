@@ -21,10 +21,12 @@ use crate::ast::{BindingDecl, CellFilter, OutDecl, RequireBlock, Sheet, SheetIte
 use crate::type_registry::TypeShape;
 
 /// Checks `sheet` against `registry`'s registered types, returning every type diagnostic found.
-/// Never fails — an unrecognized annotation, an unresolved identifier, or a custom operator
-/// [`cel_parser::op_table::builtin_operand_types`] doesn't know about all resolve to
+/// Never fails — an absent Adam annotation, an unresolved identifier, an Adam `cell`/`source`/`out`
+/// annotation `registry` doesn't resolve, or a custom operator
+/// [`cel_parser::op_table::builtin_operand_types`] doesn't know about all fall back to
 /// [`cel_parser::Ty::Any`] and are silently skipped, not reported. CEL array annotations inside
-/// expressions use the same `registry` to resolve custom scalar leaf names.
+/// expressions use the same registry-backed CEL resolver, so unknown leaf names such as
+/// `[]: [Missing]` are still reported.
 ///
 /// - Complexity: O(n) in the number of nodes across every item in `sheet`.
 ///

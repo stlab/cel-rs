@@ -57,3 +57,11 @@ Implemented Task 5 of `docs/superpowers/plans/2026-09-16-typed-array-annotations
 
 - `cargo test --doc -p cel-parser -p adam-lang`
   - PASS
+
+## Final Task 5 review fix
+
+- Narrowed `adam-lang::check_sheet` rustdoc so only intentionally silent fallbacks remain
+  documented as `Ty::Any` behavior: absent Adam annotations, unresolved identifiers, unknown Adam
+  `cell`/`source`/`out` annotations, and unknown operator signatures.
+- Documented the contrasting behavior for embedded CEL array annotations explicitly: unknown leaf
+  names such as `[]: [Missing]` are reported, matching the doctested `check_sheet` behavior.
