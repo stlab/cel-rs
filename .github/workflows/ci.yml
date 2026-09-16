@@ -70,6 +70,9 @@ jobs:
     - name: Build the adam-lang book
       run: mdbook build adam-lang-book
 
+    - name: Build the CEL language book
+      run: mdbook build cel-lang-book
+
     - name: Check begin app (renderer-agnostic)
       run: cargo check -p begin --no-default-features
 
