@@ -42,3 +42,18 @@ Implemented Task 5 of `docs/superpowers/plans/2026-09-16-typed-array-annotations
 - `docs/superpowers/*` still contains historical design/plan documents from before issue #212 was
   implemented. I left those unchanged because they record prior accepted scope rather than current
   public module behavior.
+
+## Review fix pass
+
+- Updated `docs/superpowers/specs/2026-09-15-cel-homogeneous-arrays-design.md` to keep its
+  original historical framing while explicitly marking #212 as implemented, clarifying that only
+  bare `[]` remains unsupported, and keeping the tuple-array limitation tied to #213.
+- Expanded public rustdoc coverage in `cel-parser` and `adam-lang` so the published contracts now
+  show compile-checked scalar, nested-array, custom-registry, and empty-array annotation examples.
+- Added exact rustdoc-backed mismatch and unknown-type examples for both direct CEL parsing and
+  adam-lang's deferred `check_sheet` path.
+
+### Additional verification
+
+- `cargo test --doc -p cel-parser -p adam-lang`
+  - PASS

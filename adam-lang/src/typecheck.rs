@@ -39,6 +39,31 @@ use crate::type_registry::TypeShape;
 /// let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
 /// assert_eq!(diagnostics.len(), 1, "1.0 defaults to f64, mismatching the i32 annotation");
 /// ```
+///
+/// ```rust
+/// use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};
+///
+/// let sheet = AdamAstParser::new()
+///     .parse_str("sheet s { out values := [0, 1]: [f64]; }")
+///     .unwrap();
+/// let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+/// assert_eq!(diagnostics.len(), 1);
+/// assert_eq!(
+///     diagnostics[0].message(),
+///     "array elements must match the annotation exactly: expected `f64`, found `i32`"
+/// );
+/// ```
+///
+/// ```rust
+/// use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};
+///
+/// let sheet = AdamAstParser::new()
+///     .parse_str("sheet s { out values := []: [Missing]; }")
+///     .unwrap();
+/// let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+/// assert_eq!(diagnostics.len(), 1);
+/// assert_eq!(diagnostics[0].message(), "unknown type `Missing`");
+/// ```
 pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
     let mut diagnostics = Vec::new();
     let (cell_types, shapes) = declared_cell_types(sheet, registry);

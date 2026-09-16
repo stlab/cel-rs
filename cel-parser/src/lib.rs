@@ -81,25 +81,26 @@
 //! ## Array Literals
 //!
 //! A `[...]` literal evaluates to one [`cel_runtime::DynamicArray`] owning every element.
-//! Unannotated non-empty arrays keep their existing inference, while a typed empty array uses a
-//! postfix annotation naming the complete array type. Elements must share one complete recursive
-//! runtime type — a heterogeneous literal such as `[1i32, 2.0f64]`, an unannotated empty literal
-//! `[]`, or a trailing comma is a parse error — and the evaluated array converts to the
-//! corresponding `Vec<T>` without moving or reallocating its elements:
+//! Unannotated non-empty arrays keep their existing inference, while postfix annotations let
+//! callers state the complete scalar, nested-array, custom-registry, or empty-array type
+//! explicitly. Elements must share one complete recursive runtime type — a heterogeneous literal
+//! such as `[1i32, 2.0f64]`, an unannotated empty literal `[]`, or a trailing comma is a parse
+//! error — and the evaluated array converts to the corresponding `Vec<T>` without moving or
+//! reallocating its elements:
 //!
 //! ```rust
 //! use cel_parser::{CELParser, OpLookup};
 //! use cel_runtime::DynamicArray;
 //!
-//! let mut segment = CELParser::new(OpLookup::new()).parse_str("[0, 1, 2]").unwrap();
+//! let mut segment = CELParser::new(OpLookup::new())
+//!     .parse_str("[0, 1, 2]: [i32]")
+//!     .unwrap();
 //! let array: DynamicArray = segment.call0().unwrap();
 //! assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1, 2]);
 //!
 //! let mut segment = CELParser::new(OpLookup::new()).parse_str("[]: [i32]").unwrap();
 //! let array: DynamicArray = segment.call0().unwrap();
 //! assert!(array.try_into_vec::<i32>().unwrap().is_empty());
-//!
-//! assert!(CELParser::new(OpLookup::new()).parse_str("[1i32, 2.0f64]").is_err());
 //! ```
 //!
 //! Hosts may also resolve custom registry-backed leaf names by constructing the parser with
@@ -123,18 +124,41 @@
 //! assert!(array.try_into_vec::<Custom>().unwrap().is_empty());
 //! ```
 //!
-//! Nested literals are recursively typed rank-one arrays, so each inner value is itself a
-//! `DynamicArray`:
+//! Nested literals accept recursive array annotations, so each inner value is itself a
+//! `DynamicArray` with its own checked element descriptor:
 //!
 //! ```rust
 //! use cel_parser::{CELParser, OpLookup};
 //! use cel_runtime::DynamicArray;
 //!
-//! let mut segment = CELParser::new(OpLookup::new()).parse_str("[[0], [1]]").unwrap();
+//! let mut segment = CELParser::new(OpLookup::new())
+//!     .parse_str("[[0], [1]]: [[i32]]")
+//!     .unwrap();
 //! let array: DynamicArray = segment.call0().unwrap();
 //! let rows = array.try_into_vec::<DynamicArray>().unwrap();
 //! assert_eq!(rows.len(), 2);
 //! assert_eq!(rows[0].try_as_slice::<i32>().unwrap(), &[0]);
+//! ```
+//!
+//! Exact annotation failures stay precise:
+//!
+//! ```rust
+//! use cel_parser::{CELParser, OpLookup};
+//!
+//! let err = match CELParser::new(OpLookup::new()).parse_str("[0, 1]: [f64]") {
+//!     Ok(_) => panic!("the annotation should reject i32 elements"),
+//!     Err(err) => err,
+//! };
+//! assert_eq!(
+//!     err.message(),
+//!     "array element 0 has type i32, expected f64"
+//! );
+//!
+//! let err = match CELParser::new(OpLookup::new()).parse_str("[0]: [Nope]") {
+//!     Ok(_) => panic!("the unknown leaf name should be rejected"),
+//!     Err(err) => err,
+//! };
+//! assert_eq!(err.message(), "unknown type `Nope`");
 //! ```
 //!
 //! ### Known limitations
