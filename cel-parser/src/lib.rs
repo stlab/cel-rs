@@ -3833,15 +3833,18 @@ mod tests {
 
     #[test]
     fn array_ambient_start_is_correct_after_a_sibling_expression() -> anyhow::Result<()> {
-        // Regression guard mirroring `tuple_ambient_start_correct_after_sibling_expression`: a
-        // fully-evaluated sibling value earlier on the stack must not shift where the array
-        // literal believes its elements begin.
+        // Regression guard mirroring `tuple_ambient_start_correct_after_sibling_expression`: the
+        // array literal is deliberately *not* the first sub-expression, and its sibling has a
+        // different alignment than its element type. The `u8` sum is pushed first (offset 0,
+        // align 1), so the `i32` elements start at a nonzero offset that is only correct if the
+        // ambient start is both threaded through from the sibling and padded up to `i32`'s
+        // alignment.
         let mut parser = CELParser::new(OpLookup::new());
         let mut segment = parser
-            .parse_str("([0u8, 1u8], (2u8, 3u64).0).0")
+            .parse_str("(1u8 + 2u8, [3i32, 4i32]).1")
             .map_err(|e| anyhow::anyhow!("{}", e))?;
         let array: cel_runtime::DynamicArray = segment.call0()?;
-        assert_eq!(array.try_into_vec::<u8>()?, vec![0, 1]);
+        assert_eq!(array.try_into_vec::<i32>()?, vec![3, 4]);
         Ok(())
     }
 }
