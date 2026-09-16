@@ -2,16 +2,17 @@
 
 Operator precedence follows the parser grammar, from lowest to highest:
 
-1. logical `||`
-2. logical `&&`
-3. comparison `== != < > <= >=`
-4. bitwise `| ^ &`
-5. shift `<< >>`
-6. additive `+ -`
-7. multiplicative `* / %`
-8. casts with `as`
-9. unary `- !`
-10. postfix call and tuple index
+1. ranges `.. ..=`
+2. logical `||`
+3. logical `&&`
+4. comparison `== != < > <= >=`
+5. bitwise `| ^ &`
+6. shift `<< >>`
+7. additive `+ -`
+8. multiplicative `* / %`
+9. casts with `as`
+10. unary `- !`
+11. postfix call and tuple index
 
 ```rust
 use cel_parser::{CELParser, OpLookup};

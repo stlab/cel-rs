@@ -20,8 +20,8 @@ cover the basic array round-trip and the heterogeneous-array rejection case.
 
 ## What arrays accept
 
-- Each element can itself be any expression, including a conditional or a
-  nested array.
+- Each element can be an expression that produces a supported array element
+  type, including a conditional or a nested array.
 - Nested arrays are rank-one arrays whose element type is `DynamicArray`.
 - The parser preserves element order.
 
