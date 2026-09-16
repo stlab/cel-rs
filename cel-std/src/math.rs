@@ -38,11 +38,11 @@ pub(crate) fn min_max_scope(
         }
         ("()", 3) => {
             let top = segment.peek_stack_infos(3);
-            if top.len() != 3 || top[1].type_id != top[2].type_id {
+            if top.len() != 3 || top[1].value_type.type_id() != top[2].value_type.type_id() {
                 return Ok(false);
             }
-            let callee_type = top[0].type_id;
-            let operand_type = top[1].type_id;
+            let callee_type = top[0].value_type.type_id();
+            let operand_type = top[1].value_type.type_id();
 
             macro_rules! dispatch {
                 ($marker:ty, $method:ident, [$($t:ty),+ $(,)?]) => {
@@ -105,13 +105,13 @@ pub(crate) fn clamp_scope(
         ("()", 4) => {
             let top = segment.peek_stack_infos(4);
             if top.len() != 4
-                || top[0].type_id != TypeId::of::<ClampFn>()
-                || top[1].type_id != top[2].type_id
-                || top[1].type_id != top[3].type_id
+                || top[0].value_type.type_id() != TypeId::of::<ClampFn>()
+                || top[1].value_type.type_id() != top[2].value_type.type_id()
+                || top[1].value_type.type_id() != top[3].value_type.type_id()
             {
                 return Ok(false);
             }
-            let operand_type = top[1].type_id;
+            let operand_type = top[1].value_type.type_id();
 
             macro_rules! dispatch {
                 ([$($t:ty),+ $(,)?]) => {
@@ -162,10 +162,10 @@ pub(crate) fn abs_scope(
         }
         ("()", 2) => {
             let top = segment.peek_stack_infos(2);
-            if top.len() != 2 || top[0].type_id != TypeId::of::<AbsFn>() {
+            if top.len() != 2 || top[0].value_type.type_id() != TypeId::of::<AbsFn>() {
                 return Ok(false);
             }
-            let operand_type = top[1].type_id;
+            let operand_type = top[1].value_type.type_id();
 
             macro_rules! dispatch_checked {
                 ([$($t:ty),+ $(,)?]) => {
@@ -245,8 +245,8 @@ pub(crate) fn unary_math_scope(
             if top.len() != 2 {
                 return Ok(false);
             }
-            let callee_type = top[0].type_id;
-            let operand_type = top[1].type_id;
+            let callee_type = top[0].value_type.type_id();
+            let operand_type = top[1].value_type.type_id();
 
             macro_rules! dispatch {
                 ($marker:ty, $method:ident, [$($t:ty),+ $(,)?]) => {

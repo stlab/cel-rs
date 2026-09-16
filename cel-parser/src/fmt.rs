@@ -82,6 +82,18 @@ fn emit_gap(pieces: &[GapPiece], spacing: Spacing, depth: usize) -> String {
                     }
                     Spacing::None => out.push_str(tok),
                     Spacing::CommaAfter => {
+                        // Unlike `Around`, a comma never gets a leading space of its own -- it
+                        // glues directly to whatever precedes it, whether that's the element text
+                        // itself (the comment-free case) or a comment's trailing `" */ "` (a block
+                        // comment written between the element and its `,`, e.g.
+                        // `1i32 /* c */, 2i32`). A line comment's trailing continuation *indent*
+                        // is different: that space is meaningful (it's `indent(depth + 1)`, not
+                        // filler), so it must be left alone -- only the incidental single-space
+                        // filler a block comment or a prior `Around` punct leaves behind is
+                        // trimmed.
+                        if out.ends_with(' ') && !out.ends_with(&cont) {
+                            out.pop();
+                        }
                         out.push_str(tok);
                         out.push(' ');
                     }
@@ -167,21 +179,23 @@ fn gap_between(
 }
 
 /// Renders a comma-separated element list with per-gap comment recovery: the gap before the first
-/// element (after `bounds.0`, the opening delimiter's position, e.g. a `(`), each inter-element
-/// `,` gap, and the gap after the last element (before `bounds.1`, the position right past the
-/// closing delimiter, e.g. a `)`). `delims` is `(open, close)`, the delimiter tokens. When
-/// `trailing_comma` is set (a 1-tuple), a `,` is emitted after the sole element.
+/// element (after `bounds.0`, the opening delimiter's position, e.g. a `(` or `[`), each
+/// inter-element `,` gap, and the gap after the last element (before `bounds.1`, the position
+/// right past the closing delimiter, e.g. a `)` or `]`). `delims` is `(open, close)`, the
+/// delimiter tokens. When `trailing_comma` is set (a 1-tuple), a `,` is emitted after the sole
+/// element.
 ///
 /// `bounds` holds raw [`proc_macro2::LineColumn`] positions (not `Span`s, unlike [`gap_between`]'s
-/// `prev_end`/`next_start`) because `Expr::Apply`'s and `Expr::Tuple`'s own recorded delimiter
-/// span covers the *whole* `(...)` group rather than a single delimiter character:
-/// `AstContext::apply_op`'s `"()"` arm and `is_tuple_or_group` both capture `self.last_span` from
-/// a `Token::CloseDelim`, and `lex_lexer`'s flattening gives every `OpenDelim`/`CloseDelim` the
-/// *enclosing `Group`'s* span (see `LexLexer::next`), so a group span's `.start()` lands on `(`
-/// and its `.end()` lands just past `)` regardless of which delimiter "produced" it. Resolving
-/// which of `.start()`/`.end()` is the right boundary is the caller's job (it knows whether it's
-/// holding a whole-group span or an ordinary leaf span, e.g. a callee's own end); this helper just
-/// consumes the two positions it's given.
+/// `prev_end`/`next_start`) because `Expr::Apply`'s, `Expr::Tuple`'s, and `Expr::Array`'s own
+/// recorded delimiter span covers the *whole* `(...)`/`[...]` group rather than a single
+/// delimiter character: `AstContext::apply_op`'s `"()"` arm, `is_tuple_or_group`, and
+/// `is_array_expression` all capture `self.last_span` from a `Token::CloseDelim`, and
+/// `lex_lexer`'s flattening gives every `OpenDelim`/`CloseDelim` the *enclosing `Group`'s* span
+/// (see `LexLexer::next`), so a group span's `.start()` lands on the opening delimiter and its
+/// `.end()` lands just past the closing delimiter regardless of which delimiter "produced" it.
+/// Resolving which of `.start()`/`.end()` is the right boundary is the caller's job (it knows
+/// whether it's holding a whole-group span or an ordinary leaf span, e.g. a callee's own end);
+/// this helper just consumes the two positions it's given.
 ///
 /// - Complexity: O(n) in the number of elements plus their gap lengths.
 fn emit_list(
@@ -557,6 +571,21 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             );
             (list, Level::PRIMARY)
         }
+        Expr::Array { elements, span } => {
+            // `span.start` and `span.end` are both the same whole-group span here (see
+            // `emit_list`'s doc comment): `.start()` is the position of `[`, `.end()` the
+            // position right after `]`. Array literals never take a trailing comma (the grammar
+            // is LL(1) and rejects one outright), unlike the one-tuple special case above.
+            let list = emit_list(
+                source,
+                depth,
+                ("[", "]"),
+                (span.start.start(), span.end.end()),
+                elements,
+                false,
+            );
+            (list, Level::PRIMARY)
+        }
         Expr::TupleIndex { base, index, .. } => (
             format!(
                 "{}.{}",
@@ -879,6 +908,20 @@ mod tests {
     }
 
     #[test]
+    fn arrays_format_with_brackets_and_normalized_commas() {
+        assert_eq!(fmt("[1i32,2i32]"), "[1i32, 2i32]");
+        assert_eq!(fmt("[[1i32], [2i32]]"), "[[1i32], [2i32]]");
+    }
+
+    #[test]
+    fn array_comments_remain_in_source_order() {
+        assert_eq!(
+            fmt("[1i32 /* first */, /* second */ 2i32]"),
+            "[1i32 /* first */, /* second */ 2i32]"
+        );
+    }
+
+    #[test]
     fn comments_in_a_call_argument_list_are_preserved() {
         assert_eq!(
             fmt("f(/* a */ 1i32, /* b */ 2i32)"),
@@ -1107,6 +1150,18 @@ mod tests {
         // depth 0 => continuation at depth 1 (4 spaces). The operator keeps its leading space; the
         // line comment ends the line, and the next operand resumes at the continuation indent.
         assert_eq!(emit_gap(&pieces, Spacing::Around, 0), " + // why\n    ");
+    }
+
+    #[test]
+    fn emit_gap_comma_after_a_line_comment_keeps_the_full_continuation_indent() {
+        // A comma following a line comment must NOT lose one space of the continuation indent --
+        // that indent is meaningful (it's `indent(depth + 1)`), unlike the single incidental
+        // space a block comment or an `Around` punct leaves before a comma.
+        let pieces = vec![
+            GapPiece::Comment(Comment::Line("why".to_string())),
+            GapPiece::Punct(","),
+        ];
+        assert_eq!(emit_gap(&pieces, Spacing::CommaAfter, 0), " // why\n    , ");
     }
 
     #[test]

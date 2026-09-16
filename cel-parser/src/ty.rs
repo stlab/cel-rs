@@ -1,17 +1,19 @@
 //! A minimal static type model for the built-in primitives `adam_lang::TypeRegistry::new()`
-//! registers by default, plus [`Ty::Any`] for everything else (custom host-registered types,
-//! unannotated cells, unresolved identifiers). Used by [`check_expr`] to type-check
-//! [`crate::Expr`] trees built by [`crate::AstContext`]. Not a complete type system — see the
-//! design doc's "Type checking (v1)" section for what's deliberately out of scope.
+//! registers by default, plus [`Ty::Array`] for homogeneous arrays of those and [`Ty::Any`] for
+//! everything else (custom host-registered types, unannotated cells, unresolved identifiers).
+//! Used by [`check_expr`] to type-check [`crate::Expr`] trees built by [`crate::AstContext`]. Not
+//! a complete type system — see the design doc's "Type checking (v1)" section for what's
+//! deliberately out of scope.
 
 use std::any::TypeId;
+use std::borrow::Cow;
 
 use crate::op_table::{builtin_operand_types, cast_source_types};
 use crate::{Expr, ExprSpan, Literal, ParseError};
 
-/// A static type: one of the built-in primitives, or [`Ty::Any`] for anything adam-lang/CEL's
-/// extensible type system doesn't statically know about.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A static type: one of the built-in primitives, a homogeneous array of one of those, or
+/// [`Ty::Any`] for anything adam-lang/CEL's extensible type system doesn't statically know about.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ty {
     /// `i8`.
     I8,
@@ -45,6 +47,10 @@ pub enum Ty {
     Bool,
     /// `String`.
     String,
+    /// A homogeneous array (`cel_runtime::DynamicArray`) of the boxed element type, which may
+    /// itself be an array (`[[i32]]`) or [`Ty::Any`] (an array whose element type isn't
+    /// statically known — e.g. `[f(), g()]`, whose elements are unresolved call results).
+    Array(Box<Ty>),
     /// Anything not statically known: a custom host-registered type, an unannotated cell, an
     /// unresolved identifier, or a node kind [`check_expr`] doesn't check directly (e.g. a tuple
     /// or call result). Unifies silently with every other `Ty`, in both directions.
@@ -89,6 +95,10 @@ impl Ty {
     /// Maps a `TypeId` (e.g. from `adam_lang::TypeRegistry::TypeEntry::type_id`) to its [`Ty`].
     /// An unrecognized `TypeId` maps to [`Ty::Any`] — not an error, matching adam-lang/CEL's
     /// extensible type system (a host binary's custom registered types are invisible here).
+    /// `cel_runtime::DynamicArray`'s own `TypeId` maps to `Array(Box::new(Ty::Any))`: a bare
+    /// `TypeId` is flat, so it carries no element descriptor to recover the array's element type
+    /// from, and [`Ty::Any`] is the element type that unifies with every actual element type
+    /// rather than claiming one falsely.
     ///
     /// # Examples
     ///
@@ -98,6 +108,10 @@ impl Ty {
     ///
     /// assert_eq!(Ty::from_type_id(TypeId::of::<i32>()), Ty::I32);
     /// assert_eq!(Ty::from_type_id(TypeId::of::<Vec<u8>>()), Ty::Any);
+    /// assert_eq!(
+    ///     Ty::from_type_id(TypeId::of::<cel_runtime::DynamicArray>()),
+    ///     Ty::Array(Box::new(Ty::Any))
+    /// );
     /// ```
     pub fn from_type_id(id: TypeId) -> Ty {
         if id == TypeId::of::<i8>() {
@@ -132,13 +146,16 @@ impl Ty {
             Ty::Bool
         } else if id == TypeId::of::<String>() {
             Ty::String
+        } else if id == TypeId::of::<cel_runtime::DynamicArray>() {
+            Ty::Array(Box::new(Ty::Any))
         } else {
             Ty::Any
         }
     }
 
     /// Returns this type's `TypeId`, or `None` for [`Ty::Any`] (which has no single concrete
-    /// Rust type).
+    /// Rust type). Every [`Ty::Array`], whatever its element type, reports
+    /// `cel_runtime::DynamicArray`'s `TypeId` — the one runtime type every array value has.
     ///
     /// # Examples
     ///
@@ -148,6 +165,10 @@ impl Ty {
     ///
     /// assert_eq!(Ty::I32.type_id(), Some(TypeId::of::<i32>()));
     /// assert_eq!(Ty::Any.type_id(), None);
+    /// assert_eq!(
+    ///     Ty::Array(Box::new(Ty::I32)).type_id(),
+    ///     Some(TypeId::of::<cel_runtime::DynamicArray>())
+    /// );
     /// ```
     pub fn type_id(&self) -> Option<TypeId> {
         Some(match self {
@@ -167,11 +188,16 @@ impl Ty {
             Ty::F64 => TypeId::of::<f64>(),
             Ty::Bool => TypeId::of::<bool>(),
             Ty::String => TypeId::of::<String>(),
+            Ty::Array(_) => TypeId::of::<cel_runtime::DynamicArray>(),
             Ty::Any => return None,
         })
     }
 
-    /// A human-readable name for diagnostics (e.g. `"i32"`, `"<any>"`).
+    /// A human-readable name for diagnostics (e.g. `"i32"`, `"<any>"`, `"[[i32]]"`). Borrowed for
+    /// every non-array type; an array's name is built recursively, so it owns its rendering.
+    ///
+    /// - Complexity: O(d) time and space in this type's array nesting depth `d` (O(1) for every
+    ///   non-array type, which borrows a `'static` name).
     ///
     /// # Examples
     ///
@@ -180,9 +206,10 @@ impl Ty {
     ///
     /// assert_eq!(Ty::I32.name(), "i32");
     /// assert_eq!(Ty::Any.name(), "<any>");
+    /// assert_eq!(Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))).name(), "[[i32]]");
     /// ```
-    pub fn name(&self) -> &'static str {
-        match self {
+    pub fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed(match self {
             Ty::I8 => "i8",
             Ty::I16 => "i16",
             Ty::I32 => "i32",
@@ -199,8 +226,9 @@ impl Ty {
             Ty::F64 => "f64",
             Ty::Bool => "bool",
             Ty::String => "String",
+            Ty::Array(element) => return Cow::Owned(format!("[{}]", element.name())),
             Ty::Any => "<any>",
-        }
+        })
     }
 
     /// Maps a type's bare name (as written in source, e.g. in a cast's target position) to its
@@ -237,10 +265,15 @@ impl Ty {
         }
     }
 
-    /// Returns `true` if `self` and `other` are compatible: either is [`Ty::Any`], or they're
-    /// equal. `Ty::Any` unifying silently with everything (in both directions) is the load-bearing
-    /// property that lets unannotated cells and custom host types produce zero false-positive
-    /// diagnostics.
+    /// Returns `true` if `self` and `other` are compatible: either is [`Ty::Any`], they're two
+    /// arrays whose element types are themselves compatible, or they're equal. `Ty::Any` unifying
+    /// silently with everything (in both directions, and at every array nesting level) is the
+    /// load-bearing property that lets unannotated cells and custom host types produce zero
+    /// false-positive diagnostics.
+    ///
+    /// - Complexity: O(d) in the array nesting depth of the unified type, which is at least the
+    ///   depth of the deeper of the two operands — a [`Ty::Any`] operand still clones the other
+    ///   side's full nested structure.
     ///
     /// # Examples
     ///
@@ -249,9 +282,43 @@ impl Ty {
     ///
     /// assert!(Ty::Any.unifies_with(&Ty::I32));
     /// assert!(!Ty::I32.unifies_with(&Ty::F64));
+    /// assert!(Ty::Array(Box::new(Ty::Any)).unifies_with(&Ty::Array(Box::new(Ty::I32))));
+    /// assert!(!Ty::Array(Box::new(Ty::I32)).unifies_with(&Ty::Array(Box::new(Ty::F64))));
     /// ```
     pub fn unifies_with(&self, other: &Ty) -> bool {
-        matches!(self, Ty::Any) || matches!(other, Ty::Any) || self == other
+        self.unify(other).is_some()
+    }
+
+    /// The most specific type both `self` and `other` describe, or `None` if they're
+    /// incompatible: [`Ty::Any`] yields the other side (it constrains nothing), two arrays yield
+    /// an array of their unified element types, and two equal types yield themselves.
+    ///
+    /// - Postcondition: `self.unify(other).is_some() == self.unifies_with(other)`, and the result
+    ///   (when `Some`) unifies with both `self` and `other`.
+    /// - Complexity: O(d) in the array nesting depth of the result, which is at least the depth
+    ///   of the deeper of the two operands — a [`Ty::Any`] operand still clones the other side's
+    ///   full nested structure.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::Ty;
+    ///
+    /// assert_eq!(Ty::Any.unify(&Ty::I32), Some(Ty::I32));
+    /// assert_eq!(
+    ///     Ty::Array(Box::new(Ty::Any)).unify(&Ty::Array(Box::new(Ty::I32))),
+    ///     Some(Ty::Array(Box::new(Ty::I32)))
+    /// );
+    /// assert_eq!(Ty::I32.unify(&Ty::F64), None);
+    /// ```
+    pub fn unify(&self, other: &Ty) -> Option<Ty> {
+        match (self, other) {
+            (Ty::Any, other) => Some(other.clone()),
+            (this, Ty::Any) => Some(this.clone()),
+            (Ty::Array(lhs), Ty::Array(rhs)) => Some(Ty::Array(Box::new(lhs.unify(rhs)?))),
+            (this, other) if this == other => Some(this.clone()),
+            _ => None,
+        }
     }
 }
 
@@ -259,8 +326,9 @@ impl Ty {
 /// `Ty::Any` if unknown — e.g. a bare CEL builtin name, or an adam-lang cell with no `: type`
 /// annotation), returning the expression's inferred type plus every type diagnostic found.
 ///
-/// Only [`Expr::Op`] (via [`builtin_operand_types`]) and [`Expr::Logical`] (CEL's fixed `&&`/`||`
-/// semantics: both operands must unify with `bool`) are checked directly. [`Expr::Apply`],
+/// Only [`Expr::Op`] (via [`builtin_operand_types`]), [`Expr::Logical`] (CEL's fixed `&&`/`||`
+/// semantics: both operands must unify with `bool`), and [`Expr::Array`] (whose elements must
+/// share one type, see this module's `check_array`) are checked directly. [`Expr::Apply`],
 /// [`Expr::Tuple`], [`Expr::TupleIndex`], [`Expr::If`], and [`Expr::Closure`] are recursed into —
 /// so an `Op` nested inside one is still checked ([`Expr::Closure`] recurses into its own `body`
 /// with a resolver that shadows the outer one with the closure's own parameter names first) — but
@@ -312,6 +380,8 @@ pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<P
             }
             (Ty::Any, diagnostics)
         }
+        // An array literal's own type is `Array` of its elements' unified type; see `check_array`.
+        Expr::Array { elements, .. } => check_array(elements, resolve_ident),
         Expr::TupleIndex { base, .. } => (Ty::Any, check_expr(base, resolve_ident).1),
         Expr::Cast {
             expr,
@@ -343,6 +413,56 @@ pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<P
             (Ty::Any, diagnostics)
         }
     }
+}
+
+/// Checks an [`Expr::Array`] node: infers every element (retaining all of their own nested
+/// diagnostics, whatever the fold below finds), then folds the element types left to right with
+/// [`Ty::unify`] — so [`Ty::Any`] elements (an unresolved identifier, a call result) adopt the
+/// other elements' concrete type instead of defeating inference, and nested arrays unify
+/// recursively. The first element that doesn't unify with the accumulated type gets one
+/// diagnostic, reported at that element's own span, and folding stops there: a heterogeneous
+/// literal yields exactly one conflict diagnostic, naming the first conflicting element, matching
+/// `cel_runtime::DynamicArray`'s own runtime "first conflicting index" report. Later elements are
+/// still fully checked, so their own internal diagnostics still surface.
+///
+/// A literal whose elements conflict infers as `Array(Any)` rather than `Any`: the node is
+/// certainly an array, just one whose element type isn't known, and `Any` inside keeps the
+/// mismatch from cascading into further diagnostics at enclosing nodes. An element-less
+/// `Expr::Array` (which the grammar rejects, see <https://github.com/stlab/cel-rs/issues/212>,
+/// but which can still be built directly) infers as `Array(Any)` with no diagnostic.
+///
+/// - Postcondition: the returned type is always a [`Ty::Array`].
+/// - Complexity: O(n · d) where n is the number of elements and d is their array nesting depth,
+///   plus the cost of checking each element (see [`check_expr`]'s own complexity note).
+fn check_array(elements: &[Expr], resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<ParseError>) {
+    let mut diagnostics = Vec::new();
+    let element_tys: Vec<Ty> = elements
+        .iter()
+        .map(|element| {
+            let (ty, element_diags) = check_expr(element, resolve_ident);
+            diagnostics.extend(element_diags);
+            ty
+        })
+        .collect();
+    let mut unified = Ty::Any;
+    for (element, ty) in elements.iter().zip(&element_tys) {
+        match unified.unify(ty) {
+            Some(merged) => unified = merged,
+            None => {
+                diagnostics.push(ParseError::new_range(
+                    format!(
+                        "array elements must share one type: expected `{}`, found `{}`",
+                        unified.name(),
+                        ty.name()
+                    ),
+                    element.span().start,
+                    element.span().end,
+                ));
+                return (Ty::Array(Box::new(Ty::Any)), diagnostics);
+            }
+        }
+    }
+    (Ty::Array(Box::new(unified)), diagnostics)
 }
 
 /// Checks an [`Expr::Op`] node: infers each operand, then (only if every operand resolved to a
@@ -380,7 +500,7 @@ fn check_op(
             && (operand_tys.len() < 2 || Some(sig.rhs) == operand_tys[1].type_id())
     });
     match matched {
-        Some(_) => (result_ty_for_op(name, operand_tys[0]), diagnostics),
+        Some(_) => (result_ty_for_op(name, &operand_tys[0]), diagnostics),
         None => {
             let described = operand_tys
                 .iter()
@@ -401,10 +521,10 @@ fn check_op(
 /// comparison operators, otherwise the (matched, homogeneous) operand type — every built-in
 /// signature is either a comparison (returning `bool`) or same-type-in-same-type-out (arithmetic,
 /// bitwise, shifts, unary negation, logical not).
-fn result_ty_for_op(name: &str, operand_ty: Ty) -> Ty {
+fn result_ty_for_op(name: &str, operand_ty: &Ty) -> Ty {
     match name {
         "==" | "!=" | "<" | "<=" | ">" | ">=" => Ty::Bool,
-        _ => operand_ty,
+        _ => operand_ty.clone(),
     }
 }
 
@@ -571,10 +691,18 @@ mod tests {
 
     #[test]
     fn name_is_distinct_per_type() {
-        let names: Vec<&str> = [Ty::I32, Ty::F64, Ty::Bool, Ty::String, Ty::Any]
-            .iter()
-            .map(Ty::name)
-            .collect();
+        let names: Vec<Cow<'static, str>> = [
+            Ty::I32,
+            Ty::F64,
+            Ty::Bool,
+            Ty::String,
+            Ty::Array(Box::new(Ty::I32)),
+            Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))),
+            Ty::Any,
+        ]
+        .iter()
+        .map(Ty::name)
+        .collect();
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -603,6 +731,13 @@ mod tests {
         }
     }
 
+    fn lit_f64(v: f64) -> Expr {
+        Expr::Literal {
+            value: Literal::F64(v),
+            span: point(proc_macro2::Span::call_site()),
+        }
+    }
+
     fn lit_bool(v: bool) -> Expr {
         Expr::Literal {
             value: Literal::Bool(v),
@@ -621,6 +756,24 @@ mod tests {
         Expr::Op {
             name: name.to_string(),
             operands,
+            span: point(proc_macro2::Span::call_site()),
+        }
+    }
+
+    fn array(elements: Vec<Expr>) -> Expr {
+        Expr::Array {
+            elements,
+            span: point(proc_macro2::Span::call_site()),
+        }
+    }
+
+    fn call(callee: &str) -> Expr {
+        Expr::Apply {
+            callee: Box::new(Expr::Ident {
+                name: callee.to_string(),
+                span: point(proc_macro2::Span::call_site()),
+            }),
+            args: Vec::new(),
             span: point(proc_macro2::Span::call_site()),
         }
     }
@@ -902,6 +1055,258 @@ mod tests {
         );
         let expr = closure(vec![closure_param("x", "i32")], body);
         let (_, diags) = check_expr(&expr, &outer_resolver);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn array_type_id_is_the_runtime_array_wrapper_regardless_of_element_type() {
+        let element_id = TypeId::of::<cel_runtime::DynamicArray>();
+        assert_eq!(Ty::Array(Box::new(Ty::I32)).type_id(), Some(element_id));
+        assert_eq!(Ty::Array(Box::new(Ty::Any)).type_id(), Some(element_id));
+    }
+
+    #[test]
+    fn from_type_id_maps_the_array_wrapper_to_an_array_of_any() {
+        assert_eq!(
+            Ty::from_type_id(TypeId::of::<cel_runtime::DynamicArray>()),
+            Ty::Array(Box::new(Ty::Any))
+        );
+    }
+
+    #[test]
+    fn array_name_renders_bracket_syntax_recursively() {
+        assert_eq!(Ty::Array(Box::new(Ty::I32)).name(), "[i32]");
+        assert_eq!(
+            Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))).name(),
+            "[[i32]]"
+        );
+        assert_eq!(Ty::Array(Box::new(Ty::Any)).name(), "[<any>]");
+    }
+
+    #[test]
+    fn arrays_unify_only_when_their_element_types_unify_recursively() {
+        assert!(Ty::Array(Box::new(Ty::I32)).unifies_with(&Ty::Array(Box::new(Ty::I32))));
+        assert!(Ty::Array(Box::new(Ty::Any)).unifies_with(&Ty::Array(Box::new(Ty::I32))));
+        assert!(!Ty::Array(Box::new(Ty::I32)).unifies_with(&Ty::Array(Box::new(Ty::F64))));
+        assert!(
+            !Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32))))
+                .unifies_with(&Ty::Array(Box::new(Ty::I32))),
+            "differing nesting depth does not unify"
+        );
+        assert!(!Ty::Array(Box::new(Ty::I32)).unifies_with(&Ty::I32));
+        assert!(Ty::Any.unifies_with(&Ty::Array(Box::new(Ty::I32))));
+        assert!(Ty::Array(Box::new(Ty::I32)).unifies_with(&Ty::Any));
+    }
+
+    #[test]
+    fn unify_keeps_the_more_concrete_side_at_every_nesting_level() {
+        assert_eq!(Ty::Any.unify(&Ty::I32), Some(Ty::I32));
+        assert_eq!(Ty::I32.unify(&Ty::Any), Some(Ty::I32));
+        assert_eq!(
+            Ty::Array(Box::new(Ty::Any)).unify(&Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32))))),
+            Some(Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))))
+        );
+    }
+
+    #[test]
+    fn unify_of_incompatible_types_is_none() {
+        assert_eq!(Ty::I32.unify(&Ty::F64), None);
+        assert_eq!(Ty::Array(Box::new(Ty::I32)).unify(&Ty::I32), None);
+        assert_eq!(
+            Ty::Array(Box::new(Ty::I32)).unify(&Ty::Array(Box::new(Ty::F64))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_unified_type_unifies_with_both_of_its_sides() {
+        let lhs = Ty::Array(Box::new(Ty::Any));
+        let rhs = Ty::Array(Box::new(Ty::I32));
+        let merged = lhs.unify(&rhs).expect("compatible types unify");
+        assert!(merged.unifies_with(&lhs));
+        assert!(merged.unifies_with(&rhs));
+    }
+
+    #[test]
+    fn homogeneous_array_infers_its_element_type() {
+        let (ty, diags) = check_expr(&array(vec![lit_i32(1), lit_i32(2)]), &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::I32)));
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn single_element_array_infers_that_element_type() {
+        let (ty, diags) = check_expr(&array(vec![lit_str("s")]), &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::String)));
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn nested_array_types_unify_recursively() {
+        let expr = array(vec![array(vec![lit_i32(1)]), array(vec![lit_i32(2)])]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))));
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn heterogeneous_array_reports_the_conflicting_element() {
+        let (ty, diags) = check_expr(&array(vec![lit_i32(1), lit_f64(2.0)]), &any_resolver);
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0].message().contains("expected `i32`, found `f64`"),
+            "got: {}",
+            diags[0].message()
+        );
+        assert_eq!(
+            ty,
+            Ty::Array(Box::new(Ty::Any)),
+            "a conflicting literal is still an array, of an unknown element type"
+        );
+    }
+
+    #[test]
+    fn heterogeneous_nested_array_reports_the_recursive_element_types() {
+        let expr = array(vec![array(vec![lit_i32(1)]), array(vec![lit_f64(1.0)])]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0]
+                .message()
+                .contains("expected `[i32]`, found `[f64]`"),
+            "got: {}",
+            diags[0].message()
+        );
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
+    }
+
+    #[test]
+    fn mismatched_nesting_depth_is_a_diagnostic() {
+        let expr = array(vec![array(vec![lit_i32(1)]), lit_i32(2)]);
+        let (_, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0].message().contains("expected `[i32]`, found `i32`"),
+            "got: {}",
+            diags[0].message()
+        );
+    }
+
+    #[test]
+    fn array_of_unresolved_call_results_infers_an_array_of_any_with_no_diagnostic() {
+        // `Apply` results are deliberately `Ty::Any` in v1, so `[f(), g()]` cannot be proven
+        // homogeneous - and must not be reported as heterogeneous either.
+        let expr = array(vec![call("f"), call("g")]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn an_any_element_keeps_the_concrete_element_type() {
+        let expr = array(vec![call("f"), lit_i32(1)]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::I32)));
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn an_any_nested_element_keeps_the_concrete_recursive_element_type() {
+        let expr = array(vec![array(vec![call("f")]), array(vec![lit_i32(1)])]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))));
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn every_elements_own_diagnostics_are_retained() {
+        let expr = array(vec![
+            op("+", vec![lit_i32(1), lit_str("s")]),
+            op("+", vec![lit_i32(2), lit_str("t")]),
+        ]);
+        let (_, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(diags.len(), 2, "both broken elements are reported");
+    }
+
+    #[test]
+    fn a_later_elements_own_diagnostic_survives_an_earlier_element_conflict() {
+        let expr = array(vec![
+            lit_i32(1),
+            lit_f64(2.0),
+            op("+", vec![lit_i32(3), lit_str("s")]),
+        ]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(
+            diags.len(),
+            2,
+            "one element-conflict diagnostic plus the third element's own operator diagnostic"
+        );
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
+    }
+
+    #[test]
+    fn only_the_first_conflicting_element_is_reported() {
+        let expr = array(vec![lit_i32(1), lit_f64(2.0), lit_bool(true)]);
+        let (_, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(diags.len(), 1, "one diagnostic per array literal");
+        assert!(diags[0].message().contains("found `f64`"), "the first one");
+    }
+
+    #[test]
+    fn a_conflicting_elements_diagnostic_is_anchored_at_that_element() {
+        // Every other array test builds spans with `Span::call_site()`, where "this element's
+        // span", "the whole literal's span", and "some other element's span" are all
+        // indistinguishable. Parsing real source (proc-macro2's `span-locations` feature is on)
+        // gives each token its own line/column, making the anchoring observable: the conflict is
+        // reported at the element on line 4, not at the enclosing `[`...`]` starting on line 1,
+        // and not at a fixed earlier position such as line 2 or 3.
+        let source = "[\n    1i32,\n    2i32,\n    3.0f64,\n    4i32\n]";
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser.parse_str_ast(source).expect("source parses");
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0].message().contains("expected `i32`, found `f64`"),
+            "got: {}",
+            diags[0].message()
+        );
+        let start = diags[0].span().start();
+        let end = diags[0]
+            .end_span()
+            .expect("the conflict diagnostic spans a range")
+            .end();
+        assert_eq!(start.line, 4, "anchored at the conflicting element's line");
+        assert_eq!(start.column, 4, "at the element, not the enclosing group");
+        assert_eq!(end.line, 4);
+        assert_eq!(end.column, 4 + "3.0f64".len());
+    }
+
+    #[test]
+    fn a_conflict_inside_a_nested_array_does_not_cascade_to_the_outer_literal() {
+        // `[[1i32, 2.0f64], [3i32, 4i32]]`: the inner `[1i32, 2.0f64]` conflicts and falls back
+        // to `Array(Any)`, which still unifies with the valid inner array's `Array(i32)` - so the
+        // outer fold stays silent and the outer literal keeps the concrete nested element type.
+        let expr = array(vec![
+            array(vec![lit_i32(1), lit_f64(2.0)]),
+            array(vec![lit_i32(3), lit_i32(4)]),
+        ]);
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(diags.len(), 1, "only the inner conflict is reported");
+        assert!(
+            diags[0].message().contains("expected `i32`, found `f64`"),
+            "got: {}",
+            diags[0].message()
+        );
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))));
+    }
+
+    #[test]
+    fn an_empty_array_expression_infers_an_array_of_any() {
+        // The grammar rejects `[]` outright (see #212), but an `Expr::Array` built directly still
+        // has to infer conservatively rather than panic.
+        let (ty, diags) = check_expr(&array(Vec::new()), &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
         assert!(diags.is_empty());
     }
 }

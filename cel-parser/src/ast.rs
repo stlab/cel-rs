@@ -189,6 +189,16 @@ pub enum Expr {
         /// The span of the whole tuple, including its parentheses.
         span: ExprSpan,
     },
+    /// An array literal (`[a, b, ...]`). Always has at least one element — the grammar rejects
+    /// `[]` outright (see <https://github.com/stlab/cel-rs/issues/212>). Whether the elements
+    /// share one type is unchecked here — deferred to the type-checking phase (see the module
+    /// doc comment), same as `TupleIndex`'s deferred bounds check.
+    Array {
+        /// The element sub-expressions, in source order.
+        elements: Vec<Expr>,
+        /// The span of the whole array literal, including its brackets.
+        span: ExprSpan,
+    },
     /// A tuple index (`base.N`). Whether `base` is actually a tuple and `N` is in range is
     /// unchecked here — deferred to the type-checking phase (see the module doc comment).
     TupleIndex {
@@ -252,6 +262,7 @@ impl Expr {
             | Expr::Op { span, .. }
             | Expr::Apply { span, .. }
             | Expr::Tuple { span, .. }
+            | Expr::Array { span, .. }
             | Expr::TupleIndex { span, .. }
             | Expr::If { span, .. }
             | Expr::Logical { span, .. }
@@ -486,6 +497,26 @@ impl ParserContext for AstContext {
             elements,
             span: ExprSpan { start, end },
         });
+    }
+
+    fn make_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        let elements = self.values.split_off(ambient_start);
+        debug_assert_eq!(
+            elements.len(),
+            n,
+            "make_array splits off exactly n elements"
+        );
+        self.values.push(Expr::Array {
+            elements,
+            span: ExprSpan { start, end },
+        });
+        Ok(())
     }
 
     fn peek_tuple_arity(&self) -> Option<usize> {
@@ -1071,5 +1102,131 @@ mod tests {
     fn for_text_works_for_a_string_literal() {
         let span = ExprSpan::for_text("\"hello\"");
         assert_eq!(span.start.source_text().as_deref(), Some("\"hello\""));
+    }
+
+    #[test]
+    fn make_array_pushes_one_array_node_holding_the_elements_in_source_order() {
+        let mut ctx = AstContext::new_context();
+        let ambient_start = ctx.current_stack_offset();
+        ctx.push_literal(1i32, Span::call_site());
+        ctx.push_literal(2i32, Span::call_site());
+        ctx.make_array(2, ambient_start, Span::call_site(), Span::call_site())
+            .unwrap();
+        match ctx.into_expr() {
+            Expr::Array { elements, .. } => {
+                assert!(matches!(
+                    elements[0],
+                    Expr::Literal {
+                        value: Literal::I32(1),
+                        ..
+                    }
+                ));
+                assert!(matches!(
+                    elements[1],
+                    Expr::Literal {
+                        value: Literal::I32(2),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn array_literal_records_elements_in_source_order_with_an_enclosing_span() {
+        let source = "[0i32, 1i32, 2i32]";
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast(source).unwrap();
+        let Expr::Array { elements, span } = expr else {
+            panic!("expected Array");
+        };
+        assert_eq!(elements.len(), 3);
+        for (index, element) in elements.iter().enumerate() {
+            let Expr::Literal { value, .. } = element else {
+                panic!("expected a literal element");
+            };
+            assert_eq!(*value, Literal::I32(i32::try_from(index).unwrap()));
+        }
+        assert_eq!(span.start.source_text().as_deref(), Some(source));
+        assert_eq!(span.end.source_text().as_deref(), Some(source));
+    }
+
+    #[test]
+    fn nested_array_literal_nests_array_nodes() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("[[0i32], [1i32]]").unwrap();
+        let Expr::Array { elements, .. } = expr else {
+            panic!("expected outer Array");
+        };
+        assert_eq!(elements.len(), 2);
+        for element in &elements {
+            assert!(matches!(element, Expr::Array { elements, .. } if elements.len() == 1));
+        }
+    }
+
+    #[test]
+    fn array_literals_build_nodes_in_call_argument_and_tuple_positions() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("f([1i32], (2i32, [3i32]))").unwrap();
+        let Expr::Apply { args, .. } = expr else {
+            panic!("expected Apply");
+        };
+        assert!(matches!(args[0], Expr::Array { ref elements, .. } if elements.len() == 1));
+        let Expr::Tuple { elements, .. } = &args[1] else {
+            panic!("expected a tuple argument");
+        };
+        assert!(matches!(elements[1], Expr::Array { .. }));
+    }
+
+    #[test]
+    fn array_literals_build_nodes_in_if_branch_and_closure_body_positions() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser
+            .parse_str_ast("if true { [1i32] } else { [2i32] }")
+            .unwrap();
+        let Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        } = expr
+        else {
+            panic!("expected If");
+        };
+        assert!(matches!(*then_branch, Expr::Array { .. }));
+        assert!(matches!(else_branch.as_deref(), Some(Expr::Array { .. })));
+
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("|x: i32| [x]").unwrap();
+        let Expr::Closure { body, .. } = expr else {
+            panic!("expected Closure");
+        };
+        assert!(matches!(*body, Expr::Array { .. }));
+    }
+
+    #[test]
+    fn array_literal_with_a_tuple_element_still_builds_a_tree() {
+        // Deferred validation, mirroring `tuple_index_on_a_call_result_still_builds_a_tree`:
+        // `DynSegmentContext` rejects a tuple element at parse time (issue #213), but
+        // `AstContext` resolves no types at all, so it records the node and leaves the
+        // rejection to the later type-checking phase.
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("[(1i32, 2i32)]").unwrap();
+        assert!(matches!(expr, Expr::Array { ref elements, .. } if elements.len() == 1));
+    }
+
+    #[test]
+    fn ast_context_still_rejects_an_empty_array_literal() {
+        // The empty-literal diagnostic is a grammar-level rejection (see #212), so it applies to
+        // every `ParserContext`, not only the one that resolves runtime types.
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let err = parser
+            .parse_str_ast("[]")
+            .expect_err("an empty array literal has no inferable element type");
+        assert!(
+            err.message().contains("empty array"),
+            "got: {}",
+            err.message()
+        );
     }
 }

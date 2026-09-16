@@ -89,7 +89,7 @@ where
         ensure!(
             Stack::LENGTH == value.stack_ids.len()
                 && TypeIdIterator::<Stack>::new()
-                    .eq(value.stack_ids.iter().map(|info| info.type_id)),
+                    .eq(value.stack_ids.iter().map(|info| info.value_type.type_id())),
             "stack type ids do not match"
         );
         Ok(Segment {

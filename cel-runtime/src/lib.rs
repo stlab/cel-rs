@@ -38,6 +38,8 @@ pub mod c_stack_list;
 pub mod dyn_closure;
 /// Dynamic segment implementation with runtime type checking.
 pub mod dyn_segment;
+/// Owned, homogeneous, type-erased arrays with zero-copy `Vec<T>` conversion.
+pub mod dynamic_array;
 /// Owned, type-erased CEL tuple value that can outlive a `DynSegment` evaluation.
 pub mod dynamic_sequence;
 /// Traits for working with type lists and type information.
@@ -60,6 +62,7 @@ pub mod tuple_list;
 pub use c_stack_list::*;
 pub use dyn_closure::{CallDynFn, DynClosure};
 pub use dyn_segment::*;
+pub use dynamic_array::*;
 pub use dynamic_sequence::*;
 pub use list_traits::*;
 pub use memory::*;

@@ -90,6 +90,27 @@ pub trait ParserContext: Sized {
     /// whole `(...)` construct.
     fn make_tuple(&mut self, n: usize, ambient_start: usize, start: Span, end: Span);
 
+    /// Combines the last `n` emitted values into a single homogeneous array value. `start`/`end`
+    /// cover the whole `[...]` construct, and `ambient_start` is the stack offset the first
+    /// element was emitted at (as reported by [`Self::current_stack_offset`] before parsing it).
+    ///
+    /// - Precondition: `n >= 1` and exactly `n` values have been emitted since `ambient_start`.
+    ///
+    /// # Errors
+    ///
+    /// Implementations that validate operand types during parsing (e.g. [`DynSegmentContext`])
+    /// return `Err` if the elements' complete recursive runtime shapes differ, if any element is
+    /// a CEL tuple (see <https://github.com/stlab/cel-rs/issues/213>), or if the array's storage
+    /// layout cannot be represented. Implementations that defer type validation to a later phase
+    /// (e.g. [`crate::ast::AstContext`]) never return `Err` here.
+    fn make_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()>;
+
     /// Returns the arity of the tuple currently on top, or `None` if the top value isn't a
     /// tuple.
     fn peek_tuple_arity(&self) -> Option<usize>;
@@ -276,6 +297,21 @@ impl ParserContext for DynSegmentContext {
         self.0.make_tuple(n, ambient_start);
     }
 
+    fn make_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        self.0
+            .make_array(n, ambient_start)
+            // The error spans the whole `[...]` literal: `DynSegment::make_array` names the
+            // offending element's index only in its message text, with no structured index to map
+            // back to that element's own span (see https://github.com/stlab/cel-rs/issues/215).
+            .map_err(|e| crate::ParseError::new_range(e.to_string(), start, end))
+    }
+
     fn peek_tuple_arity(&self) -> Option<usize> {
         self.0.peek_tuple_arity()
     }
@@ -373,6 +409,34 @@ mod tests {
         assert_eq!(ctx.peek_tuple_arity(), Some(2));
         ctx.tuple_index(1, Span::call_site(), Span::call_site());
         assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 2);
+    }
+
+    #[test]
+    fn make_array_collects_homogeneous_values_into_one_array() {
+        let mut ctx = DynSegmentContext::new_context();
+        let ambient_start = ctx.current_stack_offset();
+        ctx.push_literal(1i32, Span::call_site());
+        ctx.push_literal(2i32, Span::call_site());
+        ctx.make_array(2, ambient_start, Span::call_site(), Span::call_site())
+            .unwrap();
+        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
+        assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn make_array_reports_a_mismatched_element_as_a_parse_error() {
+        let mut ctx = DynSegmentContext::new_context();
+        let ambient_start = ctx.current_stack_offset();
+        ctx.push_literal(1i32, Span::call_site());
+        ctx.push_literal(2.0f64, Span::call_site());
+        let err = ctx
+            .make_array(2, ambient_start, Span::call_site(), Span::call_site())
+            .expect_err("array elements must share one type");
+        assert!(
+            err.message().contains("array element 1"),
+            "got: {}",
+            err.message()
+        );
     }
 
     #[test]

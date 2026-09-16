@@ -42,6 +42,21 @@
 //! assert!(result.is_ok());
 //! ```
 //!
+//! ## Parsing an Array Literal
+//!
+//! A non-empty CEL array literal evaluates to one
+//! [`DynamicArray`](cel_runtime::DynamicArray) that converts to the corresponding `Vec<T>`
+//! without moving or reallocating its elements:
+//!
+//! ```rust
+//! use cel_rs::parser::{CELParser, OpLookup};
+//! use cel_rs::runtime::DynamicArray;
+//!
+//! let mut segment = CELParser::new(OpLookup::new()).parse_str("[0, 1, 2]").unwrap();
+//! let array: DynamicArray = segment.call0().unwrap();
+//! assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1, 2]);
+//! ```
+//!
 //! ## Using the Macros
 //!
 //! ```rust
