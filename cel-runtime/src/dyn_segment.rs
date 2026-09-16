@@ -942,8 +942,8 @@ impl DynSegment {
     /// Collapses the top `n` stack values into one [`DynamicArray`] validated against `element`.
     ///
     /// When `n` is zero, this emits a typed empty array that carries `element` without inferring
-    /// it from any value. When `n` is non-zero, every collected value must have exactly `element`'s
-    /// recursive shape and layout.
+    /// it from any value. When `n` is non-zero, every collected value must have exactly
+    /// `element`'s recursive shape, layout, and drop ownership.
     ///
     /// - Precondition: at least `n` values are on the stack, pushed contiguously starting at
     ///   `ambient_start` with no other values interleaved.
@@ -1007,7 +1007,7 @@ impl DynSegment {
                         .as_array_element()
                         .expect("non-tuple values have array element descriptors");
                     ensure!(
-                        element.same_shape_and_layout(&found),
+                        element.same_shape_layout_and_ownership(&found),
                         "array element {index} has type {}, expected {}",
                         info.value_type.type_name(),
                         element.display_name()
@@ -4442,6 +4442,50 @@ mod tests {
 
         assert!(error.contains("element 0"), "{error}");
         assert!(error.contains("i32") && error.contains("u32"), "{error}");
+    }
+
+    #[test]
+    fn make_typed_array_rejects_a_descriptor_whose_drop_hook_owns_a_different_type() {
+        #[derive(Clone)]
+        struct RightDrop(Arc<AtomicUsize>);
+
+        impl Drop for RightDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[derive(Clone)]
+        struct WrongDrop(Arc<AtomicUsize>);
+
+        impl Drop for WrongDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(100, Ordering::SeqCst);
+            }
+        }
+
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.just(RightDrop(Arc::new(AtomicUsize::new(0))));
+
+        let forged = ArrayElementType::leaf_from_parts(
+            TypeId::of::<RightDrop>(),
+            Cow::Borrowed("forged RightDrop"),
+            std::mem::size_of::<RightDrop>(),
+            std::mem::align_of::<RightDrop>(),
+            raw_dropper_for::<WrongDrop>(),
+        );
+
+        let error = segment
+            .make_typed_array(1, start, forged)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("element 0"), "{error}");
+        assert!(
+            error.contains("RightDrop") && error.contains("forged RightDrop"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -260,19 +260,22 @@ impl ArrayElementType {
         }
     }
 
-    /// Returns whether `self` and `other` describe the same recursive element shape and layout.
+    /// Returns whether `self` and `other` describe the same recursive element shape, layout, and
+    /// drop ownership.
     ///
-    /// This is stricter than [`PartialEq`]: it compares the stored size and alignment in addition
-    /// to the recursive type marker, so a runtime-resolved descriptor must agree with the bytes a
-    /// collected value actually occupies before the two can be treated as interchangeable.
+    /// This is stricter than [`PartialEq`]: it compares the stored size, alignment, and drop hook
+    /// in addition to the recursive type marker, so a runtime-resolved descriptor must agree with
+    /// both the bytes a collected value occupies and the way those bytes are later destroyed
+    /// before the two can be treated as interchangeable.
     ///
     /// - Complexity: O(depth).
-    pub(crate) fn same_shape_and_layout(&self, other: &Self) -> bool {
+    pub(crate) fn same_shape_layout_and_ownership(&self, other: &Self) -> bool {
         self.type_id == other.type_id
             && self.size == other.size
             && self.align == other.align
+            && std::ptr::fn_addr_eq(self.drop, other.drop)
             && match (&self.nested, &other.nested) {
-                (Some(left), Some(right)) => left.same_shape_and_layout(right),
+                (Some(left), Some(right)) => left.same_shape_layout_and_ownership(right),
                 (None, None) => true,
                 _ => false,
             }

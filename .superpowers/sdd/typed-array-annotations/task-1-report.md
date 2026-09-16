@@ -51,3 +51,31 @@ Implemented only Task 1 from `docs/superpowers/plans/2026-09-16-typed-array-anno
 ## Concerns
 - `git diff --check` reported Git's existing line-ending warning for `cel-runtime/src/dyn_segment.rs` (`LF will be replaced by CRLF the next time Git touches it`), but the diff check still exited successfully and no whitespace errors were present.
 - Task 1 intentionally does not add parser-facing type resolution yet; later tasks must ensure any registry-provided erased descriptors satisfy the documented layout preconditions before reaching `make_typed_array`.
+
+## Review fix: explicit descriptor drop-hook compatibility
+### High issue addressed
+`DynSegment::make_typed_array` previously validated an explicit `ArrayElementType` against stack values by recursive type marker plus layout, then stored that explicit descriptor on the resulting `DynamicArray`. A forged descriptor with the right `TypeId`/size/alignment but the wrong drop hook could therefore pass validation and later destroy the collected values with incompatible drop glue.
+
+### Fix
+- Tightened explicit descriptor compatibility from “same shape and layout” to “same shape, layout, and drop ownership” by comparing the stored drop hook recursively via `ArrayElementType::same_shape_layout_and_ownership`.
+- Updated `DynSegment::make_typed_array` to use that stronger compatibility check before accepting a non-empty annotated array.
+- Preserved typed-empty behavior: `make_typed_array(0, ..., element)` still stores the explicit descriptor because no stack-derived values exist yet.
+- Left the existing inferred `make_array` path unchanged.
+
+### Regression test
+Added `make_typed_array_rejects_a_descriptor_whose_drop_hook_owns_a_different_type`, which forges a descriptor using the correct `TypeId`/layout but the wrong drop hook and verifies `make_typed_array` now rejects it.
+
+### Review-fix verification
+#### RED
+- `cargo test -p cel-runtime make_typed_array_rejects_a_descriptor_whose_drop_hook_owns_a_different_type`
+  - Failed before the fix because `make_typed_array` accepted the forged descriptor (`called Result::unwrap_err() on an Ok value`).
+
+#### GREEN
+- `cargo test -p cel-runtime make_typed_array`
+  - Passed: 4 tests, including the new drop-hook mismatch regression.
+- `cargo test -p cel-runtime`
+  - Passed: full `cel-runtime` unit/doctest suite.
+- `cargo fmt --all`
+  - Succeeded.
+- `git --no-pager diff --check`
+  - Succeeded; Git again printed only the existing LF→CRLF warning for `cel-runtime/src/dyn_segment.rs`.
