@@ -8,7 +8,7 @@ parser and runtime model the surface.
 
 The expression grammar below shows how CEL precedence works from the top down: ranges bind
 loosely, then boolean operators, then comparison and bitwise operators, then arithmetic, casts,
-unary operators, postfix calls and field access, and finally the atomic primary expressions.
+unary operators, postfix calls and tuple indexing, and finally the atomic primary expressions.
 
 ```text
 expression = range_expression.
@@ -68,9 +68,10 @@ closure_param = identifier ":" closure_type_expression.
 closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")".
 ```
 
-Closure parameter types are resolved by the parser against the registered CEL types it knows
-about. That type resolution is implementation-specific, but the surface syntax is CEL syntax:
-the grammar above is what callers write, regardless of the runtime type registry they install.
+Closure parameter annotations currently accept the built-in scalar names and recursive tuple
+syntax recognized by the parser. This type resolution is implementation-specific and is not
+extended by a runtime type registry: the grammar above describes the syntax, while the parser's
+known built-in names determine which annotations are accepted.
 
 ## Literal patterns
 
