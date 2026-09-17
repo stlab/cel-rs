@@ -44,7 +44,10 @@ pub(crate) struct CellData {
     pub(crate) type_id: TypeId,
     /// Write-recency strength. High-order bit (bit 63) is set for cells that have been
     /// written or created via `add_cell`. Derived cells (outputs of selected methods)
-    /// receive strengths with bit 63 clear, assigned during the post-processing pass.
+    /// receive strengths with bit 63 clear, assigned during the post-processing pass --
+    /// except a cell claimed *self-referencingly*, whose own written value is still the
+    /// authority behind the result and so keeps its explicit strength (see
+    /// `Sheet::post_process_strengths`).
     pub(crate) strength: u64,
     /// Set during `Sheet::propagate`; cleared by `Sheet::clear_changed`.
     pub(crate) changed: bool,

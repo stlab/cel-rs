@@ -1247,8 +1247,16 @@ impl Sheet {
     /// execution order. Cells evaluated first receive the highest derived strength.
     /// Source cells (not the output of any selected method) are not modified.
     ///
-    /// - Complexity: O(R·K) where R is the number of entries and K is the maximum
-    ///   outputs per method.
+    /// A cell claimed *self-referencingly* (its claiming method reads the cell as one of
+    /// its own inputs) keeps a live explicit strength rather than being demoted: such a
+    /// method computes the cell from its own `source` aspiration (see
+    /// [`crate::planner::build_seeds`]), so an explicit `write()` to that cell is still
+    /// the authority behind the value and must keep outranking never-written cells in
+    /// later rounds. Demoting it would discard the edit the next time the cell is
+    /// re-seeded.
+    ///
+    /// - Complexity: O(R·K²) where R is the number of entries and K is the maximum
+    ///   inputs or outputs per method.
     fn post_process_strengths(&mut self, execution_order: &[PlanStep]) {
         let mut derived_strength = u64::MAX >> 1; // 0x7FFF_FFFF_FFFF_FFFF
         let mut seen: std::collections::HashSet<CellId> = std::collections::HashSet::new();
@@ -1260,9 +1268,13 @@ impl Sheet {
                 && let Some(method) = rel.methods.get(*method_idx)
             {
                 for &output in &method.outputs {
+                    let self_referencing = method.inputs.contains(&output);
                     if seen.insert(output)
                         && let Some(cell) = self.cells.get_mut(output)
                     {
+                        if self_referencing && cell.has_explicit_strength() {
+                            continue;
+                        }
                         cell.strength = derived_strength;
                         derived_strength = derived_strength.saturating_sub(1);
                     }
@@ -1314,7 +1326,9 @@ impl Sheet {
     /// **Phase 3 — General plan:** the Adam algorithm runs on the active set.
     ///
     /// **Phase 4 — Strength post-processing:** derived cells receive low-order strengths
-    /// in evaluation order, enforcing the stability invariant.
+    /// in evaluation order, enforcing the stability invariant. A cell claimed
+    /// self-referencingly keeps any live explicit strength instead, since its own written
+    /// value is still the authority behind the result.
     ///
     /// **Phase 5 — Reversion change-tracking:** a cell whose derived override existed
     /// before this round but wasn't reclaimed by any method this round has effectively
