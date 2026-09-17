@@ -67,7 +67,7 @@ Closures:
 
 ## Edge cases
 
-- Cast targets are limited to the sixteen built-in scalar type names.
+- CEL limits cast targets to the sixteen built-in scalar type names.
 - `char`, byte-string, C-string, unit, array, tuple, range, and closure
   values are not additional cast target names.
 - Number-to-`bool`, `bool`-to-float, and `String`-to-number or

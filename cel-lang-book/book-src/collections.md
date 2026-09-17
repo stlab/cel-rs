@@ -44,6 +44,8 @@ if ready { [1, 2] } else { [3, 4] }
 - Tuples and arrays are distinct value forms: tuples are positional and
   use `.N`, while arrays use bracket literals and homogeneous element
   typing.
+- Tuple indexing uses an unsuffixed integer such as `.0` or `.1`; member
+  access such as `value.name` is not part of CEL.
 - Tuple values are not valid array elements.
 
 ## Edge cases
@@ -54,3 +56,4 @@ if ready { [1, 2] } else { [3, 4] }
 - `[(0, 1)]` is not valid because tuple values are not array elements.
 - Bracket postfix indexing such as `items[0]` is not part of the
   language.
+- A suffixed tuple index such as `.0i32` is not valid.

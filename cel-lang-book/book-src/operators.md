@@ -75,6 +75,9 @@ Within one precedence level, binary operators associate to the left.
 Comparison expressions consume one comparison operator, and range forms do
 not chain.
 
+- A call is a postfix `()` form with zero or more comma-separated arguments.
+- Postfix calls and tuple indices bind more tightly than unary and binary
+  operators.
 - `+` accepts homogeneous numeric operands and `String + String`.
   Unsigned integer addition wraps. Signed integer addition reports
   `arithmetic overflow` on overflow.
@@ -98,13 +101,14 @@ not chain.
   or homogeneous `String`.
 - `<`, `<=`, `>`, and `>=` accept homogeneous numeric operands or
   homogeneous `String`.
-- Range operators are documented in [Control flow](control-flow.md) and
-  summarized in the [Reference Manual](reference.md).
+- See [Control flow](control-flow.md) for range operators and the
+  [Reference Manual](reference.md) for a summary.
 
 ## Edge cases
 
 - Write `a < b && b < c`, not `a < b < c`.
 - Write one range form at a time; `1..2..3` is not valid.
+- Call argument lists do not accept a trailing comma.
 - Negative shift counts, counts larger than `u32`, and counts outside the
   left operand's width report `shift overflow`.
 - Signed `+`, signed binary `-`, signed unary `-`, and signed `*`

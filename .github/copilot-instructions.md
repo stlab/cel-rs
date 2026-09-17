@@ -59,6 +59,10 @@ designs live under `docs/superpowers/specs/`.
 
 ## Repository conventions
 
+- For book prose, prefer direct active constructions with concrete subjects.
+  Replace indirect phrasing such as “The chapters are written...” with a clear
+  actor and action such as “Each chapter follows...”; preserve passive voice
+  when it states a precise language or implementation fact.
 - Write contract-style `///` documentation for every function. Use a present-tense summary
   ending in a period; add non-obvious `- Precondition:` and `- Postcondition:` bullets,
   `# Errors`, or `# Safety` as applicable. Document non-O(1) complexity. Public APIs need

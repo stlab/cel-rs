@@ -2,7 +2,7 @@
 
 This chapter is the compact language reference for CEL expressions. It
 gathers the core grammar, token categories, type names, literal forms,
-operators, numeric helper calls, collections, closures, and sharp edges in one
+operators, standard-library operations, collections, closures, and sharp edges in one
 place.
 
 ## Concept
@@ -76,7 +76,7 @@ true as i32
 | Kind | Names or forms | Notes |
 | --- | --- | --- |
 | Built-in scalar types | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `f32`, `f64`, `bool`, `String` | These are the only named cast targets and the only scalar names allowed in typed closure parameters. |
-| Other value forms | `char`, byte strings, C strings, unit, tuples, arrays, ranges, closures | These values are accepted in expressions, but they are not extra built-in scalar type names. |
+| Other value forms | `char`, byte strings, C strings, unit, tuples, arrays, ranges, closures | Expressions can use these values, but they are not extra built-in scalar type names. |
 
 ## Literal table
 
@@ -131,14 +131,13 @@ true as i32
 
 ## Numeric call table
 
-`round` is part of the core environment. The remaining functions in this table
-belong to an optional standard library and are available only when the
-evaluation environment installs that library. See
+All functions in this table belong to the standard library and are available
+when the evaluation environment installs it. See
 [Standard library](standard-library.md) for worked examples and fuller prose.
 
 | Function | Accepted operands | Result | Notes |
 | --- | --- | --- | --- |
-| `round(x)` | `f64` | `f64` | Core built-in call. Halfway values round away from zero. |
+| `round(x)` | `f64` | `f64` | Halfway values round away from zero. |
 | `min(a, b)`, `max(a, b)` | same-type numeric operands: `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `f32`, `f64` | same as operands | No coercion. Successful calls are infallible. |
 | `clamp(x, lo, hi)` | same-type numeric operands from the same 14-type set | same as operands | Requires ordered bounds with `lo <= hi`; otherwise reports `invalid clamp bounds`. |
 | `abs(x)` | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, `f64` | same as operand | Minimum signed integer reports `arithmetic overflow`. |

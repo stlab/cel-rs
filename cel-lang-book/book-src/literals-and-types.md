@@ -79,7 +79,7 @@ by a floating-point suffix.
 Boolean literals are `true` and `false`. String literals produce `String`
 values. Character literals produce `char` values. Byte literals produce `u8`
 values. Byte-string and C-string literals produce byte-oriented string values.
-The unit value is written as `()`.
+Write the unit value as `()`.
 
 ```text
 true
@@ -104,6 +104,8 @@ CEL also builds compound values from ordinary expressions:
 - Arrays are non-empty bracketed, homogeneous lists, and `[]` is not accepted.
 - `a..b`, `a..=b`, `a..`, `..b`, `..=b`, and `..` are range values.
 - `|| expr` and `|x: T| expr` are closure values.
+- These forms can nest inside calls, tuples, arrays, conditionals, and one
+  another wherever the grammar permits.
 
 ```text
 (1,)

@@ -1,4 +1,4 @@
-//! Support crate for *The CEL Language* book.
+//! Support crate for *The Common Expression Language* book.
 //!
 //! This crate exists so the static mdBook can point at a real Rust package
 //! whose examples compile against [`cel_parser`] and [`cel_runtime`]. The

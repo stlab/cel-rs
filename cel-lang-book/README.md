@@ -1,6 +1,6 @@
-# The CEL Language — book
+# The Common Expression Language — book
 
-This book presents CEL as a language: its syntax, values, operators, and the
+This book presents CEL: its syntax, values, operators, and the
 rules that make expressions meaningful.
 
 It is a documentation-only release: the examples are written as CEL snippets, and
@@ -21,6 +21,6 @@ cargo test -p cel-lang-book
 
 ## Scope
 
-This book documents CEL syntax and semantics as a language reference. It focuses
+This book documents CEL syntax and semantics as a reference. It focuses
 on the language forms described throughout the book and does not try to describe
 all possible dialect-specific extensions.

@@ -3,7 +3,6 @@
 - [Introduction](intro.md)
 - [Lexical conventions](lexical-conventions.md)
 - [Literals and types](literals-and-types.md)
-- [Expressions](expressions.md)
 - [Operators](operators.md)
 - [Standard library](standard-library.md)
 - [Control flow](control-flow.md)

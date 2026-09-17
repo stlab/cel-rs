@@ -1,21 +1,19 @@
 # Standard library
 
-CEL keeps the core expression language small. Numeric helper calls come in two
-layers: `round` is part of the core environment, and some evaluation
-environments also install an optional standard library that adds more numeric
-functions. When that library is present, its calls behave like ordinary CEL
-calls and produce ordinary CEL values.
+CEL keeps the core expression language small. The standard library adds
+operations such as numeric functions to the core environment. When an
+evaluation environment installs the library, its operations behave like
+ordinary CEL calls and produce ordinary CEL values.
 
-If an evaluation environment does not install the optional library, the
-optional function names in this chapter are simply unavailable there. The core
-language described elsewhere in the book still works unchanged.
+If an evaluation environment does not install the library, the operations in
+this chapter are unavailable there. The core language described elsewhere in
+the book still works unchanged.
 
 ## Availability at a glance
 
-| Layer | Functions | Availability |
+| Library | Functions | Availability |
 | --- | --- | --- |
-| Core environment | `round` | Available in the default core environment. |
-| Optional standard library | `min`, `max`, `clamp`, `abs`, `signum`, `sqrt`, `floor`, `ceil`, `trunc` | Available when the evaluation environment installs the optional library. |
+| Standard library | `round`, `min`, `max`, `clamp`, `abs`, `signum`, `sqrt`, `floor`, `ceil`, `trunc` | Available when the evaluation environment installs the library. |
 
 ## Worked examples
 
@@ -52,7 +50,7 @@ of those functions returns the same type it receives.
 
 ## `round(x)`
 
-`round` is a core numeric call, not an optional-library addition.
+`round` is a standard-library operation.
 
 - Accepted operand type: `f64`
 - Result type: `f64`
@@ -67,7 +65,7 @@ round(-3.5)
 
 ## `min(a, b)` and `max(a, b)`
 
-`min` and `max` are optional-library calls.
+`min` and `max` are standard-library operations.
 
 - Both operands must have the same numeric type.
 - Supported domains: all signed integers, all unsigned integers, `f32`, and
@@ -83,7 +81,7 @@ max(3.5f64, 2.5f64)
 
 ## `clamp(x, lo, hi)`
 
-`clamp` is an optional-library call.
+`clamp` is a standard-library operation.
 
 - `x`, `lo`, and `hi` must all have the same numeric type.
 - Supported domains: all signed integers, all unsigned integers, `f32`, and
@@ -99,7 +97,7 @@ clamp(12.5f64, 0.0f64, 10.0f64)
 
 ## `abs(x)` and `signum(x)`
 
-These are optional-library calls.
+These are standard-library operations.
 
 `abs(x)`:
 
@@ -122,7 +120,7 @@ signum(-3.5)
 
 ## `sqrt(x)`, `floor(x)`, `ceil(x)`, and `trunc(x)`
 
-These are optional-library calls.
+These are standard-library operations.
 
 - Supported domains: `f32` and `f64` only.
 - Result type: the same floating-point type as the operand.
@@ -142,14 +140,11 @@ trunc(-3.2)
 
 ## Exact rules
 
-- Function-call syntax is the same ordinary CEL call syntax documented in
-  [Expressions](expressions.md).
-- `round` belongs to the core environment.
+- Standard-library functions use ordinary CEL call syntax.
 - `min`, `max`, `clamp`, `abs`, `signum`, `sqrt`, `floor`, `ceil`, and
-  `trunc` belong to an optional library layered over the core expression
-  language.
-- Optional-library functions are available only when the evaluation environment
-  installs that library.
+  `trunc` belong to the standard library.
+- Standard-library operations are available only when the evaluation
+  environment installs the library.
 - `min` and `max` require same-type numeric operands.
 - `clamp` requires same-type operands and ordered bounds.
 - `abs` does not accept unsigned integers.

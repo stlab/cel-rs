@@ -1494,57 +1494,9 @@ impl BuiltinScope {
     }
 }
 
-/// Marker pushed onto the stack for the `round` builtin's callee (see
-/// [`round_scope`]) - carries no data, it only lets the paired `"()"` match
-/// arm recognize "this call's callee is `round`" among any other
-/// same-arity callable that might one day share the stack.
-struct RoundFn;
-
-/// Scope function implementing the `round(x: f64) -> f64` builtin: rounds
-/// to the nearest integer, halfway values away from zero, matching
-/// `f64::round` exactly - narrowing to an integer type is a separate,
-/// explicit step (`round(x) as i32`) via the general cast operator (see
-/// the "Casts" section above), not this function's job.
-///
-/// Registered by every [`OpLookup::new()`] (see there), so `round` reads
-/// like any other builtin operator without a caller needing to set it up.
-///
-/// A function call parses as two independent lookups - an arity-0 lookup
-/// for the callee name, then an arity-`N+1` lookup for `"()"` with the
-/// callee and its arguments on the stack (see `cel-parser/src/lib.rs`'s
-/// primary/postfix expression grammar) - so this one scope function
-/// handles both halves: `("round", 0)` pushes the [`RoundFn`] marker,
-/// and `("()", 2)` peeks the stack to confirm both that it actually has
-/// two operands and that this specific call's callee is that marker
-/// before consuming it, deferring to any other registered scope
-/// (`Ok(false)`) otherwise.
-fn round_scope(
-    name: &str,
-    segment: &mut DynSegment,
-    num_operands: usize,
-    _span: SourceSpan,
-) -> Result<bool> {
-    match (name, num_operands) {
-        ("round", 0) => {
-            segment.op0(|| RoundFn);
-            Ok(true)
-        }
-        ("()", 2) => {
-            let top = segment.peek_stack_infos(2);
-            if top.len() != 2 || top[0].value_type.type_id() != TypeId::of::<RoundFn>() {
-                return Ok(false);
-            }
-            segment.op2(|_callee: RoundFn, x: f64| x.round())?;
-            Ok(true)
-        }
-        _ => Ok(false),
-    }
-}
-
 /// Scope function implementing the arity-0 `range_full` internal op: constructs
-/// `std::ops::RangeFull`, the value a bare `..` produces. Unlike `round_scope`, there is
-/// no second half — `RangeFull` is never called with arguments, so there's no paired
-/// `"()"` arm to add.
+/// `std::ops::RangeFull`, the value a bare `..` produces. There is no second
+/// half because `RangeFull` is never called with arguments.
 ///
 /// Registered by every [`OpLookup::new()`] (see there). `"range_full"` is an internal
 /// dispatch name the parser selects when it recognizes a bare `..` with neither a left
@@ -1594,9 +1546,8 @@ pub struct OpLookup {
 }
 
 impl OpLookup {
-    /// Creates a new operation lookup with only built-in operations - the
-    /// infix/prefix operators, the cast operator (`as`), and the
-    /// `round` function.
+    /// creates a new operation lookup with only built-in operations - the
+    /// infix/prefix operators, the cast operator (`as`), and range syntax.
     ///
     /// # Examples
     ///
@@ -1612,7 +1563,6 @@ impl OpLookup {
             builtin_scope: BuiltinScope,
             tuple_signatures: Vec::new(),
         };
-        lookup.push_library_scope(round_scope);
         lookup.push_library_scope(range_full_scope);
         lookup
     }
@@ -1698,8 +1648,8 @@ impl OpLookup {
     /// Registers a permanent, library-level scope that is reachable from every parse,
     /// including inside closure bodies.
     ///
-    /// Used for built-in language features (like `round`) and statically-installed library
-    /// functions (like `clamp` from a `cel-std`-style crate). These scopes are registered
+    /// Used for built-in language features and statically-installed library
+    /// functions (like `round` and `clamp` from a `cel-std`-style crate). These scopes are registered
     /// once at setup time and must always be available, even when [`isolate_scopes`](Self::isolate_scopes)
     /// is active — library scopes are *never* isolated.
     ///
@@ -2187,90 +2137,6 @@ mod tests {
     }
 
     #[test]
-    fn round_rounds_half_away_from_zero() -> Result<()> {
-        // 3.5/-3.5 are the actual halfway cases (3.6 rounds to 4.0 regardless of which direction
-        // "away from zero" means, so it can't distinguish this rule from ordinary
-        // round-to-nearest); checking both signs also confirms "away from zero" rather than
-        // "toward positive infinity".
-        let lookup = OpLookup::new();
-        let mut segment = DynSegment::new::<()>();
-        lookup.lookup(
-            "round",
-            &mut segment,
-            0,
-            Span::call_site(),
-            Span::call_site(),
-        )?;
-        segment.just(3.5f64);
-        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<f64>()?, 4.0);
-
-        let mut segment = DynSegment::new::<()>();
-        lookup.lookup(
-            "round",
-            &mut segment,
-            0,
-            Span::call_site(),
-            Span::call_site(),
-        )?;
-        segment.just(-3.5f64);
-        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<f64>()?, -4.0);
-        Ok(())
-    }
-
-    #[test]
-    fn round_of_an_expression_result() -> Result<()> {
-        // The motivating case: converting a physical size times a resolution
-        // (both f64) into a whole pixel count, still as an `f64` - narrowing
-        // to `i32` is a separate `as` cast, tested in the cast tests below.
-        let lookup = OpLookup::new();
-        let mut segment = DynSegment::new::<()>();
-        lookup.lookup(
-            "round",
-            &mut segment,
-            0,
-            Span::call_site(),
-            Span::call_site(),
-        )?;
-        segment.just(3.41333333f64);
-        segment.just(300.0f64);
-        lookup.lookup("*", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<f64>()?, 1024.0);
-        Ok(())
-    }
-
-    #[test]
-    fn round_scope_declines_a_call_whose_callee_is_not_round() -> Result<()> {
-        // Defensive case for round_scope's own ("()", 2) arm: a callee that
-        // isn't the `RoundFn` marker must be declined (Ok(false)), not
-        // mistaken for a round() call - see round_scope's doc comment.
-        let mut segment = DynSegment::new::<()>();
-        segment.just(7i32);
-        segment.just(3.0f64);
-        let handled = round_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
-        assert!(!handled);
-        Ok(())
-    }
-
-    #[test]
-    fn round_scope_declines_rather_than_panics_on_an_undersized_stack() -> Result<()> {
-        // Regression test: `("()", 2)` used to index `peek_stack_infos(2)[0]` unconditionally,
-        // but `peek_stack_infos` returns an *empty* slice (not a short one) when the stack has
-        // fewer than the requested count - an empty stack here panicked instead of declining.
-        let mut segment = DynSegment::new::<()>();
-        let handled = round_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
-        assert!(!handled);
-
-        let mut segment = DynSegment::new::<()>();
-        segment.just(3.0f64); // only one of the two expected operands
-        let handled = round_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
-        assert!(!handled);
-        Ok(())
-    }
-
-    #[test]
     fn lookup_cast_errors_rather_than_panics_on_an_empty_stack() -> Result<()> {
         // Regression test: `lookup_cast` used to index `peek_stack_infos(1)[0]` unconditionally,
         // which panicked (rather than returning a `ParseError`) when the stack was empty -
@@ -2298,39 +2164,6 @@ mod tests {
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         segment.just(1024.0f64);
-        lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<i32>()?, 1024);
-        Ok(())
-    }
-
-    #[test]
-    fn cast_composes_with_round_for_the_image_resize_pattern() -> Result<()> {
-        // (width_px as f64) / dpi, mirrored back with round(... * dpi) as i32 -
-        // the actual pattern image_resize.adm2 needs for its width_px triangle. Exercises the
-        // full round trip: widening cast, round(), and the narrowing cast back to i32 - not just
-        // the widening half (see the PR review comment this regression-tests: a prior version of
-        // this test only checked `(width_px as f64) / dpi` and would not have caught a regression
-        // in `round`'s dispatch or the checked `f64 as i32` narrowing cast).
-        let lookup = OpLookup::new();
-        let mut segment = DynSegment::new::<()>();
-        segment.just(1024i32);
-        lookup.lookup_cast("f64", &mut segment, Span::call_site(), Span::call_site())?;
-        segment.just(300.0f64);
-        lookup.lookup("/", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<f64>()?, 1024.0 / 300.0);
-
-        let mut segment = DynSegment::new::<()>();
-        lookup.lookup(
-            "round",
-            &mut segment,
-            0,
-            Span::call_site(),
-            Span::call_site(),
-        )?;
-        segment.just(1024.0f64 / 300.0);
-        segment.just(300.0f64);
-        lookup.lookup("*", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
         lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())?;
         assert_eq!(segment.call0::<i32>()?, 1024);
         Ok(())
@@ -2977,25 +2810,20 @@ mod tests {
 
     #[test]
     fn isolate_scopes_leaves_library_scopes_reachable() {
-        // round_scope's own protocol is two lookups: ("round", 0) pushes a marker value, then
-        // ("()", 2) (with the marker plus an f64 operand on the stack) computes the actual round.
-        // This test only needs to prove the *first* half is still reachable while isolated — that's
-        // enough to demonstrate round_scope (a library scope) survived isolate_scopes, without
-        // needing to replicate the whole call protocol.
-        let mut lookup = OpLookup::new(); // registers round_scope via push_library_scope
+        let mut lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         let isolated = lookup.isolate_scopes();
         lookup
             .lookup(
-                "round",
+                "range_full",
                 &mut segment,
                 0,
                 proc_macro2::Span::call_site(),
                 proc_macro2::Span::call_site(),
             )
-            .expect("round is a library scope and must survive isolation");
+            .expect("range_full is a library scope and must survive isolation");
         lookup.restore_scopes(isolated);
-        assert_eq!(segment.peek_stack_infos(1).len(), 1); // the RoundFn marker was pushed
+        assert_eq!(segment.peek_stack_infos(1).len(), 1);
     }
 
     #[test]

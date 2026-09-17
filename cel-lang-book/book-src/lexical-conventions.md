@@ -1,8 +1,8 @@
 # Lexical conventions
 
-A CEL source file is read as a stream of tokens before it is read as
-expressions. This chapter describes the token forms that participate in CEL
-source. For background on the underlying token style, see the
+The lexer reads a CEL source file as a stream of tokens before the parser reads
+it as expressions. This chapter describes the token forms that participate in
+CEL source. For background on the underlying token style, see the
 [Rust Reference](https://doc.rust-lang.org/reference/). For the full CEL
 expression grammar, see the [Reference Manual](reference.md).
 
@@ -21,8 +21,8 @@ if flag {
 }
 ```
 
-Compound punctuation uses joint spelling: the characters of a compound token
-are written with no whitespace between them. This rule applies to `&&`, `||`,
+Compound punctuation uses joint spelling: write the characters of a compound
+token with no whitespace between them. This rule applies to `&&`, `||`,
 `==`, `!=`, `<=`, `>=`, `<<`, `>>`, `..`, and `..=`.
 
 ```text
@@ -91,8 +91,8 @@ b"bytes"
 c"header"
 ```
 
-The unit value `()` is described by the grammar rather than by a standalone
-literal token.
+The grammar describes the unit value `()` rather than a standalone literal
+token.
 
 ## Delimiters and punctuation
 

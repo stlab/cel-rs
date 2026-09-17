@@ -1,14 +1,8 @@
-//! Checked examples for the static CEL language book.
+//! Checked examples for the static CEL book.
 
 use cel_parser::{CELParser, OpLookup};
 use cel_runtime::{DynClosure, DynamicArray};
 use cel_std::install as install_std;
-
-/// Evaluates `source` in the core CEL environment and returns its result.
-fn eval_core<T: 'static>(source: &str) -> T {
-    let mut segment = CELParser::new(OpLookup::new()).parse_str(source).unwrap();
-    segment.call0::<T>().unwrap()
-}
 
 /// Evaluates `source` with the optional CEL standard library installed.
 fn eval_with_std<T: 'static>(source: &str) -> T {
@@ -28,8 +22,13 @@ fn arithmetic_respects_precedence() {
 }
 
 #[test]
-fn round_is_available_in_the_core_environment() {
-    assert_eq!(eval_core::<f64>("round(-3.5)"), -4.0);
+fn round_is_available_with_the_standard_library() {
+    assert!(
+        CELParser::new(OpLookup::new())
+            .parse_str("round(-3.5)")
+            .is_err()
+    );
+    assert_eq!(eval_with_std::<f64>("round(-3.5)"), -4.0);
 }
 
 #[test]

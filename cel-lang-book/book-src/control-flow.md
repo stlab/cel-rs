@@ -39,15 +39,15 @@ if open { 1..=5 } else { 10.. }
 
 - `if` is an expression, not a statement. It yields the value of the
   selected branch.
-- The supported branch forms are `if`, `if ... else`, and `if ... else
-  if ...` chains.
+- CEL supports the branch forms `if`, `if ... else`, and `if ... else if ...`
+  chains.
 - The condition and every branch body are ordinary expressions.
 - Omitting the final `else` supplies an implicit `()` branch, so the
   remaining branches must still be type-compatible with unit.
 - The braces belong to `if` syntax. CEL does not use free-standing block
   expressions.
-- The supported range forms are `a..b`, `a..=b`, `a..`, `..b`, `..=b`,
-  and `..`.
+- CEL supports the range forms `a..b`, `a..=b`, `a..`, `..b`, `..=b`, and
+  `..`.
 - Endpoint-bearing ranges require homogeneous numeric endpoints.
 - Range endpoints are full expressions, so operators inside either side
   are parsed before the range is formed.
