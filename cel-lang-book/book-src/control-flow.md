@@ -40,8 +40,10 @@ if open { 1..=5 } else { 10.. }
 - `if` is an expression, not a statement. It yields the value of the
   selected branch.
 - The supported branch forms are `if`, `if ... else`, and `if ... else
-  if ...` chains with an optional final `else`.
+  if ...` chains.
 - The condition and every branch body are ordinary expressions.
+- Omitting the final `else` supplies an implicit `()` branch, so the
+  remaining branches must still be type-compatible with unit.
 - The braces belong to `if` syntax. CEL does not use free-standing block
   expressions.
 - The supported range forms are `a..b`, `a..=b`, `a..`, `..b`, `..=b`,
@@ -56,7 +58,7 @@ if open { 1..=5 } else { 10.. }
 - `..=` always requires a right endpoint.
 - `1 + 2..3 * 4` means `(1 + 2)..(3 * 4)`.
 - `1..2..3` is not valid.
-- `if flag { 1 } else if other { 2 }` is valid even without a final
-  `else`.
+- `if flag { () } else if other { () }` is valid without a final `else`
+  because the omitted branch is also `()`.
 - See the [Reference Manual](reference.md) for the complete branch and
   range grammar.
