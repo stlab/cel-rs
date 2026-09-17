@@ -106,13 +106,13 @@ These are optional-library calls.
 - accepts signed integers and floating-point values
 - returns the same type as `x`
 - reports `arithmetic overflow` for the minimum signed integer value
-- is otherwise infallible after successful lookup and type matching
+- succeeds for every other supported operand
 
 `signum(x)`:
 
 - accepts signed integers and floating-point values
 - returns the same type as `x`
-- is infallible after successful lookup and type matching
+- succeeds for every supported operand
 
 ```text
 abs(-42i64)

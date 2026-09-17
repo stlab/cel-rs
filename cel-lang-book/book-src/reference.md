@@ -143,7 +143,7 @@ evaluation environment installs that library. See
 | `clamp(x, lo, hi)` | same-type numeric operands from the same 14-type set | same as operands | Requires ordered bounds with `lo <= hi`; otherwise reports `invalid clamp bounds`. |
 | `abs(x)` | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, `f64` | same as operand | Minimum signed integer reports `arithmetic overflow`. |
 | `signum(x)` | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, `f64` | same as operand | No unsigned support. Successful calls are infallible. |
-| `sqrt(x)` | `f32`, `f64` | same as operand | Float-only. Negative inputs follow normal floating-point behavior and may yield `NaN`. |
+| `sqrt(x)` | `f32`, `f64` | same as operand | Float-only. Inputs below zero yield `NaN` rather than an error. |
 | `floor(x)`, `ceil(x)`, `trunc(x)` | `f32`, `f64` | same as operand | Float-only. Successful calls are infallible. |
 
 - None of the documented functions are integer-only.
