@@ -1,10 +1,12 @@
 # Lexical conventions
 
-The lexer reads a CEL source file as a stream of tokens before the parser reads
-it as expressions. This chapter describes the token forms that participate in
-CEL source. For background on the underlying token style, see the
-[Rust Reference](https://doc.rust-lang.org/reference/). For the full CEL
-expression grammar, see the [Reference Manual](reference.md).
+The lexer tokenizes a stream of characters into tokens before the parser reads
+them as expressions. It is built on Rust
+[token trees](https://doc.rust-lang.org/proc_macro/enum.TokenTree.html) and
+inherits many behaviors from the Rust
+[lexical structure](https://doc.rust-lang.org/reference/lexical-structure.html).
+This chapter describes the token forms that participate in CEL source. For the
+full CEL expression grammar, see the [Reference Manual](reference.md).
 
 ## Whitespace and joint punctuation
 
