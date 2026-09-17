@@ -4093,6 +4093,21 @@ mod playground {
         }
         Ok(())
     }
+    #[test]
+    fn literal_types() {
+        use CELParser;
+        use op_table::OpLookup;
+        let source = r#"
+            b'a'
+        "#;
+        println!(
+            "{:?}",
+            CELParser::new(OpLookup::new())
+                .parse_str(source)
+                .unwrap()
+                .call0::<u8>()
+        )
+    }
 
     #[test]
     fn expression_macro_error3() {

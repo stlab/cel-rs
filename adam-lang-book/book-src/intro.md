@@ -37,9 +37,9 @@ itself.
 
 Adam adds a declarative shell (`sheet`, `cell`, `source`, `relationship`, `conditional`, `out`,
 `require`, and `filter`) around expressions written in the
-[Common Expression Language](https://github.com/google/cel-spec) (CEL), turning a set of CEL
-expressions into a live, bidirectional constraint graph. See
-[`cel-parser`'s crate documentation](../cel_parser/index.html) for CEL's own grammar, operators,
+[Common Expression Language](../cel-book/index.html) (CEL), turning a set of CEL
+expressions into a live, bidirectional constraint graph. See the
+[CEL language book](../cel-book/index.html) for CEL's own grammar, operators,
 literals, casts, and control-flow expressions.
 
 Functions callable from inside an expression, such as `min`, `max`, `clamp`, and `round`, come

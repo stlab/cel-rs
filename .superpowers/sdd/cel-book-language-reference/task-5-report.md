@@ -36,6 +36,76 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 ```
 Result: PASS.
 
+## Intro cleanup commit follow-up
+
+### Commit created
+
+- Commit: `cc28e4bb361122cdbb3e74e689dce59cb82d9a16`
+- Scope: `cel-lang-book/book-src/intro.md` only
+
+### Diff confirmation
+
+Confirmed that the committed `intro.md` change is exactly the cleanup already
+described in this report: it removes the release/process/tooling block and
+replaces it with the language-focused closing paragraph.
+
+Command:
+
+```text
+git --no-pager show --format=medium HEAD -- cel-lang-book\book-src\intro.md
+```
+
+Output:
+
+```text
+commit cc28e4bb361122cdbb3e74e689dce59cb82d9a16
+Author: sean_parent <sean.parent@stlab.cc>
+Date:   Wed Sep 16 23:08:50 2026 -0700
+
+    Commit CEL book intro cleanup
+
+    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+
+diff --git a/cel-lang-book/book-src/intro.md b/cel-lang-book/book-src/intro.md
+index 4e10a52a..155c4a70 100644
+--- a/cel-lang-book/book-src/intro.md
++++ b/cel-lang-book/book-src/intro.md
+@@ -24,22 +24,6 @@ calls layered over the core expression language. It distinguishes the core
+ `round` call from the optional library functions that are available only when
+ the evaluation environment installs that library.
+ 
+-Each chapter uses copyable CEL snippets and points back to the checked examples
+-that exercise the same forms in the book's test suite. When a chapter documents
+-environment-dependent library calls, the prose says so explicitly.
+-
+-The first release is intentionally static:
+-
+-- examples are checked as part of the book's test suite;
+-- the book builds with `mdbook build cel-lang-book`;
+-- live evaluation is intentionally deferred to a later release.
+-
+-## Local commands
+-
+-```text
+-mdbook build cel-lang-book
+-mdbook serve cel-lang-book
+-cargo test -p cel-lang-book
+-```
+-
+-`mdbook build cel-lang-book` writes output to `cel-lang-book/book-dist`.
++Each chapter uses copyable CEL snippets. Tutorial chapters introduce a form in
++running prose, then tighten the rules into concise lists and cross-reference
++the exact grammar in the [Reference Manual](reference.md).
+```
+
+Result: exact match to the previously reported cleanup.
+
+### Validation note
+
+No full-suite rerun was needed for this follow-up commit because the committed
+file content is the same already-validated `intro.md` cleanup described above;
+the only issue was that it had remained uncommitted.
+
 ### 3. Book build
 ```text
 mdbook build cel-lang-book

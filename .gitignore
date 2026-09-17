@@ -2,6 +2,7 @@
 /adam-lang-book/book-dist
 .tokensave
 .claude/worktrees/
+.superpowers/sdd/
 /begin/node_modules
 /editors/vscode-adam-lang/node_modules
 /editors/vscode-adam-lang/out

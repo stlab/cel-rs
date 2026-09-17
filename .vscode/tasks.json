@@ -208,6 +208,41 @@
             }
         },
         {
+            "label": "cel-lang-book: build",
+            "type": "shell",
+            "command": "mdbook",
+            "args": [
+                "build",
+                "cel-lang-book"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "cel-lang-book: serve",
+            "type": "shell",
+            "command": "mdbook",
+            "args": [
+                "serve",
+                "cel-lang-book"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "isBackground": true
+        },
+        {
             "label": "book: build (full)",
             "dependsOrder": "sequence",
             "dependsOn": [
