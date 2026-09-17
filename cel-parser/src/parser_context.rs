@@ -25,12 +25,33 @@ use crate::type_expr::TypeExpr;
 /// # Examples
 ///
 /// ```rust
+/// use cel_parser::{ExprSpan, TypeExpr};
 /// use cel_parser::parser_context::AnnotatedArray;
+/// use proc_macro2::Span;
 ///
-/// let mut resolve = |_: &cel_parser::TypeExpr| unreachable!("no annotation to resolve");
-/// let mut annotation = AnnotatedArray::new(&mut resolve, None, None);
-/// assert!(annotation.resolve_element_type().unwrap().is_none());
-/// assert!(annotation.into_parts().0.is_none());
+/// fn ignore(_: &TypeExpr) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+///     unreachable!("this example only inspects stored syntax")
+/// }
+///
+/// let span = ExprSpan {
+///     start: Span::call_site(),
+///     end: Span::call_site(),
+/// };
+/// let mut resolve = ignore;
+/// let annotation = AnnotatedArray::new(
+///     &mut resolve,
+///     Some(TypeExpr::Array {
+///         element: Box::new(TypeExpr::Named {
+///             name: "i32".to_string(),
+///             span,
+///         }),
+///         span,
+///     }),
+///     Some(span),
+/// );
+///
+/// assert!(matches!(annotation.type_annotation(), Some(TypeExpr::Array { .. })));
+/// assert!(annotation.annotation_span().is_some());
 /// ```
 pub struct AnnotatedArray<'a> {
     resolve_array_type: &'a mut dyn FnMut(&TypeExpr) -> crate::Result<crate::ResolvedArrayType>,
@@ -48,11 +69,32 @@ impl<'a> AnnotatedArray<'a> {
     /// # Examples
     ///
     /// ```rust
+    /// use cel_parser::{ExprSpan, TypeExpr};
     /// use cel_parser::parser_context::AnnotatedArray;
+    /// use proc_macro2::Span;
     ///
-    /// let mut resolve = |_: &cel_parser::TypeExpr| unreachable!("no annotation to resolve");
-    /// let annotation = AnnotatedArray::new(&mut resolve, None, None);
-    /// assert!(annotation.type_annotation().is_none());
+    /// fn ignore(_: &TypeExpr) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+    ///     unreachable!("this example only bundles parsed inputs")
+    /// }
+    ///
+    /// let span = ExprSpan {
+    ///     start: Span::call_site(),
+    ///     end: Span::call_site(),
+    /// };
+    /// let mut resolve = ignore;
+    /// let annotation = AnnotatedArray::new(
+    ///     &mut resolve,
+    ///     Some(TypeExpr::Array {
+    ///         element: Box::new(TypeExpr::Named {
+    ///             name: "i32".to_string(),
+    ///             span,
+    ///         }),
+    ///         span,
+    ///     }),
+    ///     Some(span),
+    /// );
+    ///
+    /// assert!(annotation.annotation_span().is_some());
     /// ```
     pub fn new(
         resolve_array_type: &'a mut dyn FnMut(&TypeExpr) -> crate::Result<crate::ResolvedArrayType>,
@@ -67,12 +109,86 @@ impl<'a> AnnotatedArray<'a> {
     }
 
     /// Returns the unresolved annotation syntax, or `None` for an unannotated array literal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{ExprSpan, TypeExpr};
+    /// use cel_parser::parser_context::AnnotatedArray;
+    /// use proc_macro2::Span;
+    ///
+    /// fn ignore(_: &TypeExpr) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+    ///     unreachable!("this example only reads the stored annotation")
+    /// }
+    ///
+    /// let span = ExprSpan {
+    ///     start: Span::call_site(),
+    ///     end: Span::call_site(),
+    /// };
+    /// let mut resolve = ignore;
+    /// let annotation = AnnotatedArray::new(
+    ///     &mut resolve,
+    ///     Some(TypeExpr::Array {
+    ///         element: Box::new(TypeExpr::Named {
+    ///             name: "i32".to_string(),
+    ///             span,
+    ///         }),
+    ///         span,
+    ///     }),
+    ///     Some(span),
+    /// );
+    ///
+    /// match annotation.type_annotation() {
+    ///     Some(TypeExpr::Array { element, .. }) => assert!(matches!(
+    ///         element.as_ref(),
+    ///         TypeExpr::Named { name, .. } if name == "i32"
+    ///     )),
+    ///     other => panic!("expected [i32], got {other:?}"),
+    /// }
+    /// ```
     #[must_use]
     pub fn type_annotation(&self) -> Option<&TypeExpr> {
         self.type_annotation.as_ref()
     }
 
     /// Returns the span covering `: type_expr`, or `None` for an unannotated array literal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::ExprSpan;
+    /// use cel_parser::parser_context::AnnotatedArray;
+    /// use proc_macro2::Span;
+    ///
+    /// fn ignore(_: &cel_parser::TypeExpr) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+    ///     unreachable!("this example only reads the stored span")
+    /// }
+    ///
+    /// fn ignore_none(
+    ///     _: &cel_parser::TypeExpr,
+    /// ) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+    ///     unreachable!("this example only checks the None case")
+    /// }
+    ///
+    /// let span = ExprSpan {
+    ///     start: Span::call_site(),
+    ///     end: Span::call_site(),
+    /// };
+    /// let mut resolve = ignore;
+    /// let annotation = AnnotatedArray::new(
+    ///     &mut resolve,
+    ///     None,
+    ///     Some(span),
+    /// );
+    ///
+    /// assert!(annotation.annotation_span().is_some());
+    /// let mut without_span = ignore_none;
+    /// assert!(
+    ///     AnnotatedArray::new(&mut without_span, None, None)
+    ///         .annotation_span()
+    ///         .is_none()
+    /// );
+    /// ```
     #[must_use]
     pub fn annotation_span(&self) -> Option<ExprSpan> {
         self.annotation_span
@@ -87,6 +203,41 @@ impl<'a> AnnotatedArray<'a> {
     ///
     /// Returns `Err` if the annotation names an unknown type, does not name a complete array
     /// type, or names tuple-valued array elements.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{ExprSpan, ResolvedArrayType, TypeExpr};
+    /// use cel_parser::parser_context::AnnotatedArray;
+    /// use cel_runtime::ArrayElementType;
+    /// use proc_macro2::Span;
+    ///
+    /// fn resolve_i32(_: &TypeExpr) -> cel_parser::Result<ResolvedArrayType> {
+    ///     Ok(ResolvedArrayType::from_element_type(
+    ///         ArrayElementType::leaf::<i32>().unwrap(),
+    ///     ))
+    /// }
+    ///
+    /// let span = ExprSpan {
+    ///     start: Span::call_site(),
+    ///     end: Span::call_site(),
+    /// };
+    /// let mut resolve = resolve_i32;
+    /// let mut annotation = AnnotatedArray::new(
+    ///     &mut resolve,
+    ///     Some(TypeExpr::Array {
+    ///         element: Box::new(TypeExpr::Named {
+    ///             name: "i32".to_string(),
+    ///             span,
+    ///         }),
+    ///         span,
+    ///     }),
+    ///     Some(span),
+    /// );
+    ///
+    /// let element_type = annotation.resolve_element_type().unwrap().unwrap();
+    /// assert_eq!(element_type.type_name(), "i32");
+    /// ```
     pub fn resolve_element_type(&mut self) -> crate::Result<Option<cel_runtime::ArrayElementType>> {
         self.type_annotation
             .as_ref()
@@ -98,6 +249,45 @@ impl<'a> AnnotatedArray<'a> {
     }
 
     /// Returns the parsed syntax-level annotation inputs unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{ExprSpan, TypeExpr};
+    /// use cel_parser::parser_context::AnnotatedArray;
+    /// use proc_macro2::Span;
+    ///
+    /// fn ignore(_: &TypeExpr) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+    ///     unreachable!("this example only unpacks stored parts")
+    /// }
+    ///
+    /// let span = ExprSpan {
+    ///     start: Span::call_site(),
+    ///     end: Span::call_site(),
+    /// };
+    /// let mut resolve = ignore;
+    /// let annotation = AnnotatedArray::new(
+    ///     &mut resolve,
+    ///     Some(TypeExpr::Array {
+    ///         element: Box::new(TypeExpr::Named {
+    ///             name: "i32".to_string(),
+    ///             span,
+    ///         }),
+    ///         span,
+    ///     }),
+    ///     Some(span),
+    /// );
+    ///
+    /// let (type_annotation, annotation_span) = annotation.into_parts();
+    /// assert!(annotation_span.is_some());
+    /// match type_annotation {
+    ///     Some(TypeExpr::Array { element, .. }) => assert!(matches!(
+    ///         element.as_ref(),
+    ///         TypeExpr::Named { name, .. } if name == "i32"
+    ///     )),
+    ///     other => panic!("expected [i32], got {other:?}"),
+    /// }
+    /// ```
     #[must_use]
     pub fn into_parts(self) -> (Option<TypeExpr>, Option<ExprSpan>) {
         (self.type_annotation, self.annotation_span)
