@@ -101,7 +101,7 @@ CEL also builds compound values from ordinary expressions:
 
 - `()` is the unit value, `(expr)` is grouping, `(expr,)` is a 1-tuple, and
   `(a, b, c)` is a tuple.
-- `[a, b, c]` is an array value.
+- Arrays are non-empty bracketed, homogeneous lists, and `[]` is not accepted.
 - `a..b`, `a..=b`, `a..`, `..b`, `..=b`, and `..` are range values.
 - `|| expr` and `|x: T| expr` are closure values.
 

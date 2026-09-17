@@ -1,7 +1,7 @@
 # Introduction
 
-This book is a tutorial and reference for the CEL language itself: its tokens,
-literals, expressions, operators, control flow, and collection forms.
+This book is a tutorial and reference for the CEL expression language: its
+tokens, literals, expressions, operators, control flow, and collection forms.
 
 The chapters are written in the style of K&R: each one introduces a piece of the
 language, then shows the forms it accepts, the rules that govern it, and the
