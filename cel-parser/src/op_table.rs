@@ -1417,45 +1417,62 @@ pub(crate) struct BuiltinScalarType {
     pub(crate) align: usize,
     pub(crate) dropper: cel_runtime::RawDropper,
     pub(crate) push_arg: fn(&mut DynSegment, usize),
+    pub(crate) element_type: fn() -> cel_runtime::ArrayElementType,
 }
 
-macro_rules! builtin_scalar {
-    ($name:literal, $ty:ty) => {
-        BuiltinScalarType {
-            type_id: TypeId::of::<$ty>(),
-            type_name: $name,
-            size: std::mem::size_of::<$ty>(),
-            align: std::mem::align_of::<$ty>(),
-            dropper: cel_runtime::raw_dropper_for::<$ty>(),
-            push_arg: |seg, idx| seg.push_arg::<$ty>(idx),
+/// Declares the one built-in scalar table every built-in name lookup reads: the name list
+/// [`BUILTIN_SCALAR_NAMES`] exposes and the descriptors [`builtin_scalar_type`] resolves, so a
+/// name can never be recognized by one and missed by the other.
+macro_rules! builtin_scalars {
+    ($($name:literal => $ty:ty),* $(,)?) => {
+        /// Every built-in scalar type name, in table order. Used by the cross-table consistency
+        /// tests that keep this table, [`crate::Ty`], and the CEL type resolver in agreement.
+        #[cfg(test)]
+        pub(crate) const BUILTIN_SCALAR_NAMES: &[&str] = &[$($name),*];
+
+        /// Resolves a built-in scalar type's bare identifier (a closure parameter annotation, a
+        /// CEL array annotation leaf) to its full descriptor, or `None` if `name` names no
+        /// recognized scalar type.
+        ///
+        /// - Complexity: O(1).
+        pub(crate) fn builtin_scalar_type(name: &str) -> Option<BuiltinScalarType> {
+            Some(match name {
+                $($name => BuiltinScalarType {
+                    type_id: TypeId::of::<$ty>(),
+                    type_name: $name,
+                    size: std::mem::size_of::<$ty>(),
+                    align: std::mem::align_of::<$ty>(),
+                    dropper: cel_runtime::raw_dropper_for::<$ty>(),
+                    push_arg: |seg, idx| seg.push_arg::<$ty>(idx),
+                    element_type: || {
+                        cel_runtime::ArrayElementType::leaf::<$ty>()
+                            .expect("a built-in scalar type is never DynamicArray")
+                            .with_type_name($name)
+                    },
+                },)*
+                _ => return None,
+            })
         }
     };
 }
 
-/// Resolves a closure parameter type annotation's bare identifier to its full built-in
-/// descriptor, or `None` if `name` names no recognized scalar type.
-///
-/// - Complexity: O(1).
-pub(crate) fn builtin_scalar_type(name: &str) -> Option<BuiltinScalarType> {
-    Some(match name {
-        "u8" => builtin_scalar!("u8", u8),
-        "u16" => builtin_scalar!("u16", u16),
-        "u32" => builtin_scalar!("u32", u32),
-        "u64" => builtin_scalar!("u64", u64),
-        "u128" => builtin_scalar!("u128", u128),
-        "usize" => builtin_scalar!("usize", usize),
-        "i8" => builtin_scalar!("i8", i8),
-        "i16" => builtin_scalar!("i16", i16),
-        "i32" => builtin_scalar!("i32", i32),
-        "i64" => builtin_scalar!("i64", i64),
-        "i128" => builtin_scalar!("i128", i128),
-        "isize" => builtin_scalar!("isize", isize),
-        "f32" => builtin_scalar!("f32", f32),
-        "f64" => builtin_scalar!("f64", f64),
-        "bool" => builtin_scalar!("bool", bool),
-        "String" => builtin_scalar!("String", String),
-        _ => return None,
-    })
+builtin_scalars! {
+    "u8" => u8,
+    "u16" => u16,
+    "u32" => u32,
+    "u64" => u64,
+    "u128" => u128,
+    "usize" => usize,
+    "i8" => i8,
+    "i16" => i16,
+    "i32" => i32,
+    "i64" => i64,
+    "i128" => i128,
+    "isize" => isize,
+    "f32" => f32,
+    "f64" => f64,
+    "bool" => bool,
+    "String" => String,
 }
 
 /// Built-in operation scope.
@@ -2906,13 +2923,10 @@ mod tests {
 
     #[test]
     fn builtin_scalar_type_resolves_every_documented_name() {
-        for name in [
-            "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
-            "f32", "f64", "bool", "String",
-        ] {
+        for name in BUILTIN_SCALAR_NAMES {
             let scalar =
                 builtin_scalar_type(name).unwrap_or_else(|| panic!("expected `{name}` to resolve"));
-            assert_eq!(scalar.type_name, name);
+            assert_eq!(scalar.type_name, *name);
         }
         assert!(builtin_scalar_type("not_a_type").is_none());
     }

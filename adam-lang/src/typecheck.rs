@@ -1,27 +1,33 @@
 //! A best-effort static type checker over [`crate::ast::Sheet`] trees, built on
-//! [`cel_parser::ty::check_expr`]. Checks each `cell`'s literal initializer against its `:
-//! type_name` annotation (a `source`'s initializer is checked identically — a `source` shares
+//! [`cel_parser::ty::check_expr_with_type_resolver`]. Checks each `cell`'s literal or
+//! tuple-shaped initializer against its `: type_name` annotation (a `source`'s initializer is
+//! checked identically — a `source` shares
 //! `cell`'s exact shape, including its optional `filter` clause), each `relationship`/`conditional`
 //! binding's body against its declared outputs (arity: does the body actually produce as many
 //! values as declared; and per-output type), and each `out`'s initializer body against its optional
 //! `: type_name` annotation. Any `cell`, `source`, or `out`'s optional `require { ... }` block has
-//! each of its `requirement` bodies checked to produce `bool` type. An absent
-//! annotation, an annotation
-//! naming a type [`crate::TypeRegistry`] doesn't recognize, or an operator
+//! each of its `requirement` bodies checked to produce `bool` type. Adam cell annotations that
+//! name a type [`crate::TypeRegistry`] doesn't recognize still resolve to [`cel_parser::Ty::Any`]
+//! and are never flagged, while CEL array annotations inside expression bodies resolve named
+//! leaves through the same registry-backed CEL resolver [`check_sheet`] builds per pass. An absent
+//! annotation or an operator
 //! [`cel_parser::op_table::builtin_operand_types`] doesn't recognize all resolve to
 //! [`cel_parser::Ty::Any`] and are never flagged — matching adam-lang/CEL's extensible type
 //! system. Not a complete type system; see the design doc's "Type checking (v1)" section.
 
-use cel_parser::{Expr, ExprSpan, Literal, ParseError, Ty, ty::check_expr};
+use cel_parser::{Expr, ExprSpan, Literal, ParseError, Ty, ty::check_expr_with_type_resolver};
 
 use crate::TypeRegistry;
 use crate::ast::{BindingDecl, CellFilter, OutDecl, RequireBlock, Sheet, SheetItem, TypeExpr};
 use crate::type_registry::TypeShape;
 
 /// Checks `sheet` against `registry`'s registered types, returning every type diagnostic found.
-/// Never fails — an unrecognized annotation, an unresolved identifier, or a custom operator
-/// [`cel_parser::op_table::builtin_operand_types`] doesn't know about all resolve to
-/// [`cel_parser::Ty::Any`] and are silently skipped, not reported.
+/// Never fails — an absent Adam annotation, an unresolved identifier, an Adam `cell`/`source`/`out`
+/// annotation `registry` doesn't resolve, or a custom operator
+/// [`cel_parser::op_table::builtin_operand_types`] doesn't know about all fall back to
+/// [`cel_parser::Ty::Any`] and are silently skipped, not reported. CEL array annotations inside
+/// expressions use the same registry-backed CEL resolver, so unknown leaf names such as
+/// `[]: [Missing]` are still reported.
 ///
 /// - Complexity: O(n) in the number of nodes across every item in `sheet`.
 ///
@@ -36,10 +42,36 @@ use crate::type_registry::TypeShape;
 /// let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
 /// assert_eq!(diagnostics.len(), 1, "1.0 defaults to f64, mismatching the i32 annotation");
 /// ```
+///
+/// ```rust
+/// use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};
+///
+/// let sheet = AdamAstParser::new()
+///     .parse_str("sheet s { out values := [0, 1]: [f64]; }")
+///     .unwrap();
+/// let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+/// assert_eq!(diagnostics.len(), 1);
+/// assert_eq!(
+///     diagnostics[0].message(),
+///     "array elements must match the annotation exactly: expected `f64`, found `i32`"
+/// );
+/// ```
+///
+/// ```rust
+/// use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};
+///
+/// let sheet = AdamAstParser::new()
+///     .parse_str("sheet s { out values := []: [Missing]; }")
+///     .unwrap();
+/// let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+/// assert_eq!(diagnostics.len(), 1);
+/// assert_eq!(diagnostics[0].message(), "unknown type `Missing`");
+/// ```
 pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
     let mut diagnostics = Vec::new();
     let (cell_types, shapes) = declared_cell_types(sheet, registry);
     let resolve = |name: &str| -> Ty { cell_types.get(name).cloned().unwrap_or(Ty::Any) };
+    let type_resolver = registry.cel_type_resolver();
     for item in &sheet.items {
         match item {
             SheetItem::Cell(cell) => {
@@ -47,6 +79,7 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                     cell.type_name.as_ref(),
                     cell.initializer.as_ref(),
                     registry,
+                    &type_resolver,
                     &mut diagnostics,
                 );
                 check_filter(
@@ -55,15 +88,22 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                     &cell_types,
                     &shapes,
                     &resolve,
+                    &type_resolver,
                     &mut diagnostics,
                 );
-                check_requirements(cell.require.as_ref(), &resolve, &mut diagnostics);
+                check_requirements(
+                    cell.require.as_ref(),
+                    &resolve,
+                    &type_resolver,
+                    &mut diagnostics,
+                );
             }
             SheetItem::Source(source) => {
                 check_cell_initializer(
                     source.type_name.as_ref(),
                     source.initializer.as_ref(),
                     registry,
+                    &type_resolver,
                     &mut diagnostics,
                 );
                 check_filter(
@@ -72,27 +112,54 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                     &cell_types,
                     &shapes,
                     &resolve,
+                    &type_resolver,
                     &mut diagnostics,
                 );
-                check_requirements(source.require.as_ref(), &resolve, &mut diagnostics);
+                check_requirements(
+                    source.require.as_ref(),
+                    &resolve,
+                    &type_resolver,
+                    &mut diagnostics,
+                );
             }
             SheetItem::Relationship(rel) => {
                 for binding in &rel.bindings {
-                    check_binding(binding, registry, &shapes, &resolve, &mut diagnostics);
+                    check_binding(
+                        binding,
+                        registry,
+                        &shapes,
+                        &resolve,
+                        &type_resolver,
+                        &mut diagnostics,
+                    );
                 }
             }
             SheetItem::Conditional(cond) => {
                 for branch in &cond.branches {
                     for rel in &branch.relationships {
                         for binding in &rel.bindings {
-                            check_binding(binding, registry, &shapes, &resolve, &mut diagnostics);
+                            check_binding(
+                                binding,
+                                registry,
+                                &shapes,
+                                &resolve,
+                                &type_resolver,
+                                &mut diagnostics,
+                            );
                         }
                     }
                 }
                 if let Some(default) = &cond.default {
                     for rel in &default.relationships {
                         for binding in &rel.bindings {
-                            check_binding(binding, registry, &shapes, &resolve, &mut diagnostics);
+                            check_binding(
+                                binding,
+                                registry,
+                                &shapes,
+                                &resolve,
+                                &type_resolver,
+                                &mut diagnostics,
+                            );
                         }
                     }
                 }
@@ -103,12 +170,28 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                 &cell_types,
                 &shapes,
                 &resolve,
+                &type_resolver,
                 &mut diagnostics,
             ),
             SheetItem::Error { .. } => {} // already reported as a syntax error; nothing to type-check
         }
     }
     diagnostics
+}
+
+/// Converts a recursive [`TypeShape`] to the closest [`Ty`] approximation available to the CEL
+/// expression checker.
+fn shape_to_ty(shape: &TypeShape) -> Ty {
+    match shape {
+        TypeShape::Named(type_id) => Ty::from_type_id(*type_id),
+        TypeShape::Tuple(_) => Ty::Any,
+    }
+}
+
+/// Returns whether `lit` matches `declared` exactly, preserving adam-lang's no-coercion literal
+/// initializer rules.
+fn literal_matches_declared_ty(lit: &Literal, declared: &Ty) -> bool {
+    *declared == Ty::Any || Ty::from_literal(lit) == *declared
 }
 
 /// Maps every declared cell name — from a `cell`, a `source`, or an `out` — to both its scalar
@@ -141,15 +224,6 @@ fn declared_cell_types(
         type_expr.and_then(|type_expr| registry.resolve(type_expr).ok())
     }
 
-    /// Converts a resolved `TypeShape` to its scalar `Ty` approximation: `Ty` has no tuple
-    /// variant, so a `TypeShape::Tuple` always maps to `Ty::Any`.
-    fn shape_to_ty(shape: &TypeShape) -> Ty {
-        match shape {
-            TypeShape::Named(type_id) => Ty::from_type_id(*type_id),
-            TypeShape::Tuple(_) => Ty::Any,
-        }
-    }
-
     let mut map = std::collections::HashMap::new();
     let mut shapes = std::collections::HashMap::new();
     for item in &sheet.items {
@@ -174,14 +248,15 @@ fn declared_cell_types(
         }
     }
     let resolve_cells = |name: &str| -> Ty { map.get(name).cloned().unwrap_or(Ty::Any) };
+    let type_resolver = registry.cel_type_resolver();
     let mut out_types = std::collections::HashMap::new();
     for item in &sheet.items {
         if let SheetItem::Out(out_decl) = item {
             let shape = resolve_annotation_shape(out_decl.type_name.as_ref(), registry);
-            let ty = shape
-                .as_ref()
-                .map(shape_to_ty)
-                .unwrap_or_else(|| check_expr(&out_decl.initializer, &resolve_cells).0);
+            let ty = shape.as_ref().map(shape_to_ty).unwrap_or_else(|| {
+                check_expr_with_type_resolver(&out_decl.initializer, &resolve_cells, &type_resolver)
+                    .0
+            });
             if let Some(shape) = shape {
                 shapes.insert(out_decl.name.clone(), shape);
             }
@@ -192,22 +267,10 @@ fn declared_cell_types(
     (map, shapes)
 }
 
-/// Checks whether `lit` is compatible with `declared`, mirroring `adam_lang::parser`'s real
-/// `cell_decl` grammar: `lit`'s own default-inferred type ([`Ty::from_literal`] — an unsuffixed
-/// integer literal is `i32`, an unsuffixed float literal is `f64`; a suffixed literal keeps its
-/// own suffix type) must equal `declared` exactly, with no coercion between int widths or between
-/// int and float. `declared == Ty::Any` (an unregistered custom type) always matches — not
-/// statically checked. A char/byte-string/C-string/unit literal ([`Ty::from_literal`] maps these
-/// to [`Ty::Any`]) never equals a concrete `declared` type, so it mismatches every registered
-/// type, as adam-lang's real parser has no rule accepting one there.
-fn literal_matches_declared_ty(lit: &Literal, declared: &Ty) -> bool {
-    *declared == Ty::Any || Ty::from_literal(lit) == *declared
-}
-
 /// Checks whether `expr` structurally matches `shape`, recursively: a `TypeShape::Named` leaf
 /// must be a non-tuple `Expr` whose checked `Ty` unifies with that leaf (mirroring
-/// `literal_matches_declared_ty`'s spirit, generalized past bare literals now that initializers
-/// are full `expression`s); a `TypeShape::Tuple` must be an `Expr::Tuple` of matching arity,
+/// adam-lang's exact-type initializer matching, generalized past bare literals now that
+/// initializers are full `expression`s); a `TypeShape::Tuple` must be an `Expr::Tuple` of matching arity,
 /// checked element-wise, or an `Expr::If` whose `then_branch` (and `else_branch`, if present —
 /// itself possibly another `Expr::If`, covering `else if` chains) each recursively match the same
 /// `shape`, since every branch that can be taken must produce a value of that shape. An `if` with
@@ -222,6 +285,7 @@ fn expr_matches_shape(
     shape: &TypeShape,
     registry: &TypeRegistry,
     resolve: &impl Fn(&str) -> Ty,
+    resolve_type: &impl cel_parser::TypeResolver,
     diagnostics: &mut Vec<ParseError>,
 ) {
     match (expr, shape) {
@@ -240,7 +304,14 @@ fn expr_matches_shape(
                 return;
             }
             for (element, element_shape) in elements.iter().zip(expected) {
-                expr_matches_shape(element, element_shape, registry, resolve, diagnostics);
+                expr_matches_shape(
+                    element,
+                    element_shape,
+                    registry,
+                    resolve,
+                    resolve_type,
+                    diagnostics,
+                );
             }
         }
         (
@@ -252,11 +323,25 @@ fn expr_matches_shape(
             },
             TypeShape::Tuple(_),
         ) => {
-            let (_, cond_diags) = check_expr(cond, resolve);
+            let (_, cond_diags) = check_expr_with_type_resolver(cond, resolve, resolve_type);
             diagnostics.extend(cond_diags);
-            expr_matches_shape(then_branch, shape, registry, resolve, diagnostics);
+            expr_matches_shape(
+                then_branch,
+                shape,
+                registry,
+                resolve,
+                resolve_type,
+                diagnostics,
+            );
             if let Some(else_branch) = else_branch {
-                expr_matches_shape(else_branch, shape, registry, resolve, diagnostics);
+                expr_matches_shape(
+                    else_branch,
+                    shape,
+                    registry,
+                    resolve,
+                    resolve_type,
+                    diagnostics,
+                );
             }
         }
         (_, TypeShape::Tuple(_)) => {
@@ -278,7 +363,7 @@ fn expr_matches_shape(
                 return; // unrecognized custom type: never statically checked, matches Ty::Any
             };
             let declared = Ty::from_type_id(entry.type_id);
-            let (actual, body_diags) = check_expr(expr, resolve);
+            let (actual, body_diags) = check_expr_with_type_resolver(expr, resolve, resolve_type);
             diagnostics.extend(body_diags);
             if !declared.unifies_with(&actual) {
                 diagnostics.push(ParseError::new_range(
@@ -298,8 +383,10 @@ fn expr_matches_shape(
 /// Checks one `cell`'s or `source`'s initializer against its `: type_expr` annotation. A no-op if
 /// either half is absent, or if the annotation names a type `registry` doesn't recognize.
 /// Dispatches to [`expr_matches_shape`] for a tuple-shaped annotation (recursively,
-/// element-wise); otherwise falls back to the original literal/scalar check, since a non-tuple
-/// initializer that isn't a bare literal fails to constant-fold in the real parser anyway.
+/// element-wise). A scalar annotation cross-checks only a bare literal initializer (adam-lang's
+/// exact-type, no-coercion literal rule); any other scalar initializer is only checked for its
+/// own internal diagnostics — including a CEL typed-array annotation mismatch inside its body —
+/// and never against the annotation itself, which the real parser reports from the folded value.
 ///
 /// Takes `type_name`/`initializer` directly (rather than a whole `&CellDecl`) so both
 /// `SheetItem::Cell` and `SheetItem::Source` — which share this same shape but aren't the same
@@ -308,6 +395,7 @@ fn check_cell_initializer(
     type_name: Option<&TypeExpr>,
     initializer: Option<&Expr>,
     registry: &TypeRegistry,
+    resolve_type: &impl cel_parser::TypeResolver,
     diagnostics: &mut Vec<ParseError>,
 ) {
     let (Some(type_expr), Some(expr)) = (type_name, initializer) else {
@@ -318,35 +406,32 @@ fn check_cell_initializer(
     };
     if let TypeShape::Tuple(_) = shape {
         let resolve = |_: &str| Ty::Any; // initializers reference no cells
-        expr_matches_shape(expr, &shape, registry, &resolve, diagnostics);
+        expr_matches_shape(expr, &shape, registry, &resolve, resolve_type, diagnostics);
         return;
     }
-    // Scalar case: unchanged from before, still literal-shaped in practice (an initializer that
-    // isn't a bare literal fails to constant-fold in the real parser; this checker only needs to
-    // flag a literal/type mismatch, exactly as it always has).
-    let Expr::Literal {
+    if let Expr::Literal {
         value: literal,
         span: lit_span,
     } = expr
-    else {
+    {
+        let declared = shape_to_ty(&shape);
+        if !literal_matches_declared_ty(literal, &declared) {
+            diagnostics.push(ParseError::new_range(
+                format!("literal cannot be used as type `{}`", declared.name()),
+                lit_span.start,
+                lit_span.end,
+            ));
+        }
         return;
-    };
-    let declared = Ty::from_type_id(
-        match registry.entry_by_type_id(match shape {
-            TypeShape::Named(tid) => tid,
-            TypeShape::Tuple(_) => unreachable!("handled above"),
-        }) {
-            Some(entry) => entry.type_id,
-            None => return,
-        },
-    );
-    if !literal_matches_declared_ty(literal, &declared) {
-        diagnostics.push(ParseError::new_range(
-            format!("literal cannot be used as type `{}`", declared.name()),
-            lit_span.start,
-            lit_span.end,
-        ));
     }
+    let resolve = |_: &str| Ty::Any;
+    // Scope-preserving: a non-literal scalar initializer gets its own body diagnostics (an
+    // operator mismatch, a CEL typed-array annotation mismatch) reported, but is deliberately
+    // *not* cross-checked against the annotation here — the real parser constant-folds it and
+    // reports its own `cell ...: type mismatch` for that, and a second, differently worded
+    // diagnostic from this checker would only duplicate it.
+    let (_, body_diags) = check_expr_with_type_resolver(expr, &resolve, resolve_type);
+    diagnostics.extend(body_diags);
 }
 
 /// The expected `TypeShape` for a filtered cell's own declared/inferred shape (`_`'s type inside
@@ -443,6 +528,7 @@ fn check_filter(
     cell_types: &std::collections::HashMap<String, Ty>,
     shapes: &std::collections::HashMap<String, TypeShape>,
     resolve: &impl Fn(&str) -> Ty,
+    resolve_type: &impl cel_parser::TypeResolver,
     diagnostics: &mut Vec<ParseError>,
 ) {
     let Some(filter) = filter else {
@@ -474,7 +560,8 @@ fn check_filter(
     match shape {
         Some(TypeShape::Tuple(_)) => unreachable!("handled above"),
         Some(TypeShape::Named(type_id)) => {
-            let (body_ty, body_diags) = check_expr(&filter.body, &body_resolve);
+            let (body_ty, body_diags) =
+                check_expr_with_type_resolver(&filter.body, &body_resolve, resolve_type);
             diagnostics.extend(body_diags);
             let declared = Ty::from_type_id(type_id);
             if !declared.unifies_with(&body_ty) {
@@ -486,7 +573,8 @@ fn check_filter(
             }
         }
         None => {
-            let (_, body_diags) = check_expr(&filter.body, &body_resolve);
+            let (_, body_diags) =
+                check_expr_with_type_resolver(&filter.body, &body_resolve, resolve_type);
             diagnostics.extend(body_diags);
         }
     }
@@ -514,12 +602,14 @@ fn check_tuple_output_body(
     body: &Expr,
     outputs: &[(String, ExprSpan)],
     resolve: &impl Fn(&str) -> Ty,
+    resolve_type: &impl cel_parser::TypeResolver,
     diagnostics: &mut Vec<ParseError>,
 ) {
     match body {
         Expr::Tuple { elements, .. } if elements.len() == outputs.len() => {
             for (element, (name, _)) in elements.iter().zip(outputs) {
-                let (element_ty, element_diags) = check_expr(element, resolve);
+                let (element_ty, element_diags) =
+                    check_expr_with_type_resolver(element, resolve, resolve_type);
                 diagnostics.extend(element_diags);
                 let declared = resolve(name);
                 if !declared.unifies_with(&element_ty) {
@@ -541,15 +631,15 @@ fn check_tuple_output_body(
             else_branch,
             ..
         } => {
-            let (_, cond_diags) = check_expr(cond, resolve);
+            let (_, cond_diags) = check_expr_with_type_resolver(cond, resolve, resolve_type);
             diagnostics.extend(cond_diags);
-            check_tuple_output_body(then_branch, outputs, resolve, diagnostics);
+            check_tuple_output_body(then_branch, outputs, resolve, resolve_type, diagnostics);
             if let Some(else_branch) = else_branch {
-                check_tuple_output_body(else_branch, outputs, resolve, diagnostics);
+                check_tuple_output_body(else_branch, outputs, resolve, resolve_type, diagnostics);
             }
         }
         other => {
-            let (_, body_diags) = check_expr(other, resolve);
+            let (_, body_diags) = check_expr_with_type_resolver(other, resolve, resolve_type);
             diagnostics.extend(body_diags);
             let n = outputs.len();
             diagnostics.push(ParseError::new_range(
@@ -574,22 +664,36 @@ fn check_binding(
     registry: &TypeRegistry,
     shapes: &std::collections::HashMap<String, TypeShape>,
     resolve: &impl Fn(&str) -> Ty,
+    resolve_type: &impl cel_parser::TypeResolver,
     diagnostics: &mut Vec<ParseError>,
 ) {
     if binding.destructure {
-        check_tuple_output_body(&binding.body, &binding.outputs, resolve, diagnostics);
+        check_tuple_output_body(
+            &binding.body,
+            &binding.outputs,
+            resolve,
+            resolve_type,
+            diagnostics,
+        );
         return;
     }
     let Some((name, _)) = binding.outputs.first() else {
-        let (_, body_diags) = check_expr(&binding.body, resolve);
+        let (_, body_diags) = check_expr_with_type_resolver(&binding.body, resolve, resolve_type);
         diagnostics.extend(body_diags);
         return;
     };
     if let Some(shape @ TypeShape::Tuple(_)) = shapes.get(name) {
-        expr_matches_shape(&binding.body, shape, registry, resolve, diagnostics);
+        expr_matches_shape(
+            &binding.body,
+            shape,
+            registry,
+            resolve,
+            resolve_type,
+            diagnostics,
+        );
         return;
     }
-    let (body_ty, body_diags) = check_expr(&binding.body, resolve);
+    let (body_ty, body_diags) = check_expr_with_type_resolver(&binding.body, resolve, resolve_type);
     diagnostics.extend(body_diags);
     if let Expr::Tuple { elements, .. } = &binding.body {
         let n = elements.len();
@@ -628,12 +732,21 @@ fn check_out(
     cell_types: &std::collections::HashMap<String, Ty>,
     shapes: &std::collections::HashMap<String, TypeShape>,
     resolve: &impl Fn(&str) -> Ty,
+    resolve_type: &impl cel_parser::TypeResolver,
     diagnostics: &mut Vec<ParseError>,
 ) {
     if let Some(shape @ TypeShape::Tuple(_)) = shapes.get(&out_decl.name) {
-        expr_matches_shape(&out_decl.initializer, shape, registry, resolve, diagnostics);
+        expr_matches_shape(
+            &out_decl.initializer,
+            shape,
+            registry,
+            resolve,
+            resolve_type,
+            diagnostics,
+        );
     } else {
-        let (body_ty, body_diags) = check_expr(&out_decl.initializer, resolve);
+        let (body_ty, body_diags) =
+            check_expr_with_type_resolver(&out_decl.initializer, resolve, resolve_type);
         diagnostics.extend(body_diags);
         if out_decl.type_name.is_some() {
             let declared = resolve(&out_decl.name);
@@ -657,9 +770,15 @@ fn check_out(
         cell_types,
         shapes,
         resolve,
+        resolve_type,
         diagnostics,
     );
-    check_requirements(out_decl.require.as_ref(), resolve, diagnostics);
+    check_requirements(
+        out_decl.require.as_ref(),
+        resolve,
+        resolve_type,
+        diagnostics,
+    );
 }
 
 /// Checks every requirement in `require`'s body against `resolve`, appending a diagnostic for
@@ -670,13 +789,15 @@ fn check_out(
 fn check_requirements(
     require: Option<&RequireBlock>,
     resolve: &impl Fn(&str) -> Ty,
+    resolve_type: &impl cel_parser::TypeResolver,
     diagnostics: &mut Vec<ParseError>,
 ) {
     let Some(require) = require else {
         return;
     };
     for requirement in &require.requirements {
-        let (req_ty, req_diags) = check_expr(&requirement.body, resolve);
+        let (req_ty, req_diags) =
+            check_expr_with_type_resolver(&requirement.body, resolve, resolve_type);
         diagnostics.extend(req_diags);
         if !req_ty.unifies_with(&Ty::Bool) {
             diagnostics.push(ParseError::new_range(
@@ -706,6 +827,9 @@ mod tests {
         AdamAstParser::new().parse_str(source).unwrap()
     }
 
+    #[derive(Clone, Debug, PartialEq)]
+    struct Custom(i32);
+
     #[test]
     fn cell_initializer_matching_its_annotation_has_no_diagnostic() {
         let sheet = parse("sheet s { cell x: i32 = 1; }");
@@ -730,10 +854,97 @@ mod tests {
     }
 
     #[test]
+    fn custom_array_annotations_use_the_registry_type_resolver() {
+        let sheet = parse(
+            "sheet s { \
+                out values := []: [Custom]; \
+                out nested := [[]: [Custom]]: [[Custom]]; \
+            }",
+        );
+        let mut registry = TypeRegistry::new();
+        registry.register_no_default::<Custom>("Custom");
+
+        let diagnostics = check_sheet(&sheet, &registry);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn custom_array_annotations_reject_exact_scalar_type_mismatches() {
+        let sheet = parse("sheet s { out values := [1]: [Custom]; }");
+        let mut registry = TypeRegistry::new();
+        registry.register_no_default::<Custom>("Custom");
+
+        let diagnostics = check_sheet(&sheet, &registry);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(
+            diagnostics[0]
+                .message()
+                .contains("expected `Custom`, found `i32`"),
+            "got: {}",
+            diagnostics[0].message()
+        );
+    }
+
+    #[test]
+    fn unknown_custom_array_annotation_type_is_reported() {
+        let sheet = parse("sheet s { out values := []: [Missing]; }");
+        let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            diagnostics[0].message().contains("unknown type `Missing`"),
+            "got: {}",
+            diagnostics[0].message()
+        );
+    }
+
+    #[test]
+    fn tuple_typed_array_annotations_report_the_existing_issue_213_diagnostic() {
+        let sheet = parse("sheet s { out values := []: [(i32, f64)]; }");
+        let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(
+            diagnostics[0]
+                .message()
+                .contains("tuple-valued array elements are not supported"),
+            "got: {}",
+            diagnostics[0].message()
+        );
+        assert!(
+            diagnostics[0].message().contains("issues/213"),
+            "the diagnostic must reference the tuple-array issue, got: {}",
+            diagnostics[0].message()
+        );
+    }
+
+    #[test]
     fn cell_requirement_non_bool_body_is_a_diagnostic() {
         let sheet = parse("sheet s { cell x: i32 = 5 require { @positive x; }; }");
         let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn cell_initializer_non_literal_expression_is_not_cross_checked() {
+        // A non-literal scalar initializer is left to the real parser, which constant-folds it
+        // and reports its own `cell ...: type mismatch`. The checker must not add a second,
+        // differently-worded diagnostic here.
+        let sheet = parse("sheet s { cell x: f64 = 1 + 2; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let messages: Vec<&str> = diags.iter().map(cel_parser::ParseError::message).collect();
+        assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
+    }
+
+    #[test]
+    fn cell_initializer_array_annotation_diagnostics_still_surface() {
+        // The initializer's own body diagnostics (here, a CEL typed-array annotation mismatch)
+        // must still be reported even though the initializer isn't a bare literal.
+        let sheet = parse("sheet s { cell x: f64 = [0, 1]: [f64]; }");
+        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let messages: Vec<&str> = diags.iter().map(cel_parser::ParseError::message).collect();
+        assert_eq!(
+            messages,
+            vec!["array elements must match the annotation exactly: expected `f64`, found `i32`"]
+        );
     }
 
     #[test]

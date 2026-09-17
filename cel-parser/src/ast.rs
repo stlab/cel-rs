@@ -3,6 +3,12 @@
 //! execution. Consumed as-is by adam-lang (method bodies/initializers), the language server, the
 //! formatter, and the future macro-compilation backend. Carries no resolved types or operator
 //! overloads: resolution and type/range validation are deferred to a later, separate phase.
+//!
+//! Array nodes preserve optional recursive type ascriptions exactly as written — for example
+//! `[0, 1]: [i32]`, `[]: [[i32]]`, or `[]: [Custom]` — using unresolved [`TypeExpr`] leaves so a
+//! later checker can resolve names through built-in CEL types or a host registry. Tuple-shaped
+//! type expressions remain representable in the tree for grammar reuse, but tuple-valued array
+//! elements are still rejected during semantic checking (issue #213).
 
 use std::any::Any;
 use std::ffi::CString;
@@ -11,6 +17,7 @@ use proc_macro2::Span;
 
 use crate::op_table::OpLookup;
 use crate::parser_context::ParserContext;
+use crate::type_expr::TypeExpr;
 
 /// Source range of an AST node: start of its first token to end of its last.
 ///
@@ -189,14 +196,22 @@ pub enum Expr {
         /// The span of the whole tuple, including its parentheses.
         span: ExprSpan,
     },
-    /// An array literal (`[a, b, ...]`). Always has at least one element — the grammar rejects
-    /// `[]` outright (see <https://github.com/stlab/cel-rs/issues/212>). Whether the elements
-    /// share one type is unchecked here — deferred to the type-checking phase (see the module
-    /// doc comment), same as `TupleIndex`'s deferred bounds check.
+    /// An array literal (`[a, b, ...]`, `[a, b]: [T]`, or `[]: [T]`). An unannotated empty array
+    /// is still rejected by the grammar (see <https://github.com/stlab/cel-rs/issues/212>), but
+    /// a typed empty array is recorded here with `elements.is_empty()`. `type_annotation` stores
+    /// the complete recursive array type exactly as written, including nested arrays and custom
+    /// leaf names such as `Custom`. Whether the elements share one type, whether
+    /// `type_annotation` names a complete array type, and whether tuple-valued array elements
+    /// remain unsupported are all deferred to the later type-checking phase (see the module doc
+    /// comment), same as `TupleIndex`'s deferred bounds check.
     Array {
         /// The element sub-expressions, in source order.
         elements: Vec<Expr>,
-        /// The span of the whole array literal, including its brackets.
+        /// The optional declared array type, as written after `:`.
+        type_annotation: Option<TypeExpr>,
+        /// The span from the `:` token through the end of the declared type, when present.
+        annotation_span: Option<ExprSpan>,
+        /// The span of the whole array literal, including its brackets and any annotation.
         span: ExprSpan,
     },
     /// A tuple index (`base.N`). Whether `base` is actually a tuple and `N` is in range is
@@ -514,6 +529,32 @@ impl ParserContext for AstContext {
         );
         self.values.push(Expr::Array {
             elements,
+            type_annotation: None,
+            annotation_span: None,
+            span: ExprSpan { start, end },
+        });
+        Ok(())
+    }
+
+    fn make_annotated_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        annotation: crate::parser_context::AnnotatedArray<'_>,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        let elements = self.values.split_off(ambient_start);
+        debug_assert_eq!(
+            elements.len(),
+            n,
+            "make_annotated_array splits off exactly n elements"
+        );
+        let (type_annotation, annotation_span) = annotation.into_parts();
+        self.values.push(Expr::Array {
+            elements,
+            type_annotation,
+            annotation_span,
             span: ExprSpan { start, end },
         });
         Ok(())
@@ -1138,7 +1179,7 @@ mod tests {
         let source = "[0i32, 1i32, 2i32]";
         let mut parser = Parser::<AstContext>::new(OpLookup::new());
         let expr = parser.parse_str_ast(source).unwrap();
-        let Expr::Array { elements, span } = expr else {
+        let Expr::Array { elements, span, .. } = expr else {
             panic!("expected Array");
         };
         assert_eq!(elements.len(), 3);
@@ -1163,6 +1204,62 @@ mod tests {
         for element in &elements {
             assert!(matches!(element, Expr::Array { elements, .. } if elements.len() == 1));
         }
+    }
+
+    #[test]
+    fn typed_array_literal_still_builds_an_array_node() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("[0, 1]: [i32]").unwrap();
+        let Expr::Array {
+            elements,
+            type_annotation,
+            annotation_span,
+            ..
+        } = expr
+        else {
+            panic!("expected Array");
+        };
+        assert_eq!(elements.len(), 2);
+        assert!(annotation_span.is_some());
+        match type_annotation {
+            Some(TypeExpr::Array { element, .. }) => {
+                assert!(matches!(*element, TypeExpr::Named { ref name, .. } if name == "i32"));
+            }
+            other => panic!("expected an array type annotation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_empty_array_literal_builds_an_empty_array_node() {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast("[]: [i32]").unwrap();
+        assert!(matches!(
+            expr,
+            Expr::Array {
+                ref elements,
+                type_annotation: Some(_),
+                annotation_span: Some(_),
+                ..
+            } if elements.is_empty()
+        ));
+    }
+
+    #[test]
+    fn typed_array_literal_preserves_the_exact_annotation_span() {
+        let source = "[1.0, 42.5]: [f64]";
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = parser.parse_str_ast(source).unwrap();
+        let Expr::Array {
+            type_annotation: Some(_),
+            annotation_span: Some(annotation_span),
+            ..
+        } = expr
+        else {
+            panic!("expected Array");
+        };
+        let start = annotation_span.start.start();
+        let end = annotation_span.end.end();
+        assert_eq!(&source[start.column..end.column], ": [f64]");
     }
 
     #[test]

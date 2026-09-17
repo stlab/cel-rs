@@ -36,7 +36,12 @@
 //! CEL expression grammar), as well as `literal_pattern` (a bare literal, optionally negated by
 //! a leading `-`, matching Rust's own `LiteralPattern` rule — CEL has no constant-expression
 //! syntax in pattern position), are defined by `cel_parser` — see that crate's own
-//! [`# Grammar`](../cel_parser/index.html#grammar) section.
+//! [`# Grammar`](../cel_parser/index.html#grammar) section. That embedded CEL grammar now includes
+//! postfix array type ascriptions such as `[left, right]: [Custom]` and `[]: [[i32]]`. The
+//! ascription names the complete array type, resolves leaf names through the active
+//! [`TypeRegistry`], and reuses recursive tuple/array type syntax. Tuple-valued array elements
+//! remain explicitly unsupported, so `[]: [(i32, f64)]` still reports the existing issue #213
+//! diagnostic.
 //!
 //! A `cell_filter`'s `expression` names no explicit parameter list: `_` always refers to the
 //! candidate value being conformed (of the filtered cell's own declared type), and every other
@@ -62,6 +67,89 @@
 //!         cell area:   f64;
 //!     }
 //! "#).unwrap();
+//! ```
+//!
+//! Built-in and registered Adam types are both visible inside embedded CEL array ascriptions:
+//!
+//! ```rust
+//! use adam_lang::{AdamParser, TypeRegistry};
+//! use cel_parser::OpLookup;
+//! use cel_runtime::DynamicArray;
+//!
+//! #[derive(Clone, Debug, PartialEq)]
+//! struct Custom(i32);
+//!
+//! #[derive(Clone)]
+//! struct CountFn;
+//!
+//! let mut lookup = OpLookup::new();
+//! lookup.push_scope(|name, segment, arity, _span| match (name, arity) {
+//!     ("left", 0) => {
+//!         segment.op0(|| Custom(1));
+//!         Ok(true)
+//!     }
+//!     ("right", 0) => {
+//!         segment.op0(|| Custom(2));
+//!         Ok(true)
+//!     }
+//!     ("count", 0) => {
+//!         segment.op0(|| CountFn);
+//!         Ok(true)
+//!     }
+//!     ("()", 2) => {
+//!         segment.op2(|_callee: CountFn, values: DynamicArray| values.len() as i32)?;
+//!         Ok(true)
+//!     }
+//!     _ => Ok(false),
+//! });
+//!
+//! let mut types = TypeRegistry::new();
+//! types.register_no_default::<Custom>("Custom");
+//! let mut parser = AdamParser::new(types, lookup);
+//! let parsed = parser.parse_str(
+//!     "sheet s { \
+//!         cell scalar: i32 = count([1, 2]: [i32]); \
+//!         cell values: i32 = count([left, right]: [Custom]); \
+//!         cell empty: i32 = count([]: [Custom]); \
+//!         cell nested: i32 = count([[]: [Custom]]: [[Custom]]); \
+//!     }",
+//! ).unwrap();
+//!
+//! let (scalar, _) = parsed.cell_names["scalar"];
+//! assert_eq!(*parsed.read::<i32>(scalar).unwrap(), 2);
+//! let (values, _) = parsed.cell_names["values"];
+//! assert_eq!(*parsed.read::<i32>(values).unwrap(), 2);
+//! let (empty, _) = parsed.cell_names["empty"];
+//! assert_eq!(*parsed.read::<i32>(empty).unwrap(), 0);
+//! let (nested, _) = parsed.cell_names["nested"];
+//! assert_eq!(*parsed.read::<i32>(nested).unwrap(), 1);
+//! ```
+//!
+//! Embedded CEL array diagnostics stay exact:
+//!
+//! ```rust
+//! use adam_lang::{AdamParser, TypeRegistry};
+//! use cel_parser::OpLookup;
+//!
+//! let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+//! let err = parser
+//!     .parse_str("sheet s { cell values = []: [Missing]; }")
+//!     .unwrap_err();
+//! assert_eq!(err.message(), "unknown type `Missing`");
+//! ```
+//!
+//! ```rust
+//! use adam_lang::{AdamAstParser, TypeRegistry, check_sheet};
+//!
+//! let sheet = AdamAstParser::new()
+//!     .parse_str("sheet s { out values := [0, 1]: [f64]; }")
+//!     .unwrap();
+//! let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+//! assert_eq!(diagnostics.len(), 1);
+//! assert_eq!(
+//!     diagnostics[0].message(),
+//!     "array elements must match the annotation exactly: expected `f64`, found `i32`"
+//! );
 //! ```
 
 pub mod ast;
