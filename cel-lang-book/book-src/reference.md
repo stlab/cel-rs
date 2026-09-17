@@ -2,7 +2,8 @@
 
 This chapter is the compact language reference for CEL expressions. It
 gathers the core grammar, token categories, type names, literal forms,
-operators, collections, closures, and sharp edges in one place.
+operators, numeric helper calls, collections, closures, and sharp edges in one
+place.
 
 ## Concept
 
@@ -127,6 +128,29 @@ true as i32
 | range forms | homogeneous numeric endpoints, or no endpoints for `..` | `..=` requires a right endpoint. Endpoints are full expressions. |
 | `as` | expression plus built-in scalar target name | Integer targets accept integer, floating-point, and `bool` sources. `f32`/`f64` targets accept integer and floating-point sources. `bool` and `String` only cast to themselves. |
 | call and `.N` | a valid callee and arguments, or a tuple plus an unsuffixed integer | `.N` applies to tuples only. |
+
+## Numeric call table
+
+`round` is part of the core environment. The remaining functions in this table
+belong to an optional standard library and are available only when the
+evaluation environment installs that library. See
+[Standard library](standard-library.md) for worked examples and fuller prose.
+
+| Function | Accepted operands | Result | Notes |
+| --- | --- | --- | --- |
+| `round(x)` | `f64` | `f64` | Core built-in call. Halfway values round away from zero. |
+| `min(a, b)`, `max(a, b)` | same-type numeric operands: `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `f32`, `f64` | same as operands | No coercion. Successful calls are infallible. |
+| `clamp(x, lo, hi)` | same-type numeric operands from the same 14-type set | same as operands | Requires ordered bounds with `lo <= hi`; otherwise reports `invalid clamp bounds`. |
+| `abs(x)` | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, `f64` | same as operand | Minimum signed integer reports `arithmetic overflow`. |
+| `signum(x)` | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, `f64` | same as operand | No unsigned support. Successful calls are infallible. |
+| `sqrt(x)` | `f32`, `f64` | same as operand | Float-only. Negative inputs follow normal floating-point behavior and may yield `NaN`. |
+| `floor(x)`, `ceil(x)`, `trunc(x)` | `f32`, `f64` | same as operand | Float-only. Successful calls are infallible. |
+
+- None of the documented functions are integer-only.
+- `round`, `sqrt`, `floor`, `ceil`, and `trunc` are float-only.
+- `min`, `max`, and `clamp` support both integers and floats.
+- `abs` and `signum` support signed integers and floats, but not unsigned
+  integers.
 
 ## Collection table
 

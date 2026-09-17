@@ -8,5 +8,8 @@ publish = false
 cel-parser = { path = "../cel-parser" }
 cel-runtime = { path = "../cel-runtime" }
 
+[dev-dependencies]
+cel-std = { path = "../cel-std" }
+
 [lints]
 workspace = true

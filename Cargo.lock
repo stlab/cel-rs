@@ -525,6 +525,7 @@ version = "0.1.0"
 dependencies = [
  "cel-parser",
  "cel-runtime",
+ "cel-std",
 ]
 
 [[package]]
