@@ -1247,6 +1247,14 @@ impl Sheet {
     /// execution order. Cells evaluated first receive the highest derived strength.
     /// Source cells (not the output of any selected method) are not modified.
     ///
+    /// A cell claimed *self-referencingly* (its claiming method reads the cell as one of
+    /// its own inputs) keeps a live explicit strength rather than being demoted: such a
+    /// method computes the cell from its own `source` aspiration (see
+    /// [`crate::planner::build_seeds`]), so an explicit `write()` to that cell is still
+    /// the authority behind the value and must keep outranking never-written cells in
+    /// later rounds. Demoting it would discard the edit the next time the cell is
+    /// re-seeded.
+    ///
     /// - Complexity: O(R·K) where R is the number of entries and K is the maximum
     ///   outputs per method.
     fn post_process_strengths(&mut self, execution_order: &[PlanStep]) {
@@ -1259,10 +1267,19 @@ impl Sheet {
             if let Some(rel) = self.relationships.get(*rel_id)
                 && let Some(method) = rel.methods.get(*method_idx)
             {
+                let self_referencing: Vec<CellId> = method
+                    .outputs
+                    .iter()
+                    .copied()
+                    .filter(|output| method.inputs.contains(output))
+                    .collect();
                 for &output in &method.outputs {
                     if seen.insert(output)
                         && let Some(cell) = self.cells.get_mut(output)
                     {
+                        if self_referencing.contains(&output) && cell.has_explicit_strength() {
+                            continue;
+                        }
                         cell.strength = derived_strength;
                         derived_strength = derived_strength.saturating_sub(1);
                     }
