@@ -1255,8 +1255,8 @@ impl Sheet {
     /// later rounds. Demoting it would discard the edit the next time the cell is
     /// re-seeded.
     ///
-    /// - Complexity: O(R·K) where R is the number of entries and K is the maximum
-    ///   outputs per method.
+    /// - Complexity: O(R·K²) where R is the number of entries and K is the maximum
+    ///   inputs or outputs per method.
     fn post_process_strengths(&mut self, execution_order: &[PlanStep]) {
         let mut derived_strength = u64::MAX >> 1; // 0x7FFF_FFFF_FFFF_FFFF
         let mut seen: std::collections::HashSet<CellId> = std::collections::HashSet::new();
@@ -1267,17 +1267,12 @@ impl Sheet {
             if let Some(rel) = self.relationships.get(*rel_id)
                 && let Some(method) = rel.methods.get(*method_idx)
             {
-                let self_referencing: Vec<CellId> = method
-                    .outputs
-                    .iter()
-                    .copied()
-                    .filter(|output| method.inputs.contains(output))
-                    .collect();
                 for &output in &method.outputs {
+                    let self_referencing = method.inputs.contains(&output);
                     if seen.insert(output)
                         && let Some(cell) = self.cells.get_mut(output)
                     {
-                        if self_referencing.contains(&output) && cell.has_explicit_strength() {
+                        if self_referencing && cell.has_explicit_strength() {
                             continue;
                         }
                         cell.strength = derived_strength;
@@ -1331,7 +1326,9 @@ impl Sheet {
     /// **Phase 3 — General plan:** the Adam algorithm runs on the active set.
     ///
     /// **Phase 4 — Strength post-processing:** derived cells receive low-order strengths
-    /// in evaluation order, enforcing the stability invariant.
+    /// in evaluation order, enforcing the stability invariant. A cell claimed
+    /// self-referencingly keeps any live explicit strength instead, since its own written
+    /// value is still the authority behind the result.
     ///
     /// **Phase 5 — Reversion change-tracking:** a cell whose derived override existed
     /// before this round but wasn't reclaimed by any method this round has effectively
