@@ -24,22 +24,6 @@ calls layered over the core expression language. It distinguishes the core
 `round` call from the optional library functions that are available only when
 the evaluation environment installs that library.
 
-Each chapter uses copyable CEL snippets and points back to the checked examples
-that exercise the same forms in the book's test suite. When a chapter documents
-environment-dependent library calls, the prose says so explicitly.
-
-The first release is intentionally static:
-
-- examples are checked as part of the book's test suite;
-- the book builds with `mdbook build cel-lang-book`;
-- live evaluation is intentionally deferred to a later release.
-
-## Local commands
-
-```text
-mdbook build cel-lang-book
-mdbook serve cel-lang-book
-cargo test -p cel-lang-book
-```
-
-`mdbook build cel-lang-book` writes output to `cel-lang-book/book-dist`.
+Each chapter uses copyable CEL snippets. Tutorial chapters introduce a form in
+running prose, then tighten the rules into concise lists and cross-reference
+the exact grammar in the [Reference Manual](reference.md).
