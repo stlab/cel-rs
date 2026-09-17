@@ -1,63 +1,62 @@
 # Control flow
 
-CEL `if` expressions are value-producing expressions:
+CEL uses value-producing `if` expressions and first-class range values to
+direct expression flow. For the exact grammar, see the
+[Reference Manual](reference.md).
 
-```rust
-use cel_parser::{CELParser, OpLookup};
+## Concept
 
-let mut segment = CELParser::new(OpLookup::new())
-    .parse_str("if false { 1i32 } else if true { 2i32 } else { 3i32 }")
-    .unwrap();
+An `if` expression selects one branch value. A range expression builds a
+range value from zero, one, or two numeric endpoints. Both forms are
+ordinary expressions and can appear anywhere an expression is expected.
 
-assert_eq!(segment.call0::<i32>().unwrap(), 2);
-```
-
-The checked examples in
-[cel-lang-book/tests/examples.rs](https://github.com/stlab/cel-rs/blob/main/cel-lang-book/tests/examples.rs)
-cover the basic branch selection case, and the parser tests cover `else if`
-chains and omitted `else` branches. The parser source in
-[cel-parser/src/lib.rs](https://github.com/stlab/cel-rs/blob/main/cel-parser/src/lib.rs)
-contains the exact grammar.
-
-Like every other CEL expression in this implementation, the condition and
-both branches still depend on the active `OpLookup` to resolve whatever values
-and operations they use.
-
-## `if` / `else if` / `else`
-
-The supported form is:
+## Syntax
 
 ```text
-if condition { then_branch } else if other_condition { other_branch } else { fallback }
+if condition { then_expression }
+if condition { then_expression } else { else_expression }
+if condition { then_expression } else if other_condition { other_expression } else { fallback_expression }
+
+start..end
+start..=end
+start..
+..end
+..=end
+..
 ```
 
-The condition and each branch are ordinary expressions. Branch result types
-must agree, because the parser/runtimes join the two branch fragments into one
-expression result.
+## Worked examples
 
-## Ranges
-
-The book also treats ranges here because the parser's range production is part
-of the same expression layer and is used heavily by control-flow examples.
-
-- `a..b` is an exclusive range.
-- `a..=b` is an inclusive range.
-- `a..` is a range from a lower bound.
-- `..b` is a range to an upper bound.
-- `..=b` is an inclusive upper bound.
-- `..` is the full range.
-
-```rust
-use cel_parser::{CELParser, OpLookup};
-
-let mut seg = CELParser::new(OpLookup::new()).parse_str("1i32..=5i32").unwrap();
-assert_eq!(
-    seg.call0::<std::ops::RangeInclusive<i32>>().unwrap(),
-    1i32..=5i32
-);
+```text
+if ready { 1 } else { 0 }
+if score > 90 { "high" } else if score > 75 { "mid" } else { "low" }
+0..limit
+..=10
+if open { 1..=5 } else { 10.. }
 ```
 
-The parser tests in
-[cel-parser/src/lib.rs](https://github.com/stlab/cel-rs/blob/main/cel-parser/src/lib.rs)
-also show that range endpoints are full expressions and that `..=` without a
-right endpoint is rejected.
+## Exact rules
+
+- `if` is an expression, not a statement. It yields the value of the
+  selected branch.
+- The supported branch forms are `if`, `if ... else`, and `if ... else
+  if ...` chains with an optional final `else`.
+- The condition and every branch body are ordinary expressions.
+- The braces belong to `if` syntax. CEL does not use free-standing block
+  expressions.
+- The supported range forms are `a..b`, `a..=b`, `a..`, `..b`, `..=b`,
+  and `..`.
+- Endpoint-bearing ranges require homogeneous numeric endpoints.
+- Range endpoints are full expressions, so operators inside either side
+  are parsed before the range is formed.
+- Range expressions have the lowest precedence in the language.
+
+## Edge cases
+
+- `..=` always requires a right endpoint.
+- `1 + 2..3 * 4` means `(1 + 2)..(3 * 4)`.
+- `1..2..3` is not valid.
+- `if flag { 1 } else if other { 2 }` is valid even without a final
+  `else`.
+- See the [Reference Manual](reference.md) for the complete branch and
+  range grammar.

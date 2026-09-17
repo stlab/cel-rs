@@ -1,62 +1,78 @@
 # Casts and closures
 
-`as` casts are part of the parser's precedence chain and associate left to
-right.
+CEL uses `as` for explicit conversion and `|...|` for closure literals.
+Both forms are expressions and can appear anywhere an expression is
+expected. For the exact grammar, see the [Reference Manual](reference.md).
 
-```rust
-use cel_parser::{CELParser, OpLookup};
+## Concept
 
-let mut segment = CELParser::new(OpLookup::new())
-    .parse_str("1.5f64 as i32 as f64")
-    .unwrap();
+A cast converts a value to one of the built-in scalar types supported by
+the language. A closure packages a parameter list and a single expression
+body into a callable value.
 
-assert_eq!(segment.call0::<f64>().unwrap(), 1.0);
-```
-
-The checked parser tests cover cast execution and the fact that casts bind
-tighter than unary negation.
-
-## Closure syntax
-
-Closures use pipe-delimited parameter lists:
+## Syntax
 
 ```text
-|| body
-|x: i32| body
-|a: i32, b: i32| body
-|r: (i32, i32)| body
+expression as Type
+expression as Type as OtherType
+|| expression
+|x: Type| expression
+|x: Type, y: Type| expression
+|pair: (Type, Type)| expression
 ```
 
-The parameter type after `:` can be a scalar name or a tuple type. The body is
-an ordinary expression.
+## Worked examples
 
-```rust
-use cel_parser::{CELParser, OpLookup};
-use cel_runtime::DynClosure;
-
-let mut segment = CELParser::new(OpLookup::new())
-    .parse_str("|x: i32| x + 1")
-    .unwrap();
-
-let closure: DynClosure = segment.call0().unwrap();
-let x = 5i32;
-assert_eq!(closure.call::<i32>(&[&x]).unwrap(), 6);
+```text
+1.5 as i32
+true as i64
+|x: i32| x + 1
+|pair: (i32, i32)| pair.0 + pair.1
+|| 1..=5
 ```
 
-The checked examples and parser tests also cover:
+## Exact rules
 
-- zero-parameter closures (`|| 42`);
-- multiple parameters;
-- tuple-typed parameters;
-- closure bodies that return arrays or ranges;
-- the fact that closures do not capture names from surrounding scopes.
+Casts:
 
-## Practical limits
+- `as` associates from left to right, so `x as T as U` applies the first
+  cast before the second one.
+- The built-in scalar type names are `i8`, `i16`, `i32`, `i64`, `i128`,
+  `isize`, `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `f32`, `f64`,
+  `bool`, and `String`.
+- Any integer target accepts integer, floating-point, and `bool` source
+  values.
+- `f32` and `f64` targets accept integer and floating-point source
+  values.
+- `bool` casts only to `bool`, and `String` casts only to `String`.
+- Integer-to-integer casts check that the source fits in the target.
+- Floating-point to integer casts require a finite, in-range source and
+  truncate toward zero.
+- `f64 as f32` checks finite range before narrowing.
+- `true` casts to integer `1`, and `false` casts to integer `0`.
 
-Closures are first-class runtime values, but they are still compiled from a
-single expression body. They do not introduce block statements, mutable local
-bindings, or captured environments in this implementation.
+Closures:
 
-For the exact closure grammar and the isolation rules used during parsing, see
-[cel-parser/src/lib.rs](https://github.com/stlab/cel-rs/blob/main/cel-parser/src/lib.rs)
-and the checked parser tests.
+- `|| body` declares a zero-parameter closure.
+- `|name: Type| body` declares one typed parameter.
+- `|a: T, b: U| body` declares multiple typed parameters in source order.
+- A closure parameter type is either a built-in scalar name or a
+  parenthesized tuple type built recursively from closure parameter
+  types.
+- `|pair: (i32, i32)| pair.0 + pair.1` declares one tuple-typed
+  parameter, not two separate parameters.
+- The closure body is one expression.
+- A closure body resolves its own parameters and does not capture free
+  variables from an enclosing expression.
+
+## Edge cases
+
+- Cast targets are limited to the sixteen built-in scalar type names.
+- `char`, byte-string, C-string, unit, array, tuple, range, and closure
+  values are not additional cast target names.
+- Number-to-`bool`, `bool`-to-float, and `String`-to-number or
+  `String`-to-`bool` casts are not valid.
+- Closure parameter lists do not accept a trailing comma.
+- `(i32,)` is not accepted as a one-element closure tuple type.
+- Closure bodies do not introduce statement blocks or local binding
+  syntax.

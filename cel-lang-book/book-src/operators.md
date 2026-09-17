@@ -1,61 +1,112 @@
 # Operators
 
-Operator precedence follows the parser grammar, from lowest to highest:
+CEL operators combine existing expression values. Precedence and
+associativity determine how unparenthesized expressions group. For the
+full grammar, see the [Reference Manual](reference.md).
 
-1. ranges `.. ..=`
-2. logical `||`
-3. logical `&&`
-4. comparison `== != < > <= >=`
-5. bitwise `| ^ &`
-6. shift `<< >>`
-7. additive `+ -`
-8. multiplicative `* / %`
-9. casts with `as`
-10. unary `- !`
-11. postfix call and tuple index
+## Concept
 
-```rust
-use cel_parser::{CELParser, OpLookup};
+Unary, binary, cast, and postfix operators all participate in one
+expression grammar. Postfix calls and tuple indices bind most tightly.
+Range forms bind most loosely. Logical operators short-circuit, and
+comparison and range forms do not chain.
 
-let mut segment = CELParser::new(OpLookup::new())
-    .parse_str("10u32 + 20u32 * 5u32")
-    .unwrap();
+## Syntax
 
-assert_eq!(segment.call0::<u32>().unwrap(), 110);
+```text
+!x
+-x
+x as Type
+a * b
+a / b
+a % b
+a + b
+a - b
+a << b
+a >> b
+a & b
+a ^ b
+a | b
+a == b
+a != b
+a < b
+a <= b
+a > b
+a >= b
+a && b
+a || b
+a..b
+a..=b
+a..
+..b
+..=b
+..
 ```
 
-The checked examples in
-[cel-lang-book/tests/examples.rs](https://github.com/stlab/cel-rs/blob/main/cel-lang-book/tests/examples.rs)
-cover arithmetic precedence, boolean operators, and custom operator lookup.
+## Worked examples
 
-## Built-in operations and lookup
-
-The parser does not hard-code evaluation for every symbol. It asks the current
-`OpLookup` whether a name can be resolved for the operand types on the stack.
-That is why built-in operations, custom scopes, and zero-argument identifiers
-all share the same resolution path.
-
-The practical result is:
-
-- built-in arithmetic and comparisons work when their operand types are
-  supported;
-- a custom scope can add new zero-argument values or new operator behavior;
-- parsing succeeds only when the lookup can build the needed operation.
-
-## Comparison and ranges
-
-Comparison operators do not chain. Ranges are parsed as expressions with very
-low precedence, so the parser treats `1i32 + 2i32..3i32 * 4i32` as a range
-whose endpoints are full expressions.
-
-```rust
-use cel_parser::{CELParser, OpLookup};
-
-let mut seg = CELParser::new(OpLookup::new())
-    .parse_str("1i32 + 2i32..3i32 * 4i32")
-    .unwrap();
-assert_eq!(seg.call0::<std::ops::Range<i32>>().unwrap(), 3i32..12i32);
+```text
+10 + 20 * 5
+"cel" + "-" + "lang"
+ok && round(3.5) > 3.0
+1u64 << 3u32
+1 + 2..3 * 4
 ```
 
-See the range tests in the checked parser suite for the exclusive and
-inclusive forms.
+## Exact rules
+
+Precedence runs from lowest to highest in this order:
+
+1. range forms
+2. `||`
+3. `&&`
+4. comparison operators
+5. bitwise `|`
+6. bitwise `^`
+7. bitwise `&`
+8. shifts `<<` and `>>`
+9. additive `+` and `-`
+10. multiplicative `*`, `/`, and `%`
+11. casts with `as`
+12. unary `-` and `!`
+13. postfix calls and tuple indexing
+
+Within one precedence level, binary operators associate to the left.
+Comparison expressions consume one comparison operator, and range forms do
+not chain.
+
+- `+` accepts homogeneous numeric operands and `String + String`.
+  Unsigned integer addition wraps. Signed integer addition reports
+  `arithmetic overflow` on overflow.
+- Binary `-` accepts homogeneous numeric operands. Unary `-` accepts only
+  signed integers and floating-point values. Unsigned integer subtraction
+  wraps. Signed binary subtraction and signed unary negation report
+  `arithmetic overflow` on overflow.
+- `*` accepts homogeneous numeric operands. Unsigned integer
+  multiplication wraps. Signed integer multiplication reports
+  `arithmetic overflow` on overflow.
+- `/` and `%` accept homogeneous numeric operands. Floating-point
+  division and remainder use normal floating-point behavior. Integer
+  failures report `division by zero`.
+- `&`, `|`, and `^` accept homogeneous integer operands only.
+- `<<` and `>>` accept integer operands only. The right operand must fit
+  in `u32`, and the shift count must be in range. Shift failures report
+  `shift overflow`.
+- `!` accepts `bool` only.
+- `&&` and `||` accept `bool` operands only and short-circuit.
+- `==` and `!=` accept homogeneous numeric operands, homogeneous `bool`,
+  or homogeneous `String`.
+- `<`, `<=`, `>`, and `>=` accept homogeneous numeric operands or
+  homogeneous `String`.
+- Range operators are documented in [Control flow](control-flow.md) and
+  summarized in the [Reference Manual](reference.md).
+
+## Edge cases
+
+- Write `a < b && b < c`, not `a < b < c`.
+- Write one range form at a time; `1..2..3` is not valid.
+- Negative shift counts, counts larger than `u32`, and counts outside the
+  left operand's width report `shift overflow`.
+- Signed `+`, signed binary `-`, signed unary `-`, and signed `*`
+  overflows report `arithmetic overflow`.
+- Integer `/` and `%` report `division by zero` when they fail.
