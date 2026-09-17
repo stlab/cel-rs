@@ -64,6 +64,9 @@ jobs:
     - name: Build the adam-lang book
       run: mdbook build adam-lang-book
 
+    - name: Build the CEL language book
+      run: mdbook build cel-lang-book
+
     # `cp -r src dst` only produces a flat `dst` when `dst` doesn't already exist; if
     # `target/doc/book` survived from a cached `target/` (Swatinem/rust-cache persists it
     # across runs), `cp -r` instead nests the source *into* it as `target/doc/book/book-dist`,
@@ -74,6 +77,11 @@ jobs:
       run: |
         rm -rf target/doc/book
         cp -r adam-lang-book/book-dist target/doc/book
+
+    - name: Copy the CEL language book into the docs site
+      run: |
+        rm -rf target/doc/cel-book
+        cp -r cel-lang-book/book-dist target/doc/cel-book
 
     - uses: actions/upload-pages-artifact@v3
       with:

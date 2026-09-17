@@ -1,0 +1,164 @@
+.graph-view {
+    flex: 1;
+    height: 100%;
+    overflow: hidden;
+    position: relative;
+}
+
+.bg-layer rect {
+    fill: #f5f5f5;
+    stroke: #bbb;
+    stroke-width: 1;
+    stroke-dasharray: 6 3;
+}
+
+.link {
+    stroke: #444;
+    stroke-width: 1.5;
+}
+
+.node-cell {
+    /* Opaque, not alpha-blended: an edge occasionally settles behind a
+       node in the force layout, and it must stay fully hidden rather
+       than show through the fill. */
+    fill: #eaf2fb;
+    stroke: #2a78d6;
+    stroke-width: 1.5;
+    cursor: grab;
+}
+
+.node-relationship {
+    fill: #fdf0eb;
+    stroke: #eb6834;
+    stroke-width: 1.5;
+    cursor: grab;
+}
+
+.node-label {
+    font-family: monospace;
+    font-size: 11px;
+    font-weight: bold;
+    text-anchor: middle;
+    fill: #333;
+    pointer-events: none;
+    user-select: none;
+}
+
+.node-value {
+    font-family: monospace;
+    font-size: 10px;
+    text-anchor: middle;
+    fill: #666;
+    pointer-events: none;
+    user-select: none;
+}
+
+.node-conditional {
+    fill: #e8f7f2;
+    stroke: #1baf7a;
+    stroke-width: 1.5;
+    cursor: grab;
+}
+
+.link-control {
+    stroke: #444;
+    stroke-width: 1.5;
+    fill: none;
+}
+
+.node-cell.forced {
+    stroke: #8e44ad;
+    stroke-width: 3;
+}
+
+.link.forced-edge {
+    stroke: #8e44ad;
+    stroke-width: 3;
+}
+
+.node-relationship.forced {
+    stroke: #8e44ad;
+    stroke-width: 3;
+}
+
+.node-cell.dragging,
+.node-relationship.dragging,
+.node-conditional.dragging {
+    cursor: grabbing;
+}
+
+.graph-legend {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    z-index: 10;
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid #e1e0d9;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 11px;
+    color: #333;
+    max-width: 220px;
+}
+
+.graph-legend-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.graph-legend-row:last-child {
+    margin-bottom: 0;
+}
+
+/* Fixed-width column every row's icon sits in, whatever the icon's own
+   size - the widest icon (a 22px-wide edge glyph) sets the column width,
+   so text after it always starts at the same x position. */
+.graph-legend-icon {
+    flex: none;
+    width: 22px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.graph-legend-shape {
+    width: 14px;
+    height: 14px;
+    box-sizing: border-box;
+}
+
+.graph-legend-shape.cell {
+    background: #eaf2fb;
+    border: 1.5px solid #2a78d6;
+    border-radius: 2px;
+}
+
+.graph-legend-shape.relationship {
+    background: #fdf0eb;
+    border: 1.5px solid #eb6834;
+    border-radius: 50%;
+}
+
+.graph-legend-shape.conditional {
+    width: 10px;
+    height: 10px;
+    background: #e8f7f2;
+    border: 1.5px solid #1baf7a;
+    transform: rotate(45deg);
+}
+
+.graph-legend-shape.forced {
+    background: #fff;
+    border: 2px solid #8e44ad;
+    border-radius: 2px;
+}
+
+.graph-legend-shape.inactive {
+    background: #fff;
+    border: 1.5px solid #ccc;
+    border-radius: 50%;
+}

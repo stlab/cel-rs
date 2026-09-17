@@ -12,6 +12,10 @@
 //!
 //! # Grammar
 //!
+//! For a prose reference manual with the same grammar, see the standalone
+//! [CEL book](../cel-book/index.html) and its
+//! [reference chapter](../cel-book/reference.html).
+//!
 //! ```text
 //! expression = range_expression.
 //! range_expression = or_expression [ ".." [ or_expression ] | "..=" or_expression ]
