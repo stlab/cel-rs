@@ -1,26 +1,28 @@
 # Introduction
 
-This book documents the CEL implementation in `cel-parser` and
-`cel-runtime`. It describes the syntax and runtime behavior that this
-repository actually supports, not every possible CEL dialect or extension.
+This book is a tutorial and reference for the CEL language itself: its tokens,
+literals, expressions, operators, control flow, and collection forms.
+
+The chapters are written in the style of K&R: each one introduces a piece of the
+language, then shows the forms it accepts, the rules that govern it, and the
+examples that make those rules memorable.
 
 The tutorial chapters are ordered as follows:
 
-1. [Literals and types](literals-and-types.md)
-2. [Expressions](expressions.md)
-3. [Operators](operators.md)
-4. [Control flow](control-flow.md)
-5. [Collections](collections.md)
-6. [Casts and closures](casts-and-closures.md)
-7. [Lexical conventions](lexical-conventions.md)
+1. [Lexical conventions](lexical-conventions.md)
+2. [Literals and types](literals-and-types.md)
+3. [Expressions](expressions.md)
+4. [Operators](operators.md)
+5. [Control flow](control-flow.md)
+6. [Collections](collections.md)
+7. [Casts and closures](casts-and-closures.md)
 
-Each chapter uses copyable snippets and links back to the checked examples
-in [cel-lang-book/tests/examples.rs](https://github.com/stlab/cel-rs/blob/main/cel-lang-book/tests/examples.rs)
-or to the parser/runtime source that defines the behavior.
+Each chapter uses copyable CEL snippets and points back to the checked examples
+that exercise the same forms in the book's test suite.
 
 The first release is intentionally static:
 
-- examples are checked at compile time against the Rust crates;
+- examples are checked as part of the book's test suite;
 - the book builds with `mdbook build cel-lang-book`;
 - live evaluation is intentionally deferred to a later release.
 
