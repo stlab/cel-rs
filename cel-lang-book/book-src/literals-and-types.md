@@ -115,7 +115,6 @@ CEL also builds compound values from ordinary expressions:
 - `()` is the unit value, `(expr)` is grouping, `(expr,)` is a 1-tuple, and
   `(a, b, c)` is a tuple.
 - Arrays are non-empty bracketed, homogeneous lists, and `[]` is not accepted.
-- `a..b`, `a..=b`, `a..`, `..b`, `..=b`, and `..` are range values.
 - `|| expr` and `|x: T| expr` are closure values.
 - These forms can nest inside calls, tuples, arrays, conditionals, and one
   another wherever the grammar permits.
@@ -124,10 +123,27 @@ CEL also builds compound values from ordinary expressions:
 (1,)
 (1, 2, 3)
 [0, 1, 2]
-1..=5
-..10
 |x: i32| x + 1
 ```
 
-Use this chapter for the value categories and [Reference Manual](reference.md)
-for the detailed grammar of literal, tuple, array, range, and closure syntax.
+## Range values
+
+A range expression produces a range value from zero, one, or two numeric
+endpoints. CEL supports bounded, half-bounded, and unbounded forms:
+
+```text
+a..b
+a..=b
+a..
+..b
+..=b
+..
+```
+
+Endpoint-bearing ranges require homogeneous numeric endpoints. Each endpoint
+is a full expression, so operators inside either side are parsed before the
+range is formed. The [Operators](operators.md) chapter defines precedence and
+the non-chaining rule for range expressions.
+
+Use this chapter for value categories and [Reference Manual](reference.md)
+for the complete grammar of literal, tuple, array, range, and closure syntax.

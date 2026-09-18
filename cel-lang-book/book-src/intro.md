@@ -16,7 +16,7 @@ The tutorial chapters follow this order:
 3. [Operators](operators.md) explains precedence, associativity, arithmetic,
    comparison, logical, bitwise, cast, and range operators.
 4. [Conditional expressions](conditional-expressions.md) explains
-   value-producing `if` expressions and range expressions.
+   value-producing `if` expressions.
 5. [Collections](collections.md) explains tuples and homogeneous arrays.
 6. [Closures](closures.md) explains closure literals and parameter typing.
 7. [Standard library](standard-library.md) explains additional operations

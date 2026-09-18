@@ -12,10 +12,12 @@ callable value.
 ## Syntax
 
 ```text
-|| expression
-|x: Type| expression
-|x: Type, y: Type| expression
-|pair: (Type, Type)| expression
+closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|")
+                     expression .
+closure_param = identifier ":" closure_type_expression .
+closure_type_expression = identifier
+                        | "(" [ closure_type_expression
+                                { "," closure_type_expression } ] ")" .
 ```
 
 ## Worked examples
@@ -44,11 +46,6 @@ Closures:
 
 ## Edge cases
 
-- CEL limits cast targets to the sixteen built-in scalar type names.
-- `char`, byte-string, C-string, unit, array, tuple, range, and closure
-  values are not additional cast target names.
-- Number-to-`bool`, `bool`-to-float, and `String`-to-number or
-  `String`-to-`bool` casts are not valid.
 - Closure parameter lists do not accept a trailing comma.
 - `(i32,)` is not accepted as a one-element closure tuple type.
 - Closure bodies do not introduce statement blocks or local binding

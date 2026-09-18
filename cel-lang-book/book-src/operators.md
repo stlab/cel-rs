@@ -92,6 +92,12 @@ not chain.
   or homogeneous `String`.
 - `<`, `<=`, `>`, and `>=` accept homogeneous numeric operands or
   homogeneous `String`.
+- Range forms bind more loosely than every other operator. The valid forms
+  are `a..b`, `a..=b`, `a..`, `..b`, `..=b`, and `..`.
+- `..=` always requires a right endpoint.
+- Range endpoints are full expressions.
+- Range expressions do not chain, so `1..2..3` is not valid.
+- `1 + 2..3 * 4` means `(1 + 2)..(3 * 4)`.
 - `as` converts a value to one of the sixteen built-in scalar type names:
   `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`,
   `u128`, `usize`, `f32`, `f64`, `bool`, and `String`.
@@ -102,16 +108,20 @@ not chain.
   Floating-point-to-integer casts require a finite, in-range source and
   truncate toward zero. `f64 as f32` checks finite range before narrowing.
 - `true` casts to integer `1`, and `false` casts to integer `0`.
+- CEL limits cast targets to the sixteen built-in scalar type names.
+- `char`, byte-string, C-string, unit, array, tuple, range, and closure
+  values are not additional cast target names.
+- Number-to-`bool`, `bool`-to-float, and `String`-to-number or
+  `String`-to-`bool` casts are not valid.
 - Casts associate from left to right, so `x as T as U` applies the first
   cast before the second.
 - See [Conditional expressions](conditional-expressions.md) for `if`
-  expressions and range forms, and the
+  expressions, and the
   [Reference Manual](reference.md) for a summary.
 
 ## Edge cases
 
 - Write `a < b && b < c`, not `a < b < c`.
-- Write one range form at a time; `1..2..3` is not valid.
 - Call argument lists do not accept a trailing comma.
 - Negative shift counts, counts larger than `u32`, and counts outside the
   left operand's width report `shift overflow`.
