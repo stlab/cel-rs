@@ -2409,3 +2409,76 @@ fn issue_182_inequality_chain_writing_the_middle_cell_then_an_untouched_endpoint
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 50);
     assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
 }
+
+/// Builds the `a <= b <= c` tutorial chain (`inequality.adm2`) with declared values
+/// 10, 20, 30, already propagated once.
+fn inequality_chain() -> (Sheet, CellId, CellId, CellId) {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet.propagate().unwrap();
+    (sheet, a, b, c)
+}
+
+#[test]
+fn inequality_chain_redundant_write_does_not_discard_another_cells_edit() {
+    // a<=b<=c. write(b, 100) raises c to 100 and leaves a alone (10, 100, 100). A
+    // *redundant* write of a's own current value (10) -- what a slider drag or arrow-key
+    // nudge emits before it emits a new one -- claims a and b through their
+    // self-referencing methods but changes nothing. That round must not cost b its
+    // edit's explicit strength: the following write(a, 9) is still consistent with
+    // b=100, so b and c must stay at 100 rather than springing back to their declared
+    // 20 and 30.
+    let (mut sheet, a, b, c) = inequality_chain();
+    sheet.write(b, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+
+    sheet.write(a, 10_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+
+    sheet.write(a, 9_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 9);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+}
+
+#[test]
+fn inequality_chain_dragging_the_low_end_keeps_the_middle_cells_edit() {
+    // a<=b<=c after write(b, 100): dragging a across many intermediate values (the
+    // stream of writes a slider emits) must leave b and c pinned at b's edit of 100
+    // whenever a <= 100, and push the whole chain up only while a exceeds it. Every
+    // round re-claims b and c self-referencingly, so this also guards against b's
+    // explicit strength decaying over a long run of rounds rather than on just one.
+    let (mut sheet, a, b, c) = inequality_chain();
+    sheet.write(b, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    for a_val in [10, 9, 8, 5, 0, 5, 50, 100, 120, 100, 50, 10] {
+        sheet.write(a, a_val).unwrap();
+        sheet.propagate().unwrap();
+        let expected = a_val.max(100);
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), a_val, "a at a={a_val}");
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), expected, "b at a={a_val}");
+        assert_eq!(*sheet.read::<i32>(c).unwrap(), expected, "c at a={a_val}");
+    }
+}

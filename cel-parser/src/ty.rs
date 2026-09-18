@@ -9,6 +9,7 @@ use std::any::TypeId;
 use std::borrow::Cow;
 
 use crate::op_table::{builtin_operand_types, cast_source_types};
+use crate::type_expr::{BuiltinTypeResolver, ResolvedType, TypeExpr, TypeResolver};
 use crate::{Expr, ExprSpan, Literal, ParseError};
 
 /// A static type: one of the built-in primitives, a homogeneous array of one of those, or
@@ -357,6 +358,41 @@ impl Ty {
 /// assert!(diagnostics.is_empty());
 /// ```
 pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<ParseError>) {
+    check_expr_with_type_resolver(expr, resolve_ident, &BuiltinTypeResolver)
+}
+
+/// Infers `expr`'s type using both an identifier resolver and a named-type resolver for array
+/// annotations.
+///
+/// This is the same checker as [`check_expr`], but callers that support custom named CEL types
+/// may override the built-in type resolver used for array annotations.
+///
+/// - Complexity: O(n) in the number of nodes in `expr`.
+///
+/// # Examples
+///
+/// ```rust
+/// use cel_parser::{AstContext, OpLookup, Parser, Ty};
+/// use cel_parser::ty::check_expr_with_type_resolver;
+///
+/// let mut parser = Parser::<AstContext>::new(OpLookup::new());
+/// let expr = parser.parse_str_ast("[]: [i32]").unwrap();
+/// let (ty, diagnostics) =
+///     check_expr_with_type_resolver(&expr, &|_name| Ty::Any, &[(
+///         "i32",
+///         cel_parser::ResolvedLeafType::new(
+///             "i32",
+///             cel_runtime::ArrayElementType::leaf::<i32>().unwrap(),
+///         ),
+///     )]);
+/// assert_eq!(ty, Ty::Array(Box::new(Ty::I32)));
+/// assert!(diagnostics.is_empty());
+/// ```
+pub fn check_expr_with_type_resolver(
+    expr: &Expr,
+    resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
+) -> (Ty, Vec<ParseError>) {
     match expr {
         Expr::Literal { value, .. } => (Ty::from_literal(value), Vec::new()),
         Expr::Ident { name, .. } => (resolve_ident(name), Vec::new()),
@@ -364,40 +400,63 @@ pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<P
             name,
             operands,
             span,
-        } => check_op(name, operands, *span, resolve_ident),
-        Expr::Logical { lhs, rhs, span, .. } => check_logical(lhs, rhs, *span, resolve_ident),
+        } => check_op(name, operands, *span, resolve_ident, resolve_type),
+        Expr::Logical { lhs, rhs, span, .. } => {
+            check_logical(lhs, rhs, *span, resolve_ident, resolve_type)
+        }
         Expr::Apply { callee, args, .. } => {
-            let mut diagnostics = check_expr(callee, resolve_ident).1;
+            let mut diagnostics =
+                check_expr_with_type_resolver(callee, resolve_ident, resolve_type).1;
             for arg in args {
-                diagnostics.extend(check_expr(arg, resolve_ident).1);
+                diagnostics
+                    .extend(check_expr_with_type_resolver(arg, resolve_ident, resolve_type).1);
             }
             (Ty::Any, diagnostics)
         }
         Expr::Tuple { elements, .. } => {
             let mut diagnostics = Vec::new();
             for element in elements {
-                diagnostics.extend(check_expr(element, resolve_ident).1);
+                diagnostics
+                    .extend(check_expr_with_type_resolver(element, resolve_ident, resolve_type).1);
             }
             (Ty::Any, diagnostics)
         }
         // An array literal's own type is `Array` of its elements' unified type; see `check_array`.
-        Expr::Array { elements, .. } => check_array(elements, resolve_ident),
-        Expr::TupleIndex { base, .. } => (Ty::Any, check_expr(base, resolve_ident).1),
+        Expr::Array {
+            elements,
+            type_annotation,
+            annotation_span,
+            ..
+        } => check_array(
+            elements,
+            type_annotation.as_ref(),
+            *annotation_span,
+            resolve_ident,
+            resolve_type,
+        ),
+        Expr::TupleIndex { base, .. } => (
+            Ty::Any,
+            check_expr_with_type_resolver(base, resolve_ident, resolve_type).1,
+        ),
         Expr::Cast {
             expr,
             type_name,
             span,
-        } => check_cast(expr, type_name, *span, resolve_ident),
+        } => check_cast(expr, type_name, *span, resolve_ident, resolve_type),
         Expr::If {
             cond,
             then_branch,
             else_branch,
             ..
         } => {
-            let mut diagnostics = check_expr(cond, resolve_ident).1;
-            diagnostics.extend(check_expr(then_branch, resolve_ident).1);
+            let mut diagnostics =
+                check_expr_with_type_resolver(cond, resolve_ident, resolve_type).1;
+            diagnostics
+                .extend(check_expr_with_type_resolver(then_branch, resolve_ident, resolve_type).1);
             if let Some(else_branch) = else_branch {
-                diagnostics.extend(check_expr(else_branch, resolve_ident).1);
+                diagnostics.extend(
+                    check_expr_with_type_resolver(else_branch, resolve_ident, resolve_type).1,
+                );
             }
             (Ty::Any, diagnostics)
         }
@@ -409,7 +468,8 @@ pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<P
                     resolve_ident(name)
                 }
             };
-            let (_, diagnostics) = check_expr(body, &resolve_with_params);
+            let (_, diagnostics) =
+                check_expr_with_type_resolver(body, &resolve_with_params, resolve_type);
             (Ty::Any, diagnostics)
         }
     }
@@ -434,35 +494,246 @@ pub fn check_expr(expr: &Expr, resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<P
 /// - Postcondition: the returned type is always a [`Ty::Array`].
 /// - Complexity: O(n · d) where n is the number of elements and d is their array nesting depth,
 ///   plus the cost of checking each element (see [`check_expr`]'s own complexity note).
-fn check_array(elements: &[Expr], resolve_ident: &dyn Fn(&str) -> Ty) -> (Ty, Vec<ParseError>) {
+fn check_array(
+    elements: &[Expr],
+    type_annotation: Option<&TypeExpr>,
+    annotation_span: Option<ExprSpan>,
+    resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
+) -> (Ty, Vec<ParseError>) {
     let mut diagnostics = Vec::new();
     let element_tys: Vec<Ty> = elements
         .iter()
         .map(|element| {
-            let (ty, element_diags) = check_expr(element, resolve_ident);
+            let (ty, element_diags) =
+                check_expr_with_type_resolver(element, resolve_ident, resolve_type);
             diagnostics.extend(element_diags);
             ty
         })
         .collect();
-    let mut unified = Ty::Any;
-    for (element, ty) in elements.iter().zip(&element_tys) {
-        match unified.unify(ty) {
-            Some(merged) => unified = merged,
-            None => {
-                diagnostics.push(ParseError::new_range(
-                    format!(
-                        "array elements must share one type: expected `{}`, found `{}`",
-                        unified.name(),
-                        ty.name()
-                    ),
-                    element.span().start,
-                    element.span().end,
-                ));
-                return (Ty::Array(Box::new(Ty::Any)), diagnostics);
+    let Some(type_annotation) = type_annotation else {
+        let mut unified = Ty::Any;
+        for (element, ty) in elements.iter().zip(&element_tys) {
+            match unified.unify(ty) {
+                Some(merged) => unified = merged,
+                None => {
+                    diagnostics.push(ParseError::new_range(
+                        format!(
+                            "array elements must share one type: expected `{}`, found `{}`",
+                            unified.name(),
+                            ty.name()
+                        ),
+                        element.span().start,
+                        element.span().end,
+                    ));
+                    return (Ty::Array(Box::new(Ty::Any)), diagnostics);
+                }
             }
         }
+        return (Ty::Array(Box::new(unified)), diagnostics);
+    };
+
+    let (resolved_annotation, declared_ty, mut annotation_diags) =
+        check_array_annotation(type_annotation, annotation_span, resolve_type);
+    diagnostics.append(&mut annotation_diags);
+    let (
+        Some(ResolvedType::Array {
+            element: declared_element_resolved,
+        }),
+        Ty::Array(declared_element_ty),
+    ) = (&resolved_annotation, &declared_ty)
+    else {
+        return (Ty::Array(Box::new(Ty::Any)), diagnostics);
+    };
+
+    for (element, actual_ty) in elements.iter().zip(&element_tys) {
+        if let Some((expected, actual)) = exact_array_annotation_mismatch(
+            element,
+            declared_element_resolved,
+            resolve_ident,
+            resolve_type,
+        ) {
+            diagnostics.push(ParseError::new_range(
+                format!(
+                    "array elements must match the annotation exactly: expected `{}`, found `{}`",
+                    expected, actual
+                ),
+                element.span().start,
+                element.span().end,
+            ));
+            break;
+        }
+        if !declared_element_ty.unifies_with(actual_ty) {
+            diagnostics.push(ParseError::new_range(
+                format!(
+                    "array elements must match the annotation exactly: expected `{}`, found `{}`",
+                    declared_element_ty.name(),
+                    actual_ty.name()
+                ),
+                element.span().start,
+                element.span().end,
+            ));
+            break;
+        }
     }
-    (Ty::Array(Box::new(unified)), diagnostics)
+    (declared_ty, diagnostics)
+}
+
+/// Resolves one array annotation to both its recursive descriptor tree and its best-effort `Ty`.
+///
+/// # Errors
+///
+/// Returns one diagnostic when the annotation names an unknown type, does not name a complete
+/// array type, or names tuple-valued array elements.
+fn check_array_annotation(
+    type_annotation: &TypeExpr,
+    annotation_span: Option<ExprSpan>,
+    resolve_type: &dyn TypeResolver,
+) -> (Option<ResolvedType>, Ty, Vec<ParseError>) {
+    let resolved = match type_annotation.resolve(resolve_type) {
+        Ok(resolved) => resolved,
+        Err(err) => return (None, Ty::Array(Box::new(Ty::Any)), vec![err]),
+    };
+    match resolved_type_to_array_ty(
+        &resolved,
+        annotation_span.unwrap_or_else(|| type_annotation.span()),
+    ) {
+        Ok(array_ty) => (Some(resolved), array_ty, Vec::new()),
+        Err(err) => (Some(resolved), Ty::Array(Box::new(Ty::Any)), vec![err]),
+    }
+}
+
+/// Returns the first exact mismatch between `expr` and an array annotation element type erased by
+/// [`Ty::Any`].
+///
+/// Built-in leaves continue to use ordinary [`Ty`] unification; this helper is only the narrow
+/// fallback for custom leaves whose `TypeId` the minimal `Ty` model cannot preserve. A nested
+/// array literal carrying its own annotation is compared against that declared type directly, so
+/// an annotated empty literal (which has no elements to infer from) is still checked.
+///
+/// - Complexity: O(n) in the number of nodes visited before the first mismatch (or the full
+///   nested array on success).
+fn exact_array_annotation_mismatch(
+    expr: &Expr,
+    expected: &ResolvedType,
+    resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
+) -> Option<(String, String)> {
+    if !resolved_type_contains_erased_custom_leaf(expected) {
+        return None;
+    }
+    match expected {
+        ResolvedType::Scalar(leaf) => {
+            let actual = check_expr_with_type_resolver(expr, resolve_ident, resolve_type).0;
+            let actual_type_id = actual.type_id()?;
+            (actual_type_id != leaf.type_id())
+                .then(|| (leaf.type_name().to_string(), actual.name().into_owned()))
+        }
+        ResolvedType::Array { element } => match expr {
+            Expr::Array {
+                elements,
+                type_annotation,
+                ..
+            } => {
+                // A nested literal's own annotation declares its complete type, so it is what the
+                // enclosing annotation must agree with — an empty annotated literal has no
+                // elements left to compare, and a non-empty one would otherwise be checked only
+                // against its elements.
+                if let Some(type_annotation) = type_annotation
+                    && let Ok(declared) = type_annotation.resolve(resolve_type)
+                    && !resolved_types_match(expected, &declared)
+                {
+                    return Some((expected.display_name(), declared.display_name()));
+                }
+                elements.iter().find_map(|element_expr| {
+                    exact_array_annotation_mismatch(
+                        element_expr,
+                        element,
+                        resolve_ident,
+                        resolve_type,
+                    )
+                })
+            }
+            _ => {
+                let actual = check_expr_with_type_resolver(expr, resolve_ident, resolve_type).0;
+                match actual {
+                    Ty::Array(_) | Ty::Any => None,
+                    _ => Some((expected.display_name(), actual.name().into_owned())),
+                }
+            }
+        },
+        ResolvedType::Tuple { .. } => None,
+    }
+}
+
+/// Returns whether two resolved types denote the same type: the same leaf `TypeId`s in the same
+/// recursive shape, whatever names they were resolved from.
+///
+/// This is the exact comparison [`Ty`] cannot make, since every custom leaf erases to
+/// [`Ty::Any`].
+///
+/// - Complexity: O(n) in the number of nodes in the smaller type tree.
+fn resolved_types_match(expected: &ResolvedType, actual: &ResolvedType) -> bool {
+    match (expected, actual) {
+        (ResolvedType::Scalar(expected), ResolvedType::Scalar(actual)) => {
+            expected.type_id() == actual.type_id()
+        }
+        (ResolvedType::Array { element: expected }, ResolvedType::Array { element: actual }) => {
+            resolved_types_match(expected, actual)
+        }
+        (ResolvedType::Tuple { elements: expected }, ResolvedType::Tuple { elements: actual }) => {
+            expected.len() == actual.len()
+                && expected
+                    .iter()
+                    .zip(actual)
+                    .all(|(expected, actual)| resolved_types_match(expected, actual))
+        }
+        _ => false,
+    }
+}
+
+/// Returns whether `resolved` contains any scalar leaf that collapses to [`Ty::Any`].
+///
+/// - Complexity: O(n) in the number of nodes in `resolved`.
+fn resolved_type_contains_erased_custom_leaf(resolved: &ResolvedType) -> bool {
+    match resolved {
+        ResolvedType::Scalar(leaf) => Ty::from_type_id(leaf.type_id()) == Ty::Any,
+        ResolvedType::Array { element } => resolved_type_contains_erased_custom_leaf(element),
+        ResolvedType::Tuple { elements } => elements
+            .iter()
+            .any(resolved_type_contains_erased_custom_leaf),
+    }
+}
+
+fn resolved_type_to_array_ty(resolved: &ResolvedType, span: ExprSpan) -> crate::Result<Ty> {
+    match resolved {
+        ResolvedType::Array { element } => Ok(Ty::Array(Box::new(resolved_type_to_element_ty(
+            element, span,
+        )?))),
+        other => Err(ParseError::new_range(
+            format!(
+                "array annotations must name a complete array type, found `{}`",
+                other.display_name()
+            ),
+            span.start,
+            span.end,
+        )),
+    }
+}
+
+fn resolved_type_to_element_ty(resolved: &ResolvedType, span: ExprSpan) -> crate::Result<Ty> {
+    match resolved {
+        ResolvedType::Scalar(leaf) => Ok(Ty::from_type_id(leaf.type_id())),
+        ResolvedType::Array { element } => {
+            Ok(Ty::Array(Box::new(resolved_type_to_element_ty(element, span)?)))
+        }
+        ResolvedType::Tuple { .. } => Err(ParseError::new_range(
+            "tuple-valued array elements are not supported; see https://github.com/stlab/cel-rs/issues/213"
+                .to_string(),
+            span.start,
+            span.end,
+        )),
+    }
 }
 
 /// Checks an [`Expr::Op`] node: infers each operand, then (only if every operand resolved to a
@@ -477,12 +748,14 @@ fn check_op(
     operands: &[Expr],
     span: ExprSpan,
     resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
 ) -> (Ty, Vec<ParseError>) {
     let mut diagnostics = Vec::new();
     let operand_tys: Vec<Ty> = operands
         .iter()
         .map(|operand| {
-            let (ty, operand_diags) = check_expr(operand, resolve_ident);
+            let (ty, operand_diags) =
+                check_expr_with_type_resolver(operand, resolve_ident, resolve_type);
             diagnostics.extend(operand_diags);
             ty
         })
@@ -555,8 +828,10 @@ fn check_cast(
     type_name: &str,
     span: ExprSpan,
     resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
 ) -> (Ty, Vec<ParseError>) {
-    let (expr_ty, mut diagnostics) = check_expr(expr, resolve_ident);
+    let (expr_ty, mut diagnostics) =
+        check_expr_with_type_resolver(expr, resolve_ident, resolve_type);
     let Some(target_ty) = Ty::from_name(type_name) else {
         diagnostics.push(ParseError::new_range(
             format!("unknown type `{type_name}`"),
@@ -585,9 +860,10 @@ fn check_logical(
     rhs: &Expr,
     span: ExprSpan,
     resolve_ident: &dyn Fn(&str) -> Ty,
+    resolve_type: &dyn TypeResolver,
 ) -> (Ty, Vec<ParseError>) {
-    let (lhs_ty, mut diagnostics) = check_expr(lhs, resolve_ident);
-    let (rhs_ty, rhs_diags) = check_expr(rhs, resolve_ident);
+    let (lhs_ty, mut diagnostics) = check_expr_with_type_resolver(lhs, resolve_ident, resolve_type);
+    let (rhs_ty, rhs_diags) = check_expr_with_type_resolver(rhs, resolve_ident, resolve_type);
     diagnostics.extend(rhs_diags);
     for (side, ty) in [("left", lhs_ty), ("right", rhs_ty)] {
         if !ty.unifies_with(&Ty::Bool) {
@@ -689,6 +965,78 @@ mod tests {
         assert!(!Ty::I32.unifies_with(&Ty::Bool));
     }
 
+    /// Every concrete (non-[`Ty::Array`], non-[`Ty::Any`]) variant, in declaration order.
+    fn concrete_tys() -> [Ty; 16] {
+        [
+            Ty::I8,
+            Ty::I16,
+            Ty::I32,
+            Ty::I64,
+            Ty::I128,
+            Ty::Isize,
+            Ty::U8,
+            Ty::U16,
+            Ty::U32,
+            Ty::U64,
+            Ty::U128,
+            Ty::Usize,
+            Ty::F32,
+            Ty::F64,
+            Ty::Bool,
+            Ty::String,
+        ]
+    }
+
+    #[test]
+    fn every_builtin_scalar_table_agrees_on_the_same_names_and_types() {
+        use crate::op_table::{BUILTIN_SCALAR_NAMES, builtin_scalar_type};
+        use crate::type_expr::TypeResolver;
+
+        for ty in concrete_tys() {
+            let name = ty.name();
+            let expected_id = ty.type_id().expect("a concrete Ty has a TypeId");
+            assert!(
+                BUILTIN_SCALAR_NAMES.contains(&&*name),
+                "`{name}` must be one of the built-in scalar names"
+            );
+            assert_eq!(
+                Ty::from_name(&name),
+                Some(ty.clone()),
+                "`{name}` must round-trip through Ty::from_name"
+            );
+            let scalar = builtin_scalar_type(&name)
+                .unwrap_or_else(|| panic!("`{name}` must resolve as a built-in scalar"));
+            assert_eq!(scalar.type_id, expected_id);
+            assert_eq!(scalar.type_name, name);
+            let leaf = BuiltinTypeResolver
+                .resolve_named_type(&name)
+                .unwrap_or_else(|| panic!("`{name}` must resolve as a CEL leaf type"));
+            assert_eq!(leaf.type_id(), expected_id);
+            assert_eq!(leaf.type_name(), name);
+            assert_eq!(leaf.element_type().type_id(), expected_id);
+            assert_eq!(
+                leaf.element_type().type_name(),
+                name,
+                "the runtime element descriptor must carry the source-level name"
+            );
+            assert_eq!(leaf.element_type().size(), scalar.size);
+            assert_eq!(leaf.element_type().align(), scalar.align);
+        }
+    }
+
+    #[test]
+    fn every_builtin_scalar_name_has_a_concrete_ty() {
+        use crate::op_table::BUILTIN_SCALAR_NAMES;
+
+        let ty_names: Vec<Cow<'static, str>> = concrete_tys().iter().map(Ty::name).collect();
+        for name in BUILTIN_SCALAR_NAMES {
+            assert!(
+                ty_names.iter().any(|ty_name| ty_name == name),
+                "the built-in scalar `{name}` has no concrete Ty variant"
+            );
+        }
+    }
+
     #[test]
     fn name_is_distinct_per_type() {
         let names: Vec<Cow<'static, str>> = [
@@ -763,6 +1111,8 @@ mod tests {
     fn array(elements: Vec<Expr>) -> Expr {
         Expr::Array {
             elements,
+            type_annotation: None,
+            annotation_span: None,
             span: point(proc_macro2::Span::call_site()),
         }
     }
@@ -1299,6 +1649,173 @@ mod tests {
             diags[0].message()
         );
         assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))));
+    }
+
+    #[test]
+    fn typed_array_annotation_returns_the_declared_array_type() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[0, 1]: [i32]")
+            .expect("source parses");
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::I32)));
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    }
+
+    #[test]
+    fn typed_empty_array_annotation_returns_the_declared_nested_array_type() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser.parse_str_ast("[]: [[i32]]").expect("source parses");
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::I32)))));
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    }
+
+    #[test]
+    fn typed_array_annotation_reports_exact_element_type_mismatches() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[0, 1]: [f64]")
+            .expect("source parses");
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::F64)));
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0].message().contains("expected `f64`, found `i32`"),
+            "got: {}",
+            diags[0].message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_reports_exact_custom_element_type_mismatches() {
+        #[derive(Clone)]
+        struct Custom;
+
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[0]: [Custom]")
+            .expect("source parses");
+        let (ty, diags) = check_expr_with_type_resolver(
+            &expr,
+            &any_resolver,
+            &[(
+                "Custom",
+                crate::ResolvedLeafType::new(
+                    "Custom",
+                    cel_runtime::ArrayElementType::leaf::<Custom>().unwrap(),
+                ),
+            )],
+        );
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0]
+                .message()
+                .contains("expected `Custom`, found `i32`"),
+            "got: {}",
+            diags[0].message()
+        );
+    }
+
+    /// A nested literal's own annotation is part of what it means: `[[]: [CustomA]]` is an array
+    /// of `[CustomA]`, which the runtime rejects against `[[CustomB]]`. Custom leaves both erase
+    /// to [`Ty::Any`], so the declared inner annotation is the only thing left to compare.
+    #[test]
+    fn nested_annotated_array_reports_a_custom_element_mismatch() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[[]: [CustomA]]: [[CustomB]]")
+            .expect("source parses");
+        let (ty, diags) =
+            check_expr_with_type_resolver(&expr, &any_resolver, &custom_ab_resolver());
+
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::Any)))));
+        assert_eq!(diags.len(), 1, "unexpected diagnostics: {diags:?}");
+        assert!(
+            diags[0]
+                .message()
+                .contains("expected `[CustomB]`, found `[CustomA]`"),
+            "got: {}",
+            diags[0].message()
+        );
+    }
+
+    /// The same nesting with agreeing annotations is accepted with no diagnostic.
+    #[test]
+    fn nested_annotated_array_accepts_a_matching_custom_element_annotation() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[[]: [CustomA]]: [[CustomA]]")
+            .expect("source parses");
+        let (ty, diags) =
+            check_expr_with_type_resolver(&expr, &any_resolver, &custom_ab_resolver());
+
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::Any)))));
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    }
+
+    /// A resolver registering two distinct custom leaf types, both of which erase to [`Ty::Any`].
+    fn custom_ab_resolver() -> [(&'static str, crate::ResolvedLeafType); 2] {
+        #[derive(Clone)]
+        struct CustomA;
+        #[derive(Clone)]
+        struct CustomB;
+
+        [
+            (
+                "CustomA",
+                crate::ResolvedLeafType::new(
+                    "CustomA",
+                    cel_runtime::ArrayElementType::leaf::<CustomA>().unwrap(),
+                ),
+            ),
+            (
+                "CustomB",
+                crate::ResolvedLeafType::new(
+                    "CustomB",
+                    cel_runtime::ArrayElementType::leaf::<CustomB>().unwrap(),
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn typed_array_annotation_diagnostics_are_anchored_at_the_annotation_span() {
+        let source = "[0]: i32";
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser.parse_str_ast(source).expect("source parses");
+        let (_, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0]
+                .message()
+                .contains("array annotations must name a complete array type"),
+            "got: {}",
+            diags[0].message()
+        );
+        let start = diags[0].span().start();
+        let end = diags[0]
+            .end_span()
+            .expect("annotation diagnostics span a range")
+            .end();
+        assert_eq!(&source[start.column..end.column], ": i32");
+    }
+
+    #[test]
+    fn typed_array_annotation_rejects_tuple_array_element_types() {
+        let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
+        let expr = parser
+            .parse_str_ast("[]: [(i32, f64)]")
+            .expect("source parses");
+        let (ty, diags) = check_expr(&expr, &any_resolver);
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0].message().contains("tuple"),
+            "got: {}",
+            diags[0].message()
+        );
     }
 
     #[test]

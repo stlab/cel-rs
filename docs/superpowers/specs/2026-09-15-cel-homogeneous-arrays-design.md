@@ -3,6 +3,13 @@
 **Date:** 2026-09-15
 **Branch:** `worktree-cell-parser/arrays`
 
+> **Historical status note (updated 2026-09-16):** This document records the original
+> homogeneous-array design before the follow-up work for
+> [#212](https://github.com/stlab/cel-rs/issues/212) landed. Explicit typed array annotations,
+> including typed empty arrays such as `[]: [i32]`, are now implemented. Bare `[]` still remains
+> intentionally unsupported because it provides no element type to infer. CEL tuple-valued array
+> elements remain future work tracked by [#213](https://github.com/stlab/cel-rs/issues/213).
+
 ## Summary
 
 Add Rust-style homogeneous array literals to `cel-parser`, backed by a new
@@ -15,10 +22,13 @@ recursively homogeneous nested literals such as `[[0], [1]]`. Each nesting level
 rank-one allocation. Flat multidimensional shape/rank metadata and J-style operations are future
 work built on this representation.
 
-Untyped empty literals are intentionally rejected. Contextually typed empty arrays are tracked by
-[#212](https://github.com/stlab/cel-rs/issues/212). CEL tuple literals as array elements require
+At the time this design was written, untyped empty literals were intentionally rejected and
+contextually typed empty arrays were tracked by
+[#212](https://github.com/stlab/cel-rs/issues/212). That follow-up has since shipped as explicit
+typed array annotations (for example `[]: [i32]`), so this document now serves as the pre-#212
+baseline for homogeneous arrays. CEL tuple literals as array elements still require
 materialization from the runtime's internal `DynTuple` layout into concrete `DynamicSequence`
-values and are tracked by [#213](https://github.com/stlab/cel-rs/issues/213).
+values and remain tracked by [#213](https://github.com/stlab/cel-rs/issues/213).
 
 ## Goals
 
@@ -36,7 +46,8 @@ values and are tracked by [#213](https://github.com/stlab/cel-rs/issues/213).
 
 ## Non-goals
 
-- Empty array literal inference; see #212.
+- Bare empty array literal inference from `[]` alone; at design time see #212. Follow-up work has
+  since implemented explicit typed empty arrays such as `[]: [T]`.
 - CEL tuple literals as array elements; see #213.
 - Repeat expressions such as `[value; count]`.
 - Array indexing, slicing, comprehensions, or mutation syntax.
@@ -89,9 +100,11 @@ Examples:
 [[0], [1]]
 ```
 
-`[]` is recognized as an array literal and rejected with a targeted diagnostic that explains that
-an element type cannot yet be inferred and references the future context-typing work represented
-by #212. This is preferable to treating `[]` as an unrelated syntax error.
+In this original design, `[]` is recognized as an array literal and rejected with a targeted
+diagnostic that explains that an element type cannot yet be inferred and references the future
+context-typing work represented by #212. Follow-up work later implemented explicit typed empty
+arrays (`[]: [T]`) while intentionally keeping bare `[]` rejected. This is preferable to treating
+`[]` as an unrelated syntax error.
 
 A comma always requires another expression. Trailing commas are intentionally unsupported so the
 production remains Wirth-style LL(1), consistent with the parser's existing tuple and parameter
@@ -333,7 +346,8 @@ only for arrays.
 
 New diagnostics include:
 
-- Empty literal: array element type cannot yet be inferred; see #212.
+- Bare empty literal: array element type cannot yet be inferred; at design time see #212. Current
+  behavior still rejects only bare `[]`; explicit typed empties such as `[]: [i32]` now succeed.
 - Heterogeneous literal: expected the first element's recursive type, found the conflicting
   element's recursive type.
 - Unsupported tuple element: CEL tuple literals cannot yet be array elements; see #213.
@@ -417,6 +431,8 @@ flat shaped array.
    `'static` element types.
 4. Array literals of arbitrary concrete host types require no traits beyond `'static`.
 5. Nested literals such as `[[0], [1]]` work as recursively typed rank-one arrays.
-6. Empty and CEL-tuple-valued literals fail with targeted diagnostics referencing #212 and #213.
+6. In the original design, empty and CEL-tuple-valued literals fail with targeted diagnostics
+   referencing #212 and #213. In the implemented follow-up, bare `[]` still references #212,
+   typed empty arrays succeed, and tuple-valued array elements continue to reference #213.
 7. All success and failure paths preserve alignment and drop every initialized value exactly once.
 8. Existing scalar and tuple parsing/evaluation behavior remains unchanged.

@@ -208,6 +208,31 @@ impl ArrayElementType {
         &self.type_name
     }
 
+    /// Returns this descriptor with `type_name` as the name diagnostics report for its own type.
+    ///
+    /// [`leaf`](Self::leaf) records `std::any::type_name::<T>()`, a Rust type path. A host that
+    /// resolves a source-level annotation (`[]: [Celsius]`) uses this to keep the name the source
+    /// actually wrote in later runtime mismatch diagnostics. Only this descriptor's own name
+    /// changes: an array descriptor renders its diagnostics name recursively from its nested
+    /// element, so renaming an [`array_of`](Self::array_of) descriptor has no visible effect.
+    ///
+    /// - Postcondition: the returned descriptor's identity, layout, and drop hook are unchanged,
+    ///   so it stays interchangeable with the descriptor it was built from.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::ArrayElementType;
+    ///
+    /// let element = ArrayElementType::leaf::<String>().unwrap().with_type_name("String");
+    /// assert_eq!(element.type_name(), "String");
+    /// ```
+    #[must_use]
+    pub fn with_type_name(mut self, type_name: impl Into<Cow<'static, str>>) -> Self {
+        self.type_name = type_name.into();
+        self
+    }
+
     /// Returns the element size in bytes.
     ///
     /// # Examples
@@ -258,6 +283,32 @@ impl ArrayElementType {
             Some(nested) => Cow::Owned(format!("[{}]", nested.display_name())),
             None => self.type_name.clone(),
         }
+    }
+
+    /// Returns whether `self` and `other` describe the same recursive element shape and layout.
+    ///
+    /// This is stricter than [`PartialEq`]: it compares the stored size and alignment in addition
+    /// to the recursive type marker, so a runtime-resolved descriptor must agree with the bytes a
+    /// collected value occupies before the two can be treated as interchangeable.
+    ///
+    /// Drop hooks are deliberately *not* compared by address. Every constructor
+    /// ([`leaf`](Self::leaf), [`array_of`](Self::array_of)) derives the hook from the same type
+    /// the `TypeId` names, and [`leaf_from_parts`](Self::leaf_from_parts) requires its caller to
+    /// do the same, so equal `TypeId`s already imply equivalent drop ownership. Function-pointer
+    /// identity does not: the same `raw_dropper_for::<T>` instantiated in two crates (or two
+    /// codegen units) may have two addresses, which would reject a perfectly valid host-resolved
+    /// descriptor.
+    ///
+    /// - Complexity: O(depth).
+    pub(crate) fn same_shape_and_layout(&self, other: &Self) -> bool {
+        self.type_id == other.type_id
+            && self.size == other.size
+            && self.align == other.align
+            && match (&self.nested, &other.nested) {
+                (Some(left), Some(right)) => left.same_shape_and_layout(right),
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 
@@ -758,6 +809,33 @@ impl DynamicArray {
         Ok(Self::from_validated_vec(values, element))
     }
 
+    /// Returns an empty array carrying `element` as its runtime descriptor.
+    ///
+    /// The returned array owns no element allocation. It exists for contexts such as typed empty
+    /// CEL array literals, where the element descriptor is known but no element value exists from
+    /// which to infer one.
+    ///
+    /// - Postcondition: the result has length and capacity zero.
+    /// - Complexity: O(1).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_runtime::{ArrayElementType, DynamicArray};
+    ///
+    /// let element = ArrayElementType::leaf::<i32>().unwrap();
+    /// let array = DynamicArray::empty_with_element_type(element.clone());
+    ///
+    /// assert!(array.is_empty());
+    /// assert_eq!(array.element_type(), &element);
+    /// ```
+    #[must_use]
+    pub fn empty_with_element_type(element: ArrayElementType) -> Self {
+        let ptr = dangling_for(&element);
+        unsafe { Self::try_from_raw_parts(ptr, 0, 0, element) }
+            .expect("an empty typed array satisfies DynamicArray's invariants")
+    }
+
     /// Takes ownership of a vector after checking an explicit element descriptor.
     ///
     /// # Errors
@@ -1224,6 +1302,103 @@ mod tests {
                 .unwrap();
 
         assert!(array.try_into_vec::<DynamicArray>().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_with_element_type_preserves_leaf_descriptor() {
+        let element = ArrayElementType::leaf::<i32>().unwrap();
+
+        let array = DynamicArray::empty_with_element_type(element.clone());
+
+        assert!(array.is_empty());
+        assert_eq!(array.capacity(), 0);
+        assert_eq!(array.element_type(), &element);
+        assert!(array.try_into_vec::<i32>().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_with_element_type_preserves_nested_descriptor() {
+        let element = ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap());
+
+        let array = DynamicArray::empty_with_element_type(element.clone());
+
+        assert!(array.is_empty());
+        assert_eq!(array.capacity(), 0);
+        assert_eq!(array.element_type(), &element);
+        assert!(array.try_into_vec::<DynamicArray>().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_with_element_type_preserves_zero_sized_leaf_descriptor() {
+        let element = ArrayElementType::leaf::<DroppingZst>().unwrap();
+
+        let array = DynamicArray::empty_with_element_type(element.clone());
+
+        assert!(array.is_empty());
+        assert_eq!(array.capacity(), 0);
+        assert_eq!(array.element_type(), &element);
+        assert!(array.try_into_vec::<DroppingZst>().unwrap().is_empty());
+    }
+
+    #[test]
+    fn with_type_name_renames_a_leaf_without_changing_its_identity() {
+        let element = ArrayElementType::leaf::<String>()
+            .unwrap()
+            .with_type_name("String");
+
+        assert_eq!(element.type_name(), "String");
+        assert_eq!(element.type_id(), TypeId::of::<String>());
+        assert_eq!(element.size(), std::mem::size_of::<String>());
+        assert_eq!(element.align(), std::mem::align_of::<String>());
+        assert!(element.same_shape_and_layout(&ArrayElementType::leaf::<String>().unwrap()));
+    }
+
+    /// Drops a `String` in place through a distinct function item, standing in for the separate
+    /// `raw_dropper_for::<String>` instantiation another crate would supply.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`RawDropper`]: `ptr` points to a live, aligned `String`.
+    unsafe fn drop_string_through_another_instantiation(
+        ptr: *mut u8,
+        associated: &[crate::AssociatedType],
+    ) {
+        // SAFETY: the caller upholds `RawDropper`'s contract for `String`, which is exactly what
+        // `raw_dropper_for::<String>()` requires.
+        unsafe { raw_dropper_for::<String>()(ptr, associated) }
+    }
+
+    /// A host that resolves `[Celsius]` through its own registry builds the descriptor in its own
+    /// crate, so its `raw_dropper_for::<T>` instantiation need not share an address with the one
+    /// the collected values carry. Descriptor acceptance must not depend on that address.
+    #[test]
+    fn descriptors_for_one_type_match_across_distinct_dropper_instantiations() {
+        let direct = ArrayElementType::leaf::<String>().unwrap();
+        let indirect = ArrayElementType::leaf_from_parts(
+            TypeId::of::<String>(),
+            Cow::Borrowed("Celsius"),
+            std::mem::size_of::<String>(),
+            std::mem::align_of::<String>(),
+            drop_string_through_another_instantiation,
+        );
+
+        assert!(direct.same_shape_and_layout(&indirect));
+        assert!(indirect.same_shape_and_layout(&direct));
+        assert!(
+            ArrayElementType::array_of(direct)
+                .same_shape_and_layout(&ArrayElementType::array_of(indirect))
+        );
+    }
+
+    #[test]
+    fn with_type_name_on_a_leaf_is_visible_through_a_nested_descriptor() {
+        let element = ArrayElementType::array_of(
+            ArrayElementType::leaf::<String>()
+                .unwrap()
+                .with_type_name("String"),
+        );
+
+        assert_eq!(element.display_name(), "[String]");
     }
 
     #[test]

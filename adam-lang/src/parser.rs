@@ -211,12 +211,12 @@ impl AdamParser {
     /// `op_lookup` is forwarded to the embedded [`CELParser`] when compiling method
     /// body expressions. See
     /// [`OpLookup::push_library_scope`](cel_parser::OpLookup::push_library_scope) for how to
-    /// install a function library (e.g. `cel-std`) before parsing.
+    /// install a function library (e.g. `cel-std`) before parsing. The embedded CEL parser also
+    /// receives a snapshot of `types`' registered scalar leaf names so typed array annotations
+    /// such as `[]: [Custom]` resolve custom Adam types during direct parsing.
     pub fn new(types: TypeRegistry, op_lookup: OpLookup) -> Self {
-        AdamParser {
-            types,
-            cel: CELParser::new(op_lookup),
-        }
+        let cel = CELParser::with_type_resolver(op_lookup, types.cel_type_resolver());
+        AdamParser { types, cel }
     }
 
     /// Returns a mutable reference to the embedded CEL operation lookup.
@@ -695,6 +695,35 @@ impl AdamParser {
             }
         };
         Ok((shape, cell_id))
+    }
+
+    /// Returns the DSL name `self.types` registered `type_id` under, or `"?"` when it is
+    /// unregistered.
+    ///
+    /// Keeps an "expected"/"got" pair in one naming scheme: `TypeRegistry::display_name` renders
+    /// the expected side from registered names, while a live value's `ValueType::type_name` is a
+    /// Rust type path (`alloc::string::String` for the type registered as `String`).
+    fn registered_type_name(&self, type_id: TypeId) -> &str {
+        self.types.registered_name(type_id).unwrap_or("?")
+    }
+
+    /// Returns one live tuple element's type name in the same registered naming scheme
+    /// [`TypeRegistry::display_name`] uses, recursing into nested tuples. Falls back to the
+    /// value's own Rust type path for an unregistered leaf, which has no registered name.
+    ///
+    /// - Complexity: O(n) in the number of (nested) elements.
+    fn associated_display_name(&self, elem: &cel_runtime::AssociatedType) -> String {
+        match elem.value_type.tuple_elements() {
+            Some(children) => self
+                .shape_of_associated(children)
+                .map(|shape| self.types.display_name(&shape))
+                .unwrap_or_else(|_| elem.value_type.type_name().to_string()),
+            None => self
+                .types
+                .registered_name(elem.value_type.type_id())
+                .unwrap_or_else(|| elem.value_type.type_name())
+                .to_string(),
+        }
     }
 
     /// Recursively converts a live tuple's `AssociatedType` shape into a `TypeShape`, by looking
@@ -1648,11 +1677,7 @@ impl AdamParser {
                     })?;
                     if actual_type_id != *out_type_id {
                         let expected = self.types.display_name(out_shape);
-                        let got = self
-                            .types
-                            .entry_by_type_id(actual_type_id)
-                            .map(|e| e.type_name.to_string())
-                            .unwrap_or_else(|| "?".to_string());
+                        let got = self.registered_type_name(actual_type_id);
                         return Err(ctx.err_at(format!(
                             "output `{out_name}`: type mismatch: expected `{expected}`, got `{got}`"
                         )));
@@ -1720,7 +1745,7 @@ impl AdamParser {
                     return Err(ctx.err_at(format!(
                         "output {i} `{out_name}`: type mismatch: expected `{}`, got `{}`",
                         self.types.display_name(out_shape),
-                        elem.value_type.type_name()
+                        self.associated_display_name(elem)
                     )));
                 }
                 extractors.push(match out_shape {
@@ -1963,9 +1988,40 @@ mod tests {
     use super::*;
     use crate::TypeRegistry;
     use cel_parser::OpLookup;
+    use cel_runtime::DynamicArray;
 
     fn parser() -> AdamParser {
         AdamParser::new(TypeRegistry::new(), OpLookup::new())
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct Custom(i32);
+
+    #[derive(Clone)]
+    struct CountFn;
+
+    fn custom_lookup() -> OpLookup {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, arity, _span| match name {
+            "left" if arity == 0 => {
+                segment.op0(|| Custom(1));
+                Ok(true)
+            }
+            "right" if arity == 0 => {
+                segment.op0(|| Custom(2));
+                Ok(true)
+            }
+            "count" if arity == 0 => {
+                segment.op0(|| CountFn);
+                Ok(true)
+            }
+            "()" if arity == 2 => {
+                segment.op2(|_callee: CountFn, array: DynamicArray| array.len() as i32)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        });
+        lookup
     }
 
     #[test]
@@ -2011,6 +2067,66 @@ mod tests {
         let mut p = AdamParser::new(reg, OpLookup::new());
         let result = p.parse_str("sheet s { cell x: NoDef; }");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_cell_initializer_supports_registry_typed_arrays() {
+        let mut reg = TypeRegistry::new();
+        reg.register_no_default::<Custom>("Custom");
+        let mut parser = AdamParser::new(reg, custom_lookup());
+
+        let parsed = parser
+            .parse_str(
+                "sheet s { \
+                    cell values: i32 = count([left, right]: [Custom]); \
+                    cell empty: i32 = count([]: [Custom]); \
+                    cell nested: i32 = count([[]: [Custom]]: [[Custom]]); \
+                }",
+            )
+            .unwrap();
+
+        let (values_id, _) = parsed.cell_names["values"];
+        assert_eq!(*parsed.read::<i32>(values_id).unwrap(), 2);
+
+        let (empty_id, _) = parsed.cell_names["empty"];
+        assert_eq!(*parsed.read::<i32>(empty_id).unwrap(), 0);
+
+        let (nested_id, _) = parsed.cell_names["nested"];
+        assert_eq!(*parsed.read::<i32>(nested_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_cell_initializer_rejects_unknown_registry_typed_arrays() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), custom_lookup());
+        let err = parser
+            .parse_str("sheet s { cell values = []: [Custom]; }")
+            .expect_err("unknown custom array annotations must fail");
+
+        assert!(
+            err.message().contains("unknown type `Custom`"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn parse_cell_initializer_rejects_tuple_typed_array_annotations() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let err = parser
+            .parse_str("sheet s { cell values = []: [(i32, f64)]; }")
+            .expect_err("tuple-valued array annotations must remain unsupported");
+
+        assert!(
+            err.message()
+                .contains("tuple-valued array elements are not supported"),
+            "got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("issues/213"),
+            "the diagnostic must reference the tuple-array issue, got: {}",
+            err.message()
+        );
     }
 
     #[test]
@@ -2784,6 +2900,42 @@ mod tests {
         let err = result.expect_err("expected Err");
         let msg = err.message().to_lowercase();
         assert!(msg.contains("arity"), "{msg}");
+    }
+
+    #[test]
+    fn parse_method_output_type_mismatch_names_the_registered_type() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell a: String = "x";
+                cell x: i32;
+                relationship { x := a; }
+            }
+        "#,
+        );
+        let err = result.expect_err("a String body for an i32 output must be an error");
+        let msg = err.message();
+        assert!(msg.contains("got `String`"), "{msg}");
+        assert!(!msg.contains("::"), "no Rust type path may leak: {msg}");
+    }
+
+    #[test]
+    fn parse_method_destructured_output_type_mismatch_names_the_registered_type() {
+        let result = parser().parse_str(
+            r#"
+            sheet s {
+                cell a: String = "x";
+                cell b: i32 = 1;
+                cell x: i32;
+                cell y: i32;
+                relationship { (x, y) := (a, b); }
+            }
+        "#,
+        );
+        let err = result.expect_err("a String tuple element for an i32 output must be an error");
+        let msg = err.message();
+        assert!(msg.contains("got `String`"), "{msg}");
+        assert!(!msg.contains("::"), "no Rust type path may leak: {msg}");
     }
 
     #[test]

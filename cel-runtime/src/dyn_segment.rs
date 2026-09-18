@@ -936,6 +936,51 @@ impl DynSegment {
             "an empty array literal has no inferable element type; \
              see https://github.com/stlab/cel-rs/issues/212"
         );
+        self.make_array_with_element_type(n, ambient_start, None)
+    }
+
+    /// Collapses the top `n` stack values into one [`DynamicArray`] validated against `element`.
+    ///
+    /// When `n` is zero, this emits a typed empty array that carries `element` without inferring
+    /// it from any value. When `n` is non-zero, every collected value must have exactly
+    /// `element`'s recursive shape and layout.
+    ///
+    /// - Precondition: at least `n` values are on the stack, pushed contiguously starting at
+    ///   `ambient_start` with no other values interleaved.
+    ///
+    /// # Errors
+    /// Returns an error, leaving the segment exactly as it was, when the stack holds fewer than
+    /// `n` values, when an element is a CEL tuple (see
+    /// <https://github.com/stlab/cel-rs/issues/213>), when a collected value does not match
+    /// `element`, or when the array's storage layout would overflow.
+    ///
+    /// - Complexity: O(n) in the total (nested) element count.
+    pub fn make_typed_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        element: ArrayElementType,
+    ) -> Result<()> {
+        self.make_array_with_element_type(n, ambient_start, Some(element))
+    }
+
+    /// Collapses the top `n` stack values into one [`DynamicArray`], optionally validating them
+    /// against an explicit descriptor.
+    ///
+    /// - Precondition: at least `n` values are on the stack, pushed contiguously starting at
+    ///   `ambient_start` with no other values interleaved.
+    ///
+    /// # Errors
+    /// Returns an error under the combined conditions documented by
+    /// [`make_array`](Self::make_array) and [`make_typed_array`](Self::make_typed_array).
+    ///
+    /// - Complexity: O(n) in the total (nested) element count.
+    fn make_array_with_element_type(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        explicit_element: Option<ArrayElementType>,
+    ) -> Result<()> {
         ensure!(
             n <= self.stack_ids.len(),
             "make_array: expected {n} array element(s) on the stack, found {}",
@@ -950,22 +995,68 @@ impl DynSegment {
             self.stack_offset_after(start),
             "ambient_start must equal the stack offset where the array elements begin"
         );
-        let expected = &self.stack_ids[start].value_type;
-        let element = expected
-            .as_array_element()
-            .ok_or_else(|| Self::tuple_element_error(0))?;
-        for (offset, info) in self.stack_ids[start + 1..].iter().enumerate() {
-            let index = offset + 1;
-            ensure!(
-                !matches!(info.value_type.kind(), ValueKind::Tuple(_)),
-                Self::tuple_element_error(index)
-            );
-            ensure!(
-                expected.same_shape(&info.value_type),
-                "array element {index} has type {}, expected {}",
-                info.value_type.type_name(),
-                expected.type_name()
-            );
+        let element = match explicit_element {
+            Some(element) => {
+                for (index, info) in self.stack_ids[start..].iter().enumerate() {
+                    ensure!(
+                        !matches!(info.value_type.kind(), ValueKind::Tuple(_)),
+                        Self::tuple_element_error(index)
+                    );
+                    let found = info
+                        .value_type
+                        .as_array_element()
+                        .expect("non-tuple values have array element descriptors");
+                    ensure!(
+                        element.same_shape_and_layout(&found),
+                        "array element {index} has type {}, expected {}",
+                        info.value_type.type_name(),
+                        element.display_name()
+                    );
+                }
+                element
+            }
+            None => {
+                let expected = &self.stack_ids[start].value_type;
+                let element = expected
+                    .as_array_element()
+                    .ok_or_else(|| Self::tuple_element_error(0))?;
+                for (offset, info) in self.stack_ids[start + 1..].iter().enumerate() {
+                    let index = offset + 1;
+                    ensure!(
+                        !matches!(info.value_type.kind(), ValueKind::Tuple(_)),
+                        Self::tuple_element_error(index)
+                    );
+                    ensure!(
+                        expected.same_shape(&info.value_type),
+                        "array element {index} has type {}, expected {}",
+                        info.value_type.type_name(),
+                        expected.type_name()
+                    );
+                }
+                element
+            }
+        };
+        if n == 0 {
+            check_array_capacity(&element, 0)?;
+
+            let value_type = ValueType::array(element.clone());
+            let dest_base = align_index(value_type.align, ambient_start);
+            let padding = dest_base != ambient_start;
+            self.segment.update_base_alignment(value_type.align);
+            self.segment.raw0_(move |stack| {
+                let array = DynamicArray::empty_with_element_type(element.clone());
+                let pushed_padding = stack.push(array);
+                debug_assert_eq!(
+                    pushed_padding, padding,
+                    "the collected array's padding must match the parse-time prediction"
+                );
+                Ok(())
+            });
+            self.stack_ids.push(StackInfo {
+                padding,
+                value_type,
+            });
+            return Ok(());
         }
         check_array_capacity(&element, n)?;
 
@@ -4304,6 +4395,94 @@ mod tests {
 
         assert!(error.contains("element 1"), "{error}");
         assert!(error.contains("213"), "{error}");
+    }
+
+    #[test]
+    fn make_typed_array_collects_an_empty_array_from_a_leaf_descriptor() -> anyhow::Result<()> {
+        let mut segment = DynSegment::new::<()>();
+        let element = ArrayElementType::leaf::<i32>().unwrap();
+
+        segment.make_typed_array(0, segment.current_stack_offset(), element)?;
+
+        let array: DynamicArray = segment.call0()?;
+        assert!(array.is_empty());
+        assert_eq!(
+            array.element_type(),
+            &ArrayElementType::leaf::<i32>().unwrap()
+        );
+        assert!(array.try_into_vec::<i32>()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn make_typed_array_collects_an_empty_array_from_a_nested_descriptor() -> anyhow::Result<()> {
+        let mut segment = DynSegment::new::<()>();
+        let element = ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap());
+
+        segment.make_typed_array(0, segment.current_stack_offset(), element.clone())?;
+
+        let array: DynamicArray = segment.call0()?;
+        assert!(array.is_empty());
+        assert_eq!(array.element_type(), &element);
+        assert!(array.try_into_vec::<DynamicArray>()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn make_typed_array_rejects_a_descriptor_whose_layout_mismatches_the_values() {
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.just(0i32);
+        segment.just(1i32);
+
+        let error = segment
+            .make_typed_array(2, start, ArrayElementType::leaf::<u32>().unwrap())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("element 0"), "{error}");
+        assert!(error.contains("i32") && error.contains("u32"), "{error}");
+    }
+
+    /// Drops a `String` in place through a distinct function item, standing in for the separate
+    /// `raw_dropper_for::<String>` instantiation another crate would supply.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`RawDropper`]: `ptr` points to a live, aligned `String`.
+    unsafe fn drop_string_through_another_instantiation(
+        ptr: *mut u8,
+        associated: &[AssociatedType],
+    ) {
+        // SAFETY: the caller upholds `RawDropper`'s contract for `String`, which is exactly what
+        // `raw_dropper_for::<String>()` requires.
+        unsafe { raw_dropper_for::<String>()(ptr, associated) }
+    }
+
+    /// A host resolving a source-level annotation (`[]: [Celsius]`) builds its descriptor in its
+    /// own crate, with its own `raw_dropper_for::<T>` instantiation and its own source-level type
+    /// name. Such a descriptor describes the same values and must be accepted.
+    #[test]
+    fn make_typed_array_accepts_a_host_resolved_descriptor_for_the_same_type() -> anyhow::Result<()>
+    {
+        let mut segment = DynSegment::new::<()>();
+        let start = segment.current_stack_offset();
+        segment.just("20".to_string());
+        segment.just("21".to_string());
+
+        let host_resolved = ArrayElementType::leaf_from_parts(
+            TypeId::of::<String>(),
+            Cow::Borrowed("Celsius"),
+            std::mem::size_of::<String>(),
+            std::mem::align_of::<String>(),
+            drop_string_through_another_instantiation,
+        );
+
+        segment.make_typed_array(2, start, host_resolved)?;
+
+        let array: DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<String>()?, vec!["20", "21"]);
+        Ok(())
     }
 
     #[test]
