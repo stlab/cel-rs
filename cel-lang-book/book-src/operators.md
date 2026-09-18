@@ -103,7 +103,7 @@ not chain.
   `u128`, `usize`, `f32`, `f64`, `bool`, and `String`.
 - Integer targets accept integer, floating-point, and `bool` sources.
   Floating-point targets accept integer and floating-point sources.
-  `bool` and `String` cast only to themselves.
+  `bool` and `String` targets accept only their same-type sources.
 - Integer-to-integer casts check that the source fits in the target.
   Floating-point-to-integer casts require a finite, in-range source and
   truncate toward zero. `f64 as f32` checks finite range before narrowing.

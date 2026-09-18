@@ -126,7 +126,7 @@ true as i32
 | `==`, `!=` | homogeneous numeric operands, homogeneous `bool`, or homogeneous `String` | Produces `bool`. |
 | `<`, `<=`, `>`, `>=` | homogeneous numeric operands or homogeneous `String` | Produces `bool`. |
 | range forms | homogeneous numeric endpoints, or no endpoints for `..` | `..=` requires a right endpoint. Endpoints are full expressions. |
-| `as` | expression plus built-in scalar target name | Integer targets accept integer, floating-point, and `bool` sources. `f32`/`f64` targets accept integer and floating-point sources. `bool` and `String` only cast to themselves. |
+| `as` | expression plus built-in scalar target name | Integer targets accept integer, floating-point, and `bool` sources. `f32`/`f64` targets accept integer and floating-point sources. `bool` and `String` targets accept only their same-type sources. |
 | call and `.N` | a valid callee and arguments, or a tuple plus an unsuffixed integer | `.N` applies to tuples only. |
 
 ## Numeric call table

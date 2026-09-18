@@ -148,8 +148,8 @@ trunc(-3.2)
 ## Exact rules
 
 - Standard-library functions use ordinary CEL call syntax.
-- `min`, `max`, `clamp`, `abs`, `signum`, `sqrt`, `floor`, `ceil`, and
-  `trunc` belong to the standard library.
+- `round`, `min`, `max`, `clamp`, `abs`, `signum`, `sqrt`, `floor`, `ceil`,
+  and `trunc` belong to the standard library.
 - Standard-library operations are available only when the evaluation
   environment installs the library.
 - `min` and `max` require same-type numeric operands.

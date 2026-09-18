@@ -1546,7 +1546,7 @@ pub struct OpLookup {
 }
 
 impl OpLookup {
-    /// creates a new operation lookup with only built-in operations - the
+    /// Creates a new operation lookup with only built-in operations - the
     /// infix/prefix operators, the cast operator (`as`), and range syntax.
     ///
     /// # Examples
