@@ -1119,8 +1119,8 @@ fn signatures_for(name: &str) -> Option<&'static [OpSignature]> {
 //   - float -> int: checked - `Err` for non-finite or out-of-range values;
 //     a value with a fractional part is *truncated* toward zero, same as
 //     Rust's `as` (checking is only about range/finiteness, not fractional
-//     truncation policy - `round(x) as i32` is the idiom for "round to
-//     nearest first").
+//     truncation policy - use a standard-library rounding function before
+//     converting when nearest-integer behavior is needed).
 //   - f32 -> f64: infallible (always exact). f64 -> f32: checked (may not
 //     fit in `f32`'s finite range).
 //   - bool -> int: infallible (`as`), matching Rust exactly (`true` -> `1`,

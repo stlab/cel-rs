@@ -22,13 +22,16 @@ fn arithmetic_respects_precedence() {
 }
 
 #[test]
-fn round_is_available_with_the_standard_library() {
+fn round_is_not_available_with_the_standard_library() {
     assert!(
         CELParser::new(OpLookup::new())
             .parse_str("round(-3.5)")
             .is_err()
     );
-    assert_eq!(eval_with_std::<f64>("round(-3.5)"), -4.0);
+
+    let mut lookup = OpLookup::new();
+    install_std(&mut lookup);
+    assert!(CELParser::new(lookup).parse_str("round(-3.5)").is_err());
 }
 
 #[test]
@@ -109,6 +112,8 @@ fn optional_standard_library_supports_float_projection_examples() {
     assert_eq!(eval_with_std::<f64>("floor(-3.2)"), -4.0);
     assert_eq!(eval_with_std::<f64>("ceil(-3.2)"), -3.0);
     assert_eq!(eval_with_std::<f64>("trunc(-3.2)"), -3.0);
+    assert_eq!(eval_with_std::<f64>("round_ties_even(2.5)"), 2.0);
+    assert_eq!(eval_with_std::<f32>("fract(-3.75f32)"), -0.75);
 }
 
 #[test]

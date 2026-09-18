@@ -38,7 +38,7 @@ argument_list = expression { "," expression } .
 ```text
 10 + 20 * 5
 "cel" + "-" + "lang"
-ok && round(3.5) > 3.0
+ok && round_ties_even(3.5) > 3.0
 1u64 << 3u32
 1.5 as i32
 1 + 2..3 * 4

@@ -20,12 +20,11 @@ argument_list = expression { "," expression } .
 
 | Library | Functions | Availability |
 | --- | --- | --- |
-| Standard library | `round`, `min`, `max`, `clamp`, `abs`, `signum`, `sqrt`, `floor`, `ceil`, `trunc` | Available when the evaluation environment installs the library. |
+| Standard library | `min`, `max`, `clamp`, `abs`, `signum`, `sqrt`, `floor`, `ceil`, `trunc`, `fract`, `round_ties_even` | Available when the evaluation environment installs the library. |
 
 ## Worked examples
 
 ```text
-round(3.5)
 min(3i32, -5i32)
 max(3.5f64, 2.5f64)
 clamp(-2i32, 0i32, 10i32)
@@ -35,13 +34,16 @@ sqrt(9.0f32)
 floor(-3.2)
 ceil(-3.2)
 trunc(-3.2)
+fract(-3.75f32)
+round_ties_even(2.5)
 ```
 
 ## Numeric domains
 
 None of the documented functions are integer-only.
 
-- `round`, `sqrt`, `floor`, `ceil`, and `trunc` are float-only.
+- `sqrt`, `floor`, `ceil`, `trunc`, `fract`, and `round_ties_even` are
+  float-only.
 - `min`, `max`, and `clamp` support both integers and floats.
 - `abs` and `signum` support signed integers and floats, but not unsigned
   integers.
@@ -52,23 +54,9 @@ operands match: `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`,
 the operand type.
 
 `abs` and `signum` accept `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`,
-and `f64`. `sqrt`, `floor`, `ceil`, and `trunc` accept `f32` and `f64`. Each
-of those functions returns the same type it receives.
-
-## `round(x)`
-
-`round` is a standard-library operation.
-
-- Accepted operand type: `f64`
-- Result type: `f64`
-- Semantics: rounds to the nearest integral value represented as `f64`
-- Halfway values round away from zero
-- Successful calls are infallible
-
-```text
-round(3.5)
-round(-3.5)
-```
+and `f64`. `sqrt`, `floor`, `ceil`, `trunc`, `fract`, and
+`round_ties_even` accept `f32` and `f64`. Each of those functions returns the
+same type it receives.
 
 ## `min(a, b)` and `max(a, b)`
 
@@ -125,7 +113,7 @@ signum(-7i32)
 signum(-3.5)
 ```
 
-## `sqrt(x)`, `floor(x)`, `ceil(x)`, and `trunc(x)`
+## `sqrt(x)`, `floor(x)`, `ceil(x)`, `trunc(x)`, `fract(x)`, and `round_ties_even(x)`
 
 These are standard-library operations.
 
@@ -136,6 +124,9 @@ These are standard-library operations.
 - `floor` rounds toward negative infinity.
 - `ceil` rounds toward positive infinity.
 - `trunc` rounds toward zero.
+- `fract` returns the fractional part.
+- `round_ties_even` rounds to the nearest integer, with halfway values rounded
+  to the nearest even integer.
 - Successful calls are infallible.
 
 ```text
@@ -143,26 +134,30 @@ sqrt(9.0f32)
 floor(-3.2)
 ceil(-3.2)
 trunc(-3.2)
+fract(-3.75f32)
+round_ties_even(2.5)
 ```
 
 ## Exact rules
 
 - Standard-library functions use ordinary CEL call syntax.
-- `round`, `min`, `max`, `clamp`, `abs`, `signum`, `sqrt`, `floor`, `ceil`,
-  and `trunc` belong to the standard library.
+- `min`, `max`, `clamp`, `abs`, `signum`, `sqrt`, `floor`, `ceil`, `trunc`,
+  `fract`, and `round_ties_even` belong to the standard library.
 - Standard-library operations are available only when the evaluation
   environment installs the library.
 - `min` and `max` require same-type numeric operands.
 - `clamp` requires same-type operands and ordered bounds.
 - `abs` does not accept unsigned integers.
 - `signum` does not accept unsigned integers.
-- `sqrt`, `floor`, `ceil`, and `trunc` do not accept integers.
+- `sqrt`, `floor`, `ceil`, `trunc`, `fract`, and `round_ties_even` do not
+  accept integers.
 - The documented successful calls are otherwise infallible except for `clamp`
   with unordered bounds and `abs` on the minimum signed integer.
 
 ## Edge cases
 
-- `round(-3.5)` returns `-4.0`.
+- `round_ties_even(2.5)` returns `2.0`.
+- `fract(-3.75f32)` returns `-0.75f32`.
 - `min` and `max` do not coerce mixed numeric types.
 - `clamp` reports `invalid clamp bounds` when `lo <= hi` is false.
 - `abs(-128i8)` reports `arithmetic overflow`.

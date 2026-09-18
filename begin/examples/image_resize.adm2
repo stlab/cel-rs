@@ -53,21 +53,21 @@ sheet image_resize {
     conditional resample {
         true => {
             relationship {
-                width_pixels := round(width_pixels_percent * original_width_pixels as f64 / 100.0) as i32;
+                width_pixels := round_ties_even(width_pixels_percent * original_width_pixels as f64 / 100.0) as i32;
                 width_pixels_percent := width_pixels as f64 * 100.0 / original_width_pixels as f64;
             }
             relationship {
-                height_pixels := round(height_pixels_percent * original_height_pixels as f64 / 100.0) as i32;
+                height_pixels := round_ties_even(height_pixels_percent * original_height_pixels as f64 / 100.0) as i32;
                 height_pixels_percent := height_pixels as f64 * 100.0 / original_height_pixels as f64;
             }
             relationship {
                 width_inches := width_pixels as f64 / resolution;
-                width_pixels := round(width_inches * resolution) as i32;
+                width_pixels := round_ties_even(width_inches * resolution) as i32;
                 resolution := width_pixels as f64 / width_inches;
             }
             relationship {
                 height_inches := height_pixels as f64 / resolution;
-                height_pixels := round(height_inches * resolution) as i32;
+                height_pixels := round_ties_even(height_inches * resolution) as i32;
                 resolution := height_pixels as f64 / height_inches;
             }
         }

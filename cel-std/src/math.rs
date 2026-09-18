@@ -10,39 +10,12 @@ use cel_parser::SourceSpan;
 use cel_runtime::DynSegment;
 use std::any::TypeId;
 
-/// Marker pushed for a bare `round` lookup; consumed by the paired `"()"` call.
-struct RoundFn;
-
 /// Marker pushed for a bare `min` lookup; consumed by the paired `"()"` call.
 struct MinFn;
 /// Marker pushed for a bare `max` lookup; consumed by the paired `"()"` call.
 struct MaxFn;
 /// Marker pushed for a bare `clamp` lookup; consumed by the paired `"()"` call.
 struct ClampFn;
-
-/// `round(x)` rounds an `f64` to the nearest integer, with halfway values away from zero.
-pub(crate) fn round_scope(
-    name: &str,
-    segment: &mut DynSegment,
-    num_operands: usize,
-    _span: SourceSpan,
-) -> Result<bool> {
-    match (name, num_operands) {
-        ("round", 0) => {
-            segment.op0(|| RoundFn);
-            Ok(true)
-        }
-        ("()", 2) => {
-            let top = segment.peek_stack_infos(2);
-            if top.len() != 2 || top[0].value_type.type_id() != TypeId::of::<RoundFn>() {
-                return Ok(false);
-            }
-            segment.op2(|_callee: RoundFn, x: f64| x.round())?;
-            Ok(true)
-        }
-        _ => Ok(false),
-    }
-}
 
 /// `min(a, b) = a.min(b)`, `max(a, b) = a.max(b)` over all 14 numeric types — `Ord::min`/
 /// `max` for integers, the inherent (NaN-avoiding) `f32`/`f64` `min`/`max` for floats.
@@ -236,10 +209,14 @@ struct FloorFn;
 struct CeilFn;
 /// Marker pushed for a bare `trunc` lookup; consumed by the paired `"()"` call.
 struct TruncFn;
+/// Marker pushed for a bare `fract` lookup; consumed by the paired `"()"` call.
+struct FractFn;
+/// Marker pushed for a bare `round_ties_even` lookup; consumed by the paired `"()"` call.
+struct RoundTiesEvenFn;
 
-/// `signum(x)` (signed integers and floats), `sqrt(x)`/`floor(x)`/`ceil(x)`/`trunc(x)`
-/// (floats only) — all infallible, matching the semantics of Rust's method of the same
-/// name (e.g. `sqrt` of a negative float yields `NaN`, not an error).
+/// `signum(x)` (signed integers and floats), and `sqrt(x)`, `floor(x)`, `ceil(x)`,
+/// `trunc(x)`, `fract(x)`, and `round_ties_even(x)` (floats only) — all infallible,
+/// matching the semantics of Rust's method of the same name.
 pub(crate) fn unary_math_scope(
     name: &str,
     segment: &mut DynSegment,
@@ -265,6 +242,14 @@ pub(crate) fn unary_math_scope(
         }
         ("trunc", 0) => {
             segment.op0(|| TruncFn);
+            Ok(true)
+        }
+        ("fract", 0) => {
+            segment.op0(|| FractFn);
+            Ok(true)
+        }
+        ("round_ties_even", 0) => {
+            segment.op0(|| RoundTiesEvenFn);
             Ok(true)
         }
         ("()", 2) => {
@@ -294,6 +279,8 @@ pub(crate) fn unary_math_scope(
             dispatch!(FloorFn, floor, [f32, f64]);
             dispatch!(CeilFn, ceil, [f32, f64]);
             dispatch!(TruncFn, trunc, [f32, f64]);
+            dispatch!(FractFn, fract, [f32, f64]);
+            dispatch!(RoundTiesEvenFn, round_ties_even, [f32, f64]);
             Ok(false)
         }
         _ => Ok(false),
@@ -786,20 +773,38 @@ mod tests {
     }
 
     #[test]
-    fn round_rounds_half_away_from_zero() -> Result<()> {
+    fn round_is_not_a_standard_library_function() {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+
         assert!(
-            cel_parser::CELParser::new(cel_parser::OpLookup::new())
+            cel_parser::CELParser::new(lookup)
                 .parse_str("round(-3.5)")
                 .is_err()
         );
+    }
 
+    #[test]
+    fn round_ties_even_rounds_halfway_values_to_the_nearest_even_integer() -> Result<()> {
         let mut lookup = OpLookup::new();
         install(&mut lookup);
         let mut segment = cel_parser::CELParser::new(lookup)
-            .parse_str("round(-3.5)")
+            .parse_str("round_ties_even(2.5)")
             .unwrap();
 
-        assert_eq!(segment.call0::<f64>()?, -4.0);
+        assert_eq!(segment.call0::<f64>()?, 2.0);
+        Ok(())
+    }
+
+    #[test]
+    fn fract_returns_the_fractional_part_of_a_float() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = cel_parser::CELParser::new(lookup)
+            .parse_str("fract(-3.75f32)")
+            .unwrap();
+
+        assert_eq!(segment.call0::<f32>()?, -0.75);
         Ok(())
     }
 }
