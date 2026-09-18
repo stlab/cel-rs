@@ -227,7 +227,10 @@ pub use parser_context::{DynSegmentContext, ParserContext};
 pub use proc_macro2::LineColumn;
 pub use trivia::Comment;
 pub use ty::Ty;
-pub use type_expr::{ResolvedArrayType, ResolvedLeafType, ResolvedType, TypeExpr, TypeResolver};
+pub use type_expr::{
+    ResolvedArrayType, ResolvedLeafType, ResolvedType, TypeExpr, TypeResolver,
+    builtin_type_resolver,
+};
 
 use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};
 
@@ -575,7 +578,7 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// * `op_lookup` - Operation lookup for resolving operators and identifiers
     pub fn new(op_lookup: OpLookup) -> Self {
-        Self::with_shared_type_resolver(op_lookup, type_expr::default_type_resolver())
+        Self::with_shared_type_resolver(op_lookup, type_expr::builtin_type_resolver())
     }
 
     /// Creates a new CEL parser with the given operation lookup and leaf type resolver.

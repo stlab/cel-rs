@@ -151,7 +151,16 @@ impl TypeResolver for BuiltinTypeResolver {
     }
 }
 
-pub(crate) fn default_type_resolver() -> Arc<dyn TypeResolver> {
+/// Returns `cel-parser`'s own built-in type resolver — every scalar name
+/// [`crate::op_table::builtin_scalar_type`] recognizes, plus every built-in generic type
+/// [`crate::op_table::builtin_generic_type`]/[`crate::op_table::builtin_generic_type_0`]
+/// recognizes (the `Range` family).
+///
+/// A host embedding `cel-parser` with its own [`TypeResolver`] (one that also knows
+/// host-specific custom types) can delegate any name it doesn't itself recognize to this
+/// resolver, so built-in types stay visible inside host-embedded CEL expressions.
+#[must_use]
+pub fn builtin_type_resolver() -> Arc<dyn TypeResolver> {
     Arc::new(BuiltinTypeResolver)
 }
 
@@ -667,5 +676,21 @@ mod tests {
             }
             other => panic!("expected a named type expression, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn builtin_type_resolver_resolves_scalars_and_generics() {
+        let resolver = crate::builtin_type_resolver();
+
+        let scalar = resolver.resolve_named_type("i32", &[]).unwrap();
+        assert_eq!(scalar.type_name(), "i32");
+
+        let arg = ResolvedType::Scalar(resolver.resolve_named_type("f64", &[]).unwrap());
+        let generic = resolver
+            .resolve_named_type("RangeInclusive", std::slice::from_ref(&arg))
+            .unwrap();
+        assert_eq!(generic.type_name(), "RangeInclusive(f64)");
+
+        assert!(resolver.resolve_named_type("not_a_type", &[]).is_none());
     }
 }
