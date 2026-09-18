@@ -136,10 +136,14 @@ pub(crate) struct BuiltinTypeResolver;
 
 impl TypeResolver for BuiltinTypeResolver {
     fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
-        if !args.is_empty() {
-            return None;
-        }
-        let builtin = op_table::builtin_scalar_type(name)?;
+        let builtin = match args {
+            [] => op_table::builtin_scalar_type(name)
+                .or_else(|| op_table::builtin_generic_type_0(name)),
+            [ResolvedType::Scalar(arg_leaf)] => {
+                op_table::builtin_generic_type(name, arg_leaf.type_name())
+            }
+            _ => None,
+        }?;
         Some(ResolvedLeafType::new(
             builtin.type_name,
             (builtin.element_type)(),
@@ -526,15 +530,58 @@ mod tests {
     }
 
     #[test]
-    fn resolve_type_expr_reports_unknown_type_when_args_are_unrecognized() {
+    fn resolve_builtin_generic_type_expr_end_to_end() {
         let mut parser = CELParser::new(OpLookup::new());
         let expr = parser.parse_type_expr_str("RangeInclusive(f64)").unwrap();
+        let resolved = parser.resolve_type_expr(&expr).unwrap();
+
+        match resolved {
+            ResolvedType::Scalar(leaf) => {
+                assert_eq!(leaf.type_name(), "RangeInclusive(f64)");
+                assert_eq!(
+                    leaf.type_id(),
+                    TypeId::of::<std::ops::RangeInclusive<f64>>()
+                );
+            }
+            other => panic!("expected a resolved scalar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_builtin_generic_type_as_array_element() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("[RangeInclusive(f64)]").unwrap();
+        let resolved = parser.resolve_type_expr(&expr).unwrap();
+        let array = crate::ResolvedArrayType::from_resolved_type(resolved, expr.span()).unwrap();
+
+        assert_eq!(
+            array.element_type().type_id(),
+            TypeId::of::<std::ops::RangeInclusive<f64>>()
+        );
+    }
+
+    #[test]
+    fn resolve_range_full_generic_type_expr() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("RangeFull()").unwrap();
+        let resolved = parser.resolve_type_expr(&expr).unwrap();
+
+        match resolved {
+            ResolvedType::Scalar(leaf) => assert_eq!(leaf.type_name(), "RangeFull"),
+            other => panic!("expected a resolved scalar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_type_expr_reports_unknown_type_when_args_are_unrecognized() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("Wrapper(f64)").unwrap();
         let err = parser
             .resolve_type_expr(&expr)
-            .expect_err("no resolver registers RangeInclusive yet in this test");
+            .expect_err("no resolver registers Wrapper as a built-in generic type");
 
         assert!(
-            err.message().contains("unknown type `RangeInclusive`"),
+            err.message().contains("unknown type `Wrapper`"),
             "got: {}",
             err.message()
         );
