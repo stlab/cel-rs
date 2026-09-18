@@ -7,6 +7,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  MDBOOK_VERSION: 0.5.4
 
 # Only one Pages deployment may run at a time; let a newer push supersede an
 # in-flight one rather than queuing behind it.
@@ -18,13 +19,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
 
     - name: Cache dependencies
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
 
     # --lib skips `xtask` automatically (it has no library target). `begin` is excluded
     # explicitly, not just left to `--lib`: `--lib` only filters which *targets* get
@@ -43,9 +46,7 @@ jobs:
       run: echo '<meta http-equiv="refresh" content="0; url=cel_rs/index.html">' > target/doc/index.html
 
     - name: Install mdBook
-      uses: peaceiris/actions-mdbook@v2
-      with:
-        mdbook-version: 'latest'
+      run: cargo install mdbook --version "$MDBOOK_VERSION" --locked
 
     - name: Install the live-examples mdBook preprocessor
       run: cargo install --path adam-lang-book-preprocessor
@@ -83,7 +84,7 @@ jobs:
         rm -rf target/doc/cel-book
         cp -r cel-lang-book/book-dist target/doc/cel-book
 
-    - uses: actions/upload-pages-artifact@v3
+    - uses: actions/upload-pages-artifact@v5
       with:
         path: target/doc
 
@@ -98,4 +99,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
     - id: deployment
-      uses: actions/deploy-pages@v4
+      uses: actions/deploy-pages@v5
