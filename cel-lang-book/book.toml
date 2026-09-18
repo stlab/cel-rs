@@ -1,6 +1,6 @@
 [book]
-title = "The CEL Language"
-description = "A static tutorial and reference book for the CEL implementation in cel-parser and cel-runtime"
+title = "The Common Expression Language"
+description = "A tutorial and reference for CEL."
 authors = ["stlab"]
 language = "en"
 src = "book-src"

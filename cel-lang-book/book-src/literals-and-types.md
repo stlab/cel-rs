@@ -1,69 +1,153 @@
 # Literals and types
 
-CEL literals are ordinary Rust token literals fed through `proc_macro2` and
-the `cel-parser` lexer. The parser accepts integer, float, boolean, string,
-and character literals, then turns them into runtime values before execution.
-That means the book can talk about a parsed expression as a `DynSegment`, and
-about a runtime result as the value produced by `call0` or another call method.
+CEL source includes literal values for numbers, booleans, text, characters, and
+bytes. It also uses tuple, array, range, and closure syntax to build larger
+values from expressions. For the full grammar of these forms, see the
+[Reference Manual](reference.md).
 
-```rust
-use cel_parser::{CELParser, OpLookup};
+## Built-in scalar type names
 
-let mut segment = CELParser::new(OpLookup::new()).parse_str("10u32").unwrap();
-assert_eq!(segment.call0::<u32>().unwrap(), 10);
+These sixteen names are the built-in scalar type names used by `as` casts and
+typed closure parameters.
+
+| Category | Types |
+| --- | --- |
+| Signed integers | `i8`, `i16`, `i32`, `i64`, `i128`, `isize` |
+| Unsigned integers | `u8`, `u16`, `u32`, `u64`, `u128`, `usize` |
+| Floating-point numbers | `f32`, `f64` |
+| Other scalars | `bool`, `String` |
+
+The language also accepts character, byte-string, C-string, and unit values in
+expressions. The named scalar type set remains the sixteen type names listed
+above.
+
+## Syntax
+
+```text
+literal = integer_literal
+        | floating_point_literal
+        | boolean_literal
+        | string_literal
+        | character_literal
+        | byte_literal
+        | byte_string_literal
+        | c_string_literal .
 ```
 
-The checked examples in
-[cel-lang-book/tests/examples.rs](https://github.com/stlab/cel-rs/blob/main/cel-lang-book/tests/examples.rs)
-exercise the same path for arithmetic, booleans, strings, and custom name
-resolution.
+## Integer literals
 
-## Literal forms
+An integer literal is a whole number optionally followed by one of the accepted
+integer suffixes.
 
-- Integer literals use Rust suffixes such as `i32`, `u32`, `f32`, and `f64`.
-  Unsuffixed integers default to `i32`.
-- Float literals accept the default `f64` form and explicit `f32`/`f64`
-  suffixes.
-- Boolean literals are `true` and `false`.
-- String and character literals are passed through as runtime `String` and
-  `char` values.
+| Suffix | Resulting type |
+| --- | --- |
+| none | `i32` |
+| `i8` | `i8` |
+| `i16` | `i16` |
+| `i32` | `i32` |
+| `i64` | `i64` |
+| `i128` | `i128` |
+| `isize` | `isize` |
+| `u8` | `u8` |
+| `u16` | `u16` |
+| `u32` | `u32` |
+| `u64` | `u64` |
+| `u128` | `u128` |
+| `usize` | `usize` |
 
-These forms are the ones demonstrated by the parser tests and by the
-checked examples in the book.
+Unary `-` combines with a numeric literal to form a negative numeric
+expression.
 
-## Identifiers and runtime values
-
-An identifier is not automatically a variable. It becomes a runtime value only
-if the active `OpLookup` resolves it, either through a built-in operation or a
-custom scope.
-
-```rust
-use cel_parser::{CELParser, OpLookup};
-
-let mut lookup = OpLookup::new();
-lookup.push_scope(|name, segment, num_operands, _span| match (name, num_operands) {
-    ("x", 0) => {
-        segment.op0(|| 10i32);
-        Ok(true)
-    }
-    ("y", 0) => {
-        segment.op0(|| 20i32);
-        Ok(true)
-    }
-    _ => Ok(false),
-});
-
-let mut segment = CELParser::new(lookup).parse_str("x + y").unwrap();
-assert_eq!(segment.call0::<i32>().unwrap(), 30);
+```text
+0
+42i8
+42i64
+42u16
+42u128
+42usize
+-1i32
 ```
 
-The parser tests for custom name lookup live in
-[cel-lang-book/tests/examples.rs](https://github.com/stlab/cel-rs/blob/main/cel-lang-book/tests/examples.rs).
+## Floating-point literals
 
-## Notes
+A floating-point literal uses decimal or exponent notation, optionally followed
+by a floating-point suffix.
 
-- Literal syntax is determined by Rust tokenization, not by a hand-written
-  CEL-specific lexer.
-- The book does not claim support for every CEL dialect literal form.
-- See the parser grammar in `cel-parser/src/lib.rs` for the exact production
-  rules that turn these tokens into expressions.
+| Suffix | Resulting type |
+| --- | --- |
+| none | `f64` |
+| `f64` | `f64` |
+| `f32` | `f32` |
+
+```text
+3.5
+1e3
+0.25f64
+6.022e23f32
+-3.5
+```
+
+## Boolean, string, character, byte, and unit values
+
+Boolean literals are `true` and `false`. String literals produce `String`
+values. Character literals produce `char` values. Byte literals produce `u8`
+values. Byte-string and C-string literals produce byte-oriented string values.
+Write the unit value as `()`.
+
+```text
+true
+false
+"hello"
+'a'
+b'A'
+b"bytes"
+c"header"
+()
+```
+
+A byte literal such as `b'A'` and an explicitly suffixed integer such as `65u8`
+both denote `u8` values.
+
+## Compound values
+
+CEL also builds compound values from ordinary expressions:
+
+- `()` is the unit value, `(expr)` is grouping, `(expr,)` is a 1-tuple, and
+  `(a, b, c)` is a tuple.
+- Arrays are homogeneous bracketed lists. An unannotated array is non-empty;
+  a type annotation such as `[]: [i32]` supplies the element type for an empty
+  array.
+- `|| expr` and `|x: T| expr` are closure values.
+- These forms can nest inside calls, tuples, arrays, conditionals, and one
+  another wherever the grammar permits.
+
+```text
+(1,)
+(1, 2, 3)
+[0, 1, 2]
+[0, 1]: [i32]
+[]: [i32]
+|x: i32| x + 1
+```
+
+## Range values
+
+A range expression produces a range value from zero, one, or two numeric
+endpoints. CEL supports bounded, half-bounded, and unbounded forms:
+
+```text
+a..b
+a..=b
+a..
+..b
+..=b
+..
+```
+
+Endpoint-bearing ranges require homogeneous numeric endpoints. Each endpoint
+is a full expression, so operators inside either side are parsed before the
+range is formed. The [Operators](operators.md) chapter defines precedence and
+the non-chaining rule for range expressions.
+
+Use this chapter for value categories and [Reference Manual](reference.md)
+for the complete grammar of literal, tuple, array, range, and closure syntax.

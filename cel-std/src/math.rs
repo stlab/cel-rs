@@ -1,14 +1,17 @@
 //! Numeric CEL standard-library functions.
 //!
-//! Each function follows the pattern `cel-parser`'s built-in `round` uses: a marker
+//! Each function follows the marker-and-call pattern used by CEL functions: a marker
 //! struct is pushed for the bare-identifier (arity-0) lookup of the function's name, and
 //! consumed by the paired `"()"` call lookup once the marker confirms this call's callee
-//! is that function (see `cel-parser/src/op_table.rs`'s `round_scope`).
+//! is that function.
 
 use anyhow::Result;
 use cel_parser::SourceSpan;
 use cel_runtime::DynSegment;
 use std::any::TypeId;
+
+/// Marker pushed for a bare `round` lookup; consumed by the paired `"()"` call.
+struct RoundFn;
 
 /// Marker pushed for a bare `min` lookup; consumed by the paired `"()"` call.
 struct MinFn;
@@ -16,6 +19,30 @@ struct MinFn;
 struct MaxFn;
 /// Marker pushed for a bare `clamp` lookup; consumed by the paired `"()"` call.
 struct ClampFn;
+
+/// `round(x)` rounds an `f64` to the nearest integer, with halfway values away from zero.
+pub(crate) fn round_scope(
+    name: &str,
+    segment: &mut DynSegment,
+    num_operands: usize,
+    _span: SourceSpan,
+) -> Result<bool> {
+    match (name, num_operands) {
+        ("round", 0) => {
+            segment.op0(|| RoundFn);
+            Ok(true)
+        }
+        ("()", 2) => {
+            let top = segment.peek_stack_infos(2);
+            if top.len() != 2 || top[0].value_type.type_id() != TypeId::of::<RoundFn>() {
+                return Ok(false);
+            }
+            segment.op2(|_callee: RoundFn, x: f64| x.round())?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
 
 /// `min(a, b) = a.min(b)`, `max(a, b) = a.max(b)` over all 14 numeric types — `Ord::min`/
 /// `max` for integers, the inherent (NaN-avoiding) `f32`/`f64` `min`/`max` for floats.
@@ -755,6 +782,24 @@ mod tests {
             .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
             .map_err(|_| anyhow::anyhow!("lookup failed"))?;
         assert_eq!(segment.call0::<f64>()?, -3.0);
+        Ok(())
+    }
+
+    #[test]
+    fn round_rounds_half_away_from_zero() -> Result<()> {
+        assert!(
+            cel_parser::CELParser::new(cel_parser::OpLookup::new())
+                .parse_str("round(-3.5)")
+                .is_err()
+        );
+
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = cel_parser::CELParser::new(lookup)
+            .parse_str("round(-3.5)")
+            .unwrap();
+
+        assert_eq!(segment.call0::<f64>()?, -4.0);
         Ok(())
     }
 }

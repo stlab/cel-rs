@@ -1,60 +1,68 @@
 # Collections
 
-Arrays are non-empty, homogeneous, and recursively typed.
+CEL uses tuples and arrays for compound values. Tuples preserve fixed
+positional shape. Arrays hold homogeneous sequences of values; an empty array
+uses a type annotation to state its element type. For the complete grammar,
+see the [Reference Manual](reference.md).
 
-```rust
-use cel_parser::{CELParser, OpLookup};
-use cel_runtime::DynamicArray;
+## Concept
 
-let mut segment = CELParser::new(OpLookup::new())
-    .parse_str("[0i32, 1i32, 2i32]")
-    .unwrap();
+Parentheses and brackets build different kinds of values. Parentheses can
+mean unit, grouping, or tuples. Brackets always mean arrays. That shape
+difference matters because tuple indexing uses `.N`, while arrays follow
+their own literal rules and do not use tuple indexing syntax.
 
-let array: DynamicArray = segment.call0().unwrap();
-assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1, 2]);
+## Syntax
+
+```text
+tuple_or_group = "(" [ expression [ "," [ expression { "," expression } ] ] ] ")" .
+array_expression = "[" [ expression { "," expression } ] "]"
+                 [ ":" type_expr ] .
+type_expr = identifier
+          | "[" type_expr "]"
+          | "(" [ type_expr [ "," [ type_expr { "," type_expr } ] ] ] ")" .
 ```
 
-The checked examples in
-[cel-lang-book/tests/examples.rs](https://github.com/stlab/cel-rs/blob/main/cel-lang-book/tests/examples.rs)
-cover the basic array round-trip and the heterogeneous-array rejection case.
+## Worked examples
 
-## What arrays accept
-
-- Each element can be an expression that produces a supported array element
-  type, including a conditional or a nested array.
-- Nested arrays are rank-one arrays whose element type is `DynamicArray`.
-- The parser preserves element order.
-
-```rust
-use cel_parser::{CELParser, OpLookup};
-use cel_runtime::DynamicArray;
-
-let mut segment = CELParser::new(OpLookup::new())
-    .parse_str("[[0i32], [1i32]]")
-    .unwrap();
-
-let array: DynamicArray = segment.call0().unwrap();
-let rows = array.try_into_vec::<DynamicArray>().unwrap();
-assert_eq!(rows[0].try_as_slice::<i32>().unwrap(), &[0]);
-assert_eq!(rows[1].try_as_slice::<i32>().unwrap(), &[1]);
+```text
+(1,)
+(1, 2, 3)
+[0, 1, 2]
+[[0], [1]]
+[0, 1]: [i32]
+[]: [i32]
+[]: [[i32]]
+if ready { [1, 2] } else { [3, 4] }
 ```
 
-## What arrays do not accept
+## Exact rules
 
-- Empty arrays are rejected, because this implementation does not infer an
-  element type from `[]`.
-- Trailing commas are rejected: `[0i32,]` is not a valid array literal.
-- Mixed element types are rejected.
-- Tuples are not valid array elements.
+- `()` is unit, `(expr)` is grouping, `(expr,)` is a 1-tuple, and
+  `(a, b, c)` is a tuple.
+- `[a, b, c]` is an array literal.
+- An unannotated array is non-empty and every element must have the same type.
+- A type annotation after `:` states the complete array type. It permits an
+  empty array, as in `[]: [i32]`.
+- A non-empty array annotation must match the element type exactly.
+- Nested arrays are valid when each element is itself an array of the
+  same element type.
+- Tuples and arrays are distinct value forms: tuples are positional and
+  use `.N`, while arrays use bracket literals and homogeneous element
+  typing.
+- Tuple indexing uses an unsuffixed integer such as `.0` or `.1`; member
+  access such as `value.name` is not part of CEL.
+- Tuple values are not valid array elements.
 
-Those limitations are intentional and are covered by the parser tests.
+## Edge cases
 
-## Tuples versus arrays
-
-Parenthesized tuples and bracketed arrays are different runtime shapes:
-
-- `(a, b)` is a tuple or grouping expression.
-- `[a, b]` is a homogeneous array.
-
-This distinction matters because tuple indexing and array element typing use
-different runtime machinery.
+- `[]` is not valid because an empty array needs a type annotation.
+- `[0,]` is not valid.
+- `[]: [i32]` is a valid typed empty array.
+- `[0, true]` is not valid because the element types differ.
+- `[(0, 1)]` is not valid because tuple values are not array elements.
+- `[]: [[i32]]` is a valid typed empty nested array.
+- Tuple-valued array element annotations are not supported.
+- Bracket postfix indexing such as `items[0]` is not part of the
+  language.
+- A suffixed tuple index such as `.0i32` is not valid.
