@@ -57,6 +57,12 @@
 //! array types (`[i32]`, `[[i32]]`), and tuple syntax is preserved for future typed CEL surfaces
 //! even though tuple-valued array elements remain explicitly unsupported today.
 //!
+//! ```text
+//! type_expression = identifier [ "(" [ type_expression { "," type_expression } ] ")" ]
+//!                  | "[" type_expression "]"
+//!                  | "(" [ type_expression ["," [ type_expression { "," type_expression } ]] ] ")".
+//! ```
+//!
 //! # Examples
 //!
 //! ```rust
@@ -1874,25 +1880,47 @@ impl<C: ParserContext> Parser<C> {
         Ok(true)
     }
 
-    /// `type_expr = identifier | "[" type_expr "]" | "(" [ type_expr ["," [ type_expr {
-    /// "," type_expr } ]] ] ")" .`
+    /// `type_expression = identifier [ "(" [ type_expression { "," type_expression } ] ")" ]
+    ///                  | "[" type_expression "]"
+    ///                  | "(" [ type_expression ["," [ type_expression { "," type_expression } ]] ] ")" .`
     ///
     /// `()` is the empty tuple type (0 elements); `(T)` is grouping (same as bare `T`); `(T,)`
     /// is a 1-element tuple; `(T, U, ...)` is n-element, no trailing comma. `[T]` names an
-    /// array type whose elements have type `T`.
+    /// array type whose elements have type `T`. `Name(A, B)` applies zero or more type
+    /// arguments to a named (generic) type.
     ///
     /// # Errors
     ///
-    /// Returns an error if a named leaf is missing, if an array or tuple element list is
+    /// Returns an error if a named leaf is missing, if an array, tuple, or type-argument list is
     /// malformed, or if a closing `]`/`)` is missing.
     fn parse_type_expression(&mut self) -> Result<TypeExpr> {
         if let Some(Token::Identifier(_)) = self.peek_token() {
             let name = self.expect_identifier("expected a type name")?;
-            let span = ExprSpan {
-                start: self.last_span,
-                end: self.last_span,
-            };
-            return Ok(TypeExpr::Named { name, span });
+            let name_span = self.last_span;
+            let mut args = Vec::new();
+            let mut end_span = name_span;
+            if self.is_open_paren() {
+                if !self.is_close_paren() {
+                    args.push(self.parse_type_expression()?);
+                    while self.is_punctuation(",") {
+                        args.push(self.parse_type_expression()?);
+                    }
+                    if !self.is_close_paren() {
+                        return Err(
+                            self.error_at("expected ',' or closing ')' in type argument list")
+                        );
+                    }
+                }
+                end_span = self.last_span;
+            }
+            return Ok(TypeExpr::Named {
+                name,
+                args,
+                span: ExprSpan {
+                    start: name_span,
+                    end: end_span,
+                },
+            });
         }
 
         if matches!(
@@ -1947,7 +1975,7 @@ impl<C: ParserContext> Parser<C> {
                 end: self.last_span,
             };
             return Ok(match first {
-                TypeExpr::Named { name, .. } => TypeExpr::Named { name, span },
+                TypeExpr::Named { name, args, .. } => TypeExpr::Named { name, args, span },
                 TypeExpr::Array { element, .. } => TypeExpr::Array { element, span },
                 TypeExpr::Tuple { elements, .. } => TypeExpr::Tuple { elements, span },
             });

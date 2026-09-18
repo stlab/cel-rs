@@ -12,18 +12,26 @@ use cel_runtime::ArrayElementType;
 
 use crate::{ExprSpan, ParseError, Result, op_table};
 
-/// `type_expr = identifier | "[" type_expr "]" | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".`
+/// `type_expression = identifier [ "(" [ type_expression { "," type_expression } ] ")" ]
+///                   | "[" type_expression "]"
+///                   | "(" [ type_expression ["," [ type_expression { "," type_expression } ]] ] ")".`
 ///
 /// `()` is the empty tuple type (0 elements); `(T)` is grouping (same as bare `T`); `(T,)` is a
 /// 1-element tuple; `(T, U, ...)` is n-element, no trailing comma. `[T]` names a rank-one array
-/// whose elements have type `T`; nested brackets compose recursively.
+/// whose elements have type `T`; nested brackets compose recursively. `Name(A, B)` names a
+/// parameterized (generic) type applying zero or more type arguments (`RangeInclusive(f64)`,
+/// `RangeFull()`); an identifier immediately followed by `(` has no other meaning in type
+/// position, so this is unambiguous with adjacent tuple-grouping syntax.
 #[derive(Clone, Debug)]
 pub enum TypeExpr {
-    /// A single type name, resolved later through a [`TypeResolver`].
+    /// A single type name, optionally applying type arguments, resolved later through a
+    /// [`TypeResolver`].
     Named {
         /// The unresolved type name, exactly as written.
         name: String,
-        /// The source span of the full name token.
+        /// Type arguments, e.g. `f64` in `RangeInclusive(f64)`. Empty for a plain name.
+        args: Vec<TypeExpr>,
+        /// The source span of the full name token, including any parenthesized argument list.
         span: ExprSpan,
     },
     /// A recursively nested array type expression (`[T]`).
@@ -62,7 +70,7 @@ impl TypeExpr {
     /// - Complexity: O(n) in the number of nodes in this type tree.
     pub fn resolve(&self, resolver: &dyn TypeResolver) -> Result<ResolvedType> {
         match self {
-            TypeExpr::Named { name, span } => resolver.resolve_named_type(name).map_or_else(
+            TypeExpr::Named { name, span, .. } => resolver.resolve_named_type(name).map_or_else(
                 || {
                     Err(ParseError::new_range(
                         format!("unknown type `{name}`"),
@@ -308,8 +316,9 @@ mod tests {
         let expr = parser.parse_type_expr_str("i32").unwrap();
 
         match expr {
-            TypeExpr::Named { name, span } => {
+            TypeExpr::Named { name, args, span } => {
                 assert_eq!(name, "i32");
+                assert!(args.is_empty());
                 assert_eq!(span.start.source_text().as_deref(), Some("i32"));
                 assert_eq!(span.end.source_text().as_deref(), Some("i32"));
             }
@@ -465,6 +474,88 @@ mod tests {
                 other => panic!("expected a nested array resolution, got {other:?}"),
             },
             other => panic!("expected an array resolution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_named_type_expr_with_one_type_argument() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("RangeInclusive(f64)").unwrap();
+
+        match expr {
+            TypeExpr::Named { name, args, span } => {
+                assert_eq!(name, "RangeInclusive");
+                assert_eq!(span.start.source_text().as_deref(), Some("RangeInclusive"));
+                assert_eq!(span.end.source_text().as_deref(), Some("(f64)"));
+                assert_eq!(args.len(), 1);
+                match &args[0] {
+                    TypeExpr::Named { name, args, .. } => {
+                        assert_eq!(name, "f64");
+                        assert!(args.is_empty());
+                    }
+                    other => panic!("expected a named type argument, got {other:?}"),
+                }
+            }
+            other => panic!("expected a named type expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_named_type_expr_with_zero_type_arguments() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("RangeFull()").unwrap();
+
+        match expr {
+            TypeExpr::Named { name, args, span } => {
+                assert_eq!(name, "RangeFull");
+                assert_eq!(span.end.source_text().as_deref(), Some("()"));
+                assert!(args.is_empty());
+            }
+            other => panic!("expected a named type expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_named_type_expr_with_multiple_and_nested_type_arguments() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser
+            .parse_type_expr_str("Pair(RangeInclusive(f64), i32)")
+            .unwrap();
+
+        match expr {
+            TypeExpr::Named { name, args, .. } => {
+                assert_eq!(name, "Pair");
+                assert_eq!(args.len(), 2);
+                match &args[0] {
+                    TypeExpr::Named { name, args, .. } => {
+                        assert_eq!(name, "RangeInclusive");
+                        assert_eq!(args.len(), 1);
+                    }
+                    other => panic!("expected the first argument to be named, got {other:?}"),
+                }
+                match &args[1] {
+                    TypeExpr::Named { name, args, .. } => {
+                        assert_eq!(name, "i32");
+                        assert!(args.is_empty());
+                    }
+                    other => panic!("expected the second argument to be named, got {other:?}"),
+                }
+            }
+            other => panic!("expected a named type expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_named_type_expr_with_no_parens_still_parses_a_bare_name() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("i32").unwrap();
+
+        match expr {
+            TypeExpr::Named { name, args, .. } => {
+                assert_eq!(name, "i32");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected a named type expression, got {other:?}"),
         }
     }
 }
