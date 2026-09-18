@@ -9,20 +9,21 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  MDBOOK_VERSION: 0.5.4
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
+      run: |
+        rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+        rustup default stable
     
     - name: Cache dependencies
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
 
     - name: Check formatting
       run: cargo fmt --check
@@ -48,9 +49,7 @@ jobs:
       run: cargo doc --workspace --exclude begin --no-deps --lib
 
     - name: Install mdBook
-      uses: peaceiris/actions-mdbook@v2
-      with:
-        mdbook-version: 'latest'
+      run: cargo install mdbook --version "$MDBOOK_VERSION" --locked
 
     - name: Install the live-examples mdBook preprocessor
       run: cargo install --path adam-lang-book-preprocessor
