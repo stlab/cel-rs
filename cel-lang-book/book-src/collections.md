@@ -14,12 +14,8 @@ their own literal rules and do not use tuple indexing syntax.
 ## Syntax
 
 ```text
-()
-(expression)
-(expression,)
-(expression, expression, ...)
-[expression, expression, ...]
-[[expression], [expression]]
+tuple_or_group = "(" [ expression [ "," [ expression { "," expression } ] ] ] ")" .
+array_expression = "[" expression { "," expression } "]" .
 ```
 
 ## Worked examples

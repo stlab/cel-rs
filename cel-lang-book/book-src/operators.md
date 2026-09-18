@@ -14,33 +14,23 @@ comparison and range forms do not chain.
 ## Syntax
 
 ```text
-!x
--x
-x as Type
-a * b
-a / b
-a % b
-a + b
-a - b
-a << b
-a >> b
-a & b
-a ^ b
-a | b
-a == b
-a != b
-a < b
-a <= b
-a > b
-a >= b
-a && b
-a || b
-a..b
-a..=b
-a..
-..b
-..=b
-..
+range_expression = ".." [ or_expression ]
+                 | "..=" or_expression
+                 | or_expression [ ".." [ or_expression ] | "..=" or_expression ] .
+or_expression = and_expression { "||" and_expression } .
+and_expression = comparison_expression { "&&" comparison_expression } .
+comparison_expression = bitwise_or_expression
+    [ ("==" | "!=" | "<" | ">" | "<=" | ">=") bitwise_or_expression ] .
+bitwise_or_expression = bitwise_xor_expression { "|" bitwise_xor_expression } .
+bitwise_xor_expression = bitwise_and_expression { "^" bitwise_and_expression } .
+bitwise_and_expression = bitwise_shift_expression { "&" bitwise_shift_expression } .
+bitwise_shift_expression = additive_expression { ("<<" | ">>") additive_expression } .
+additive_expression = multiplicative_expression { ("+" | "-") multiplicative_expression } .
+multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression } .
+cast_expression = unary_expression { "as" identifier } .
+unary_expression = (("-" | "!") unary_expression) | postfix_expression .
+postfix_expression = primary_expression { "(" [ argument_list ] ")" | "." unsuffixed_integer } .
+argument_list = expression { "," expression } .
 ```
 
 ## Worked examples
@@ -50,6 +40,7 @@ a..
 "cel" + "-" + "lang"
 ok && round(3.5) > 3.0
 1u64 << 3u32
+1.5 as i32
 1 + 2..3 * 4
 ```
 
@@ -101,7 +92,20 @@ not chain.
   or homogeneous `String`.
 - `<`, `<=`, `>`, and `>=` accept homogeneous numeric operands or
   homogeneous `String`.
-- See [Control flow](control-flow.md) for range operators and the
+- `as` converts a value to one of the sixteen built-in scalar type names:
+  `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`,
+  `u128`, `usize`, `f32`, `f64`, `bool`, and `String`.
+- Integer targets accept integer, floating-point, and `bool` sources.
+  Floating-point targets accept integer and floating-point sources.
+  `bool` and `String` cast only to themselves.
+- Integer-to-integer casts check that the source fits in the target.
+  Floating-point-to-integer casts require a finite, in-range source and
+  truncate toward zero. `f64 as f32` checks finite range before narrowing.
+- `true` casts to integer `1`, and `false` casts to integer `0`.
+- Casts associate from left to right, so `x as T as U` applies the first
+  cast before the second.
+- See [Conditional expressions](conditional-expressions.md) for `if`
+  expressions and range forms, and the
   [Reference Manual](reference.md) for a summary.
 
 ## Edge cases
@@ -114,3 +118,5 @@ not chain.
 - Signed `+`, signed binary `-`, signed unary `-`, and signed `*`
   overflows report `arithmetic overflow`.
 - Integer `/` and `%` report `division by zero` when they fail.
+- Casts cannot target `char`, byte-string, C-string, unit, array, tuple,
+  range, or closure values.

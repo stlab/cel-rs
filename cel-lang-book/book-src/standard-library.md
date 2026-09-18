@@ -9,6 +9,13 @@ If an evaluation environment does not install the library, the operations in
 this chapter are unavailable there. The core language described elsewhere in
 the book still works unchanged.
 
+## Syntax
+
+```text
+standard_library_call = identifier "(" [ argument_list ] ")" .
+argument_list = expression { "," expression } .
+```
+
 ## Availability at a glance
 
 | Library | Functions | Availability |

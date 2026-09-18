@@ -8,7 +8,15 @@ inherits many behaviors from the Rust
 This chapter describes the token forms that participate in CEL source. For the
 full CEL expression grammar, see the [Reference Manual](reference.md).
 
-## Whitespace and joint punctuation
+## Syntax
+
+```text
+compound_token = "&&" | "||" | "==" | "!=" | "<=" | ">="
+               | "<<" | ">>" | ".." | "..=" .
+identifier = identifier_start { identifier_continue } .
+```
+
+## Whitespace and Compound tokens
 
 Spaces, tabs, and line breaks separate tokens. They do not otherwise change the
 meaning of an expression.
@@ -23,8 +31,7 @@ if flag {
 }
 ```
 
-Compound punctuation uses joint spelling: write the characters of a compound
-token with no whitespace between them. This rule applies to `&&`, `||`,
+Certain punctuation characters combine to form single tokens so long as there is no intervening white space. This includes, `&&`, `||`,
 `==`, `!=`, `<=`, `>=`, `<<`, `>>`, `..`, and `..=`.
 
 ```text
@@ -33,12 +40,10 @@ x<=y
 1..=5
 ```
 
-Write each compound token as one uninterrupted piece of punctuation.
-
 ## Comments and trivia
 
 Comments are source trivia. They may appear between tokens in the same places
-as whitespace and do not become expressions of their own.
+as whitespace.
 
 ```text
 x /* midpoint */ + 1
@@ -50,15 +55,22 @@ Line comments use `// ...`. Block comments use `/* ... */`.
 
 ## Identifiers and reserved words
 
-Identifiers name values, callees, and closure parameters.
+An identifier is a non-empty name made from Unicode identifier characters.
+The first character may be a Unicode letter or `_`; later characters may also
+include Unicode digits. CEL follows the Rust
+[identifier rules](https://doc.rust-lang.org/reference/identifiers.html) for
+the spellings that its lexer accepts.
 
 ```text
 x
 user_name
 value2
+π
+_temporary
 ```
 
-The following words have fixed roles in CEL source:
+These words are reserved for fixed roles in CEL source and cannot name
+user-defined values:
 
 - `if`
 - `else`
@@ -132,20 +144,5 @@ as
 ```
 
 The grammar determines where each operator may appear and how tightly it binds.
-
-## Lexing and grammar
-
-Lexing answers "what token is this text?" Grammar answers "how do these tokens
-combine into a CEL expression?" The same delimiter token can therefore
-participate in different expression forms:
-
-```text
-()
-(1 + 2)
-(1, 2)
-round(3.5)
-1..5
-```
-
-Use this chapter for token shapes and the [Reference Manual](reference.md) for
+See [Reference Manual](reference.md) for
 the full expression grammar.

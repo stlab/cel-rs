@@ -15,13 +15,12 @@ The tutorial chapters follow this order:
    closure values.
 3. [Operators](operators.md) explains precedence, associativity, arithmetic,
    comparison, logical, bitwise, cast, and range operators.
-4. [Standard library](standard-library.md) explains additional operations
+4. [Conditional expressions](conditional-expressions.md) explains
+   value-producing `if` expressions and range expressions.
+5. [Collections](collections.md) explains tuples and homogeneous arrays.
+6. [Closures](closures.md) explains closure literals and parameter typing.
+7. [Standard library](standard-library.md) explains additional operations
    available when the evaluation environment installs the library.
-5. [Control flow](control-flow.md) explains value-producing `if` expressions
-   and range expressions.
-6. [Collections](collections.md) explains tuples and homogeneous arrays.
-7. [Casts and closures](casts-and-closures.md) explains explicit conversions
-   and closure literals.
 
 The [Reference Manual](reference.md) gathers the complete grammar, exact
 operator rules, type names, library operations, and edge cases in one place.

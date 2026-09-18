@@ -21,6 +21,19 @@ The language also accepts character, byte-string, C-string, and unit values in
 expressions. The named scalar type set remains the sixteen type names listed
 above.
 
+## Syntax
+
+```text
+literal = integer_literal
+        | floating_point_literal
+        | boolean_literal
+        | string_literal
+        | character_literal
+        | byte_literal
+        | byte_string_literal
+        | c_string_literal .
+```
+
 ## Integer literals
 
 An integer literal is a whole number optionally followed by one of the accepted

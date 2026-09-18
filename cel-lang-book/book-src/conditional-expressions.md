@@ -1,4 +1,4 @@
-# Control flow
+# Conditional expressions
 
 CEL uses value-producing `if` expressions and first-class range values to
 direct expression flow. For the exact grammar, see the
@@ -13,16 +13,11 @@ ordinary expressions and can appear anywhere an expression is expected.
 ## Syntax
 
 ```text
-if condition { then_expression }
-if condition { then_expression } else { else_expression }
-if condition { then_expression } else if other_condition { other_expression } else { fallback_expression }
-
-start..end
-start..=end
-start..
-..end
-..=end
-..
+if_expression = "if" expression "{" expression "}"
+              [ "else" ( "{" expression "}" | if_expression ) ] .
+range_expression = ".." [ or_expression ]
+                 | "..=" or_expression
+                 | or_expression [ ".." [ or_expression ] | "..=" or_expression ] .
 ```
 
 ## Worked examples
