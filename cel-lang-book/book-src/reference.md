@@ -40,7 +40,11 @@ primary_expression = literal
                    | if_expression
                    | closure_expression .
 tuple_or_group = "(" [ expression [ "," [ expression { "," expression } ] ] ] ")" .
-array_expression = "[" expression { "," expression } "]" .
+array_expression = "[" [ expression { "," expression } ] "]"
+                 [ ":" type_expr ] .
+type_expr = identifier
+          | "[" type_expr "]"
+          | "(" [ type_expr [ "," [ type_expr { "," type_expr } ] ] ] ")" .
 if_expression = "if" expression "{" expression "}"
               [ "else" ( "{" expression "}" | if_expression ) ] .
 closure_expression = "||" expression
@@ -158,8 +162,9 @@ when the evaluation environment installs it. See
 | Unit | `()` | The empty parenthesized form is the unit value. |
 | Grouping | `(expr)` | Changes grouping without creating a tuple. |
 | Tuple | `(expr,)`, `(a, b, ...)` | Positional value form. A 1-tuple requires the trailing comma. |
-| Array | `[a, b, ...]` | Non-empty, homogeneous, and comma-separated. |
-| Nested array | `[[0], [1]]` | Each element must still have the same array element type. |
+| Array | `[a, b, ...]` | Unannotated arrays are non-empty, homogeneous, and comma-separated. |
+| Typed array | `[a, b]: [T]`, `[]: [T]` | The annotation states the complete array type and permits empty arrays. |
+| Nested array | `[[0], [1]]`, `[]: [[i32]]` | Each element must still have the same array element type. |
 | Range | `a..b`, `a..=b`, `a..`, `..b`, `..=b`, `..` | Endpoint-bearing forms require homogeneous numeric endpoints. |
 
 ## Closure table
@@ -177,7 +182,9 @@ when the evaluation environment installs it. See
 - Calls accept zero or more comma-separated arguments and do not accept a
   trailing comma.
 - Tuple indexing uses `.N` with an unsuffixed integer and may be chained.
-- Arrays are non-empty and homogeneous.
+- Unannotated arrays are non-empty and homogeneous. A complete type
+  annotation permits an empty array and must match the element type exactly.
+- Tuple-valued array element annotations are not supported.
 - Tuples and arrays are distinct forms, and tuple values are not valid
   array elements.
 - Comparison expressions consume one comparison operator.

@@ -114,7 +114,9 @@ CEL also builds compound values from ordinary expressions:
 
 - `()` is the unit value, `(expr)` is grouping, `(expr,)` is a 1-tuple, and
   `(a, b, c)` is a tuple.
-- Arrays are non-empty bracketed, homogeneous lists, and `[]` is not accepted.
+- Arrays are homogeneous bracketed lists. An unannotated array is non-empty;
+  a type annotation such as `[]: [i32]` supplies the element type for an empty
+  array.
 - `|| expr` and `|x: T| expr` are closure values.
 - These forms can nest inside calls, tuples, arrays, conditionals, and one
   another wherever the grammar permits.
@@ -123,6 +125,8 @@ CEL also builds compound values from ordinary expressions:
 (1,)
 (1, 2, 3)
 [0, 1, 2]
+[0, 1]: [i32]
+[]: [i32]
 |x: i32| x + 1
 ```
 

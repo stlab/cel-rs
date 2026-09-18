@@ -60,6 +60,24 @@ fn heterogeneous_array_is_rejected() {
 }
 
 #[test]
+fn typed_array_annotations_support_empty_arrays() {
+    let mut empty = CELParser::new(OpLookup::new())
+        .parse_str("[]: [i32]")
+        .unwrap();
+    let empty_array: DynamicArray = empty.call0().unwrap();
+    assert_eq!(
+        empty_array.try_into_vec::<i32>().unwrap(),
+        Vec::<i32>::new()
+    );
+
+    let mut values = CELParser::new(OpLookup::new())
+        .parse_str("[0i32, 1i32]: [i32]")
+        .unwrap();
+    let array: DynamicArray = values.call0().unwrap();
+    assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1]);
+}
+
+#[test]
 fn closure_literal_compiles_and_calls() {
     let mut segment = CELParser::new(OpLookup::new())
         .parse_str("|x: i32| x + 1")
