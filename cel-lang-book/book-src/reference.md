@@ -141,16 +141,16 @@ when the evaluation environment installs it. See
 
 | Function | Accepted operands | Result | Notes |
 | --- | --- | --- | --- |
-| `round(x)` | `f64` | `f64` | Halfway values round away from zero. |
 | `min(a, b)`, `max(a, b)` | same-type numeric operands: `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `f32`, `f64` | same as operands | No coercion. Successful calls are infallible. |
 | `clamp(x, lo, hi)` | same-type numeric operands from the same 14-type set | same as operands | Requires ordered bounds with `lo <= hi`; otherwise reports `invalid clamp bounds`. |
 | `abs(x)` | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, `f64` | same as operand | Minimum signed integer reports `arithmetic overflow`. |
 | `signum(x)` | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `f32`, `f64` | same as operand | No unsigned support. Successful calls are infallible. |
 | `sqrt(x)` | `f32`, `f64` | same as operand | Float-only. Inputs below zero yield `NaN` rather than an error. |
-| `floor(x)`, `ceil(x)`, `trunc(x)` | `f32`, `f64` | same as operand | Float-only. Successful calls are infallible. |
+| `floor(x)`, `ceil(x)`, `trunc(x)`, `fract(x)`, `round_ties_even(x)` | `f32`, `f64` | same as operand | Float-only. Successful calls are infallible. |
 
 - None of the documented functions are integer-only.
-- `round`, `sqrt`, `floor`, `ceil`, and `trunc` are float-only.
+- `sqrt`, `floor`, `ceil`, `trunc`, `fract`, and `round_ties_even` are
+  float-only.
 - `min`, `max`, and `clamp` support both integers and floats.
 - `abs` and `signum` support signed integers and floats, but not unsigned
   integers.
