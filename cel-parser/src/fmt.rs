@@ -332,23 +332,6 @@ fn unary_op_token(name: &str) -> &'static str {
     }
 }
 
-/// Renders a closure parameter's unresolved type expression, e.g. `"i32"` or `"(i32, f64)"`.
-///
-/// - Complexity: O(n) in the number of (nested) tuple elements in the type expression.
-fn render_closure_param_type(type_expr: &crate::ClosureParamTypeExpr) -> String {
-    match type_expr {
-        crate::ClosureParamTypeExpr::Named(name, _) => name.clone(),
-        crate::ClosureParamTypeExpr::Tuple(elements, _) => {
-            let inner = elements
-                .iter()
-                .map(render_closure_param_type)
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("({inner})")
-        }
-    }
-}
-
 /// Renders one unresolved array-annotation type expression.
 ///
 /// Named leaves are emitted verbatim, so built-in names and host-registered custom names format
@@ -383,15 +366,6 @@ fn render_type_expr(type_expr: &crate::TypeExpr) -> String {
                 _ => format!("({inner})"),
             }
         }
-    }
-}
-
-/// Returns the end position of a closure parameter's declared type expression — the boundary
-/// right before the header's closing `|`.
-fn closure_param_type_end(type_expr: &crate::ClosureParamTypeExpr) -> proc_macro2::Span {
-    match type_expr {
-        crate::ClosureParamTypeExpr::Named(_, span) => span.end,
-        crate::ClosureParamTypeExpr::Tuple(_, span) => span.end,
     }
 }
 
@@ -740,13 +714,13 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             } else {
                 let params_s = params
                     .iter()
-                    .map(|p| format!("{}: {}", p.name, render_closure_param_type(&p.type_expr)))
+                    .map(|p| format!("{}: {}", p.name, render_type_expr(&p.type_expr)))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("|{params_s}|")
             };
             let (tail_start, expected): (proc_macro2::Span, &[&'static str]) = match params.last() {
-                Some(last) => (closure_param_type_end(&last.type_expr), &["|"]),
+                Some(last) => (last.type_expr.span().end, &["|"]),
                 None => (span.start, &[]),
             };
             let pieces = gap_between(source, tail_start, body.span().start, expected);

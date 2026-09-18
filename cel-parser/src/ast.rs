@@ -287,7 +287,7 @@ impl Expr {
     }
 }
 
-/// One `closure_param = identifier ":" closure_type_expression` — a closure literal's declared
+/// One `closure_param = identifier ":" type_expression` — a closure literal's declared
 /// parameter.
 #[derive(Clone, Debug)]
 pub struct ClosureParam {
@@ -296,23 +296,7 @@ pub struct ClosureParam {
     /// The name token's span.
     pub name_span: ExprSpan,
     /// The parameter's declared, unresolved type.
-    pub type_expr: ClosureParamTypeExpr,
-}
-
-/// `closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")".`
-///
-/// Unresolved — mirrors `adam_lang::ast::TypeExpr`'s shape exactly (a bare name, or a
-/// recursively-nested tuple), but lives here because closures are a `cel-parser` construct, not
-/// an `adam-lang` one. A bare name is only ever a `crate::op_table::builtin_scalar_type` name,
-/// already validated during parsing — see `Parser::parse_closure_type_expression`.
-#[derive(Clone, Debug)]
-pub enum ClosureParamTypeExpr {
-    /// A single built-in scalar type name (e.g. `"i32"`, `"bool"`).
-    Named(String, ExprSpan),
-    /// A (possibly nested) tuple of parameter types — `Vec::new()` for `()`. Note: unlike
-    /// `adam_lang::ast::TypeExpr::Tuple`, this production has no dedicated 1-element form; see
-    /// `Parser::parse_closure_type_expression`'s doc comment (added in Task 2).
-    Tuple(Vec<ClosureParamTypeExpr>, ExprSpan),
+    pub type_expr: crate::TypeExpr,
 }
 
 /// Converts a statically-known literal value into its [`Literal`] variant.

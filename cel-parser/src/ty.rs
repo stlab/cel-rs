@@ -801,16 +801,18 @@ fn result_ty_for_op(name: &str, operand_ty: &Ty) -> Ty {
     }
 }
 
-/// Approximates a closure parameter's declared type as a [`Ty`], for use as the identifier
-/// resolver when checking a closure's own body: a tuple-shaped parameter has no `Ty` variant
-/// (`Ty` has none) and maps to [`Ty::Any`]; a scalar parameter maps via [`Ty::from_name`] —
-/// always `Some` in practice, since a [`crate::ClosureParamTypeExpr::Named`] is only ever built
-/// from a name `crate::op_table::builtin_scalar_type` already validated during parsing, the
-/// identical name set `Ty::from_name` recognizes.
-fn closure_param_ty(type_expr: &crate::ClosureParamTypeExpr) -> Ty {
+/// Maps a closure parameter's declared type to a static [`Ty`] for type checking. A bare
+/// built-in scalar name maps to its concrete `Ty`; a generic type (non-empty `args`), an array
+/// type, or a tuple maps to [`Ty::Any`] — this pass does not yet model those shapes, consistent
+/// with the existing "unresolved falls to `Any`" rule this function already applied to tuples.
+fn closure_param_ty(type_expr: &crate::TypeExpr) -> Ty {
     match type_expr {
-        crate::ClosureParamTypeExpr::Named(name, _) => Ty::from_name(name).unwrap_or(Ty::Any),
-        crate::ClosureParamTypeExpr::Tuple(..) => Ty::Any,
+        crate::TypeExpr::Named { name, args, .. } if args.is_empty() => {
+            Ty::from_name(name).unwrap_or(Ty::Any)
+        }
+        crate::TypeExpr::Named { .. }
+        | crate::TypeExpr::Array { .. }
+        | crate::TypeExpr::Tuple { .. } => Ty::Any,
     }
 }
 
@@ -1341,10 +1343,11 @@ mod tests {
         crate::ClosureParam {
             name: name.to_string(),
             name_span: point(proc_macro2::Span::call_site()),
-            type_expr: crate::ClosureParamTypeExpr::Named(
-                type_name.to_string(),
-                point(proc_macro2::Span::call_site()),
-            ),
+            type_expr: crate::TypeExpr::Named {
+                name: type_name.to_string(),
+                args: Vec::new(),
+                span: point(proc_macro2::Span::call_site()),
+            },
         }
     }
 
