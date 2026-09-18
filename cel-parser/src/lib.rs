@@ -235,7 +235,7 @@ pub use trivia::Comment;
 pub use ty::Ty;
 pub use type_expr::{
     ResolvedArrayType, ResolvedLeafType, ResolvedType, TypeExpr, TypeResolver,
-    builtin_type_resolver,
+    builtin_type_resolver, resolve_builtin_named_type,
 };
 
 use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};

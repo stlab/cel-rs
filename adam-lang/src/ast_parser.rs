@@ -1519,6 +1519,22 @@ mod tests {
     }
 
     #[test]
+    fn malformed_generic_type_argument_list_recovers_at_the_next_sheet_item() {
+        // Same balanced-delimiter caveat as the tuple-type test above: the missing `,` between
+        // the two type arguments, not an unmatched paren, is what's malformed here.
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                "sheet s { cell good_before: i32 = 1; cell bad: Pair(i32 i32); cell good_after: i32 = 2; }",
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
+    }
+
+    #[test]
     fn attaches_an_outer_doc_comment_to_a_cell() {
         let sheet = AdamAstParser::new()
             .parse_str("sheet s {\n    /// the total\n    cell x: i32 = 1;\n}")

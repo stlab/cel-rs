@@ -163,6 +163,17 @@ pub fn builtin_type_resolver() -> Arc<dyn TypeResolver> {
     Arc::new(BuiltinTypeResolver)
 }
 
+/// Resolves `name`/`args` against `cel-parser`'s own built-in type resolver, without allocating
+/// a [`TypeResolver`] trait object.
+///
+/// Equivalent to `builtin_type_resolver().resolve_named_type(name, args)`, but for a host that
+/// only needs a one-off built-in fallback lookup (rather than a `TypeResolver` trait object to
+/// pass around), this avoids constructing a new `Arc` on every call.
+#[must_use]
+pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
+    BuiltinTypeResolver.resolve_named_type(name, args)
+}
+
 /// One resolved scalar leaf type.
 ///
 /// This pairs a human-readable type name with the runtime element descriptor needed to build or
@@ -678,6 +689,99 @@ mod tests {
     }
 
     #[test]
+    fn parse_named_type_expr_rejects_a_trailing_comma_in_the_argument_list() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = parser
+            .parse_type_expr_str("RangeInclusive(f64,)")
+            .expect_err("a trailing comma is not a valid type-argument list");
+
+        assert!(
+            err.message().contains("expected a type name"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn parse_named_type_expr_rejects_a_missing_closing_paren() {
+        // `proc_macro2::TokenStream::from_str` tokenizes delimiters into a matched tree up
+        // front, so a truly unclosed `(` is rejected at tokenization (a `LexError`), before
+        // `parse_type_expression`'s own "expected ',' or closing ')'" check ever runs — see
+        // `parse_named_type_expr_rejects_arguments_missing_a_separating_comma` for that case.
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = parser
+            .parse_type_expr_str("RangeInclusive(f64")
+            .expect_err("an unclosed type-argument list must be rejected");
+
+        assert!(
+            err.message().contains("unclosed delimiter"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn parse_named_type_expr_rejects_arguments_missing_a_separating_comma() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = parser
+            .parse_type_expr_str("Pair(i32 f64)")
+            .expect_err("adjacent type arguments without a comma must be rejected");
+
+        assert!(
+            err.message()
+                .contains("expected ',' or closing ')' in type argument list"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn parse_named_type_expr_supports_deeply_nested_generic_arguments() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser
+            .parse_type_expr_str("Outer(Middle(Inner(f64)))")
+            .unwrap();
+
+        match expr {
+            TypeExpr::Named { name, args, .. } => {
+                assert_eq!(name, "Outer");
+                match &args[..] {
+                    [
+                        TypeExpr::Named {
+                            name: middle_name,
+                            args: middle_args,
+                            ..
+                        },
+                    ] => {
+                        assert_eq!(middle_name, "Middle");
+                        match &middle_args[..] {
+                            [
+                                TypeExpr::Named {
+                                    name: inner_name,
+                                    args: inner_args,
+                                    ..
+                                },
+                            ] => {
+                                assert_eq!(inner_name, "Inner");
+                                match &inner_args[..] {
+                                    [TypeExpr::Named { name, args, .. }] => {
+                                        assert_eq!(name, "f64");
+                                        assert!(args.is_empty());
+                                    }
+                                    other => panic!("expected one named argument, got {other:?}"),
+                                }
+                            }
+                            other => panic!("expected one named argument, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected one named argument, got {other:?}"),
+                }
+            }
+            other => panic!("expected a named type expression, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn builtin_type_resolver_resolves_scalars_and_generics() {
         let resolver = crate::builtin_type_resolver();
 
@@ -691,5 +795,19 @@ mod tests {
         assert_eq!(generic.type_name(), "RangeInclusive(f64)");
 
         assert!(resolver.resolve_named_type("not_a_type", &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_builtin_named_type_matches_the_arc_wrapped_resolver() {
+        let scalar = crate::resolve_builtin_named_type("i32", &[]).unwrap();
+        assert_eq!(scalar.type_name(), "i32");
+
+        let arg = ResolvedType::Scalar(crate::resolve_builtin_named_type("f64", &[]).unwrap());
+        let generic =
+            crate::resolve_builtin_named_type("RangeInclusive", std::slice::from_ref(&arg))
+                .unwrap();
+        assert_eq!(generic.type_name(), "RangeInclusive(f64)");
+
+        assert!(crate::resolve_builtin_named_type("not_a_type", &[]).is_none());
     }
 }

@@ -756,7 +756,7 @@ impl TypeResolver for RegistryTypeResolver {
         {
             return Some(leaf);
         }
-        cel_parser::builtin_type_resolver().resolve_named_type(name, args)
+        cel_parser::resolve_builtin_named_type(name, args)
     }
 }
 
