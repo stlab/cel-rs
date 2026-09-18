@@ -151,10 +151,9 @@ impl TypeResolver for BuiltinTypeResolver {
     }
 }
 
-/// Returns `cel-parser`'s own built-in type resolver — every scalar name
-/// [`crate::op_table::builtin_scalar_type`] recognizes, plus every built-in generic type
-/// [`crate::op_table::builtin_generic_type`]/[`crate::op_table::builtin_generic_type_0`]
-/// recognizes (the `Range` family).
+/// Returns `cel-parser`'s own built-in type resolver — every scalar name recognized by
+/// `builtin_scalar_type`, plus every built-in generic type recognized by `builtin_generic_type`
+/// (the `Range` family).
 ///
 /// A host embedding `cel-parser` with its own [`TypeResolver`] (one that also knows
 /// host-specific custom types) can delegate any name it doesn't itself recognize to this

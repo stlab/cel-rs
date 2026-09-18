@@ -37,12 +37,15 @@
 //! primary_expression = literal | identifier | tuple_or_group | array_expression
 //!                    | if_expression | closure_expression.
 //! tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".
-//! array_expression = "[" [ expression { "," expression } ] "]" [ ":" type_expr ].
+//! array_expression = "[" [ expression { "," expression } ] "]" [ ":" type_expression ].
 //! if_expression = "if" expression "{" expression "}" [ "else" ( "{" expression "}" | if_expression ) ].
 //! closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression.
-//! closure_param = identifier ":" closure_type_expression.
-//! closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")".
+//! closure_param = identifier ":" type_expression.
 //! parameter_list = expression { "," expression }.
+//!
+//! type_expression = identifier [ "(" [ type_expression { "," type_expression } ] ")" ]
+//!                  | "[" type_expression "]"
+//!                  | "(" [ type_expression ["," [ type_expression { "," type_expression } ]] ] ")".
 //!
 //! literal_pattern = ["-"] literal.
 //! ```
@@ -52,16 +55,19 @@
 //! and need Rust's own `LiteralPattern` rule: a bare literal, or one directly negated by a
 //! leading `-` (no `!`, no chained `--`, no arbitrary unary/postfix operand) — see
 //! <https://doc.rust-lang.org/reference/patterns.html#literal-patterns>.
-//! `type_expr` is the reusable recursive type grammar used by array type ascriptions:
-//! bare names resolve through the configured [`TypeResolver`], bracketed forms compose nested
-//! array types (`[i32]`, `[[i32]]`), and tuple syntax is preserved for future typed CEL surfaces
-//! even though tuple-valued array elements remain explicitly unsupported today.
 //!
-//! ```text
-//! type_expression = identifier [ "(" [ type_expression { "," type_expression } ] ")" ]
-//!                  | "[" type_expression "]"
-//!                  | "(" [ type_expression ["," [ type_expression { "," type_expression } ]] ] ")".
-//! ```
+//! `type_expression` is the single, reusable recursive type grammar shared by array type
+//! ascriptions (`[i32]: [...]`), closure parameters (`|x: RangeInclusive(f64)| ...`), and
+//! adam-lang cell/source/out type annotations (`cell x: (i32, f64);`). A bare identifier
+//! resolves through the configured [`TypeResolver`] (array/closure contexts) or a host
+//! `TypeRegistry` (adam-lang cell contexts); `Name(args)` names a parameterized/generic type
+//! (e.g. `RangeInclusive(f64)`, the type produced by CEL's own `..=` range operator) resolved
+//! against the same [`TypeResolver`]; `[T]` composes nested array types (`[i32]`, `[[i32]]`);
+//! and parenthesized tuple syntax names a (possibly nested) tuple type. Every context that
+//! accepts `type_expression` documents its own narrower support boundary where one exists (for
+//! example, closure parameters do not yet support `[T]` — see
+//! <https://github.com/stlab/cel-rs/issues/228> — and adam-lang cell types do not yet support
+//! `[T]` or `Name(args)` — see <https://github.com/stlab/cel-rs/issues/227>).
 //!
 //! # Examples
 //!
