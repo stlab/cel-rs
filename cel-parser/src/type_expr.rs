@@ -70,16 +70,24 @@ impl TypeExpr {
     /// - Complexity: O(n) in the number of nodes in this type tree.
     pub fn resolve(&self, resolver: &dyn TypeResolver) -> Result<ResolvedType> {
         match self {
-            TypeExpr::Named { name, span, .. } => resolver.resolve_named_type(name).map_or_else(
-                || {
-                    Err(ParseError::new_range(
-                        format!("unknown type `{name}`"),
-                        span.start,
-                        span.end,
-                    ))
-                },
-                |leaf| Ok(ResolvedType::Scalar(leaf)),
-            ),
+            TypeExpr::Named { name, args, span } => {
+                let resolved_args = args
+                    .iter()
+                    .map(|arg| arg.resolve(resolver))
+                    .collect::<Result<Vec<_>>>()?;
+                resolver
+                    .resolve_named_type(name, &resolved_args)
+                    .map_or_else(
+                        || {
+                            Err(ParseError::new_range(
+                                format!("unknown type `{name}`"),
+                                span.start,
+                                span.end,
+                            ))
+                        },
+                        |leaf| Ok(ResolvedType::Scalar(leaf)),
+                    )
+            }
             TypeExpr::Array { element, .. } => Ok(ResolvedType::Array {
                 element: Box::new(element.resolve(resolver)?),
             }),
@@ -98,21 +106,25 @@ impl TypeExpr {
 /// Implementations return `None` when `name` is unknown. Recursive array and tuple composition is
 /// performed by [`TypeExpr::resolve`], so a resolver only needs to recognize leaf names.
 pub trait TypeResolver: Send + Sync {
-    /// Returns the registered leaf type named `name`, or `None` if it is unknown.
-    fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType>;
+    /// Returns the registered leaf type named `name` applying `args` (already resolved), or
+    /// `None` if `name`/`args` is unrecognized. `args` is empty for a plain (non-generic) name.
+    fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType>;
 }
 
 impl<F> TypeResolver for F
 where
-    F: Fn(&str) -> Option<ResolvedLeafType> + Send + Sync,
+    F: Fn(&str, &[ResolvedType]) -> Option<ResolvedLeafType> + Send + Sync,
 {
-    fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType> {
-        self(name)
+    fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
+        self(name, args)
     }
 }
 
 impl<const N: usize> TypeResolver for [(&'static str, ResolvedLeafType); N] {
-    fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType> {
+    fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
+        if !args.is_empty() {
+            return None;
+        }
         self.iter()
             .find(|(registered_name, _)| *registered_name == name)
             .map(|(_, leaf)| leaf.clone())
@@ -123,7 +135,10 @@ impl<const N: usize> TypeResolver for [(&'static str, ResolvedLeafType); N] {
 pub(crate) struct BuiltinTypeResolver;
 
 impl TypeResolver for BuiltinTypeResolver {
-    fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType> {
+    fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
+        if !args.is_empty() {
+            return None;
+        }
         let builtin = op_table::builtin_scalar_type(name)?;
         Some(ResolvedLeafType::new(
             builtin.type_name,
@@ -305,7 +320,7 @@ mod tests {
 
     use crate::{CELParser, OpLookup};
 
-    use super::{ResolvedLeafType, ResolvedType, TypeExpr};
+    use super::{ResolvedLeafType, ResolvedType, TypeExpr, TypeResolver};
 
     #[derive(Clone)]
     struct RegistryType;
@@ -475,6 +490,54 @@ mod tests {
             },
             other => panic!("expected an array resolution, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_type_expr_passes_resolved_args_to_the_resolver() {
+        struct GenericResolver;
+        impl TypeResolver for GenericResolver {
+            fn resolve_named_type(
+                &self,
+                name: &str,
+                args: &[ResolvedType],
+            ) -> Option<ResolvedLeafType> {
+                match (name, args) {
+                    ("Wrapper", [ResolvedType::Scalar(inner)]) => Some(ResolvedLeafType::new(
+                        format!("Wrapper({})", inner.type_name()),
+                        ArrayElementType::leaf::<i32>().unwrap(),
+                    )),
+                    ("i32", []) => Some(ResolvedLeafType::new(
+                        "i32",
+                        ArrayElementType::leaf::<i32>().unwrap(),
+                    )),
+                    _ => None,
+                }
+            }
+        }
+
+        let mut parser = CELParser::with_type_resolver(OpLookup::new(), GenericResolver);
+        let expr = parser.parse_type_expr_str("Wrapper(i32)").unwrap();
+        let resolved = parser.resolve_type_expr(&expr).unwrap();
+
+        match resolved {
+            ResolvedType::Scalar(leaf) => assert_eq!(leaf.type_name(), "Wrapper(i32)"),
+            other => panic!("expected a resolved scalar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_type_expr_reports_unknown_type_when_args_are_unrecognized() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("RangeInclusive(f64)").unwrap();
+        let err = parser
+            .resolve_type_expr(&expr)
+            .expect_err("no resolver registers RangeInclusive yet in this test");
+
+        assert!(
+            err.message().contains("unknown type `RangeInclusive`"),
+            "got: {}",
+            err.message()
+        );
     }
 
     #[test]

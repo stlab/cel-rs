@@ -1009,7 +1009,7 @@ mod tests {
             assert_eq!(scalar.type_id, expected_id);
             assert_eq!(scalar.type_name, name);
             let leaf = BuiltinTypeResolver
-                .resolve_named_type(&name)
+                .resolve_named_type(&name, &[])
                 .unwrap_or_else(|| panic!("`{name}` must resolve as a CEL leaf type"));
             assert_eq!(leaf.type_id(), expected_id);
             assert_eq!(leaf.type_name(), name);

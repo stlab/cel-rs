@@ -23,7 +23,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use adam_rs::{CellId, ConditionalId, MatchExpr, RelationshipId, Sheet};
-use cel_parser::{ResolvedLeafType, TypeResolver};
+use cel_parser::{ResolvedLeafType, ResolvedType, TypeResolver};
 use cel_runtime::{BoxExtractor, DynSegment};
 
 /// The identity of a declared adam-lang cell type. Every distinct tuple *shape* erases to the
@@ -733,7 +733,10 @@ pub struct RegistryTypeResolver {
 }
 
 impl TypeResolver for RegistryTypeResolver {
-    fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType> {
+    fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
+        if !args.is_empty() {
+            return None;
+        }
         self.by_name.get(name).cloned()
     }
 }
@@ -810,7 +813,7 @@ mod tests {
 
         let resolver = reg.cel_type_resolver();
         let leaf = resolver
-            .resolve_named_type("Custom")
+            .resolve_named_type("Custom", &[])
             .expect("custom leaf registered");
 
         assert_eq!(leaf.type_id(), TypeId::of::<Custom>());
