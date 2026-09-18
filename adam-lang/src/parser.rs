@@ -857,66 +857,14 @@ impl AdamParser {
         }
     }
 
-    /// `type_expr = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".`
-    ///
-    /// `()` is the empty tuple type (0 elements); `(T)` is grouping (same as bare `T`); `(T,)`
-    /// is a 1-element tuple; `(T, U, ...)` is n-element, no trailing comma.
+    /// Delegates one `type_expr` to CELParser, sharing the token stream.
     fn parse_type_expr(&mut self, ctx: &mut ParseContext) -> Result<crate::ast::TypeExpr> {
-        if matches!(ctx.peek_token(), Some(Token::Identifier(_))) {
-            let (name, span) = ctx.consume_ident()?;
-            return Ok(crate::ast::TypeExpr::Named(name, point(span)));
-        }
-
-        let open_span = ctx.expect_open_paren()?;
-        if ctx.at_close_paren() {
-            let close_span = ctx.expect_close_paren()?;
-            return Ok(crate::ast::TypeExpr::Tuple(
-                Vec::new(),
-                crate::ast::ExprSpan {
-                    start: open_span,
-                    end: close_span,
-                },
-            ));
-        }
-
-        let first = self.parse_type_expr(ctx)?;
-        if ctx.at_close_paren() {
-            // Grouping: exactly one type, no comma.
-            ctx.expect_close_paren()?;
-            return Ok(first);
-        }
-        if !ctx.consume_punct(",") {
-            return Err(ctx.err_at("expected ',' or closing parenthesis"));
-        }
-        if ctx.at_close_paren() {
-            // Single element + trailing comma: 1-tuple.
-            let close_span = ctx.expect_close_paren()?;
-            return Ok(crate::ast::TypeExpr::Tuple(
-                vec![first],
-                crate::ast::ExprSpan {
-                    start: open_span,
-                    end: close_span,
-                },
-            ));
-        }
-        let mut elements = vec![first];
-        loop {
-            elements.push(self.parse_type_expr(ctx)?);
-            if ctx.at_close_paren() {
-                break;
-            }
-            if !ctx.consume_punct(",") {
-                return Err(ctx.err_at("expected ',' or closing parenthesis"));
-            }
-        }
-        let close_span = ctx.expect_close_paren()?;
-        Ok(crate::ast::TypeExpr::Tuple(
-            elements,
-            crate::ast::ExprSpan {
-                start: open_span,
-                end: close_span,
-            },
-        ))
+        let tokens = ctx.cursor.take_tokens().expect("tokens present");
+        self.cel.set_lex_tokens(tokens);
+        let result = self.cel.parse_type_expression();
+        ctx.cursor
+            .set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
+        result
     }
 
     /// `relationship_decl = "relationship" "{" { binding } "}".`
@@ -1926,14 +1874,6 @@ fn cell_type_id(shape: &TypeShape) -> TypeId {
     match shape {
         TypeShape::Named(type_id) => *type_id,
         TypeShape::Tuple(_) => TypeId::of::<cel_runtime::DynamicSequence>(),
-    }
-}
-
-/// A single-token `ExprSpan` where start and end coincide.
-fn point(span: Span) -> crate::ast::ExprSpan {
-    crate::ast::ExprSpan {
-        start: span,
-        end: span,
     }
 }
 

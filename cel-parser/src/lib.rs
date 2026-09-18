@@ -1941,7 +1941,7 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// Returns an error if a named leaf is missing, if an array, tuple, or type-argument list is
     /// malformed, or if a closing `]`/`)` is missing.
-    fn parse_type_expression(&mut self) -> Result<TypeExpr> {
+    pub fn parse_type_expression(&mut self) -> Result<TypeExpr> {
         if let Some(Token::Identifier(_)) = self.peek_token() {
             let name = self.expect_identifier("expected a type name")?;
             let name_span = self.last_span;

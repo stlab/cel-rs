@@ -299,64 +299,15 @@ impl AdamAstParser {
         })
     }
 
-    /// `type_expr = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".`
+    /// Delegates one `type_expr` to `cel_parser::Parser<AstContext>`, sharing the token stream
+    /// (the same take/set-tokens handoff `parse_cel_expression` uses).
     fn parse_type_expr(&mut self, cursor: &mut TokenCursor) -> Result<ast::TypeExpr> {
-        use cel_parser::lex_lexer::Token;
-        if matches!(cursor.peek_token(), Some(Token::Identifier(_))) {
-            let (name, span) = cursor.consume_ident()?;
-            return Ok(ast::TypeExpr::Named(name, point(span)));
-        }
-
-        let open_span = cursor.expect_open_paren()?;
-        if cursor.at_close_paren() {
-            let close_span = cursor.expect_close_paren()?;
-            return Ok(ast::TypeExpr::Tuple(
-                Vec::new(),
-                ast::ExprSpan {
-                    start: open_span,
-                    end: close_span,
-                },
-            ));
-        }
-
-        let first = self.parse_type_expr(cursor)?;
-        if cursor.at_close_paren() {
-            // Grouping: exactly one type, no comma.
-            cursor.expect_close_paren()?;
-            return Ok(first);
-        }
-        if !cursor.consume_punct(",") {
-            return Err(cursor.err_at("expected ',' or closing parenthesis"));
-        }
-        if cursor.at_close_paren() {
-            // Single element + trailing comma: 1-tuple.
-            let close_span = cursor.expect_close_paren()?;
-            return Ok(ast::TypeExpr::Tuple(
-                vec![first],
-                ast::ExprSpan {
-                    start: open_span,
-                    end: close_span,
-                },
-            ));
-        }
-        let mut elements = vec![first];
-        loop {
-            elements.push(self.parse_type_expr(cursor)?);
-            if cursor.at_close_paren() {
-                break;
-            }
-            if !cursor.consume_punct(",") {
-                return Err(cursor.err_at("expected ',' or closing parenthesis"));
-            }
-        }
-        let close_span = cursor.expect_close_paren()?;
-        Ok(ast::TypeExpr::Tuple(
-            elements,
-            ast::ExprSpan {
-                start: open_span,
-                end: close_span,
-            },
-        ))
+        let tokens = cursor.take_tokens().expect("tokens present");
+        self.cel.set_lex_tokens(tokens);
+        let result = self.cel.parse_type_expression();
+        cursor.set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
+        cursor.absorb_unbalanced_delimiters(self.cel.unbalanced_delimiter_count());
+        result
     }
 
     /// `relationship_decl = "relationship" "{" { binding } "}".`
@@ -677,7 +628,7 @@ mod tests {
         assert_eq!(cell.name, "width");
         assert!(matches!(
             cell.type_name.as_ref().unwrap(),
-            ast::TypeExpr::Named(n, _) if n == "f64"
+            ast::TypeExpr::Named { name: n, .. } if n == "f64"
         ));
         assert!(cell.initializer.is_some());
     }
@@ -1302,7 +1253,7 @@ mod tests {
         assert_eq!(out.name, "area");
         assert!(matches!(
             out.type_name.as_ref().unwrap(),
-            ast::TypeExpr::Named(n, _) if n == "f64"
+            ast::TypeExpr::Named { name: n, .. } if n == "f64"
         ));
         assert!(matches!(out.initializer, Expr::Op { ref name, .. } if name == "*"));
         assert!(out.require.is_none());
@@ -1391,10 +1342,10 @@ mod tests {
             panic!("expected Cell");
         };
         match cell.type_name.as_ref().unwrap() {
-            ast::TypeExpr::Tuple(elements, _) => {
+            ast::TypeExpr::Tuple { elements, .. } => {
                 assert_eq!(elements.len(), 2);
-                assert!(matches!(&elements[0], ast::TypeExpr::Named(n, _) if n == "i32"));
-                assert!(matches!(&elements[1], ast::TypeExpr::Named(n, _) if n == "f64"));
+                assert!(matches!(&elements[0], ast::TypeExpr::Named { name: n, .. } if n == "i32"));
+                assert!(matches!(&elements[1], ast::TypeExpr::Named { name: n, .. } if n == "f64"));
             }
             other => panic!("expected Tuple, got {other:?}"),
         }
@@ -1470,13 +1421,15 @@ mod tests {
         let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
             panic!("expected Cell");
         };
-        let ast::TypeExpr::Tuple(elements, _) = cell.type_name.as_ref().unwrap() else {
+        let ast::TypeExpr::Tuple { elements, .. } = cell.type_name.as_ref().unwrap() else {
             panic!("expected top-level Tuple");
         };
         assert_eq!(elements.len(), 2);
-        assert!(matches!(&elements[0], ast::TypeExpr::Named(n, _) if n == "i32"));
+        assert!(matches!(&elements[0], ast::TypeExpr::Named { name: n, .. } if n == "i32"));
         match &elements[1] {
-            ast::TypeExpr::Tuple(inner, _) => assert_eq!(inner.len(), 2),
+            ast::TypeExpr::Tuple {
+                elements: inner, ..
+            } => assert_eq!(inner.len(), 2),
             other => panic!("expected nested Tuple, got {other:?}"),
         }
     }
@@ -1490,7 +1443,7 @@ mod tests {
             panic!("expected Cell");
         };
         match cell.type_name.as_ref().unwrap() {
-            ast::TypeExpr::Tuple(elements, _) => assert!(elements.is_empty()),
+            ast::TypeExpr::Tuple { elements, .. } => assert!(elements.is_empty()),
             other => panic!("expected empty Tuple, got {other:?}"),
         }
     }
@@ -1503,9 +1456,10 @@ mod tests {
         let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
             panic!("expected Cell");
         };
-        assert!(
-            matches!(cell.type_name.as_ref().unwrap(), ast::TypeExpr::Named(n, _) if n == "i32")
-        );
+        assert!(matches!(
+            cell.type_name.as_ref().unwrap(),
+            ast::TypeExpr::Named { name: n, .. } if n == "i32"
+        ));
     }
 
     #[test]
@@ -1517,7 +1471,7 @@ mod tests {
             panic!("expected Cell");
         };
         match cell.type_name.as_ref().unwrap() {
-            ast::TypeExpr::Tuple(elements, _) => assert_eq!(elements.len(), 1),
+            ast::TypeExpr::Tuple { elements, .. } => assert_eq!(elements.len(), 1),
             other => panic!("expected 1-Tuple, got {other:?}"),
         }
     }
@@ -1541,9 +1495,10 @@ mod tests {
         let ast::SheetItem::Out(out) = &sheet.items[0] else {
             panic!("expected Out");
         };
-        assert!(
-            matches!(out.type_name.as_ref().unwrap(), ast::TypeExpr::Tuple(elements, _) if elements.len() == 2)
-        );
+        assert!(matches!(
+            out.type_name.as_ref().unwrap(),
+            ast::TypeExpr::Tuple { elements, .. } if elements.len() == 2
+        ));
     }
 
     #[test]
