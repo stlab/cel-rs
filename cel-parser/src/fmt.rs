@@ -358,7 +358,18 @@ fn render_closure_param_type(type_expr: &crate::ClosureParamTypeExpr) -> String 
 /// - Complexity: O(n) in the number of nodes in `type_expr`.
 fn render_type_expr(type_expr: &crate::TypeExpr) -> String {
     match type_expr {
-        crate::TypeExpr::Named { name, .. } => name.clone(),
+        crate::TypeExpr::Named { name, args, .. } => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                let inner = args
+                    .iter()
+                    .map(render_type_expr)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{name}({inner})")
+            }
+        }
         crate::TypeExpr::Array { element, .. } => format!("[{}]", render_type_expr(element)),
         crate::TypeExpr::Tuple { elements, .. } => {
             let inner = elements
@@ -960,6 +971,14 @@ mod tests {
     fn typed_arrays_format_with_a_type_ascription() {
         assert_eq!(fmt("[1i32,2i32]:[i32]"), "[1i32, 2i32]: [i32]");
         assert_eq!(fmt("[]:[[i32]]"), "[]: [[i32]]");
+    }
+
+    #[test]
+    fn format_array_annotation_with_a_generic_builtin_element_type() {
+        let source = "[]: [RangeInclusive(f64)]";
+        let expr = parse(source);
+        let formatted = format_expr(&expr, source, 0);
+        assert_eq!(formatted, source);
     }
 
     #[test]
