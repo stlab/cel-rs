@@ -11,5 +11,16 @@
         "Peekable"
     ],
     "cSpell.useGitignore": false,
-    "rust-analyzer.cargo.features": ["playground"]
+    "rust-analyzer.cargo.features": [
+        "playground"
+    ],
+    "taskManager.favorites": [
+        "cel-rs/Workspace/Install adam-lsp + Extension (Local)",
+        "cel-rs/Workspace/begin: serve (desktop)",
+        "cel-rs/Workspace/begin: serve (web)",
+        "cel-rs/Workspace/book: serve (full)",
+        "cel-rs/Workspace/cel-lang-book: serve",
+        "cel-rs/Workspace/worktree: create",
+        "cel-rs/Workspace/worktree: remove"
+    ]
 }
