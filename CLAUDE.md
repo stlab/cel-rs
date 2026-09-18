@@ -60,6 +60,15 @@ RUSTFLAGS=-Zsanitizer=thread  cargo +nightly test -Zbuild-std --target <triple> 
 RUSTFLAGS=-Zsanitizer=leak    cargo +nightly test -Zbuild-std --target <triple> --workspace
 ```
 
+## Superpowers Workflow
+
+When executing an implementation plan (from `writing-plans` or a design doc) that breaks down
+into independent or semi-independent tasks, default to the `subagent-driven-development` skill
+rather than `executing-plans` — dispatch each task to a subagent with its own context, review
+each result, and update the plan/ledger as tasks complete. Only fall back to a single-session,
+non-delegated execution when the user explicitly asks for it or the plan has no tasks that
+benefit from separate context (e.g. a single tightly-coupled edit).
+
 ## Git Workflow
 
 If a request is made that requires any modification, additions, or deletions to files in the project, stop and suggest the user create a worktree first.

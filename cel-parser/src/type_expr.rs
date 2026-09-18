@@ -12,18 +12,26 @@ use cel_runtime::ArrayElementType;
 
 use crate::{ExprSpan, ParseError, Result, op_table};
 
-/// `type_expr = identifier | "[" type_expr "]" | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".`
+/// `type_expression = identifier [ "(" [ type_expression { "," type_expression } ] ")" ]
+///                   | "[" type_expression "]"
+///                   | "(" [ type_expression ["," [ type_expression { "," type_expression } ]] ] ")".`
 ///
 /// `()` is the empty tuple type (0 elements); `(T)` is grouping (same as bare `T`); `(T,)` is a
 /// 1-element tuple; `(T, U, ...)` is n-element, no trailing comma. `[T]` names a rank-one array
-/// whose elements have type `T`; nested brackets compose recursively.
+/// whose elements have type `T`; nested brackets compose recursively. `Name(A, B)` names a
+/// parameterized (generic) type applying zero or more type arguments (`RangeInclusive(f64)`,
+/// `RangeFull()`); an identifier immediately followed by `(` has no other meaning in type
+/// position, so this is unambiguous with adjacent tuple-grouping syntax.
 #[derive(Clone, Debug)]
 pub enum TypeExpr {
-    /// A single type name, resolved later through a [`TypeResolver`].
+    /// A single type name, optionally applying type arguments, resolved later through a
+    /// [`TypeResolver`].
     Named {
         /// The unresolved type name, exactly as written.
         name: String,
-        /// The source span of the full name token.
+        /// Type arguments, e.g. `f64` in `RangeInclusive(f64)`. Empty for a plain name.
+        args: Vec<TypeExpr>,
+        /// The source span of the full name token, including any parenthesized argument list.
         span: ExprSpan,
     },
     /// A recursively nested array type expression (`[T]`).
@@ -62,16 +70,24 @@ impl TypeExpr {
     /// - Complexity: O(n) in the number of nodes in this type tree.
     pub fn resolve(&self, resolver: &dyn TypeResolver) -> Result<ResolvedType> {
         match self {
-            TypeExpr::Named { name, span } => resolver.resolve_named_type(name).map_or_else(
-                || {
-                    Err(ParseError::new_range(
-                        format!("unknown type `{name}`"),
-                        span.start,
-                        span.end,
-                    ))
-                },
-                |leaf| Ok(ResolvedType::Scalar(leaf)),
-            ),
+            TypeExpr::Named { name, args, span } => {
+                let resolved_args = args
+                    .iter()
+                    .map(|arg| arg.resolve(resolver))
+                    .collect::<Result<Vec<_>>>()?;
+                resolver
+                    .resolve_named_type(name, &resolved_args)
+                    .map_or_else(
+                        || {
+                            Err(ParseError::new_range(
+                                format!("unknown type `{name}`"),
+                                span.start,
+                                span.end,
+                            ))
+                        },
+                        |leaf| Ok(ResolvedType::Scalar(leaf)),
+                    )
+            }
             TypeExpr::Array { element, .. } => Ok(ResolvedType::Array {
                 element: Box::new(element.resolve(resolver)?),
             }),
@@ -90,21 +106,25 @@ impl TypeExpr {
 /// Implementations return `None` when `name` is unknown. Recursive array and tuple composition is
 /// performed by [`TypeExpr::resolve`], so a resolver only needs to recognize leaf names.
 pub trait TypeResolver: Send + Sync {
-    /// Returns the registered leaf type named `name`, or `None` if it is unknown.
-    fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType>;
+    /// Returns the registered leaf type named `name` applying `args` (already resolved), or
+    /// `None` if `name`/`args` is unrecognized. `args` is empty for a plain (non-generic) name.
+    fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType>;
 }
 
 impl<F> TypeResolver for F
 where
-    F: Fn(&str) -> Option<ResolvedLeafType> + Send + Sync,
+    F: Fn(&str, &[ResolvedType]) -> Option<ResolvedLeafType> + Send + Sync,
 {
-    fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType> {
-        self(name)
+    fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
+        self(name, args)
     }
 }
 
 impl<const N: usize> TypeResolver for [(&'static str, ResolvedLeafType); N] {
-    fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType> {
+    fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
+        if !args.is_empty() {
+            return None;
+        }
         self.iter()
             .find(|(registered_name, _)| *registered_name == name)
             .map(|(_, leaf)| leaf.clone())
@@ -115,8 +135,15 @@ impl<const N: usize> TypeResolver for [(&'static str, ResolvedLeafType); N] {
 pub(crate) struct BuiltinTypeResolver;
 
 impl TypeResolver for BuiltinTypeResolver {
-    fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType> {
-        let builtin = op_table::builtin_scalar_type(name)?;
+    fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
+        let builtin = match args {
+            [] => op_table::builtin_scalar_type(name)
+                .or_else(|| op_table::builtin_generic_type_0(name)),
+            [ResolvedType::Scalar(arg_leaf)] => {
+                op_table::builtin_generic_type(name, arg_leaf.type_name())
+            }
+            _ => None,
+        }?;
         Some(ResolvedLeafType::new(
             builtin.type_name,
             (builtin.element_type)(),
@@ -124,8 +151,27 @@ impl TypeResolver for BuiltinTypeResolver {
     }
 }
 
-pub(crate) fn default_type_resolver() -> Arc<dyn TypeResolver> {
+/// Returns `cel-parser`'s own built-in type resolver — every scalar name recognized by
+/// `builtin_scalar_type`, plus every built-in generic type recognized by `builtin_generic_type`
+/// (the `Range` family).
+///
+/// A host embedding `cel-parser` with its own [`TypeResolver`] (one that also knows
+/// host-specific custom types) can delegate any name it doesn't itself recognize to this
+/// resolver, so built-in types stay visible inside host-embedded CEL expressions.
+#[must_use]
+pub fn builtin_type_resolver() -> Arc<dyn TypeResolver> {
     Arc::new(BuiltinTypeResolver)
+}
+
+/// Resolves `name`/`args` against `cel-parser`'s own built-in type resolver, without allocating
+/// a [`TypeResolver`] trait object.
+///
+/// Equivalent to `builtin_type_resolver().resolve_named_type(name, args)`, but for a host that
+/// only needs a one-off built-in fallback lookup (rather than a `TypeResolver` trait object to
+/// pass around), this avoids constructing a new `Arc` on every call.
+#[must_use]
+pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
+    BuiltinTypeResolver.resolve_named_type(name, args)
 }
 
 /// One resolved scalar leaf type.
@@ -297,7 +343,7 @@ mod tests {
 
     use crate::{CELParser, OpLookup};
 
-    use super::{ResolvedLeafType, ResolvedType, TypeExpr};
+    use super::{ResolvedLeafType, ResolvedType, TypeExpr, TypeResolver};
 
     #[derive(Clone)]
     struct RegistryType;
@@ -308,8 +354,9 @@ mod tests {
         let expr = parser.parse_type_expr_str("i32").unwrap();
 
         match expr {
-            TypeExpr::Named { name, span } => {
+            TypeExpr::Named { name, args, span } => {
                 assert_eq!(name, "i32");
+                assert!(args.is_empty());
                 assert_eq!(span.start.source_text().as_deref(), Some("i32"));
                 assert_eq!(span.end.source_text().as_deref(), Some("i32"));
             }
@@ -466,5 +513,301 @@ mod tests {
             },
             other => panic!("expected an array resolution, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_type_expr_passes_resolved_args_to_the_resolver() {
+        struct GenericResolver;
+        impl TypeResolver for GenericResolver {
+            fn resolve_named_type(
+                &self,
+                name: &str,
+                args: &[ResolvedType],
+            ) -> Option<ResolvedLeafType> {
+                match (name, args) {
+                    ("Wrapper", [ResolvedType::Scalar(inner)]) => Some(ResolvedLeafType::new(
+                        format!("Wrapper({})", inner.type_name()),
+                        ArrayElementType::leaf::<i32>().unwrap(),
+                    )),
+                    ("i32", []) => Some(ResolvedLeafType::new(
+                        "i32",
+                        ArrayElementType::leaf::<i32>().unwrap(),
+                    )),
+                    _ => None,
+                }
+            }
+        }
+
+        let mut parser = CELParser::with_type_resolver(OpLookup::new(), GenericResolver);
+        let expr = parser.parse_type_expr_str("Wrapper(i32)").unwrap();
+        let resolved = parser.resolve_type_expr(&expr).unwrap();
+
+        match resolved {
+            ResolvedType::Scalar(leaf) => assert_eq!(leaf.type_name(), "Wrapper(i32)"),
+            other => panic!("expected a resolved scalar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_builtin_generic_type_expr_end_to_end() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("RangeInclusive(f64)").unwrap();
+        let resolved = parser.resolve_type_expr(&expr).unwrap();
+
+        match resolved {
+            ResolvedType::Scalar(leaf) => {
+                assert_eq!(leaf.type_name(), "RangeInclusive(f64)");
+                assert_eq!(
+                    leaf.type_id(),
+                    TypeId::of::<std::ops::RangeInclusive<f64>>()
+                );
+            }
+            other => panic!("expected a resolved scalar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_builtin_generic_type_as_array_element() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("[RangeInclusive(f64)]").unwrap();
+        let resolved = parser.resolve_type_expr(&expr).unwrap();
+        let array = crate::ResolvedArrayType::from_resolved_type(resolved, expr.span()).unwrap();
+
+        assert_eq!(
+            array.element_type().type_id(),
+            TypeId::of::<std::ops::RangeInclusive<f64>>()
+        );
+    }
+
+    #[test]
+    fn resolve_range_full_generic_type_expr() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("RangeFull()").unwrap();
+        let resolved = parser.resolve_type_expr(&expr).unwrap();
+
+        match resolved {
+            ResolvedType::Scalar(leaf) => assert_eq!(leaf.type_name(), "RangeFull"),
+            other => panic!("expected a resolved scalar, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_type_expr_reports_unknown_type_when_args_are_unrecognized() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("Wrapper(f64)").unwrap();
+        let err = parser
+            .resolve_type_expr(&expr)
+            .expect_err("no resolver registers Wrapper as a built-in generic type");
+
+        assert!(
+            err.message().contains("unknown type `Wrapper`"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn parse_named_type_expr_with_one_type_argument() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("RangeInclusive(f64)").unwrap();
+
+        match expr {
+            TypeExpr::Named { name, args, span } => {
+                assert_eq!(name, "RangeInclusive");
+                assert_eq!(span.start.source_text().as_deref(), Some("RangeInclusive"));
+                assert_eq!(span.end.source_text().as_deref(), Some("(f64)"));
+                assert_eq!(args.len(), 1);
+                match &args[0] {
+                    TypeExpr::Named { name, args, .. } => {
+                        assert_eq!(name, "f64");
+                        assert!(args.is_empty());
+                    }
+                    other => panic!("expected a named type argument, got {other:?}"),
+                }
+            }
+            other => panic!("expected a named type expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_named_type_expr_with_zero_type_arguments() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("RangeFull()").unwrap();
+
+        match expr {
+            TypeExpr::Named { name, args, span } => {
+                assert_eq!(name, "RangeFull");
+                assert_eq!(span.end.source_text().as_deref(), Some("()"));
+                assert!(args.is_empty());
+            }
+            other => panic!("expected a named type expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_named_type_expr_with_multiple_and_nested_type_arguments() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser
+            .parse_type_expr_str("Pair(RangeInclusive(f64), i32)")
+            .unwrap();
+
+        match expr {
+            TypeExpr::Named { name, args, .. } => {
+                assert_eq!(name, "Pair");
+                assert_eq!(args.len(), 2);
+                match &args[0] {
+                    TypeExpr::Named { name, args, .. } => {
+                        assert_eq!(name, "RangeInclusive");
+                        assert_eq!(args.len(), 1);
+                    }
+                    other => panic!("expected the first argument to be named, got {other:?}"),
+                }
+                match &args[1] {
+                    TypeExpr::Named { name, args, .. } => {
+                        assert_eq!(name, "i32");
+                        assert!(args.is_empty());
+                    }
+                    other => panic!("expected the second argument to be named, got {other:?}"),
+                }
+            }
+            other => panic!("expected a named type expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_named_type_expr_with_no_parens_still_parses_a_bare_name() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser.parse_type_expr_str("i32").unwrap();
+
+        match expr {
+            TypeExpr::Named { name, args, .. } => {
+                assert_eq!(name, "i32");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected a named type expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_named_type_expr_rejects_a_trailing_comma_in_the_argument_list() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = parser
+            .parse_type_expr_str("RangeInclusive(f64,)")
+            .expect_err("a trailing comma is not a valid type-argument list");
+
+        assert!(
+            err.message().contains("expected a type name"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn parse_named_type_expr_rejects_a_missing_closing_paren() {
+        // `proc_macro2::TokenStream::from_str` tokenizes delimiters into a matched tree up
+        // front, so a truly unclosed `(` is rejected at tokenization (a `LexError`), before
+        // `parse_type_expression`'s own "expected ',' or closing ')'" check ever runs — see
+        // `parse_named_type_expr_rejects_arguments_missing_a_separating_comma` for that case.
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = parser
+            .parse_type_expr_str("RangeInclusive(f64")
+            .expect_err("an unclosed type-argument list must be rejected");
+
+        assert!(
+            err.message().contains("unclosed delimiter"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn parse_named_type_expr_rejects_arguments_missing_a_separating_comma() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = parser
+            .parse_type_expr_str("Pair(i32 f64)")
+            .expect_err("adjacent type arguments without a comma must be rejected");
+
+        assert!(
+            err.message()
+                .contains("expected ',' or closing ')' in type argument list"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn parse_named_type_expr_supports_deeply_nested_generic_arguments() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let expr = parser
+            .parse_type_expr_str("Outer(Middle(Inner(f64)))")
+            .unwrap();
+
+        match expr {
+            TypeExpr::Named { name, args, .. } => {
+                assert_eq!(name, "Outer");
+                match &args[..] {
+                    [
+                        TypeExpr::Named {
+                            name: middle_name,
+                            args: middle_args,
+                            ..
+                        },
+                    ] => {
+                        assert_eq!(middle_name, "Middle");
+                        match &middle_args[..] {
+                            [
+                                TypeExpr::Named {
+                                    name: inner_name,
+                                    args: inner_args,
+                                    ..
+                                },
+                            ] => {
+                                assert_eq!(inner_name, "Inner");
+                                match &inner_args[..] {
+                                    [TypeExpr::Named { name, args, .. }] => {
+                                        assert_eq!(name, "f64");
+                                        assert!(args.is_empty());
+                                    }
+                                    other => panic!("expected one named argument, got {other:?}"),
+                                }
+                            }
+                            other => panic!("expected one named argument, got {other:?}"),
+                        }
+                    }
+                    other => panic!("expected one named argument, got {other:?}"),
+                }
+            }
+            other => panic!("expected a named type expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builtin_type_resolver_resolves_scalars_and_generics() {
+        let resolver = crate::builtin_type_resolver();
+
+        let scalar = resolver.resolve_named_type("i32", &[]).unwrap();
+        assert_eq!(scalar.type_name(), "i32");
+
+        let arg = ResolvedType::Scalar(resolver.resolve_named_type("f64", &[]).unwrap());
+        let generic = resolver
+            .resolve_named_type("RangeInclusive", std::slice::from_ref(&arg))
+            .unwrap();
+        assert_eq!(generic.type_name(), "RangeInclusive(f64)");
+
+        assert!(resolver.resolve_named_type("not_a_type", &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_builtin_named_type_matches_the_arc_wrapped_resolver() {
+        let scalar = crate::resolve_builtin_named_type("i32", &[]).unwrap();
+        assert_eq!(scalar.type_name(), "i32");
+
+        let arg = ResolvedType::Scalar(crate::resolve_builtin_named_type("f64", &[]).unwrap());
+        let generic =
+            crate::resolve_builtin_named_type("RangeInclusive", std::slice::from_ref(&arg))
+                .unwrap();
+        assert_eq!(generic.type_name(), "RangeInclusive(f64)");
+
+        assert!(crate::resolve_builtin_named_type("not_a_type", &[]).is_none());
     }
 }

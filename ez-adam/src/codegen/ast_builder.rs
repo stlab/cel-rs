@@ -44,7 +44,11 @@ fn type_expr_for(ty: &CellType) -> adam_lang::ast::TypeExpr {
         CellType::Bool => "bool",
         CellType::Text => "String",
     };
-    adam_lang::ast::TypeExpr::Named(name.to_string(), cel_parser::ExprSpan::for_text(name))
+    adam_lang::ast::TypeExpr::Named {
+        name: name.to_string(),
+        args: Vec::new(),
+        span: cel_parser::ExprSpan::for_text(name),
+    }
 }
 
 /// Builds a `cell <name>: <type> [filter ...];` declaration for `cell`,
@@ -647,11 +651,11 @@ mod tests {
     fn type_expr_for_i64_has_the_right_source_text() {
         let type_expr = type_expr_for(&CellType::i64());
         match type_expr {
-            adam_lang::ast::TypeExpr::Named(name, span) => {
+            adam_lang::ast::TypeExpr::Named { name, span, .. } => {
                 assert_eq!(name, "i64");
                 assert_eq!(span.start.source_text().as_deref(), Some("i64"));
             }
-            adam_lang::ast::TypeExpr::Tuple(..) => panic!("expected Named"),
+            other => panic!("expected Named, got {other:?}"),
         }
     }
 

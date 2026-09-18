@@ -1475,6 +1475,117 @@ builtin_scalars! {
     "String" => String,
 }
 
+/// Declares the built-in *generic* (parameterized) type table: one entry per
+/// `(generic constructor name, argument type name)` pair, in the same
+/// `BuiltinScalarType` shape [`builtin_scalar_type`] returns for plain names. Covers exactly
+/// the numeric type set each range operator (`..`, `..=`, etc. — see `RANGE_SIGNATURES` and
+/// its siblings above) already supports.
+macro_rules! builtin_generic_types {
+    ($($generic:literal => { $($arg_name:literal => $ty:ty),* $(,)? }),* $(,)?) => {
+        /// Resolves a one-argument built-in generic type (e.g. `Range(u8)`) to its full
+        /// descriptor, given the generic constructor's name and its already-resolved argument
+        /// type's name (e.g. `"u8"`). Returns `None` if `generic_name`/`arg_type_name` names no
+        /// recognized combination.
+        ///
+        /// - Complexity: O(1).
+        pub(crate) fn builtin_generic_type(
+            generic_name: &str,
+            arg_type_name: &str,
+        ) -> Option<BuiltinScalarType> {
+            match generic_name {
+                $($generic => match arg_type_name {
+                    $($arg_name => Some(BuiltinScalarType {
+                        type_id: TypeId::of::<$ty>(),
+                        type_name: concat!($generic, "(", $arg_name, ")"),
+                        size: std::mem::size_of::<$ty>(),
+                        align: std::mem::align_of::<$ty>(),
+                        dropper: cel_runtime::raw_dropper_for::<$ty>(),
+                        push_arg: |seg, idx| seg.push_arg::<$ty>(idx),
+                        element_type: || {
+                            cel_runtime::ArrayElementType::leaf::<$ty>()
+                                .expect("a built-in generic type is never DynamicArray")
+                                .with_type_name(concat!($generic, "(", $arg_name, ")"))
+                        },
+                    }),)*
+                    _ => None,
+                },)*
+                _ => None,
+            }
+        }
+    };
+}
+
+builtin_generic_types! {
+    "Range" => {
+        "u8" => std::ops::Range<u8>, "u16" => std::ops::Range<u16>,
+        "u32" => std::ops::Range<u32>, "u64" => std::ops::Range<u64>,
+        "u128" => std::ops::Range<u128>, "usize" => std::ops::Range<usize>,
+        "i8" => std::ops::Range<i8>, "i16" => std::ops::Range<i16>,
+        "i32" => std::ops::Range<i32>, "i64" => std::ops::Range<i64>,
+        "i128" => std::ops::Range<i128>, "isize" => std::ops::Range<isize>,
+        "f32" => std::ops::Range<f32>, "f64" => std::ops::Range<f64>,
+    },
+    "RangeInclusive" => {
+        "u8" => std::ops::RangeInclusive<u8>, "u16" => std::ops::RangeInclusive<u16>,
+        "u32" => std::ops::RangeInclusive<u32>, "u64" => std::ops::RangeInclusive<u64>,
+        "u128" => std::ops::RangeInclusive<u128>, "usize" => std::ops::RangeInclusive<usize>,
+        "i8" => std::ops::RangeInclusive<i8>, "i16" => std::ops::RangeInclusive<i16>,
+        "i32" => std::ops::RangeInclusive<i32>, "i64" => std::ops::RangeInclusive<i64>,
+        "i128" => std::ops::RangeInclusive<i128>, "isize" => std::ops::RangeInclusive<isize>,
+        "f32" => std::ops::RangeInclusive<f32>, "f64" => std::ops::RangeInclusive<f64>,
+    },
+    "RangeFrom" => {
+        "u8" => std::ops::RangeFrom<u8>, "u16" => std::ops::RangeFrom<u16>,
+        "u32" => std::ops::RangeFrom<u32>, "u64" => std::ops::RangeFrom<u64>,
+        "u128" => std::ops::RangeFrom<u128>, "usize" => std::ops::RangeFrom<usize>,
+        "i8" => std::ops::RangeFrom<i8>, "i16" => std::ops::RangeFrom<i16>,
+        "i32" => std::ops::RangeFrom<i32>, "i64" => std::ops::RangeFrom<i64>,
+        "i128" => std::ops::RangeFrom<i128>, "isize" => std::ops::RangeFrom<isize>,
+        "f32" => std::ops::RangeFrom<f32>, "f64" => std::ops::RangeFrom<f64>,
+    },
+    "RangeTo" => {
+        "u8" => std::ops::RangeTo<u8>, "u16" => std::ops::RangeTo<u16>,
+        "u32" => std::ops::RangeTo<u32>, "u64" => std::ops::RangeTo<u64>,
+        "u128" => std::ops::RangeTo<u128>, "usize" => std::ops::RangeTo<usize>,
+        "i8" => std::ops::RangeTo<i8>, "i16" => std::ops::RangeTo<i16>,
+        "i32" => std::ops::RangeTo<i32>, "i64" => std::ops::RangeTo<i64>,
+        "i128" => std::ops::RangeTo<i128>, "isize" => std::ops::RangeTo<isize>,
+        "f32" => std::ops::RangeTo<f32>, "f64" => std::ops::RangeTo<f64>,
+    },
+    "RangeToInclusive" => {
+        "u8" => std::ops::RangeToInclusive<u8>, "u16" => std::ops::RangeToInclusive<u16>,
+        "u32" => std::ops::RangeToInclusive<u32>, "u64" => std::ops::RangeToInclusive<u64>,
+        "u128" => std::ops::RangeToInclusive<u128>, "usize" => std::ops::RangeToInclusive<usize>,
+        "i8" => std::ops::RangeToInclusive<i8>, "i16" => std::ops::RangeToInclusive<i16>,
+        "i32" => std::ops::RangeToInclusive<i32>, "i64" => std::ops::RangeToInclusive<i64>,
+        "i128" => std::ops::RangeToInclusive<i128>, "isize" => std::ops::RangeToInclusive<isize>,
+        "f32" => std::ops::RangeToInclusive<f32>, "f64" => std::ops::RangeToInclusive<f64>,
+    },
+}
+
+/// Resolves a zero-argument built-in generic type (currently only `RangeFull`) to its full
+/// descriptor.
+///
+/// - Complexity: O(1).
+pub(crate) fn builtin_generic_type_0(name: &str) -> Option<BuiltinScalarType> {
+    match name {
+        "RangeFull" => Some(BuiltinScalarType {
+            type_id: TypeId::of::<std::ops::RangeFull>(),
+            type_name: "RangeFull",
+            size: std::mem::size_of::<std::ops::RangeFull>(),
+            align: std::mem::align_of::<std::ops::RangeFull>(),
+            dropper: cel_runtime::raw_dropper_for::<std::ops::RangeFull>(),
+            push_arg: |seg, idx| seg.push_arg::<std::ops::RangeFull>(idx),
+            element_type: || {
+                cel_runtime::ArrayElementType::leaf::<std::ops::RangeFull>()
+                    .expect("RangeFull is never DynamicArray")
+                    .with_type_name("RangeFull")
+            },
+        }),
+        _ => None,
+    }
+}
+
 /// Built-in operation scope.
 ///
 /// Provides lookup for standard operations using a compile-time hash table.
@@ -2780,6 +2891,65 @@ mod tests {
         let value = 42i32;
         let result: i32 = segment.call_dyn(&[&value]).unwrap();
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn builtin_generic_type_resolves_every_range_family_member_for_every_numeric_type() {
+        for generic in [
+            "Range",
+            "RangeInclusive",
+            "RangeFrom",
+            "RangeTo",
+            "RangeToInclusive",
+        ] {
+            for arg in [
+                "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128",
+                "isize", "f32", "f64",
+            ] {
+                let resolved = builtin_generic_type(generic, arg)
+                    .unwrap_or_else(|| panic!("expected `{generic}({arg})` to resolve"));
+                assert_eq!(resolved.type_name, format!("{generic}({arg})"));
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_generic_type_range_inclusive_f64_matches_std_any_type_id() {
+        let resolved = builtin_generic_type("RangeInclusive", "f64").unwrap();
+        assert_eq!(
+            resolved.type_id,
+            TypeId::of::<std::ops::RangeInclusive<f64>>()
+        );
+        assert_eq!(
+            resolved.size,
+            std::mem::size_of::<std::ops::RangeInclusive<f64>>()
+        );
+    }
+
+    #[test]
+    fn builtin_generic_type_is_none_for_unknown_generic_or_argument() {
+        assert!(builtin_generic_type("NotAGeneric", "f64").is_none());
+        assert!(builtin_generic_type("Range", "not_a_type").is_none());
+        assert!(builtin_generic_type("Range", "bool").is_none());
+        assert!(builtin_generic_type("Range", "String").is_none());
+    }
+
+    #[test]
+    fn builtin_generic_type_0_resolves_range_full() {
+        let resolved = builtin_generic_type_0("RangeFull").unwrap();
+        assert_eq!(resolved.type_name, "RangeFull");
+        assert_eq!(resolved.type_id, TypeId::of::<std::ops::RangeFull>());
+        assert!(builtin_generic_type_0("NotAGeneric").is_none());
+    }
+
+    #[test]
+    fn builtin_generic_type_push_arg_declares_a_readable_argument() {
+        let resolved = builtin_generic_type("RangeInclusive", "i32").unwrap();
+        let mut segment = DynSegment::new::<()>();
+        (resolved.push_arg)(&mut segment, 0);
+        let value = 1i32..=5i32;
+        let result: std::ops::RangeInclusive<i32> = segment.call_dyn(&[&value]).unwrap();
+        assert_eq!(result, 1..=5);
     }
 
     #[test]

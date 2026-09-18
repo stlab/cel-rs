@@ -23,7 +23,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 use adam_rs::{CellId, ConditionalId, MatchExpr, RelationshipId, Sheet};
-use cel_parser::{ResolvedLeafType, TypeResolver};
+use cel_parser::{ResolvedLeafType, ResolvedType, TypeResolver};
 use cel_runtime::{BoxExtractor, DynSegment};
 
 /// The identity of a declared adam-lang cell type. Every distinct tuple *shape* erases to the
@@ -490,25 +490,42 @@ impl TypeRegistry {
     /// Resolves a parsed `type_expr` against this registry, recursively.
     ///
     /// # Errors
-    /// Returns the unknown type name and its span if some leaf name isn't registered.
+    /// Returns the unknown type name and its span if some leaf name isn't registered. Also
+    /// returns an error citing <https://github.com/stlab/cel-rs/issues/227> for a cell-declared
+    /// array type, or a parameterized/generic named type (non-empty `args`), since cell
+    /// declarations do not support either yet.
     pub fn resolve(
         &self,
-        expr: &crate::ast::TypeExpr,
+        expr: &cel_parser::TypeExpr,
     ) -> std::result::Result<TypeShape, (String, proc_macro2::Span)> {
         match expr {
-            crate::ast::TypeExpr::Named(name, span) => {
+            cel_parser::TypeExpr::Named { name, args, span } => {
+                if !args.is_empty() {
+                    return Err((
+                        format!(
+                            "cell type `{name}` cannot be a parameterized/generic type yet; \
+                             see https://github.com/stlab/cel-rs/issues/227"
+                        ),
+                        span.start,
+                    ));
+                }
                 let entry = self
                     .get(name)
                     .ok_or_else(|| (format!("unknown type `{name}`"), span.start))?;
                 Ok(TypeShape::Named(entry.type_id))
             }
-            crate::ast::TypeExpr::Tuple(elements, _) => {
+            cel_parser::TypeExpr::Tuple { elements, .. } => {
                 let shapes = elements
                     .iter()
                     .map(|e| self.resolve(e))
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 Ok(TypeShape::Tuple(shapes))
             }
+            cel_parser::TypeExpr::Array { span, .. } => Err((
+                "cell types cannot be arrays yet; see https://github.com/stlab/cel-rs/issues/227"
+                    .to_string(),
+                span.start,
+            )),
         }
     }
 
@@ -733,8 +750,13 @@ pub struct RegistryTypeResolver {
 }
 
 impl TypeResolver for RegistryTypeResolver {
-    fn resolve_named_type(&self, name: &str) -> Option<ResolvedLeafType> {
-        self.by_name.get(name).cloned()
+    fn resolve_named_type(&self, name: &str, args: &[ResolvedType]) -> Option<ResolvedLeafType> {
+        if args.is_empty()
+            && let Some(leaf) = self.by_name.get(name).cloned()
+        {
+            return Some(leaf);
+        }
+        cel_parser::resolve_builtin_named_type(name, args)
     }
 }
 
@@ -810,7 +832,7 @@ mod tests {
 
         let resolver = reg.cel_type_resolver();
         let leaf = resolver
-            .resolve_named_type("Custom")
+            .resolve_named_type("Custom", &[])
             .expect("custom leaf registered");
 
         assert_eq!(leaf.type_id(), TypeId::of::<Custom>());
@@ -971,7 +993,11 @@ mod tests {
     #[test]
     fn resolve_named_type_expr_returns_the_matching_type_shape() {
         let reg = TypeRegistry::new();
-        let expr = crate::ast::TypeExpr::Named("i32".to_string(), point(Span::call_site()));
+        let expr = cel_parser::TypeExpr::Named {
+            name: "i32".to_string(),
+            args: Vec::new(),
+            span: point(Span::call_site()),
+        };
         let shape = reg.resolve(&expr).unwrap();
         assert_eq!(shape, TypeShape::Named(TypeId::of::<i32>()));
     }
@@ -979,7 +1005,11 @@ mod tests {
     #[test]
     fn resolve_unknown_named_type_expr_is_an_error() {
         let reg = TypeRegistry::new();
-        let expr = crate::ast::TypeExpr::Named("bogus".to_string(), point(Span::call_site()));
+        let expr = cel_parser::TypeExpr::Named {
+            name: "bogus".to_string(),
+            args: Vec::new(),
+            span: point(Span::call_site()),
+        };
         assert!(reg.resolve(&expr).is_err());
     }
 
@@ -987,19 +1017,31 @@ mod tests {
     fn resolve_tuple_type_expr_returns_a_nested_type_shape() {
         let reg = TypeRegistry::new();
         let span = point(Span::call_site());
-        let expr = crate::ast::TypeExpr::Tuple(
-            vec![
-                crate::ast::TypeExpr::Named("i32".to_string(), span),
-                crate::ast::TypeExpr::Tuple(
-                    vec![
-                        crate::ast::TypeExpr::Named("f64".to_string(), span),
-                        crate::ast::TypeExpr::Named("String".to_string(), span),
+        let expr = cel_parser::TypeExpr::Tuple {
+            elements: vec![
+                cel_parser::TypeExpr::Named {
+                    name: "i32".to_string(),
+                    args: Vec::new(),
+                    span,
+                },
+                cel_parser::TypeExpr::Tuple {
+                    elements: vec![
+                        cel_parser::TypeExpr::Named {
+                            name: "f64".to_string(),
+                            args: Vec::new(),
+                            span,
+                        },
+                        cel_parser::TypeExpr::Named {
+                            name: "String".to_string(),
+                            args: Vec::new(),
+                            span,
+                        },
                     ],
                     span,
-                ),
+                },
             ],
             span,
-        );
+        };
         let shape = reg.resolve(&expr).unwrap();
         assert_eq!(
             shape,
@@ -1011,6 +1053,54 @@ mod tests {
                 ]),
             ])
         );
+    }
+
+    #[test]
+    fn resolve_rejects_an_array_cell_type_citing_issue_227() {
+        let registry = TypeRegistry::new();
+        let span = point(Span::call_site());
+        let expr = cel_parser::TypeExpr::Array {
+            element: Box::new(cel_parser::TypeExpr::Named {
+                name: "i32".to_string(),
+                args: Vec::new(),
+                span,
+            }),
+            span,
+        };
+        let err = registry
+            .resolve(&expr)
+            .expect_err("array cell types are not yet supported");
+        assert!(err.0.contains("issues/227"), "got: {}", err.0);
+    }
+
+    #[test]
+    fn resolve_rejects_a_generic_cell_type_citing_issue_227() {
+        let registry = TypeRegistry::new();
+        let span = point(Span::call_site());
+        let expr = cel_parser::TypeExpr::Named {
+            name: "RangeInclusive".to_string(),
+            args: vec![cel_parser::TypeExpr::Named {
+                name: "f64".to_string(),
+                args: Vec::new(),
+                span,
+            }],
+            span,
+        };
+        let err = registry
+            .resolve(&expr)
+            .expect_err("generic cell types are not yet supported");
+        assert!(err.0.contains("issues/227"), "got: {}", err.0);
+    }
+
+    #[test]
+    fn cel_type_resolver_falls_back_to_builtin_generics() {
+        let registry = TypeRegistry::new();
+        let resolver = registry.cel_type_resolver();
+        let f64_leaf = resolver.resolve_named_type("f64", &[]).expect("f64");
+        let resolved = resolver
+            .resolve_named_type("RangeInclusive", &[ResolvedType::Scalar(f64_leaf)])
+            .expect("RangeInclusive(f64) should resolve via the builtin fallback");
+        assert_eq!(resolved.type_name(), "RangeInclusive(f64)");
     }
 
     #[test]

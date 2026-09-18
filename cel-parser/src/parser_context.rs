@@ -43,6 +43,7 @@ use crate::type_expr::TypeExpr;
 ///     Some(TypeExpr::Array {
 ///         element: Box::new(TypeExpr::Named {
 ///             name: "i32".to_string(),
+///             args: Vec::new(),
 ///             span,
 ///         }),
 ///         span,
@@ -87,6 +88,7 @@ impl<'a> AnnotatedArray<'a> {
     ///     Some(TypeExpr::Array {
     ///         element: Box::new(TypeExpr::Named {
     ///             name: "i32".to_string(),
+    ///             args: Vec::new(),
     ///             span,
     ///         }),
     ///         span,
@@ -131,6 +133,7 @@ impl<'a> AnnotatedArray<'a> {
     ///     Some(TypeExpr::Array {
     ///         element: Box::new(TypeExpr::Named {
     ///             name: "i32".to_string(),
+    ///             args: Vec::new(),
     ///             span,
     ///         }),
     ///         span,
@@ -228,6 +231,7 @@ impl<'a> AnnotatedArray<'a> {
     ///     Some(TypeExpr::Array {
     ///         element: Box::new(TypeExpr::Named {
     ///             name: "i32".to_string(),
+    ///             args: Vec::new(),
     ///             span,
     ///         }),
     ///         span,
@@ -271,6 +275,7 @@ impl<'a> AnnotatedArray<'a> {
     ///     Some(TypeExpr::Array {
     ///         element: Box::new(TypeExpr::Named {
     ///             name: "i32".to_string(),
+    ///             args: Vec::new(),
     ///             span,
     ///         }),
     ///         span,
@@ -948,6 +953,7 @@ mod tests {
         let annotation = TypeExpr::Array {
             element: Box::new(TypeExpr::Named {
                 name: "i32".to_string(),
+                args: Vec::new(),
                 span: ExprSpan {
                     start: Span::call_site(),
                     end: Span::call_site(),

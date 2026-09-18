@@ -179,22 +179,10 @@ impl SheetItem {
 /// `()` is the empty tuple type (0 elements); `(T)` is grouping (same as bare `T` — types have
 /// no precedence to disambiguate, but staying symmetric with `cel_parser`'s expression grammar
 /// costs nothing); `(T,)` is a 1-element tuple; `(T, U, ...)` is n-element, no trailing comma.
-#[derive(Debug, Clone)]
-pub enum TypeExpr {
-    /// A single type name, resolved later against a `TypeRegistry`.
-    Named(String, ExprSpan),
-    /// A tuple type, recursively — `Vec::new()` for `()`.
-    Tuple(Vec<TypeExpr>, ExprSpan),
-}
-
-impl TypeExpr {
-    /// Returns this type expression's source span.
-    pub fn span(&self) -> ExprSpan {
-        match self {
-            TypeExpr::Named(_, span) | TypeExpr::Tuple(_, span) => *span,
-        }
-    }
-}
+/// Shared verbatim with `cel_parser` (which additionally supports `[T]` array types and
+/// `Name(args)` parameterized/generic types) so both crates resolve, format, and error on
+/// exactly one type-expression grammar.
+pub use cel_parser::TypeExpr;
 
 /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] [ "require" "{" { requirement }
 /// "}" ] ";".`
@@ -734,16 +722,38 @@ mod tests {
     }
 
     #[test]
+    fn ast_type_expr_is_the_shared_cel_parser_type_expr() {
+        fn assert_same_type<T>(_: &T) {}
+        let span = cel_parser::ExprSpan {
+            start: Span::call_site(),
+            end: Span::call_site(),
+        };
+        let expr: TypeExpr = cel_parser::TypeExpr::Named {
+            name: "i32".to_string(),
+            args: Vec::new(),
+            span,
+        };
+        assert_same_type::<cel_parser::TypeExpr>(&expr);
+    }
+
+    #[test]
     fn type_expr_named_span_is_its_own_span() {
         let span = point(Span::call_site());
-        let expr = TypeExpr::Named("i32".to_string(), span);
+        let expr = TypeExpr::Named {
+            name: "i32".to_string(),
+            args: Vec::new(),
+            span,
+        };
         assert_eq!(format!("{:?}", expr.span()), format!("{span:?}"));
     }
 
     #[test]
     fn type_expr_tuple_span_is_the_whole_parenthesized_span() {
         let span = point(Span::call_site());
-        let expr = TypeExpr::Tuple(Vec::new(), span);
+        let expr = TypeExpr::Tuple {
+            elements: Vec::new(),
+            span,
+        };
         assert_eq!(format!("{:?}", expr.span()), format!("{span:?}"));
     }
 
@@ -753,13 +763,21 @@ mod tests {
         let cell = CellDecl {
             name: "a".to_string(),
             name_span: span,
-            type_name: Some(TypeExpr::Tuple(
-                vec![
-                    TypeExpr::Named("i32".to_string(), span),
-                    TypeExpr::Named("f64".to_string(), span),
+            type_name: Some(TypeExpr::Tuple {
+                elements: vec![
+                    TypeExpr::Named {
+                        name: "i32".to_string(),
+                        args: Vec::new(),
+                        span,
+                    },
+                    TypeExpr::Named {
+                        name: "f64".to_string(),
+                        args: Vec::new(),
+                        span,
+                    },
                 ],
                 span,
-            )),
+            }),
             initializer: None,
             filter: None,
             require: None,
@@ -770,7 +788,7 @@ mod tests {
             span,
         };
         match cell.type_name {
-            Some(TypeExpr::Tuple(elements, _)) => assert_eq!(elements.len(), 2),
+            Some(TypeExpr::Tuple { elements, .. }) => assert_eq!(elements.len(), 2),
             other => panic!("expected Tuple, got {other:?}"),
         }
     }
