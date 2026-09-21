@@ -61,14 +61,20 @@
 
   /**
    * Returns the point where a source-to-target ray exits a rectangle.
+   * The rectangle is centered at the target and uses the supplied positive
+   * half-width and half-height; omitted dimensions default to `CELL_W / 2`
+   * (`30`) and `CELL_H / 2` (`18`).
    * @param {number} sx Source x-coordinate.
    * @param {number} sy Source y-coordinate.
    * @param {number} tx Target x-coordinate.
    * @param {number} ty Target y-coordinate.
    * @param {number} [hw] Rectangle half-width.
    * @param {number} [hh] Rectangle half-height.
-   * @returns {{x: number, y: number}} The rectangle boundary point, or the target
-   * when the distance is less than one unit.
+   * @returns {{x: number, y: number}} A point on the rectangle boundary in the
+   * target-facing direction, or exactly `{x: tx, y: ty}` when the distance is
+   * less than one unit.
+   * @postcondition For non-near-zero input, the returned point lies on the
+   * rectangle boundary selected by the smaller normalized-axis distance.
    * @complexity O(1) time and space.
    */
   function cellEdgePoint(sx, sy, tx, ty, hw, hh) {
@@ -92,13 +98,17 @@
 
   /**
    * Returns the point where a source-to-center ray exits a circle.
+   * The circle is centered at `(cx, cy)` and has the supplied positive radius.
    * @param {number} sx Source x-coordinate.
    * @param {number} sy Source y-coordinate.
    * @param {number} cx Circle center x-coordinate.
    * @param {number} cy Circle center y-coordinate.
    * @param {number} r Circle radius.
-   * @returns {{x: number, y: number}} The circle boundary point, or the center
-   * when the distance is less than one unit.
+   * @returns {{x: number, y: number}} A point exactly `r` units from the center
+   * along the source-facing radial direction, or exactly `{x: cx, y: cy}` when
+   * the distance is less than one unit.
+   * @postcondition For non-near-zero input, the returned point lies on the
+   * circle boundary.
    * @complexity O(1) time and space.
    */
   function circleEdgePoint(sx, sy, cx, cy, r) {
@@ -111,8 +121,13 @@
 
   /**
    * Computes clipped endpoints for a graph link.
-   * @param {{source: object, target: object}} d Link with resolved node objects.
+   * `Cell` nodes use their rectangle (`w` or `CELL_W`, by `CELL_H`); `Relationship`
+   * nodes use `REL_R`; `Conditional` nodes use `COND_COLLIDE_R`; and `Branch`
+   * nodes are not clipped.
+   * @param {{source: {kind: string, x: number, y: number, w?: number}, target: {kind: string, x: number, y: number, w?: number}}} d Link with resolved node objects.
    * @returns {{x1: number, y1: number, x2: number, y2: number}} Clipped endpoints.
+   * @postcondition Each endpoint is clipped according to the source or target
+   * node kind, and a `Branch` endpoint equals that node's coordinates.
    * @complexity O(1) time and space.
    */
   function linkEndpoints(d) {
@@ -138,12 +153,18 @@
   }
 
   /**
-   * Computes the visible graph bounds with a fixed margin.
-   * @param {Array<object>} nodes Graph nodes with id, kind, x, y, and optional w.
+   * Computes the visible graph bounds with the fixed `FIT_MARGIN` (`16`).
+   * `Cell` geometry uses half-width `w / 2` or `CELL_W / 2` (`30`) and
+   * half-height `CELL_H / 2` (`18`); `Relationship` uses `REL_R` (`16`);
+   * `Conditional` uses `COND_COLLIDE_R` (`20 * sqrt(2)`); and `Branch` has
+   * zero extent.
+   * @param {Array<{id: string, kind: string, x: number, y: number, w?: number}>} nodes Graph nodes.
    * @param {number} width Viewport width.
    * @param {number} height Viewport height.
    * @param {Set<string>} [hiddenNodeIds] Node ids excluded from the bounds.
-   * @returns {{minX: number, minY: number, maxX: number, maxY: number}} Bounds.
+   * @returns {{minX: number, minY: number, maxX: number, maxY: number}} Bounds
+   * expanded by `FIT_MARGIN`, or the unexpanded viewport when no node is visible.
+   * @postcondition Hidden nodes do not affect the bounds.
    * @complexity O(n) time and O(1) auxiliary space.
    */
   function computeBBox(nodes, width, height, hiddenNodeIds) {
@@ -185,10 +206,14 @@
 
   /**
    * Computes a centered fit scale and translation for graph bounds.
+   * The scale is the smaller of the viewport width/content width and viewport
+   * height/content height; zero-sized content is treated as one unit.
    * @param {{minX: number, minY: number, maxX: number, maxY: number}} bbox Bounds.
    * @param {number} width Viewport width.
    * @param {number} height Viewport height.
    * @returns {{fitScale: number, x: number, y: number}} Fit parameters.
+   * @postcondition The transformed bounding-box center is the viewport center,
+   * and the fitted content does not exceed either viewport axis.
    * @complexity O(1) time and space.
    */
   function fitTransformFor(bbox, width, height) {
@@ -212,6 +237,14 @@
    * @complexity O(n + m) time and O(n + m) space.
    */
   function reconcileNodes(previous, next) {
+    /**
+     * Produces an order-independent key for an undirected link.
+     * @param {string|{id: string}} a First endpoint identifier or node.
+     * @param {string|{id: string}} b Second endpoint identifier or node.
+     * @returns {string} A stable key containing both endpoint identifiers.
+     * @postcondition Reversing the endpoints produces the same key.
+     * @complexity O(1) time and space.
+     */
     function linkKey(a, b) {
       var source = typeof a === "object" ? a.id : a;
       var target = typeof b === "object" ? b.id : b;
@@ -321,10 +354,26 @@
     this.hiddenNodeIds = new Set();
   }
 
+  /**
+   * Returns this instance's visible-node bounds for its current viewport.
+   * @returns {{minX: number, minY: number, maxX: number, maxY: number}} Bounds
+   * computed with `FIT_MARGIN` and `hiddenNodeIds`.
+   * @postcondition The result matches `computeBBox(this.nodes, this.width,
+   * this.height, this.hiddenNodeIds)`.
+   * @complexity O(n) time and O(1) auxiliary space.
+   */
   GraphInstance.prototype.computeBBox = function () {
     return computeBBox(this.nodes, this.width, this.height, this.hiddenNodeIds);
   };
 
+  /**
+   * Returns the D3 transform that fits bounds in this instance's viewport.
+   * @param {{minX: number, minY: number, maxX: number, maxY: number}} bbox Bounds.
+   * @returns {{fitScale: number, transform: object}} Fit scale and D3 transform.
+   * @postcondition The transform centers the bounds and uses the smaller
+   * viewport-axis scale.
+   * @complexity O(1) time and space.
+   */
   GraphInstance.prototype.fitTransformFor = function (bbox) {
     var fit = fitTransformFor(bbox, this.width, this.height);
     return {
@@ -551,6 +600,15 @@
   // created for (see `to_graph_data` in `adam-web-ui/src/graph/data.rs`), which is
   // safe here specifically because a *different* Sheet always gets a brand new
   // `GraphInstance` (via the public `init` below) rather than reusing this one.
+  /**
+   * Reconciles incoming graph data into this live instance.
+   * @param {{nodes: Array<object>, links: Array<object>}} data Graph data whose
+   * node ids are unique within this instance.
+   * @postcondition Existing nodes with matching ids retain object identity,
+   * positions, and pin state; value and label fields are refreshed. The
+   * simulation restarts only when topology or visibility changes.
+   * @complexity O(n + m) time and O(n + m) auxiliary space.
+   */
   GraphInstance.prototype.update = function (data) {
     var self = this;
     this.latestData = data;

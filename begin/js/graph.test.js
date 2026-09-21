@@ -9,6 +9,14 @@ const {
   reconcileNodes,
 } = require("../assets/graph.js");
 
+/**
+ * Asserts that two finite Cartesian points are equal within one nanounit.
+ * @param {{x: number, y: number}} actual Point returned by a graph helper.
+ * @param {{x: number, y: number}} expected Contractually expected point.
+ * @postcondition The test throws when either coordinate differs by at least
+ * `1e-9`; otherwise it returns normally.
+ * @complexity O(1) time and space.
+ */
 function assertPoint(actual, expected) {
   assert.ok(Math.abs(actual.x - expected.x) < 1e-9);
   assert.ok(Math.abs(actual.y - expected.y) < 1e-9);
