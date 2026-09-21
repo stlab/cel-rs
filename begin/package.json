@@ -6,6 +6,9 @@
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
   },
+  "overrides": {
+    "vite": "7.3.6"
+  },
   "scripts": {
     "build": "esbuild js/spectrum-entry.js --bundle --format=esm --outfile=assets/swc.js --loader:.css=css",
     "test": "vitest run"
@@ -15,6 +18,6 @@
     "@spectrum-web-components/bundle": "1.12.2",
     "@spectrum-web-components/theme": "1.12.2",
     "@spectrum-web-components/icons-workflow": "1.12.2",
-    "vitest": "4.0.18"
+    "vitest": "4.1.11"
   }
 }
