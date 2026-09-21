@@ -1,4 +1,5 @@
 (function () {
+  var root = typeof window !== "undefined" ? window : globalThis;
   // Tunable layout constants (shared across every instance).
   var LINK_DISTANCE = 80;
   var CHARGE_STRENGTH = -300;
@@ -58,6 +59,24 @@
     return true;
   }
 
+  /**
+   * Returns the point where a source-to-target ray exits a rectangle.
+   * The rectangle is centered at the target and uses the supplied positive
+   * half-width and half-height; omitted dimensions default to `CELL_W / 2`
+   * (`30`) and `CELL_H / 2` (`18`).
+   * @param {number} sx Source x-coordinate.
+   * @param {number} sy Source y-coordinate.
+   * @param {number} tx Target x-coordinate.
+   * @param {number} ty Target y-coordinate.
+   * @param {number} [hw] Rectangle half-width.
+   * @param {number} [hh] Rectangle half-height.
+   * @returns {{x: number, y: number}} A point on the rectangle boundary in the
+   * target-facing direction, or exactly `{x: tx, y: ty}` when the distance is
+   * less than one unit.
+   * @postcondition For non-near-zero input, the returned point lies on the
+   * rectangle boundary selected by the smaller normalized-axis distance.
+   * @complexity O(1) time and space.
+   */
   function cellEdgePoint(sx, sy, tx, ty, hw, hh) {
     if (hw === undefined) hw = CELL_W / 2;
     if (hh === undefined) hh = CELL_H / 2;
@@ -77,6 +96,21 @@
     return d.w || CELL_W;
   }
 
+  /**
+   * Returns the point where a source-to-center ray exits a circle.
+   * The circle is centered at `(cx, cy)` and has the supplied positive radius.
+   * @param {number} sx Source x-coordinate.
+   * @param {number} sy Source y-coordinate.
+   * @param {number} cx Circle center x-coordinate.
+   * @param {number} cy Circle center y-coordinate.
+   * @param {number} r Circle radius.
+   * @returns {{x: number, y: number}} A point exactly `r` units from the center
+   * along the source-facing radial direction, or exactly `{x: cx, y: cy}` when
+   * the distance is less than one unit.
+   * @postcondition For non-near-zero input, the returned point lies on the
+   * circle boundary.
+   * @complexity O(1) time and space.
+   */
   function circleEdgePoint(sx, sy, cx, cy, r) {
     var dx = cx - sx,
       dy = cy - sy;
@@ -85,6 +119,17 @@
     return { x: cx - (dx / dist) * r, y: cy - (dy / dist) * r };
   }
 
+  /**
+   * Computes clipped endpoints for a graph link.
+   * `Cell` nodes use their rectangle (`w` or `CELL_W`, by `CELL_H`); `Relationship`
+   * nodes use `REL_R`; `Conditional` nodes use `COND_COLLIDE_R`; and `Branch`
+   * nodes are not clipped.
+   * @param {{source: {kind: string, x: number, y: number, w?: number}, target: {kind: string, x: number, y: number, w?: number}}} d Link with resolved node objects.
+   * @returns {{x1: number, y1: number, x2: number, y2: number}} Clipped endpoints.
+   * @postcondition Each endpoint is clipped according to the source or target
+   * node kind, and a `Branch` endpoint equals that node's coordinates.
+   * @complexity O(1) time and space.
+   */
   function linkEndpoints(d) {
     var s = d.source,
       t = d.target;
@@ -105,6 +150,148 @@
     var srcPt = edgePt(s, t.x, t.y);
     var tgtPt = edgePt(t, s.x, s.y);
     return { x1: srcPt.x, y1: srcPt.y, x2: tgtPt.x, y2: tgtPt.y };
+  }
+
+  /**
+   * Computes the visible graph bounds with the fixed `FIT_MARGIN` (`16`).
+   * `Cell` geometry uses half-width `w / 2` or `CELL_W / 2` (`30`) and
+   * half-height `CELL_H / 2` (`18`); `Relationship` uses `REL_R` (`16`);
+   * `Conditional` uses `COND_COLLIDE_R` (`20 * sqrt(2)`); and `Branch` has
+   * zero extent.
+   * @param {Array<{id: string, kind: string, x: number, y: number, w?: number}>} nodes Graph nodes.
+   * @param {number} width Viewport width.
+   * @param {number} height Viewport height.
+   * @param {Set<string>} [hiddenNodeIds] Node ids excluded from the bounds.
+   * @returns {{minX: number, minY: number, maxX: number, maxY: number}} Bounds
+   * expanded by `FIT_MARGIN`, or the unexpanded viewport when no node is visible.
+   * @postcondition Hidden nodes do not affect the bounds.
+   * @complexity O(n) time and O(1) auxiliary space.
+   */
+  function computeBBox(nodes, width, height, hiddenNodeIds) {
+    var minX = Infinity,
+      minY = Infinity,
+      maxX = -Infinity,
+      maxY = -Infinity;
+    nodes.forEach(function (n) {
+      if (hiddenNodeIds && hiddenNodeIds.has(n.id)) return;
+      var hw, hh;
+      if (n.kind === "Cell") {
+        hw = cellWidth(n) / 2;
+        hh = CELL_H / 2;
+      } else if (n.kind === "Conditional") {
+        hw = COND_COLLIDE_R;
+        hh = COND_COLLIDE_R;
+      } else if (n.kind === "Branch") {
+        hw = 0;
+        hh = 0;
+      } else {
+        hw = REL_R;
+        hh = REL_R;
+      }
+      minX = Math.min(minX, n.x - hw);
+      minY = Math.min(minY, n.y - hh);
+      maxX = Math.max(maxX, n.x + hw);
+      maxY = Math.max(maxY, n.y + hh);
+    });
+    if (!isFinite(minX)) {
+      return { minX: 0, minY: 0, maxX: width, maxY: height };
+    }
+    return {
+      minX: minX - FIT_MARGIN,
+      minY: minY - FIT_MARGIN,
+      maxX: maxX + FIT_MARGIN,
+      maxY: maxY + FIT_MARGIN,
+    };
+  }
+
+  /**
+   * Computes a centered fit scale and translation for graph bounds.
+   * The scale is the smaller of the viewport width/content width and viewport
+   * height/content height; zero-sized content is treated as one unit.
+   * @param {{minX: number, minY: number, maxX: number, maxY: number}} bbox Bounds.
+   * @param {number} width Viewport width.
+   * @param {number} height Viewport height.
+   * @returns {{fitScale: number, x: number, y: number}} Fit parameters.
+   * @postcondition The transformed bounding-box center is the viewport center,
+   * and the fitted content does not exceed either viewport axis.
+   * @complexity O(1) time and space.
+   */
+  function fitTransformFor(bbox, width, height) {
+    var cx = (bbox.minX + bbox.maxX) / 2;
+    var cy = (bbox.minY + bbox.maxY) / 2;
+    var contentW = Math.max(bbox.maxX - bbox.minX, 1);
+    var contentH = Math.max(bbox.maxY - bbox.minY, 1);
+    var fitScale = Math.min(width / contentW, height / contentH);
+    return {
+      fitScale: fitScale,
+      x: width / 2 - fitScale * cx,
+      y: height / 2 - fitScale * cy,
+    };
+  }
+
+  /**
+   * Reconciles graph data while retaining existing node objects and positions.
+   * @param {{nodes: Array<object>, links: Array<object>}} previous Previous graph.
+   * @param {{nodes: Array<object>, links: Array<object>}} next Incoming graph.
+   * @returns {{nodes: Array<object>, links: Array<object>, relabeledIds: Set<string>, structureChanged: boolean}} Reconciled graph.
+   * @complexity O(n + m) time and O(n + m) space.
+   */
+  function reconcileNodes(previous, next) {
+    /**
+     * Produces an order-independent key for an undirected link.
+     * @param {string|{id: string}} a First endpoint identifier or node.
+     * @param {string|{id: string}} b Second endpoint identifier or node.
+     * @returns {string} A stable key containing both endpoint identifiers.
+     * @postcondition Reversing the endpoints produces the same key.
+     * @complexity O(1) time and space.
+     */
+    function linkKey(a, b) {
+      var source = typeof a === "object" ? a.id : a;
+      var target = typeof b === "object" ? b.id : b;
+      return source < target ? source + "|" + target : target + "|" + source;
+    }
+    var oldNodeIds = new Set(
+      previous.nodes.map(function (n) {
+        return n.id;
+      }),
+    );
+    var oldLinkSet = new Set(
+      previous.links.map(function (l) {
+        return linkKey(l.source, l.target);
+      }),
+    );
+    var structureChanged =
+      previous.nodes.length !== next.nodes.length ||
+      previous.links.length !== next.links.length ||
+      next.nodes.some(function (n) {
+        return !oldNodeIds.has(n.id);
+      }) ||
+      next.links.some(function (l) {
+        return !oldLinkSet.has(linkKey(l.source, l.target));
+      });
+    var oldNodeMap = new Map(
+      previous.nodes.map(function (n) {
+        return [n.id, n];
+      }),
+    );
+    var relabeledIds = new Set();
+    var nodes = next.nodes.map(function (n) {
+      var existing = oldNodeMap.get(n.id);
+      if (!existing) return Object.assign({}, n);
+      if (existing.label !== n.label) relabeledIds.add(n.id);
+      existing.kind = n.kind;
+      existing.label = n.label;
+      existing.value = n.value;
+      return existing;
+    });
+    return {
+      nodes: nodes,
+      links: next.links.map(function (l) {
+        return Object.assign({}, l);
+      }),
+      relabeledIds: relabeledIds,
+      structureChanged: structureChanged,
+    };
   }
 
   function dragBehavior(sim) {
@@ -161,62 +348,40 @@
     // not hide) when the global is unset -- e.g. every book page, which has no
     // such toggle.
     this.showInactive =
-      typeof window.__beginShowInactive === "boolean"
-        ? window.__beginShowInactive
+      typeof root.__beginShowInactive === "boolean"
+        ? root.__beginShowInactive
         : true;
     this.hiddenNodeIds = new Set();
   }
 
+  /**
+   * Returns this instance's visible-node bounds for its current viewport.
+   * @returns {{minX: number, minY: number, maxX: number, maxY: number}} Bounds
+   * computed with `FIT_MARGIN` and `hiddenNodeIds`.
+   * @postcondition The result matches `computeBBox(this.nodes, this.width,
+   * this.height, this.hiddenNodeIds)`.
+   * @complexity O(n) time and O(1) auxiliary space.
+   */
   GraphInstance.prototype.computeBBox = function () {
-    var self = this;
-    var minX = Infinity,
-      minY = Infinity,
-      maxX = -Infinity,
-      maxY = -Infinity;
-    this.nodes.forEach(function (n) {
-      if (self.hiddenNodeIds.has(n.id)) return;
-      var hw, hh;
-      if (n.kind === "Cell") {
-        hw = cellWidth(n) / 2;
-        hh = CELL_H / 2;
-      } else if (n.kind === "Conditional") {
-        hw = COND_COLLIDE_R;
-        hh = COND_COLLIDE_R;
-      } else if (n.kind === "Branch") {
-        hw = 0;
-        hh = 0;
-      } else {
-        hw = REL_R;
-        hh = REL_R;
-      }
-      minX = Math.min(minX, n.x - hw);
-      minY = Math.min(minY, n.y - hh);
-      maxX = Math.max(maxX, n.x + hw);
-      maxY = Math.max(maxY, n.y + hh);
-    });
-    if (!isFinite(minX)) {
-      return { minX: 0, minY: 0, maxX: this.width, maxY: this.height };
-    }
-    return {
-      minX: minX - FIT_MARGIN,
-      minY: minY - FIT_MARGIN,
-      maxX: maxX + FIT_MARGIN,
-      maxY: maxY + FIT_MARGIN,
-    };
+    return computeBBox(this.nodes, this.width, this.height, this.hiddenNodeIds);
   };
 
+  /**
+   * Returns the D3 transform that fits bounds in this instance's viewport.
+   * @param {{minX: number, minY: number, maxX: number, maxY: number}} bbox Bounds.
+   * @returns {{fitScale: number, transform: object}} Fit scale and D3 transform.
+   * @postcondition The transform centers the bounds and uses the smaller
+   * viewport-axis scale.
+   * @complexity O(1) time and space.
+   */
   GraphInstance.prototype.fitTransformFor = function (bbox) {
-    var cx = (bbox.minX + bbox.maxX) / 2;
-    var cy = (bbox.minY + bbox.maxY) / 2;
-    var contentW = Math.max(bbox.maxX - bbox.minX, 1);
-    var contentH = Math.max(bbox.maxY - bbox.minY, 1);
-    var fitScale = Math.min(this.width / contentW, this.height / contentH);
+    var fit = fitTransformFor(bbox, this.width, this.height);
     return {
-      fitScale: fitScale,
+      fitScale: fit.fitScale,
       transform: d3.zoomIdentity
         .translate(this.width / 2, this.height / 2)
-        .scale(fitScale)
-        .translate(-cx, -cy),
+        .scale(fit.fitScale)
+        .translate(-(bbox.minX + bbox.maxX) / 2, -(bbox.minY + bbox.maxY) / 2),
     };
   };
 
@@ -435,6 +600,15 @@
   // created for (see `to_graph_data` in `adam-web-ui/src/graph/data.rs`), which is
   // safe here specifically because a *different* Sheet always gets a brand new
   // `GraphInstance` (via the public `init` below) rather than reusing this one.
+  /**
+   * Reconciles incoming graph data into this live instance.
+   * @param {{nodes: Array<object>, links: Array<object>}} data Graph data whose
+   * node ids are unique within this instance.
+   * @postcondition Existing nodes with matching ids retain object identity,
+   * positions, and pin state; value and label fields are refreshed. The
+   * simulation restarts only when topology or visibility changes.
+   * @complexity O(n + m) time and O(n + m) auxiliary space.
+   */
   GraphInstance.prototype.update = function (data) {
     var self = this;
     this.latestData = data;
@@ -446,64 +620,20 @@
     // never carries over another sheet's nodes to begin with.
     var isFirstPopulation = this.nodes.length === 0 && data.nodes.length > 0;
 
-    function linkKey(a, b) {
-      return a < b ? a + "|" + b : b + "|" + a;
-    }
-    var oldNodeIds = new Set(
-      this.nodes.map(function (n) {
-        return n.id;
-      }),
+    var reconciled = reconcileNodes(
+      { nodes: this.nodes, links: this.links },
+      data,
     );
-    var oldLinkSet = new Set(
-      this.links.map(function (l) {
-        var src = typeof l.source === "object" ? l.source.id : l.source;
-        var tgt = typeof l.target === "object" ? l.target.id : l.target;
-        return linkKey(src, tgt);
-      }),
-    );
-    var structureChanged =
-      this.nodes.length !== data.nodes.length ||
-      this.links.length !== data.links.length ||
-      data.nodes.some(function (n) {
-        return !oldNodeIds.has(n.id);
-      }) ||
-      data.links.some(function (l) {
-        return !oldLinkSet.has(linkKey(l.source, l.target));
-      });
-
-    // Node ids are only unique *within* the one Sheet this instance was created
-    // for -- they're built from a cell's raw slotmap index (see cell_node_id()
-    // in adam-web-ui/src/graph/data.rs) -- and begin rebuilds a brand-new Sheet from source text on
-    // every same-source hot-reload (see App's use_effect in begin/src/app.rs),
-    // so an id can be silently recycled for a *different* cell across two
-    // consecutive update() calls on this same instance. relabeledIds tracks
-    // exactly that case so the width-measuring step below knows to remeasure
-    // even though oldNodeMap already has the id.
-    var oldNodeMap = new Map(
-      this.nodes.map(function (n) {
-        return [n.id, n];
-      }),
-    );
-    var relabeledIds = new Set();
-    this.nodes = data.nodes.map(function (n) {
-      var existing = oldNodeMap.get(n.id);
-      if (existing) {
-        if (existing.label !== n.label) relabeledIds.add(n.id);
-        existing.kind = n.kind;
-        existing.label = n.label;
-        existing.value = n.value;
-        return existing;
-      }
-      return Object.assign({}, n);
-    });
+    var structureChanged = reconciled.structureChanged;
+    var relabeledIds = reconciled.relabeledIds;
+    var oldNodeMap = new Map(this.nodes.map(function (n) { return [n.id, n]; }));
+    this.nodes = reconciled.nodes;
+    this.links = reconciled.links;
     var nodeMap = new Map(
       this.nodes.map(function (n) {
         return [n.id, n];
       }),
     );
-    this.links = data.links.map(function (l) {
-      return Object.assign({}, l);
-    });
 
     var changedSet = new Set(data.changed || []);
 
@@ -903,13 +1033,26 @@
     if (inst) inst.setShowInactive(value);
   }
 
-  window.beginGraph = {
-    init: init,
-    update: update,
-    destroy: destroy,
-    zoomIn: zoomIn,
-    zoomOut: zoomOut,
-    resetZoom: resetZoom,
-    setShowInactive: setShowInactive,
-  };
+  if (typeof window !== "undefined") {
+    root.beginGraph = {
+      init: init,
+      update: update,
+      destroy: destroy,
+      zoomIn: zoomIn,
+      zoomOut: zoomOut,
+      resetZoom: resetZoom,
+      setShowInactive: setShowInactive,
+    };
+  }
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      cellEdgePoint: cellEdgePoint,
+      circleEdgePoint: circleEdgePoint,
+      linkEndpoints: linkEndpoints,
+      computeBBox: computeBBox,
+      fitTransformFor: fitTransformFor,
+      reconcileNodes: reconcileNodes,
+    };
+  }
 })();

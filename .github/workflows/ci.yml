@@ -16,6 +16,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+
+    - name: Install Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: 22.12.0
+
+    - name: Run begin JavaScript tests
+      working-directory: begin
+      run: |
+        npm ci
+        npm test
     
     - name: Install Rust toolchain
       run: |

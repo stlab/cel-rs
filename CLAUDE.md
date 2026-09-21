@@ -175,7 +175,13 @@ The compile-time type system uses **cons-cell heterogeneous lists** (`CStackList
 
 ### Documentation comments
 
-Every function must have a `///` doc comment written in **contract style**. The contract lives adjacent to the declaration so it stays synchronized with the code.
+Every class, type, and function in every language used by the repository must have an
+adjacent contract written in the language's documentation or comment syntax. The contract
+lives adjacent to the declaration so it stays synchronized with the code. Each contract
+states type invariants at public boundaries, valid inputs, observable postconditions, errors
+where applicable, and non-constant complexity.
+
+For Rust functions, use a `///` doc comment written in **contract style**.
 
 **Required sections** (include only those that apply):
 
@@ -207,7 +213,10 @@ pub fn pop<T>(&mut self, padding: bool) -> T
 
 ### Unit tests
 
-Derive tests from the **contract and public interface only** — do not read or consider the implementation. The test suite verifies observable behavior as specified by the contract:
+Derive tests from the **contract and public interface only** — do not read or consider the
+implementation. The test suite verifies observable behavior as specified by the contract. If
+an implementation detail is needed to write a test, clarify the contract or redesign the
+interface instead.
 
 - Each `# Errors` condition should assert the `Err` variant is returned.
 - Each postcondition should be asserted.
