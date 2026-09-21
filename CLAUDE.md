@@ -73,6 +73,8 @@ benefit from separate context (e.g. a single tightly-coupled edit).
 
 If a request is made that requires any modification, additions, or deletions to files in the project, stop and suggest the user create a worktree first.
 
+Create project worktrees under `.claude/worktrees/`; do not place them outside the repository.
+
 Never commit directly to `main`.
 
 Before creating a PR, run the full check suite locally — every command in the Commands
