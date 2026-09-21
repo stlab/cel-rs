@@ -5,7 +5,7 @@
   "description": "Builds begin's vendored Spectrum Web Components bundle (assets/swc.js) via esbuild.",
   "scripts": {
     "build": "esbuild js/spectrum-entry.js --bundle --format=esm --outfile=assets/swc.js --loader:.css=css",
-    "test": "vitest run --globals"
+    "test": "vitest run"
   },
   "devDependencies": {
     "esbuild": "0.25.12",

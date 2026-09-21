@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+import { describe, it } from "vitest";
 const {
   cellEdgePoint,
   circleEdgePoint,
