@@ -16,6 +16,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
+
+    - name: Run begin JavaScript tests
+      working-directory: begin
+      run: |
+        npm ci
+        npm test
     
     - name: Install Rust toolchain
       run: |
