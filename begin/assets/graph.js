@@ -1033,16 +1033,7 @@
     if (inst) inst.setShowInactive(value);
   }
 
-  if (typeof module !== "undefined" && module.exports) {
-    module.exports = {
-      cellEdgePoint: cellEdgePoint,
-      circleEdgePoint: circleEdgePoint,
-      linkEndpoints: linkEndpoints,
-      computeBBox: computeBBox,
-      fitTransformFor: fitTransformFor,
-      reconcileNodes: reconcileNodes,
-    };
-  } else {
+  if (typeof window !== "undefined") {
     root.beginGraph = {
       init: init,
       update: update,
@@ -1051,6 +1042,17 @@
       zoomOut: zoomOut,
       resetZoom: resetZoom,
       setShowInactive: setShowInactive,
+    };
+  }
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      cellEdgePoint: cellEdgePoint,
+      circleEdgePoint: circleEdgePoint,
+      linkEndpoints: linkEndpoints,
+      computeBBox: computeBBox,
+      fitTransformFor: fitTransformFor,
+      reconcileNodes: reconcileNodes,
     };
   }
 })();

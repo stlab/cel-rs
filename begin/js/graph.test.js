@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
 import { describe, it } from "vitest";
 const {
   cellEdgePoint,
@@ -174,5 +176,19 @@ describe("reconcileNodes", () => {
       { x: result.nodes[0].x, y: result.nodes[0].y, label: result.nodes[0].label, value: result.nodes[0].value },
       { x: 10, y: 20, label: "Renamed", value: "2" },
     );
+  });
+});
+
+describe("browser module compatibility", () => {
+  it("publishes the browser API when a CommonJS shim is also present", () => {
+    const window = {};
+    const module = { exports: {} };
+    vm.runInNewContext(
+      fs.readFileSync(new URL("../assets/graph.js", import.meta.url), "utf8"),
+      { window, module },
+    );
+
+    assert.equal(typeof window.beginGraph.init, "function");
+    assert.equal(typeof module.exports.cellEdgePoint, "function");
   });
 });

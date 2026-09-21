@@ -3,6 +3,9 @@
   "private": true,
   "version": "1.0.0",
   "description": "Builds begin's vendored Spectrum Web Components bundle (assets/swc.js) via esbuild.",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "scripts": {
     "build": "esbuild js/spectrum-entry.js --bundle --format=esm --outfile=assets/swc.js --loader:.css=css",
     "test": "vitest run"
