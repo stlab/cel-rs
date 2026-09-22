@@ -147,17 +147,32 @@ pub fn nodes_in_rect(doc: &Document, corner_a: Point, corner_b: Point) -> Vec<No
     found
 }
 
-/// One edge to render: a line from `from` to `to` in canvas/world space.
+/// The visual line style of an [`Edge`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeStyle {
+    /// A relationship-group ↔ cell edge, or a conditional ↔ condition-cell
+    /// edge.
+    Solid,
+    /// A conditional ↔ relationship-group edge — dashed so the "this
+    /// conditional gates that relationship" link reads visually distinct
+    /// from a relationship's own solid cell-membership edges.
+    Dashed,
+}
+
+/// One edge to render: a line from `from` to `to` in canvas/world space,
+/// drawn per `style`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Edge {
     pub from: Point,
     pub to: Point,
+    pub style: EdgeStyle,
 }
 
-/// Returns every edge to render for `doc`: one per relationship-group
-/// member (group ↔ cell) and one per conditional-group's wrapped
-/// relationship groups (conditional ↔ each of its `default`/branch
-/// `enabled_groups`, deduplicated).
+/// Returns every edge to render for `doc`: one solid edge per
+/// relationship-group member (group ↔ cell), one dashed edge per
+/// conditional-group's wrapped relationship groups (conditional ↔ each of
+/// its `default`/branch `enabled_groups`, deduplicated), and one solid edge
+/// per conditional-group's condition cell(s).
 ///
 /// - Complexity: O(n) in the total number of relationship-group members
 ///   plus conditional-group branch/default entries.
@@ -169,6 +184,7 @@ pub fn compute_edges(doc: &Document) -> Vec<Edge> {
             edges.push(Edge {
                 from: group.position,
                 to: doc.cell_nodes[*node].position,
+                style: EdgeStyle::Solid,
             });
         }
     }
@@ -185,6 +201,7 @@ pub fn compute_edges(doc: &Document) -> Vec<Edge> {
                 edges.push(Edge {
                     from: cond.position,
                     to: doc.relationship_groups[group_id].position,
+                    style: EdgeStyle::Dashed,
                 });
             }
         }
@@ -202,6 +219,7 @@ pub fn compute_edges(doc: &Document) -> Vec<Edge> {
                 edges.push(Edge {
                     from: cond.position,
                     to: node.position,
+                    style: EdgeStyle::Solid,
                 });
             }
         }
@@ -214,6 +232,17 @@ pub fn compute_edges(doc: &Document) -> Vec<Edge> {
 /// Returns `"red"` if `selected` is true, `"black"` otherwise.
 fn node_stroke(selected: bool) -> &'static str {
     if selected { "red" } else { "black" }
+}
+
+/// Returns the SVG `stroke-dasharray` value for an edge's line style.
+///
+/// Returns `"4"` for `EdgeStyle::Dashed`, `"0"` for `EdgeStyle::Solid` (a
+/// dash length of `0` renders as an unbroken line).
+fn edge_dasharray(style: EdgeStyle) -> &'static str {
+    match style {
+        EdgeStyle::Solid => "0",
+        EdgeStyle::Dashed => "4",
+    }
 }
 
 /// Which gesture [`Canvas`]'s current mouse drag is performing.
@@ -291,12 +320,13 @@ fn rubber_band_rect(
 /// `Tool::AddRelationship`, a mousedown on a hit node instead advances the
 /// Add-Relationship click sequence via `add_relationship_click`; a
 /// mousedown on empty canvas is a no-op (no pan/rubber-band in this tool).
-/// When `active_tool` is `Tool::AddConditional`, a mousedown on a
-/// relationship-group node starts a drag (tracked internally, not via
-/// `DragMode`); a mouseup over any node then completes the gesture via
-/// `add_conditional_drag`, wrapping the source group in a new conditional
-/// group. Zoom (mouse wheel, via `zoom_at`) works regardless of
-/// `active_tool`.
+/// When `active_tool` is `Tool::AddConditional`, a mousedown on a hit node
+/// instead advances the Add-Conditional click sequence via
+/// `add_conditional_click`, mirroring Add-Relationship. Completing either
+/// gesture (`ClickSequenceOutcome::Completed`) switches `active_tool` back
+/// to `Tool::Select` so the user isn't left in the connect-mode after
+/// finishing a connection. Zoom (mouse wheel, via `zoom_at`) works
+/// regardless of `active_tool`.
 ///
 /// All mouse/wheel handlers read `client_coordinates()` (viewport-relative),
 /// while rendering computes shape positions via `canvas_to_screen(...)` into
@@ -374,7 +404,8 @@ pub fn Canvas(
                 let shift_held = data.modifiers().shift();
                 let transform = *view_transform.read();
 
-                match *active_tool.read() {
+                let current_tool = *active_tool.read();
+                match current_tool {
                     crate::ui::toolbar::Tool::Select => {
                         let doc = document.read();
                         let mode = start_drag(&doc, &transform, screen_point, shift_held);
@@ -387,25 +418,49 @@ pub fn Canvas(
                     crate::ui::toolbar::Tool::AddRelationship => {
                         let hit = hit_test(&document.read(), &transform, screen_point);
                         if let Some(clicked) = hit {
-                            let new_pending = add_relationship_click(
+                            let pending = *pending_first_click.read();
+                            let outcome = add_relationship_click(
                                 &mut document.write(),
-                                *pending_first_click.read(),
+                                pending,
                                 clicked,
                             );
-                            pending_first_click.set(new_pending);
+                            match outcome {
+                                ClickSequenceOutcome::Pending(node) => {
+                                    pending_first_click.set(Some(node));
+                                }
+                                ClickSequenceOutcome::Completed => {
+                                    pending_first_click.set(None);
+                                    active_tool.set(crate::ui::toolbar::Tool::Select);
+                                }
+                                ClickSequenceOutcome::NoOp => {
+                                    pending_first_click.set(None);
+                                }
+                            }
                         }
                     }
                     crate::ui::toolbar::Tool::AddConditional => {
                         let hit = hit_test(&document.read(), &transform, screen_point);
                         if let Some(clicked) = hit {
                             let canvas_point = screen_to_canvas(&transform, screen_point);
-                            let new_pending = add_conditional_click(
+                            let pending = *pending_conditional_source.read();
+                            let outcome = add_conditional_click(
                                 &mut document.write(),
-                                *pending_conditional_source.read(),
+                                pending,
                                 clicked,
                                 canvas_point,
                             );
-                            pending_conditional_source.set(new_pending);
+                            match outcome {
+                                ClickSequenceOutcome::Pending(group) => {
+                                    pending_conditional_source.set(Some(group));
+                                }
+                                ClickSequenceOutcome::Completed => {
+                                    pending_conditional_source.set(None);
+                                    active_tool.set(crate::ui::toolbar::Tool::Select);
+                                }
+                                ClickSequenceOutcome::NoOp => {
+                                    pending_conditional_source.set(None);
+                                }
+                            }
                         }
                     }
                     crate::ui::toolbar::Tool::Duplicate => {}
@@ -510,6 +565,7 @@ pub fn Canvas(
                     x2: "{canvas_to_screen(&transform, edge.to).x}",
                     y2: "{canvas_to_screen(&transform, edge.to).y}",
                     stroke: "black",
+                    stroke_dasharray: "{edge_dasharray(edge.style)}",
                 }
             }
             for (id, cell_node) in &doc.cell_nodes {
@@ -667,42 +723,61 @@ fn wheel_zoom_delta(delta_y: f64) -> f64 {
     1.0 + (-delta_y * 0.001).clamp(-0.5, 0.5)
 }
 
+/// The outcome of one click in a two-click "connect two things" gesture
+/// (Add Relationship's [`add_relationship_click`], Add Conditional's
+/// [`add_conditional_click`]) — distinct from a plain "new pending state"
+/// return value so a caller can tell a genuinely *completed* gesture (the
+/// document changed) apart from a first click or a mismatched click that
+/// merely happens to also leave nothing pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickSequenceOutcome<T> {
+    /// This was the first click of the sequence; `T` is the pending state
+    /// to remember for the next click.
+    Pending(T),
+    /// This was a matching second click: the gesture completed and
+    /// mutated the document.
+    Completed,
+    /// This click didn't advance the gesture (a mismatched second click,
+    /// or a first click on something that can't start one) — any prior
+    /// pending state should be discarded.
+    NoOp,
+}
+
 /// Advances the Add-Relationship tool's click sequence: given whatever was
 /// clicked previously (`pending_first_click`, `None` if this is a fresh
 /// sequence) and what was just clicked (`clicked`), either creates a new
 /// relationship group, extends an existing one, or does nothing (a bare
-/// first click on something other than a cell), returning the new pending
-/// state.
+/// first click on something other than a cell).
 ///
-/// - `(None, cell)` → pending becomes `Some(cell)`.
+/// - `(None, cell)` → `Pending(cell)`.
 /// - `(Some(cell_a), cell_b)` → creates a relationship binding both, placed
 ///   at the midpoint between the two cells' own node positions (not either
-///   click position), returns `None`.
+///   click position), returns `Completed`.
 /// - `(Some(cell), group)` or `(Some(group), cell)` → adds `cell` as a
-///   member of `group`, returns `None`.
+///   member of `group`, returns `Completed`.
 /// - Any other combination (e.g. a bare first click on a group, or two
-///   groups) → returns `None` with no mutation — not a meaningful gesture.
+///   groups) → `NoOp` with no mutation — not a meaningful gesture.
 pub fn add_relationship_click(
     doc: &mut Document,
     pending_first_click: Option<NodeId>,
     clicked: NodeId,
-) -> Option<NodeId> {
+) -> ClickSequenceOutcome<NodeId> {
     match (pending_first_click, clicked) {
-        (None, NodeId::CellNode(_)) => Some(clicked),
-        (None, _) => None,
+        (None, NodeId::CellNode(_)) => ClickSequenceOutcome::Pending(clicked),
+        (None, _) => ClickSequenceOutcome::NoOp,
         (Some(NodeId::CellNode(a)), NodeId::CellNode(b)) => {
             let pa = doc.cell_nodes[a].position;
             let pb = doc.cell_nodes[b].position;
             let midpoint = Point::new((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0);
             let _ = create_relationship(doc, a, b, midpoint);
-            None
+            ClickSequenceOutcome::Completed
         }
         (Some(NodeId::CellNode(cell)), NodeId::RelationshipGroup(group))
         | (Some(NodeId::RelationshipGroup(group)), NodeId::CellNode(cell)) => {
             add_member(doc, group, cell);
-            None
+            ClickSequenceOutcome::Completed
         }
-        _ => None,
+        _ => ClickSequenceOutcome::NoOp,
     }
 }
 
@@ -710,33 +785,32 @@ pub fn add_relationship_click(
 /// relationship group was clicked previously (`pending_source`, `None` if
 /// this is a fresh sequence) and what was just clicked (`clicked`), either
 /// records a fresh pending source or completes the gesture against the
-/// newly clicked target via [`add_conditional_target`], returning the new
-/// pending state.
+/// newly clicked target via [`add_conditional_target`].
 ///
-/// - `(None, RelationshipGroup(g))` → pending becomes `Some(g)`.
+/// - `(None, RelationshipGroup(g))` → `Pending(g)`.
 /// - `(Some(g), CellNode(_))` or `(Some(g), ConditionalGroup(_))` →
 ///   completes the gesture (see [`add_conditional_target`]; any error it
 ///   returns — e.g. an existing conditional with no branches yet — is
 ///   swallowed here the same way [`add_relationship_click`] never surfaces
-///   one, since neither tool has an error-reporting UI path today),
-///   returns `None`.
+///   one, since neither tool has an error-reporting UI path today), returns
+///   `Completed`.
 /// - Any other combination (e.g. a bare first click on a cell, or two
-///   relationship groups) → returns `None` with no mutation — not a
-///   meaningful gesture.
+///   relationship groups) → `NoOp` with no mutation — not a meaningful
+///   gesture.
 pub fn add_conditional_click(
     doc: &mut Document,
     pending_source: Option<RelationshipGroupId>,
     clicked: NodeId,
     position: Point,
-) -> Option<RelationshipGroupId> {
+) -> ClickSequenceOutcome<RelationshipGroupId> {
     match (pending_source, clicked) {
-        (None, NodeId::RelationshipGroup(g)) => Some(g),
-        (None, _) => None,
+        (None, NodeId::RelationshipGroup(g)) => ClickSequenceOutcome::Pending(g),
+        (None, _) => ClickSequenceOutcome::NoOp,
         (Some(g), NodeId::CellNode(_)) | (Some(g), NodeId::ConditionalGroup(_)) => {
             let _ = add_conditional_target(doc, g, clicked, position);
-            None
+            ClickSequenceOutcome::Completed
         }
-        _ => None,
+        _ => ClickSequenceOutcome::NoOp,
     }
 }
 
@@ -1059,7 +1133,7 @@ mod tests {
             Point::new(5.0, 5.0),
         );
 
-        assert_eq!(pending, Some(group));
+        assert_eq!(pending, ClickSequenceOutcome::Pending(group));
         assert!(doc.conditional_groups_in_order().next().is_none());
     }
 
@@ -1076,7 +1150,7 @@ mod tests {
             Point::new(0.0, 0.0),
         );
 
-        assert_eq!(pending, None);
+        assert_eq!(pending, ClickSequenceOutcome::NoOp);
     }
 
     #[test]
@@ -1097,7 +1171,7 @@ mod tests {
             Point::new(0.0, 40.0),
         );
 
-        assert_eq!(pending, None);
+        assert_eq!(pending, ClickSequenceOutcome::Completed);
         assert_eq!(doc.conditional_groups_in_order().count(), 1);
     }
 
@@ -1132,7 +1206,7 @@ mod tests {
             Point::new(0.0, 40.0),
         );
 
-        assert_eq!(pending, None);
+        assert_eq!(pending, ClickSequenceOutcome::Completed);
         let last_branch = doc.conditional_groups[cond_id].branches.len() - 1;
         assert!(
             doc.conditional_groups[cond_id].branches[last_branch]
@@ -1162,7 +1236,7 @@ mod tests {
             Point::new(5.0, 25.0),
         );
 
-        assert_eq!(pending, None);
+        assert_eq!(pending, ClickSequenceOutcome::NoOp);
         assert!(doc.conditional_groups_in_order().next().is_none());
     }
 
@@ -1174,7 +1248,10 @@ mod tests {
 
         let pending = add_relationship_click(&mut doc, None, NodeId::CellNode(a_node));
 
-        assert_eq!(pending, Some(NodeId::CellNode(a_node)));
+        assert_eq!(
+            pending,
+            ClickSequenceOutcome::Pending(NodeId::CellNode(a_node))
+        );
         assert!(doc.relationship_groups_in_order().next().is_none());
     }
 
@@ -1192,7 +1269,7 @@ mod tests {
             NodeId::CellNode(b_node),
         );
 
-        assert_eq!(pending, None);
+        assert_eq!(pending, ClickSequenceOutcome::Completed);
         let (_, group) = doc.relationship_groups_in_order().next().unwrap();
         assert_eq!(group.position, Point::new(5.0, 10.0));
     }
@@ -1214,7 +1291,7 @@ mod tests {
             NodeId::CellNode(c_node),
         );
 
-        assert_eq!(pending, None);
+        assert_eq!(pending, ClickSequenceOutcome::Completed);
         assert_eq!(doc.relationship_groups[group].members.len(), 3);
     }
 
@@ -1235,7 +1312,7 @@ mod tests {
 
         let pending = add_relationship_click(&mut doc, None, NodeId::RelationshipGroup(group));
 
-        assert_eq!(pending, None);
+        assert_eq!(pending, ClickSequenceOutcome::NoOp);
         assert_eq!(doc.relationship_groups[group].members.len(), 2);
     }
 
@@ -1701,6 +1778,7 @@ mod edge_tests {
         let edges = compute_edges(&doc);
         assert_eq!(edges.len(), 2);
         assert!(edges.iter().all(|e| e.from == Point::new(5.0, 5.0)));
+        assert!(edges.iter().all(|e| e.style == EdgeStyle::Solid));
     }
 
     #[test]
@@ -1729,14 +1807,15 @@ mod edge_tests {
         toggle_enabled_group(&mut doc, cond, 0, group);
 
         let edges = compute_edges(&doc);
-        let cond_to_group = edges
+        let cond_to_group: Vec<_> = edges
             .iter()
             .filter(|e| {
                 e.from == doc.conditional_groups[cond].position
                     && e.to == doc.relationship_groups[group].position
             })
-            .count();
-        assert_eq!(cond_to_group, 1);
+            .collect();
+        assert_eq!(cond_to_group.len(), 1);
+        assert_eq!(cond_to_group[0].style, EdgeStyle::Dashed);
     }
 
     #[test]
@@ -1757,10 +1836,9 @@ mod edge_tests {
         let edges = compute_edges(&doc);
         let cond_position = doc.conditional_groups[cond].position;
         let flag_position = doc.cell_nodes[flag_node].position;
-        assert!(
-            edges
-                .iter()
-                .any(|e| e.from == cond_position && e.to == flag_position)
-        );
+        let cond_to_flag = edges
+            .iter()
+            .find(|e| e.from == cond_position && e.to == flag_position);
+        assert_eq!(cond_to_flag.map(|e| e.style), Some(EdgeStyle::Solid));
     }
 }
