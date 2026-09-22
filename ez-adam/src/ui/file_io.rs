@@ -22,10 +22,11 @@ pub fn read_document_file(path: &Path) -> Result<Document, String> {
 ///
 /// # Errors
 ///
-/// Returns a human-readable message if `path` cannot be written.
+/// Returns a human-readable message if `doc` fails to serialize, or if
+/// `path` cannot be written.
 pub fn write_document_file(path: &Path, doc: &Document) -> Result<(), String> {
-    std::fs::write(path, to_json(doc))
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    let text = to_json(doc).map_err(|e| format!("failed to serialize document: {e}"))?;
+    std::fs::write(path, text).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
 /// Writes already-generated `.adm2` text to `path`.
