@@ -331,14 +331,21 @@ pub fn Canvas(
     rsx! {
         svg {
             class: "canvas",
-            // No stylesheet exists yet (tracked in issue #177), so without an
-            // explicit size an `<svg>` collapses to a zero-size box under
-            // default replaced-element sizing rules. `1200x800` is a
-            // reasonable placeholder desktop-window default until real CSS
-            // layout (flex/grid sizing the canvas to fill its container)
-            // lands.
-            width: "1200",
-            height: "800",
+            // Fills its containing block exactly, with no `viewBox` — so 1
+            // SVG user unit equals 1 CSS pixel and mouse-event
+            // `client_coordinates()` (viewport-relative) line up exactly
+            // with the coordinates `canvas_to_screen` renders shapes at
+            // (SVG-local, i.e. same-origin as the viewport since this
+            // element and its ancestors are positioned at the viewport's
+            // top-left — see `App`'s layout). `display: block` avoids the
+            // few-pixel inline-element baseline gap `<svg>` gets by
+            // default. Positioning the `<svg>` anywhere other than the
+            // viewport's top-left would reintroduce the coordinate offset
+            // this comment describes fixing (see issue #177's original
+            // report).
+            width: "100%",
+            height: "100%",
+            style: "position: absolute; top: 0; left: 0; display: block;",
             onmousedown: move |evt: Event<MouseData>| {
                 let data = evt.data();
                 let client_pt = data.client_coordinates();
@@ -371,12 +378,10 @@ pub fn Canvas(
                     crate::ui::toolbar::Tool::AddRelationship => {
                         let hit = hit_test(&document.read(), &transform, screen_point);
                         if let Some(clicked) = hit {
-                            let canvas_point = screen_to_canvas(&transform, screen_point);
                             let new_pending = add_relationship_click(
                                 &mut document.write(),
                                 *pending_first_click.read(),
                                 clicked,
-                                canvas_point,
                             );
                             pending_first_click.set(new_pending);
                         }
@@ -460,6 +465,11 @@ pub fn Canvas(
                 }
             },
             onwheel: move |evt: Event<WheelData>| {
+                // Without this, the wheel event also triggers the browser's
+                // native page-scroll behavior, which visibly moves the
+                // whole app (including the pinned menu/toolbar) instead of
+                // just zooming the canvas.
+                evt.prevent_default();
                 let data = evt.data();
                 let client_pt = data.client_coordinates();
                 let cursor_point = Point::new(client_pt.x, client_pt.y);
@@ -488,24 +498,34 @@ pub fn Canvas(
                     stroke: "black",
                 }
             }
-            for (id, _) in &doc.cell_nodes {
+            for (id, cell_node) in &doc.cell_nodes {
                 {
                     let p = canvas_to_screen(&transform, node_position(&doc, NodeId::CellNode(id)));
                     let selected = sel.contains(&NodeId::CellNode(id));
+                    let name = &doc.cells[cell_node.cell].name;
+                    let half_width = cell_label_half_width(name);
                     rsx! {
                         rect {
-                            x: "{p.x - 40.0}",
-                            y: "{p.y - 15.0}",
-                            width: "80",
-                            height: "30",
+                            x: "{p.x - half_width}",
+                            y: "{p.y - CELL_HALF_HEIGHT}",
+                            width: "{half_width * 2.0}",
+                            height: "{CELL_HALF_HEIGHT * 2.0}",
                             rx: "6",
                             fill: "lightblue",
                             stroke: node_stroke(selected),
                         }
+                        text {
+                            x: "{p.x}",
+                            y: "{p.y}",
+                            text_anchor: "middle",
+                            dominant_baseline: "middle",
+                            font_size: "12",
+                            "{name}"
+                        }
                     }
                 }
             }
-            for (id, _) in &doc.relationship_groups {
+            for (id, group) in &doc.relationship_groups {
                 {
                     let p = canvas_to_screen(
                         &transform,
@@ -520,10 +540,18 @@ pub fn Canvas(
                             fill: "lightgreen",
                             stroke: node_stroke(selected),
                         }
+                        text {
+                            x: "{p.x}",
+                            y: "{p.y - 18.0}",
+                            text_anchor: "middle",
+                            dominant_baseline: "middle",
+                            font_size: "12",
+                            "{group.display_name}"
+                        }
                     }
                 }
             }
-            for (id, _) in &doc.conditional_groups {
+            for (id, cond) in &doc.conditional_groups {
                 {
                     let p = canvas_to_screen(
                         &transform,
@@ -540,6 +568,14 @@ pub fn Canvas(
                             fill: "orange",
                             stroke: node_stroke(selected),
                         }
+                        text {
+                            x: "{p.x}",
+                            y: "{p.y - 20.0}",
+                            text_anchor: "middle",
+                            dominant_baseline: "middle",
+                            font_size: "12",
+                            "{cond.display_name}"
+                        }
                     }
                 }
             }
@@ -547,11 +583,31 @@ pub fn Canvas(
     }
 }
 
-/// The half-width/height (in canvas units) treated as "on" a node for hit
-/// testing — matches [`Canvas`]'s rendered shape sizes (cells: 40×15
-/// half-extents; relationship/conditional groups: 12 half-extent).
-const CELL_HIT_HALF_EXTENT: (f64, f64) = (40.0, 15.0);
+/// The half-height (in canvas units) treated as "on" a cell node for hit
+/// testing — matches [`Canvas`]'s rendered cell box height. The half-width
+/// varies per cell (see [`cell_label_half_width`]) since the box widens to
+/// fit longer names. Relationship/conditional groups use a fixed
+/// [`GROUP_HIT_RADIUS`] half-extent instead, since their shapes don't
+/// resize for a label.
+const CELL_HALF_HEIGHT: f64 = 15.0;
 const GROUP_HIT_RADIUS: f64 = 12.0;
+
+/// Returns a cell rect's half-width, in canvas units, wide enough to fit
+/// `name`'s label — the minimum half-width matches the original fixed box
+/// size (for short names); longer names widen it via a rough monospace
+/// character-width estimate, since no real text-measurement API is used.
+/// Shared by [`Canvas`]'s rendering and [`hit_test`] so the clickable area
+/// always matches the drawn box exactly.
+///
+/// - Complexity: O(n) in `name.len()`.
+#[must_use]
+fn cell_label_half_width(name: &str) -> f64 {
+    const CHAR_WIDTH: f64 = 7.0;
+    const MIN_HALF_WIDTH: f64 = 40.0;
+    const PADDING: f64 = 10.0;
+    let estimated = (name.chars().count() as f64) * CHAR_WIDTH / 2.0 + PADDING;
+    estimated.max(MIN_HALF_WIDTH)
+}
 
 /// Returns the topmost node under `screen_point` (converted to canvas
 /// space via `transform`), or `None` if no node is there. Checks cell
@@ -568,7 +624,8 @@ pub fn hit_test(doc: &Document, transform: &ViewTransform, screen_point: Point) 
     for (id, node) in &doc.cell_nodes {
         let dx = (canvas_point.x - node.position.x).abs();
         let dy = (canvas_point.y - node.position.y).abs();
-        if dx <= CELL_HIT_HALF_EXTENT.0 && dy <= CELL_HIT_HALF_EXTENT.1 {
+        let half_width = cell_label_half_width(&doc.cells[node.cell].name);
+        if dx <= half_width && dy <= CELL_HALF_HEIGHT {
             return Some(NodeId::CellNode(id));
         }
     }
@@ -604,8 +661,9 @@ fn wheel_zoom_delta(delta_y: f64) -> f64 {
 /// state.
 ///
 /// - `(None, cell)` → pending becomes `Some(cell)`.
-/// - `(Some(cell_a), cell_b)` → creates a relationship binding both,
-///   returns `None`.
+/// - `(Some(cell_a), cell_b)` → creates a relationship binding both, placed
+///   at the midpoint between the two cells' own node positions (not either
+///   click position), returns `None`.
 /// - `(Some(cell), group)` or `(Some(group), cell)` → adds `cell` as a
 ///   member of `group`, returns `None`.
 /// - Any other combination (e.g. a bare first click on a group, or two
@@ -614,13 +672,15 @@ pub fn add_relationship_click(
     doc: &mut Document,
     pending_first_click: Option<NodeId>,
     clicked: NodeId,
-    position: Point,
 ) -> Option<NodeId> {
     match (pending_first_click, clicked) {
         (None, NodeId::CellNode(_)) => Some(clicked),
         (None, _) => None,
         (Some(NodeId::CellNode(a)), NodeId::CellNode(b)) => {
-            let _ = create_relationship(doc, a, b, position);
+            let pa = doc.cell_nodes[a].position;
+            let pb = doc.cell_nodes[b].position;
+            let midpoint = Point::new((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0);
+            let _ = create_relationship(doc, a, b, midpoint);
             None
         }
         (Some(NodeId::CellNode(cell)), NodeId::RelationshipGroup(group))
@@ -801,34 +861,29 @@ mod tests {
         let a = add_cell(&mut doc, "a", CellType::i64());
         let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
 
-        let pending = add_relationship_click(
-            &mut doc,
-            None,
-            NodeId::CellNode(a_node),
-            Point::new(0.0, 0.0),
-        );
+        let pending = add_relationship_click(&mut doc, None, NodeId::CellNode(a_node));
 
         assert_eq!(pending, Some(NodeId::CellNode(a_node)));
         assert!(doc.relationship_groups_in_order().next().is_none());
     }
 
     #[test]
-    fn add_relationship_click_second_click_on_a_cell_creates_a_group() {
+    fn add_relationship_click_second_click_on_a_cell_creates_a_group_at_the_midpoint() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CellType::i64());
         let b = add_cell(&mut doc, "b", CellType::i64());
         let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
-        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 20.0));
 
         let pending = add_relationship_click(
             &mut doc,
             Some(NodeId::CellNode(a_node)),
             NodeId::CellNode(b_node),
-            Point::new(5.0, 5.0),
         );
 
         assert_eq!(pending, None);
-        assert_eq!(doc.relationship_groups_in_order().count(), 1);
+        let (_, group) = doc.relationship_groups_in_order().next().unwrap();
+        assert_eq!(group.position, Point::new(5.0, 10.0));
     }
 
     #[test]
@@ -846,7 +901,6 @@ mod tests {
             &mut doc,
             Some(NodeId::RelationshipGroup(group)),
             NodeId::CellNode(c_node),
-            Point::new(5.0, 5.0),
         );
 
         assert_eq!(pending, None);
@@ -868,12 +922,7 @@ mod tests {
         let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
         let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
 
-        let pending = add_relationship_click(
-            &mut doc,
-            None,
-            NodeId::RelationshipGroup(group),
-            Point::new(5.0, 5.0),
-        );
+        let pending = add_relationship_click(&mut doc, None, NodeId::RelationshipGroup(group));
 
         assert_eq!(pending, None);
         assert_eq!(doc.relationship_groups[group].members.len(), 2);
@@ -1042,6 +1091,37 @@ mod tests {
         let doc = Document::new("demo");
         let t = ViewTransform::identity();
         assert_eq!(hit_test(&doc, &t, Point::new(500.0, 500.0)), None);
+    }
+
+    #[test]
+    fn cell_label_half_width_has_a_minimum_for_short_names() {
+        assert_eq!(cell_label_half_width("a"), 40.0);
+    }
+
+    #[test]
+    fn cell_label_half_width_widens_for_long_names() {
+        let long_name = "a_very_long_cell_name_indeed";
+        assert!(cell_label_half_width(long_name) > 40.0);
+    }
+
+    #[test]
+    fn hit_test_finds_a_cell_with_a_long_name_beyond_the_minimum_box_width() {
+        let mut doc = Document::new("demo");
+        let long_name = "a_very_long_cell_name_indeed";
+        let a = add_cell(&mut doc, long_name, CellType::i64());
+        let node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let t = ViewTransform::identity();
+        let half_width = cell_label_half_width(long_name);
+        assert!(half_width > 40.0, "test assumes this name widens the box");
+
+        // 39 units out is inside the old fixed 40.0 half-width, but well
+        // within this longer name's actual (wider) box.
+        let hit = hit_test(&doc, &t, Point::new(39.0, 0.0));
+        assert_eq!(hit, Some(NodeId::CellNode(node)));
+
+        // Just past the actual (widened) box edge should miss.
+        let miss = hit_test(&doc, &t, Point::new(half_width + 1.0, 0.0));
+        assert_eq!(miss, None);
     }
 
     #[test]

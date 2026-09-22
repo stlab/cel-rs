@@ -90,22 +90,53 @@ pub fn App() -> Element {
     };
 
     rsx! {
+        // No stylesheet pipeline exists yet (tracked in issue #177). This
+        // neutralizes the browser's default `<body>` margin, which would
+        // otherwise offset the canvas's `<svg>` a few pixels from the
+        // viewport's true top-left and reintroduce the coordinate mismatch
+        // described below.
+        style { "html, body {{ margin: 0; padding: 0; overflow: hidden; }}" }
         div {
             class: "app",
+            // Fills the viewport and clips anything that would otherwise
+            // scroll it (native wheel-scroll is also prevented in
+            // `Canvas`'s `onwheel`, but this is cheap defensive insurance).
+            style: "position: relative; width: 100vw; height: 100vh; overflow: hidden;",
+            div {
+                class: "workspace",
+                // Positioned to fill the app exactly, starting at the
+                // viewport's top-left corner — `Canvas`'s `<svg>` (a child
+                // of this div, sized 100%/100%) needs to start at exactly
+                // (0, 0) in viewport space for mouse-event
+                // `client_coordinates()` to line up with the coordinates
+                // shapes are rendered at. The menu/toolbar/side-panel are
+                // overlaid on TOP of the canvas (via their own absolute
+                // positioning below) rather than pushing it down in normal
+                // document flow, which is what broke this originally.
+                style: "position: absolute; top: 0; left: 0; width: 100%; height: 100%;",
+                Canvas { document, view_transform, selection, active_tool }
+                div {
+                    style: "position: absolute; top: 0; right: 0; z-index: 10; background: white; border-left: 1px solid #ccc; max-width: 300px; max-height: 100%; overflow: auto;",
+                    SidePanel { document, selection }
+                }
+            }
             div {
                 class: "menu",
+                style: "position: absolute; top: 0; left: 0; z-index: 10; background: white; padding: 4px; border-bottom: 1px solid #ccc;",
                 button { onclick: open, "Open" }
                 button { onclick: save, "Save" }
                 button { onclick: export, "Export .adm2" }
             }
             if let Some(msg) = error_message.read().as_deref() {
-                div { class: "error", "{msg}" }
+                div {
+                    class: "error",
+                    style: "position: absolute; top: 32px; left: 0; z-index: 10; background: #fee; padding: 4px;",
+                    "{msg}"
+                }
             }
-            Toolbar { active_tool, document, selection }
             div {
-                class: "workspace",
-                Canvas { document, view_transform, selection, active_tool }
-                SidePanel { document, selection }
+                style: "position: absolute; top: 32px; left: 0; z-index: 10;",
+                Toolbar { active_tool, document, selection }
             }
         }
     }
