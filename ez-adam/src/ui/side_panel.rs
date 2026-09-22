@@ -154,6 +154,44 @@ pub fn referenced_groups(
     groups
 }
 
+/// Returns `known` extended with any group from `referenced` not already
+/// present in it, appended in `referenced`'s order.
+///
+/// Used to grow — but never shrink — [`ConditionalPanel`]'s displayed set
+/// of enable-table columns: unchecking a group's last enabled checkbox
+/// removes it from [`referenced_groups`]'s result (see
+/// [`crate::ops::conditionals::toggle_enabled_group`]), and recomputing the
+/// table's columns from only the *current* reference set on every render
+/// would make that column — and every column after it — disappear and
+/// shift left out from under the very click that just happened, so a
+/// follow-up click can land on a different group's checkbox than the one
+/// the user is looking at.
+///
+/// - Postcondition: every element of `known` appears in the result, in the
+///   same relative order it had in `known`, followed by every element of
+///   `referenced` not already present, in `referenced`'s order, with no
+///   duplicates.
+///
+/// # Examples
+///
+/// ```ignore
+/// let known = vec![group_a];
+/// let referenced = vec![group_b];
+/// assert_eq!(union_preserving_known_order(&known, &referenced), vec![group_a, group_b]);
+/// ```
+fn union_preserving_known_order(
+    known: &[RelationshipGroupId],
+    referenced: &[RelationshipGroupId],
+) -> Vec<RelationshipGroupId> {
+    let mut result = known.to_vec();
+    for &group in referenced {
+        if !result.contains(&group) {
+            result.push(group);
+        }
+    }
+    result
+}
+
 /// Renders `group`'s member formulas as an editable list, each validated
 /// live via [`formula_diagnostic`].
 #[component]
@@ -199,20 +237,41 @@ fn formula_expr_for_display(condition: &ConditionExpr) -> Option<&str> {
 }
 
 /// Renders `conditional`'s enable-table: rows = branches, columns =
-/// relationship groups referenced by the conditional's default or any branch,
+/// relationship groups referenced by the conditional's default or any
+/// branch (plus any group this panel has already shown as a column during
+/// its current lifetime — see [`union_preserving_known_order`]),
 /// checkboxes = whether each group is enabled on that branch.
+///
+/// - Precondition: the caller gives this component a distinct `key` per
+///   `conditional` (e.g. in [`SidePanel`]) so switching to a different
+///   conditional starts a fresh column set instead of carrying over the
+///   previous conditional's columns.
 #[component]
 pub fn ConditionalPanel(
     mut document: Signal<Document>,
     conditional: ConditionalGroupId,
 ) -> Element {
-    let (branches, all_groups, formula_expr) = {
+    let mut known_groups = use_signal(Vec::<RelationshipGroupId>::new);
+
+    use_effect(move || {
+        let referenced = {
+            let doc = document.read();
+            let cond = &doc.conditional_groups[conditional];
+            referenced_groups(&cond.default, &cond.branches)
+        };
+        let merged = union_preserving_known_order(&known_groups.peek(), &referenced);
+        if merged != *known_groups.peek() {
+            known_groups.set(merged);
+        }
+    });
+
+    let (branches, formula_expr) = {
         let doc = document.read();
         let cond = &doc.conditional_groups[conditional];
-        let groups = referenced_groups(&cond.default, &cond.branches);
         let formula_expr = formula_expr_for_display(&cond.condition).map(str::to_owned);
-        (cond.branches.clone(), groups, formula_expr)
+        (cond.branches.clone(), formula_expr)
     };
+    let all_groups = known_groups.read().clone();
 
     rsx! {
         if let Some(expr) = formula_expr {
@@ -236,13 +295,17 @@ pub fn ConditionalPanel(
                 tr {
                     th { "" }
                     for group in &all_groups {
-                        th { "{document.read().relationship_groups[*group].display_name}" }
+                        th {
+                            key: "{group:?}",
+                            "{document.read().relationship_groups[*group].display_name}"
+                        }
                     }
                 }
             }
             tbody {
                 for (branch_index, branch) in branches.iter().enumerate() {
                     tr {
+                        key: "{branch_index}",
                         td { "{branch_index}" }
                         for group in &all_groups {
                             {
@@ -250,6 +313,7 @@ pub fn ConditionalPanel(
                                 let checked = branch.enabled_groups.contains(&group);
                                 rsx! {
                                     td {
+                                        key: "{group:?}",
                                         input {
                                             r#type: "checkbox",
                                             checked: checked,
@@ -284,7 +348,13 @@ pub fn SidePanel(
                     rsx! { CellPanel { document, cell } }
                 }
                 Some(NodeId::RelationshipGroup(group)) => rsx! { RelationshipPanel { document, group } },
-                Some(NodeId::ConditionalGroup(conditional)) => rsx! { ConditionalPanel { document, conditional } },
+                Some(NodeId::ConditionalGroup(conditional)) => rsx! {
+                    ConditionalPanel {
+                        key: "{conditional:?}",
+                        document,
+                        conditional,
+                    }
+                },
                 None => rsx! { div { "No selection" } },
             }
         }
@@ -457,6 +527,56 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result.iter().filter(|g| *g == &group_a).count(), 1);
         assert_eq!(result.iter().filter(|g| *g == &group_b).count(), 1);
+    }
+
+    #[test]
+    fn union_preserving_known_order_with_nothing_known_returns_referenced_in_order() {
+        use slotmap::SlotMap;
+
+        let mut groups: SlotMap<RelationshipGroupId, ()> = SlotMap::with_key();
+        let group_a = groups.insert(());
+        let group_b = groups.insert(());
+
+        let result = union_preserving_known_order(&[], &[group_a, group_b]);
+        assert_eq!(result, vec![group_a, group_b]);
+    }
+
+    #[test]
+    fn union_preserving_known_order_keeps_a_known_group_that_is_no_longer_referenced() {
+        use slotmap::SlotMap;
+
+        let mut groups: SlotMap<RelationshipGroupId, ()> = SlotMap::with_key();
+        let group_a = groups.insert(());
+
+        // group_a was shown before but is no longer referenced at all
+        // (e.g. its last enabled checkbox was just unchecked) — it must
+        // stay in the result so the column doesn't vanish underneath the
+        // user.
+        let result = union_preserving_known_order(&[group_a], &[]);
+        assert_eq!(result, vec![group_a]);
+    }
+
+    #[test]
+    fn union_preserving_known_order_appends_newly_referenced_groups_after_known_ones() {
+        use slotmap::SlotMap;
+
+        let mut groups: SlotMap<RelationshipGroupId, ()> = SlotMap::with_key();
+        let group_a = groups.insert(());
+        let group_b = groups.insert(());
+
+        let result = union_preserving_known_order(&[group_a], &[group_a, group_b]);
+        assert_eq!(result, vec![group_a, group_b]);
+    }
+
+    #[test]
+    fn union_preserving_known_order_does_not_duplicate_an_already_known_group() {
+        use slotmap::SlotMap;
+
+        let mut groups: SlotMap<RelationshipGroupId, ()> = SlotMap::with_key();
+        let group_a = groups.insert(());
+
+        let result = union_preserving_known_order(&[group_a], &[group_a]);
+        assert_eq!(result, vec![group_a]);
     }
 
     #[test]
