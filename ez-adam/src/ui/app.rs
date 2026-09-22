@@ -14,7 +14,7 @@ use crate::ui::file_io::{
 };
 use crate::ui::history::{record_history, redo_target, undo_target};
 use crate::ui::menu::{MENU_EXPORT, MENU_OPEN, MENU_REDO, MENU_SAVE, MENU_SAVE_AS, MENU_UNDO};
-use crate::ui::side_panel::SidePanel;
+use crate::ui::side_panel::{SidePanel, panel_target};
 use crate::ui::toolbar::{Tool, Toolbar};
 
 /// The application's root component: owns all top-level state and
@@ -202,9 +202,17 @@ pub fn App() -> Element {
                 class: "workspace",
                 style: "position: absolute; top: 0; left: 0; width: 100%; height: 100%;",
                 Canvas { document, view_transform, selection, active_tool }
-                div {
-                    style: "position: absolute; top: 0; right: 0; z-index: 10; background: white; border-left: 1px solid #ccc; max-width: 300px; max-height: 100%; overflow: auto;",
-                    SidePanel { document, selection }
+                // Only occupies (and intercepts clicks/drags over) screen
+                // space when there's actually something to show — an
+                // always-present strip here, even showing nothing but "No
+                // selection" text, would permanently block canvas
+                // interaction underneath it (e.g. dragging a relationship
+                // group onto a conditional that happens to fall under it).
+                if panel_target(&selection.read()).is_some() {
+                    div {
+                        style: "position: absolute; top: 0; right: 0; z-index: 10; background: white; border-left: 1px solid #ccc; max-width: 300px; max-height: 100%; overflow: auto;",
+                        SidePanel { document, selection }
+                    }
                 }
             }
         }
