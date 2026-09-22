@@ -3,10 +3,19 @@
 version = 4
 
 [[package]]
+name = "adam-fmt"
+version = "0.1.0"
+dependencies = [
+ "adam-lang",
+ "annotate-snippets",
+]
+
+[[package]]
 name = "adam-lang"
 version = "0.1.0"
 dependencies = [
  "adam-rs",
+ "annotate-snippets",
  "anyhow",
  "cel-parser",
  "cel-runtime",
@@ -83,6 +92,9 @@ dependencies = [
  "cel-std",
  "dioxus",
  "indexmap",
+ "serde",
+ "serde_json",
+ "slotmap",
  "wasm-bindgen",
  "web-sys",
 ]
@@ -375,7 +387,6 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
- "slotmap",
 ]
 
 [[package]]
@@ -506,6 +517,15 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
+]
+
+[[package]]
+name = "cel-lang-book"
+version = "0.1.0"
+dependencies = [
+ "cel-parser",
+ "cel-runtime",
+ "cel-std",
 ]
 
 [[package]]

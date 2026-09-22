@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use adam_lang::{AdamAstParser, attach_trivia, format_sheet};
+use adam_lang::format_source;
 use lsp_server::{Connection, Message, Notification as ServerNotification, Request, Response};
 use lsp_types::{
     DidChangeTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams, OneOf,
@@ -214,23 +214,20 @@ fn publish(connection: &Connection, uri: &Uri, source: &str) -> anyhow::Result<(
 
 /// Computes the `textDocument/formatting` edit for adam-lang `source`.
 ///
-/// - Postcondition: returns an empty `Vec` if `source` doesn't parse (`AdamAstParser::parse_str`
-///   returns `Err`) or parses with any recovered syntax error (`Sheet.errors` non-empty) —
-///   refusing to format code it can't fully understand, matching `rustfmt`. Otherwise returns
-///   exactly one [`TextEdit`] replacing the whole document with [`format_sheet`]'s output.
+/// - Postcondition: returns an empty `Vec` if [`format_source`] refuses `source` (it doesn't
+///   parse, or parses with any recovered syntax error) — refusing to format code it can't fully
+///   understand, matching `rustfmt`. Otherwise returns exactly one [`TextEdit`] replacing the
+///   whole document with `format_source`'s output.
 /// - Complexity: O(n) in the length of `source` — parses, attaches trivia to, and formats the
 ///   whole sheet once, with no caching across calls.
 fn format_edits(source: &str) -> Vec<TextEdit> {
-    let mut parser = AdamAstParser::new();
-    let mut sheet = match parser.parse_str(source) {
-        Ok(sheet) if sheet.errors.is_empty() => sheet,
-        _ => return Vec::new(),
-    };
-    attach_trivia(source, &mut sheet);
-    vec![TextEdit {
-        range: whole_document_range(),
-        new_text: format_sheet(&sheet),
-    }]
+    match format_source(source) {
+        Ok(formatted) => vec![TextEdit {
+            range: whole_document_range(),
+            new_text: formatted,
+        }],
+        Err(_) => Vec::new(),
+    }
 }
 
 /// A `Range` guaranteed to cover an entire document regardless of its actual length — LSP
@@ -284,11 +281,11 @@ mod tests {
 
     #[test]
     fn format_edits_formats_a_cell_with_a_filter() {
-        let edits = format_edits("sheet s { cell a:i32=1 filter clamp:_; }");
+        let edits = format_edits("sheet s { cell a:i32=1 filter _; }");
         assert_eq!(edits.len(), 1);
         assert_eq!(
             edits[0].new_text,
-            "sheet s {\n    cell a: i32 = 1 filter clamp: _;\n}\n"
+            "sheet s {\n    cell a: i32 = 1 filter _;\n}\n"
         );
     }
 
@@ -299,11 +296,11 @@ mod tests {
         // cel_parser::fmt::binary_op_level ("unknown operator `range_inclusive`"), crashing
         // adam-lsp's single-threaded server mid-request — which VS Code's format-on-save then
         // waited on forever, indistinguishable from a hang.
-        let edits = format_edits("sheet s { cell a:i32=0 filter clamp:0..=200; }");
+        let edits = format_edits("sheet s { cell a:i32=0 filter 0..=200; }");
         assert_eq!(edits.len(), 1);
         assert_eq!(
             edits[0].new_text,
-            "sheet s {\n    cell a: i32 = 0 filter clamp: 0..=200;\n}\n"
+            "sheet s {\n    cell a: i32 = 0 filter 0..=200;\n}\n"
         );
     }
 

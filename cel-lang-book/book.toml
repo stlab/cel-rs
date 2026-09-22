@@ -1,0 +1,13 @@
+[book]
+title = "The Common Expression Language"
+description = "A tutorial and reference for CEL."
+authors = ["stlab"]
+language = "en"
+src = "book-src"
+
+[build]
+build-dir = "book-dist"
+
+[output.html]
+git-repository-url = "https://github.com/stlab/cel-rs"
+edit-url-template = "https://github.com/stlab/cel-rs/edit/main/cel-lang-book/{path}"

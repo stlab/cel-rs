@@ -6,6 +6,7 @@
 
 use annotate_snippets::{AnnotationKind, Group, Level, Renderer, Snippet};
 use proc_macro2::LineColumn;
+use std::str::FromStr;
 
 /// Source region as start/end line and column.
 ///
@@ -188,25 +189,145 @@ pub(crate) fn span_to_byte_range(source: &str, span: SourceSpan) -> std::ops::Ra
     start_byte..end_byte
 }
 
+/// One labelled span in a multi-span diagnostic.
+#[derive(Clone, Debug)]
+pub struct SpanLabel {
+    /// The source region to underline.
+    pub span: SourceSpan,
+    /// The label printed beside the caret.
+    pub label: String,
+}
+
+/// Renders `title` with several labelled annotations over `source_code`, the first as the
+/// primary caret and the rest as secondary context, in rustc style.
+///
+/// - Precondition: `labels` is non-empty.
+/// - Complexity: O(n) in `source_code`'s length plus the number of labels.
+///
+/// # Examples
+///
+/// ```rust
+/// use annotate_snippets::Renderer;
+/// use cel_parser::{SourceSpan, SpanLabel, format_multi_span};
+///
+/// let labels = vec![SpanLabel { span: SourceSpan::new(1, 0, 1, 1), label: "here".into() }];
+/// let out = format_multi_span("oops", &labels, "x", "f.adm2", 1, &Renderer::plain());
+/// assert!(out.contains("oops"));
+/// ```
+pub fn format_multi_span(
+    title: &str,
+    labels: &[SpanLabel],
+    source_code: &str,
+    filename: &str,
+    start_line: u32,
+    renderer: &Renderer,
+) -> String {
+    debug_assert!(!labels.is_empty(), "`labels` must be non-empty");
+    let mut snippet = Snippet::source(source_code)
+        .path(filename)
+        .line_start(start_line as usize);
+    for (i, l) in labels.iter().enumerate() {
+        let range = span_to_byte_range(source_code, l.span);
+        let kind = if i == 0 {
+            AnnotationKind::Primary
+        } else {
+            AnnotationKind::Context
+        };
+        snippet = snippet.annotation(kind.span(range).label(l.label.as_str()));
+    }
+    let report = [Group::with_title(Level::ERROR.primary_title(title)).element(snippet)];
+    renderer.render(&report)
+}
+
+/// Returns the closing delimiter character that pairs with opening bracket `open`.
+///
+/// - Precondition: `open` is one of `(`, `[`, `{`.
+fn matching_close(open: char) -> char {
+    match open {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        _ => {
+            debug_assert!(false, "`open` must be one of `(`, `[`, `{{`");
+            open
+        }
+    }
+}
+
+/// Finds the innermost bracket delimiter still open at the point where an unmatched or
+/// mismatched closing delimiter appears at `close_span` in `source`.
+///
+/// `close_span` is the first lex failure in `source`, so everything before it lexed as a
+/// self-contained run of valid tokens: literals and comments already closed, and nested
+/// bracket groups already balanced. The only way that prefix can itself fail to lex on its
+/// own is an unclosed group, and `proc_macro2` reports the position of its innermost
+/// still-open delimiter — exactly the opener `close_span`'s delimiter failed to match.
+///
+/// Returns `None` when the prefix lexes cleanly (no opener at all to match).
+///
+/// - Complexity: O(n) in `source`'s length (re-lexes the prefix before `close_span`).
+fn innermost_open_delimiter(
+    source: &str,
+    close_span: proc_macro2::Span,
+) -> Option<(char, proc_macro2::Span)> {
+    let close_start = span_to_byte_range(source, SourceSpan::from_proc_macro2(close_span)).start;
+    let prefix_err = proc_macro2::TokenStream::from_str(&source[..close_start]).err()?;
+    let open_span = prefix_err.span();
+    let open_start = span_to_byte_range(source, SourceSpan::from_proc_macro2(open_span)).start;
+    match source[open_start..].chars().next()? {
+        ch @ ('(' | '[' | '{') => Some((ch, open_span)),
+        _ => None,
+    }
+}
+
 /// Classifies a lex failure by inspecting the character at `span`'s start in `source`.
+///
+/// Returns the message plus an optional secondary label: for a closing delimiter that
+/// doesn't match (or has no) currently-open opener, the secondary points back at the
+/// unmatched opener when one exists.
 ///
 /// Returns `None` when the span doesn't resolve to a character (e.g. it points past the end of
 /// `source`), so the caller can fall back to a generic message.
-fn lex_failure_message(source: &str, span: proc_macro2::Span) -> Option<String> {
+fn lex_failure_message(
+    source: &str,
+    span: proc_macro2::Span,
+) -> Option<(String, Option<SpanLabel>)> {
     let byte_range = span_to_byte_range(source, SourceSpan::from_proc_macro2(span));
     let rest = &source[byte_range.start..];
     Some(match rest.chars().next()? {
-        '(' => "unclosed delimiter `(`: expected a matching `)`".to_string(),
-        '[' => "unclosed delimiter `[`: expected a matching `]`".to_string(),
-        '{' => "unclosed delimiter `{`: expected a matching `}`".to_string(),
-        ')' => "unexpected closing delimiter `)`".to_string(),
-        ']' => "unexpected closing delimiter `]`".to_string(),
-        '}' => "unexpected closing delimiter `}`".to_string(),
-        '"' => "unterminated string literal".to_string(),
-        '\'' => "invalid or unterminated character literal".to_string(),
-        '`' => "invalid character `` ` ``".to_string(),
-        '/' if rest.starts_with("/*") => "unterminated block comment".to_string(),
-        ch => format!("invalid character `{ch}`"),
+        '(' => (
+            "unclosed delimiter `(`: expected a matching `)`".to_string(),
+            None,
+        ),
+        '[' => (
+            "unclosed delimiter `[`: expected a matching `]`".to_string(),
+            None,
+        ),
+        '{' => (
+            "unclosed delimiter `{`: expected a matching `}`".to_string(),
+            None,
+        ),
+        ch @ (')' | ']' | '}') => match innermost_open_delimiter(source, span) {
+            Some((open_ch, open_span)) => (
+                format!(
+                    "mismatched closing delimiter: found `{ch}`, expected `{}`",
+                    matching_close(open_ch)
+                ),
+                Some(SpanLabel {
+                    span: SourceSpan::from_proc_macro2(open_span),
+                    label: format!("unclosed delimiter `{open_ch}`"),
+                }),
+            ),
+            None => (format!("unexpected closing delimiter `{ch}`"), None),
+        },
+        '"' => ("unterminated string literal".to_string(), None),
+        '\'' => (
+            "invalid or unterminated character literal".to_string(),
+            None,
+        ),
+        '`' => ("invalid character `` ` ``".to_string(), None),
+        '/' if rest.starts_with("/*") => ("unterminated block comment".to_string(), None),
+        ch => (format!("invalid character `{ch}`"), None),
     })
 }
 
@@ -329,6 +450,7 @@ pub struct ParseError {
     message: String,
     span: proc_macro2::Span,
     end_span: Option<proc_macro2::Span>,
+    secondary: Vec<SpanLabel>,
 }
 
 impl ParseError {
@@ -348,6 +470,7 @@ impl ParseError {
             message: message.into(),
             span,
             end_span: None,
+            secondary: Vec::new(),
         }
     }
 
@@ -379,6 +502,7 @@ impl ParseError {
             message: message.into(),
             span: start,
             end_span: Some(end),
+            secondary: Vec::new(),
         }
     }
 
@@ -401,6 +525,25 @@ impl ParseError {
     /// `None` for errors created with [`new`](Self::new).
     pub fn end_span(&self) -> Option<proc_macro2::Span> {
         self.end_span
+    }
+
+    /// Attaches secondary labelled spans, rendered as extra carets alongside the primary.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use proc_macro2::Span;
+    /// use cel_parser::{ParseError, SourceSpan, SpanLabel};
+    ///
+    /// let e = ParseError::new("bad", Span::call_site()).with_secondary(vec![SpanLabel {
+    ///     span: SourceSpan::new(1, 4, 1, 7),
+    ///     label: "also here".into(),
+    /// }]);
+    /// assert_eq!(e.message(), "bad");
+    /// ```
+    pub fn with_secondary(mut self, secondary: Vec<SpanLabel>) -> Self {
+        self.secondary = secondary;
+        self
     }
 
     /// Converts a lex failure (e.g. from `proc_macro2::TokenStream::from_str`) into a
@@ -427,15 +570,22 @@ impl ParseError {
     /// ```
     pub fn from_lex_error(source: &str, err: proc_macro2::LexError) -> Self {
         let span = err.span();
-        let message = lex_failure_message(source, span).unwrap_or_else(|| err.to_string());
-        ParseError::new(message, span)
+        match lex_failure_message(source, span) {
+            Some((message, Some(secondary))) => {
+                ParseError::new(message, span).with_secondary(vec![secondary])
+            }
+            Some((message, None)) => ParseError::new(message, span),
+            None => ParseError::new(err.to_string(), span),
+        }
     }
 
     /// Formats this error in rustc diagnostic style with source context.
     ///
-    /// Identical contract to [`CELError::format_rustc_style`]; prefer calling
-    /// this directly on a `ParseError` rather than converting to `CELError`
-    /// first when you have the source text at hand.
+    /// Identical contract to [`CELError::format_rustc_style`] when no secondary spans are
+    /// attached; prefer calling this directly on a `ParseError` rather than converting to
+    /// `CELError` first when you have the source text at hand. When secondaries have been
+    /// added via [`with_secondary`](Self::with_secondary), renders a multi-span diagnostic
+    /// (the primary span plus one context caret per secondary) via [`format_multi_span`].
     ///
     /// # Examples
     ///
@@ -462,6 +612,21 @@ impl ParseError {
             start: self.span.start(),
             end: self.end_span.unwrap_or(self.span).end(),
         };
+        if !self.secondary.is_empty() {
+            let mut labels = vec![SpanLabel {
+                span: source_span,
+                label: String::new(),
+            }];
+            labels.extend(self.secondary.iter().cloned());
+            return format_multi_span(
+                &self.message,
+                &labels,
+                source_code,
+                filename,
+                start_line,
+                renderer,
+            );
+        }
         let byte_range = span_to_byte_range(source_code, source_span);
         let report = [
             Group::with_title(Level::ERROR.primary_title(self.message.as_str())).element(
@@ -729,11 +894,54 @@ mod tests {
     }
 
     #[test]
-    fn from_lex_error_mismatched_delimiter_reports_actual_closer() {
+    fn from_lex_error_mismatched_delimiter_names_found_and_expected() {
         let source = "(1 + 2]";
         let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
         let e = ParseError::from_lex_error(source, lex_err);
-        assert_eq!(e.message(), "unexpected closing delimiter `]`");
+        assert_eq!(
+            e.message(),
+            "mismatched closing delimiter: found `]`, expected `)`"
+        );
+        let out = e.format_rustc_style(source, "t.cel", 1, &Renderer::plain());
+        assert!(
+            out.contains("unclosed delimiter `(`"),
+            "expected a secondary annotation on the unclosed `(`:\n{out}"
+        );
+    }
+
+    #[test]
+    fn from_lex_error_mismatched_delimiter_issue_77_example() {
+        // From issue #77: the real problem is the unclosed `(`, not the `}` the lex error
+        // itself points at.
+        let source = "{a: (1 + 2}";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(
+            e.message(),
+            "mismatched closing delimiter: found `}`, expected `)`"
+        );
+        let out = e.format_rustc_style(source, "t.cel", 1, &Renderer::plain());
+        assert!(
+            out.contains("unclosed delimiter `(`"),
+            "expected a secondary annotation on the unclosed `(`:\n{out}"
+        );
+    }
+
+    #[test]
+    fn from_lex_error_mismatched_delimiter_reports_innermost_opener() {
+        // Innermost open delimiter is `{`, not the outer `[` or `(`.
+        let source = "([{1)]}";
+        let lex_err = source.parse::<proc_macro2::TokenStream>().unwrap_err();
+        let e = ParseError::from_lex_error(source, lex_err);
+        assert_eq!(
+            e.message(),
+            "mismatched closing delimiter: found `)`, expected `}`"
+        );
+        let out = e.format_rustc_style(source, "t.cel", 1, &Renderer::plain());
+        assert!(
+            out.contains("unclosed delimiter `{`"),
+            "expected a secondary annotation on the unclosed `{{`:\n{out}"
+        );
     }
 
     #[test]
@@ -900,6 +1108,48 @@ mod tests {
             &Renderer::plain(),
         );
         assert_eq!(output, "something went wrong");
+    }
+
+    #[test]
+    fn parse_error_with_secondary_renders_all_spans() {
+        let source = "aaa bbb";
+        let e = ParseError::new_range("bad", Span::call_site(), Span::call_site()).with_secondary(
+            vec![SpanLabel {
+                span: SourceSpan::new(1, 4, 1, 7),
+                label: "also here".into(),
+            }],
+        );
+        // primary span is call_site (line 1 col 0..0); secondary underlines "bbb".
+        let out = e.format_rustc_style(source, "t.cel", 1, &Renderer::plain());
+        assert!(out.contains("bad"), "{out}");
+        assert!(out.contains("also here"), "{out}");
+    }
+
+    #[test]
+    fn parse_error_without_secondary_renders_single_span_as_before() {
+        let e = ParseError::new("bad", Span::call_site());
+        let out = e.format_rustc_style("10 + 20 30", "t.cel", 1, &Renderer::plain());
+        assert!(out.contains("error: bad"), "{out}");
+    }
+
+    #[test]
+    fn format_multi_span_underlines_every_span_and_prints_labels() {
+        let source = "aaa bbb ccc";
+        let labels = vec![
+            SpanLabel {
+                span: SourceSpan::new(1, 0, 1, 3),
+                label: "first".into(),
+            },
+            SpanLabel {
+                span: SourceSpan::new(1, 8, 1, 11),
+                label: "third".into(),
+            },
+        ];
+        let out = format_multi_span("mismatch", &labels, source, "t.adm2", 1, &Renderer::plain());
+        assert!(out.contains("mismatch"), "{out}");
+        assert!(out.contains("first"), "{out}");
+        assert!(out.contains("third"), "{out}");
+        assert!(!out.contains('\u{1b}'), "plain renderer has no ANSI: {out}");
     }
 
     #[test]

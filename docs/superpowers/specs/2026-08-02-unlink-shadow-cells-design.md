@@ -253,3 +253,27 @@ Derived from the contract above (no reference to implementation internals):
 8. **Ordinary unconditional derived cells are unaffected**: existing tests
    (`strength_drives_method_selection`, `arity_3_2_1`, etc.) continue to pass unmodified,
    confirming zero behavior change for cells that need no shadowing.
+
+## Correction (2026-09-09)
+
+Case 2's trigger as implemented above — "the output is a pure output of a method whose
+relationship is registered under some `add_conditional`" — was broader than intended. Membership
+in a conditional says nothing about whether the relationship's method choice is actually
+inevitable: a conditional relationship can still have multiple live methods with a genuine
+strength-based choice between them (e.g. a mutual `a := b; b := a;`, as in
+`adam-lang-book/book-src/examples/tutorial/constrain.adm2`), in which case shadowing the losing
+cell's output preserves a `source` that was never actually forced, silently diverging from how an
+equivalent *unconditional* multi-method relationship behaves.
+
+The corrected trigger is **structurally forced**, not merely conditional: the output is in
+[`planner::Plan::forced_outputs`](../../../adam-rs/src/planner.rs) — the same per-round fixpoint
+already exposed publicly via `Sheet::is_forced`/`Sheet::forced_cells` — computed from `active`
+regardless of whether the producing relationship itself is registered under a conditional. This
+also fixes a related gap: an unconditional relationship whose output becomes forced only by
+cascading through an adjacent conditional relationship (see
+`forced_output_cells`'s fixpoint in `planner.rs`) is now shadowed too, closing the same
+revert-on-deactivation gap one hop further out. See
+`cell_shadowed_as_self_ref_in_one_branch_and_plain_reassignment_in_another`,
+`unforced_conditional_relationship_does_not_shadow_its_losing_cell`, and
+`cascaded_forced_output_of_an_unconditional_relationship_shadows_and_reverts` in
+`adam-rs/tests/integration.rs`.

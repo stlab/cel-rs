@@ -5,7 +5,9 @@
 //! shared state between them.
 
 use adam_web_ui::spectrum::SpTheme;
-use adam_web_ui::{Renderer, SheetInspector, build_sheet};
+use adam_web_ui::{
+    GraphDrive, Renderer, SheetInspector, build_sheet, graph_drive_script, to_graph_data,
+};
 use dioxus::prelude::*;
 use wasm_bindgen::prelude::*;
 
@@ -13,6 +15,7 @@ use wasm_bindgen::prelude::*;
 struct RootProps {
     source: String,
     name: String,
+    graph_ids: Vec<String>,
 }
 
 /// Parses `props.source`, then renders either a live [`SheetInspector`] (on success) or the
@@ -25,12 +28,13 @@ struct RootProps {
 /// is a browser element, not a terminal, so ANSI escape codes would show as literal garbage
 /// text rather than color.
 ///
-/// `outcome` is a plain call rather than a `use_hook` because `BuildOutcome` holds a `Sheet`,
-/// which cannot be `Clone` (it owns type-erased cell values) and `use_hook` requires its state
-/// to be. `sheet` and `labels` still end up seeded exactly once: `use_signal`'s initializer
-/// closure only ever fires on this component's first render, and props never change after
-/// [`mount`] constructs them, so no later render (should one ever occur; this component holds
-/// no subscriptions of its own that would trigger one) can replace already-mounted state.
+/// `outcome` is a plain call rather than a `use_hook` because `BuildOutcome` holds a
+/// `ParsedSheet`, which cannot be `Clone` (it owns type-erased cell values) and `use_hook`
+/// requires its state to be. `parsed` and `labels` still end up seeded exactly once:
+/// `use_signal`'s initializer closure only ever fires on this component's first render, and
+/// props never change after [`mount`] constructs them, so no later render (should one ever
+/// occur; this component holds no subscriptions of its own that would trigger one) can replace
+/// already-mounted state.
 ///
 /// Caution: the `use_signal` calls below live inside a `match` arm on `outcome.sheet_labels`,
 /// which is only sound because `build_sheet` is deterministic over an unchanging `props` — the
@@ -51,12 +55,45 @@ fn Root(props: RootProps) -> Element {
     });
 
     let inner = match outcome.sheet_labels {
-        Some((sheet, labels)) => {
-            let sheet = use_signal(|| sheet);
+        Some((parsed, labels)) => {
+            let parsed = use_signal(|| parsed);
             let labels = use_signal(|| labels);
             let error = outcome.error.clone();
+
+            let data = use_memo(move || to_graph_data(&parsed.read(), &labels.read()));
+            let graph_ids = props.graph_ids.clone();
+            let mut first_drive = use_signal(|| true);
+            // The first-run `init` call relies on the bootstrap having already loaded
+            // `graph.js` (defining `window.beginGraph`) before `mount` runs `graph_drive_script`
+            // — there is no polling fallback here (unlike `GraphView`'s `onmounted`), so the
+            // bootstrap's load-before-mount ordering must hold or the graph stays blank.
+            use_effect(move || {
+                let is_first = *first_drive.peek();
+                if is_first {
+                    first_drive.set(false);
+                }
+                let call = if is_first {
+                    GraphDrive::Init
+                } else {
+                    GraphDrive::Update
+                };
+                // Read `data` synchronously so this effect re-subscribes to it, then build every
+                // script before the async block: the container ids are all driven with one shared
+                // `init` on the first run (the graphs draw from initial state) and `update` after.
+                let d = data.read();
+                let scripts: Vec<String> = graph_ids
+                    .iter()
+                    .map(|id| graph_drive_script(id, &d, call))
+                    .collect();
+                spawn(async move {
+                    for script in scripts {
+                        let _ = document::eval(&script).await;
+                    }
+                });
+            });
+
             rsx! {
-                SheetInspector { sheet, labels, source_text, source_name }
+                SheetInspector { parsed, labels, source_text, source_name }
                 if let Some(err) = error {
                     pre { class: "adam-live-error", "{err}" }
                 }
@@ -82,16 +119,19 @@ fn Root(props: RootProps) -> Element {
 
 /// Mounts a live [`SheetInspector`] for `source` into the DOM element with id `element_id`,
 /// using `name` (the example's `data-example` attribute, e.g. `"relationships/conflict_error"`)
-/// as the diagnostic file name shown in any parse/propagate error.
+/// as the diagnostic file name shown in any parse/propagate error. Also drives each id in
+/// `graph_ids` (the graph containers bound to this example's sheet) on every propagate, via
+/// [`graph_drive_script`].
 ///
 /// - Precondition: an element with id `element_id` already exists in the document — the
 ///   mdBook `live-examples` preprocessor is what creates it (see
 ///   `adam-lang-book-preprocessor`).
 #[wasm_bindgen]
-pub fn mount(element_id: &str, source: &str, name: &str) {
+pub fn mount(element_id: &str, source: &str, name: &str, graph_ids: Vec<String>) {
     let props = RootProps {
         source: source.to_string(),
         name: format!("{name}.adm2"),
+        graph_ids,
     };
     let vdom = VirtualDom::new_with_props(Root, props);
     let config = dioxus::web::Config::new().rootname(element_id);

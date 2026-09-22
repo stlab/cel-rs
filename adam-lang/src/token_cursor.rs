@@ -17,27 +17,20 @@ pub(crate) struct TokenCursor {
     /// Running brace/bracket/paren nesting depth, incremented/decremented only by this cursor's
     /// own `expect_open_brace`/`expect_close_brace`/`expect_open_bracket`/`expect_close_bracket`/
     /// `expect_open_paren`/`expect_close_paren` (all three delimiter kinds are tracked uniformly
-    /// as one counter). Tokens consumed directly by an embedded `cel_parser::Parser` while it
-    /// temporarily owns the stream (see `take_tokens`/`set_tokens`) never pass through these
-    /// methods, so they don't affect this counter — which is exactly what callers like
-    /// [`skip_to_recovery_point`] need: a depth that reflects only adam-lang-grammar nesting, not
-    /// CEL sub-expression internals.
-    ///
-    /// This separation holds only as long as a failed CEL sub-expression doesn't leave a dangling,
-    /// unmatched delimiter of a kind CEL also reuses for its own internal grouping. `type_expr`
-    /// (the one adam-lang-grammar-level production that uses parens) is the sole
-    /// adam-lang-grammar exception: those parens genuinely go through `expect_open_paren`/
-    /// `expect_close_paren`, exactly like brace/bracket, so a malformed `type_expr` unwinds
-    /// `depth` correctly. It does not hold for `Delimiter::Brace` or, now, `Delimiter::Parenthesis`
-    /// when the dangling delimiter comes from CEL's own internal grouping instead: CEL's `if`/
-    /// `else` expressions use braces for their branches, and CEL's tuple/group literals use
-    /// parens, the same delimiter kinds adam-lang uses for `relationship`/`conditional`/`out`'s
-    /// `require` bodies and for `type_expr`, respectively. A CEL `if` expression whose then-branch fails to
-    /// parse (e.g. `if a { }`), or a CEL tuple/group literal that fails partway through (e.g.
-    /// `(+)`), can leave a stray `}`/`)` in the stream that this counter — and
-    /// [`skip_to_recovery_point`], which reads it — has no way to distinguish from a real
-    /// adam-lang-tracked brace/paren. See [`skip_to_recovery_point`]'s doc comment for the
-    /// resulting scope boundary.
+    /// as one counter), plus [`Self::absorb_unbalanced_delimiters`]. Tokens consumed directly by
+    /// an embedded `cel_parser::Parser` while it temporarily owns the stream (see
+    /// `take_tokens`/`set_tokens`) never pass through the `expect_*` methods, so on their own they
+    /// don't affect this counter — which is exactly what callers like [`skip_to_recovery_point`]
+    /// need: a depth that reflects only adam-lang-grammar nesting, not CEL sub-expression
+    /// internals. But CEL's own grammar reuses these same delimiter kinds for its internal
+    /// grouping (`Delimiter::Brace` for `if`/`else` branches, `Delimiter::Parenthesis` for
+    /// tuple/group literals and calls), so a CEL sub-expression that fails partway through a
+    /// production that had already consumed one or more of its own opening delimiters (e.g. an
+    /// `if`-expression's then-branch `{`) leaves those delimiters dangling, unmatched, in the
+    /// shared stream. Every caller that hands the stream to an embedded `cel_parser::Parser`
+    /// reclaims it via [`Self::absorb_unbalanced_delimiters`] immediately afterward, folding in
+    /// `cel_parser::Parser::unbalanced_delimiter_count` so this counter stays consistent with the
+    /// stream's actual physical nesting even when CEL left something dangling.
     depth: i32,
     /// The span of the last token [`Self::advance`] actually consumed. Callers seed this to a
     /// known-good starting point via [`Self::set_last_span`] before dispatching to a production
@@ -81,6 +74,19 @@ impl TokenCursor {
     ///   stream.
     pub(crate) fn depth(&self) -> i32 {
         self.depth
+    }
+
+    /// Folds `count` (a `cel_parser::Parser::unbalanced_delimiter_count` reading) into
+    /// [`Self::depth`], accounting for delimiters an embedded `cel_parser::Parser` consumed
+    /// directly while it temporarily owned this cursor's token stream (see
+    /// `take_tokens`/`set_tokens`), bypassing `expect_open_brace`/`expect_close_brace`/etc.
+    ///
+    /// Callers reclaiming the stream from an embedded CEL sub-parse call this immediately
+    /// afterward, whether the sub-parse succeeded or failed: `count` is `0` on success (a no-op),
+    /// and the net number of delimiters CEL left dangling, unmatched, in the stream on failure —
+    /// see [`Self::depth`]'s doc comment for why that can happen.
+    pub(crate) fn absorb_unbalanced_delimiters(&mut self, count: i32) {
+        self.depth += count;
     }
 
     /// Takes the token stream, leaving `None` behind — used to hand the stream to an embedded
@@ -419,20 +425,17 @@ impl TokenCursor {
     /// `Delimiter::None` is treated as an ordinary token (consumed, no depth change): it never
     /// appears in adam-lang's own grammar, or in a way `cel_parser` leaves dangling.
     ///
-    /// **Known limitation (accepted scope boundary):** because CEL's own grammar reuses these
-    /// same delimiter kinds for its internal grouping — `Delimiter::Brace` for `if`/`else`
-    /// branches, `Delimiter::Parenthesis` for tuple/group literals — a CEL sub-expression that
-    /// fails partway through (leaving a dangling, unmatched brace or paren behind) is
-    /// indistinguishable, by delimiter kind alone, from a real adam-lang-tracked brace or paren.
-    /// A CEL `if` expression whose then-branch fails to parse (`if a { }`) leaves a stray `}`
-    /// this way; a CEL tuple/group literal that fails partway through (`(+)`, where
-    /// `is_tuple_or_group` consumes `(` but the error occurs before its matching `)` is ever
-    /// reached) leaves a stray `)` the same way. In either case this method (and the recovery it
-    /// drives) may stop one delimiter too early, mistaking the stray one for a real
-    /// adam-lang-tracked one, aborting the whole parse with `Err` rather than isolating just the
-    /// one malformed item. Fixing this in general requires `cel_parser`'s `Parser<C>` to report
-    /// back exactly what it left unbalanced on a failed parse — out of scope here; see the
-    /// tracking issue for the general fix: <https://github.com/stlab/cel-rs/issues/43>.
+    /// Because CEL's own grammar reuses these same delimiter kinds for its internal grouping —
+    /// `Delimiter::Brace` for `if`/`else` branches, `Delimiter::Parenthesis` for tuple/group
+    /// literals and calls — a CEL sub-expression that fails partway through a production that had
+    /// already consumed one or more of its own opening delimiters (e.g. an `if`-expression's
+    /// then-branch `{`) leaves a dangling, unmatched brace or paren behind in the stream that is,
+    /// by delimiter kind alone, indistinguishable from a real adam-lang-tracked one. This is not
+    /// a problem for `depth` here: every caller that hands the stream to an embedded
+    /// `cel_parser::Parser` folds `cel_parser::Parser::unbalanced_delimiter_count` back into
+    /// `depth` via [`Self::absorb_unbalanced_delimiters`] before this method ever runs, so `depth`
+    /// already reflects the phantom nesting those dangling delimiters represent — this method
+    /// then unwinds back out through them exactly like a real adam-lang-tracked delimiter.
     ///
     /// The keyword check matters when the malformed item has no `;` of its own — e.g.
     /// `cell bad unknown_syntax` immediately followed by a sibling `cell` declaration — so

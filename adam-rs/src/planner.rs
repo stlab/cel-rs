@@ -3,15 +3,21 @@
 //!
 //! The planner finds the strength-optimal acyclic assignment of methods to
 //! relationships: [`release::resolve`] greedily tries, in descending cell-strength
-//! order, to leave each cell unclaimed (a source), keeping the change only when a
-//! valid method assignment still exists ([`matching::Assignment::solve`]) *and* its
-//! induced dependency digraph is acyclic ([`digraph::is_acyclic`]). This single
-//! mechanism handles both ordinary strength-based method selection (an uncontested
-//! relationship's choice of which cell to leave exogenous) and overlapping cyclic
-//! ("diamond") structures uniformly -- both are instances of "does releasing this cell
-//! still admit a valid acyclic assignment". See
-//! `docs/superpowers/specs/2026-08-04-cyclic-constraint-planner-design.md` for the
-//! full design rationale and literature grounding.
+//! order, to leave each cell unclaimed (a source), keeping the change only when a valid
+//! method assignment still exists ([`matching::Assignment::solve`]) *and* its induced
+//! dependency digraph is acyclic ([`digraph::is_acyclic`]). This single mechanism
+//! handles ordinary strength-based method selection (an uncontested relationship's
+//! choice of which cell to leave exogenous) and overlapping cyclic ("diamond")
+//! structures uniformly -- both are instances of "does releasing this cell still admit
+//! a valid acyclic assignment". See
+//! `docs/superpowers/specs/2026-08-04-cyclic-constraint-planner-design.md` for the full
+//! design rationale and literature grounding.
+//!
+//! Method selection is value-blind, including for self-referencing components: a
+//! self-referencing chain reaches the correct values through [`build_seeds`], which
+//! reconstructs each self-referencing input's value at execution time (see
+//! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`),
+//! not through a value-aware assignment choice.
 //!
 //! Once [`release::resolve`] succeeds, its result's induced digraph is guaranteed
 //! acyclic, so a plain topological sort (reusing [`scc::tarjan_scc`], which produces
@@ -25,13 +31,14 @@
 //! does not influence method selection above, which discovers the same infeasibility
 //! structurally via failed augmenting-path displacement in [`matching::Assignment::solve`].
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
 use slotmap::SlotMap;
 
 use crate::{
     cell::{CellData, CellId},
-    error::Error,
+    error::{Error, ErrorSite},
     relationship::{RelationshipData, RelationshipId},
 };
 
@@ -39,10 +46,19 @@ mod digraph;
 mod matching;
 mod release;
 mod scc;
+mod seed;
+mod trace;
 
 use digraph::{Node, add_filter_edges, build_digraph};
 use matching::pure_outputs;
 use release::ReleaseFailure;
+
+pub(crate) use seed::build_seeds;
+
+/// The seed value each self-referencing input should read this round, keyed by cell. A
+/// cell absent from the map reads its own `source`. See [`seed`] and
+/// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`.
+pub(crate) type Seeds = HashMap<CellId, Box<dyn Any>>;
 
 /// One step of a [`Plan`]'s `execution_order`: either a selected method, or reapplying a
 /// source cell's filter against its (now-settled) current argument values.
@@ -76,7 +92,10 @@ pub(crate) struct Plan {
 /// Assigns one method per active relationship and returns them in dependency order.
 ///
 /// Only relationships in `active` are planned; relationships outside `active` are
-/// invisible to method selection.
+/// invisible to method selection. Method selection is purely strength-based and
+/// value-blind: a self-referencing chain reaches the correct values not by choosing a
+/// value-aware assignment, but by [`build_seeds`] reconstructing each self-referencing
+/// input's value at execution time.
 ///
 /// # Errors
 ///
@@ -94,10 +113,19 @@ pub(crate) fn plan(
 ) -> Result<Plan, Error> {
     let (forced_outputs, alive) = forced_output_cells(relationships, active);
 
-    let assignment = release::resolve(cells, relationships, active).map_err(|e| match e {
-        ReleaseFailure::NoAssignment => Error::Conflict,
-        ReleaseFailure::NoAcyclicAssignment => Error::Cycle,
-    })?;
+    let assignment = match release::resolve(cells, relationships, active) {
+        Ok(a) => a,
+        Err(ReleaseFailure::NoAssignment) => {
+            return Err(Error::Conflict {
+                sites: conflict_sites(relationships, active),
+            });
+        }
+        Err(ReleaseFailure::NoAcyclicAssignment(cyclic)) => {
+            return Err(Error::Cycle {
+                sites: cycle_sites(&cyclic, relationships),
+            });
+        }
+    };
 
     let mut adj = build_digraph(&assignment, relationships);
     add_filter_edges(&mut adj, cells, &assignment);
@@ -114,7 +142,11 @@ pub(crate) fn plan(
     let mut execution_order: Vec<PlanStep> = Vec::new();
     for component in components {
         if component.len() != 1 {
-            return Err(Error::FilterCycle);
+            let sites = trace::recover_cycle(&adj, &component)
+                .into_iter()
+                .map(node_to_site)
+                .collect();
+            return Err(Error::FilterCycle { sites });
         }
         match component[0] {
             Node::Relationship(rel_id) => {
@@ -131,8 +163,16 @@ pub(crate) fn plan(
         .iter()
         .filter(|step| matches!(step, PlanStep::Method(..)))
         .count();
+    // Believed unreachable: every active relationship lands in its own singleton
+    // `tarjan_scc` component here, since the `FilterCycle` branch above already
+    // returned on any component of size > 1 -- so `method_count == active.len()`
+    // always holds and `active` is never actually infeasible when this branch runs.
+    // `minimal_infeasible_set`'s own `debug_assert!` guards that assumption in
+    // debug/test builds.
     if method_count != active.len() {
-        return Err(Error::Conflict);
+        return Err(Error::Conflict {
+            sites: conflict_sites(relationships, active),
+        });
     }
 
     let forced_relationships: HashSet<RelationshipId> = alive
@@ -146,6 +186,46 @@ pub(crate) fn plan(
         forced_outputs,
         forced_relationships,
     })
+}
+
+/// Maps a cyclic assignment to `Relationship`/`Cell` sites in loop order.
+///
+/// - Complexity: O(V + E) over the digraph induced by `assignment` (dominated by
+///   [`build_digraph`] and [`scc::tarjan_scc`]).
+fn cycle_sites(
+    assignment: &matching::Assignment,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+) -> Vec<ErrorSite> {
+    let adj = build_digraph(assignment, relationships);
+    let component = scc::tarjan_scc(&adj)
+        .into_iter()
+        .find(|c| c.len() > 1)
+        .unwrap_or_default();
+    trace::recover_cycle(&adj, &component)
+        .into_iter()
+        .map(node_to_site)
+        .collect()
+}
+
+/// Wraps [`trace::minimal_infeasible_set`] as `Relationship` sites.
+///
+/// - Complexity: see [`trace::minimal_infeasible_set`].
+fn conflict_sites(
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    active: &HashSet<RelationshipId>,
+) -> Vec<ErrorSite> {
+    trace::minimal_infeasible_set(relationships, active)
+        .into_iter()
+        .map(ErrorSite::Relationship)
+        .collect()
+}
+
+/// Maps a digraph `Node` to its `ErrorSite`.
+fn node_to_site(node: Node) -> ErrorSite {
+    match node {
+        Node::Relationship(r) => ErrorSite::Relationship(r),
+        Node::Cell(c) => ErrorSite::Cell(c),
+    }
 }
 
 /// Computes the cells that can never be a source under `active`, and which methods
@@ -301,7 +381,40 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(b, out, |x: &i32| Ok(*x))])
             .unwrap();
 
-        assert!(matches!(sheet.propagate(), Err(Error::Conflict)));
+        assert!(matches!(sheet.propagate(), Err(Error::Conflict { .. })));
+    }
+
+    #[test]
+    fn conflict_error_names_the_minimal_infeasible_set() {
+        // Two relationships both want to overwrite the same cell; only one method
+        // each, and both output the same cell -- the whole active set is the
+        // minimal infeasible set here.
+        use crate::error::ErrorSite;
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let out = sheet.add_cell(0_i32);
+
+        let r1 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, out, |x: &i32| Ok(*x))])
+            .unwrap();
+        let r2 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, out, |x: &i32| Ok(*x))])
+            .unwrap();
+
+        let err = sheet.propagate().unwrap_err();
+        let sites = match err {
+            Error::Conflict { sites } => sites,
+            other => panic!("{other:?}"),
+        };
+        let rels: std::collections::HashSet<_> = sites
+            .iter()
+            .filter_map(|s| match s {
+                ErrorSite::Relationship(r) => Some(*r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rels, [r1, r2].into_iter().collect());
     }
 
     #[test]
@@ -504,11 +617,7 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v))])
             .unwrap();
         sheet
-            .add_filter(
-                y,
-                "clamp",
-                Filter::from_fn_0(|v: &i32| Ok((*v).clamp(0, 100))),
-            )
+            .add_filter(y, Filter::from_fn_0(|v: &i32| Ok((*v).clamp(0, 100))))
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
@@ -530,7 +639,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "bound",
                 Filter::from_fn_1(bound, |x: &i32, b: &i32| Ok((*x).min(*b))),
             )
             .unwrap();
@@ -567,7 +675,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "bound",
                 Filter::from_fn_1(bound, |x: &i32, b: &i32| Ok((*x).min(*b))),
             )
             .unwrap();
@@ -599,13 +706,72 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "bound",
                 Filter::from_fn_1(b, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
             )
             .unwrap();
 
         let active: HashSet<_> = sheet.relationships().collect();
         let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
-        assert!(matches!(result, Err(Error::FilterCycle)));
+        assert!(matches!(result, Err(Error::FilterCycle { .. })));
+    }
+
+    #[test]
+    fn filter_cycle_error_names_its_members() {
+        use crate::error::ErrorSite;
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        let b = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        sheet
+            .add_filter(
+                a,
+                Filter::from_fn_1(b, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
+            )
+            .unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
+        let sites = match result {
+            Err(Error::FilterCycle { sites }) => sites,
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("expected FilterCycle error"),
+        };
+        assert!(!sites.is_empty());
+        assert!(sites.iter().any(|s| matches!(s, ErrorSite::Cell(_))));
+        assert!(
+            sites
+                .iter()
+                .any(|s| matches!(s, ErrorSite::Relationship(_)))
+        );
+    }
+
+    #[test]
+    fn cycle_error_names_the_relationships_in_loop_order() {
+        use crate::error::ErrorSite;
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(0_i32);
+        let y = sheet.add_cell(0_i32);
+        let r1 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(y, x, |v: &i32| Ok(*v + 1))])
+            .unwrap();
+        let r2 = sheet
+            .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v + 1))])
+            .unwrap();
+        let err = sheet.propagate().unwrap_err();
+        let sites = match &err {
+            Error::Cycle { sites } => sites.clone(),
+            other => panic!("{other:?}"),
+        };
+        let rels: std::collections::HashSet<_> = sites
+            .iter()
+            .filter_map(|s| match s {
+                ErrorSite::Relationship(r) => Some(*r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rels, [r1, r2].into_iter().collect());
+        assert!(sites.iter().any(|s| matches!(s, ErrorSite::Cell(_))));
     }
 }

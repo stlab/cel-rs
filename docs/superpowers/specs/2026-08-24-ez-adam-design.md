@@ -248,7 +248,9 @@ redrawing edges across a cluttered canvas) without further model changes.
 
 ## 5. Code generation (`Document` → `.adm2`)
 
-A pure function `generate_adm2(doc: &Document) -> String`, one-way only:
+A pure function `generate_adm2(doc: &Document) -> Result<String, ExportError>`, one-way only
+(fallible: stored formula/condition text can be invalid CEL, and a few values — e.g. an
+`i64::MIN` branch key — aren't representable in `.adm2`):
 
 - `Document::sheet_name` → `sheet <name> { ... }`.
 - Each `Cell` → `cell <name>: <Type>;`, with type mapping

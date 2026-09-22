@@ -1,4 +1,4 @@
-//! Examples backing `book-src/filters.md` (Chapter 7). See `src/lib.rs` for how these `.adm2`
+//! Examples backing `book-src/filters.md` (Chapter 5). See `src/lib.rs` for how these `.adm2`
 //! files are wired into the book.
 
 #[test]
@@ -69,30 +69,6 @@ fn derived_cell_diagnosed_not_corrected() {
 }
 
 #[test]
-fn must_reference_underscore() {
-    let mut parser = adam_lang_book::support::parser();
-    let err = parser
-        .parse_str(include_str!(
-            "../book-src/examples/filters/must_reference_underscore.adm2"
-        )) // never mentions `_`
-        .err()
-        .unwrap();
-    assert!(format!("{err}").contains("must reference `_`"));
-}
-
-#[test]
-fn tuple_filter_not_supported() {
-    let mut parser = adam_lang_book::support::parser();
-    let err = parser
-        .parse_str(include_str!(
-            "../book-src/examples/filters/tuple_filter_not_supported.adm2"
-        )) // tuple-typed cell
-        .err()
-        .unwrap();
-    assert!(format!("{err}").contains("tuple"));
-}
-
-#[test]
 fn filter_on_an_out_cell() {
     let mut parser = adam_lang_book::support::parser();
     let mut parsed = parser
@@ -101,7 +77,6 @@ fn filter_on_an_out_cell() {
         ))
         .unwrap();
     let area = parsed.output_names["area"];
-    assert_eq!(parsed.filter_name(area), Some("clamp"));
 
     parsed.propagate().unwrap();
     assert_eq!(*parsed.read::<i32>(area).unwrap(), 4); // within range, unclamped

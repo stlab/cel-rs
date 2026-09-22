@@ -8,7 +8,7 @@
 use adam_lang::type_registry::TypeShape;
 use adam_rs::{CellId, Error, Sheet};
 pub use annotate_snippets::Renderer;
-use cel_parser::FormatRustcStyle;
+use cel_parser::{FormatRustcStyle, SpanContext, SpanLabel};
 use indexmap::IndexMap;
 use std::any::TypeId;
 
@@ -27,8 +27,10 @@ pub struct CellMeta {
     /// instead of a plain text field.
     pub is_numeric: bool,
     /// `true` if the cell holds one of the 12 integer primitive types (as opposed to
-    /// `f32`/`f64`), so [`crate::SheetInspector`] can set [`crate::spectrum::SpNumberfield`]'s
-    /// `step` to `1` — an integer cell has no fractional steps to land on.
+    /// `f32`/`f64`), so [`crate::SheetInspector`] can set its numeric widget's `step` to `1` —
+    /// [`crate::spectrum::SpNumberfield`]'s, or, for a range-filtered cell,
+    /// [`crate::spectrum::SpSlider`]'s — since an integer cell has no fractional steps to land
+    /// on.
     pub is_integer: bool,
     /// Returns the current cell value as a display string.
     pub display: Box<dyn Fn(&Sheet) -> String>,
@@ -81,9 +83,10 @@ impl Labels {
                         .unwrap_or_else(|_| "?".to_owned())
                 }),
                 write_str: Box::new(move |sheet, s| {
-                    let value = s
-                        .parse::<T>()
-                        .map_err(|e| Error::MethodFailed(anyhow::anyhow!("parse error: {}", e)))?;
+                    let value = s.parse::<T>().map_err(|e| Error::MethodFailed {
+                        error: anyhow::anyhow!("parse error: {}", e),
+                        sites: vec![],
+                    })?;
                     sheet.write(id, value)
                 }),
                 range: None,
@@ -116,9 +119,10 @@ impl Labels {
                         .unwrap_or_else(|_| "?".to_owned())
                 }),
                 write_str: Box::new(|_sheet, _s| {
-                    Err(Error::MethodFailed(anyhow::anyhow!(
-                        "editing tuple-typed cells is not yet supported"
-                    )))
+                    Err(Error::MethodFailed {
+                        error: anyhow::anyhow!("editing tuple-typed cells is not yet supported"),
+                        sites: vec![],
+                    })
                 }),
                 range: None,
             },
@@ -295,12 +299,48 @@ fn mark_numeric<T: std::any::Any + Clone + ToF64Display>(
 /// [`Renderer::styled`] for a real terminal (ANSI colors) or [`Renderer::plain`]
 /// for a context that can't display them (a browser `<pre>` element, a log file) —
 /// with `file_name` (e.g. `"begin/examples/toy_example.adm2"`) shown in the
-/// diagnostic header. All other variants have no source span and fall back to
-/// their `Display` message, ignoring `file_name` and `renderer`.
-pub fn format_adam_error(e: &Error, source: &str, file_name: &str, renderer: &Renderer) -> String {
-    match e {
-        Error::MethodFailed(inner) => inner.format_rustc_style(source, file_name, 1, renderer),
-        other => other.to_string(),
+/// diagnostic header. Otherwise, `e`'s sites are resolved against `parsed` via
+/// `adam_lang::ParsedSheet::locate_error`: zero resolved sites falls back to `e`'s
+/// `Display` message; exactly one renders a single-caret diagnostic; two or more render
+/// a multi-span backtrace (e.g. every relationship binding in a cycle), primary site
+/// first.
+///
+/// - Complexity: O(n) in the length of `source`, plus O(s) in the number of `e`'s sites —
+///   `ParsedSheet::locate_error` and, on the multi-span path, `cel_parser::format_multi_span`
+///   both re-scan `source` to render the annotated snippet.
+pub fn format_adam_error(
+    e: &Error,
+    parsed: &adam_lang::ParsedSheet,
+    source: &str,
+    file_name: &str,
+    renderer: &Renderer,
+) -> String {
+    // CEL-internal sub-expression span wins when present.
+    if let Error::MethodFailed { error, .. } = e
+        && error.downcast_ref::<SpanContext>().is_some()
+    {
+        return error.format_rustc_style(source, file_name, 1, renderer);
+    }
+    let located = parsed.locate_error(e);
+    match located.as_slice() {
+        [] => e.to_string(),
+        [(span, _label)] => SpanContext::new(*span).format_rustc_style(
+            &e.to_string(),
+            source,
+            file_name,
+            1,
+            renderer,
+        ),
+        many => {
+            let labels: Vec<SpanLabel> = many
+                .iter()
+                .map(|(span, label)| SpanLabel {
+                    span: *span,
+                    label: label.clone(),
+                })
+                .collect();
+            cel_parser::format_multi_span(&e.to_string(), &labels, source, file_name, 1, renderer)
+        }
     }
 }
 
@@ -309,11 +349,23 @@ mod tests {
     use super::*;
     use adam_rs::Sheet as AdamSheet;
 
+    /// Parses `src` into a `ParsedSheet` via the standard adam-lang pipeline, for tests that
+    /// need a real (rather than hand-built) span table to resolve `Error` sites against.
+    fn parse(src: &str) -> adam_lang::ParsedSheet {
+        use adam_lang::{AdamParser, TypeRegistry};
+        use cel_parser::OpLookup;
+        AdamParser::new(TypeRegistry::new(), OpLookup::new())
+            .parse_str(src)
+            .unwrap()
+    }
+
     #[test]
     fn format_adam_error_invalid_id_falls_back_to_display() {
+        let parsed = parse("sheet s { cell a: i32 = 0; }");
         let msg = format_adam_error(
             &Error::InvalidId,
-            "source text",
+            &parsed,
+            "sheet s { cell a: i32 = 0; }",
             "test.adm2",
             &Renderer::styled(),
         );
@@ -324,12 +376,16 @@ mod tests {
     fn format_adam_error_method_failed_renders_caret_diagnostic() {
         use cel_parser::{SourceSpan, SpanContext};
 
+        let parsed = parse("sheet s { cell a: i32 = 0; }");
         let source = "1i32 / 0i32";
         let span = SourceSpan::new(1, 0, 1, 11);
         let inner = anyhow::anyhow!("division by zero").context(SpanContext::new(span));
-        let err = Error::MethodFailed(inner);
+        let err = Error::MethodFailed {
+            error: inner,
+            sites: vec![],
+        };
 
-        let msg = format_adam_error(&err, source, "test.adm2", &Renderer::styled());
+        let msg = format_adam_error(&err, &parsed, source, "test.adm2", &Renderer::styled());
 
         assert!(msg.contains("division by zero"), "{msg}");
         assert!(msg.contains(source), "{msg}");
@@ -339,18 +395,57 @@ mod tests {
     fn format_adam_error_plain_renderer_has_no_ansi_escape_codes() {
         use cel_parser::{SourceSpan, SpanContext};
 
+        let parsed = parse("sheet s { cell a: i32 = 0; }");
         let source = "1i32 / 0i32";
         let span = SourceSpan::new(1, 0, 1, 11);
         let inner = anyhow::anyhow!("division by zero").context(SpanContext::new(span));
-        let err = Error::MethodFailed(inner);
+        let err = Error::MethodFailed {
+            error: inner,
+            sites: vec![],
+        };
 
-        let msg = format_adam_error(&err, source, "test.adm2", &Renderer::plain());
+        let msg = format_adam_error(&err, &parsed, source, "test.adm2", &Renderer::plain());
 
         assert!(msg.contains("division by zero"), "{msg}");
         assert!(
             !msg.contains('\u{1b}'),
             "expected no ANSI escapes, got: {msg}"
         );
+    }
+
+    #[test]
+    fn format_adam_error_method_failed_falls_back_to_a_single_located_span_without_a_span_context()
+    {
+        use adam_rs::ErrorSite;
+
+        let source =
+            "sheet s {\n    cell a: i32;\n    relationship {\n        a := 1i32;\n    }\n}";
+        let parsed = parse(source);
+        let &(rel_id, idx) = parsed.method_spans.keys().next().expect("one relationship");
+
+        let err = Error::MethodFailed {
+            error: anyhow::anyhow!("boom"),
+            sites: vec![ErrorSite::Method(rel_id, idx)],
+        };
+
+        let msg = format_adam_error(&err, &parsed, source, "test.adm2", &Renderer::plain());
+
+        assert!(msg.contains("boom"), "{msg}");
+        assert!(msg.contains("a := 1i32;"), "{msg}");
+    }
+
+    #[test]
+    fn format_adam_error_cycle_renders_a_multi_span_backtrace() {
+        use adam_lang::{AdamParser, TypeRegistry};
+        use cel_parser::OpLookup;
+        let src = "sheet s { cell x: i32 = 0; cell y: i32 = 0; relationship { x := y + 1i32; } relationship { y := x + 1i32; } }";
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let mut parsed = parser.parse_str(src).unwrap();
+        let err = parsed.propagate().unwrap_err();
+        let msg = format_adam_error(&err, &parsed, src, "t.adm2", &Renderer::plain());
+        assert!(msg.contains("cycle"), "{msg}");
+        // both relationship bindings referenced
+        assert!(msg.contains("x :=") && msg.contains("y :="), "{msg}");
     }
 
     #[test]
@@ -500,7 +595,7 @@ mod tests {
                 ))
             },
         );
-        sheet.add_filter(a, "range_0_100", filter).unwrap();
+        sheet.add_filter(a, filter).unwrap();
 
         let mut cell_names = IndexMap::new();
         cell_names.insert("a".to_string(), (a, TypeShape::Named(TypeId::of::<i32>())));

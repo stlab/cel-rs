@@ -1,0 +1,20 @@
+[package]
+name = "adam-fmt"
+version = "0.1.0"
+edition = "2024"
+description = "Formats adam-lang .adm2 source files in place"
+
+[dependencies]
+adam-lang = { path = "../adam-lang" }
+annotate-snippets = "0.12"
+
+[lib]
+name = "adam_fmt"
+path = "src/lib.rs"
+
+[[bin]]
+name = "adam-fmt"
+path = "src/main.rs"
+
+[lints]
+workspace = true

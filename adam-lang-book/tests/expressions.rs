@@ -1,5 +1,7 @@
 //! Examples backing `book-src/expressions.md` (Chapter 4). See `src/lib.rs` for how these
-//! `.adm2` files are wired into the book.
+//! `.adm2` files are wired into the book. `no_standard_library` is kept as a regression test
+//! only — it needs a parser built without `cel-std`, so it is never `{{#include}}`d into the
+//! chapter itself; see `NO_LIVE_MOUNT` in `adam-lang-book-live-config`.
 
 #[test]
 fn no_standard_library() {
@@ -12,16 +14,4 @@ fn no_standard_library() {
         .err()
         .unwrap();
     assert!(format!("{err}").to_lowercase().contains("min"));
-}
-
-#[test]
-fn initializer_sees_no_cells() {
-    let mut parser = adam_lang_book::support::parser();
-    let err = parser
-        .parse_str(include_str!(
-            "../book-src/examples/expressions/initializer_sees_no_cells.adm2"
-        ))
-        .err()
-        .unwrap();
-    assert!(format!("{err}").to_lowercase().contains("x"));
 }

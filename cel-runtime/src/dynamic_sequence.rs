@@ -812,6 +812,9 @@ mod tests {
     use super::*;
     use std::mem::{align_of, size_of};
 
+    #[repr(align(8))]
+    struct SequenceTestBuffer([u8; 32]);
+
     #[test]
     fn sequence_list_base_case_is_a_no_op() {
         let mut shape = Vec::new();
@@ -830,13 +833,13 @@ mod tests {
         assert_eq!(shape[1].offset, 8); // i32 at [0,4); f64 aligned up to 8
         let offsets: Vec<usize> = shape.iter().map(|e| e.offset).collect();
 
-        let mut buf = [0u8; 16];
+        let mut buf = SequenceTestBuffer([0u8; 32]);
         let list = (7i32, (2.5f64, ()));
-        unsafe { list.write_into(buf.as_mut_ptr(), &offsets) };
+        unsafe { list.write_into(buf.0.as_mut_ptr(), &offsets) };
         let cloned =
-            unsafe { <(i32, (f64, ())) as SequenceList>::clone_from(buf.as_ptr(), &offsets) };
+            unsafe { <(i32, (f64, ())) as SequenceList>::clone_from(buf.0.as_ptr(), &offsets) };
         assert_eq!(cloned, (7, (2.5, ())));
-        let read = unsafe { <(i32, (f64, ()))>::read_from(buf.as_ptr(), &offsets) };
+        let read = unsafe { <(i32, (f64, ()))>::read_from(buf.0.as_ptr(), &offsets) };
         assert_eq!(read, (7, (2.5, ())));
     }
 
@@ -849,11 +852,11 @@ mod tests {
         <(i32, ((i32, i32), (bool, ())))>::append_shape(&mut shape, 0, &mut max_align);
         let offsets: Vec<usize> = shape.iter().map(|e| e.offset).collect();
 
-        let mut buf = [0u8; 16];
+        let mut buf = SequenceTestBuffer([0u8; 32]);
         let list = (1i32, ((2i32, 3i32), (true, ())));
-        unsafe { list.write_into(buf.as_mut_ptr(), &offsets) };
+        unsafe { list.write_into(buf.0.as_mut_ptr(), &offsets) };
         let read = unsafe {
-            <(i32, ((i32, i32), (bool, ()))) as SequenceList>::read_from(buf.as_ptr(), &offsets)
+            <(i32, ((i32, i32), (bool, ()))) as SequenceList>::read_from(buf.0.as_ptr(), &offsets)
         };
         assert_eq!(read, (1, ((2, 3), (true, ()))));
     }

@@ -54,7 +54,7 @@ fn build_resize_sheet() -> Document {
         &mut doc,
         r1,
         height_node,
-        "(aspect_ratio / (width_pixels as f64)) as i64",
+        "((width_pixels as f64) / aspect_ratio) as i64",
     );
     set_member_formula(
         &mut doc,
@@ -79,7 +79,7 @@ fn the_resize_sheet_generates_valid_adm2() {
 #[test]
 fn the_resize_sheet_survives_a_save_and_load_round_trip() {
     let doc = build_resize_sheet();
-    let reloaded = from_json(&to_json(&doc)).unwrap();
+    let reloaded = from_json(&to_json(&doc).unwrap()).unwrap();
     assert_eq!(doc, reloaded);
     assert_eq!(
         generate_adm2(&doc).expect("document should export cleanly"),

@@ -117,30 +117,56 @@ pub fn SpNumberfield(
     }
 }
 
-/// A draggable range slider for a numeric value with live min/max bounds.
+/// A draggable slider for a numeric value with live min/max bounds, its own built-in label,
+/// and an optional inline editable number field.
 ///
-/// Maps to `<sp-slider>`. `min`/`max` are passed as strings, recomputed by the caller on every
-/// render from the cell's current filter bounds (see `begin/src/bridge.rs`'s `CellMeta::range`),
-/// so a range driven by other cells stays live. Fires a standard DOM `input` event; reading the
-/// live numeric value off the DOM (not the synthetic event) is the caller's job, mirroring
+/// Maps to `<sp-slider>`. `label` renders as part of the slider's own markup (its internal
+/// `sp-field-label`, linked to the handle or, when `editable` is set, to the paired
+/// `sp-number-field`) — a caller using this component does not also render a separate
+/// [`SpFieldLabel`] alongside it. `min`/`max` are passed as strings, recomputed by the caller on
+/// every render from the cell's current filter bounds (see `adam-web-ui/src/labels.rs`'s
+/// `CellMeta::range`), so a range driven by other cells stays live. `step`, when present, sets
+/// the amount the drag handle/stepper/arrow keys move the value by — pass `"1"` for an
+/// integer-typed cell, mirroring [`SpNumberfield`]'s own `step`. Setting `editable` to `true`
+/// renders an internal `sp-number-field` alongside the track (SWC's own `Slider.render`),
+/// letting the user type an exact value instead of only dragging; both the drag handle and the
+/// editable field dispatch the same DOM `input` event on this element (SWC's
+/// `SliderHandle.dispatchInputEvent`), so a single `oninput` handler here covers both — reading
+/// the live numeric value off the DOM (not the synthetic event) is the caller's job, mirroring
+/// [`SpTextfield`]/[`SpNumberfield`]. `sp-slider` has no `invalid`/`readonly` state; a caller
+/// that needs to surface either (e.g. a failing `require` on a range-filtered out cell) has to
+/// render that separately, alongside this component. `onfocus`/`onblur` fire for both the drag
+/// handle and (when `editable` is set) the inline number field — neither SWC handle re-dispatches
+/// a bubbling event, but DOM `focus`/`blur` are `composed`, so a listener on this host element
+/// still observes them across the intervening shadow boundaries, mirroring
 /// [`SpTextfield`]/[`SpNumberfield`].
 #[component]
 pub fn SpSlider(
     id: String,
+    label: String,
     value: String,
     min: String,
     max: String,
+    step: Option<String>,
+    editable: bool,
     disabled: bool,
     oninput: EventHandler<FormEvent>,
+    onfocus: EventHandler<FocusEvent>,
+    onblur: EventHandler<FocusEvent>,
 ) -> Element {
     rsx! {
         sp-slider {
             "id": "{id}",
+            "label": "{label}",
             "value": "{value}",
             "min": "{min}",
             "max": "{max}",
+            "step": step.as_deref(),
+            "editable": if editable { "true" },
             "disabled": if disabled { "true" },
             oninput: move |e| oninput.call(e),
+            onfocus: move |e| onfocus.call(e),
+            onblur: move |e| onblur.call(e),
         }
     }
 }
@@ -266,11 +292,14 @@ pub fn SpSwitch(checked: bool, onclick: EventHandler<MouseEvent>, children: Elem
 
 /// A togglable checkbox for a `bool`-typed value.
 ///
-/// Maps to `<sp-checkbox>`. Setting `invalid` to `true` renders the SWC error state.
-/// Setting `disabled` to `true` renders the SWC disabled state. `onclick` fires on
-/// every toggle press, mirroring `SpSwitch`'s `checked`/`onclick` pattern — the caller
-/// owns the boolean state and re-renders `checked` from it rather than reading the new
-/// state off a native `change` event.
+/// Maps to `<sp-checkbox>`. `children` is the checkbox's own label, rendered as its
+/// light-DOM content (`<sp-checkbox>label</sp-checkbox>`) — SWC gives `sp-checkbox` no
+/// separate label slot, so a sibling field label would render disconnected from the
+/// control. Setting `invalid` to `true` renders the SWC error state. Setting `disabled`
+/// to `true` renders the SWC disabled state. `onclick` fires on every toggle press,
+/// mirroring `SpSwitch`'s `checked`/`onclick` pattern — the caller owns the boolean
+/// state and re-renders `checked` from it rather than reading the new state off a
+/// native `change` event.
 #[component]
 pub fn SpCheckbox(
     id: String,
@@ -278,6 +307,7 @@ pub fn SpCheckbox(
     invalid: bool,
     disabled: bool,
     onclick: EventHandler<MouseEvent>,
+    children: Element,
 ) -> Element {
     rsx! {
         sp-checkbox {
@@ -287,6 +317,7 @@ pub fn SpCheckbox(
             "checked": if checked { "true" },
             "invalid": if invalid { "true" },
             "disabled": if disabled { "true" },
+            {children}
         }
     }
 }

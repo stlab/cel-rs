@@ -1,5 +1,5 @@
 sheet s {
-    cell width: i32 = 10;
+    source width: i32 = 10;
     out area := width * 2;
     out doubled_area := area * 2;
 }

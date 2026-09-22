@@ -25,7 +25,18 @@
 //! `OutDecl`'s `require` block, when present, uses the standard [`attach_trailing`] path
 //! directly, like any other container).
 //! See <https://github.com/stlab/cel-rs/issues/52>.
+//!
+//! A `//`/`/* */` comment ending or beginning on the same source line as an adjacent node's own
+//! first/last token — rather than on a fresh line of its own — attaches as that adjacent node's
+//! own `trailing_line_comment` instead of the following node's `leading_comment`; see
+//! [`analyze_gap`]'s `same_line` result and <https://github.com/stlab/cel-rs/issues/59>. This
+//! reuses the same node-to-node gaps described above, so it covers every sibling list and
+//! closing-brace gap this module already tracks, but goes no further: a comment written *inside*
+//! a CEL expression body (between two sub-expression tokens, with no adam-lang-tracked node
+//! boundary between them) is invisible to this whole gap-scanning mechanism and is silently
+//! dropped on reformat — see <https://github.com/stlab/cel-rs/issues/201>.
 
+use cel_parser::trivia::{line_column_to_byte, line_start_byte_offsets};
 use proc_macro2::LineColumn;
 
 use crate::ast::{
@@ -37,6 +48,10 @@ use crate::ast::{
 trait TriviaTarget {
     fn span(&self) -> ExprSpan;
     fn set_leading_comment(&mut self, comment: crate::ast::Comment);
+    /// Sets a `//`/`/* */` comment recovered on the same source line as this node's own last
+    /// token, immediately before the next sibling (or the enclosing container's own closing
+    /// `}`). See <https://github.com/stlab/cel-rs/issues/59>.
+    fn set_trailing_line_comment(&mut self, comment: crate::ast::Comment);
     fn set_blank_line_before(&mut self, value: bool);
 }
 
@@ -46,6 +61,9 @@ impl TriviaTarget for crate::ast::SheetItem {
     }
     fn set_leading_comment(&mut self, comment: crate::ast::Comment) {
         crate::ast::SheetItem::set_leading_comment(self, comment)
+    }
+    fn set_trailing_line_comment(&mut self, comment: crate::ast::Comment) {
+        crate::ast::SheetItem::set_trailing_line_comment(self, comment)
     }
     fn set_blank_line_before(&mut self, value: bool) {
         crate::ast::SheetItem::set_blank_line_before(self, value)
@@ -59,6 +77,9 @@ impl TriviaTarget for BindingDecl {
     fn set_leading_comment(&mut self, comment: crate::ast::Comment) {
         self.leading_comment = Some(comment);
     }
+    fn set_trailing_line_comment(&mut self, comment: crate::ast::Comment) {
+        self.trailing_line_comment = Some(comment);
+    }
     fn set_blank_line_before(&mut self, value: bool) {
         self.blank_line_before = value;
     }
@@ -70,6 +91,9 @@ impl TriviaTarget for RelationshipDecl {
     }
     fn set_leading_comment(&mut self, comment: crate::ast::Comment) {
         self.leading_comment = Some(comment);
+    }
+    fn set_trailing_line_comment(&mut self, comment: crate::ast::Comment) {
+        self.trailing_line_comment = Some(comment);
     }
     fn set_blank_line_before(&mut self, value: bool) {
         self.blank_line_before = value;
@@ -83,6 +107,9 @@ impl TriviaTarget for ConditionalBranch {
     fn set_leading_comment(&mut self, comment: crate::ast::Comment) {
         self.leading_comment = Some(comment);
     }
+    fn set_trailing_line_comment(&mut self, comment: crate::ast::Comment) {
+        self.trailing_line_comment = Some(comment);
+    }
     fn set_blank_line_before(&mut self, value: bool) {
         self.blank_line_before = value;
     }
@@ -94,6 +121,9 @@ impl TriviaTarget for RequirementDecl {
     }
     fn set_leading_comment(&mut self, comment: crate::ast::Comment) {
         self.leading_comment = Some(comment);
+    }
+    fn set_trailing_line_comment(&mut self, comment: crate::ast::Comment) {
+        self.trailing_line_comment = Some(comment);
     }
     fn set_blank_line_before(&mut self, value: bool) {
         self.blank_line_before = value;
@@ -216,24 +246,39 @@ fn before_close_brace(
 /// borrow of `container`, since `container` may be that same list's owner — and `container`'s
 /// own closing `}`, or between its opening `{` and closing `}` when `last_child_end` is `None`)
 /// and attaches it to `container`. See <https://github.com/stlab/cel-rs/issues/52>.
+///
+/// When the recovered comment's first line begins on the same source line as the last child's
+/// own last token, it belongs to that child's `trailing_line_comment` instead of `container`'s
+/// own `trailing_comment` (see <https://github.com/stlab/cel-rs/issues/59>) — but this function
+/// has no access to the child list itself (only its precomputed end position), so it returns the
+/// comment to the caller in that case instead of attaching it, leaving the caller (which does
+/// have the list) to set it on `items.last_mut()`. Returns `None` when there is no such same-line
+/// comment to route (either no comment was found, or it was a fresh leading-style comment and has
+/// already been attached directly to `container`).
 fn attach_trailing<C: TrailingTriviaTarget>(
     source: &str,
     line_starts: &[usize],
     last_child_end: Option<LineColumn>,
     container: &mut C,
-) {
+) -> Option<crate::ast::Comment> {
     let start = match last_child_end {
         Some(pos) => line_column_to_byte(source, line_starts, pos),
         None => after_open_brace(source, line_starts, container.open_brace_span()),
     };
     let end = before_close_brace(source, line_starts, container.close_span());
-    if start < end {
-        let gap_text = &source[start..end];
-        let (comment, blank_line_before_close) = analyze_gap(gap_text);
-        container.set_blank_line_before_close(blank_line_before_close);
-        if let Some(comment) = comment {
+    if start >= end {
+        return None;
+    }
+    let gap_text = &source[start..end];
+    let (comment, blank_line_before_close, same_line) = analyze_gap(gap_text);
+    container.set_blank_line_before_close(blank_line_before_close);
+    match comment {
+        Some(comment) if same_line && last_child_end.is_some() => Some(comment),
+        Some(comment) => {
             container.set_trailing_comment(comment);
+            None
         }
+        None => None,
     }
 }
 
@@ -241,7 +286,16 @@ fn attach_trailing<C: TrailingTriviaTarget>(
 /// after its default arm if present, else its last branch, else (an empty conditional) its own
 /// opening `{`. Handled specially because a `ConditionalDecl`'s "last child" isn't a single
 /// homogeneous list — it's whichever of `branches`/`default` came last in declaration order.
-fn attach_conditional_trailing(source: &str, line_starts: &[usize], cond: &mut ConditionalDecl) {
+///
+/// Same-line routing mirrors [`attach_trailing`]: returns the comment instead of attaching it to
+/// `cond` when it belongs on the same line as the default arm's (or last branch's) own last
+/// token, leaving the caller to attach it there. See <https://github.com/stlab/cel-rs/issues/59>.
+fn attach_conditional_trailing(
+    source: &str,
+    line_starts: &[usize],
+    cond: &mut ConditionalDecl,
+) -> Option<crate::ast::Comment> {
+    let has_last_child = cond.default.is_some() || !cond.branches.is_empty();
     let start = if let Some(default) = &cond.default {
         line_column_to_byte(source, line_starts, default.span.end.end())
     } else if let Some(last_branch) = cond.branches.last() {
@@ -250,13 +304,19 @@ fn attach_conditional_trailing(source: &str, line_starts: &[usize], cond: &mut C
         after_open_brace(source, line_starts, cond.open_brace_span.end)
     };
     let end = before_close_brace(source, line_starts, cond.span.end);
-    if start < end {
-        let gap_text = &source[start..end];
-        let (comment, blank_line_before_close) = analyze_gap(gap_text);
-        cond.blank_line_before_close = blank_line_before_close;
-        if let Some(comment) = comment {
+    if start >= end {
+        return None;
+    }
+    let gap_text = &source[start..end];
+    let (comment, blank_line_before_close, same_line) = analyze_gap(gap_text);
+    cond.blank_line_before_close = blank_line_before_close;
+    match comment {
+        Some(comment) if same_line && has_last_child => Some(comment),
+        Some(comment) => {
             cond.trailing_comment = Some(comment);
+            None
         }
+        None => None,
     }
 }
 
@@ -273,11 +333,17 @@ fn attach_conditional_trailing(source: &str, line_starts: &[usize], cond: &mut C
 pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
     let line_starts = line_start_byte_offsets(source);
     let sheet_start = line_column_to_byte(source, &line_starts, sheet.span.start.start());
-    let (leading_comment, _) = analyze_gap(&source[..sheet_start]);
+    let (leading_comment, _, _) = analyze_gap(&source[..sheet_start]);
     sheet.leading_comment = leading_comment;
     attach_gaps(source, &line_starts, &mut sheet.items);
     let last_child_end = sheet.items.last().map(|item| item.span().end.end());
-    attach_trailing(source, &line_starts, last_child_end, sheet);
+    if let Some(comment) = attach_trailing(source, &line_starts, last_child_end, sheet) {
+        sheet
+            .items
+            .last_mut()
+            .expect("same-line routing only returns Some when a last child exists")
+            .set_trailing_line_comment(comment);
+    }
     for item in &mut sheet.items {
         match item {
             crate::ast::SheetItem::Relationship(rel) => {
@@ -300,7 +366,12 @@ pub fn attach_trivia(source: &str, sheet: &mut Sheet) {
 fn attach_relationship(source: &str, line_starts: &[usize], rel: &mut RelationshipDecl) {
     attach_gaps(source, line_starts, &mut rel.bindings);
     let last_child_end = rel.bindings.last().map(|b| b.span().end.end());
-    attach_trailing(source, line_starts, last_child_end, rel);
+    if let Some(comment) = attach_trailing(source, line_starts, last_child_end, rel) {
+        rel.bindings
+            .last_mut()
+            .expect("same-line routing only returns Some when a last child exists")
+            .set_trailing_line_comment(comment);
+    }
 }
 
 /// Recovers trivia for a conditional's branches, its default, and their nested relationships.
@@ -309,7 +380,13 @@ fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut Conditiona
     for branch in &mut cond.branches {
         attach_gaps(source, line_starts, &mut branch.relationships);
         let last_child_end = branch.relationships.last().map(|r| r.span().end.end());
-        attach_trailing(source, line_starts, last_child_end, branch);
+        if let Some(comment) = attach_trailing(source, line_starts, last_child_end, branch) {
+            branch
+                .relationships
+                .last_mut()
+                .expect("same-line routing only returns Some when a last child exists")
+                .set_trailing_line_comment(comment);
+        }
         for rel in &mut branch.relationships {
             attach_relationship(source, line_starts, rel);
         }
@@ -317,12 +394,24 @@ fn attach_conditional(source: &str, line_starts: &[usize], cond: &mut Conditiona
     if let Some(default) = &mut cond.default {
         attach_gaps(source, line_starts, &mut default.relationships);
         let last_child_end = default.relationships.last().map(|r| r.span().end.end());
-        attach_trailing(source, line_starts, last_child_end, default);
+        if let Some(comment) = attach_trailing(source, line_starts, last_child_end, default) {
+            default
+                .relationships
+                .last_mut()
+                .expect("same-line routing only returns Some when a last child exists")
+                .set_trailing_line_comment(comment);
+        }
         for rel in default.relationships.iter_mut() {
             attach_relationship(source, line_starts, rel);
         }
     }
-    attach_conditional_trailing(source, line_starts, cond);
+    if let Some(comment) = attach_conditional_trailing(source, line_starts, cond) {
+        if let Some(default) = &mut cond.default {
+            default.trailing_line_comment = Some(comment);
+        } else if let Some(last_branch) = cond.branches.last_mut() {
+            last_branch.set_trailing_line_comment(comment);
+        }
+    }
 }
 
 /// Recovers trivia for a `require { ... }` block, if present — the gap before its own closing
@@ -337,7 +426,13 @@ fn attach_require_block(source: &str, line_starts: &[usize], require: Option<&mu
     };
     attach_gaps(source, line_starts, &mut require.requirements);
     let last_child_end = require.requirements.last().map(|r| r.span().end.end());
-    attach_trailing(source, line_starts, last_child_end, require);
+    if let Some(comment) = attach_trailing(source, line_starts, last_child_end, require) {
+        require
+            .requirements
+            .last_mut()
+            .expect("same-line routing only returns Some when a last child exists")
+            .set_trailing_line_comment(comment);
+    }
 }
 
 /// Recovers trivia for an `out` declaration's `require` block, if present, via
@@ -359,9 +454,12 @@ fn attach_source(source: &str, line_starts: &[usize], source_decl: &mut SourceDe
 }
 
 /// Recovers comments/blank-lines from the gaps between consecutive `items`, attaching each to the
-/// nearest following item. The first item in `items` never gets a blank-line-before or comment —
-/// nothing in this list precedes it (a blank line or comment between it and this list's own
-/// enclosing `{` is a separate, untracked case; see the module doc's linked issue).
+/// nearest following item — unless the comment's first line begins on the same source line as
+/// the *previous* item's own last token, in which case it attaches to that previous item's
+/// `trailing_line_comment` instead (see <https://github.com/stlab/cel-rs/issues/59>). The first
+/// item in `items` never gets a blank-line-before or leading comment — nothing in this list
+/// precedes it (a blank line or comment between it and this list's own enclosing `{` is a
+/// separate, untracked case; see the module doc's linked issue).
 fn attach_gaps<T: TriviaTarget>(source: &str, line_starts: &[usize], items: &mut [T]) {
     if items.len() < 2 {
         return;
@@ -370,62 +468,41 @@ fn attach_gaps<T: TriviaTarget>(source: &str, line_starts: &[usize], items: &mut
         let start = line_column_to_byte(source, line_starts, items[i - 1].span().end.end());
         let end = line_column_to_byte(source, line_starts, items[i].span().start.start());
         let gap_text = &source[start..end];
-        let (comment, blank_line_before) = analyze_gap(gap_text);
+        let (comment, blank_line_before, same_line) = analyze_gap(gap_text);
         items[i].set_blank_line_before(blank_line_before);
         if let Some(comment) = comment {
-            items[i].set_leading_comment(comment);
+            if same_line {
+                items[i - 1].set_trailing_line_comment(comment);
+            } else {
+                items[i].set_leading_comment(comment);
+            }
         }
     }
 }
 
-/// Returns the byte offset of the start of each line in `source`: `result[line - 1]` is the
-/// start of 1-based line `line` (matching [`proc_macro2::LineColumn::line`]'s convention).
-///
-/// - Complexity: O(n) in the length of `source`.
-fn line_start_byte_offsets(source: &str) -> Vec<usize> {
-    let mut offsets = vec![0usize];
-    let mut byte = 0usize;
-    for line in source.split_inclusive('\n') {
-        byte += line.len();
-        offsets.push(byte);
-    }
-    offsets
-}
-
-/// Converts a [`LineColumn`] (1-based line, 0-based character column) to a byte offset in
-/// `source`, using `line_starts` (from [`line_start_byte_offsets`]) instead of rescanning
-/// `source` from byte 0.
-///
-/// - Precondition: `line_starts` was built from exactly `source`, and `pos` was recorded
-///   against `source` (so `pos.line - 1` is in range).
-///
-/// - Complexity: O(k), where k is `pos.column` — bounded by that one line's length, not the
-///   whole of `source`.
-fn line_column_to_byte(source: &str, line_starts: &[usize], pos: LineColumn) -> usize {
-    let line_start = line_starts[pos.line - 1];
-    line_start
-        + source[line_start..]
-            .chars()
-            .take(pos.column)
-            .map(char::len_utf8)
-            .sum::<usize>()
-}
-
 /// Analyzes one gap between two consecutive items: the maximal trailing run of `//` line
 /// comments, or a single `/* ... */` block comment (possibly spanning multiple lines),
-/// immediately preceding the next item, if any, and whether a blank line remains anywhere in
+/// immediately preceding the next item, if any; whether that comment run's first line begins on
+/// the same source line as the gap's own start (i.e. it directly trails the *previous* item's
+/// last token, rather than leading the next item on a fresh line — see
+/// <https://github.com/stlab/cel-rs/issues/59>); and whether a blank line remains anywhere in
 /// what's left of the gap once that trailing run is accounted for (see the module doc for why
 /// the scan order matters).
 ///
 /// - Complexity: O(n) in the length of `gap`.
-fn analyze_gap(gap: &str) -> (Option<crate::ast::Comment>, bool) {
+fn analyze_gap(gap: &str) -> (Option<crate::ast::Comment>, bool, bool) {
     use crate::ast::Comment;
     let mut lines: Vec<&str> = gap.lines().collect();
-    // `gap` ends exactly where the following item's first token begins. When that token isn't
-    // at column 0, `lines()`'s final entry is only the leading whitespace before it on its own
-    // line, not a blank source line — drop that fragment before scanning for a trailing comment
-    // run so a real blank line (a genuine empty entry from `lines()`) still breaks the run.
-    if !gap.ends_with('\n') {
+    // `gap` ends exactly where the following item's first token begins. When that token isn't at
+    // column 0 and its own line is otherwise blank up to that point, `lines()`'s final entry is
+    // only leading whitespace, not a blank source line — drop that fragment before scanning for a
+    // trailing comment run so a real blank line (a genuine empty entry from `lines()`) still
+    // breaks the run. But when the gap has no newline at all (the previous item, an intervening
+    // comment, and the next item all share one physical line — see
+    // <https://github.com/stlab/cel-rs/pull/202>'s review), this same final entry is the *entire*
+    // gap, not just trailing indentation, so a non-whitespace fragment (a same-line `/* */`
+    // comment) must be kept for the scan below rather than discarded unseen.
+    if !gap.ends_with('\n') && lines.last().is_some_and(|line| line.trim().is_empty()) {
         lines.pop();
     }
     let mut comment = None;
@@ -487,12 +564,18 @@ fn analyze_gap(gap: &str) -> (Option<crate::ast::Comment>, bool) {
             }
         }
     }
+    // If the comment run's backward scan consumed every remaining line, including `lines[0]`
+    // (the trailing remainder of the *previous* item's own source line), then the comment's
+    // first line began immediately after the previous item's last token — a same-line trailing
+    // comment, not a fresh leading comment on the next item. See
+    // <https://github.com/stlab/cel-rs/issues/59>.
+    let same_line = comment.is_some() && lines.is_empty();
     // `lines[0]` is always the trailing remainder of the *previous* item's own source line (the
     // fragment before the gap's first `\n`), which is empty whenever that item's last token is
     // already at end-of-line — the common case. It must be excluded here: only a line strictly
     // after it sits between two `\n`s in the original gap and can be a genuine blank line.
     let blank_line_before = lines.len() > 1 && lines[1..].iter().any(|l| l.trim().is_empty());
-    (comment, blank_line_before)
+    (comment, blank_line_before, same_line)
 }
 
 #[cfg(test)]
@@ -811,7 +894,7 @@ mod tests {
         // never-first-item limitation as every other sibling list (see the module doc's #52
         // link). A second requirement here lands the comment in a tracked gap between two
         // siblings instead, exercising the same attach-to-a-nested-requirement behavior.
-        let source = "sheet s {\n    out area: f64 := width * height require {\n        max_area: width * height <= max_area;\n        // second\n        c: width <= 10.0;\n    };\n}";
+        let source = "sheet s {\n    out area: f64 := width * height require {\n        @max_area width * height <= max_area;\n        // second\n        @c width <= 10.0;\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Out(out) = &sheet.items[0] else {
@@ -915,7 +998,7 @@ mod tests {
 
     #[test]
     fn recovers_a_trailing_comment_before_a_requires_closing_brace() {
-        let source = "sheet s {\n    out area: f64 := w require {\n        c: w <= 10.0;\n        // trailing\n    };\n}";
+        let source = "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0;\n        // trailing\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Out(out) = &sheet.items[0] else {
@@ -933,7 +1016,7 @@ mod tests {
         // Mirrors `attaches_a_comment_to_a_requirement_inside_an_out_declaration`, but for a
         // `cell`'s own `require` block — `CellDecl` gained `require` alongside `out`'s, and its
         // trivia recovery must not be dropped on the floor the way it was before this fix.
-        let source = "sheet s {\n    cell a: i32 = 1 require {\n        r1: a > 0;\n        // second\n        r2: a < 10;\n    };\n}";
+        let source = "sheet s {\n    cell a: i32 = 1 require {\n        @r1 a > 0;\n        // second\n        @r2 a < 10;\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Cell(cell) = &sheet.items[0] else {
@@ -950,7 +1033,7 @@ mod tests {
     fn recovers_a_trailing_comment_before_a_cells_requires_closing_brace() {
         // Mirrors `recovers_a_trailing_comment_before_a_requires_closing_brace`, but for a
         // `cell`'s own `require` block.
-        let source = "sheet s {\n    cell a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
+        let source = "sheet s {\n    cell a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Cell(cell) = &sheet.items[0] else {
@@ -967,7 +1050,7 @@ mod tests {
     fn attaches_a_comment_to_a_requirement_inside_a_source_declaration() {
         // Mirrors `attaches_a_comment_to_a_requirement_inside_an_out_declaration`, but for a
         // `source`'s own `require` block.
-        let source = "sheet s {\n    source a: i32 = 1 require {\n        r1: a > 0;\n        // second\n        r2: a < 10;\n    };\n}";
+        let source = "sheet s {\n    source a: i32 = 1 require {\n        @r1 a > 0;\n        // second\n        @r2 a < 10;\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Source(source_decl) = &sheet.items[0] else {
@@ -984,7 +1067,7 @@ mod tests {
     fn recovers_a_trailing_comment_before_a_sources_requires_closing_brace() {
         // Mirrors `recovers_a_trailing_comment_before_a_requires_closing_brace`, but for a
         // `source`'s own `require` block.
-        let source = "sheet s {\n    source a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
+        let source = "sheet s {\n    source a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}";
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         let crate::ast::SheetItem::Source(source_decl) = &sheet.items[0] else {
@@ -1011,5 +1094,214 @@ mod tests {
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         attach_trivia(source, &mut sheet);
         assert_eq!(sheet.trailing_comment, None);
+    }
+
+    // Issue #59: a `//` comment at the end of a declaration's own line must attach to that
+    // declaration's own `trailing_line_comment`, not the following item's `leading_comment`.
+
+    #[test]
+    fn a_same_line_trailing_line_comment_attaches_to_the_previous_cell_not_the_next() {
+        let source =
+            "sheet s {\n    cell a: f64 = 2.0; // end of line comment\n    cell b: f64 = 3.0;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Cell(a) = &sheet.items[0] else {
+            panic!("expected Cell");
+        };
+        assert_eq!(
+            a.trailing_line_comment,
+            Some(crate::ast::Comment::Line("end of line comment".to_string()))
+        );
+        let crate::ast::SheetItem::Cell(b) = &sheet.items[1] else {
+            panic!("expected Cell");
+        };
+        assert_eq!(b.leading_comment, None);
+        assert!(!b.blank_line_before);
+    }
+
+    #[test]
+    fn a_same_line_trailing_block_comment_attaches_to_the_previous_cell_not_the_next() {
+        let source = "sheet s {\n    cell a: f64 = 2.0; /* note */\n    cell b: f64 = 3.0;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Cell(a) = &sheet.items[0] else {
+            panic!("expected Cell");
+        };
+        assert_eq!(
+            a.trailing_line_comment,
+            Some(crate::ast::Comment::Block("note".to_string()))
+        );
+        let crate::ast::SheetItem::Cell(b) = &sheet.items[1] else {
+            panic!("expected Cell");
+        };
+        assert_eq!(b.leading_comment, None);
+    }
+
+    #[test]
+    fn a_comment_on_its_own_line_still_attaches_as_a_leading_comment() {
+        // Regression guard: a comment that starts on a fresh line (not same-line as the previous
+        // item) must keep attaching as the next item's leading_comment, exactly as before #59.
+        let source = "sheet s {\n    cell a: i32 = 1;\n    // the total\n    cell b: i32 = 2;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Cell(a) = &sheet.items[0] else {
+            panic!("expected Cell");
+        };
+        assert_eq!(a.trailing_line_comment, None);
+        let crate::ast::SheetItem::Cell(b) = &sheet.items[1] else {
+            panic!("expected Cell");
+        };
+        assert_eq!(
+            b.leading_comment,
+            Some(crate::ast::Comment::Line("the total".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_attaches_to_a_binding_inside_a_relationship() {
+        let source =
+            "sheet s {\n    relationship {\n        b := a; // note\n        a := b;\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
+        };
+        assert_eq!(
+            rel.bindings[0].trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(rel.bindings[1].leading_comment, None);
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_sheets_closing_brace_attaches_to_the_last_item() {
+        let source = "sheet s {\n    cell a: i32 = 1; // note\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Cell(a) = &sheet.items[0] else {
+            panic!("expected Cell");
+        };
+        assert_eq!(
+            a.trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(sheet.trailing_comment, None);
+    }
+
+    #[test]
+    fn same_line_gap_with_no_newline_still_recovers_a_block_comment() {
+        // PR #202 review: when both items and the comment share one physical line with no
+        // newline anywhere in the gap, the old unconditional "drop the final fragment" logic
+        // popped the whole gap (comment included) before the comment scanner ever ran.
+        let source = "sheet s {\n    cell a: i32 = 1; /* note */ cell b: i32 = 2;\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Cell(a) = &sheet.items[0] else {
+            panic!("expected Cell");
+        };
+        assert_eq!(
+            a.trailing_line_comment,
+            Some(crate::ast::Comment::Block("note".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_relationships_closing_brace_attaches_to_the_last_binding()
+     {
+        let source = "sheet s {\n    relationship {\n        b := a; // note\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Relationship(rel) = &sheet.items[0] else {
+            panic!("expected Relationship");
+        };
+        assert_eq!(
+            rel.bindings[0].trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(rel.trailing_comment, None);
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_conditional_branchs_own_closing_brace_attaches_to_the_last_relationship()
+     {
+        let source = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship { b := a; } // note\n        }\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        assert_eq!(
+            cond.branches[0].relationships[0].trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(cond.branches[0].trailing_comment, None);
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_default_arms_own_closing_brace_attaches_to_the_last_relationship()
+     {
+        let source = "sheet s {\n    conditional m {\n        _ => {\n            relationship { b := a; } // note\n        }\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        let default = cond.default.as_ref().expect("default branch present");
+        assert_eq!(
+            default.relationships[0].trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(default.trailing_comment, None);
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_conditionals_own_closing_brace_with_only_branches_attaches_to_the_last_branch()
+     {
+        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { b := a; } } // note\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        assert_eq!(
+            cond.branches[0].trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(cond.trailing_comment, None);
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_conditionals_own_closing_brace_with_a_default_attaches_to_the_default()
+     {
+        let source = "sheet s {\n    conditional m {\n        _ => { relationship { b := a; } } // note\n    }\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Conditional(cond) = &sheet.items[0] else {
+            panic!("expected Conditional");
+        };
+        let default = cond.default.as_ref().expect("default branch present");
+        assert_eq!(
+            default.trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(cond.trailing_comment, None);
+    }
+
+    #[test]
+    fn a_same_line_trailing_comment_before_a_requires_closing_brace_attaches_to_the_last_requirement()
+     {
+        let source =
+            "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0; // note\n    };\n}";
+        let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
+        attach_trivia(source, &mut sheet);
+        let crate::ast::SheetItem::Out(out) = &sheet.items[0] else {
+            panic!("expected Out");
+        };
+        let require = out.require.as_ref().expect("require block present");
+        assert_eq!(
+            require.requirements[0].trailing_line_comment,
+            Some(crate::ast::Comment::Line("note".to_string()))
+        );
+        assert_eq!(require.trailing_comment, None);
     }
 }

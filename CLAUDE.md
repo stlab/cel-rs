@@ -66,9 +66,20 @@ RUSTFLAGS=-Zsanitizer=thread  cargo +nightly test -Zbuild-std --target <triple> 
 RUSTFLAGS=-Zsanitizer=leak    cargo +nightly test -Zbuild-std --target <triple> --workspace
 ```
 
+## Superpowers Workflow
+
+When executing an implementation plan (from `writing-plans` or a design doc) that breaks down
+into independent or semi-independent tasks, default to the `subagent-driven-development` skill
+rather than `executing-plans` — dispatch each task to a subagent with its own context, review
+each result, and update the plan/ledger as tasks complete. Only fall back to a single-session,
+non-delegated execution when the user explicitly asks for it or the plan has no tasks that
+benefit from separate context (e.g. a single tightly-coupled edit).
+
 ## Git Workflow
 
 If a request is made that requires any modification, additions, or deletions to files in the project, stop and suggest the user create a worktree first.
+
+Create project worktrees under `.claude/worktrees/`; do not place them outside the repository.
 
 Never commit directly to `main`.
 
@@ -172,7 +183,13 @@ The compile-time type system uses **cons-cell heterogeneous lists** (`CStackList
 
 ### Documentation comments
 
-Every function must have a `///` doc comment written in **contract style**. The contract lives adjacent to the declaration so it stays synchronized with the code.
+Every class, type, and function in every language used by the repository must have an
+adjacent contract written in the language's documentation or comment syntax. The contract
+lives adjacent to the declaration so it stays synchronized with the code. Each contract
+states type invariants at public boundaries, valid inputs, observable postconditions, errors
+where applicable, and non-constant complexity.
+
+For Rust functions, use a `///` doc comment written in **contract style**.
 
 **Required sections** (include only those that apply):
 
@@ -204,7 +221,10 @@ pub fn pop<T>(&mut self, padding: bool) -> T
 
 ### Unit tests
 
-Derive tests from the **contract and public interface only** — do not read or consider the implementation. The test suite verifies observable behavior as specified by the contract:
+Derive tests from the **contract and public interface only** — do not read or consider the
+implementation. The test suite verifies observable behavior as specified by the contract. If
+an implementation detail is needed to write a test, clarify the contract or redesign the
+interface instead.
 
 - Each `# Errors` condition should assert the `Err` variant is returned.
 - Each postcondition should be asserted.

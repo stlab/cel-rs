@@ -27,7 +27,7 @@
 //!   or masking the shift count (release).
 
 use anyhow::{Result, anyhow};
-use cel_runtime::{DynSegment, DynTuple};
+use cel_runtime::DynSegment;
 use once_cell::sync::Lazy;
 use phf::phf_map;
 use std::any::TypeId;
@@ -1119,8 +1119,8 @@ fn signatures_for(name: &str) -> Option<&'static [OpSignature]> {
 //   - float -> int: checked - `Err` for non-finite or out-of-range values;
 //     a value with a fractional part is *truncated* toward zero, same as
 //     Rust's `as` (checking is only about range/finiteness, not fractional
-//     truncation policy - `round(x) as i32` is the idiom for "round to
-//     nearest first").
+//     truncation policy - use a standard-library rounding function before
+//     converting when nearest-integer behavior is needed).
 //   - f32 -> f64: infallible (always exact). f64 -> f32: checked (may not
 //     fit in `f32`'s finite range).
 //   - bool -> int: infallible (`as`), matching Rust exactly (`true` -> `1`,
@@ -1417,45 +1417,173 @@ pub(crate) struct BuiltinScalarType {
     pub(crate) align: usize,
     pub(crate) dropper: cel_runtime::RawDropper,
     pub(crate) push_arg: fn(&mut DynSegment, usize),
+    pub(crate) element_type: fn() -> cel_runtime::ArrayElementType,
 }
 
-macro_rules! builtin_scalar {
-    ($name:literal, $ty:ty) => {
-        BuiltinScalarType {
-            type_id: TypeId::of::<$ty>(),
-            type_name: $name,
-            size: std::mem::size_of::<$ty>(),
-            align: std::mem::align_of::<$ty>(),
-            dropper: cel_runtime::raw_dropper_for::<$ty>(),
-            push_arg: |seg, idx| seg.push_arg::<$ty>(idx),
+/// Declares the one built-in scalar table every built-in name lookup reads: the name list
+/// [`BUILTIN_SCALAR_NAMES`] exposes and the descriptors [`builtin_scalar_type`] resolves, so a
+/// name can never be recognized by one and missed by the other.
+macro_rules! builtin_scalars {
+    ($($name:literal => $ty:ty),* $(,)?) => {
+        /// Every built-in scalar type name, in table order. Used by the cross-table consistency
+        /// tests that keep this table, [`crate::Ty`], and the CEL type resolver in agreement.
+        #[cfg(test)]
+        pub(crate) const BUILTIN_SCALAR_NAMES: &[&str] = &[$($name),*];
+
+        /// Resolves a built-in scalar type's bare identifier (a closure parameter annotation, a
+        /// CEL array annotation leaf) to its full descriptor, or `None` if `name` names no
+        /// recognized scalar type.
+        ///
+        /// - Complexity: O(1).
+        pub(crate) fn builtin_scalar_type(name: &str) -> Option<BuiltinScalarType> {
+            Some(match name {
+                $($name => BuiltinScalarType {
+                    type_id: TypeId::of::<$ty>(),
+                    type_name: $name,
+                    size: std::mem::size_of::<$ty>(),
+                    align: std::mem::align_of::<$ty>(),
+                    dropper: cel_runtime::raw_dropper_for::<$ty>(),
+                    push_arg: |seg, idx| seg.push_arg::<$ty>(idx),
+                    element_type: || {
+                        cel_runtime::ArrayElementType::leaf::<$ty>()
+                            .expect("a built-in scalar type is never DynamicArray")
+                            .with_type_name($name)
+                    },
+                },)*
+                _ => return None,
+            })
         }
     };
 }
 
-/// Resolves a closure parameter type annotation's bare identifier to its full built-in
-/// descriptor, or `None` if `name` names no recognized scalar type.
+builtin_scalars! {
+    "u8" => u8,
+    "u16" => u16,
+    "u32" => u32,
+    "u64" => u64,
+    "u128" => u128,
+    "usize" => usize,
+    "i8" => i8,
+    "i16" => i16,
+    "i32" => i32,
+    "i64" => i64,
+    "i128" => i128,
+    "isize" => isize,
+    "f32" => f32,
+    "f64" => f64,
+    "bool" => bool,
+    "String" => String,
+}
+
+/// Declares the built-in *generic* (parameterized) type table: one entry per
+/// `(generic constructor name, argument type name)` pair, in the same
+/// `BuiltinScalarType` shape [`builtin_scalar_type`] returns for plain names. Covers exactly
+/// the numeric type set each range operator (`..`, `..=`, etc. — see `RANGE_SIGNATURES` and
+/// its siblings above) already supports.
+macro_rules! builtin_generic_types {
+    ($($generic:literal => { $($arg_name:literal => $ty:ty),* $(,)? }),* $(,)?) => {
+        /// Resolves a one-argument built-in generic type (e.g. `Range(u8)`) to its full
+        /// descriptor, given the generic constructor's name and its already-resolved argument
+        /// type's name (e.g. `"u8"`). Returns `None` if `generic_name`/`arg_type_name` names no
+        /// recognized combination.
+        ///
+        /// - Complexity: O(1).
+        pub(crate) fn builtin_generic_type(
+            generic_name: &str,
+            arg_type_name: &str,
+        ) -> Option<BuiltinScalarType> {
+            match generic_name {
+                $($generic => match arg_type_name {
+                    $($arg_name => Some(BuiltinScalarType {
+                        type_id: TypeId::of::<$ty>(),
+                        type_name: concat!($generic, "(", $arg_name, ")"),
+                        size: std::mem::size_of::<$ty>(),
+                        align: std::mem::align_of::<$ty>(),
+                        dropper: cel_runtime::raw_dropper_for::<$ty>(),
+                        push_arg: |seg, idx| seg.push_arg::<$ty>(idx),
+                        element_type: || {
+                            cel_runtime::ArrayElementType::leaf::<$ty>()
+                                .expect("a built-in generic type is never DynamicArray")
+                                .with_type_name(concat!($generic, "(", $arg_name, ")"))
+                        },
+                    }),)*
+                    _ => None,
+                },)*
+                _ => None,
+            }
+        }
+    };
+}
+
+builtin_generic_types! {
+    "Range" => {
+        "u8" => std::ops::Range<u8>, "u16" => std::ops::Range<u16>,
+        "u32" => std::ops::Range<u32>, "u64" => std::ops::Range<u64>,
+        "u128" => std::ops::Range<u128>, "usize" => std::ops::Range<usize>,
+        "i8" => std::ops::Range<i8>, "i16" => std::ops::Range<i16>,
+        "i32" => std::ops::Range<i32>, "i64" => std::ops::Range<i64>,
+        "i128" => std::ops::Range<i128>, "isize" => std::ops::Range<isize>,
+        "f32" => std::ops::Range<f32>, "f64" => std::ops::Range<f64>,
+    },
+    "RangeInclusive" => {
+        "u8" => std::ops::RangeInclusive<u8>, "u16" => std::ops::RangeInclusive<u16>,
+        "u32" => std::ops::RangeInclusive<u32>, "u64" => std::ops::RangeInclusive<u64>,
+        "u128" => std::ops::RangeInclusive<u128>, "usize" => std::ops::RangeInclusive<usize>,
+        "i8" => std::ops::RangeInclusive<i8>, "i16" => std::ops::RangeInclusive<i16>,
+        "i32" => std::ops::RangeInclusive<i32>, "i64" => std::ops::RangeInclusive<i64>,
+        "i128" => std::ops::RangeInclusive<i128>, "isize" => std::ops::RangeInclusive<isize>,
+        "f32" => std::ops::RangeInclusive<f32>, "f64" => std::ops::RangeInclusive<f64>,
+    },
+    "RangeFrom" => {
+        "u8" => std::ops::RangeFrom<u8>, "u16" => std::ops::RangeFrom<u16>,
+        "u32" => std::ops::RangeFrom<u32>, "u64" => std::ops::RangeFrom<u64>,
+        "u128" => std::ops::RangeFrom<u128>, "usize" => std::ops::RangeFrom<usize>,
+        "i8" => std::ops::RangeFrom<i8>, "i16" => std::ops::RangeFrom<i16>,
+        "i32" => std::ops::RangeFrom<i32>, "i64" => std::ops::RangeFrom<i64>,
+        "i128" => std::ops::RangeFrom<i128>, "isize" => std::ops::RangeFrom<isize>,
+        "f32" => std::ops::RangeFrom<f32>, "f64" => std::ops::RangeFrom<f64>,
+    },
+    "RangeTo" => {
+        "u8" => std::ops::RangeTo<u8>, "u16" => std::ops::RangeTo<u16>,
+        "u32" => std::ops::RangeTo<u32>, "u64" => std::ops::RangeTo<u64>,
+        "u128" => std::ops::RangeTo<u128>, "usize" => std::ops::RangeTo<usize>,
+        "i8" => std::ops::RangeTo<i8>, "i16" => std::ops::RangeTo<i16>,
+        "i32" => std::ops::RangeTo<i32>, "i64" => std::ops::RangeTo<i64>,
+        "i128" => std::ops::RangeTo<i128>, "isize" => std::ops::RangeTo<isize>,
+        "f32" => std::ops::RangeTo<f32>, "f64" => std::ops::RangeTo<f64>,
+    },
+    "RangeToInclusive" => {
+        "u8" => std::ops::RangeToInclusive<u8>, "u16" => std::ops::RangeToInclusive<u16>,
+        "u32" => std::ops::RangeToInclusive<u32>, "u64" => std::ops::RangeToInclusive<u64>,
+        "u128" => std::ops::RangeToInclusive<u128>, "usize" => std::ops::RangeToInclusive<usize>,
+        "i8" => std::ops::RangeToInclusive<i8>, "i16" => std::ops::RangeToInclusive<i16>,
+        "i32" => std::ops::RangeToInclusive<i32>, "i64" => std::ops::RangeToInclusive<i64>,
+        "i128" => std::ops::RangeToInclusive<i128>, "isize" => std::ops::RangeToInclusive<isize>,
+        "f32" => std::ops::RangeToInclusive<f32>, "f64" => std::ops::RangeToInclusive<f64>,
+    },
+}
+
+/// Resolves a zero-argument built-in generic type (currently only `RangeFull`) to its full
+/// descriptor.
 ///
 /// - Complexity: O(1).
-pub(crate) fn builtin_scalar_type(name: &str) -> Option<BuiltinScalarType> {
-    Some(match name {
-        "u8" => builtin_scalar!("u8", u8),
-        "u16" => builtin_scalar!("u16", u16),
-        "u32" => builtin_scalar!("u32", u32),
-        "u64" => builtin_scalar!("u64", u64),
-        "u128" => builtin_scalar!("u128", u128),
-        "usize" => builtin_scalar!("usize", usize),
-        "i8" => builtin_scalar!("i8", i8),
-        "i16" => builtin_scalar!("i16", i16),
-        "i32" => builtin_scalar!("i32", i32),
-        "i64" => builtin_scalar!("i64", i64),
-        "i128" => builtin_scalar!("i128", i128),
-        "isize" => builtin_scalar!("isize", isize),
-        "f32" => builtin_scalar!("f32", f32),
-        "f64" => builtin_scalar!("f64", f64),
-        "bool" => builtin_scalar!("bool", bool),
-        "String" => builtin_scalar!("String", String),
-        _ => return None,
-    })
+pub(crate) fn builtin_generic_type_0(name: &str) -> Option<BuiltinScalarType> {
+    match name {
+        "RangeFull" => Some(BuiltinScalarType {
+            type_id: TypeId::of::<std::ops::RangeFull>(),
+            type_name: "RangeFull",
+            size: std::mem::size_of::<std::ops::RangeFull>(),
+            align: std::mem::align_of::<std::ops::RangeFull>(),
+            dropper: cel_runtime::raw_dropper_for::<std::ops::RangeFull>(),
+            push_arg: |seg, idx| seg.push_arg::<std::ops::RangeFull>(idx),
+            element_type: || {
+                cel_runtime::ArrayElementType::leaf::<std::ops::RangeFull>()
+                    .expect("RangeFull is never DynamicArray")
+                    .with_type_name("RangeFull")
+            },
+        }),
+        _ => None,
+    }
 }
 
 /// Built-in operation scope.
@@ -1483,8 +1611,8 @@ impl BuiltinScope {
         for sig in signatures {
             let arity = sig.arity as usize;
             let matches = arity == stack_infos.len()
-                && stack_infos[0].type_id == sig.lhs_type_id()
-                && (arity < 2 || stack_infos[1].type_id == sig.rhs_type_id());
+                && stack_infos[0].value_type.type_id() == sig.lhs_type_id()
+                && (arity < 2 || stack_infos[1].value_type.type_id() == sig.rhs_type_id());
             if matches {
                 (sig.op_fn)(segment, span)?;
                 return Ok(true);
@@ -1494,57 +1622,9 @@ impl BuiltinScope {
     }
 }
 
-/// Marker pushed onto the stack for the `round` builtin's callee (see
-/// [`round_scope`]) - carries no data, it only lets the paired `"()"` match
-/// arm recognize "this call's callee is `round`" among any other
-/// same-arity callable that might one day share the stack.
-struct RoundFn;
-
-/// Scope function implementing the `round(x: f64) -> f64` builtin: rounds
-/// to the nearest integer, halfway values away from zero, matching
-/// `f64::round` exactly - narrowing to an integer type is a separate,
-/// explicit step (`round(x) as i32`) via the general cast operator (see
-/// the "Casts" section above), not this function's job.
-///
-/// Registered by every [`OpLookup::new()`] (see there), so `round` reads
-/// like any other builtin operator without a caller needing to set it up.
-///
-/// A function call parses as two independent lookups - an arity-0 lookup
-/// for the callee name, then an arity-`N+1` lookup for `"()"` with the
-/// callee and its arguments on the stack (see `cel-parser/src/lib.rs`'s
-/// primary/postfix expression grammar) - so this one scope function
-/// handles both halves: `("round", 0)` pushes the [`RoundFn`] marker,
-/// and `("()", 2)` peeks the stack to confirm both that it actually has
-/// two operands and that this specific call's callee is that marker
-/// before consuming it, deferring to any other registered scope
-/// (`Ok(false)`) otherwise.
-fn round_scope(
-    name: &str,
-    segment: &mut DynSegment,
-    num_operands: usize,
-    _span: SourceSpan,
-) -> Result<bool> {
-    match (name, num_operands) {
-        ("round", 0) => {
-            segment.op0(|| RoundFn);
-            Ok(true)
-        }
-        ("()", 2) => {
-            let top = segment.peek_stack_infos(2);
-            if top.len() != 2 || top[0].type_id != TypeId::of::<RoundFn>() {
-                return Ok(false);
-            }
-            segment.op2(|_callee: RoundFn, x: f64| x.round())?;
-            Ok(true)
-        }
-        _ => Ok(false),
-    }
-}
-
 /// Scope function implementing the arity-0 `range_full` internal op: constructs
-/// `std::ops::RangeFull`, the value a bare `..` produces. Unlike `round_scope`, there is
-/// no second half — `RangeFull` is never called with arguments, so there's no paired
-/// `"()"` arm to add.
+/// `std::ops::RangeFull`, the value a bare `..` produces. There is no second
+/// half because `RangeFull` is never called with arguments.
 ///
 /// Registered by every [`OpLookup::new()`] (see there). `"range_full"` is an internal
 /// dispatch name the parser selects when it recognizes a bare `..` with neither a left
@@ -1595,8 +1675,7 @@ pub struct OpLookup {
 
 impl OpLookup {
     /// Creates a new operation lookup with only built-in operations - the
-    /// infix/prefix operators, the cast operator (`as`), and the
-    /// `round` function.
+    /// infix/prefix operators, the cast operator (`as`), and range syntax.
     ///
     /// # Examples
     ///
@@ -1612,7 +1691,6 @@ impl OpLookup {
             builtin_scope: BuiltinScope,
             tuple_signatures: Vec::new(),
         };
-        lookup.push_library_scope(round_scope);
         lookup.push_library_scope(range_full_scope);
         lookup
     }
@@ -1642,18 +1720,22 @@ impl OpLookup {
                 continue;
             }
             let tuple_info = &stack_infos[sig.tuple_operand_index];
-            let shape_matches = tuple_info.type_id == TypeId::of::<DynTuple>()
-                && tuple_info.associated.len() == sig.shape.len()
-                && tuple_info
-                    .associated
-                    .iter()
-                    .zip(&sig.shape)
-                    .all(|(a, t)| a.type_id == *t);
+            let shape_matches = tuple_info
+                .value_type
+                .tuple_elements()
+                .is_some_and(|elements| {
+                    elements.len() == sig.shape.len()
+                        && elements
+                            .iter()
+                            .zip(&sig.shape)
+                            .all(|(a, t)| a.value_type.type_id() == *t)
+                });
             if !shape_matches {
                 continue;
             }
             let others_match = stack_infos.iter().enumerate().all(|(i, info)| {
-                i == sig.tuple_operand_index || sig.operand_type_ids.get(i) == Some(&info.type_id)
+                i == sig.tuple_operand_index
+                    || sig.operand_type_ids.get(i) == Some(&info.value_type.type_id())
             });
             if others_match {
                 (sig.op_fn)(segment, span)?;
@@ -1694,8 +1776,8 @@ impl OpLookup {
     /// Registers a permanent, library-level scope that is reachable from every parse,
     /// including inside closure bodies.
     ///
-    /// Used for built-in language features (like `round`) and statically-installed library
-    /// functions (like `clamp` from a `cel-std`-style crate). These scopes are registered
+    /// Used for built-in language features and statically-installed library
+    /// functions (like `round` and `clamp` from a `cel-std`-style crate). These scopes are registered
     /// once at setup time and must always be available, even when [`isolate_scopes`](Self::isolate_scopes)
     /// is active — library scopes are *never* isolated.
     ///
@@ -1880,7 +1962,7 @@ impl OpLookup {
                 type_names.push_str(", ");
             }
             type_names.push('`');
-            type_names.push_str(info.type_name.as_ref());
+            type_names.push_str(info.value_type.type_name());
             type_names.push('`');
         }
         Err(crate::ParseError::new_range(
@@ -1945,7 +2027,7 @@ impl OpLookup {
                 end,
             ));
         };
-        let source_type_id = operand.type_id;
+        let source_type_id = operand.value_type.type_id();
         for sig in signatures {
             if sig.source_type_id() == source_type_id {
                 (sig.op_fn)(segment, source_span).map_err(|e| {
@@ -1955,7 +2037,10 @@ impl OpLookup {
             }
         }
         Err(crate::ParseError::new_range(
-            format!("no cast from `{}` to `{type_name}`", operand.type_name),
+            format!(
+                "no cast from `{}` to `{type_name}`",
+                operand.value_type.type_name()
+            ),
             start,
             end,
         ))
@@ -2127,7 +2212,9 @@ mod tests {
         lookup.push_scope(|name, segment, num_operands, _span| {
             let matches = {
                 let top = segment.peek_stack_infos(num_operands);
-                name == "double" && top.len() == 1 && top[0].type_id == TypeId::of::<u32>()
+                name == "double"
+                    && top.len() == 1
+                    && top[0].value_type.type_id() == TypeId::of::<u32>()
             };
             if matches {
                 segment.op1(|a: u32| a * 2)?;
@@ -2158,7 +2245,7 @@ mod tests {
         lookup.push_scope(|name, segment, num_operands, _span| {
             let matches = {
                 let top = segment.peek_stack_infos(num_operands);
-                name == "+" && top.len() == 2 && top[0].type_id == TypeId::of::<u32>()
+                name == "+" && top.len() == 2 && top[0].value_type.type_id() == TypeId::of::<u32>()
             };
             if matches {
                 segment.op2(|_a: u32, _b: u32| 100u32)?;
@@ -2174,90 +2261,6 @@ mod tests {
         lookup.lookup("+", &mut segment, 2, Span::call_site(), Span::call_site())?;
         assert_eq!(segment.call0::<u32>()?, 100);
 
-        Ok(())
-    }
-
-    #[test]
-    fn round_rounds_half_away_from_zero() -> Result<()> {
-        // 3.5/-3.5 are the actual halfway cases (3.6 rounds to 4.0 regardless of which direction
-        // "away from zero" means, so it can't distinguish this rule from ordinary
-        // round-to-nearest); checking both signs also confirms "away from zero" rather than
-        // "toward positive infinity".
-        let lookup = OpLookup::new();
-        let mut segment = DynSegment::new::<()>();
-        lookup.lookup(
-            "round",
-            &mut segment,
-            0,
-            Span::call_site(),
-            Span::call_site(),
-        )?;
-        segment.just(3.5f64);
-        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<f64>()?, 4.0);
-
-        let mut segment = DynSegment::new::<()>();
-        lookup.lookup(
-            "round",
-            &mut segment,
-            0,
-            Span::call_site(),
-            Span::call_site(),
-        )?;
-        segment.just(-3.5f64);
-        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<f64>()?, -4.0);
-        Ok(())
-    }
-
-    #[test]
-    fn round_of_an_expression_result() -> Result<()> {
-        // The motivating case: converting a physical size times a resolution
-        // (both f64) into a whole pixel count, still as an `f64` - narrowing
-        // to `i32` is a separate `as` cast, tested in the cast tests below.
-        let lookup = OpLookup::new();
-        let mut segment = DynSegment::new::<()>();
-        lookup.lookup(
-            "round",
-            &mut segment,
-            0,
-            Span::call_site(),
-            Span::call_site(),
-        )?;
-        segment.just(3.41333333f64);
-        segment.just(300.0f64);
-        lookup.lookup("*", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<f64>()?, 1024.0);
-        Ok(())
-    }
-
-    #[test]
-    fn round_scope_declines_a_call_whose_callee_is_not_round() -> Result<()> {
-        // Defensive case for round_scope's own ("()", 2) arm: a callee that
-        // isn't the `RoundFn` marker must be declined (Ok(false)), not
-        // mistaken for a round() call - see round_scope's doc comment.
-        let mut segment = DynSegment::new::<()>();
-        segment.just(7i32);
-        segment.just(3.0f64);
-        let handled = round_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
-        assert!(!handled);
-        Ok(())
-    }
-
-    #[test]
-    fn round_scope_declines_rather_than_panics_on_an_undersized_stack() -> Result<()> {
-        // Regression test: `("()", 2)` used to index `peek_stack_infos(2)[0]` unconditionally,
-        // but `peek_stack_infos` returns an *empty* slice (not a short one) when the stack has
-        // fewer than the requested count - an empty stack here panicked instead of declining.
-        let mut segment = DynSegment::new::<()>();
-        let handled = round_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
-        assert!(!handled);
-
-        let mut segment = DynSegment::new::<()>();
-        segment.just(3.0f64); // only one of the two expected operands
-        let handled = round_scope("()", &mut segment, 2, SourceSpan::new(1, 0, 1, 1))?;
-        assert!(!handled);
         Ok(())
     }
 
@@ -2289,39 +2292,6 @@ mod tests {
         let lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         segment.just(1024.0f64);
-        lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<i32>()?, 1024);
-        Ok(())
-    }
-
-    #[test]
-    fn cast_composes_with_round_for_the_image_resize_pattern() -> Result<()> {
-        // (width_px as f64) / dpi, mirrored back with round(... * dpi) as i32 -
-        // the actual pattern image_resize.adm2 needs for its width_px triangle. Exercises the
-        // full round trip: widening cast, round(), and the narrowing cast back to i32 - not just
-        // the widening half (see the PR review comment this regression-tests: a prior version of
-        // this test only checked `(width_px as f64) / dpi` and would not have caught a regression
-        // in `round`'s dispatch or the checked `f64 as i32` narrowing cast).
-        let lookup = OpLookup::new();
-        let mut segment = DynSegment::new::<()>();
-        segment.just(1024i32);
-        lookup.lookup_cast("f64", &mut segment, Span::call_site(), Span::call_site())?;
-        segment.just(300.0f64);
-        lookup.lookup("/", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        assert_eq!(segment.call0::<f64>()?, 1024.0 / 300.0);
-
-        let mut segment = DynSegment::new::<()>();
-        lookup.lookup(
-            "round",
-            &mut segment,
-            0,
-            Span::call_site(),
-            Span::call_site(),
-        )?;
-        segment.just(1024.0f64 / 300.0);
-        segment.just(300.0f64);
-        lookup.lookup("*", &mut segment, 2, Span::call_site(), Span::call_site())?;
-        lookup.lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())?;
         lookup.lookup_cast("i32", &mut segment, Span::call_site(), Span::call_site())?;
         assert_eq!(segment.call0::<i32>()?, 1024);
         Ok(())
@@ -2622,7 +2592,7 @@ mod tests {
         lookup.push_scope(|name, segment, num_operands, _span| {
             let matches = {
                 let top = segment.peek_stack_infos(num_operands);
-                name == "+" && top.len() == 2 && top[0].type_id == TypeId::of::<u32>()
+                name == "+" && top.len() == 2 && top[0].value_type.type_id() == TypeId::of::<u32>()
             };
             if matches {
                 segment.op2(|_a: u32, _b: u32| 100u32)?;
@@ -2897,13 +2867,10 @@ mod tests {
 
     #[test]
     fn builtin_scalar_type_resolves_every_documented_name() {
-        for name in [
-            "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
-            "f32", "f64", "bool", "String",
-        ] {
+        for name in BUILTIN_SCALAR_NAMES {
             let scalar =
                 builtin_scalar_type(name).unwrap_or_else(|| panic!("expected `{name}` to resolve"));
-            assert_eq!(scalar.type_name, name);
+            assert_eq!(scalar.type_name, *name);
         }
         assert!(builtin_scalar_type("not_a_type").is_none());
     }
@@ -2924,6 +2891,65 @@ mod tests {
         let value = 42i32;
         let result: i32 = segment.call_dyn(&[&value]).unwrap();
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn builtin_generic_type_resolves_every_range_family_member_for_every_numeric_type() {
+        for generic in [
+            "Range",
+            "RangeInclusive",
+            "RangeFrom",
+            "RangeTo",
+            "RangeToInclusive",
+        ] {
+            for arg in [
+                "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128",
+                "isize", "f32", "f64",
+            ] {
+                let resolved = builtin_generic_type(generic, arg)
+                    .unwrap_or_else(|| panic!("expected `{generic}({arg})` to resolve"));
+                assert_eq!(resolved.type_name, format!("{generic}({arg})"));
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_generic_type_range_inclusive_f64_matches_std_any_type_id() {
+        let resolved = builtin_generic_type("RangeInclusive", "f64").unwrap();
+        assert_eq!(
+            resolved.type_id,
+            TypeId::of::<std::ops::RangeInclusive<f64>>()
+        );
+        assert_eq!(
+            resolved.size,
+            std::mem::size_of::<std::ops::RangeInclusive<f64>>()
+        );
+    }
+
+    #[test]
+    fn builtin_generic_type_is_none_for_unknown_generic_or_argument() {
+        assert!(builtin_generic_type("NotAGeneric", "f64").is_none());
+        assert!(builtin_generic_type("Range", "not_a_type").is_none());
+        assert!(builtin_generic_type("Range", "bool").is_none());
+        assert!(builtin_generic_type("Range", "String").is_none());
+    }
+
+    #[test]
+    fn builtin_generic_type_0_resolves_range_full() {
+        let resolved = builtin_generic_type_0("RangeFull").unwrap();
+        assert_eq!(resolved.type_name, "RangeFull");
+        assert_eq!(resolved.type_id, TypeId::of::<std::ops::RangeFull>());
+        assert!(builtin_generic_type_0("NotAGeneric").is_none());
+    }
+
+    #[test]
+    fn builtin_generic_type_push_arg_declares_a_readable_argument() {
+        let resolved = builtin_generic_type("RangeInclusive", "i32").unwrap();
+        let mut segment = DynSegment::new::<()>();
+        (resolved.push_arg)(&mut segment, 0);
+        let value = 1i32..=5i32;
+        let result: std::ops::RangeInclusive<i32> = segment.call_dyn(&[&value]).unwrap();
+        assert_eq!(result, 1..=5);
     }
 
     #[test]
@@ -2968,25 +2994,20 @@ mod tests {
 
     #[test]
     fn isolate_scopes_leaves_library_scopes_reachable() {
-        // round_scope's own protocol is two lookups: ("round", 0) pushes a marker value, then
-        // ("()", 2) (with the marker plus an f64 operand on the stack) computes the actual round.
-        // This test only needs to prove the *first* half is still reachable while isolated — that's
-        // enough to demonstrate round_scope (a library scope) survived isolate_scopes, without
-        // needing to replicate the whole call protocol.
-        let mut lookup = OpLookup::new(); // registers round_scope via push_library_scope
+        let mut lookup = OpLookup::new();
         let mut segment = DynSegment::new::<()>();
         let isolated = lookup.isolate_scopes();
         lookup
             .lookup(
-                "round",
+                "range_full",
                 &mut segment,
                 0,
                 proc_macro2::Span::call_site(),
                 proc_macro2::Span::call_site(),
             )
-            .expect("round is a library scope and must survive isolation");
+            .expect("range_full is a library scope and must survive isolation");
         lookup.restore_scopes(isolated);
-        assert_eq!(segment.peek_stack_infos(1).len(), 1); // the RoundFn marker was pushed
+        assert_eq!(segment.peek_stack_infos(1).len(), 1);
     }
 
     #[test]

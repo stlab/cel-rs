@@ -1,8 +1,0 @@
-sheet s {
-    source x: i32 = 1;
-    cell y: i32 = 2;
-
-    relationship {
-        x := y;
-    }
-}

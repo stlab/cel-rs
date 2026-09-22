@@ -19,14 +19,24 @@ fn indent(depth: usize) -> String {
     "    ".repeat(depth)
 }
 
-/// Writes one recovered `Comment` at `depth`'s indentation: a `Comment::Line` as one `// ` line
-/// per stored line; a `Comment::Block` as `/* text */` on one line when its text has no internal
-/// `\n`, or a multi-line `/*`/`*/`-delimited block (one line per stored line, indented one level
-/// past `depth`) when it does.
-fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
+/// Writes `comment`'s text starting at the current write position — its first line gets no
+/// leading indent or prefix of its own, so the caller positions the cursor first (either after
+/// its own `indent(depth)`, for a comment on its own line, or inline after a declaration's own
+/// terminator) — continuing any further lines at `depth`'s indentation, and always ending with a
+/// newline: a `Comment::Line` as one `// ` line per stored line; a `Comment::Block` as
+/// `/* text */` on one line when its text has no internal `\n`, or a multi-line `/*`/`*/`-
+/// delimited block (one line per stored line, indented one level past `depth`) when it does.
+/// Shared by [`write_comment`] and [`write_line_end`].
+fn write_comment_inline(out: &mut String, comment: &ast::Comment, depth: usize) {
     match comment {
         ast::Comment::Line(text) => {
-            for line in text.split('\n') {
+            let mut lines = text.split('\n');
+            if let Some(first) = lines.next() {
+                out.push_str("// ");
+                out.push_str(first);
+                out.push('\n');
+            }
+            for line in lines {
                 out.push_str(&indent(depth));
                 out.push_str("// ");
                 out.push_str(line);
@@ -34,7 +44,6 @@ fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
             }
         }
         ast::Comment::Block(text) => {
-            out.push_str(&indent(depth));
             if text.contains('\n') {
                 out.push_str("/*\n");
                 for line in text.split('\n') {
@@ -51,6 +60,13 @@ fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
             }
         }
     }
+}
+
+/// Writes one recovered `Comment` on its own line at `depth`'s indentation, via
+/// [`write_comment_inline`].
+fn write_comment(out: &mut String, comment: &ast::Comment, depth: usize) {
+    out.push_str(&indent(depth));
+    write_comment_inline(out, comment, depth);
 }
 
 /// Writes `doc_comment`'s lines (if present) as one `marker` line per stored line, at `depth`'s
@@ -100,6 +116,26 @@ fn write_trailing_trivia(
     }
 }
 
+/// Terminates a declaration's own output line with `terminator` (`;` or `}`), appending its
+/// same-line `trailing_line_comment` inline first when present — a `//` comment always ends the
+/// line it's on, and a `/* */` comment stays inline with what precedes it, so both are written
+/// before the newline rather than after it. See <https://github.com/stlab/cel-rs/issues/59>.
+fn write_line_end(
+    out: &mut String,
+    terminator: &str,
+    trailing_line_comment: Option<&ast::Comment>,
+    depth: usize,
+) {
+    out.push_str(terminator);
+    match trailing_line_comment {
+        Some(comment) => {
+            out.push(' ');
+            write_comment_inline(out, comment, depth);
+        }
+        None => out.push('\n'),
+    }
+}
+
 /// Re-emits a literal's exact original text via its span, falling back to an empty string when
 /// none is recoverable — mirrors `cel_parser::fmt`'s identical fallback (see the module doc for
 /// why no `Literal` value is needed here).
@@ -107,9 +143,97 @@ fn source_text_or_empty(span: ast::ExprSpan) -> String {
     span.start.source_text().unwrap_or_default()
 }
 
+/// A single-point `ExprSpan` (start and end coincide), for a gap endpoint with no spanned AST
+/// node of its own — e.g. the terminating `;` following a `CellDecl`'s initializer, which has
+/// only `CellDecl.span.end` (the `;` token's own span) available, not a full node.
+fn point_span(span: proc_macro2::Span) -> ast::ExprSpan {
+    ast::ExprSpan {
+        start: span,
+        end: span,
+    }
+}
+
+/// Renders the source gap between two adam-lang declaration positions — any comments it holds,
+/// interleaved *in source order* with `expected`, the fixed literal tokens (e.g. `"="`, `":="`)
+/// the grammar guarantees appear there. Passing the operator through [`cel_parser::trivia::scan_gap`]
+/// (rather than having the caller append it afterward) is what preserves ordering: a comment that
+/// follows the `=` in `cell a: i32 = /* p */ 1;` stays after it, and one on each side of it
+/// (`cell a: i32 /* before */ = /* after */ 1;`) keeps its position relative to the operator.
+///
+/// Spacing mirrors `cel_parser::fmt::emit_gap`'s `Around` convention: an `expected` token is
+/// rendered space-separated, a `Comment::Block` stays inline, and a `Comment::Line` (which runs to
+/// end of line) wraps — ending the gap with a newline plus `indent(depth + 1)` so whatever the
+/// caller appends next starts on a fresh line rather than being swallowed into the comment.
+///
+/// - Postcondition: an *operator* gap (`expected` non-empty) always emits every `expected` token,
+///   even when `source` is empty or the positions don't resolve (a hand-built declaration with
+///   synthetic spans still gets its `=`/`:=`), and ends with a separating space so the caller's
+///   next token (the initializer) is not glued on. A *comment-only* gap (`expected` empty) returns
+///   `""` when it holds no comments, and never adds a trailing space, so the caller appends its own
+///   terminator (`;`) or keyword directly.
+///
+/// `depth` is the caller's own indent depth (the declaration's, not the gap's).
+fn emit_decl_gap(
+    source: &str,
+    prev_end: ast::ExprSpan,
+    next_start: ast::ExprSpan,
+    expected: &[&'static str],
+    depth: usize,
+) -> String {
+    use cel_parser::trivia::{GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap};
+    // `scan_gap` re-synthesizes every `expected` token even on an empty or non-resolving gap, so a
+    // hand-built declaration (empty `source`) still renders its operator.
+    let pieces = if source.is_empty() {
+        scan_gap("", expected)
+    } else {
+        let line_starts = line_start_byte_offsets(source);
+        let start = line_column_to_byte(source, &line_starts, prev_end.end.end());
+        let end = line_column_to_byte(source, &line_starts, next_start.start.start());
+        match source.get(start..end) {
+            Some(gap) => scan_gap(gap, expected),
+            None => scan_gap("", expected),
+        }
+    };
+    let mut out = String::new();
+    for piece in pieces {
+        match piece {
+            GapPiece::Punct(tok) => {
+                if !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push_str(tok);
+                out.push(' ');
+            }
+            GapPiece::Comment(cel_parser::Comment::Block(text)) => {
+                if !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push_str("/* ");
+                out.push_str(&text);
+                out.push_str(" */");
+            }
+            GapPiece::Comment(cel_parser::Comment::Line(text)) => {
+                if !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push_str("// ");
+                out.push_str(&text);
+                out.push('\n');
+                out.push_str(&indent(depth + 1));
+            }
+        }
+    }
+    // An operator gap must end separated from the initializer the caller appends next; a
+    // comment-only gap must not (its terminator/keyword is appended with its own leading space).
+    if !expected.is_empty() && !out.is_empty() && !out.ends_with(' ') {
+        out.push(' ');
+    }
+    out
+}
+
 /// Writes one `a := ...;` / `(a, b) := ...;` binding, delegating its body to
 /// [`cel_parser::format_expr`].
-fn write_binding(out: &mut String, binding: &ast::BindingDecl, depth: usize) {
+fn write_binding(out: &mut String, source: &str, binding: &ast::BindingDecl, depth: usize) {
     write_trivia(
         out,
         binding.blank_line_before,
@@ -137,13 +261,33 @@ fn write_binding(out: &mut String, binding: &ast::BindingDecl, depth: usize) {
         );
         out.push_str(&binding.outputs[0].0);
     }
-    out.push_str(" := ");
-    out.push_str(&cel_parser::format_expr(&binding.body));
-    out.push_str(";\n");
+    // `:=` gap, rendered in-position so a comment on either side of it keeps its order.
+    let op_start = binding
+        .outputs
+        .last()
+        .map(|(_, span)| *span)
+        .unwrap_or(binding.span);
+    out.push_str(&emit_decl_gap(
+        source,
+        op_start,
+        binding.body.span(),
+        &[":="],
+        depth,
+    ));
+    out.push_str(&cel_parser::format_expr(&binding.body, source, depth));
+    // Comment between the binding's body and its terminating `;`.
+    out.push_str(&emit_decl_gap(
+        source,
+        binding.body.span(),
+        point_span(binding.span.end),
+        &[],
+        depth,
+    ));
+    write_line_end(out, ";", binding.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one `relationship { ... }` declaration and its bindings, in declaration order.
-fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usize) {
+fn write_relationship(out: &mut String, source: &str, rel: &ast::RelationshipDecl, depth: usize) {
     write_trivia(
         out,
         rel.blank_line_before,
@@ -152,9 +296,19 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
     );
     write_doc_comment(out, "///", rel.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
-    out.push_str("relationship {\n");
+    out.push_str("relationship");
+    // Comment between the `relationship` keyword and its `{` (the keyword's own span starts at
+    // `rel.span.start`; scan from just past it to the block's `{`).
+    out.push_str(&emit_decl_gap(
+        source,
+        point_span(rel.span.start),
+        rel.open_brace_span,
+        &[],
+        depth,
+    ));
+    out.push_str(" {\n");
     for binding in &rel.bindings {
-        write_binding(out, binding, depth + 1);
+        write_binding(out, source, binding, depth + 1);
     }
     write_trailing_trivia(
         out,
@@ -163,31 +317,33 @@ fn write_relationship(out: &mut String, rel: &ast::RelationshipDecl, depth: usiz
         depth + 1,
     );
     out.push_str(&indent(depth));
-    out.push_str("}\n");
+    write_line_end(out, "}", rel.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes a `{ ... }` block of relationships, shared by both a named conditional branch and the
 /// default (`_ =>`) arm.
 fn write_branch_relationships(
     out: &mut String,
+    source: &str,
     relationships: &[ast::RelationshipDecl],
     trailing_comment: Option<&ast::Comment>,
     blank_line_before_close: bool,
+    line_trailing_comment: Option<&ast::Comment>,
     depth: usize,
 ) {
     out.push_str("{\n");
     for rel in relationships {
-        write_relationship(out, rel, depth + 1);
+        write_relationship(out, source, rel, depth + 1);
     }
     write_trailing_trivia(out, blank_line_before_close, trailing_comment, depth + 1);
     out.push_str(&indent(depth));
-    out.push_str("}\n");
+    write_line_end(out, "}", line_trailing_comment, depth);
 }
 
 /// Writes one `literal_pattern => { ... }` conditional branch, re-emitting the match literal via
 /// its span rather than the (unused) `Literal` value, with a leading `-` when
 /// [`ast::ConditionalBranch::negated`].
-fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize) {
+fn write_branch(out: &mut String, source: &str, branch: &ast::ConditionalBranch, depth: usize) {
     write_trivia(
         out,
         branch.blank_line_before,
@@ -199,19 +355,29 @@ fn write_branch(out: &mut String, branch: &ast::ConditionalBranch, depth: usize)
         out.push('-');
     }
     out.push_str(&source_text_or_empty(branch.literal_span));
-    out.push_str(" => ");
+    // One gap from the literal through the `=>` to the branch body's `{`, recovering comments on
+    // either side of `=>` in source order.
+    out.push_str(&emit_decl_gap(
+        source,
+        branch.literal_span,
+        branch.open_brace_span,
+        &["=>"],
+        depth,
+    ));
     write_branch_relationships(
         out,
+        source,
         &branch.relationships,
         branch.trailing_comment.as_ref(),
         branch.blank_line_before_close,
+        branch.trailing_line_comment.as_ref(),
         depth,
     );
 }
 
 /// Writes one `conditional <expr> { ... }` declaration: its branches in declaration
 /// order (dispatching on the match-subject expression), followed by its optional `_ => { ... }` default arm.
-fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize) {
+fn write_conditional(out: &mut String, source: &str, cond: &ast::ConditionalDecl, depth: usize) {
     write_trivia(
         out,
         cond.blank_line_before,
@@ -221,19 +387,37 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
     write_doc_comment(out, "///", cond.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("conditional ");
-    out.push_str(&cel_parser::format_expr(&cond.match_expr));
+    out.push_str(&cel_parser::format_expr(&cond.match_expr, source, depth));
+    // Comment between the match subject and the conditional's own `{`.
+    out.push_str(&emit_decl_gap(
+        source,
+        cond.match_expr.span(),
+        cond.open_brace_span,
+        &[],
+        depth,
+    ));
     out.push_str(" {\n");
     for branch in &cond.branches {
-        write_branch(out, branch, depth + 1);
+        write_branch(out, source, branch, depth + 1);
     }
     if let Some(default) = &cond.default {
         out.push_str(&indent(depth + 1));
-        out.push_str("_ => ");
+        out.push('_');
+        // One gap from `_` through `=>` to the default body's `{`, recovering comments around `=>`.
+        out.push_str(&emit_decl_gap(
+            source,
+            point_span(default.span.start),
+            default.open_brace_span,
+            &["=>"],
+            depth + 1,
+        ));
         write_branch_relationships(
             out,
+            source,
             &default.relationships,
             default.trailing_comment.as_ref(),
             default.blank_line_before_close,
+            default.trailing_line_comment.as_ref(),
             depth + 1,
         );
     }
@@ -244,13 +428,13 @@ fn write_conditional(out: &mut String, cond: &ast::ConditionalDecl, depth: usize
         depth + 1,
     );
     out.push_str(&indent(depth));
-    out.push_str("}\n");
+    write_line_end(out, "}", cond.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one `cell name[: type][ = initializer][ filter body][ require { ... }];` declaration,
 /// delegating its type annotation to [`source_text_or_empty`] via `TypeExpr::span()` and its
 /// initializer/filter body to [`cel_parser::format_expr`].
-fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
+fn write_cell(out: &mut String, source: &str, cell: &ast::CellDecl, depth: usize) {
     write_trivia(
         out,
         cell.blank_line_before,
@@ -265,24 +449,86 @@ fn write_cell(out: &mut String, cell: &ast::CellDecl, depth: usize) {
         out.push_str(": ");
         out.push_str(&source_text_or_empty(type_expr.span()));
     }
+    // `=` gap, rendered in-position so comments keep their order relative to the operator.
     if let Some(expr) = &cell.initializer {
-        out.push_str(" = ");
-        out.push_str(&cel_parser::format_expr(expr));
+        let op_start = cell
+            .type_name
+            .as_ref()
+            .map(ast::TypeExpr::span)
+            .unwrap_or(cell.name_span);
+        out.push_str(&emit_decl_gap(source, op_start, expr.span(), &["="], depth));
+        out.push_str(&cel_parser::format_expr(expr, source, depth));
     }
-    if let Some(filter) = &cell.filter {
-        out.push_str(" filter ");
-        out.push_str(&filter.name);
-        out.push_str(": ");
-        out.push_str(&cel_parser::format_expr(&filter.body));
-    }
-    if let Some(require) = &cell.require {
-        write_require_clause(out, require, depth);
-    }
-    out.push_str(";\n");
+    write_cell_clauses(
+        out,
+        source,
+        depth,
+        cell.initializer.as_ref().map(cel_parser::Expr::span),
+        cell.type_name.as_ref().map(ast::TypeExpr::span),
+        cell.name_span,
+        cell.filter.as_ref(),
+        cell.require.as_ref(),
+        cell.span.end,
+    );
+    write_line_end(out, ";", cell.trailing_line_comment.as_ref(), depth);
 }
 
-/// Writes one `name: ...;` requirement.
-fn write_requirement(out: &mut String, req: &ast::RequirementDecl, depth: usize) {
+/// Writes a declaration's optional `filter`/`require` clauses and recovers any comment in each gap
+/// between adjacent segments (initializer → `filter` → `require` → `;`), shared by [`write_cell`],
+/// [`write_source`], and [`write_out`]. `prev_*` give the end span of whichever of
+/// initializer/type/name precedes the clauses; `terminator` is the declaration's own `;` span.
+#[allow(clippy::too_many_arguments)]
+fn write_cell_clauses(
+    out: &mut String,
+    source: &str,
+    depth: usize,
+    initializer_span: Option<ast::ExprSpan>,
+    type_span: Option<ast::ExprSpan>,
+    name_span: ast::ExprSpan,
+    filter: Option<&ast::CellFilter>,
+    require: Option<&ast::RequireBlock>,
+    terminator: proc_macro2::Span,
+) {
+    let mut prev = initializer_span.or(type_span).unwrap_or(name_span);
+    if let Some(filter) = filter {
+        // One gap from the previous segment through the `filter` keyword to the filter body,
+        // recovering comments on either side of `filter` in source order.
+        out.push_str(&emit_decl_gap(
+            source,
+            prev,
+            filter.body.span(),
+            &["filter"],
+            depth,
+        ));
+        out.push_str(&cel_parser::format_expr(&filter.body, source, depth));
+        prev = filter.body.span();
+    }
+    if let Some(require) = require {
+        // One gap from the previous segment through the `require` keyword to the block's `{`,
+        // recovering comments on either side of `require` (the keyword itself has no stored span,
+        // but it lies inside this gap).
+        out.push_str(&emit_decl_gap(
+            source,
+            prev,
+            require.open_brace_span,
+            &["require"],
+            depth,
+        ));
+        write_require_block(out, source, require, depth);
+        prev = require.span;
+    }
+    // Comment between the last segment and the terminating `;`.
+    out.push_str(&emit_decl_gap(
+        source,
+        prev,
+        point_span(terminator),
+        &[],
+        depth,
+    ));
+}
+
+/// Writes one `[ "@" identifier " " ] ...;` requirement.
+fn write_requirement(out: &mut String, source: &str, req: &ast::RequirementDecl, depth: usize) {
     write_trivia(
         out,
         req.blank_line_before,
@@ -290,18 +536,33 @@ fn write_requirement(out: &mut String, req: &ast::RequirementDecl, depth: usize)
         depth,
     );
     out.push_str(&indent(depth));
-    out.push_str(&req.name);
-    out.push_str(": ");
-    out.push_str(&cel_parser::format_expr(&req.body));
-    out.push_str(";\n");
+    if let Some(name) = &req.name {
+        out.push('@');
+        out.push_str(name);
+        // Recover any comment between the `@label` and the body (e.g. `@c /* keep */ w <= 10`).
+        if let Some(name_span) = req.name_span {
+            out.push_str(&emit_decl_gap(
+                source,
+                name_span,
+                req.body.span(),
+                &[],
+                depth,
+            ));
+        }
+        out.push(' ');
+    }
+    out.push_str(&cel_parser::format_expr(&req.body, source, depth));
+    write_line_end(out, ";", req.trailing_line_comment.as_ref(), depth);
 }
 
-/// Writes one ` require { ... }` clause (no trailing `;`) — shared by [`write_cell`],
-/// [`write_source`], and [`write_out`].
-fn write_require_clause(out: &mut String, require: &ast::RequireBlock, depth: usize) {
-    out.push_str(" require {\n");
+/// Writes one `require` block's `{ ... }` body (no `require` keyword, no trailing `;`) — the
+/// caller emits the `require` keyword (and any comments around it) via [`emit_decl_gap`] so a
+/// comment between `require` and its `{` is preserved. Shared by [`write_cell`], [`write_source`],
+/// and [`write_out`].
+fn write_require_block(out: &mut String, source: &str, require: &ast::RequireBlock, depth: usize) {
+    out.push_str("{\n");
     for req in &require.requirements {
-        write_requirement(out, req, depth + 1);
+        write_requirement(out, source, req, depth + 1);
     }
     write_trailing_trivia(
         out,
@@ -314,7 +575,7 @@ fn write_require_clause(out: &mut String, require: &ast::RequireBlock, depth: us
 }
 
 /// Writes one `out name[: type] := ...[ filter body][ require { ... } ];` declaration.
-fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
+fn write_out(out: &mut String, source: &str, decl: &ast::OutDecl, depth: usize) {
     write_trivia(
         out,
         decl.blank_line_before,
@@ -329,23 +590,37 @@ fn write_out(out: &mut String, decl: &ast::OutDecl, depth: usize) {
         out.push_str(": ");
         out.push_str(&source_text_or_empty(type_expr.span()));
     }
-    out.push_str(" := ");
-    out.push_str(&cel_parser::format_expr(&decl.initializer));
-    if let Some(filter) = &decl.filter {
-        out.push_str(" filter ");
-        out.push_str(&filter.name);
-        out.push_str(": ");
-        out.push_str(&cel_parser::format_expr(&filter.body));
-    }
-    if let Some(require) = &decl.require {
-        write_require_clause(out, require, depth);
-    }
-    out.push_str(";\n");
+    // `:=` gap, rendered in-position so comments keep their order relative to the operator.
+    let op_start = decl
+        .type_name
+        .as_ref()
+        .map(ast::TypeExpr::span)
+        .unwrap_or(decl.name_span);
+    out.push_str(&emit_decl_gap(
+        source,
+        op_start,
+        decl.initializer.span(),
+        &[":="],
+        depth,
+    ));
+    out.push_str(&cel_parser::format_expr(&decl.initializer, source, depth));
+    write_cell_clauses(
+        out,
+        source,
+        depth,
+        Some(decl.initializer.span()),
+        decl.type_name.as_ref().map(ast::TypeExpr::span),
+        decl.name_span,
+        decl.filter.as_ref(),
+        decl.require.as_ref(),
+        decl.span.end,
+    );
+    write_line_end(out, ";", decl.trailing_line_comment.as_ref(), depth);
 }
 
 /// Writes one `source name[: type][ = initializer][ filter body][ require { ... }];` declaration.
 /// Mirrors [`write_cell`] exactly.
-fn write_source(out: &mut String, decl: &ast::SourceDecl, depth: usize) {
+fn write_source(out: &mut String, source: &str, decl: &ast::SourceDecl, depth: usize) {
     write_trivia(
         out,
         decl.blank_line_before,
@@ -360,33 +635,41 @@ fn write_source(out: &mut String, decl: &ast::SourceDecl, depth: usize) {
         out.push_str(": ");
         out.push_str(&source_text_or_empty(type_expr.span()));
     }
+    // `=` gap, rendered in-position so comments keep their order relative to the operator.
     if let Some(expr) = &decl.initializer {
-        out.push_str(" = ");
-        out.push_str(&cel_parser::format_expr(expr));
+        let op_start = decl
+            .type_name
+            .as_ref()
+            .map(ast::TypeExpr::span)
+            .unwrap_or(decl.name_span);
+        out.push_str(&emit_decl_gap(source, op_start, expr.span(), &["="], depth));
+        out.push_str(&cel_parser::format_expr(expr, source, depth));
     }
-    if let Some(filter) = &decl.filter {
-        out.push_str(" filter ");
-        out.push_str(&filter.name);
-        out.push_str(": ");
-        out.push_str(&cel_parser::format_expr(&filter.body));
-    }
-    if let Some(require) = &decl.require {
-        write_require_clause(out, require, depth);
-    }
-    out.push_str(";\n");
+    write_cell_clauses(
+        out,
+        source,
+        depth,
+        decl.initializer.as_ref().map(cel_parser::Expr::span),
+        decl.type_name.as_ref().map(ast::TypeExpr::span),
+        decl.name_span,
+        decl.filter.as_ref(),
+        decl.require.as_ref(),
+        decl.span.end,
+    );
+    write_line_end(out, ";", decl.trailing_line_comment.as_ref(), depth);
 }
 
 /// Dispatches to the writer for one top-level sheet item.
 ///
 /// - Precondition: `item` is not `SheetItem::Error` — [`format_sheet`]'s own precondition
 ///   (`sheet.errors.is_empty()`) guarantees no `Error` item ever reaches this function.
-fn write_sheet_item(out: &mut String, item: &ast::SheetItem, depth: usize) {
+fn write_sheet_item(out: &mut String, source: &str, item: &ast::SheetItem, depth: usize) {
     match item {
-        ast::SheetItem::Cell(cell) => write_cell(out, cell, depth),
-        ast::SheetItem::Relationship(rel) => write_relationship(out, rel, depth),
-        ast::SheetItem::Conditional(cond) => write_conditional(out, cond, depth),
-        ast::SheetItem::Out(out_decl) => write_out(out, out_decl, depth),
-        ast::SheetItem::Source(decl) => write_source(out, decl, depth),
+        ast::SheetItem::Cell(cell) => write_cell(out, source, cell, depth),
+        ast::SheetItem::Relationship(rel) => write_relationship(out, source, rel, depth),
+        ast::SheetItem::Conditional(cond) => write_conditional(out, source, cond, depth),
+        ast::SheetItem::Out(out_decl) => write_out(out, source, out_decl, depth),
+        ast::SheetItem::Source(decl) => write_source(out, source, decl, depth),
         ast::SheetItem::Error { .. } => {
             unreachable!("format_sheet is only called on a sheet with no recorded syntax errors")
         }
@@ -395,6 +678,9 @@ fn write_sheet_item(out: &mut String, item: &ast::SheetItem, depth: usize) {
 
 /// Pretty-prints `sheet` back to adam-lang source text — see the module doc for the printing
 /// rules.
+///
+/// `source` is the text `sheet` was parsed from (or `""` for a programmatically built `Sheet`);
+/// it's forwarded to [`cel_parser::format_expr`] for every embedded expression.
 ///
 /// - Precondition: `sheet` has no recorded syntax errors (`sheet.errors.is_empty()`) — a sheet
 ///   with a `SheetItem::Error` placeholder cannot be printed back to valid source.
@@ -407,9 +693,9 @@ fn write_sheet_item(out: &mut String, item: &ast::SheetItem, depth: usize) {
 /// let source = "sheet s { cell x: i32 = 1; }";
 /// let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
 /// attach_trivia(source, &mut sheet);
-/// assert_eq!(format_sheet(&sheet), "sheet s {\n    cell x: i32 = 1;\n}\n");
+/// assert_eq!(format_sheet(&sheet, source), "sheet s {\n    cell x: i32 = 1;\n}\n");
 /// ```
-pub fn format_sheet(sheet: &ast::Sheet) -> String {
+pub fn format_sheet(sheet: &ast::Sheet, source: &str) -> String {
     debug_assert!(
         sheet.errors.is_empty(),
         "format_sheet's precondition: no recorded syntax errors"
@@ -419,7 +705,7 @@ pub fn format_sheet(sheet: &ast::Sheet) -> String {
     write_doc_comment(&mut out, "//!", sheet.doc_comment.as_deref(), 0);
     out.push_str(&format!("sheet {} {{\n", sheet.name));
     for item in &sheet.items {
-        write_sheet_item(&mut out, item, 1);
+        write_sheet_item(&mut out, source, item, 1);
     }
     write_trailing_trivia(
         &mut out,
@@ -431,6 +717,66 @@ pub fn format_sheet(sheet: &ast::Sheet) -> String {
     out
 }
 
+/// Error returned by [`format_source`] when `source` can't be safely formatted.
+#[derive(Debug)]
+pub enum FormatSourceError {
+    /// `source` failed to parse at all.
+    Parse(cel_parser::ParseError),
+    /// `source` parsed but recovered one or more syntax errors inside individual sheet items.
+    Recovered(Vec<cel_parser::ParseError>),
+}
+
+impl std::fmt::Display for FormatSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FormatSourceError::Parse(error) => write!(f, "{error}"),
+            FormatSourceError::Recovered(errors) => {
+                for (i, error) in errors.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    write!(f, "{error}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for FormatSourceError {}
+
+/// Parses and formats `source` as a complete adam-lang sheet, matching `adam-lsp`'s
+/// `textDocument/formatting` handler exactly.
+///
+/// # Errors
+///
+/// Returns [`FormatSourceError::Parse`] if `source` fails to parse at all
+/// ([`crate::AdamAstParser::parse_str`] returns `Err`), or [`FormatSourceError::Recovered`] if it
+/// parses with one or more recovered syntax errors (`Sheet.errors` non-empty) — refusing to
+/// format code it can't fully understand, matching `rustfmt`.
+///
+/// # Examples
+///
+/// ```
+/// use adam_lang::format_source;
+///
+/// assert_eq!(
+///     format_source("sheet   s{cell x:i32=1;}").unwrap(),
+///     "sheet s {\n    cell x: i32 = 1;\n}\n"
+/// );
+/// assert!(format_source("not a sheet at all").is_err());
+/// ```
+pub fn format_source(source: &str) -> Result<String, FormatSourceError> {
+    let mut sheet = crate::AdamAstParser::new()
+        .parse_str(source)
+        .map_err(FormatSourceError::Parse)?;
+    if !sheet.errors.is_empty() {
+        return Err(FormatSourceError::Recovered(sheet.errors));
+    }
+    crate::attach_trivia(source, &mut sheet);
+    Ok(format_sheet(&sheet, source))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,7 +785,7 @@ mod tests {
     fn format(source: &str) -> String {
         let mut sheet = AdamAstParser::new().parse_str(source).unwrap();
         crate::attach_trivia(source, &mut sheet);
-        format_sheet(&sheet)
+        format_sheet(&sheet, source)
     }
 
     #[test]
@@ -613,35 +959,35 @@ mod tests {
 
     #[test]
     fn formats_an_out_with_requirements_in_declaration_order() {
-        let source = "sheet s {\n    out area: f64 := width * height require {\n        max_area: width * height <= max_area;\n    };\n}";
-        let expected = "sheet s {\n    out area: f64 := width * height require {\n        max_area: width * height <= max_area;\n    };\n}\n";
+        let source = "sheet s {\n    out area: f64 := width * height require {\n        @max_area width * height <= max_area;\n    };\n}";
+        let expected = "sheet s {\n    out area: f64 := width * height require {\n        @max_area width * height <= max_area;\n    };\n}\n";
         assert_eq!(format(source), expected);
     }
 
     #[test]
     fn formats_a_cell_with_a_require_block() {
         let source =
-            "sheet s {\n    cell x: i32 = 5 require {\n        positive: x > 0;\n    };\n}";
+            "sheet s {\n    cell x: i32 = 5 require {\n        @positive x > 0;\n    };\n}";
         assert_eq!(format(source), format!("{source}\n"));
     }
 
     #[test]
     fn formats_a_source_with_a_require_block() {
         let source =
-            "sheet s {\n    source x: i32 = 5 require {\n        positive: x > 0;\n    };\n}";
+            "sheet s {\n    source x: i32 = 5 require {\n        @positive x > 0;\n    };\n}";
         assert_eq!(format(source), format!("{source}\n"));
     }
 
     #[test]
     fn formats_a_source_with_a_filter_clause() {
-        let source = "sheet s {\n    source x: i32 = 5 filter clamp: 0..=10;\n}";
+        let source = "sheet s {\n    source x: i32 = 5 filter 0..=10;\n}";
         assert_eq!(format(source), format!("{source}\n"));
     }
 
     #[test]
     fn formats_an_out_with_a_filter_clause() {
         let source =
-            "sheet s {\n    cell width: i32 = 4;\n    out area := width filter clamp: 0..=100;\n}";
+            "sheet s {\n    cell width: i32 = 4;\n    out area := width filter 0..=100;\n}";
         assert_eq!(format(source), format!("{source}\n"));
     }
 
@@ -682,11 +1028,9 @@ mod tests {
         // A comment immediately after the sheet's opening `{` (before its first item) falls into
         // the untracked gap from issue #52 (see trivia.rs's module doc) — unrelated to this
         // change — so a preceding cell is included here to land the comment in a tracked gap.
-        // The comment also needs its own source line: when a comment and its neighboring items
-        // all share one physical line, `analyze_gap`'s same-line-fragment handling (pre-existing,
-        // also unrelated to this change) can't distinguish trailing whitespace from a same-line
-        // comment. What this test is actually checking is that a `/* */` comment round-trips as
-        // `/* */`, not `//`.
+        // The comment is on its own source line so it attaches as `x`'s leading comment, not `a`'s
+        // same-line trailing comment (see issue #59) — what this test is actually checking is that
+        // a `/* */` leading comment round-trips as `/* */`, not `//`.
         let source =
             "sheet s {\n    cell a: i32 = 1;\n    /* the total */\n    cell x: i32 = 1;\n}";
         let expected =
@@ -809,8 +1153,8 @@ mod tests {
 
     #[test]
     fn formats_a_trailing_comment_before_a_requires_closing_brace() {
-        let source = "sheet s {\n    out area: f64 := w require {\n        c: w <= 10.0;\n        // trailing\n    };\n}";
-        let expected = "sheet s {\n    out area: f64 := w require {\n        c: w <= 10.0;\n        // trailing\n    };\n}\n";
+        let source = "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0;\n        // trailing\n    };\n}";
+        let expected = "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0;\n        // trailing\n    };\n}\n";
         assert_eq!(format(source), expected);
     }
 
@@ -820,8 +1164,8 @@ mod tests {
         // `cell`'s own `require` block — regression test for the comment being silently dropped
         // (never attached, so never written back out) because `attach_trivia` only recovered
         // require-block trivia for `SheetItem::Out`, not `SheetItem::Cell`/`SheetItem::Source`.
-        let source = "sheet s {\n    cell a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
-        let expected = "sheet s {\n    cell a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}\n";
+        let source = "sheet s {\n    cell a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}";
+        let expected = "sheet s {\n    cell a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}\n";
         assert_eq!(format(source), expected);
     }
 
@@ -829,8 +1173,8 @@ mod tests {
     fn formats_a_trailing_comment_before_a_sources_requires_closing_brace() {
         // Mirrors `formats_a_trailing_comment_before_a_requires_closing_brace`, but for a
         // `source`'s own `require` block.
-        let source = "sheet s {\n    source a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}";
-        let expected = "sheet s {\n    source a: i32 = 1 require {\n        r: a > 0;\n        // trailing\n    };\n}\n";
+        let source = "sheet s {\n    source a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}";
+        let expected = "sheet s {\n    source a: i32 = 1 require {\n        @r a > 0;\n        // trailing\n    };\n}\n";
         assert_eq!(format(source), expected);
     }
 
@@ -845,35 +1189,324 @@ mod tests {
     #[test]
     fn formats_a_cell_with_a_filter() {
         assert_eq!(
-            format("sheet s { cell a: i32 = 1 filter clamp: _; }"),
-            "sheet s {\n    cell a: i32 = 1 filter clamp: _;\n}\n"
+            format("sheet s { cell a: i32 = 1 filter _; }"),
+            "sheet s {\n    cell a: i32 = 1 filter _;\n}\n"
         );
     }
 
     #[test]
     fn formats_a_cell_with_a_filter_referencing_a_cell() {
         assert_eq!(
-            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter clamp: min(_, hi); }"),
-            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter clamp: min(_, hi);\n}\n"
+            format("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter min(_, hi); }"),
+            "sheet s {\n    cell hi: i32 = 100;\n    cell a: i32 = 1 filter min(_, hi);\n}\n"
         );
     }
 
     #[test]
     fn format_is_idempotent_through_a_reparse_with_a_filter() {
-        let source = "sheet s {\n    cell a: i32 = 1 filter clamp: _;\n}";
+        let source = "sheet s {\n    cell a: i32 = 1 filter _;\n}";
         let once = format(source);
         let twice = format(&once);
         assert_eq!(once, twice);
     }
 
     #[test]
-    fn formats_a_named_filter() {
-        let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell x: i32 = 0 filter clamp: 0..=10; }")
-            .unwrap();
+    fn formats_a_filter() {
+        let source = "sheet s { cell x: i32 = 0 filter 0..=10; }";
+        let sheet = AdamAstParser::new().parse_str(source).unwrap();
         assert_eq!(
-            format_sheet(&sheet),
-            "sheet s {\n    cell x: i32 = 0 filter clamp: 0..=10;\n}\n"
+            format_sheet(&sheet, source),
+            "sheet s {\n    cell x: i32 = 0 filter 0..=10;\n}\n"
+        );
+    }
+
+    #[test]
+    fn formats_a_requirement_with_no_label() {
+        let source = "sheet s {\n    cell x: i32 = 5 require {\n        x > 0;\n    };\n}";
+        assert_eq!(format(source), format!("{source}\n"));
+    }
+
+    #[test]
+    fn format_source_formats_valid_source() {
+        assert_eq!(
+            format_source("sheet   s{cell x:i32=1;}").unwrap(),
+            "sheet s {\n    cell x: i32 = 1;\n}\n"
+        );
+    }
+
+    #[test]
+    fn format_source_errors_on_source_that_fails_to_parse() {
+        assert!(matches!(
+            format_source("not a sheet at all"),
+            Err(FormatSourceError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn format_source_errors_on_a_recovered_syntax_error() {
+        assert!(matches!(
+            format_source("sheet s { cell x unknown_syntax }"),
+            Err(FormatSourceError::Recovered(_))
+        ));
+    }
+
+    // Issue #59: a same-line trailing `//`/`/* */` comment stays on the declaration it trails,
+    // instead of migrating onto its own line before the next declaration.
+
+    #[test]
+    fn formats_a_same_line_trailing_line_comment_on_a_cell() {
+        let source =
+            "sheet s {\n    cell a: f64 = 2.0; // end of line comment\n    cell b: f64 = 3.0;\n}";
+        let expected =
+            "sheet s {\n    cell a: f64 = 2.0; // end of line comment\n    cell b: f64 = 3.0;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_block_comment_on_a_cell() {
+        let source = "sheet s {\n    cell a: f64 = 2.0; /* note */\n    cell b: f64 = 3.0;\n}";
+        let expected = "sheet s {\n    cell a: f64 = 2.0; /* note */\n    cell b: f64 = 3.0;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_on_the_last_item_before_the_sheets_closing_brace() {
+        let source = "sheet s {\n    cell a: i32 = 1; // note\n}";
+        let expected = "sheet s {\n    cell a: i32 = 1; // note\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_on_a_binding() {
+        let source =
+            "sheet s {\n    relationship {\n        b := a; // note\n        a := b;\n    }\n}";
+        let expected =
+            "sheet s {\n    relationship {\n        b := a; // note\n        a := b;\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_block_comment_when_the_gap_has_no_newline_at_all() {
+        // PR #202 review: previously the trailing `/* note */` was silently dropped, since
+        // items+comment sharing one physical line with no `\n` anywhere in the gap fell into
+        // the "drop the final fragment" path before the comment scanner ever ran.
+        let source = "sheet s {\n    cell a: i32 = 1; /* note */ cell b: i32 = 2;\n}";
+        let expected = "sheet s {\n    cell a: i32 = 1; /* note */\n    cell b: i32 = 2;\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_before_a_conditional_branchs_own_closing_brace() {
+        let source = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship { b := a; } // note\n        }\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship {\n                b := a;\n            } // note\n        }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_before_a_default_arms_own_closing_brace() {
+        let source = "sheet s {\n    conditional m {\n        _ => {\n            relationship { b := a; } // note\n        }\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        _ => {\n            relationship {\n                b := a;\n            } // note\n        }\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_before_a_conditionals_own_closing_brace_with_only_branches()
+     {
+        let source = "sheet s {\n    conditional m {\n        0i32 => { relationship { b := a; } } // note\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        0i32 => {\n            relationship {\n                b := a;\n            }\n        } // note\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_before_a_conditionals_own_closing_brace_with_a_default()
+    {
+        let source = "sheet s {\n    conditional m {\n        _ => { relationship { b := a; } } // note\n    }\n}";
+        let expected = "sheet s {\n    conditional m {\n        _ => {\n            relationship {\n                b := a;\n            }\n        } // note\n    }\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn formats_a_same_line_trailing_comment_before_a_requires_closing_brace() {
+        let source =
+            "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0; // note\n    };\n}";
+        let expected = "sheet s {\n    out area: f64 := w require {\n        @c w <= 10.0; // note\n    };\n}\n";
+        assert_eq!(format(source), expected);
+    }
+
+    #[test]
+    fn same_line_trailing_comment_formatting_is_idempotent_through_a_reparse() {
+        let source =
+            "sheet s {\n    cell a: f64 = 2.0; // end of line comment\n    cell b: f64 = 3.0;\n}";
+        let once = format(source);
+        let twice = format(&once);
+        assert_eq!(once, twice);
+    }
+
+    // Issue #201: comments in gaps *within* one declaration's own tokens (as opposed to gaps
+    // between sibling declarations, or before a container's closing brace — both already handled
+    // by `trivia.rs`).
+
+    #[test]
+    fn preserves_a_block_comment_between_a_cell_initializer_and_its_semicolon() {
+        let source = "sheet s {\n    cell a: i32 = 1 /* trailing */;\n}";
+        assert_eq!(
+            format(source),
+            "sheet s {\n    cell a: i32 = 1 /* trailing */;\n}\n"
+        );
+    }
+
+    #[test]
+    fn preserves_a_block_comment_between_a_type_and_the_equals() {
+        let source = "sheet s {\n    cell a: i32 /* t */ = 1;\n}";
+        assert_eq!(
+            format(source),
+            "sheet s {\n    cell a: i32 /* t */ = 1;\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_declaration_with_no_intra_token_comments_is_unchanged() {
+        assert_eq!(
+            format("sheet s { cell a: i32 = 1; }"),
+            "sheet s {\n    cell a: i32 = 1;\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_cell_initializer_with_leading_inline_and_trailing_comments_round_trips_losslessly() {
+        let source = "sheet s {\n    cell a: i32 = /* p */ 1 /* q */ + 2 /* r */;\n}";
+        let once = format_source(source).unwrap();
+        // Every comment survives (none silently dropped).
+        for needle in ["/* p */", "/* q */", "/* r */"] {
+            assert!(once.contains(needle), "comment {needle} lost: {once:?}");
+        }
+        // And formatting is idempotent.
+        let twice = format_source(&once).unwrap();
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn preserves_a_line_comment_between_a_cell_initializer_and_its_semicolon() {
+        // A `//` comment forces a line wrap; the terminating `;` must land on the continuation
+        // line, not get glued onto the comment's own line, which would comment the `;` out and
+        // make the output fail to reparse.
+        let source = "sheet s {\n    cell a: i32 = 1 // c\n    ;\n}";
+        let once = format_source(source).unwrap();
+        assert!(once.contains("// c"), "comment must survive: {once:?}");
+        assert!(
+            once.trim_end().ends_with('}'),
+            "the sheet's own closing brace must not have been commented out: {once:?}"
+        );
+        // Must still reparse (a stray `;` swallowed into the comment would fail this).
+        let twice = format_source(&once).unwrap();
+        assert_eq!(once, twice, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn preserves_a_line_comment_between_a_type_and_the_equals() {
+        let source = "sheet s {\n    cell a: i32 // c\n    = 1;\n}";
+        let once = format_source(source).unwrap();
+        assert!(once.contains("// c"), "comment must survive: {once:?}");
+        let twice = format_source(&once).unwrap();
+        assert_eq!(once, twice, "formatting must be idempotent");
+    }
+
+    #[test]
+    fn preserves_comment_order_after_the_equals() {
+        let source = "sheet s {\n    cell a: i32 = /* after */ 1;\n}";
+        let once = format_source(source).unwrap();
+        let eq = once.find('=').expect("has =");
+        let c = once.find("/* after */").expect("comment survives");
+        assert!(c > eq, "comment must stay AFTER the =, got: {once:?}");
+    }
+
+    #[test]
+    fn preserves_comment_order_around_the_equals() {
+        let source = "sheet s {\n    cell a: i32 /* before */ = /* after */ 1;\n}";
+        let once = format_source(source).unwrap();
+        let before = once.find("/* before */").expect("before survives");
+        let eq = once.find('=').expect("has =");
+        let after = once.find("/* after */").expect("after survives");
+        assert!(before < eq && eq < after, "order lost: {once:?}");
+    }
+
+    #[test]
+    fn preserves_a_comment_before_the_filter_keyword() {
+        let source = "sheet s {\n    cell a: i32 = 1 /* keep */ filter 0..=10;\n}";
+        let once = format_source(source).unwrap();
+        assert!(once.contains("/* keep */"), "comment dropped: {once:?}");
+    }
+
+    #[test]
+    fn preserves_a_comment_after_the_filter_body() {
+        let source = "sheet s {\n    cell a: i32 = 1 filter 0..=10 /* keep */;\n}";
+        let once = format_source(source).unwrap();
+        assert!(once.contains("/* keep */"), "comment dropped: {once:?}");
+    }
+
+    #[test]
+    fn preserves_a_comment_before_the_require_keyword() {
+        let source = "sheet s {\n    out area: f64 := w /* keep */ require {\n        @c w <= 10.0;\n    };\n}";
+        let once = format_source(source).unwrap();
+        assert!(once.contains("/* keep */"), "comment dropped: {once:?}");
+    }
+
+    /// Every keyword-to-body gap must preserve a comment and stay idempotent — one case per
+    /// hardcoded token the declaration formatter reprints (`filter`, `require`, `=>`, the `@label`,
+    /// the conditional subject's `{`, and the `relationship` keyword's `{`). See PR #207 review.
+    fn assert_comment_survives_and_is_idempotent(source: &str) {
+        let once = format_source(source).unwrap();
+        assert!(once.contains("/* keep */"), "comment dropped: {once:?}");
+        let twice = format_source(&once).unwrap();
+        assert_eq!(once, twice, "formatting must be idempotent: {once:?}");
+    }
+
+    #[test]
+    fn preserves_a_comment_between_the_filter_keyword_and_body() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    cell a: i32 = 1 filter /* keep */ 0..=10;\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_the_require_keyword_and_brace() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    out area: f64 := w require /* keep */ {\n        @c w <= 10.0;\n    };\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_a_branch_literal_and_the_fat_arrow() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    conditional p {\n        0i32 /* keep */ => { relationship { b := a; } }\n    }\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_the_fat_arrow_and_a_branch_body() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    conditional p {\n        0i32 => /* keep */ { relationship { b := a; } }\n    }\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_a_requirement_label_and_body() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    out area: f64 := w require {\n        @c /* keep */ w <= 10.0;\n    };\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_a_conditional_subject_and_its_brace() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    conditional p /* keep */ {\n        0i32 => { relationship { b := a; } }\n    }\n}",
+        );
+    }
+
+    #[test]
+    fn preserves_a_comment_between_the_relationship_keyword_and_its_brace() {
+        assert_comment_survives_and_is_idempotent(
+            "sheet s {\n    relationship /* keep */ {\n        b := a;\n    }\n}",
         );
     }
 }

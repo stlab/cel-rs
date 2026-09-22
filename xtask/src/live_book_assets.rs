@@ -1,6 +1,7 @@
 //! `prepare-live-book-assets`: assembles everything `adam-lang-book`'s live examples need
 //! before `mdbook build` runs — the per-example source manifest, the vendored Spectrum Web
-//! Components bundle, and the compiled `adam-lang-book-live` wasm/js bundle — into
+//! Components bundle, the D3/graph JS+CSS assets, and the compiled
+//! `adam-lang-book-live` wasm/js bundle — into
 //! `adam-lang-book/book-src/theme/`, where mdBook's theme-directory mechanism copies it
 //! verbatim into `book-dist/theme/` (see `adam-live-bootstrap.js` for how those files are
 //! then fetched at runtime).
@@ -128,7 +129,13 @@ pub fn prepare_live_book_assets() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let begin_assets = root.join("begin").join("assets");
-    for name in ["swc.js", "inspector.css"] {
+    for name in [
+        "swc.js",
+        "inspector.css",
+        "graph.js",
+        "graph.css",
+        "d3.v7.min.js",
+    ] {
         let from = begin_assets.join(name);
         let to = theme_dir.join(name);
         fs::copy(&from, &to)?;

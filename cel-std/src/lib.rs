@@ -1,5 +1,5 @@
-//! CEL standard library: `min`, `max`, `clamp`, and related numeric functions built on
-//! Rust's standard library, registered via [`cel_parser::OpLookup::push_library_scope`].
+//! CEL standard library: `min`, `max`, `clamp`, and related numeric functions built on Rust's
+//! standard library, registered via [`cel_parser::OpLookup::push_library_scope`].
 //!
 //! # Examples
 //!
@@ -12,8 +12,8 @@
 
 mod math;
 
-/// Registers every CEL standard-library function on `lookup`: `min`, `max`, `clamp`,
-/// `abs`, `signum`, `sqrt`, `floor`, `ceil`, `trunc`.
+/// Registers every CEL standard-library function on `lookup`: `min`, `max`, `clamp`, `abs`,
+/// `signum`, `sqrt`, `floor`, `ceil`, `trunc`, `fract`, and `round_ties_even`.
 ///
 /// These functions are registered as library scopes, meaning they are always reachable,
 /// including inside closure bodies. Library functions should never be isolated; only

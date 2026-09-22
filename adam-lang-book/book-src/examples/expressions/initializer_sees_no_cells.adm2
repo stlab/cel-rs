@@ -1,1 +1,0 @@
-sheet s { cell x = 1; cell y = x + 1; }

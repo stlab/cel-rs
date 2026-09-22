@@ -1,151 +1,213 @@
-# Chapter 1: A Tutorial Introduction
+# A Tutorial Introduction
 
-An Adam sheet declares the relationships among a set of properties (invariants in a
-document's structure, constraints between a command's arguments and its result, or values
-useful for constructing a new argument or document state), instead of the event logic that
-would otherwise maintain them by hand.
+Adam programs are called _sheets_, a term borrowed from spreadsheets. This chapter is an informal
+tour of Adam; later chapters go over the same ground in more detail, and the [reference
+manual](reference.md) provides a full specification.
 
-Let's get started. The best way to learn a new language is to write programs in it, and
-Adam programs are called **sheets**. This chapter is a fast, informal tour of every
-construct Adam has; later chapters go back over the same ground in more detail, and the
-[reference manual](reference.md) collects the precise rules for looking things up.
+An Adam sheet declares the relationships among a set of properties called _cells_. These
+relationships are maintained when edits occur, providing correct behaviors for user interfaces and
+scripting without having to code complex event handling logic.
 
-You don't need to install anything to follow along: every source fragment below stands on its
-own as a `.adm2` file, included directly from a test that also exercises it, so a chapter's
-prose can never drift from code that actually parses and runs.
+Every source fragment below is the complete description used to generate the UI, UI behavior, and
+graph visualization. The UI is live, so you can change the values and explore the behavior. Within
+an application, a sheet instance is typically bound to a UI construct or scripting system with human-
+readable text labels, instead of cell identifiers.
 
-## 1.1 A first sheet
+## A first sheet
 
-An Adam program is a single `sheet`, named, with a body of declarations between braces.
-The simplest useful sheet declares a few cells and nothing else:
+An Adam program is a single `sheet`, named, with a body of declarations between braces. A simple
+sheet declares a couple of source cells:
 
-```
+```adam
 {{#include examples/tutorial/first_sheet.adm2}}
 ```
 
-A **cell** is a named, typed storage location: the basic unit of state in a property model.
-`width` and `height` are `i32`-typed cells, each given an initial value. Semicolons end
-declarations, exactly as in Rust or C; a sheet's body is a sequence of declarations, not a
-sequence of statements: there is no control flow at this level, no loops, and no imperative
-execution order. A sheet describes a *graph* of cells and the constraints between them, not a
-sequence of steps to run.
+A _cell_ is a named, typed storage location: the basic unit of state in a property model. `width`
+and `height` are `i32`-typed cells, each given an initial value (the types are deduced from the
+initial value). A `source` cell is like a spreadsheet's value cell: it holds a value written into
+it.
 
-Parsing this text and reading or writing its cells is a Rust-level embedding concern, not
-something a sheet author does; see [Appendix A.11](reference.md#a11-the-host-embedding-api)
-for how a host application actually drives a parsed sheet.
+A sheet's body is a sequence of declarations. A sheet describes a _graph_ of cells and the
+constraints between them. The graph for `hello` is just the two unconnected cells.
 
-## 1.2 Relationships: multi-way constraints
+<graph sheet="first_sheet">
 
-A sheet with only cells and no relationships is just a struct. What makes Adam interesting
-is the **relationship**: a set of alternative ways to keep a group of cells consistent, any one
-of which the solver may pick at any given moment. (A `relationship` binding can never derive a
-[`source`](source.md) cell — that's the one kind of cell always left alone as a source; more on
-that in [Chapter 3](source.md).)
+## Filters
 
-The classic example is three numbers related by multiplication (`a * b = c`), where any one of
-the three can be computed from the other two, the same shape as `pixels == inches * resolution`
-from [the introduction](intro.md#why-adam). As a sheet:
+A `filter` clause attaches a domain constraint to a cell, most commonly a range:
 
-```
-{{#include examples/tutorial/multiplication_triangle.adm2}}
-```
-
-The `relationship` block offers three **bindings**: `c := a * b`, `a := c / b`, and
-`b := c / a`, each an alternative *method* for deriving one cell from the others. Only one
-binding is active at a time; which one is chosen depends on which cells were written most
-recently (see [Chapter 5](relationships.md) for the full rule). A cell's *declaration* counts as
-a write for this purpose, so before anything is ever explicitly written, cells declared earlier
-are treated as "staler" than cells declared later. The solver prefers to leave the freshest
-cells alone and derive the stalest one: here, `c`, declared first.
-
-Nothing here names *which* cell is the "output"; that's the whole point. Whichever cell was
-written (or, failing that, declared) least recently is the one the solver derives; `write`ing a
-cell is what tells the solver "trust this one; recompute something else instead."
-
-## 1.3 Conditionals
-
-A `conditional` groups relationships that are only active under a matching condition. It
-evaluates a **match subject**, then activates whichever branch's literal equals the current
-match value:
-
-```
-{{#include examples/tutorial/mode_demo.adm2}}
-```
-
-Only the active branch's relationships participate in that round's solve; every other branch's
-relationships are as if they weren't declared at all. The `_` branch, if present, catches any
-value none of the named branches list, and must be written last.
-
-See [Chapter 6](conditionals.md) for branch types, tuple match subjects, and what happens when
-no branch matches and there's no default.
-
-## 1.4 Filters: self-correcting cells
-
-A `filter` clause attaches a standing domain constraint to a cell, most commonly a range:
-
-```
+```adam
 {{#include examples/tutorial/clamp_demo.adm2}}
 ```
 
-Write an out-of-range value and the cell keeps it, raw: a filter never inspects or blocks the
-value at the moment it's written. The clamp only takes effect the next time the sheet resolves,
-and it's that corrected value every read of the cell sees from then on.
+`0..=100` is an _inclusive_ range. Try writing a value outside `[0, 100]` into `level` above and
+watch it snap back into range.
 
-A filter's bounds don't have to be constants: `0..=max` references another cell, and the clamp
-tracks it live. [Chapter 7](filters.md) covers filters in full, including the precise
-source/derived model behind "the cell keeps its own raw value forever, and the filter only ever
-corrects what you *read*," and how the same `filter` clause also attaches to an `out`
-declaration.
+A filter's bounds don't have to be constants: `0..=max` references another cell. The [filters
+chapter](filters.md) covers filters in full.
 
-## 1.5 Destructuring
+## Out Cells
 
-A binding's left-hand side can name more than one output cell by parenthesizing it, splitting a
-tuple-valued expression on the right into its parts, one cell per element, using the same
-`(a, b)` syntax Rust uses for tuple patterns:
+An `out` declaration is like a spreadsheet's equation cell. Its value is computed from the provided
+_method_.
 
-```
-{{#include examples/tutorial/destructuring_demo.adm2}}
+```adam
+{{#include examples/tutorial/basic_output.adm2}}
 ```
 
-Tuple *types* (`cell point: (f64, f64) = (0.0, 0.0);`) are a CEL feature, documented in
-[Chapter 2](cells.md); destructuring is the relationship-binding syntax built on top of them,
-and could one day extend to struct patterns too. See
-[Chapter 5](relationships.md#55-destructuring-bindings) for the full
-destructuring-vs-direct-bind distinction.
+The method on the out cell can reference other cells in the sheet, and the calculation is reapplied
+when those values change. In the graph representation, the method is a relationship and drawn as a
+circle between the cells. The heavy arrows and border around the out cell indicate that the value is
+_forced_ by the relationship. A forced cell's value is not editable.
 
-## 1.6 Outputs and requirements
+<graph sheet="basic_output">
 
-An `out` declaration computes one final, read-only value from the rest of the sheet, and can
-carry named `require`ments: boolean checks re-evaluated and reported each time the sheet
-resolves, never enforced by rejecting a write:
+See the [outputs chapter](outputs.md) for the full treatment.
 
+## Cells and Relationships
+
+A plain `cell` declaration acts as a source _or_ out cell. Cells are connected by one or more
+_relationships_, each a bundle of methods that satisfy the relationship but solve for a different
+term (or set of terms).
+
+For example, if we have two values \\(a\\) and \\(b\\) where \\(a = 2b\\), that can be represented
+as:
+
+```adam
+{{#include examples/tutorial/basic_relationship.adm2}}
 ```
+
+For any active `relationship`, exactly one method is selected to execute. The method chosen is based
+on the _strength_ of the cells. Cells that have been written more recently have a higher strength.
+The declaration order determines the cells' initial strength. Cells declared later have
+a higher strength.
+
+In the graph, you can see the flow change as you write `a` or `b`.
+
+<graph sheet="basic_relationship">
+
+The methods in a relationship must be _consistent_. If the result of the selected method is used to
+recalculate the non-selected methods, the result should not change the value of the assigned cells
+within an error epsilon.
+
+Relationships can be chained together. We can express the relationship `a <= b <= c` like this:
+
+```adam
+{{#include examples/tutorial/inequality.adm2}}
+```
+
+<graph sheet="inequality">
+
+This example also demonstrates two additional features.
+
+- A method can be _self-referential_, naming a cell as both a dependency and a result. In such a
+  case, the method must be idempotent.
+- When a cell value is derived in terms of itself via a self-referential method (or filter). The
+  last written value is preserved.
+
+You can see the effect of the second behavior by sliding `a` to `100` which will pull `b` and `c` to
+`100` and then slide `a` back to `0`. `b` and `c` will return to their prior values.
+
+In the [relationships chapter](relationships.md), you will see relationships are not limited in their
+arity (you can have n-way relationships with each method solving for 1 or more cells).
+
+## Conditionals
+
+A `conditional` groups relationships that are only active under a matching condition. It evaluates a
+_match subject_, then activates whichever branch's literal equals the current match value:
+
+```adam
+{{#include examples/tutorial/constrain.adm2}}
+```
+
+Only the active branch participates. The `_` branch, if present, catches any value
+not in the named branches list, and must be written last. If no branch is matched, the conditional
+has no effect.
+
+<graph sheet="constrain">
+
+A conditional relationship may force a cell value, in this case any source cell value is preserved
+and restored when the conditional is removed. The UI for a forced cell value will typically disable
+the control.
+
+```adam
+{{#include examples/tutorial/conditional_forced.adm2}}
+```
+
+## Requirements
+
+Filters on source cells were introduced in the above [[Filters]] section. For an out cell or a cell
+in an out role, violating a filter will trigger a diagnostic.
+
+```adam
+{{#include examples/tutorial/requirements_filter_diagnostic.adm2}}
+```
+
+A cell may also have one or more requirements. For source cell or when a cell is writable, the requirements act are a boolean expression that act as a filter rejecting any input that doesn't satisfy the requirements.
+
+For an out cell, violating a requirement will trigger a diagnostic. Requirements have an optional name that can be associated with a message explaining the issue.
+
+```adam
 {{#include examples/tutorial/area_with_requirement.adm2}}
 ```
 
-See [Chapter 8](outputs.md) for the full rules: an output's cell can be read anywhere a plain
-cell can, but nothing may ever write it directly, and a failed requirement never stops the
-sheet from resolving; it's a diagnostic, not a gate. `require` isn't limited to `out`, either —
-see [Chapter 2](cells.md#22-cell-declarations) and [Chapter 3](source.md).
+<!-- This section disabled - it will be relocated to another chapter.
 
-## 1.7 Comments
+### Relationship Rules
 
-`//` starts a line comment; `/* ... */` a block comment, exactly as in C, Rust, or CEL. `///`
-immediately before a declaration and `//!` immediately before the `sheet` keyword are doc
-comments, carried through by the language server and formatter but otherwise inert:
+Every relationship's methods must satisfy a set of rules:
 
-```text
-//! A sheet describing a simple resize dialog.
-sheet image_resize {
-    /// The image's width in pixels, before any resampling.
-    cell width_pixels: i32 = 1920;
-}
+- Every method's \\(inputs \cup outputs\\) must be the same set of cells as every other
+  method's in the same relationship.
+
+```adam
+{{#include examples/tutorial/fail_mismatched_cells.adm2}}
 ```
 
-See [Chapter 9](style.md) for the formatter's canonical layout.
+> Note: The incorrect span in the error reporting is actively being fixed.
 
-## 1.8 Where to go next
+- No two methods in the same relationship may share an identical output set.
 
-That's the whole language. [Chapter 2](cells.md) onward covers each construct in the depth this
-chapter skipped past, and the [reference manual](reference.md) gives you the full grammar and
-every built-in type in one place.
+```adam
+{{#include examples/tutorial/fail_overlapping_outputs.adm2}}
+```
+
+- A cell can appear as the output of at most one selected method.
+
+```adam
+{{#include examples/tutorial/fail_contradiction.adm2}}
+```
+
+## Relationships continued: destructuring and self-reference
+
+A binding's left-hand side can name more than one output cell by parenthesizing it, splitting a
+tuple-valued expression on the right into its parts, one cell per element, using the same `(a, b)`
+syntax Rust uses for tuple patterns:
+
+```adam
+{{#include examples/tutorial/destructuring_demo.adm2}}
+```
+
+Tuple _types_ (`cell point: (f64, f64) = (0.0, 0.0);`) are a CEL feature, documented in the [types
+chapter](cells.md); destructuring is the relationship-binding syntax built on top of them, and could
+one day extend to struct patterns too. See [destructuring
+bindings](relationships-continued.md#destructuring-bindings) for the full
+destructuring-vs-direct-bind distinction.
+
+A binding may also name the same cell on both sides of `:=`: a _self-referencing method_, deriving a
+cell's own next value from its own current one. The [relationships-continued
+chapter](relationships-continued.md) walks through a full worked example with its own
+`self_referencing_method.adm2`, rather than repeating one here; the [Conditionals](#conditionals)
+section below shows the same pattern once more, inside a conditional branch. The obligation on a
+self-referencing method is stricter than an ordinary one: the method's own job is to correct a value
+into whatever set the relationship enforces, and if reapplying it to its own already-corrected
+output would change the value again, the "correction" was never well-defined in the first place. The
+solver never checks this; it's on the sheet author.
+
+-->
+
+## Where to go next
+
+That's the whole language. The remaining chapters, starting with [sheets, cells, and
+types](cells.md), cover each construct in the depth this chapter skipped past, and the [reference
+manual](reference.md) gives you the full grammar and every built-in type in one place.

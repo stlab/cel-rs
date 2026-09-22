@@ -24,6 +24,8 @@ use super::ExportError;
 ///
 /// Returns the underlying [`cel_parser::ParseError`] if `text` is not
 /// syntactically valid CEL.
+///
+/// - Complexity: O(n) in `text.len()` (it lexes and parses `text`).
 fn parse_expr_text(text: &str) -> Result<cel_parser::Expr, cel_parser::ParseError> {
     let mut lookup = OpLookup::new();
     cel_std::install(&mut lookup);
@@ -42,27 +44,39 @@ fn type_expr_for(ty: &CellType) -> adam_lang::ast::TypeExpr {
         CellType::Bool => "bool",
         CellType::Text => "String",
     };
-    adam_lang::ast::TypeExpr::Named(name.to_string(), cel_parser::ExprSpan::for_text(name))
+    adam_lang::ast::TypeExpr::Named {
+        name: name.to_string(),
+        args: Vec::new(),
+        span: cel_parser::ExprSpan::for_text(name),
+    }
 }
 
 /// Builds a `cell <name>: <type> [filter ...];` declaration for `cell`,
 /// including a clamp filter clause when its type has clamp bounds set.
 ///
+/// # Errors
+///
+/// Returns [`ExportError::NonFiniteClampBound`] if `cell` has a non-finite
+/// `f64` clamp bound (no `.adm2` literal can represent it), or
+/// [`ExportError::UnrepresentableClampBound`] if `cell` has an `i64::MIN`
+/// clamp bound (no `.adm2` literal can represent it either).
+///
 /// - Postcondition: `filter` is `None` iff `cell.ty` is `Bool`/`Text` or
 ///   has no clamp bounds.
-pub(crate) fn build_cell_decl(cell: &Cell) -> CellDecl {
-    CellDecl {
+pub(crate) fn build_cell_decl(cell: &Cell) -> Result<CellDecl, ExportError> {
+    Ok(CellDecl {
         name: cell.name.clone(),
         name_span: ExprSpan::for_text(&cell.name),
         type_name: Some(type_expr_for(&cell.ty)),
         initializer: None,
-        filter: clamp_filter(&cell.ty),
+        filter: clamp_filter(&cell.name, &cell.ty)?,
         require: None,
         leading_comment: None,
         doc_comment: None,
+        trailing_line_comment: None,
         blank_line_before: false,
         span: ExprSpan::for_text(&cell.name),
-    }
+    })
 }
 
 /// Returns a hand-built, `"clamp"`-named `filter` clause clamping `ty`'s
@@ -77,34 +91,63 @@ pub(crate) fn build_cell_decl(cell: &Cell) -> CellDecl {
 /// avoid literal-type-inference ambiguity — see this function's own body —
 /// and is parsed into an `Expr` to become the filter's `body` directly.
 ///
+/// # Errors
+///
+/// Returns [`ExportError::NonFiniteClampBound`] (naming `cell_name`) if an
+/// `f64` clamp bound is non-finite: `.adm2` has no literal for `NaN`/`±inf`,
+/// and Debug-formatting one emits a bare `NaN`/`inf` token that parses as an
+/// identifier rather than a numeric literal. Returns
+/// [`ExportError::UnrepresentableClampBound`] (naming `cell_name`) if an
+/// `i64` clamp bound is `i64::MIN`: `.adm2`'s `["-"] literal` grammar
+/// stores the sign separately from an *unsigned* literal token, and
+/// `i64::MIN`'s magnitude is out of range for one.
+///
 /// - Precondition: the synthesized clamp-call text is always valid CEL —
 ///   a parse failure here indicates a bug in this function, not bad user
 ///   data, so it panics rather than returning a `Result`.
-fn clamp_filter(ty: &CellType) -> Option<CellFilter> {
+fn clamp_filter(cell_name: &str, ty: &CellType) -> Result<Option<CellFilter>, ExportError> {
     let body_text = match ty {
-        CellType::F64 { clamp } => match (clamp.min, clamp.max) {
-            (None, None) => return None,
-            (Some(min), None) => format!("max(_, {min:?})"),
-            (None, Some(max)) => format!("min(_, {max:?})"),
-            (Some(min), Some(max)) => format!("clamp(_, {min:?}, {max:?})"),
-        },
-        CellType::I64 { clamp } => match (clamp.min, clamp.max) {
-            (None, None) => return None,
-            (Some(min), None) => format!("max(_, {min}i64)"),
-            (None, Some(max)) => format!("min(_, {max}i64)"),
-            (Some(min), Some(max)) => format!("clamp(_, {min}i64, {max}i64)"),
-        },
-        CellType::Bool | CellType::Text => return None,
+        CellType::F64 { clamp } => {
+            for bound in [clamp.min, clamp.max].into_iter().flatten() {
+                if !bound.is_finite() {
+                    return Err(ExportError::NonFiniteClampBound {
+                        cell_name: cell_name.to_string(),
+                        bound,
+                    });
+                }
+            }
+            match (clamp.min, clamp.max) {
+                (None, None) => return Ok(None),
+                (Some(min), None) => format!("max(_, {min:?})"),
+                (None, Some(max)) => format!("min(_, {max:?})"),
+                (Some(min), Some(max)) => format!("clamp(_, {min:?}, {max:?})"),
+            }
+        }
+        CellType::I64 { clamp } => {
+            for bound in [clamp.min, clamp.max].into_iter().flatten() {
+                if bound == i64::MIN {
+                    return Err(ExportError::UnrepresentableClampBound {
+                        cell_name: cell_name.to_string(),
+                        bound,
+                    });
+                }
+            }
+            match (clamp.min, clamp.max) {
+                (None, None) => return Ok(None),
+                (Some(min), None) => format!("max(_, {min}i64)"),
+                (None, Some(max)) => format!("min(_, {max}i64)"),
+                (Some(min), Some(max)) => format!("clamp(_, {min}i64, {max}i64)"),
+            }
+        }
+        CellType::Bool | CellType::Text => return Ok(None),
     };
     let body = parse_expr_text(&body_text).unwrap_or_else(|e| {
         panic!("synthesized clamp expression {body_text:?} failed to parse: {e:?}")
     });
-    Some(CellFilter {
-        name: "clamp".to_string(),
-        name_span: ExprSpan::for_text("clamp"),
+    Ok(Some(CellFilter {
         body,
         span: ExprSpan::for_text("_"),
-    })
+    }))
 }
 
 /// Builds a `relationship { ... }` block for `group` (identified by
@@ -136,6 +179,7 @@ pub(crate) fn build_relationship_decl(
             destructure: false,
             body,
             leading_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span: ExprSpan::for_text(&cell.name),
         });
@@ -144,6 +188,7 @@ pub(crate) fn build_relationship_decl(
         bindings,
         leading_comment: None,
         doc_comment: None,
+        trailing_line_comment: None,
         blank_line_before: false,
         trailing_comment: None,
         blank_line_before_close: false,
@@ -196,7 +241,12 @@ pub(crate) fn build_conditional_decl(
         }
         ConditionExpr::Cells(cells) => {
             let match_expr = cells_tuple_expr(doc, cells);
-            Ok(vec![build_single_conditional_decl(doc, cond, match_expr)?])
+            Ok(vec![build_single_conditional_decl(
+                doc,
+                conditional_id,
+                cond,
+                match_expr,
+            )?])
         }
         ConditionExpr::Formula {
             expr,
@@ -212,7 +262,12 @@ pub(crate) fn build_conditional_decl(
                     conditional: conditional_id,
                     source,
                 })?;
-            Ok(vec![build_single_conditional_decl(doc, cond, match_expr)?])
+            Ok(vec![build_single_conditional_decl(
+                doc,
+                conditional_id,
+                cond,
+                match_expr,
+            )?])
         }
     }
 }
@@ -225,12 +280,15 @@ pub(crate) fn build_conditional_decl(
 /// # Errors
 ///
 /// Propagates [`ExportError::InvalidFormula`] from any nested relationship
-/// group's members.
+/// group's members. Returns
+/// [`ExportError::UnrepresentableBranchLiteral`] if a branch is keyed on
+/// `i64::MIN`, which `adam_lang`'s branch grammar can't spell.
 ///
 /// - Complexity: O(n) in the total number of branches, their enabled
 ///   groups' members, and the default's members.
 fn build_single_conditional_decl(
     doc: &Document,
+    conditional_id: ConditionalGroupId,
     cond: &ConditionalGroup,
     match_expr: Expr,
 ) -> Result<ConditionalDecl, ExportError> {
@@ -241,6 +299,12 @@ fn build_single_conditional_decl(
             1,
             "build_single_conditional_decl requires arity-1 branches"
         );
+        if matches!(branch.values[0], CellValueLiteral::I64(i64::MIN)) {
+            return Err(ExportError::UnrepresentableBranchLiteral {
+                conditional: conditional_id,
+                value: i64::MIN,
+            });
+        }
         let relationships = build_branch_relationships(doc, &branch.enabled_groups)?;
         let (negated, literal, literal_span) = literal_and_sign(&branch.values[0]);
         branches.push(ConditionalBranch {
@@ -249,6 +313,7 @@ fn build_single_conditional_decl(
             literal_span,
             relationships,
             leading_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             trailing_comment: None,
             blank_line_before_close: false,
@@ -265,12 +330,14 @@ fn build_single_conditional_decl(
         default: Some(DefaultBranch {
             relationships: default_relationships,
             trailing_comment: None,
+            trailing_line_comment: None,
             blank_line_before_close: false,
             open_brace_span: ExprSpan::for_text("_"),
             span: ExprSpan::for_text("_"),
         }),
         leading_comment: None,
         doc_comment: None,
+        trailing_line_comment: None,
         blank_line_before: false,
         trailing_comment: None,
         blank_line_before_close: false,
@@ -351,6 +418,7 @@ fn build_decomposed_multi_cell_conditionals(
                 literal_span: ExprSpan::for_text("true"),
                 relationships,
                 leading_comment: None,
+                trailing_line_comment: None,
                 blank_line_before: false,
                 trailing_comment: None,
                 blank_line_before_close: false,
@@ -360,12 +428,14 @@ fn build_decomposed_multi_cell_conditionals(
             default: Some(DefaultBranch {
                 relationships: Vec::new(),
                 trailing_comment: None,
+                trailing_line_comment: None,
                 blank_line_before_close: false,
                 open_brace_span: ExprSpan::for_text("_"),
                 span: ExprSpan::for_text("_"),
             }),
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             trailing_comment: None,
             blank_line_before_close: false,
@@ -399,6 +469,8 @@ fn build_branch_relationships(
 /// `Cells`-mode condition — a single cell renders as a bare identifier
 /// reference instead of a one-element tuple.
 ///
+/// - Precondition: `cells` is non-empty (an empty tuple `()` is neither a
+///   bare identifier nor a valid match subject here).
 /// - Precondition: the synthesized text is always valid CEL (a bare
 ///   identifier, or a parenthesized comma-list of them) — a parse failure
 ///   here indicates a bug in this function, not bad user data, so it
@@ -406,6 +478,7 @@ fn build_branch_relationships(
 ///
 /// - Complexity: O(n) in `cells.len()`.
 fn cells_tuple_expr(doc: &Document, cells: &[CellId]) -> Expr {
+    debug_assert!(!cells.is_empty(), "cells must be non-empty");
     let text = if cells.len() == 1 {
         doc.cells[cells[0]].name.clone()
     } else {
@@ -428,6 +501,11 @@ fn cells_tuple_expr(doc: &Document, cells: &[CellId]) -> Expr {
 ///   literal token — a lex failure or non-literal token here indicates a
 ///   bug in this function, not bad user data, so it panics rather than
 ///   returning a `Result`.
+/// - Precondition: `value` is not `CellValueLiteral::I64(i64::MIN)`. Its
+///   magnitude (`9223372036854775808`) lexes fine here but is out of range
+///   for the `i64` literal token `adam_lang` re-validates on parse; the
+///   caller ([`build_single_conditional_decl`]) rejects it up front with
+///   [`ExportError::UnrepresentableBranchLiteral`].
 fn literal_and_sign(value: &CellValueLiteral) -> (bool, cel_parser::lex_lexer::Literal, ExprSpan) {
     let (negated, text) = match value {
         CellValueLiteral::Bool(b) => (false, b.to_string()),
@@ -459,10 +537,15 @@ fn lex_single_literal(text: &str) -> cel_parser::lex_lexer::Literal {
         .parse()
         .unwrap_or_else(|e| panic!("synthesized literal text {text:?} failed to tokenize: {e}"));
     let mut lexer = cel_parser::lex_lexer::LexLexer::new(tokens.into_iter());
-    match lexer.next() {
+    let lit = match lexer.next() {
         Some(cel_parser::lex_lexer::Token::Literal(lit)) => lit,
         other => panic!("expected a literal token for {text:?}, got {other:?}"),
-    }
+    };
+    debug_assert!(
+        lexer.next().is_none(),
+        "text {text:?} must lex to exactly one literal token"
+    );
+    lit
 }
 
 #[cfg(test)]
@@ -473,7 +556,7 @@ mod tests {
     #[test]
     fn build_cell_decl_for_a_plain_cell_has_no_filter() {
         let cell = Cell::new("width_pixels", CellType::i64());
-        let decl = build_cell_decl(&cell);
+        let decl = build_cell_decl(&cell).expect("plain cell should build");
         assert_eq!(decl.name, "width_pixels");
         assert!(decl.filter.is_none());
     }
@@ -489,12 +572,68 @@ mod tests {
                 },
             },
         );
-        let decl = build_cell_decl(&cell);
+        let decl = build_cell_decl(&cell).expect("clamped cell should build");
         let filter = decl.filter.expect("expected a filter clause");
         assert!(matches!(filter.body, cel_parser::Expr::Apply { .. }));
         assert_eq!(
-            cel_parser::format_expr(&filter.body),
+            cel_parser::format_expr(&filter.body, "", 0),
             "clamp(_, 0i64, 100i64)"
+        );
+    }
+
+    #[test]
+    fn build_cell_decl_rejects_a_non_finite_f64_clamp_bound() {
+        let cell = Cell::new(
+            "ratio",
+            CellType::F64 {
+                clamp: ClampRange {
+                    min: Some(0.0),
+                    max: Some(f64::NAN),
+                },
+            },
+        );
+        assert!(matches!(
+            build_cell_decl(&cell),
+            Err(ExportError::NonFiniteClampBound { .. })
+        ));
+    }
+
+    #[test]
+    fn build_cell_decl_rejects_an_i64_min_clamp_bound() {
+        let cell = Cell::new(
+            "offset",
+            CellType::I64 {
+                clamp: ClampRange {
+                    min: Some(i64::MIN),
+                    max: None,
+                },
+            },
+        );
+        assert!(matches!(
+            build_cell_decl(&cell),
+            Err(ExportError::UnrepresentableClampBound {
+                bound: i64::MIN,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn build_cell_decl_accepts_an_i64_max_clamp_bound() {
+        let cell = Cell::new(
+            "offset",
+            CellType::I64 {
+                clamp: ClampRange {
+                    min: None,
+                    max: Some(i64::MAX),
+                },
+            },
+        );
+        let decl = build_cell_decl(&cell).expect("i64::MAX clamp bound should export cleanly");
+        let filter = decl.filter.expect("expected a filter clause");
+        assert_eq!(
+            cel_parser::format_expr(&filter.body, "", 0),
+            format!("min(_, {}i64)", i64::MAX)
         );
     }
 
@@ -512,11 +651,11 @@ mod tests {
     fn type_expr_for_i64_has_the_right_source_text() {
         let type_expr = type_expr_for(&CellType::i64());
         match type_expr {
-            adam_lang::ast::TypeExpr::Named(name, span) => {
+            adam_lang::ast::TypeExpr::Named { name, span, .. } => {
                 assert_eq!(name, "i64");
                 assert_eq!(span.start.source_text().as_deref(), Some("i64"));
             }
-            adam_lang::ast::TypeExpr::Tuple(..) => panic!("expected Named"),
+            other => panic!("expected Named, got {other:?}"),
         }
     }
 
@@ -622,7 +761,7 @@ mod tests {
         // combination is empty and contributes no decl.
         assert_eq!(decls.len(), 1);
         assert_eq!(
-            cel_parser::format_expr(&decls[0].match_expr),
+            cel_parser::format_expr(&decls[0].match_expr, "", 0),
             "constrain_proportions && lock_aspect"
         );
         assert_eq!(decls[0].branches.len(), 1);

@@ -9,17 +9,7 @@
 pub use cel_parser::ExprSpan;
 use cel_parser::lex_lexer::Literal;
 
-/// A recovered `//`/`/* */` comment, remembering which delimiter style the source used so the
-/// formatter can reproduce it instead of normalizing everything to `//`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Comment {
-    /// One or more consecutive `// text` lines, joined by `\n`, each with its leading `//`/space
-    /// stripped.
-    Line(String),
-    /// A single `/* text */` block comment (single- or multi-line), its inner text joined by
-    /// `\n` with the opening `/*`/closing `*/` and per-line indentation stripped.
-    Block(String),
-}
+pub use cel_parser::Comment;
 
 /// A parsed adam-lang sheet declaration, with source spans on every node.
 ///
@@ -82,6 +72,10 @@ pub enum SheetItem {
         /// A leading `///` doc comment immediately preceding this item, if recovered by
         /// [`crate::AdamAstParser`] before parsing failed.
         doc_comment: Option<String>,
+        /// A `//`/`/* */` comment on the same source line as this item's own last token, if
+        /// recovered by [`crate::trivia::attach_trivia`]. Distinct from `leading_comment`, which
+        /// precedes an item on its own line. See <https://github.com/stlab/cel-rs/issues/59>.
+        trailing_line_comment: Option<Comment>,
         /// Whether the gap before this item contained a blank line, if recovered by
         /// [`crate::trivia::attach_trivia`].
         blank_line_before: bool,
@@ -112,6 +106,22 @@ impl SheetItem {
             SheetItem::Error {
                 leading_comment, ..
             } => *leading_comment = Some(comment),
+        }
+    }
+
+    /// Sets a `//`/`/* */` comment recovered on the same source line as this item's own last
+    /// token. See <https://github.com/stlab/cel-rs/issues/59>.
+    pub(crate) fn set_trailing_line_comment(&mut self, comment: Comment) {
+        match self {
+            SheetItem::Cell(c) => c.trailing_line_comment = Some(comment),
+            SheetItem::Relationship(r) => r.trailing_line_comment = Some(comment),
+            SheetItem::Conditional(c) => c.trailing_line_comment = Some(comment),
+            SheetItem::Out(o) => o.trailing_line_comment = Some(comment),
+            SheetItem::Source(s) => s.trailing_line_comment = Some(comment),
+            SheetItem::Error {
+                trailing_line_comment,
+                ..
+            } => *trailing_line_comment = Some(comment),
         }
     }
 
@@ -169,22 +179,10 @@ impl SheetItem {
 /// `()` is the empty tuple type (0 elements); `(T)` is grouping (same as bare `T` — types have
 /// no precedence to disambiguate, but staying symmetric with `cel_parser`'s expression grammar
 /// costs nothing); `(T,)` is a 1-element tuple; `(T, U, ...)` is n-element, no trailing comma.
-#[derive(Debug, Clone)]
-pub enum TypeExpr {
-    /// A single type name, resolved later against a `TypeRegistry`.
-    Named(String, ExprSpan),
-    /// A tuple type, recursively — `Vec::new()` for `()`.
-    Tuple(Vec<TypeExpr>, ExprSpan),
-}
-
-impl TypeExpr {
-    /// Returns this type expression's source span.
-    pub fn span(&self) -> ExprSpan {
-        match self {
-            TypeExpr::Named(_, span) | TypeExpr::Tuple(_, span) => *span,
-        }
-    }
-}
+/// Shared verbatim with `cel_parser` (which additionally supports `[T]` array types and
+/// `Name(args)` parameterized/generic types) so both crates resolve, format, and error on
+/// exactly one type-expression grammar.
+pub use cel_parser::TypeExpr;
 
 /// `cell_decl = "cell" identifier cell_type_init [ cell_filter ] [ "require" "{" { requirement }
 /// "}" ] ";".`
@@ -201,7 +199,7 @@ pub struct CellDecl {
     pub name_span: ExprSpan,
     /// The `: type_expr` annotation, if present.
     pub type_name: Option<TypeExpr>,
-    /// The `= or_expression` initializer, if present. Unresolved and unevaluated here — see
+    /// The `= expression` initializer, if present. Unresolved and unevaluated here — see
     /// `crate::parser::AdamParser` for the compile-to-`Sheet` phase, which parses this with no
     /// cell scope pushed and evaluates it eagerly, once, at parse time.
     pub initializer: Option<cel_parser::Expr>,
@@ -215,6 +213,10 @@ pub struct CellDecl {
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
     /// [`crate::AdamAstParser`].
     pub doc_comment: Option<String>,
+    /// A `//`/`/* */` comment on the same source line as this declaration's own last token, if
+    /// recovered by [`crate::trivia::attach_trivia`]. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -235,7 +237,7 @@ pub struct SourceDecl {
     pub name_span: ExprSpan,
     /// The `: type_expr` annotation, if present.
     pub type_name: Option<TypeExpr>,
-    /// The `= or_expression` initializer, if present. Unresolved and unevaluated here — see
+    /// The `= expression` initializer, if present. Unresolved and unevaluated here — see
     /// `crate::parser::AdamParser` for the compile-to-`Sheet` phase, which parses this with no
     /// cell scope pushed and evaluates it eagerly, once, at parse time.
     pub initializer: Option<cel_parser::Expr>,
@@ -249,6 +251,10 @@ pub struct SourceDecl {
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
     /// [`crate::AdamAstParser`].
     pub doc_comment: Option<String>,
+    /// A `//`/`/* */` comment on the same source line as this declaration's own last token, if
+    /// recovered by [`crate::trivia::attach_trivia`]. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -256,13 +262,9 @@ pub struct SourceDecl {
     pub span: ExprSpan,
 }
 
-/// `cell_filter = "filter" identifier ":" expression.`
+/// `cell_filter = "filter" expression.`
 #[derive(Debug, Clone)]
 pub struct CellFilter {
-    /// The filter's declared name.
-    pub name: String,
-    /// The name token's span.
-    pub name_span: ExprSpan,
     /// The filter's body expression. `_` inside it denotes the candidate value being conformed;
     /// every other identifier that names an already-declared cell is a deduced dependency.
     pub body: cel_parser::Expr,
@@ -280,6 +282,10 @@ pub struct RelationshipDecl {
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
     /// [`crate::AdamAstParser`].
     pub doc_comment: Option<String>,
+    /// A `//`/`/* */` comment on the same source line as this declaration's own closing `}`, if
+    /// recovered. Distinct from `trailing_comment`, which precedes this declaration's own
+    /// closing `}` on an earlier line. See <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this declaration, if recovered.
     pub blank_line_before: bool,
     /// A trailing comment immediately preceding this declaration's own closing `}`, if
@@ -295,7 +301,7 @@ pub struct RelationshipDecl {
     pub span: ExprSpan,
 }
 
-/// `binding = binding_target ":=" or_expression ";".`
+/// `binding = binding_target ":=" expression ";".`
 /// `binding_target = identifier | "(" identifier { "," identifier } [ "," ] ")".`
 ///
 /// Unlike the old `method_decl` this replaces, a binding names no explicit input cell list —
@@ -325,6 +331,10 @@ pub struct BindingDecl {
     /// A leading comment immediately preceding this binding, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
+    /// A `//`/`/* */` comment on the same source line as this binding's own last token, if
+    /// recovered by [`crate::trivia::attach_trivia`]. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this binding, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -332,7 +342,7 @@ pub struct BindingDecl {
     pub span: ExprSpan,
 }
 
-/// `out_decl = "out" identifier [ ":" type_expr ] ":=" or_expression [ cell_filter ] [ "require"
+/// `out_decl = "out" identifier [ ":" type_expr ] ":=" expression [ cell_filter ] [ "require"
 /// "{" { requirement } "}" ] ";".`
 ///
 /// `type_expr` is unresolved here (no `TypeRegistry` lookup), matching `CellDecl`. When
@@ -358,6 +368,10 @@ pub struct OutDecl {
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
     /// [`crate::AdamAstParser`].
     pub doc_comment: Option<String>,
+    /// A `//`/`/* */` comment on the same source line as this declaration's own last token, if
+    /// recovered by [`crate::trivia::attach_trivia`]. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this declaration, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -383,30 +397,34 @@ pub struct RequireBlock {
     pub span: ExprSpan,
 }
 
-/// `requirement = identifier ":" or_expression ";".`
+/// `requirement = [ "@" identifier ] expression ";".`
 ///
-/// `name` is a plain string label passed to `adam_rs::Sheet::add_requirement`, not a cell
-/// reference — it may coincide with a cell name declared elsewhere in the sheet but doesn't
-/// have to.
+/// `name`, when present, is a plain string label passed to `adam_rs::Sheet::add_requirement`,
+/// not a cell reference — it may coincide with a cell name declared elsewhere in the sheet but
+/// doesn't have to.
 #[derive(Debug, Clone)]
 pub struct RequirementDecl {
-    /// The requirement's declared name.
-    pub name: String,
-    /// The name token's span.
-    pub name_span: ExprSpan,
+    /// The requirement's declared label, if the `@identifier` marker was present.
+    pub name: Option<String>,
+    /// The `@identifier` marker's span, if present.
+    pub name_span: Option<ExprSpan>,
     /// The parsed requirement body expression; must type-check as `bool`.
     pub body: cel_parser::Expr,
     /// A leading comment immediately preceding this requirement, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
+    /// A `//`/`/* */` comment on the same source line as this requirement's own last token, if
+    /// recovered by [`crate::trivia::attach_trivia`]. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this requirement, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
-    /// The span of the whole `name: ...;` declaration.
+    /// The span of the whole `[ "@" identifier ] expr;` declaration.
     pub span: ExprSpan,
 }
 
-/// `conditional_decl = "conditional" or_expression "{" { conditional_branch } "}".`
+/// `conditional_decl = "conditional" expression "{" { conditional_branch } "}".`
 #[derive(Debug, Clone)]
 pub struct ConditionalDecl {
     /// The match subject: an arbitrary expression over already-declared cells (a bare
@@ -421,6 +439,10 @@ pub struct ConditionalDecl {
     /// A leading `///` doc comment immediately preceding this declaration, if recovered by
     /// [`crate::AdamAstParser`].
     pub doc_comment: Option<String>,
+    /// A `//`/`/* */` comment on the same source line as this declaration's own closing `}`, if
+    /// recovered. Distinct from `trailing_comment`, which precedes this declaration's own
+    /// closing `}` on an earlier line. See <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this declaration, if recovered.
     pub blank_line_before: bool,
     /// A trailing comment immediately preceding this declaration's own closing `}`, if
@@ -445,6 +467,10 @@ pub struct DefaultBranch {
     /// A trailing comment immediately preceding this branch's own closing `}`, if recovered.
     /// See <https://github.com/stlab/cel-rs/issues/52>.
     pub trailing_comment: Option<Comment>,
+    /// A `//`/`/* */` comment on the same source line as this branch's own closing `}` (between
+    /// it and the enclosing conditional's own closing `}`), if recovered. See
+    /// <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this branch's own closing `}`, if recovered.
     pub blank_line_before_close: bool,
     /// The span of this branch's own opening `{`, used to recover trailing trivia when
@@ -473,6 +499,10 @@ pub struct ConditionalBranch {
     /// A leading comment immediately preceding this branch, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub leading_comment: Option<Comment>,
+    /// A `//`/`/* */` comment on the same source line as this branch's own closing `}`, if
+    /// recovered. Distinct from `trailing_comment`, which precedes this branch's own closing
+    /// `}` on an earlier line. See <https://github.com/stlab/cel-rs/issues/59>.
+    pub trailing_line_comment: Option<Comment>,
     /// Whether a blank line preceded this branch, if recovered by
     /// [`crate::trivia::attach_trivia`].
     pub blank_line_before: bool,
@@ -513,6 +543,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         });
@@ -526,6 +557,7 @@ mod tests {
             bindings: Vec::new(),
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             trailing_comment: None,
             blank_line_before_close: false,
@@ -547,6 +579,7 @@ mod tests {
             default: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             trailing_comment: None,
             blank_line_before_close: false,
@@ -563,6 +596,7 @@ mod tests {
             span,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
         };
         assert_eq!(format!("{:?}", item.span()), format!("{span:?}"));
@@ -580,6 +614,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         });
@@ -599,6 +634,7 @@ mod tests {
             span,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
         };
         item.set_leading_comment(Comment::Line("hi".to_string()));
@@ -624,6 +660,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         });
@@ -649,6 +686,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         });
@@ -670,6 +708,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         });
@@ -683,16 +722,38 @@ mod tests {
     }
 
     #[test]
+    fn ast_type_expr_is_the_shared_cel_parser_type_expr() {
+        fn assert_same_type<T>(_: &T) {}
+        let span = cel_parser::ExprSpan {
+            start: Span::call_site(),
+            end: Span::call_site(),
+        };
+        let expr: TypeExpr = cel_parser::TypeExpr::Named {
+            name: "i32".to_string(),
+            args: Vec::new(),
+            span,
+        };
+        assert_same_type::<cel_parser::TypeExpr>(&expr);
+    }
+
+    #[test]
     fn type_expr_named_span_is_its_own_span() {
         let span = point(Span::call_site());
-        let expr = TypeExpr::Named("i32".to_string(), span);
+        let expr = TypeExpr::Named {
+            name: "i32".to_string(),
+            args: Vec::new(),
+            span,
+        };
         assert_eq!(format!("{:?}", expr.span()), format!("{span:?}"));
     }
 
     #[test]
     fn type_expr_tuple_span_is_the_whole_parenthesized_span() {
         let span = point(Span::call_site());
-        let expr = TypeExpr::Tuple(Vec::new(), span);
+        let expr = TypeExpr::Tuple {
+            elements: Vec::new(),
+            span,
+        };
         assert_eq!(format!("{:?}", expr.span()), format!("{span:?}"));
     }
 
@@ -702,23 +763,32 @@ mod tests {
         let cell = CellDecl {
             name: "a".to_string(),
             name_span: span,
-            type_name: Some(TypeExpr::Tuple(
-                vec![
-                    TypeExpr::Named("i32".to_string(), span),
-                    TypeExpr::Named("f64".to_string(), span),
+            type_name: Some(TypeExpr::Tuple {
+                elements: vec![
+                    TypeExpr::Named {
+                        name: "i32".to_string(),
+                        args: Vec::new(),
+                        span,
+                    },
+                    TypeExpr::Named {
+                        name: "f64".to_string(),
+                        args: Vec::new(),
+                        span,
+                    },
                 ],
                 span,
-            )),
+            }),
             initializer: None,
             filter: None,
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         };
         match cell.type_name {
-            Some(TypeExpr::Tuple(elements, _)) => assert_eq!(elements.len(), 2),
+            Some(TypeExpr::Tuple { elements, .. }) => assert_eq!(elements.len(), 2),
             other => panic!("expected Tuple, got {other:?}"),
         }
     }
@@ -738,6 +808,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         };
@@ -756,8 +827,6 @@ mod tests {
             type_name: None,
             initializer: None,
             filter: Some(CellFilter {
-                name: "clamp".to_string(),
-                name_span: span,
                 body: cel_parser::Expr::Ident {
                     name: "_".to_string(),
                     span,
@@ -767,6 +836,7 @@ mod tests {
             require: None,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span,
         };

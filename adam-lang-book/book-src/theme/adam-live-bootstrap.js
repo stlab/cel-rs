@@ -1,12 +1,15 @@
-// Mounts a live SheetInspector into every `.adam-live` div the live-examples preprocessor
-// inserted. Each div's `data-example` (e.g. "cells/tuple_typed_cell") names one of the
-// `adam-live-examples.json` manifest's entries; the manifest and the compiled
-// adam-lang-book-live wasm/js bundle are both generated into `book-src/theme/` by the book
-// build (see the CI workflow changes), and mdBook's built-in theme-directory mechanism copies
-// everything under `book-src/theme/` into `book-dist/theme/` verbatim (at the site root),
-// regardless of whether it's also named in `book.toml`'s `additional-js`/`additional-css`
-// (which this script itself is, so it is served from a different path — alongside a copy of
-// `book-src/` preserved verbatim — than its sibling wasm/js/manifest files land at).
+// Mounts a live SheetInspector into every `.adam-live` div that the live-examples preprocessor
+// inserted. Each `.adam-live-graph` div sharing that mount's `data-example` is not mounted on
+// its own; it's a plain container whose id is handed to the inspector's `mount` call, and the
+// inspector's own sheet drives it via `window.beginGraph` (see `begin/assets/graph.js`). Each
+// div's `data-example` (e.g. "cells/tuple_typed_cell") names one of the `adam-live-examples.json`
+// manifest's entries; the manifest and the compiled adam-lang-book-live wasm/js bundle are both
+// generated into `book-src/theme/` by the book build (see the CI workflow changes), and
+// mdBook's built-in theme-directory mechanism copies everything under `book-src/theme/` into
+// `book-dist/theme/` verbatim (at the site root), regardless of whether it's also named in
+// `book.toml`'s `additional-js`/`additional-css` (which this script itself is, so it is served
+// from a different path — alongside a copy of `book-src/` preserved verbatim — than its sibling
+// wasm/js/manifest files land at).
 //
 // A plain relative specifier can't paper over that split: `fetch()` resolves a relative URL
 // against the *document's* URL, but a dynamic `import()` in a classic (non-module) script
@@ -19,41 +22,70 @@ const themeBase = new URL("theme/", document.baseURI);
 const moduleUrl = new URL("adam_lang_book_live.js", themeBase).href;
 const manifestUrl = new URL("adam-live-examples.json", themeBase).href;
 const swcUrl = new URL("swc.js", themeBase).href;
+const d3Url = new URL("d3.v7.min.js", themeBase).href;
+const graphJsUrl = new URL("graph.js", themeBase).href;
 
-// `SheetInspector` renders `sp-*` elements (see `adam-web-ui/src/spectrum.rs`), but each
-// mounted `VirtualDom` is rooted at its own `.adam-live` div — none of them ever renders a
-// `<script>` tag of their own the way `begin/src/app.rs`'s top-level `App` component does for
-// its single, page-wide desktop/web window. Left unloaded, every `sp-*` tag on the page stays
-// an undefined custom element: no shadow DOM, so `SheetInspector`'s own `shadowRoot.querySelector`
-// reads come back null and the number-field/slider write paths never fire, and no visible input
-// box at all (an undefined custom element renders only its — here, absent — light-DOM children).
-// Load `swc.js` once at the page level, in parallel with the wasm/manifest fetches below, so it
-// defines every `sp-*` element exactly once regardless of how many examples the page mounts.
-function loadSwc() {
+// Loads a page-level <script> from `url`, resolving when it has loaded. Pass `{ module: true }`
+// for an ES module (e.g. swc.js); classic scripts (d3, graph.js) omit it.
+function loadScript(url, { module = false } = {}) {
   return new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    script.type = "module";
-    script.src = swcUrl;
+    if (module) script.type = "module";
+    script.src = url;
     script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`adam-live: failed to load ${swcUrl}`));
+    script.onerror = () => reject(new Error(`adam-live: failed to load ${url}`));
     document.head.appendChild(script);
   });
 }
 
 (async () => {
-  const mounts = document.querySelectorAll(".adam-live");
-  if (mounts.length === 0) {
+  const inspectorMounts = document.querySelectorAll(".adam-live");
+  const graphMounts = document.querySelectorAll(".adam-live-graph");
+  if (inspectorMounts.length === 0 && graphMounts.length === 0) {
     return;
   }
 
-  const [{ default: init, mount }, manifest] = await Promise.all([
+  // `SheetInspector` renders `sp-*` elements (see `adam-web-ui/src/spectrum.rs`), but each
+  // mounted `VirtualDom` is rooted at its own `.adam-live` div — none of them ever renders a
+  // `<script>` tag of their own the way `begin/src/app.rs`'s top-level `App` component does for
+  // its single, page-wide desktop/web window. Left unloaded, every `sp-*` tag on the page stays
+  // an undefined custom element: no shadow DOM, so `SheetInspector`'s own `shadowRoot.querySelector`
+  // reads come back null and the number-field/slider write paths never fire, and no visible input
+  // box at all (an undefined custom element renders only its — here, absent — light-DOM children).
+  // Load `swc.js` once at the page level, in parallel with the wasm/manifest fetches below, so it
+  // defines every `sp-*` element exactly once regardless of how many examples the page mounts.
+  const loaders = [
     import(moduleUrl),
     fetch(manifestUrl).then((r) => r.json()),
-    loadSwc(),
-  ]);
+    loadScript(swcUrl, { module: true }),
+  ];
+  if (graphMounts.length > 0) {
+    // Loaded once at the page level for the same reason `swc.js` is: the sheet each inspector
+    // mount owns drives D3 through `window.beginGraph` (see `begin/assets/graph.js`), which
+    // expects a global `d3`, regardless of how many `.adam-live-graph` divs the page mounts.
+    loaders.push(loadScript(d3Url));
+    // `graph.js` defines `window.beginGraph`, the D3 driver each inspector mount's sheet calls
+    // once it has a graph container id to draw into. It's a classic (non-module) IIFE that sets
+    // `window.beginGraph` at load with no top-level `d3` dependency, so it can load in parallel
+    // with `d3.v7.min.js`; both must simply be present before any graph mounts.
+    loaders.push(loadScript(graphJsUrl));
+  }
+  const [{ default: init, mount }, manifest] = await Promise.all(loaders);
   await init();
 
-  mounts.forEach((div, index) => {
+  // Assign each graph container its own id and index it by the example it shows, so each
+  // inspector mount can be handed the ids of the graphs its sheet must drive. The graph divs
+  // are now plain containers graph.js attaches to; the inspector mount owns the sheet.
+  const graphIdsByExample = new Map();
+  graphMounts.forEach((div, index) => {
+    const name = div.dataset.example;
+    const id = `adam-live-graph-${index}`;
+    div.id = id;
+    if (!graphIdsByExample.has(name)) graphIdsByExample.set(name, []);
+    graphIdsByExample.get(name).push(id);
+  });
+
+  inspectorMounts.forEach((div, index) => {
     const name = div.dataset.example;
     const source = manifest[name];
     if (source === undefined) {
@@ -62,6 +94,7 @@ function loadSwc() {
     }
     const id = `adam-live-${index}`;
     div.id = id;
-    mount(id, source, name);
+    const graphIds = graphIdsByExample.get(name) || [];
+    mount(id, source, name, graphIds);
   });
 })();

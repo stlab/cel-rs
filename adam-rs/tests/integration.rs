@@ -18,7 +18,7 @@ fn sheet_with_area_output() -> (Sheet, CellId, CellId, CellId, CellId) {
         .add_out(
             writer,
             vec![(
-                "max_area",
+                Some("max_area"),
                 Requirement::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
             )],
         )
@@ -429,7 +429,7 @@ fn method_returning_error_propagates_as_method_failed() {
         .unwrap();
 
     let result = sheet.propagate();
-    assert!(matches!(result, Err(Error::MethodFailed(_))));
+    assert!(matches!(result, Err(Error::MethodFailed { .. })));
 }
 
 #[test]
@@ -448,7 +448,7 @@ fn mutually_dependent_relationships_return_cycle() {
         .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
         .unwrap();
 
-    assert!(matches!(sheet.propagate(), Err(Error::Cycle)));
+    assert!(matches!(sheet.propagate(), Err(Error::Cycle { .. })));
 }
 
 #[test]
@@ -1035,10 +1035,13 @@ fn conditional_match_cell_is_derived_from_unconditional_relationship() {
 }
 
 #[test]
-fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
+fn cell_shadowed_as_self_ref_in_one_branch_and_plain_reassignment_in_another() {
     // p == 0: a <= b enforced by a two-way self-referencing relationship.
-    // p != 0 (default): a and b are forced from each other directly, whichever
-    // is the stronger (more recently written) cell wins.
+    // p != 0 (default): a and b are mutually assignable (two methods, neither
+    // structurally forced), so whichever is the stronger (more recently written)
+    // cell wins and becomes the new source, exactly as an unconditional two-method
+    // relationship would behave -- being inside a conditional does not, on its own,
+    // shadow a genuinely choosable output.
     let mut sheet = Sheet::new();
     let p = sheet.add_cell(0_i32);
     let a = sheet.add_cell(4_i32);
@@ -1050,7 +1053,7 @@ fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
             Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
         ])
         .unwrap();
-    let rel_force = sheet
+    let rel_swap = sheet
         .add_relationship(vec![
             Method::from_fn_1_1(b, a, |y: &i32| Ok(*y)),
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
@@ -1060,7 +1063,7 @@ fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
         .add_conditional(
             MatchExpr::cell(p),
             vec![(vec![0_i32], vec![rel_self_ref])],
-            vec![rel_force],
+            vec![rel_swap],
         )
         .unwrap();
 
@@ -1072,24 +1075,134 @@ fn cell_shadowed_as_self_ref_in_one_branch_and_forced_output_in_another() {
     assert_eq!(*sheet.source::<i32>(a).unwrap(), 4);
     assert_eq!(*sheet.source::<i32>(b).unwrap(), 9);
 
-    // p == 1: default (forcing) branch. b is the more recently written cell,
-    // so a <- b.
+    // p == 1: default (swap) branch. b is the more recently written cell, so
+    // a <- b -- and, since rel_swap is not structurally forced (either cell could
+    // be the source), a's source is overwritten just like an ordinary derived
+    // cell, not preserved.
     sheet.write(a, 4_i32).unwrap();
     sheet.write(b, 20_i32).unwrap();
     sheet.write(p, 1_i32).unwrap();
     sheet.propagate().unwrap();
     assert_eq!(*sheet.read::<i32>(a).unwrap(), 20);
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
-    // Sources are untouched by the forcing branch.
-    assert_eq!(*sheet.source::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 20);
     assert_eq!(*sheet.source::<i32>(b).unwrap(), 20);
 
-    // Back to p == 0: self-ref recomputed fresh from each cell's own source
-    // (4 and 20), not from the stale forced value.
+    // Back to p == 0: self-ref recomputed fresh from each cell's own source --
+    // both now 20, since rel_swap already overwrote a's source above.
     sheet.write(p, 0_i32).unwrap();
     sheet.propagate().unwrap();
-    assert_eq!(*sheet.read::<i32>(a).unwrap(), 4);
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 20);
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+}
+
+#[test]
+fn unforced_conditional_relationship_does_not_shadow_its_losing_cell() {
+    // A two-method mutual relationship (`a := b; b := a;`), active only while a
+    // conditional's key matches -- e.g. adam-lang-book's constrain.adm2. Neither
+    // method is self-referencing, and with two live methods the relationship is
+    // never structurally forced, so activating it must behave exactly like an
+    // ordinary (unconditional) two-method relationship: the losing cell's source
+    // is overwritten, not preserved for later reveal.
+    let mut sheet = Sheet::new();
+    let constrain = sheet.add_cell(false);
+    let a = sheet.add_cell(5_i32);
+    let b = sheet.add_cell(10_i32);
+
+    let rel = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(constrain),
+            vec![(vec![true], vec![rel])],
+            vec![],
+        )
+        .unwrap();
+
+    // Inactive: both cells are plain, untouched sources.
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 5);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    assert!(sheet.is_source(a));
+    assert!(sheet.is_source(b));
+
+    // Active: b has higher strength (added after a), so a <- b, and a's source is
+    // overwritten (not shadowed) -- matching an unconditional two-method
+    // relationship's behavior.
+    sheet.write(constrain, true).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+    assert_eq!(*sheet.source::<i32>(a).unwrap(), 10);
+
+    // Deactivating again does not reveal a stale original value: a's source was
+    // genuinely overwritten while the relationship was active, so it stays 10.
+    sheet.write(constrain, false).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+}
+
+#[test]
+fn cascaded_forced_output_of_an_unconditional_relationship_shadows_and_reverts() {
+    // R1 (a -> b, single method) lives in a conditional and forces b only while
+    // active. R2 (b <-> c, two methods) is itself unconditional, but once R1 is
+    // active, R2's c -> b method would double-write b, so c becomes forced too --
+    // purely via cascading through the planner's forced-output fixpoint, not
+    // because R2 is registered under any conditional. c's output must still be
+    // shadowed while forced, preserving its own original source underneath --
+    // otherwise it would be permanently overwritten by the cascaded value, with
+    // no original left to fall back to once R1 deactivates and the cascade lifts.
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let a = sheet.add_cell(2_i32);
+    let b = sheet.add_cell(0_i32);
+    let c = sheet.add_cell(9_i32);
+
+    let rel_force = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 10))])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(b, c, |x: &i32| Ok(*x + 1)),
+            Method::from_fn_1_1(c, b, |x: &i32| Ok(*x + 1)),
+        ])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(p),
+            vec![(vec![1_i32], vec![rel_force])],
+            vec![],
+        )
+        .unwrap();
+
+    // p == 1: R1 active, forces b, which cascades to force c too.
+    sheet.write(p, 1_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 21);
+    assert_eq!(
+        *sheet.source::<i32>(c).unwrap(),
+        9,
+        "c's cascade-forced output must be shadowed, preserving its own original source"
+    );
+
+    // p == 0: R1 inactive, cascade lifts, and R2 is a genuine two-way choice
+    // again. b's derived strength (assigned while forced) still outranks c's, so
+    // b is preferred as the source this round -- revealing its own untouched
+    // original (0), not the stale forced 20, exactly because it was shadowed
+    // rather than overwritten. c is then freshly derived from that real value
+    // (0 + 1 = 1), not left stuck at the stale cascaded 21.
+    sheet.write(p, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(
+        *sheet.read::<i32>(b).unwrap(),
+        0,
+        "b must reveal its own untouched original value, not the stale forced 20"
+    );
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 1);
 }
 
 #[test]
@@ -1238,7 +1351,7 @@ fn mutually_dependent_relationships_with_no_external_input_remain_cycle() {
     sheet
         .add_relationship(vec![Method::from_fn_1_1(x, y, |v: &i32| Ok(*v + 1))])
         .unwrap();
-    assert!(matches!(sheet.propagate(), Err(Error::Cycle)));
+    assert!(matches!(sheet.propagate(), Err(Error::Cycle { .. })));
 }
 
 #[test]
@@ -1249,7 +1362,7 @@ fn add_out_succeeds_with_no_requirements() {
     let area = sheet.add_cell(0_i32);
     let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h));
     let out = sheet
-        .add_out(writer, Vec::<(&str, Requirement)>::new())
+        .add_out(writer, Vec::<(Option<&str>, Requirement)>::new())
         .unwrap();
     assert_eq!(out, area);
 }
@@ -1268,7 +1381,7 @@ fn add_out_succeeds_with_one_requirement() {
         .add_out(
             writer,
             vec![(
-                "max_area",
+                Some("max_area"),
                 Requirement::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
             )],
         )
@@ -1292,11 +1405,11 @@ fn add_out_succeeds_with_multiple_requirements() {
             writer,
             vec![
                 (
-                    "max_width",
+                    Some("max_width"),
                     Requirement::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
                 ),
                 (
-                    "max_height",
+                    Some("max_height"),
                     Requirement::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
                 ),
             ],
@@ -1312,7 +1425,7 @@ fn add_out_returns_invalid_output_for_writer_with_zero_outputs() {
     let writer = Method::new(vec![a], vec![], vec![TypeId::of::<i32>()], vec![], |_| {
         Ok(vec![])
     });
-    let result = sheet.add_out(writer, Vec::<(&str, Requirement)>::new());
+    let result = sheet.add_out(writer, Vec::<(Option<&str>, Requirement)>::new());
     assert!(matches!(result, Err(Error::InvalidOutput)));
 }
 
@@ -1332,7 +1445,7 @@ fn add_out_returns_invalid_output_for_writer_with_two_outputs() {
             Ok(vec![Box::new(*x), Box::new(*x)])
         },
     );
-    let result = sheet.add_out(writer, Vec::<(&str, Requirement)>::new());
+    let result = sheet.add_out(writer, Vec::<(Option<&str>, Requirement)>::new());
     assert!(matches!(result, Err(Error::InvalidOutput)));
 }
 
@@ -1350,22 +1463,15 @@ fn add_out_returns_invalid_requirement_for_duplicate_requirement_names() {
     let result = sheet.add_out(
         writer,
         vec![
-            ("check", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0))),
-            ("check", Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100))),
+            (
+                Some("check"),
+                Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)),
+            ),
+            (
+                Some("check"),
+                Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)),
+            ),
         ],
-    );
-    assert!(matches!(result, Err(Error::InvalidRequirement)));
-}
-
-#[test]
-fn add_out_returns_invalid_requirement_for_empty_requirement_name() {
-    let mut sheet = Sheet::new();
-    let a = sheet.add_cell(0_i32);
-    let b = sheet.add_cell(0_i32);
-    let writer = Method::from_fn_1_1(a, b, |x: &i32| Ok(*x));
-    let result = sheet.add_out(
-        writer,
-        vec![("", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
     );
     assert!(matches!(result, Err(Error::InvalidRequirement)));
 }
@@ -1381,8 +1487,8 @@ fn add_out_returns_invalid_cell_kind_when_output_cell_already_has_a_relationship
         .unwrap();
     let c = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(c, b, |x: &i32| Ok(*x));
-    let result = sheet.add_out(writer, Vec::<(&str, Requirement)>::new());
-    assert!(matches!(result, Err(Error::InvalidCellKind)));
+    let result = sheet.add_out(writer, Vec::<(Option<&str>, Requirement)>::new());
+    assert!(matches!(result, Err(Error::InvalidCellKind { .. })));
 }
 
 #[test]
@@ -1398,7 +1504,7 @@ fn add_out_succeeds_when_output_cell_was_previously_a_conditional_match_cell() {
         .unwrap();
     let a = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(a, mode, |x: &i32| Ok(*x));
-    let result = sheet.add_out(writer, Vec::<(&str, Requirement)>::new());
+    let result = sheet.add_out(writer, Vec::<(Option<&str>, Requirement)>::new());
     assert!(result.is_ok());
     assert_eq!(sheet.cell_kind(mode), Some(CellKind::Out));
 }
@@ -1415,13 +1521,13 @@ fn add_out_succeeds_when_writer_input_is_already_an_out_cell() {
     sheet
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            Vec::<(&str, Requirement)>::new(),
+            Vec::<(Option<&str>, Requirement)>::new(),
         )
         .unwrap();
     let c = sheet.add_cell(0_i32);
     let result = sheet.add_out(
         Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)),
-        Vec::<(&str, Requirement)>::new(),
+        Vec::<(Option<&str>, Requirement)>::new(),
     );
     assert!(result.is_ok());
 }
@@ -1438,14 +1544,17 @@ fn add_out_succeeds_when_requirement_input_is_already_an_out_cell() {
     sheet
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            Vec::<(&str, Requirement)>::new(),
+            Vec::<(Option<&str>, Requirement)>::new(),
         )
         .unwrap();
     let c = sheet.add_cell(0_i32);
     let d = sheet.add_cell(0_i32);
     let result = sheet.add_out(
         Method::from_fn_1_1(c, d, |x: &i32| Ok(*x)),
-        vec![("uses_b", Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0)))],
+        vec![(
+            Some("uses_b"),
+            Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0)),
+        )],
     );
     assert!(result.is_ok());
 }
@@ -1457,7 +1566,10 @@ fn add_out_allows_a_requirement_to_reference_the_outputs_own_cell() {
     let b = sheet.add_cell(0_i32);
     let result = sheet.add_out(
         Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-        vec![("positive", Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0)))],
+        vec![(
+            Some("positive"),
+            Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0)),
+        )],
     );
     assert!(result.is_ok());
 }
@@ -1470,10 +1582,13 @@ fn write_returns_invalid_cell_kind_for_an_output_cell() {
     sheet
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            Vec::<(&str, Requirement)>::new(),
+            Vec::<(Option<&str>, Requirement)>::new(),
         )
         .unwrap();
-    assert!(matches!(sheet.write(b, 5_i32), Err(Error::InvalidCellKind)));
+    assert!(matches!(
+        sheet.write(b, 5_i32),
+        Err(Error::InvalidCellKind { .. })
+    ));
 }
 
 #[test]
@@ -1485,14 +1600,35 @@ fn cell_requirements_returns_requirement_ids_in_declaration_order() {
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             vec![
-                ("first", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0))),
-                ("second", Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100))),
+                (
+                    Some("first"),
+                    Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)),
+                ),
+                (
+                    Some("second"),
+                    Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)),
+                ),
             ],
         )
         .unwrap();
     let ids = sheet.cell_requirements(out).unwrap();
     assert_eq!(sheet.requirement_name(ids[0]), Some("first"));
     assert_eq!(sheet.requirement_name(ids[1]), Some("second"));
+}
+
+#[test]
+fn requirement_name_returns_none_for_a_live_unlabeled_requirement() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let out = sheet
+        .add_out(
+            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+            vec![(None, Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
+        )
+        .unwrap();
+    let id = sheet.cell_requirements(out).unwrap()[0];
+    assert_eq!(sheet.requirement_name(id), None);
 }
 
 #[test]
@@ -1503,7 +1639,10 @@ fn requirement_cell_and_inputs_return_correct_values() {
     let out = sheet
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            vec![("check", Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
+            vec![(
+                Some("check"),
+                Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)),
+            )],
         )
         .unwrap();
     let id = sheet.cell_requirements(out).unwrap()[0];
@@ -1572,11 +1711,11 @@ fn violated_requirements_returns_only_the_failing_subset_of_multiple_requirement
             writer,
             vec![
                 (
-                    "max_width",
+                    Some("max_width"),
                     Requirement::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
                 ),
                 (
-                    "max_height",
+                    Some("max_height"),
                     Requirement::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
                 ),
             ],
@@ -1616,12 +1755,12 @@ fn requirement_function_error_aborts_propagate_with_method_failed() {
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             vec![(
-                "always_errors",
+                Some("always_errors"),
                 Requirement::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("check failed"))),
             )],
         )
         .unwrap();
-    assert!(matches!(sheet.propagate(), Err(Error::MethodFailed(_))));
+    assert!(matches!(sheet.propagate(), Err(Error::MethodFailed { .. })));
 }
 
 #[test]
@@ -1865,7 +2004,7 @@ fn requirement_relevant_cells_unions_across_multiple_out_cells() {
         .add_out(
             Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)),
             vec![(
-                "always_true",
+                Some("always_true"),
                 Requirement::from_fn_1(out_a, |_: &i32| Ok(true)),
             )],
         )
@@ -1874,7 +2013,7 @@ fn requirement_relevant_cells_unions_across_multiple_out_cells() {
         .add_out(
             Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)),
             vec![(
-                "always_true",
+                Some("always_true"),
                 Requirement::from_fn_1(out_b, |_: &i32| Ok(true)),
             )],
         )
@@ -1906,7 +2045,10 @@ fn requirement_relevant_cells_updates_when_a_different_relationship_becomes_acti
     sheet
         .add_out(
             Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)),
-            vec![("always_true", Requirement::from_fn_1(c, |_: &i32| Ok(true)))],
+            vec![(
+                Some("always_true"),
+                Requirement::from_fn_1(c, |_: &i32| Ok(true)),
+            )],
         )
         .unwrap();
 
@@ -1961,7 +2103,7 @@ fn requirement_violation_cells_unions_across_multiple_violated_requirements() {
         .add_out(
             Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)),
             vec![(
-                "max_a",
+                Some("max_a"),
                 Requirement::from_fn_2([a, max_a], |v: &i32, max: &i32| Ok(v <= max)),
             )],
         )
@@ -1970,7 +2112,7 @@ fn requirement_violation_cells_unions_across_multiple_violated_requirements() {
         .add_out(
             Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)),
             vec![(
-                "max_b",
+                Some("max_b"),
                 Requirement::from_fn_2([b, max_b], |v: &i32, max: &i32| Ok(v <= max)),
             )],
         )
@@ -1997,4 +2139,346 @@ fn requirement_violation_cells_updates_across_propagate_calls() {
     sheet.write(height, 1_i32).unwrap();
     sheet.propagate().unwrap();
     assert_eq!(sheet.requirement_violation_cells(), HashSet::new());
+}
+
+#[test]
+fn issue_182_inequality_chain_preserves_a_consistent_edit() {
+    // a<=b<=c via two self-referencing relationships (the inequality.adm2 tutorial
+    // shape). Writing a=25 then c=40 is jointly consistent (any b in [25,40] satisfies
+    // a<=b<=c), so both edits must survive across two separate propagate() rounds.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+    sheet.write(a, 25_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(c, 40_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 25);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 25);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 40);
+}
+
+#[test]
+fn issue_182_inequality_chain_discriminating_case_unchanged() {
+    // The case that must stay correct: stays are already consistent (11 <= 20 <= 100),
+    // so nothing needs to move.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+    sheet.write(a, 11_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(c, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(c, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 11);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+}
+
+#[test]
+fn issue_182_inequality_chain_later_edit_below_earlier_one_repropagates() {
+    // a<=b<=c again. Writing a=25 raises b to 25 too. Writing c=24 then makes the
+    // chain jointly inconsistent unless a also moves down: r2's min-method is
+    // self-referencing on b, and its seed must be b's aspiration from r1 (b := max(a,
+    // b) = 25, build_seeds folding r1's method from a's source) rather than b's stale
+    // source of 20 -- otherwise b snaps to 20 and drags a down to 20 with it,
+    // discarding a's higher-strength 25 for a value nobody asked for. Seeding from 25
+    // instead lets r2 settle b (and so a, via r1) at 24, the strongest value
+    // consistent with both edits.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+    sheet.write(a, 25_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(c, 24_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 24);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 24);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 24);
+}
+
+#[test]
+fn issue_182_inequality_chain_survives_two_consecutive_edits_to_the_same_cell() {
+    // a<=b<=c again. Writing a=25 raises b to 25. Writing c=24 correctly pulls a and b
+    // down to 24 (issue_182_inequality_chain_later_edit_below_earlier_one_repropagates).
+    // A THIRD edit to c (23, continuing to slide down) guards against any mechanism that
+    // only rebuilds a self-referencing input's seed correctly on the *first* round a
+    // relationship claims it: build_seeds recomputes b's seed from a's `source` fresh
+    // every round regardless of how many consecutive rounds r2 has claimed b, so a and b
+    // must keep sliding down to 23 rather than springing back to their untouched
+    // declared values (10, 20) on this second consecutive round.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+    sheet.write(a, 25_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(c, 24_i32).unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(c, 23_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 23);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 23);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 23);
+}
+
+#[test]
+fn issue_182_inequality_chain_springs_back_when_the_raising_edit_is_lowered() {
+    // a<=b<=c. Writing a=100 raises b and c to 100 (a pushes the whole chain up). Then
+    // writing a=0 releases that pressure: b and c must spring back to their own
+    // untouched declared values (20, 30), not stay pinned at 100. b's derived value
+    // (100) is stale once a stops forcing it up; build_seeds recomputes b's and c's
+    // seeds from `source` fresh every round, so the spring-back falls out of seedfill
+    // directly rather than needing any dedicated unwind logic.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+    sheet.write(a, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+
+    sheet.write(a, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 30);
+}
+
+#[test]
+fn issue_182_inequality_chain_has_no_spring_back_hysteresis_when_dragging_a_bound() {
+    // Simulates dragging the `c` slider in the a<=b<=c tutorial after writing a=25:
+    // down through the point where the chain fully collapses (a=b=c=20), then back up.
+    // At every step a and b must equal min(c, 25) -- a's stored aspiration, clamped by
+    // c. The two-method min/max encoding on its own cannot raise a "sunk" cell back up
+    // when c relaxes (a single execution pass only lowers); seedfill removes that
+    // hysteresis by rebuilding each self-referencing input's value from source every
+    // round, so b re-aspires to a=25 and both climb back as c does.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet.propagate().unwrap();
+    sheet.write(a, 25_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    // Slide c down past the collapse point, then back up above a's stored 25.
+    for c_val in [29, 28, 25, 24, 23, 22, 21, 20, 21, 24, 30, 40] {
+        sheet.write(c, c_val).unwrap();
+        sheet.propagate().unwrap();
+        let expected = c_val.min(25);
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), expected, "a at c={c_val}");
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), expected, "b at c={c_val}");
+        assert_eq!(*sheet.read::<i32>(c).unwrap(), c_val);
+    }
+}
+
+#[test]
+fn issue_182_inequality_chain_writing_the_middle_cell_then_an_untouched_endpoint_keeps_its_edit() {
+    // a<=b<=c again, but this time the *middle* cell is written directly, unlike every
+    // other issue_182 case above (which only ever writes the two endpoints). write(a,
+    // 100) drags the whole chain up to 100; write(b, 50) then correctly pulls a down to
+    // meet it (b now outranks a's stale write). The regression: a third write to c --
+    // even to its already-current value of 100 -- must not resurrect a's stale strength
+    // and drag b back up to 100. b's higher-strength edit must still stand.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(42_i32);
+    let c = sheet.add_cell(100_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+    sheet.write(a, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+
+    sheet.write(b, 50_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 50);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 50);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+
+    sheet.write(c, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 50);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 50);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+}
+
+/// Builds the `a <= b <= c` tutorial chain (`inequality.adm2`) with declared values
+/// 10, 20, 30, already propagated once.
+fn inequality_chain() -> (Sheet, CellId, CellId, CellId) {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(10_i32);
+    let b = sheet.add_cell(20_i32);
+    let c = sheet.add_cell(30_i32);
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, b], a, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([a, b], b, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([b, c], b, |x: &i32, y: &i32| Ok((*x).min(*y))),
+            Method::from_fn_2_1([b, c], c, |x: &i32, y: &i32| Ok((*x).max(*y))),
+        ])
+        .unwrap();
+    sheet.propagate().unwrap();
+    (sheet, a, b, c)
+}
+
+#[test]
+fn inequality_chain_redundant_write_does_not_discard_another_cells_edit() {
+    // a<=b<=c. write(b, 100) raises c to 100 and leaves a alone (10, 100, 100). A
+    // *redundant* write of a's own current value (10) -- what a slider drag or arrow-key
+    // nudge emits before it emits a new one -- claims a and b through their
+    // self-referencing methods but changes nothing. That round must not cost b its
+    // edit's explicit strength: the following write(a, 9) is still consistent with
+    // b=100, so b and c must stay at 100 rather than springing back to their declared
+    // 20 and 30.
+    let (mut sheet, a, b, c) = inequality_chain();
+    sheet.write(b, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+
+    sheet.write(a, 10_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+
+    sheet.write(a, 9_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 9);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 100);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
+}
+
+#[test]
+fn inequality_chain_dragging_the_low_end_keeps_the_middle_cells_edit() {
+    // a<=b<=c after write(b, 100): dragging a across many intermediate values (the
+    // stream of writes a slider emits) must leave b and c pinned at b's edit of 100
+    // whenever a <= 100, and push the whole chain up only while a exceeds it. Every
+    // round re-claims b and c self-referencingly, so this also guards against b's
+    // explicit strength decaying over a long run of rounds rather than on just one.
+    let (mut sheet, a, b, c) = inequality_chain();
+    sheet.write(b, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+
+    for a_val in [10, 9, 8, 5, 0, 5, 50, 100, 120, 100, 50, 10] {
+        sheet.write(a, a_val).unwrap();
+        sheet.propagate().unwrap();
+        let expected = a_val.max(100);
+        assert_eq!(*sheet.read::<i32>(a).unwrap(), a_val, "a at a={a_val}");
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), expected, "b at a={a_val}");
+        assert_eq!(*sheet.read::<i32>(c).unwrap(), expected, "c at a={a_val}");
+    }
 }

@@ -46,6 +46,92 @@ pub enum ExportError {
         /// The conditional group with the unsupported condition.
         conditional: ConditionalGroupId,
     },
+    /// `conditional` has a branch keyed on an `i64` value that
+    /// `adam_lang`'s conditional-branch grammar can't represent. Its
+    /// `["-"] literal` form stores the sign separately from an *unsigned*
+    /// literal token, and `i64::MIN`'s magnitude (`9223372036854775808`) is
+    /// out of range for an `i64` literal, so the emitted key would fail to
+    /// parse. `i64::MIN` is the only such value. See
+    /// <https://github.com/stlab/cel-rs/issues/175>.
+    UnrepresentableBranchLiteral {
+        /// The conditional group with the unrepresentable branch key.
+        conditional: ConditionalGroupId,
+        /// The offending branch value (always `i64::MIN`).
+        value: i64,
+    },
+    /// The cell named `cell_name` has a non-finite (`NaN`/`±inf`) `f64`
+    /// clamp bound. `.adm2` has no literal for a non-finite float — Debug
+    /// formatting emits bare `NaN`/`inf` tokens, which parse as identifiers
+    /// rather than numeric literals — so the bound can't be exported.
+    NonFiniteClampBound {
+        /// The name of the cell whose clamp bound is non-finite.
+        cell_name: String,
+        /// The offending bound value.
+        bound: f64,
+    },
+    /// The cell named `cell_name` has an `i64::MIN` clamp bound. `.adm2`'s
+    /// `["-"] literal` grammar stores the sign separately from an
+    /// *unsigned* literal token, and `i64::MIN`'s magnitude
+    /// (`9223372036854775808`) is out of range for an `i64` literal, so the
+    /// synthesized clamp expression would fail to parse. `i64::MIN` is the
+    /// only such value. See <https://github.com/stlab/cel-rs/issues/175>.
+    UnrepresentableClampBound {
+        /// The name of the cell whose clamp bound is `i64::MIN`.
+        cell_name: String,
+        /// The offending bound value (always `i64::MIN`).
+        bound: i64,
+    },
+}
+
+impl std::fmt::Display for ExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExportError::InvalidFormula {
+                group,
+                cell,
+                source,
+            } => write!(
+                f,
+                "invalid formula for cell {cell:?} in relationship group {group:?}: {source}"
+            ),
+            ExportError::InvalidCondition {
+                conditional,
+                source,
+            } => write!(
+                f,
+                "invalid condition expression in conditional group {conditional:?}: {source}"
+            ),
+            ExportError::UnsupportedMultiValueCondition { conditional } => write!(
+                f,
+                "conditional group {conditional:?} matches on more than one value per branch, which .adm2 cannot represent"
+            ),
+            ExportError::UnrepresentableBranchLiteral { conditional, value } => write!(
+                f,
+                "conditional group {conditional:?} has a branch keyed on {value}, which .adm2's branch grammar cannot represent"
+            ),
+            ExportError::NonFiniteClampBound { cell_name, bound } => write!(
+                f,
+                "cell `{cell_name}` has a non-finite f64 clamp bound ({bound}), which .adm2 cannot represent"
+            ),
+            ExportError::UnrepresentableClampBound { cell_name, bound } => write!(
+                f,
+                "cell `{cell_name}` has a clamp bound of {bound}, which .adm2's literal grammar cannot represent"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ExportError::InvalidFormula { source, .. }
+            | ExportError::InvalidCondition { source, .. } => Some(source),
+            ExportError::UnsupportedMultiValueCondition { .. }
+            | ExportError::UnrepresentableBranchLiteral { .. }
+            | ExportError::NonFiniteClampBound { .. }
+            | ExportError::UnrepresentableClampBound { .. } => None,
+        }
+    }
 }
 
 /// Returns `.adm2` source text for `doc`, by constructing an
@@ -62,7 +148,7 @@ pub enum ExportError {
 /// - Complexity: O(n) in the total number of cells, relationship groups,
 ///   and conditional-group branches.
 pub fn generate_adm2(doc: &Document) -> Result<String, ExportError> {
-    Ok(adam_lang::format_sheet(&build_sheet(doc)?))
+    Ok(adam_lang::format_sheet(&build_sheet(doc)?, ""))
 }
 
 /// Builds the `adam_lang::ast::Sheet` [`generate_adm2`] renders for `doc`.
@@ -84,7 +170,7 @@ fn build_sheet(doc: &Document) -> Result<Sheet, ExportError> {
     // writable cell, so `out <name> := <name>;` doesn't parse. Deferred to
     // future design work — see <https://github.com/stlab/cel-rs/issues/147>.
     for (_, cell) in doc.cells_in_order() {
-        items.push(SheetItem::Cell(ast_builder::build_cell_decl(cell)));
+        items.push(SheetItem::Cell(ast_builder::build_cell_decl(cell)?));
     }
 
     let owned = groups_owned_by_conditionals(doc);
@@ -204,7 +290,7 @@ mod tests {
         let out = generate_adm2(&doc).expect("valid document should export cleanly");
         assert_eq!(
             out,
-            "sheet demo {\n    cell width_pixels: i64 filter clamp: clamp(_, 0i64, 100i64);\n}\n"
+            "sheet demo {\n    cell width_pixels: i64 filter clamp(_, 0i64, 100i64);\n}\n"
         );
     }
 
@@ -224,7 +310,7 @@ mod tests {
         let out = generate_adm2(&doc).expect("valid document should export cleanly");
         assert_eq!(
             out,
-            "sheet demo {\n    cell width_pixels: i64 filter clamp: max(_, 0i64);\n}\n"
+            "sheet demo {\n    cell width_pixels: i64 filter max(_, 0i64);\n}\n"
         );
     }
 
@@ -244,7 +330,7 @@ mod tests {
         let out = generate_adm2(&doc).expect("valid document should export cleanly");
         assert_eq!(
             out,
-            "sheet demo {\n    cell width_pixels: f64 filter clamp: min(_, 100.0);\n}\n"
+            "sheet demo {\n    cell width_pixels: f64 filter min(_, 100.0);\n}\n"
         );
     }
 
@@ -363,5 +449,24 @@ mod tests {
 
         let result = generate_adm2(&doc);
         assert!(matches!(result, Err(ExportError::InvalidFormula { .. })));
+    }
+
+    #[test]
+    fn export_error_implements_display_and_error_source() {
+        use std::error::Error;
+
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let _ = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        // Formulas left empty, so export fails with `InvalidFormula`.
+        let err = generate_adm2(&doc).expect_err("empty formulas should fail export");
+
+        // `Display` is implemented (not just `Debug`), and the `InvalidFormula`
+        // variant chains to the underlying parse error via `Error::source`.
+        assert!(!err.to_string().is_empty());
+        assert!(err.source().is_some());
     }
 }

@@ -9,8 +9,295 @@
 use cel_runtime::DynSegment;
 use proc_macro2::Span;
 
+use crate::ExprSpan;
 use crate::ast::ClosureParam;
 use crate::op_table::OpLookup;
+use crate::type_expr::TypeExpr;
+
+/// Bundles the optional type-ascription inputs for array construction.
+///
+/// A [`ParserContext`] implementation receives one of these in
+/// [`ParserContext::make_annotated_array`] and decides how to consume it: an implementation that
+/// needs runtime array metadata immediately resolves it with
+/// [`resolve_element_type`](Self::resolve_element_type); one that defers semantic checking keeps
+/// the syntax with [`into_parts`](Self::into_parts).
+///
+/// # Examples
+///
+/// ```rust
+/// use cel_parser::{ExprSpan, TypeExpr};
+/// use cel_parser::parser_context::AnnotatedArray;
+/// use proc_macro2::Span;
+///
+/// fn ignore(_: &TypeExpr) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+///     unreachable!("this example only inspects stored syntax")
+/// }
+///
+/// let span = ExprSpan {
+///     start: Span::call_site(),
+///     end: Span::call_site(),
+/// };
+/// let mut resolve = ignore;
+/// let annotation = AnnotatedArray::new(
+///     &mut resolve,
+///     Some(TypeExpr::Array {
+///         element: Box::new(TypeExpr::Named {
+///             name: "i32".to_string(),
+///             args: Vec::new(),
+///             span,
+///         }),
+///         span,
+///     }),
+///     Some(span),
+/// );
+///
+/// assert!(matches!(annotation.type_annotation(), Some(TypeExpr::Array { .. })));
+/// assert!(annotation.annotation_span().is_some());
+/// ```
+pub struct AnnotatedArray<'a> {
+    resolve_array_type: &'a mut dyn FnMut(&TypeExpr) -> crate::Result<crate::ResolvedArrayType>,
+    type_annotation: Option<TypeExpr>,
+    annotation_span: Option<ExprSpan>,
+}
+
+impl<'a> AnnotatedArray<'a> {
+    /// Creates a bundle from the parsed array annotation inputs.
+    ///
+    /// `type_annotation` is the syntax written after `:` (or `None` for an unannotated literal),
+    /// `annotation_span` covers `: type_expr`, and `resolve_array_type` resolves the annotation
+    /// against the parser's configured type resolver on demand.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{ExprSpan, TypeExpr};
+    /// use cel_parser::parser_context::AnnotatedArray;
+    /// use proc_macro2::Span;
+    ///
+    /// fn ignore(_: &TypeExpr) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+    ///     unreachable!("this example only bundles parsed inputs")
+    /// }
+    ///
+    /// let span = ExprSpan {
+    ///     start: Span::call_site(),
+    ///     end: Span::call_site(),
+    /// };
+    /// let mut resolve = ignore;
+    /// let annotation = AnnotatedArray::new(
+    ///     &mut resolve,
+    ///     Some(TypeExpr::Array {
+    ///         element: Box::new(TypeExpr::Named {
+    ///             name: "i32".to_string(),
+    ///             args: Vec::new(),
+    ///             span,
+    ///         }),
+    ///         span,
+    ///     }),
+    ///     Some(span),
+    /// );
+    ///
+    /// assert!(annotation.annotation_span().is_some());
+    /// ```
+    pub fn new(
+        resolve_array_type: &'a mut dyn FnMut(&TypeExpr) -> crate::Result<crate::ResolvedArrayType>,
+        type_annotation: Option<TypeExpr>,
+        annotation_span: Option<ExprSpan>,
+    ) -> Self {
+        Self {
+            resolve_array_type,
+            type_annotation,
+            annotation_span,
+        }
+    }
+
+    /// Returns the unresolved annotation syntax, or `None` for an unannotated array literal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{ExprSpan, TypeExpr};
+    /// use cel_parser::parser_context::AnnotatedArray;
+    /// use proc_macro2::Span;
+    ///
+    /// fn ignore(_: &TypeExpr) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+    ///     unreachable!("this example only reads the stored annotation")
+    /// }
+    ///
+    /// let span = ExprSpan {
+    ///     start: Span::call_site(),
+    ///     end: Span::call_site(),
+    /// };
+    /// let mut resolve = ignore;
+    /// let annotation = AnnotatedArray::new(
+    ///     &mut resolve,
+    ///     Some(TypeExpr::Array {
+    ///         element: Box::new(TypeExpr::Named {
+    ///             name: "i32".to_string(),
+    ///             args: Vec::new(),
+    ///             span,
+    ///         }),
+    ///         span,
+    ///     }),
+    ///     Some(span),
+    /// );
+    ///
+    /// match annotation.type_annotation() {
+    ///     Some(TypeExpr::Array { element, .. }) => assert!(matches!(
+    ///         element.as_ref(),
+    ///         TypeExpr::Named { name, .. } if name == "i32"
+    ///     )),
+    ///     other => panic!("expected [i32], got {other:?}"),
+    /// }
+    /// ```
+    #[must_use]
+    pub fn type_annotation(&self) -> Option<&TypeExpr> {
+        self.type_annotation.as_ref()
+    }
+
+    /// Returns the span covering `: type_expr`, or `None` for an unannotated array literal.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::ExprSpan;
+    /// use cel_parser::parser_context::AnnotatedArray;
+    /// use proc_macro2::Span;
+    ///
+    /// fn ignore(_: &cel_parser::TypeExpr) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+    ///     unreachable!("this example only reads the stored span")
+    /// }
+    ///
+    /// fn ignore_none(
+    ///     _: &cel_parser::TypeExpr,
+    /// ) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+    ///     unreachable!("this example only checks the None case")
+    /// }
+    ///
+    /// let span = ExprSpan {
+    ///     start: Span::call_site(),
+    ///     end: Span::call_site(),
+    /// };
+    /// let mut resolve = ignore;
+    /// let annotation = AnnotatedArray::new(
+    ///     &mut resolve,
+    ///     None,
+    ///     Some(span),
+    /// );
+    ///
+    /// assert!(annotation.annotation_span().is_some());
+    /// let mut without_span = ignore_none;
+    /// assert!(
+    ///     AnnotatedArray::new(&mut without_span, None, None)
+    ///         .annotation_span()
+    ///         .is_none()
+    /// );
+    /// ```
+    #[must_use]
+    pub fn annotation_span(&self) -> Option<ExprSpan> {
+        self.annotation_span
+    }
+
+    /// Resolves the declared array element metadata when a type ascription is present.
+    ///
+    /// - Postcondition: returns `Ok(None)` exactly when
+    ///   [`type_annotation`](Self::type_annotation) is `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the annotation names an unknown type, does not name a complete array
+    /// type, or names tuple-valued array elements.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{ExprSpan, ResolvedArrayType, TypeExpr};
+    /// use cel_parser::parser_context::AnnotatedArray;
+    /// use cel_runtime::ArrayElementType;
+    /// use proc_macro2::Span;
+    ///
+    /// fn resolve_i32(_: &TypeExpr) -> cel_parser::Result<ResolvedArrayType> {
+    ///     Ok(ResolvedArrayType::from_element_type(
+    ///         ArrayElementType::leaf::<i32>().unwrap(),
+    ///     ))
+    /// }
+    ///
+    /// let span = ExprSpan {
+    ///     start: Span::call_site(),
+    ///     end: Span::call_site(),
+    /// };
+    /// let mut resolve = resolve_i32;
+    /// let mut annotation = AnnotatedArray::new(
+    ///     &mut resolve,
+    ///     Some(TypeExpr::Array {
+    ///         element: Box::new(TypeExpr::Named {
+    ///             name: "i32".to_string(),
+    ///             args: Vec::new(),
+    ///             span,
+    ///         }),
+    ///         span,
+    ///     }),
+    ///     Some(span),
+    /// );
+    ///
+    /// let element_type = annotation.resolve_element_type().unwrap().unwrap();
+    /// assert_eq!(element_type.type_name(), "i32");
+    /// ```
+    pub fn resolve_element_type(&mut self) -> crate::Result<Option<cel_runtime::ArrayElementType>> {
+        self.type_annotation
+            .as_ref()
+            .map(|type_annotation| {
+                (self.resolve_array_type)(type_annotation)
+                    .map(|resolved| resolved.into_element_type())
+            })
+            .transpose()
+    }
+
+    /// Returns the parsed syntax-level annotation inputs unchanged.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{ExprSpan, TypeExpr};
+    /// use cel_parser::parser_context::AnnotatedArray;
+    /// use proc_macro2::Span;
+    ///
+    /// fn ignore(_: &TypeExpr) -> cel_parser::Result<cel_parser::ResolvedArrayType> {
+    ///     unreachable!("this example only unpacks stored parts")
+    /// }
+    ///
+    /// let span = ExprSpan {
+    ///     start: Span::call_site(),
+    ///     end: Span::call_site(),
+    /// };
+    /// let mut resolve = ignore;
+    /// let annotation = AnnotatedArray::new(
+    ///     &mut resolve,
+    ///     Some(TypeExpr::Array {
+    ///         element: Box::new(TypeExpr::Named {
+    ///             name: "i32".to_string(),
+    ///             args: Vec::new(),
+    ///             span,
+    ///         }),
+    ///         span,
+    ///     }),
+    ///     Some(span),
+    /// );
+    ///
+    /// let (type_annotation, annotation_span) = annotation.into_parts();
+    /// assert!(annotation_span.is_some());
+    /// match type_annotation {
+    ///     Some(TypeExpr::Array { element, .. }) => assert!(matches!(
+    ///         element.as_ref(),
+    ///         TypeExpr::Named { name, .. } if name == "i32"
+    ///     )),
+    ///     other => panic!("expected [i32], got {other:?}"),
+    /// }
+    /// ```
+    #[must_use]
+    pub fn into_parts(self) -> (Option<TypeExpr>, Option<ExprSpan>) {
+        (self.type_annotation, self.annotation_span)
+    }
+}
 
 /// The pluggable target a grammar production emits into.
 ///
@@ -89,6 +376,57 @@ pub trait ParserContext: Sized {
     /// Combines the last `n` emitted values into a single tuple value. `start`/`end` cover the
     /// whole `(...)` construct.
     fn make_tuple(&mut self, n: usize, ambient_start: usize, start: Span, end: Span);
+
+    /// Combines the last `n` emitted values into a single homogeneous array value. `start`/`end`
+    /// cover the whole `[...]` construct, and `ambient_start` is the stack offset the first
+    /// element was emitted at (as reported by [`Self::current_stack_offset`] before parsing it).
+    ///
+    /// - Precondition: `n >= 1` and exactly `n` values have been emitted since `ambient_start`.
+    ///
+    /// # Errors
+    ///
+    /// Implementations that validate operand types during parsing (e.g. [`DynSegmentContext`])
+    /// return `Err` if the elements' complete recursive runtime shapes differ, if any element is
+    /// a CEL tuple (see <https://github.com/stlab/cel-rs/issues/213>), or if the array's storage
+    /// layout cannot be represented. Implementations that defer type validation to a later phase
+    /// (e.g. [`crate::ast::AstContext`]) never return `Err` here.
+    fn make_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()>;
+
+    /// Combines the last `n` emitted values into a single array value, honoring `annotation`'s
+    /// optional type ascription.
+    ///
+    /// This is the method the grammar actually calls for every array literal; [`Self::make_array`]
+    /// is the unannotated special case an implementation may delegate to. There is deliberately
+    /// no default implementation: an annotation changes what the literal means (`[]: [Celsius]`
+    /// is an empty array *of a specific type*), so an implementation that silently dropped it
+    /// would misreport the literal's type rather than fail to compile.
+    ///
+    /// An implementation that needs runtime array metadata immediately (e.g.
+    /// [`DynSegmentContext`]) calls [`AnnotatedArray::resolve_element_type`]; one that defers
+    /// semantic checking (e.g. [`crate::ast::AstContext`]) records the syntax returned by
+    /// [`AnnotatedArray::into_parts`].
+    ///
+    /// - Precondition: exactly `n` values have been emitted since `ambient_start`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` under [`Self::make_array`]'s conditions, and additionally — for an
+    /// implementation that resolves the annotation here — if the annotation names an unknown
+    /// type, does not name a complete array type, or disagrees with the collected elements.
+    fn make_annotated_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        annotation: AnnotatedArray<'_>,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()>;
 
     /// Returns the arity of the tuple currently on top, or `None` if the top value isn't a
     /// tuple.
@@ -276,6 +614,38 @@ impl ParserContext for DynSegmentContext {
         self.0.make_tuple(n, ambient_start);
     }
 
+    fn make_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        self.0
+            .make_array(n, ambient_start)
+            // The error spans the whole `[...]` literal: `DynSegment::make_array` names the
+            // offending element's index only in its message text, with no structured index to map
+            // back to that element's own span (see https://github.com/stlab/cel-rs/issues/215).
+            .map_err(|e| crate::ParseError::new_range(e.to_string(), start, end))
+    }
+
+    fn make_annotated_array(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        mut annotation: AnnotatedArray<'_>,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        match annotation.resolve_element_type()? {
+            Some(element_type) => self
+                .0
+                .make_typed_array(n, ambient_start, element_type)
+                .map_err(|e| crate::ParseError::new_range(e.to_string(), start, end)),
+            None => self.make_array(n, ambient_start, start, end),
+        }
+    }
+
     fn peek_tuple_arity(&self) -> Option<usize> {
         self.0.peek_tuple_arity()
     }
@@ -363,6 +733,157 @@ mod tests {
         assert!(err.message().starts_with("no operation"));
     }
 
+    /// Renders a type expression as its source-level text, for recording in assertions.
+    fn render(type_expr: &TypeExpr) -> String {
+        match type_expr {
+            TypeExpr::Named { name, .. } => name.clone(),
+            TypeExpr::Array { element, .. } => format!("[{}]", render(element)),
+            TypeExpr::Tuple { elements, .. } => format!(
+                "({})",
+                elements.iter().map(render).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+
+    /// Stands in for an out-of-tree [`ParserContext`] implementation: it records only what array
+    /// construction hands it, so a dropped annotation would be observable.
+    #[derive(Default)]
+    struct RecordingContext {
+        values: usize,
+        arrays: Vec<(usize, Option<String>)>,
+    }
+
+    impl ParserContext for RecordingContext {
+        fn new_context() -> Self {
+            Self::default()
+        }
+
+        fn new_fragment(&self) -> Self {
+            Self::default()
+        }
+
+        fn push_literal<T: 'static + Clone>(&mut self, _value: T, _span: Span) {
+            self.values += 1;
+        }
+
+        fn apply_op(
+            &mut self,
+            _op_lookup: &OpLookup,
+            _name: &str,
+            _arity: usize,
+            _start: Span,
+            _end: Span,
+        ) -> crate::Result<()> {
+            unimplemented!("RecordingContext only records array construction")
+        }
+
+        fn apply_logical(
+            &mut self,
+            _name: &str,
+            _rhs: Self,
+            _start: Span,
+            _end: Span,
+        ) -> crate::Result<()> {
+            unimplemented!("RecordingContext only records array construction")
+        }
+
+        fn join2(
+            &mut self,
+            _then_fragment: Self,
+            _else_fragment: Option<Self>,
+            _start: Span,
+            _end: Span,
+        ) -> anyhow::Result<()> {
+            unimplemented!("RecordingContext only records array construction")
+        }
+
+        fn make_tuple(&mut self, _n: usize, _ambient_start: usize, _start: Span, _end: Span) {
+            unimplemented!("RecordingContext only records array construction")
+        }
+
+        fn make_array(
+            &mut self,
+            n: usize,
+            ambient_start: usize,
+            _start: Span,
+            _end: Span,
+        ) -> crate::Result<()> {
+            self.values = ambient_start;
+            self.arrays.push((n, None));
+            self.values += 1;
+            Ok(())
+        }
+
+        fn make_annotated_array(
+            &mut self,
+            n: usize,
+            ambient_start: usize,
+            annotation: AnnotatedArray<'_>,
+            start: Span,
+            end: Span,
+        ) -> crate::Result<()> {
+            let (type_annotation, _span) = annotation.into_parts();
+            let Some(type_annotation) = type_annotation else {
+                return self.make_array(n, ambient_start, start, end);
+            };
+            self.values = ambient_start;
+            self.arrays.push((n, Some(render(&type_annotation))));
+            self.values += 1;
+            Ok(())
+        }
+
+        fn peek_tuple_arity(&self) -> Option<usize> {
+            None
+        }
+
+        fn tuple_index(&mut self, _index: usize, _start: Span, _end: Span) {
+            unimplemented!("RecordingContext only records array construction")
+        }
+
+        fn current_stack_offset(&self) -> usize {
+            self.values
+        }
+
+        fn apply_cast(
+            &mut self,
+            _op_lookup: &OpLookup,
+            _type_name: &str,
+            _start: Span,
+            _end: Span,
+        ) -> crate::Result<()> {
+            unimplemented!("RecordingContext only records array construction")
+        }
+    }
+
+    /// The grammar hands every array annotation to the context, and a context that keeps it sees
+    /// the complete declared type — including for the nested literal inside an annotated one.
+    #[test]
+    fn the_grammar_delivers_array_annotations_to_any_parser_context() {
+        let mut parser = crate::Parser::<RecordingContext>::new(OpLookup::new());
+        let ctx = parser
+            .parse_str_ctx("[[]: [i32]]: [[i32]]")
+            .expect("annotated nested array literal parses");
+
+        assert_eq!(
+            ctx.arrays,
+            vec![
+                (0, Some("[i32]".to_string())),
+                (1, Some("[[i32]]".to_string()))
+            ]
+        );
+    }
+
+    /// An unannotated literal still reaches the same method, with no annotation to record.
+    #[test]
+    fn the_grammar_reports_no_annotation_for_an_unannotated_array() {
+        let mut parser = crate::Parser::<RecordingContext>::new(OpLookup::new());
+        let ctx = parser
+            .parse_str_ctx("[1i32, 2i32]")
+            .expect("unannotated array literal parses");
+
+        assert_eq!(ctx.arrays, vec![(2, None)]);
+    }
+
     #[test]
     fn make_tuple_and_tuple_index_roundtrip() {
         let mut ctx = DynSegmentContext::new_context();
@@ -373,6 +894,97 @@ mod tests {
         assert_eq!(ctx.peek_tuple_arity(), Some(2));
         ctx.tuple_index(1, Span::call_site(), Span::call_site());
         assert_eq!(ctx.into_inner().call0::<i32>().unwrap(), 2);
+    }
+
+    #[test]
+    fn make_array_collects_homogeneous_values_into_one_array() {
+        let mut ctx = DynSegmentContext::new_context();
+        let ambient_start = ctx.current_stack_offset();
+        ctx.push_literal(1i32, Span::call_site());
+        ctx.push_literal(2i32, Span::call_site());
+        ctx.make_array(2, ambient_start, Span::call_site(), Span::call_site())
+            .unwrap();
+        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
+        assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn make_array_reports_a_mismatched_element_as_a_parse_error() {
+        let mut ctx = DynSegmentContext::new_context();
+        let ambient_start = ctx.current_stack_offset();
+        ctx.push_literal(1i32, Span::call_site());
+        ctx.push_literal(2.0f64, Span::call_site());
+        let err = ctx
+            .make_array(2, ambient_start, Span::call_site(), Span::call_site())
+            .expect_err("array elements must share one type");
+        assert!(
+            err.message().contains("array element 1"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn make_annotated_array_with_none_preserves_unannotated_array_inference() {
+        let mut ctx = DynSegmentContext::new_context();
+        let ambient_start = ctx.current_stack_offset();
+        ctx.push_literal(1i32, Span::call_site());
+        ctx.push_literal(2i32, Span::call_site());
+        ctx.make_annotated_array(
+            2,
+            ambient_start,
+            AnnotatedArray::new(
+                &mut |_| unreachable!("unannotated arrays do not resolve a declared type"),
+                None,
+                None,
+            ),
+            Span::call_site(),
+            Span::call_site(),
+        )
+        .unwrap();
+        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
+        assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn make_annotated_array_with_a_resolved_descriptor_collects_a_typed_empty_array() {
+        let mut ctx = DynSegmentContext::new_context();
+        let ambient_start = ctx.current_stack_offset();
+        let annotation = TypeExpr::Array {
+            element: Box::new(TypeExpr::Named {
+                name: "i32".to_string(),
+                args: Vec::new(),
+                span: ExprSpan {
+                    start: Span::call_site(),
+                    end: Span::call_site(),
+                },
+            }),
+            span: ExprSpan {
+                start: Span::call_site(),
+                end: Span::call_site(),
+            },
+        };
+        ctx.make_annotated_array(
+            0,
+            ambient_start,
+            AnnotatedArray::new(
+                &mut |_| {
+                    Ok(crate::ResolvedArrayType::from_element_type(
+                        cel_runtime::ArrayElementType::leaf::<i32>().unwrap(),
+                    ))
+                },
+                Some(annotation),
+                Some(ExprSpan {
+                    start: Span::call_site(),
+                    end: Span::call_site(),
+                }),
+            ),
+            Span::call_site(),
+            Span::call_site(),
+        )
+        .unwrap();
+        let array: cel_runtime::DynamicArray = ctx.into_inner().call0().unwrap();
+        assert!(array.try_into_vec::<i32>().unwrap().is_empty());
     }
 
     #[test]

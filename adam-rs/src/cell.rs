@@ -44,7 +44,10 @@ pub(crate) struct CellData {
     pub(crate) type_id: TypeId,
     /// Write-recency strength. High-order bit (bit 63) is set for cells that have been
     /// written or created via `add_cell`. Derived cells (outputs of selected methods)
-    /// receive strengths with bit 63 clear, assigned during the post-processing pass.
+    /// receive strengths with bit 63 clear, assigned during the post-processing pass --
+    /// except a cell claimed *self-referencingly*, whose own written value is still the
+    /// authority behind the result and so keeps its explicit strength (see
+    /// `Sheet::post_process_strengths`).
     pub(crate) strength: u64,
     /// Set during `Sheet::propagate`; cleared by `Sheet::clear_changed`.
     pub(crate) changed: bool,
@@ -66,6 +69,12 @@ impl CellData {
     /// Returns the effective current value: `derived` if present, else `source`.
     pub(crate) fn effective(&self) -> &dyn Any {
         self.derived.as_deref().unwrap_or(self.source.as_ref())
+    }
+
+    /// Returns whether `strength` reflects a live explicit `write()`/`add_cell` (bit 63
+    /// set) rather than a strength assigned by the post-round derived-strength pass.
+    pub(crate) fn has_explicit_strength(&self) -> bool {
+        self.strength & (1u64 << 63) != 0
     }
 }
 

@@ -1,5 +1,9 @@
 # ez-adam Codegen Revision: Shared AST/Formatter Implementation Plan
 
+> **Status (implemented, with one superseded task):** The shared-AST/`format_sheet` codegen landed in PR #150. **Task 2 (`adam-lang`: `MatchLiteral`) and its dependent `adam-lang` AST-parser/formatter changes were superseded** — `ez-adam` emits multi-cell `Cells`-mode conditionals as conjunction-based decomposition (`build_decomposed_multi_cell_conditionals`) instead of a tuple `MatchLiteral` branch key, so no `MatchLiteral` enum was added to `adam-lang`. Full tuple-branch-key support in `adam-lang` is tracked as [#173](https://github.com/stlab/cel-rs/issues/173). Read the `MatchLiteral` tasks/architecture below as historical planning context, not the shipped approach.
+
+---
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace `ez-adam`'s hand-rolled `.adm2` string generation with construction of `adam_lang::ast::Sheet` plus the existing, shared `format_sheet` — closing the "two independent serialization paths" gap — and extend `adam-lang`'s AST to support tuple conditional-branch keys, which the direct parser already accepts but the AST-only side cannot represent.

@@ -9,20 +9,32 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  MDBOOK_VERSION: 0.5.4
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
+
+    - name: Install Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: 22.12.0
+
+    - name: Run begin JavaScript tests
+      working-directory: begin
+      run: |
+        npm ci
+        npm test
     
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
+      run: |
+        rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+        rustup default stable
     
     - name: Cache dependencies
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
 
     - name: Check formatting
       run: cargo fmt --check
@@ -48,9 +60,7 @@ jobs:
       run: cargo doc --workspace --exclude begin --no-deps --lib
 
     - name: Install mdBook
-      uses: peaceiris/actions-mdbook@v2
-      with:
-        mdbook-version: 'latest'
+      run: cargo install mdbook --version "$MDBOOK_VERSION" --locked
 
     - name: Install the live-examples mdBook preprocessor
       run: cargo install --path adam-lang-book-preprocessor
@@ -70,11 +80,17 @@ jobs:
     - name: Build the adam-lang book
       run: mdbook build adam-lang-book
 
+    - name: Build the CEL language book
+      run: mdbook build cel-lang-book
+
     - name: Check begin app (renderer-agnostic)
       run: cargo check -p begin --no-default-features
 
     - name: Run tests for workspace (excluding begin app)
       run: cargo test --workspace --exclude begin --verbose -- --nocapture
+
+    - name: Run tests for begin app (renderer-agnostic)
+      run: cargo test -p begin --no-default-features --verbose -- --nocapture
 
     - name: Clippy workspace (excluding begin app)
       run: cargo clippy --workspace --exclude begin --all-targets -- -D warnings

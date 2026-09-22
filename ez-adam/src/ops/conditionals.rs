@@ -15,6 +15,10 @@ use crate::model::relationship_group::RelationshipGroupId;
 /// default) starts with no enabled groups.
 ///
 /// - Precondition: `cells` is non-empty.
+/// - Precondition: `cells.len() < usize::BITS`, so `1 << cells.len()` (the
+///   branch count) neither overflows nor wraps. In practice `cells.len()`
+///   must be far smaller, since the branch count grows as `2^cells.len()`.
+/// - Precondition: every cell in `cells` is a valid key in `doc.cells`.
 /// - Precondition: every cell in `cells` has [`CellType::Bool`].
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
 /// - Postcondition: the returned group has exactly `2.pow(cells.len())`
@@ -29,6 +33,14 @@ pub fn add_conditional_from_bool_cells(
     position: Point,
 ) -> ConditionalGroupId {
     debug_assert!(!cells.is_empty(), "cells must be non-empty");
+    debug_assert!(
+        cells.len() < usize::BITS as usize,
+        "cells.len() must be shift-safe for 1 << cells.len()"
+    );
+    debug_assert!(
+        cells.iter().all(|c| doc.cells.contains_key(*c)),
+        "every condition cell must be a valid key"
+    );
     debug_assert!(
         cells
             .iter()
@@ -71,6 +83,9 @@ pub fn add_conditional_from_bool_cells(
 /// Creates a new conditional group whose condition is a user-authored CEL
 /// formula over `referenced_cells`, with no branches yet (added via
 /// [`add_branch`]) and an empty default.
+///
+/// - Precondition: every cell in `referenced_cells` is a valid key in
+///   `doc.cells`.
 #[must_use]
 pub fn add_conditional_with_formula(
     doc: &mut Document,
@@ -78,6 +93,10 @@ pub fn add_conditional_with_formula(
     expr: impl Into<String>,
     position: Point,
 ) -> ConditionalGroupId {
+    debug_assert!(
+        referenced_cells.iter().all(|c| doc.cells.contains_key(*c)),
+        "every referenced cell must be a valid key"
+    );
     let display_name = format!("c{}", doc.conditional_group_order.len() + 1);
     let id = doc.conditional_groups.insert(ConditionalGroup {
         display_name,
@@ -107,6 +126,10 @@ pub fn add_branch(
     conditional: ConditionalGroupId,
     values: Vec<CellValueLiteral>,
 ) -> usize {
+    debug_assert!(
+        doc.conditional_groups.contains_key(conditional),
+        "conditional is not a valid key"
+    );
     let group = &mut doc.conditional_groups[conditional];
     let arity = match &group.condition {
         ConditionExpr::Cells(cells) => cells.len(),
@@ -155,12 +178,28 @@ pub fn set_condition_formula(
 ///
 /// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
 /// - Precondition: `branch_index < conditional.branches.len()`.
+/// - Precondition: `group` is a valid key in `doc.relationship_groups`.
+///
+/// - Complexity: O(n) in the branch's `enabled_groups` length (it scans for
+///   `group` to toggle it).
 pub fn toggle_enabled_group(
     doc: &mut Document,
     conditional: ConditionalGroupId,
     branch_index: usize,
     group: RelationshipGroupId,
 ) {
+    debug_assert!(
+        doc.conditional_groups.contains_key(conditional),
+        "conditional is not a valid key"
+    );
+    debug_assert!(
+        branch_index < doc.conditional_groups[conditional].branches.len(),
+        "branch_index is out of bounds"
+    );
+    debug_assert!(
+        doc.relationship_groups.contains_key(group),
+        "group is not a valid key"
+    );
     let branch = &mut doc.conditional_groups[conditional].branches[branch_index];
     if let Some(pos) = branch.enabled_groups.iter().position(|g| *g == group) {
         branch.enabled_groups.remove(pos);
@@ -278,7 +317,8 @@ mod tests {
 mod formula_tests {
     use super::*;
     use crate::model::geometry::Point;
-    use crate::ops::cells::add_cell;
+    use crate::ops::cells::{add_cell, add_cell_node};
+    use crate::ops::relationships::create_relationship;
 
     #[test]
     fn add_conditional_with_formula_starts_with_no_branches() {
@@ -355,8 +395,13 @@ mod formula_tests {
         );
         add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(true)]);
 
-        let mut groups: slotmap::SlotMap<RelationshipGroupId, ()> = slotmap::SlotMap::with_key();
-        let group = groups.insert(());
+        // A real relationship group in `doc`, so `group` is a valid key (the
+        // op's precondition), rather than a dangling id from an unrelated map.
+        let a = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let b = add_cell(&mut doc, "height_pixels", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
 
         toggle_enabled_group(&mut doc, cond, 0, group);
         assert_eq!(

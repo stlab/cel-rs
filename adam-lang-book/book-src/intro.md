@@ -23,22 +23,23 @@ much like a spreadsheet holds named, typed values. A `relationship` plays the ro
 spreadsheet's equation cell, but unlike a spreadsheet formula, which computes in one direction
 only, a relationship is multi-way: `a == b` means that changing `a` updates `b` to match, and
 changing `b` updates `a` to match. Which cell is the source and which is derived is decided
-each time the sheet is solved, not fixed by the declaration.
+based on the cell strength. Typically, cells modified most recently have greater strength.
 
 ## About this book
 
 This book has three parts: a tutorial introduction you can read start to finish, chapters that
 go back over the same ground in more detail, and a terse reference manual for looking things up.
-Every Adam source fragment shown in a fenced `text` block is exactly what you'd type into a
-`.adm2` file; every fenced `rust` block shows Adam driven through its host embedding API.
+Every Adam source fragment shown in a fenced `adam` block is exactly what you'd type into a
+`.adm2` file; a fenced `text` block instead shows grammar notation (EBNF), not Adam source
+itself.
 
 ## Expressions and the standard library
 
 Adam adds a declarative shell (`sheet`, `cell`, `source`, `relationship`, `conditional`, `out`,
 `require`, and `filter`) around expressions written in the
-[Common Expression Language](https://github.com/google/cel-spec) (CEL), turning a set of CEL
-expressions into a live, bidirectional constraint graph. See
-[`cel-parser`'s crate documentation](../cel_parser/index.html) for CEL's own grammar, operators,
+[Common Expression Language](../cel-book/index.html) (CEL), turning a set of CEL
+expressions into a live, bidirectional constraint graph. See the
+[CEL language book](../cel-book/index.html) for CEL's own grammar, operators,
 literals, casts, and control-flow expressions.
 
 Functions callable from inside an expression, such as `min`, `max`, `clamp`, and `round`, come

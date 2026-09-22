@@ -34,7 +34,14 @@ pub fn create_relationship(
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
 /// - Precondition: `node` is a valid key in `doc.cell_nodes`.
 /// - Precondition: `node` is not already a member of `group`.
+///
+/// - Complexity: O(n) in `group`'s member count (it scans to reject a
+///   duplicate `node`).
 pub fn add_member(doc: &mut Document, group: RelationshipGroupId, node: CellNodeId) {
+    debug_assert!(
+        doc.relationship_groups.contains_key(group),
+        "group is not a valid key"
+    );
     debug_assert!(doc.cell_nodes.contains_key(node), "node is not a valid key");
     let g = &mut doc.relationship_groups[group];
     debug_assert!(
@@ -48,12 +55,18 @@ pub fn add_member(doc: &mut Document, group: RelationshipGroupId, node: CellNode
 ///
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
 /// - Precondition: `node` is a member of `group`.
+///
+/// - Complexity: O(n) in `group`'s member count (linear search for `node`).
 pub fn set_member_formula(
     doc: &mut Document,
     group: RelationshipGroupId,
     node: CellNodeId,
     formula: impl Into<String>,
 ) {
+    debug_assert!(
+        doc.relationship_groups.contains_key(group),
+        "group is not a valid key"
+    );
     let g = &mut doc.relationship_groups[group];
     let entry = g.members.iter_mut().find(|(n, _)| *n == node);
     debug_assert!(entry.is_some(), "node is not a member of group");
@@ -69,6 +82,8 @@ pub fn set_member_formula(
 /// copies of the cells themselves.
 ///
 /// - Precondition: `group` is a valid key in `doc.relationship_groups`.
+/// - Precondition: every member node of `group` is a valid key in
+///   `doc.cell_nodes`.
 /// - Postcondition: the returned group has the same number of members as
 ///   `group`, each bound to a fresh node over the same cell, with empty
 ///   formula text.
@@ -80,11 +95,19 @@ pub fn duplicate_relationship_group(
     group: RelationshipGroupId,
     offset: Point,
 ) -> RelationshipGroupId {
+    debug_assert!(
+        doc.relationship_groups.contains_key(group),
+        "group is not a valid key"
+    );
     let source_members = doc.relationship_groups[group].members.clone();
     let source_position = doc.relationship_groups[group].position;
 
     let mut new_members = Vec::with_capacity(source_members.len());
     for (node, _formula) in &source_members {
+        debug_assert!(
+            doc.cell_nodes.contains_key(*node),
+            "member node is not a valid key"
+        );
         let CellNode { cell, position } = doc.cell_nodes[*node];
         let new_position = Point::new(position.x + offset.x, position.y + offset.y);
         let new_node = doc.cell_nodes.insert(CellNode::new(cell, new_position));

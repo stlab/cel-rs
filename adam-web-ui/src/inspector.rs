@@ -1,5 +1,6 @@
 //! [`SheetInspector`] — a live, editable list of a sheet's cells with a write form.
 
+use adam_lang::ParsedSheet;
 use adam_rs::{CellId, FilterViolation, Sheet};
 use dioxus::prelude::*;
 
@@ -136,6 +137,38 @@ fn format_filter_violation(label: &str, violation: &FilterViolation) -> String {
     }
 }
 
+/// Returns the message to show as a range-filtered cell's own invalid indicator.
+///
+/// `sp-slider` (unlike `SpNumberfield`/`SpCheckbox`/`SpTextfield`) has no `invalid` visual
+/// state of its own (see `SpSlider`'s doc comment), so this sibling `SpHelpText` is the only
+/// way a slider-rendered cell can surface a violation — every other control instead relies on
+/// its own `invalid` prop and only adds this same text as a supplementary detail.
+///
+/// Prefers, in order: a currently-violated `require` name attached to `id` (only possible when
+/// `id` is an out cell), then `id`'s own currently-violated filter, then a generic fallback
+/// naming `label` when `id` is flagged invalid for some other reason (e.g. it merely
+/// contributes to another cell's violated filter or requirement).
+///
+/// - Postcondition: `None` when `id` is in none of `status.invalid_outputs`,
+///   `status.invalid_contributors`, and has no currently-violated filter (`Sheet::filter_violation`).
+fn slider_invalid_message(
+    id: CellId,
+    label: &str,
+    sheet: &Sheet,
+    status: &OutputStatus,
+) -> Option<String> {
+    if let Some(names) = status.invalid_output_requirement_names.get(&id) {
+        return Some(names.clone());
+    }
+    if let Some(violation) = sheet.filter_violation(id) {
+        return Some(format_filter_violation(label, violation));
+    }
+    if status.invalid_outputs.contains(&id) || status.invalid_contributors.contains(&id) {
+        return Some(format!("`{label}` is invalid"));
+    }
+    None
+}
+
 /// A cell's Inspector display flags, derived from its own forced/error state and the
 /// sheet-wide out-cell status.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -164,55 +197,6 @@ fn cell_flags(id: CellId, forced: bool, has_error: bool, status: &OutputStatus) 
     }
 }
 
-/// Returns `true` if writing `id` can invalidate more than just the cached plan's
-/// execution order, so a full `Sheet::propagate()` is required instead of the cheaper
-/// `Sheet::propagate_without_replan()`.
-///
-/// This holds for a conditional's match cell (writing it can switch the active branch,
-/// which `propagate_without_replan` never re-evaluates) and for any cell that can move
-/// an output requirement's own true/false result (`propagate_without_replan` does not
-/// re-evaluate output requirements at all, per its own documented contract — so
-/// `cell_requirements_valid`/`requirement_violation_cells` would otherwise go stale after
-/// such a write): either a cell a requirement's own expression names directly (transitively,
-/// via `Sheet::requirement_contributing_cells`), or — since a requirement commonly reads
-/// its own output's value by name alongside whatever else it needs (outputs.md §7.3) —
-/// any cell contributing to that requirement's output's own value, even when the
-/// requirement's expression never names that cell directly.
-///
-/// This also holds for a cell referenced as another cell's filter argument
-/// ([`adam_rs::Sheet::filter_dependents`]): a source-cell filter reclamp is folded into
-/// the planner's own dependency graph (see the adam-rs planner) and is only revalidated
-/// by a full `Sheet::propagate()`'s own diagnostic phase, not by
-/// `propagate_without_replan`.
-///
-/// - Complexity: O(number of conditionals + sum of `contributing_cells`/
-///   `requirement_contributing_cells` cost over every output requirement + number of
-///   filter dependents of `id`).
-fn cell_needs_full_propagate(sheet: &Sheet, id: CellId) -> bool {
-    let is_match_cell = sheet.conditionals().any(|cid| {
-        sheet
-            .conditional_match_cells(cid)
-            .is_some_and(|c| c.contains(&id))
-    });
-    // `oid` is now the out cell's own `CellId` directly (see `compute_output_status`'s
-    // comment) — the old `Sheet::output_cell(oid)` lookup collapses to `oid` itself.
-    let feeds_requirement = sheet.out_cells().any(|oid| {
-        let Some(requirements) = sheet.cell_requirements(oid) else {
-            return false;
-        };
-        if requirements.is_empty() {
-            return false;
-        }
-        let feeds_the_outputs_own_value = sheet.contributing_cells(oid).contains(&id);
-        let feeds_a_requirement_directly = requirements
-            .iter()
-            .any(|&rid| sheet.requirement_contributing_cells(rid).contains(&id));
-        feeds_the_outputs_own_value || feeds_a_requirement_directly
-    });
-    let feeds_a_filter = !sheet.filter_dependents(id).is_empty();
-    is_match_cell || feeds_requirement || feeds_a_filter
-}
-
 /// Returns the toggled value ("true"/"false") for a bool cell currently displaying `current`.
 fn toggled_bool_value(current: &str) -> &'static str {
     if current == "true" { "false" } else { "true" }
@@ -239,35 +223,26 @@ fn dom_id_namespace(source_name: &str) -> u64 {
     hasher.finish()
 }
 
-/// Returns the `min`/`max` bounds to pass to a cell's [`SpNumberfield`]: `range`'s bounds,
-/// widened if necessary so `current` (the field's own displayed text) always falls within them.
+/// Returns the `min`/`max` bounds to pass to a range-filtered numeric cell's [`SpSlider`]:
+/// `range`'s bounds, widened if necessary so `current` (the field's own displayed text) always
+/// falls within them.
 ///
-/// `sp-number-field` clamps its displayed value to fit whatever `min`/`max` it's given — not
-/// just in response to user input, but on *any* update to `min`, `max`, or `value` where the
-/// three momentarily disagree — and, worse, resets its displayed value to `0` rather than
-/// restoring the true value if `min`/`max` are later removed entirely rather than merely
-/// changed. A range filter's live bounds (`range`, recomputed from the filter's *current*
-/// argument values) can transiently exclude a cell's actual stored value: the filter only
-/// re-clamps a cell at the moment that cell itself is written, so changing another cell its
-/// bounds depend on (e.g. a shared `max` cell) does not retroactively pull this cell back in
-/// range. Widening `range` to always include `current` guarantees the three never disagree, so
-/// the widget never mis-clamps or resets — at the cost of its stepper arrows not disabling
-/// exactly at the filter's true limit while a cell sits outside it, until the cell's own next
-/// write brings it back in range and the true bounds resume being enforced.
-///
-/// - Postcondition: returns `(None, None)` whenever `range` is `None`.
-fn number_field_bounds(
-    current: &str,
-    range: Option<(f64, f64)>,
-) -> (Option<String>, Option<String>) {
-    let Some((lo, hi)) = range else {
-        return (None, None);
-    };
+/// `sp-slider` (and, when `editable`, its inline `sp-number-field`) clamps its displayed value
+/// to fit whatever `min`/`max` it's given — not just in response to user input, but on *any*
+/// update to `min`, `max`, or `value` where the three momentarily disagree — mirroring
+/// `sp-number-field`'s own documented clamp-on-update behavior (see [`SpNumberfield`]). A range
+/// filter's live bounds (`range`, recomputed from the filter's *current* argument values) can
+/// transiently exclude a cell's actual stored value: the filter only re-clamps a cell at the
+/// moment that cell itself is written, so changing another cell its bounds depend on (e.g. a
+/// shared `max` cell) does not retroactively pull this cell back in range. Widening `range` to
+/// always include `current` guarantees the two never disagree, so the widget never mis-clamps —
+/// at the cost of its handle/stepper not disabling exactly at the filter's true limit while a
+/// cell sits outside it, until the cell's own next write brings it back in range and the true
+/// bounds resume being enforced.
+fn slider_bounds(current: &str, range: (f64, f64)) -> (String, String) {
+    let (lo, hi) = range;
     let current = current.parse::<f64>().unwrap_or(lo);
-    (
-        Some(lo.min(current).to_string()),
-        Some(hi.max(current).to_string()),
-    )
+    (lo.min(current).to_string(), hi.max(current).to_string())
 }
 
 /// Returns `true` if `typed`, read as a number, differs from `actual` (a cell's post-write
@@ -286,36 +261,39 @@ fn clamped_away(typed: &str, actual: &str) -> bool {
     }
 }
 
-/// Parses `val` for `id` via its `Labels` metadata, writes it to `sheet`, and propagates the
+/// The source context needed to format an evaluation error into a rustc-style diagnostic:
+/// the current source text and name, plus the parsed sheet whose span tables resolve an
+/// `adam_rs::Error`'s sites back to their declaration locations.
+#[derive(Clone, Copy)]
+struct ErrorContext {
+    source_text: Memo<String>,
+    source_name: Memo<String>,
+    parsed: Signal<ParsedSheet>,
+}
+
+/// Parses `val` for `id` via its `Labels` metadata, writes it to `parsed`, and propagates the
 /// sheet's constraints, updating `has_error` and reporting any error — or, on success, any
 /// currently-violated filter — to `crate::diagnostics`.
 ///
 /// - Postcondition: `has_error` is `true` on parse or propagation failure, or when a range
 ///   filter clamped `val` away from what was typed (see [`clamped_away`]); `false` otherwise.
 fn write_and_propagate(
-    mut sheet: Signal<Sheet>,
+    mut parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
     id: CellId,
     val: &str,
     mut has_error: Signal<bool>,
-    source_text: Memo<String>,
-    source_name: Memo<String>,
+    errors: ErrorContext,
 ) {
-    let mut sheet_w = sheet.write();
+    let mut parsed_w = parsed.write();
     let labels_r = labels.read();
     let Some(meta) = labels_r.cells.get(&id) else {
         return;
     };
-    let write_result = (meta.write_str)(&mut sheet_w, val);
+    let write_result = (meta.write_str)(&mut parsed_w, val);
     drop(labels_r);
     let propagate_result = match write_result {
-        Ok(()) => {
-            if sheet_w.is_source(id) && !cell_needs_full_propagate(&sheet_w, id) {
-                sheet_w.propagate_without_replan()
-            } else {
-                sheet_w.propagate()
-            }
-        }
+        Ok(()) => parsed_w.propagate(),
         Err(e) => Err(e),
     };
     match propagate_result {
@@ -324,10 +302,10 @@ fn write_and_propagate(
             let clamped = labels_r
                 .cells
                 .get(&id)
-                .is_some_and(|m| clamped_away(val, &(m.display)(&sheet_w)));
+                .is_some_and(|m| clamped_away(val, &(m.display)(&parsed_w)));
             has_error.set(clamped);
-            for violated_id in sheet_w.filter_violated_cells().collect::<Vec<_>>() {
-                let Some(violation) = sheet_w.filter_violation(violated_id) else {
+            for violated_id in parsed_w.filter_violated_cells().collect::<Vec<_>>() {
+                let Some(violation) = parsed_w.filter_violation(violated_id) else {
                     continue;
                 };
                 let label = labels_r
@@ -339,11 +317,17 @@ fn write_and_propagate(
             }
         }
         Err(e) => {
+            // Drop the write guard before reading `errors.parsed` (the same signal) again
+            // below — `format_adam_error` needs `&ParsedSheet` to locate `e`'s sites, and
+            // the write guard and a fresh read both borrowing the same signal at once would
+            // panic.
+            drop(parsed_w);
             has_error.set(true);
             crate::diagnostics::report_error(&format_adam_error(
                 &e,
-                &source_text.read(),
-                &source_name.read(),
+                &errors.parsed.read(),
+                &errors.source_text.read(),
+                &errors.source_name.read(),
                 &Renderer::styled(),
             ));
         }
@@ -351,8 +335,9 @@ fn write_and_propagate(
 }
 
 /// Sidebar panel showing all cells with labels and inputs for writing — a checkbox for
-/// `bool`-typed cells, a number field (plus a live-range slider when the cell has a range
-/// filter) for numeric cells, and a text field for everything else.
+/// `bool`-typed cells, a single editable slider (its label built in) for a numeric cell with a
+/// range filter, a plain number field for any other numeric cell, and a text field for
+/// everything else.
 ///
 /// Editing an input immediately writes the parsed value to the sheet and propagates
 /// constraints. If parsing or propagation fails (for example, non-numeric input or division
@@ -361,13 +346,13 @@ fn write_and_propagate(
 /// syncs back to the computed value on blur, keeping non-edited cells up to date.
 #[component]
 pub fn SheetInspector(
-    sheet: Signal<Sheet>,
+    parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
     source_text: Memo<String>,
     source_name: Memo<String>,
 ) -> Element {
     let ids: Vec<CellId> = labels.read().cells.keys().copied().collect();
-    let output_status = use_memo(move || compute_output_status(&sheet.read()));
+    let output_status = use_memo(move || compute_output_status(&parsed.read()));
 
     rsx! {
         div {
@@ -375,7 +360,7 @@ pub fn SheetInspector(
             SpHeading { "Cells" }
             SpDivider {}
             for id in ids {
-                CellRow { key: "{id:?}", id, sheet, labels, source_text, source_name, output_status }
+                CellRow { key: "{id:?}", id, parsed, labels, source_text, source_name, output_status }
             }
         }
     }
@@ -384,7 +369,7 @@ pub fn SheetInspector(
 #[component]
 fn CellRow(
     id: CellId,
-    sheet: Signal<Sheet>,
+    parsed: Signal<ParsedSheet>,
     labels: Signal<Labels>,
     source_text: Memo<String>,
     source_name: Memo<String>,
@@ -400,7 +385,7 @@ fn CellRow(
     });
 
     let value = use_memo(move || {
-        let s = sheet.read();
+        let s = parsed.read();
         let l = labels.read();
         l.cells
             .get(&id)
@@ -432,7 +417,7 @@ fn CellRow(
             .cells
             .get(&id)
             .and_then(|m| m.range.as_ref())
-            .map(|f| f(&sheet.read()))
+            .map(|f| f(&parsed.read()))
     });
 
     let is_integer = use_memo(move || {
@@ -444,11 +429,17 @@ fn CellRow(
             .unwrap_or(false)
     });
 
-    let forced = use_memo(move || sheet.read().is_forced(id));
+    let forced = use_memo(move || parsed.read().is_forced(id));
 
     let mut input = use_signal(|| value.peek().clone());
     let mut is_focused = use_signal(|| false);
     let mut has_error = use_signal(|| false);
+
+    let errors = ErrorContext {
+        source_text,
+        source_name,
+        parsed,
+    };
 
     let flags =
         use_memo(move || cell_flags(id, *forced.read(), *has_error.read(), &output_status.read()));
@@ -462,6 +453,13 @@ fn CellRow(
             .invalid_output_requirement_names
             .get(&id)
             .cloned()
+    });
+
+    // Only consumed by the slider branch below — `sp-slider` has no native `invalid` state,
+    // so it needs the full message (filter violation or generic fallback), not just a
+    // requirement name.
+    let slider_message = use_memo(move || {
+        slider_invalid_message(id, &label.read(), &parsed.read(), &output_status.read())
     });
 
     // Sync input to the computed value whenever it changes, but not while the user
@@ -478,8 +476,71 @@ fn CellRow(
     rsx! {
         div {
             style: "margin-bottom: 8px;",
-            SpFieldLabel { for_: field_id.clone(), "{label}" }
-            if *is_bool.read() {
+            if let Some((lo, hi)) = *range.read() {
+                {
+                    let (min, max) = slider_bounds(&input.read(), (lo, hi));
+                    let step = is_integer.read().then(|| "1".to_string());
+                    rsx! {
+                        SpSlider {
+                            id: field_id,
+                            label: label.read().clone(),
+                            value: input.read().clone(),
+                            min,
+                            max,
+                            step,
+                            editable: true,
+                            disabled: flags.read().disabled,
+                            oninput: move |_: FormEvent| {
+                                let ns = dom_id_namespace(&source_name.read());
+                                spawn(async move {
+                                    // No focus/blur staleness guard here (unlike the number and
+                                    // text fields below): dragging an `sp-slider` handle fires
+                                    // `input` without ever focusing the element — SWC's
+                                    // `SliderHandle` uses pointer capture, not focus, so neither
+                                    // `is_focused` nor `document.activeElement` reports the slider
+                                    // as focused mid-drag, and any such gate would silently drop
+                                    // every drag write. A guard is also unnecessary: the value read
+                                    // is always the slider's live position, never a partially typed
+                                    // buffer, so writing it on each event (even one whose round-trip
+                                    // resolves just after release) only ever commits the current
+                                    // value. `onfocus`/`onblur` are still wired below for the inline
+                                    // editable number field, whose real focus events do fire.
+                                    let mut eval = document::eval(&format!(
+                                        r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value.toString())"#
+                                    ));
+                                    let Ok(val) = eval.recv::<String>().await else { return; };
+                                    input.set(val.clone());
+                                    write_and_propagate(parsed, labels, id, &val, has_error, errors);
+                                });
+                            },
+                            onfocus: move |_| is_focused.set(true),
+                            onblur: move |_| {
+                                is_focused.set(false);
+                                has_error.set(false);
+                            },
+                        }
+                        // `sp-slider` has no `invalid` state or `negative-help-text` slot the
+                        // way `sp-number-field` does (see `SpSlider`'s doc comment), so any
+                        // violation on a range-filtered cell — a failing `require` on an out
+                        // cell, or the cell's own filter rejecting its forced value (see
+                        // `slider_invalid_message`) — is surfaced as a plain sibling
+                        // `SpHelpText` instead of slotted content — its parent here is a plain
+                        // `div`, not a shadow host, so `slot` has no effect; "negative-help-text"
+                        // is passed anyway (rather than an empty string) to match the name used
+                        // for the same purpose in the non-range branch below. `slider_message`
+                        // is `None` exactly when `flags.invalid` would be `false` for a non-slider
+                        // control (see `slider_invalid_message`'s postcondition), so this is
+                        // already gated on invalidity without needing to check `flags` directly.
+                        if let Some(msg) = slider_message.read().clone() {
+                            SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{msg}" }
+                        }
+                    }
+                }
+            } else if *is_bool.read() {
+                // `sp-checkbox`'s label is its own light-DOM child text, not a sibling
+                // `SpFieldLabel` (which renders as a separate line above the checkbox,
+                // disconnected from it) -- unlike the numeric/text fields below, which
+                // have no such built-in label slot.
                 SpCheckbox {
                     id: field_id,
                     checked: *value.read() == "true",
@@ -487,7 +548,7 @@ fn CellRow(
                     disabled: flags.read().disabled,
                     onclick: move |_| {
                         let next = toggled_bool_value(&value.peek());
-                        write_and_propagate(sheet, labels, id, next, has_error, source_text, source_name);
+                        write_and_propagate(parsed, labels, id, next, has_error, errors);
                         // `sp-checkbox` toggles its own shadow-DOM `checked` state
                         // natively in response to the click, before this handler runs
                         // and independent of the `checked` prop below. If the write above
@@ -504,165 +565,143 @@ fn CellRow(
                             .await;
                         });
                     },
+                    "{label}"
                 }
-            } else if *is_numeric.read() {
-                {
-                    let (min, max) = number_field_bounds(&input.read(), *range.read());
-                    let step = is_integer.read().then(|| "1".to_string());
-                    rsx! {
-                        SpNumberfield {
-                            id: field_id.clone(),
-                            value: input.read().clone(),
-                            min,
-                            max,
-                            step,
-                            invalid: flags.read().invalid,
-                            // An out cell's field is always `disabled` too (its cell is
-                            // always `forced`, never a candidate write target), but
-                            // `readonly` is what actually renders here — a disabled
-                            // `sp-number-field` suppresses `invalid` styling, which would
-                            // hide a failed `require`.
-                            disabled: flags.read().disabled && !flags.read().readonly,
-                            readonly: flags.read().readonly,
-                            oninput: move |_: FormEvent| {
-                                let ns = dom_id_namespace(&source_name.read());
-                                spawn(async move {
-                                    // Reads the shadow-DOM `<input>`'s raw text, not the host's
-                                    // `value` property: once `min`/`max` are set, `sp-number-field`
-                                    // clamps its own `value` to that range on every keystroke,
-                                    // which would hide an out-of-range-for-type entry from
-                                    // `write_and_propagate` below before it ever sees the digits
-                                    // the user actually typed.
-                                    //
-                                    // `sp-number-field` displays (and lets the user type) numbers
-                                    // grouped and decimal-marked per the resolved locale — e.g.
-                                    // `"1,920"` in `en`, `"1.920,5"` in `de`. `el.numberFormatter`
-                                    // is the exact `Intl.NumberFormat` the element itself renders
-                                    // with, so reading its group/decimal separators here (rather
-                                    // than assuming `,`/`.`) and normalizing the raw text to a
-                                    // plain `.`-decimal, ungrouped string keeps this locale-aware
-                                    // for any resolved locale. Rust only ever sees that normalized
-                                    // form, both for `write_and_propagate` below and for the
-                                    // `value` this component's `value` prop round-trips back —
-                                    // `sp-number-field`'s host `value` is a plain JS `Number`
-                                    // property, so echoing back ungrouped text is required to
-                                    // avoid the element itself parsing it as `NaN`.
-                                    //
-                                    // The stepper buttons (and scroll-wheel/arrow-key stepping)
-                                    // change `value` and fire this same `input` event without ever
-                                    // focusing the field the way Dioxus's `onfocus` can observe:
-                                    // `sp-number-field::stepBy()` calls the DOM `.focus()` method
-                                    // directly on itself, which moves `document.activeElement` but
-                                    // — unlike focus arriving from an actual pointer/keyboard
-                                    // interaction with the field — never dispatches a `focus` event
-                                    // Dioxus's delegated listener sees, so `is_focused` stays stuck
-                                    // at `false` and every stepper click was silently dropped below.
-                                    // Reading `document.activeElement` fresh here, instead of
-                                    // trusting the `is_focused` signal, sidesteps that gap while
-                                    // still discarding a response that arrives after a genuine
-                                    // blur-while-in-flight (`activeElement` has moved on by then).
-                                    let mut eval = document::eval(&format!(
-                                        r#"
-                                        const el = document.getElementById("cell-{ns}-{id:?}");
-                                        const raw = el.shadowRoot.querySelector("input").value;
-                                        let group = "", decimal = ".";
-                                        try {{
-                                            for (const p of el.numberFormatter.formatToParts(1234.5)) {{
-                                                if (p.type === "group") group = p.value;
-                                                if (p.type === "decimal") decimal = p.value;
-                                            }}
-                                        }} catch (e) {{}}
-                                        let normalized = group ? raw.split(group).join("") : raw;
-                                        if (decimal && decimal !== ".") {{
-                                            normalized = normalized.split(decimal).join(".");
+            } else {
+                SpFieldLabel { for_: field_id.clone(), "{label}" }
+                if *is_numeric.read() {
+                    SpNumberfield {
+                        id: field_id,
+                        value: input.read().clone(),
+                        min: None,
+                        max: None,
+                        step: is_integer.read().then(|| "1".to_string()),
+                        invalid: flags.read().invalid,
+                        // An out cell's field is always `disabled` too (its cell is
+                        // always `forced`, never a candidate write target), but
+                        // `readonly` is what actually renders here — a disabled
+                        // `sp-number-field` suppresses `invalid` styling, which would
+                        // hide a failed `require`.
+                        disabled: flags.read().disabled && !flags.read().readonly,
+                        readonly: flags.read().readonly,
+                        oninput: move |_: FormEvent| {
+                            let ns = dom_id_namespace(&source_name.read());
+                            spawn(async move {
+                                // Reads the shadow-DOM `<input>`'s raw text, not the host's
+                                // `value` property: once `min`/`max` are set, `sp-number-field`
+                                // clamps its own `value` to that range on every keystroke,
+                                // which would hide an out-of-range-for-type entry from
+                                // `write_and_propagate` below before it ever sees the digits
+                                // the user actually typed.
+                                //
+                                // `sp-number-field` displays (and lets the user type) numbers
+                                // grouped and decimal-marked per the resolved locale — e.g.
+                                // `"1,920"` in `en`, `"1.920,5"` in `de`. `el.numberFormatter`
+                                // is the exact `Intl.NumberFormat` the element itself renders
+                                // with, so reading its group/decimal separators here (rather
+                                // than assuming `,`/`.`) and normalizing the raw text to a
+                                // plain `.`-decimal, ungrouped string keeps this locale-aware
+                                // for any resolved locale. Rust only ever sees that normalized
+                                // form, both for `write_and_propagate` below and for the
+                                // `value` this component's `value` prop round-trips back —
+                                // `sp-number-field`'s host `value` is a plain JS `Number`
+                                // property, so echoing back ungrouped text is required to
+                                // avoid the element itself parsing it as `NaN`.
+                                //
+                                // The stepper buttons (and scroll-wheel/arrow-key stepping)
+                                // change `value` and fire this same `input` event without ever
+                                // focusing the field the way Dioxus's `onfocus` can observe:
+                                // `sp-number-field::stepBy()` calls the DOM `.focus()` method
+                                // directly on itself, which moves `document.activeElement` but
+                                // — unlike focus arriving from an actual pointer/keyboard
+                                // interaction with the field — never dispatches a `focus` event
+                                // Dioxus's delegated listener sees, so `is_focused` stays stuck
+                                // at `false` and every stepper click was silently dropped below.
+                                // Reading `document.activeElement` fresh here, instead of
+                                // trusting the `is_focused` signal, sidesteps that gap while
+                                // still discarding a response that arrives after a genuine
+                                // blur-while-in-flight (`activeElement` has moved on by then).
+                                let mut eval = document::eval(&format!(
+                                    r#"
+                                    const el = document.getElementById("cell-{ns}-{id:?}");
+                                    const raw = el.shadowRoot.querySelector("input").value;
+                                    let group = "", decimal = ".";
+                                    try {{
+                                        for (const p of el.numberFormatter.formatToParts(1234.5)) {{
+                                            if (p.type === "group") group = p.value;
+                                            if (p.type === "decimal") decimal = p.value;
                                         }}
-                                        dioxus.send((document.activeElement === el ? "1" : "0") + "|" + normalized);
-                                        "#
-                                    ));
-                                    let Ok(payload) = eval.recv::<String>().await else { return; };
-                                    let Some((still_focused, val)) = payload.split_once('|') else { return; };
-                                    if still_focused != "1" {
-                                        return;
-                                    }
-                                    input.set(val.to_string());
-                                    write_and_propagate(sheet, labels, id, val, has_error, source_text, source_name);
-                                });
-                            },
-                            onfocus: move |_| is_focused.set(true),
-                            onblur: move |_| {
-                                is_focused.set(false);
-                                has_error.set(false);
-                            },
-                            // `sp-number-field` only exposes its `negative-help-text` slot
-                            // while its own `invalid` prop is `true` (SWC's `HelpTextManager`
-                            // renders `<slot name="negative-help-text">` vs. a discarded
-                            // pass-through slot based on exactly that), so this always mounts
-                            // when there's a name to show — never independently gated on
-                            // `invalid` here, since `violated_requirement_names` is already
-                            // empty whenever `invalid` is false for an output cell (see
-                            // `OutputStatus::invalid_output_requirement_names`). Names the
-                            // `require` currently failing on this out cell — a stopgap: a real
-                            // message (see `Requirement::from_fn_*`'s own
-                            // `require { name: expression; }` source) would need the sheet to
-                            // carry more than just a name, so this just surfaces the name a
-                            // sheet author already chose.
-                            if let Some(names) = violated_requirement_names.read().clone() {
-                                SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{names}" }
-                            }
+                                    }} catch (e) {{}}
+                                    let normalized = group ? raw.split(group).join("") : raw;
+                                    if (decimal && decimal !== ".") {{
+                                        normalized = normalized.split(decimal).join(".");
+                                    }}
+                                    dioxus.send((document.activeElement === el ? "1" : "0") + "|" + normalized);
+                                    "#
+                                ));
+                                let Ok(payload) = eval.recv::<String>().await else { return; };
+                                let Some((still_focused, val)) = payload.split_once('|') else { return; };
+                                if still_focused != "1" {
+                                    return;
+                                }
+                                input.set(val.to_string());
+                                write_and_propagate(parsed, labels, id, val, has_error, errors);
+                            });
+                        },
+                        onfocus: move |_| is_focused.set(true),
+                        onblur: move |_| {
+                            is_focused.set(false);
+                            has_error.set(false);
+                        },
+                        // `sp-number-field` only exposes its `negative-help-text` slot
+                        // while its own `invalid` prop is `true` (SWC's `HelpTextManager`
+                        // renders `<slot name="negative-help-text">` vs. a discarded
+                        // pass-through slot based on exactly that), so this always mounts
+                        // when there's a name to show — never independently gated on
+                        // `invalid` here, since `violated_requirement_names` is already
+                        // empty whenever `invalid` is false for an output cell (see
+                        // `OutputStatus::invalid_output_requirement_names`). Names the
+                        // `require` currently failing on this out cell — a stopgap: a real
+                        // message (see `Requirement::from_fn_*`'s own
+                        // `require { @name expression; }` source) would need the sheet to
+                        // carry more than just a name, so this just surfaces the name a
+                        // sheet author already chose.
+                        if let Some(names) = violated_requirement_names.read().clone() {
+                            SpHelpText { slot: "negative-help-text".to_string(), variant: "negative".to_string(), "{names}" }
                         }
                     }
-                }
-                if let Some((lo, hi)) = *range.read() {
-                    SpSlider {
-                        id: format!("cell-{}-{id:?}-slider", dom_id_namespace(&source_name.read())),
+                } else {
+                    SpTextfield {
+                        id: field_id,
                         value: input.read().clone(),
-                        min: format!("{lo}"),
-                        max: format!("{hi}"),
+                        invalid: flags.read().invalid,
                         disabled: flags.read().disabled,
+                        // Dioxus's event serializer only reads event.target.value for
+                        // HTMLInputElement — custom elements (sp-textfield) always give "".
+                        // Use dioxus.send() in JS and eval.recv() to read the live value.
                         oninput: move |_: FormEvent| {
                             let ns = dom_id_namespace(&source_name.read());
                             spawn(async move {
                                 let mut eval = document::eval(&format!(
-                                    r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}-slider").value.toString())"#
+                                    r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value)"#
                                 ));
                                 let Ok(val) = eval.recv::<String>().await else { return; };
+                                // Discard the result if the user blurred while the round-trip was
+                                // in flight; blur already cleared the error and use_effect will
+                                // restore the last valid computed value.
+                                if !*is_focused.read() {
+                                    return;
+                                }
                                 input.set(val.clone());
-                                write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
+                                write_and_propagate(parsed, labels, id, &val, has_error, errors);
                             });
                         },
+                        onfocus: move |_| is_focused.set(true),
+                        onblur: move |_| {
+                            is_focused.set(false);
+                            has_error.set(false);
+                        },
                     }
-                }
-            } else {
-                SpTextfield {
-                    id: field_id,
-                    value: input.read().clone(),
-                    invalid: flags.read().invalid,
-                    disabled: flags.read().disabled,
-                    // Dioxus's event serializer only reads event.target.value for
-                    // HTMLInputElement — custom elements (sp-textfield) always give "".
-                    // Use dioxus.send() in JS and eval.recv() to read the live value.
-                    oninput: move |_: FormEvent| {
-                        let ns = dom_id_namespace(&source_name.read());
-                        spawn(async move {
-                            let mut eval = document::eval(&format!(
-                                r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value)"#
-                            ));
-                            let Ok(val) = eval.recv::<String>().await else { return; };
-                            // Discard the result if the user blurred while the round-trip was
-                            // in flight; blur already cleared the error and use_effect will
-                            // restore the last valid computed value.
-                            if !*is_focused.read() {
-                                return;
-                            }
-                            input.set(val.clone());
-                            write_and_propagate(sheet, labels, id, &val, has_error, source_text, source_name);
-                        });
-                    },
-                    onfocus: move |_| is_focused.set(true),
-                    onblur: move |_| {
-                        is_focused.set(false);
-                        has_error.set(false);
-                    },
                 }
             }
         }
@@ -738,11 +777,7 @@ mod tests {
         let a = sheet.add_cell(0.0_f64);
         let b = sheet.add_cell(0.0_f64);
         sheet
-            .add_filter(
-                a,
-                "clamp_0_100",
-                Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))))
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(b, a, |v: &f64| Ok(*v))])
@@ -763,11 +798,7 @@ mod tests {
         let a = sheet.add_cell(0.0_f64);
         let b = sheet.add_cell(0.0_f64);
         sheet
-            .add_filter(
-                a,
-                "clamp_0_100",
-                Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))))
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(b, a, |v: &f64| Ok(*v))])
@@ -815,7 +846,7 @@ mod tests {
             .add_out(
                 Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
                 vec![(
-                    "not_too_big",
+                    Some("not_too_big"),
                     Requirement::from_fn_1(area, |a: &i32| Ok(*a <= 300)),
                 )],
             )
@@ -841,7 +872,7 @@ mod tests {
             .add_out(
                 Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
                 vec![(
-                    "not_too_big",
+                    Some("not_too_big"),
                     Requirement::from_fn_1(area, |a: &i32| Ok(*a <= 300)),
                 )],
             )
@@ -864,11 +895,11 @@ mod tests {
                 Method::from_fn_1_1(a, result, |x: &i32| Ok(*x)),
                 vec![
                     (
-                        "too_big",
+                        Some("too_big"),
                         Requirement::from_fn_1(result, |r: &i32| Ok(*r <= 10)),
                     ),
                     (
-                        "not_even",
+                        Some("not_even"),
                         Requirement::from_fn_1(result, |r: &i32| Ok(r % 2 == 0)),
                     ),
                 ],
@@ -898,7 +929,7 @@ mod tests {
         sheet
             .add_requirement(
                 a,
-                "too_big",
+                Some("too_big"),
                 Requirement::from_fn_1(a, |x: &i32| Ok(*x > 100)),
             )
             .unwrap();
@@ -950,6 +981,68 @@ mod tests {
     fn dummy_cell() -> CellId {
         let mut sheet = Sheet::new();
         sheet.add_cell(0_i32)
+    }
+
+    #[test]
+    fn slider_invalid_message_prefers_a_requirement_name_when_present() {
+        let sheet = Sheet::new();
+        let id = dummy_cell();
+        let status = status_full(true, &[], &[], &[], &[], &[], &[(id, "not_too_big")]);
+        assert_eq!(
+            slider_invalid_message(id, "a", &sheet, &status),
+            Some("not_too_big".to_string())
+        );
+    }
+
+    #[test]
+    fn slider_invalid_message_reports_a_filter_violation_when_no_requirement_name_applies() {
+        use adam_rs::{Filter, Method};
+
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0.0_f64);
+        let b = sheet.add_cell(0.0_f64);
+        sheet
+            .add_filter(a, Filter::from_fn_0(|x: &f64| Ok(x.clamp(0.0, 100.0))))
+            .unwrap();
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(b, a, |v: &f64| Ok(*v))])
+            .unwrap();
+        sheet.write(b, -30.0_f64).unwrap();
+        sheet.propagate().unwrap();
+
+        let status = status(false, &[], &[], &[]);
+        let msg = slider_invalid_message(a, "a", &sheet, &status).unwrap();
+        assert!(msg.contains("does not conform"));
+    }
+
+    #[test]
+    fn slider_invalid_message_falls_back_to_a_generic_message_for_a_mere_contributor() {
+        let sheet = Sheet::new();
+        let id = dummy_cell();
+        let status = status(true, &[], &[id], &[]);
+        assert_eq!(
+            slider_invalid_message(id, "b", &sheet, &status),
+            Some("`b` is invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn slider_invalid_message_falls_back_to_a_generic_message_for_an_unnamed_invalid_output() {
+        let sheet = Sheet::new();
+        let id = dummy_cell();
+        let status = status(true, &[], &[], &[id]);
+        assert_eq!(
+            slider_invalid_message(id, "c", &sheet, &status),
+            Some("`c` is invalid".to_string())
+        );
+    }
+
+    #[test]
+    fn slider_invalid_message_none_when_nothing_flags_the_cell() {
+        let sheet = Sheet::new();
+        let id = dummy_cell();
+        let status = status(false, &[], &[], &[]);
+        assert_eq!(slider_invalid_message(id, "d", &sheet, &status), None);
     }
 
     #[test]
@@ -1074,160 +1167,35 @@ mod tests {
     }
 
     #[test]
-    fn number_field_bounds_none_when_no_range() {
-        assert_eq!(number_field_bounds("50", None), (None, None));
-    }
-
-    #[test]
-    fn number_field_bounds_returns_range_unchanged_when_current_is_within_it() {
+    fn slider_bounds_returns_range_unchanged_when_current_is_within_it() {
         assert_eq!(
-            number_field_bounds("50", Some((0.0, 100.0))),
-            (Some("0".to_string()), Some("100".to_string()))
+            slider_bounds("50", (0.0, 100.0)),
+            ("0".to_string(), "100".to_string())
         );
     }
 
     #[test]
-    fn number_field_bounds_widens_max_to_include_a_current_value_above_it() {
+    fn slider_bounds_widens_max_to_include_a_current_value_above_it() {
         assert_eq!(
-            number_field_bounds("150", Some((0.0, 100.0))),
-            (Some("0".to_string()), Some("150".to_string()))
+            slider_bounds("150", (0.0, 100.0)),
+            ("0".to_string(), "150".to_string())
         );
     }
 
     #[test]
-    fn number_field_bounds_widens_min_to_include_a_current_value_below_it() {
+    fn slider_bounds_widens_min_to_include_a_current_value_below_it() {
         assert_eq!(
-            number_field_bounds("-50", Some((0.0, 100.0))),
-            (Some("-50".to_string()), Some("100".to_string()))
+            slider_bounds("-50", (0.0, 100.0)),
+            ("-50".to_string(), "100".to_string())
         );
     }
 
     #[test]
-    fn number_field_bounds_falls_back_to_the_unwidened_range_when_current_does_not_parse() {
+    fn slider_bounds_falls_back_to_the_unwidened_range_when_current_does_not_parse() {
         assert_eq!(
-            number_field_bounds("not a number", Some((0.0, 100.0))),
-            (Some("0".to_string()), Some("100".to_string()))
+            slider_bounds("not a number", (0.0, 100.0)),
+            ("0".to_string(), "100".to_string())
         );
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_false_when_sheet_has_no_conditionals_or_outputs() {
-        let id = dummy_cell();
-        let sheet = Sheet::new();
-        assert!(!cell_needs_full_propagate(&sheet, id));
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_true_for_conditional_match_cell() {
-        use adam_rs::{MatchExpr, Method};
-
-        let mut sheet = Sheet::new();
-        let p = sheet.add_cell(0_i32);
-        let a = sheet.add_cell(0.0_f64);
-        let b = sheet.add_cell(0.0_f64);
-        let rel = sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |v: &f64| Ok(*v))])
-            .unwrap();
-        sheet
-            .add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![])
-            .unwrap();
-
-        assert!(cell_needs_full_propagate(&sheet, p));
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_true_for_cell_feeding_an_output_requirement() {
-        use adam_rs::{Method, Requirement};
-
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        let result = sheet.add_cell(0_i32);
-        sheet
-            .add_out(
-                Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
-                vec![(
-                    "min_a",
-                    Requirement::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
-                )],
-            )
-            .unwrap();
-
-        assert!(cell_needs_full_propagate(&sheet, a));
-        assert!(cell_needs_full_propagate(&sheet, b));
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_true_for_a_cell_feeding_the_output_when_its_requirement_only_names_the_output_itself()
-     {
-        // Mirrors `tutorial/area_with_requirement.adm2`: `out area := width * height
-        // require { not_too_big: area <= 300; }` — the requirement's own expression
-        // names only `area`, never `width`/`height` directly, so `requirement_inputs`
-        // alone would miss that writing `width` can flip `not_too_big`.
-        use adam_rs::{Method, Requirement};
-
-        let mut sheet = Sheet::new();
-        let width = sheet.add_cell(10_i32);
-        let height = sheet.add_cell(20_i32);
-        let area = sheet.add_cell(0_i32);
-        sheet
-            .add_out(
-                Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
-                vec![(
-                    "not_too_big",
-                    Requirement::from_fn_1(area, |a: &i32| Ok(*a <= 300)),
-                )],
-            )
-            .unwrap();
-        // `contributing_cells` (and so this fix) only resolves past the output cell
-        // itself once a plan has been computed — its own documented pre-propagate
-        // postcondition returns just `{cell}` — so establish one first, mirroring how
-        // `build_sheet` always runs an initial `propagate()` before the Inspector ever
-        // lets a user write anything.
-        sheet.propagate().unwrap();
-
-        assert!(cell_needs_full_propagate(&sheet, width));
-        assert!(cell_needs_full_propagate(&sheet, height));
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_true_for_a_cell_referenced_as_a_filter_argument() {
-        use adam_rs::Filter;
-
-        let mut sheet = Sheet::new();
-        let bound = sheet.add_cell(10_i32);
-        let a = sheet.add_cell(5_i32);
-        sheet
-            .add_filter(
-                a,
-                "clamp_to_bound",
-                Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
-            )
-            .unwrap();
-
-        assert!(cell_needs_full_propagate(&sheet, bound));
-    }
-
-    #[test]
-    fn cell_needs_full_propagate_false_for_cell_not_a_match_cell_or_requirement_input() {
-        use adam_rs::{Method, Requirement};
-
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        let result = sheet.add_cell(0_i32);
-        let unrelated = sheet.add_cell(0_i32);
-        sheet
-            .add_out(
-                Method::from_fn_2_1([a, b], result, |x: &i32, y: &i32| Ok(x + y)),
-                vec![(
-                    "min_a",
-                    Requirement::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x <= y)),
-                )],
-            )
-            .unwrap();
-
-        assert!(!cell_needs_full_propagate(&sheet, unrelated));
     }
 
     #[test]

@@ -58,23 +58,18 @@ impl AdamAstParser {
     /// Recovery is reliable for syntax errors adam-lang's own grammar detects directly (malformed
     /// `cell` declarations; `relationship`/`conditional`/`binding` structure outside their CEL
     /// expression bodies, including a malformed `type_expr`'s own dangling `(`/`)`) and for CEL
-    /// expression errors that don't leave an unbalanced delimiter of a kind CEL also uses for its
-    /// own internal grouping. It is **not** guaranteed when a CEL expression's failure leaves a
-    /// dangling, unmatched delimiter of a kind CEL reuses for its own internal structure — e.g. an
-    /// `if`/`else` expression's braces, which are the same `Delimiter::Brace` kind adam-lang uses
-    /// for its own `relationship`/`conditional` blocks (`if a { }` is one such case), or a
-    /// tuple/group literal's parens, the same `Delimiter::Parenthesis` kind `type_expr` uses
-    /// (`(+)` is one such case). In that narrower case recovery may abort the entire parse
-    /// (returning `Err`) rather than isolating the one malformed item; see
-    /// `TokenCursor::skip_to_recovery_point`'s doc comment for why a kind-based fix can't close
-    /// this in general, and the tracking issue for the general fix.
+    /// expression errors, including one that leaves a dangling, unmatched delimiter of a kind CEL
+    /// reuses for its own internal grouping — e.g. an `if`/`else` expression's braces, the same
+    /// `Delimiter::Brace` kind adam-lang uses for its own `relationship`/`conditional` blocks
+    /// (`if a { }` is one such case), or a tuple/group literal's or call's parens, the same
+    /// `Delimiter::Parenthesis` kind `type_expr` uses (`(+)` is one such case): see
+    /// `TokenCursor::absorb_unbalanced_delimiters`.
     ///
     /// # Errors
     ///
     /// Returns `Err` for structural errors outside any sheet item (e.g. a missing `sheet`
     /// keyword, missing sheet name, missing top-level braces, or trailing tokens after the
-    /// sheet closes) — these can't be attributed to a single recoverable item. Also returns `Err`
-    /// in the known-limitation case described above.
+    /// sheet closes) — these can't be attributed to a single recoverable item.
     pub fn parse_str(&mut self, source: &str) -> Result<ast::Sheet> {
         use std::str::FromStr;
         let stream = proc_macro2::TokenStream::from_str(source)
@@ -130,6 +125,7 @@ impl AdamAstParser {
                         },
                         leading_comment: None,
                         doc_comment: doc.map(|(text, _)| text),
+                        trailing_line_comment: None,
                         blank_line_before: false,
                     });
                 }
@@ -223,6 +219,7 @@ impl AdamAstParser {
             require,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
@@ -273,6 +270,7 @@ impl AdamAstParser {
             require,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
@@ -281,7 +279,7 @@ impl AdamAstParser {
         })
     }
 
-    /// `cell_filter = "filter" identifier ":" expression.`
+    /// `cell_filter = "filter" expression.`
     ///
     /// - Precondition: the `filter` keyword has already been consumed by the caller; `filter_start`
     ///   is its span.
@@ -290,13 +288,9 @@ impl AdamAstParser {
         cursor: &mut TokenCursor,
         filter_start: proc_macro2::Span,
     ) -> Result<ast::CellFilter> {
-        let (name, name_span) = cursor.consume_ident()?;
-        cursor.expect_punct(":")?;
         let body = self.parse_cel_expression(cursor)?;
         let body_end = body.span().end;
         Ok(ast::CellFilter {
-            name,
-            name_span: point(name_span),
             body,
             span: ast::ExprSpan {
                 start: filter_start,
@@ -305,64 +299,15 @@ impl AdamAstParser {
         })
     }
 
-    /// `type_expr = identifier | "(" [ type_expr ["," [ type_expr { "," type_expr } ]] ] ")".`
+    /// Delegates one `type_expr` to `cel_parser::Parser<AstContext>`, sharing the token stream
+    /// (the same take/set-tokens handoff `parse_cel_expression` uses).
     fn parse_type_expr(&mut self, cursor: &mut TokenCursor) -> Result<ast::TypeExpr> {
-        use cel_parser::lex_lexer::Token;
-        if matches!(cursor.peek_token(), Some(Token::Identifier(_))) {
-            let (name, span) = cursor.consume_ident()?;
-            return Ok(ast::TypeExpr::Named(name, point(span)));
-        }
-
-        let open_span = cursor.expect_open_paren()?;
-        if cursor.at_close_paren() {
-            let close_span = cursor.expect_close_paren()?;
-            return Ok(ast::TypeExpr::Tuple(
-                Vec::new(),
-                ast::ExprSpan {
-                    start: open_span,
-                    end: close_span,
-                },
-            ));
-        }
-
-        let first = self.parse_type_expr(cursor)?;
-        if cursor.at_close_paren() {
-            // Grouping: exactly one type, no comma.
-            cursor.expect_close_paren()?;
-            return Ok(first);
-        }
-        if !cursor.consume_punct(",") {
-            return Err(cursor.err_at("expected ',' or closing parenthesis"));
-        }
-        if cursor.at_close_paren() {
-            // Single element + trailing comma: 1-tuple.
-            let close_span = cursor.expect_close_paren()?;
-            return Ok(ast::TypeExpr::Tuple(
-                vec![first],
-                ast::ExprSpan {
-                    start: open_span,
-                    end: close_span,
-                },
-            ));
-        }
-        let mut elements = vec![first];
-        loop {
-            elements.push(self.parse_type_expr(cursor)?);
-            if cursor.at_close_paren() {
-                break;
-            }
-            if !cursor.consume_punct(",") {
-                return Err(cursor.err_at("expected ',' or closing parenthesis"));
-            }
-        }
-        let close_span = cursor.expect_close_paren()?;
-        Ok(ast::TypeExpr::Tuple(
-            elements,
-            ast::ExprSpan {
-                start: open_span,
-                end: close_span,
-            },
-        ))
+        let tokens = cursor.take_tokens().expect("tokens present");
+        self.cel.set_lex_tokens(tokens);
+        let result = self.cel.parse_type_expression();
+        cursor.set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
+        cursor.absorb_unbalanced_delimiters(self.cel.unbalanced_delimiter_count());
+        result
     }
 
     /// `relationship_decl = "relationship" "{" { binding } "}".`
@@ -382,6 +327,7 @@ impl AdamAstParser {
             bindings,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             trailing_comment: None,
             blank_line_before_close: false,
@@ -405,6 +351,7 @@ impl AdamAstParser {
             destructure,
             body,
             leading_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
@@ -434,6 +381,7 @@ impl AdamAstParser {
                 default = Some(ast::DefaultBranch {
                     relationships,
                     trailing_comment: None,
+                    trailing_line_comment: None,
                     blank_line_before_close: false,
                     open_brace_span: point(branch_open),
                     span: ast::ExprSpan {
@@ -455,6 +403,7 @@ impl AdamAstParser {
                 literal_span: point(lit_span),
                 relationships,
                 leading_comment: None,
+                trailing_line_comment: None,
                 blank_line_before: false,
                 trailing_comment: None,
                 blank_line_before_close: false,
@@ -472,6 +421,7 @@ impl AdamAstParser {
             default,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             trailing_comment: None,
             blank_line_before_close: false,
@@ -534,6 +484,7 @@ impl AdamAstParser {
             require,
             leading_comment: None,
             doc_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
@@ -564,18 +515,23 @@ impl AdamAstParser {
         })
     }
 
-    /// `requirement = identifier ":" expression ";".`
+    /// `requirement = [ "@" identifier ] expression ";".`
     fn parse_requirement(&mut self, cursor: &mut TokenCursor) -> Result<ast::RequirementDecl> {
         let decl_start = cursor.peek_span();
-        let (name, name_span) = cursor.consume_ident()?;
-        cursor.expect_punct(":")?;
+        let (name, name_span) = if cursor.consume_punct("@") {
+            let (name, span) = cursor.consume_ident()?;
+            (Some(name), Some(point(span)))
+        } else {
+            (None, None)
+        };
         let body = self.parse_cel_expression(cursor)?;
         let semi_span = cursor.expect_punct(";")?;
         Ok(ast::RequirementDecl {
             name,
-            name_span: point(name_span),
+            name_span,
             body,
             leading_comment: None,
+            trailing_line_comment: None,
             blank_line_before: false,
             span: ast::ExprSpan {
                 start: decl_start,
@@ -592,6 +548,7 @@ impl AdamAstParser {
         self.cel.set_lex_tokens(tokens);
         let result = self.cel.parse_expression_ast();
         cursor.set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
+        cursor.absorb_unbalanced_delimiters(self.cel.unbalanced_delimiter_count());
         result
     }
 }
@@ -646,16 +603,6 @@ fn parse_binding_target(cursor: &mut TokenCursor) -> Result<(Vec<(String, ast::E
     Ok((outputs, true))
 }
 
-/// `match_literal = literal | "(" match_literal { "," match_literal } [ "," ] ")".`
-///
-/// Mirrors [`parse_binding_target`]'s `"(" X { "," X } ")"` handling above (the same shape
-/// `AdamAstParser::parse_type_expr` also parses for tuple types), since a tuple match literal is
-/// structurally identical — but unlike `parse_binding_target`, a lone parenthesized literal with
-/// no comma (e.g. `(0i32)`) still becomes a 1-element `MatchLiteral::Tuple`, not a transparent
-/// grouping: `adam-lang/src/parser.rs`'s direct parser distinguishes a bare literal from a
-/// parenthesized one the same way (a tuple match key is always written with its own parens), so
-/// there's no scalar/tuple ambiguity to collapse here.
-///
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,7 +628,7 @@ mod tests {
         assert_eq!(cell.name, "width");
         assert!(matches!(
             cell.type_name.as_ref().unwrap(),
-            ast::TypeExpr::Named(n, _) if n == "f64"
+            ast::TypeExpr::Named { name: n, .. } if n == "f64"
         ));
         assert!(cell.initializer.is_some());
     }
@@ -721,13 +668,12 @@ mod tests {
     #[test]
     fn parse_source_with_a_filter() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { source a: i32 = 1 filter clamp: _; }")
+            .parse_str("sheet s { source a: i32 = 1 filter _; }")
             .unwrap();
         let ast::SheetItem::Source(source) = &sheet.items[0] else {
             panic!("expected Source");
         };
         let filter = source.filter.as_ref().expect("filter present");
-        assert_eq!(filter.name, "clamp");
         assert!(matches!(&filter.body, Expr::Ident { name, .. } if name == "_"));
     }
 
@@ -1205,113 +1151,86 @@ mod tests {
         assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
-    /// Documents a KNOWN, accepted limitation of coarse error recovery, *reintroduced* by giving
-    /// `Delimiter::Parenthesis` the same depth-tracking treatment `Delimiter::Brace`/
-    /// `Delimiter::Bracket` already have in `skip_to_recovery_point`. That change is required so a
-    /// malformed `type_expr`'s own dangling paren unwinds `TokenCursor::depth` correctly (see
-    /// `malformed_tuple_type_recovers_at_the_next_sheet_item`) — `type_expr` is the first
-    /// adam-lang-grammar production to use parens, so its own unmatched `(`/`)` must be tracked
-    /// exactly like a malformed `relationship`/`conditional` block's brace. Previously this
-    /// exact scenario recovered cleanly: `Delimiter::Parenthesis` was deliberately treated as
-    /// depth-neutral during recovery, safe *only* because CEL owned every paren back then, so a
-    /// dangling one could never be mistaken for an adam-lang-tracked one. Now that `type_expr` also
-    /// uses parens at the adam-lang-grammar level, `skip_to_recovery_point` can no longer tell "a
-    /// stray paren CEL left dangling" apart from "a real adam-lang-tracked paren" by delimiter kind
-    /// alone — the same ambiguity `Delimiter::Brace` already has (see
-    /// `recovery_known_limitation_if_expr_dangling_brace_aborts_whole_parse`). A malformed CEL
+    /// Regression test for <https://github.com/stlab/cel-rs/issues/43>: a malformed CEL
     /// expression like `(+)` causes the embedded CEL sub-parser to consume the opening `(` (via
-    /// `is_tuple_or_group`) but fail before consuming the matching `)`, since it never went through
-    /// `TokenCursor` (see `TokenCursor::depth`'s own docs); that leftover, untracked `)` is now
-    /// mistaken by `skip_to_recovery_point` for the enclosing `relationship`'s own paren-tracked
-    /// nesting closing, mis-stopping recovery one delimiter early and aborting the whole parse with
-    /// `Err` rather than isolating just this one malformed item. Fixing this in general requires
-    /// `cel_parser`'s `Parser<C>` to report back exactly what it left unbalanced on a failed parse —
-    /// out of scope here; see the tracking issue for the general fix:
-    /// <https://github.com/stlab/cel-rs/issues/43>.
+    /// `is_tuple_or_group`) but fail before consuming the matching `)`, since it never went
+    /// through `TokenCursor` (see `TokenCursor::depth`'s own docs). Previously this dangling `)`
+    /// was indistinguishable, by delimiter kind alone, from the enclosing `relationship`'s own
+    /// paren-tracked nesting, so `skip_to_recovery_point` mis-stopped one delimiter early and
+    /// aborted the whole parse with `Err` instead of isolating just this one malformed item. Now
+    /// `cel_parser::Parser::unbalanced_delimiter_count` reports the dangling `)` back to
+    /// `TokenCursor::absorb_unbalanced_delimiters`, so recovery correctly unwinds through it and
+    /// isolates just the malformed `relationship` item.
     #[test]
-    fn recovery_known_limitation_cel_dangling_paren_aborts_whole_parse() {
-        let result = AdamAstParser::new().parse_str(
-            r#"
+    fn recovery_cel_dangling_paren_recovers_at_sheet_item_level() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
                 sheet s {
                     cell good_before: i32 = 1;
                     relationship { b := (+); }
                     cell good_after: i32 = 2;
                 }
             "#,
-        );
-        assert!(
-            result.is_err(),
-            "expected the whole parse to abort with Err (known limitation); got {result:?}"
-        );
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
-    /// Documents a KNOWN, accepted limitation of coarse error recovery — this test is not
-    /// "passing by accident"; it pins down today's actual (still-buggy) behavior so a future fix
-    /// has a concrete regression test to flip from "documents the bug" to "documents the fix."
-    ///
-    /// Like `recovery_known_limitation_cel_dangling_paren_aborts_whole_parse` (a dangling `)` left
-    /// by a failed CEL sub-expression), a dangling `}` left by a failed CEL `if`-expression cannot
-    /// be fixed by the same kind-based approach: `is_if_expression` consumes the then-branch's
-    /// opening `{` directly (bypassing `TokenCursor`, exactly like the paren case) but fails
-    /// before consuming the matching `}` when the then-branch itself fails to parse (here, an
-    /// empty `{ }`). Because CEL's `if`/`else` grammar reuses `Delimiter::Brace` — the same kind
-    /// adam-lang's own `relationship`/`conditional` blocks use — `skip_to_recovery_point`
-    /// cannot tell "a stray brace CEL left dangling" apart from "a real adam-lang-tracked brace" by
-    /// delimiter kind alone (`Delimiter::Parenthesis` now shares this exact ambiguity too, since
-    /// `type_expr` started using parens at the adam-lang-grammar level; only `Delimiter::None`,
-    /// never used by adam-lang's own grammar, remains safely depth-neutral). The stray `}` here is
-    /// mistaken for the `relationship`'s own closing brace, so recovery stops one brace early and
-    /// the whole parse aborts with `Err` instead of isolating just this one item.
-    ///
-    /// Fixing this in general requires `cel_parser`'s `Parser<C>` to report back exactly what
-    /// delimiters it left unbalanced on a failed parse — a larger, cross-crate API change out of
-    /// scope for this recovery feature. See the tracking issue for the general fix:
-    /// <https://github.com/stlab/cel-rs/issues/43>.
+    /// Regression test for <https://github.com/stlab/cel-rs/issues/43>: a dangling `}` left by a
+    /// failed CEL `if`-expression. `is_if_expression` consumes the then-branch's opening `{`
+    /// directly (bypassing `TokenCursor`, exactly like the paren case above) but fails before
+    /// consuming the matching `}` when the then-branch itself fails to parse (here, an empty
+    /// `{ }`). Because CEL's `if`/`else` grammar reuses `Delimiter::Brace` — the same kind
+    /// adam-lang's own `relationship`/`conditional` blocks use — this dangling `}` was previously
+    /// mistaken for the `relationship`'s own closing brace, one delimiter early. Now
+    /// `TokenCursor::absorb_unbalanced_delimiters` accounts for it, so recovery isolates just the
+    /// malformed `relationship` item.
     #[test]
-    fn recovery_known_limitation_if_expr_dangling_brace_aborts_whole_parse() {
-        let result = AdamAstParser::new().parse_str(
-            r#"
+    fn recovery_if_expr_dangling_brace_recovers_at_sheet_item_level() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
                 sheet s {
                     cell good_before: i32 = 1;
                     relationship { b := if a { }; }
                     cell good_after: i32 = 2;
                 }
             "#,
-        );
-        assert!(
-            result.is_err(),
-            "expected the whole parse to abort with Err (known limitation); got {result:?}"
-        );
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
     }
 
-    /// A variant of the same known limitation (see
-    /// `recovery_known_limitation_if_expr_dangling_brace_aborts_whole_parse`): here the CEL
+    /// A variant of `recovery_if_expr_dangling_brace_recovers_at_sheet_item_level`: here the CEL
     /// sub-expression fails on a bare `+` (no valid expression follows it), which the failed
     /// `is_or_expression` call doesn't consume — so the very next token `skip_to_recovery_point`
     /// sees is a keyword-shaped identifier (`cell`) written just after it. Because that
     /// identifier is encountered while `depth` is still elevated (still inside the
-    /// `relationship`'s own brace, not yet unwound), the `at_or_below_target` guard on
-    /// the `cell`/`relationship`/`conditional` stopping check doesn't fire for it, so it's
-    /// swallowed as ordinary garbage rather than treated as a boundary.
-    ///
-    /// This does not corrupt the result or panic, and it does not silently drop a *subsequent,
-    /// well-formed* sheet item either: the swallow only ever consumes tokens up to the next real
-    /// adam-lang-tracked brace, at which point recovery hits the exact same dangling-brace
-    /// mis-stop as the sibling test above and the whole parse aborts with `Err` — never `Ok`
-    /// with a gap. Pinned here because the failure path differs (garbage-swallow before the
-    /// mis-stop, rather than mis-stop directly), even though the externally observable outcome
-    /// is the same accepted limitation tracked in
-    /// <https://github.com/stlab/cel-rs/issues/43>.
+    /// `relationship`'s own brace, not yet unwound, plus the dangling brace's now-absorbed depth),
+    /// the `at_or_below_target` guard on the `cell`/`relationship`/`conditional` stopping check
+    /// doesn't fire for it, so it's swallowed as ordinary garbage rather than treated as a
+    /// boundary — recovery then continues past it and still isolates just the malformed
+    /// `relationship` item once it reaches the (now correctly tracked) dangling `}`.
     #[test]
-    fn recovery_known_limitation_keyword_shaped_garbage_still_aborts_cleanly() {
-        let result = AdamAstParser::new().parse_str(
-            "sheet s { relationship { b := if a { + cell good: i32 = 1; }; } cell trailing: i32 = 2; }",
-        );
-        assert!(
-            result.is_err(),
-            "expected the whole parse to abort with Err (known limitation), not a corrupted \
-             Ok result; got {result:?}"
-        );
+    fn recovery_keyword_shaped_garbage_inside_dangling_brace_recovers_cleanly() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                "sheet s { relationship { b := if a { + cell good: i32 = 1; }; } cell trailing: i32 = 2; }",
+            )
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 2);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Cell(_)));
     }
 
     #[test]
@@ -1334,7 +1253,7 @@ mod tests {
         assert_eq!(out.name, "area");
         assert!(matches!(
             out.type_name.as_ref().unwrap(),
-            ast::TypeExpr::Named(n, _) if n == "f64"
+            ast::TypeExpr::Named { name: n, .. } if n == "f64"
         ));
         assert!(matches!(out.initializer, Expr::Op { ref name, .. } if name == "*"));
         assert!(out.require.is_none());
@@ -1358,8 +1277,8 @@ mod tests {
                 r#"
             sheet s {
                 out area: f64 := width * height require {
-                    max_area: width * height <= max_area;
-                    max_width: width <= max_width;
+                    @max_area width * height <= max_area;
+                    @max_width width <= max_width;
                 };
             }
         "#,
@@ -1370,8 +1289,28 @@ mod tests {
         };
         let require = out.require.as_ref().expect("require block present");
         assert_eq!(require.requirements.len(), 2);
-        assert_eq!(require.requirements[0].name, "max_area");
-        assert_eq!(require.requirements[1].name, "max_width");
+        assert_eq!(require.requirements[0].name.as_deref(), Some("max_area"));
+        assert_eq!(require.requirements[1].name.as_deref(), Some("max_width"));
+    }
+
+    #[test]
+    fn parse_requirement_without_a_label_leaves_name_none() {
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                r#"
+            sheet s {
+                out area: f64 := width * height require {
+                    width * height <= max_area;
+                };
+            }
+        "#,
+            )
+            .unwrap();
+        let ast::SheetItem::Out(out) = &sheet.items[0] else {
+            panic!("expected Out");
+        };
+        let require = out.require.as_ref().expect("require block present");
+        assert_eq!(require.requirements[0].name, None);
     }
 
     #[test]
@@ -1403,10 +1342,10 @@ mod tests {
             panic!("expected Cell");
         };
         match cell.type_name.as_ref().unwrap() {
-            ast::TypeExpr::Tuple(elements, _) => {
+            ast::TypeExpr::Tuple { elements, .. } => {
                 assert_eq!(elements.len(), 2);
-                assert!(matches!(&elements[0], ast::TypeExpr::Named(n, _) if n == "i32"));
-                assert!(matches!(&elements[1], ast::TypeExpr::Named(n, _) if n == "f64"));
+                assert!(matches!(&elements[0], ast::TypeExpr::Named { name: n, .. } if n == "i32"));
+                assert!(matches!(&elements[1], ast::TypeExpr::Named { name: n, .. } if n == "f64"));
             }
             other => panic!("expected Tuple, got {other:?}"),
         }
@@ -1415,7 +1354,7 @@ mod tests {
     #[test]
     fn parse_cell_with_a_filter() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell a: i32 = 1 filter clamp: _; }")
+            .parse_str("sheet s { cell a: i32 = 1 filter _; }")
             .unwrap();
         let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
             panic!("expected Cell");
@@ -1425,20 +1364,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_cell_filter_records_its_name() {
-        let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell x: i32 = 0 filter clamp: 0..=10; }")
-            .unwrap();
-        let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
-            panic!("expected a cell decl");
-        };
-        assert_eq!(cell.filter.as_ref().unwrap().name, "clamp");
-    }
-
-    #[test]
     fn parse_cell_with_a_filter_referencing_a_cell() {
         let sheet = AdamAstParser::new()
-            .parse_str("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter sum: _ + hi; }")
+            .parse_str("sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter _ + hi; }")
             .unwrap();
         let ast::SheetItem::Cell(cell) = &sheet.items[1] else {
             panic!("expected Cell");
@@ -1493,13 +1421,15 @@ mod tests {
         let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
             panic!("expected Cell");
         };
-        let ast::TypeExpr::Tuple(elements, _) = cell.type_name.as_ref().unwrap() else {
+        let ast::TypeExpr::Tuple { elements, .. } = cell.type_name.as_ref().unwrap() else {
             panic!("expected top-level Tuple");
         };
         assert_eq!(elements.len(), 2);
-        assert!(matches!(&elements[0], ast::TypeExpr::Named(n, _) if n == "i32"));
+        assert!(matches!(&elements[0], ast::TypeExpr::Named { name: n, .. } if n == "i32"));
         match &elements[1] {
-            ast::TypeExpr::Tuple(inner, _) => assert_eq!(inner.len(), 2),
+            ast::TypeExpr::Tuple {
+                elements: inner, ..
+            } => assert_eq!(inner.len(), 2),
             other => panic!("expected nested Tuple, got {other:?}"),
         }
     }
@@ -1513,7 +1443,7 @@ mod tests {
             panic!("expected Cell");
         };
         match cell.type_name.as_ref().unwrap() {
-            ast::TypeExpr::Tuple(elements, _) => assert!(elements.is_empty()),
+            ast::TypeExpr::Tuple { elements, .. } => assert!(elements.is_empty()),
             other => panic!("expected empty Tuple, got {other:?}"),
         }
     }
@@ -1526,9 +1456,10 @@ mod tests {
         let ast::SheetItem::Cell(cell) = &sheet.items[0] else {
             panic!("expected Cell");
         };
-        assert!(
-            matches!(cell.type_name.as_ref().unwrap(), ast::TypeExpr::Named(n, _) if n == "i32")
-        );
+        assert!(matches!(
+            cell.type_name.as_ref().unwrap(),
+            ast::TypeExpr::Named { name: n, .. } if n == "i32"
+        ));
     }
 
     #[test]
@@ -1540,7 +1471,7 @@ mod tests {
             panic!("expected Cell");
         };
         match cell.type_name.as_ref().unwrap() {
-            ast::TypeExpr::Tuple(elements, _) => assert_eq!(elements.len(), 1),
+            ast::TypeExpr::Tuple { elements, .. } => assert_eq!(elements.len(), 1),
             other => panic!("expected 1-Tuple, got {other:?}"),
         }
     }
@@ -1564,9 +1495,10 @@ mod tests {
         let ast::SheetItem::Out(out) = &sheet.items[0] else {
             panic!("expected Out");
         };
-        assert!(
-            matches!(out.type_name.as_ref().unwrap(), ast::TypeExpr::Tuple(elements, _) if elements.len() == 2)
-        );
+        assert!(matches!(
+            out.type_name.as_ref().unwrap(),
+            ast::TypeExpr::Tuple { elements, .. } if elements.len() == 2
+        ));
     }
 
     #[test]
@@ -1578,6 +1510,22 @@ mod tests {
         // runs. The malformed part is the missing `,` between the two type names, not the parens.
         let sheet = AdamAstParser::new()
             .parse_str("sheet s { cell good_before: i32 = 1; cell bad: (i32 i32); cell good_after: i32 = 2; }")
+            .unwrap();
+        assert_eq!(sheet.errors.len(), 1);
+        assert_eq!(sheet.items.len(), 3);
+        assert!(matches!(sheet.items[0], ast::SheetItem::Cell(_)));
+        assert!(matches!(sheet.items[1], ast::SheetItem::Error { .. }));
+        assert!(matches!(sheet.items[2], ast::SheetItem::Cell(_)));
+    }
+
+    #[test]
+    fn malformed_generic_type_argument_list_recovers_at_the_next_sheet_item() {
+        // Same balanced-delimiter caveat as the tuple-type test above: the missing `,` between
+        // the two type arguments, not an unmatched paren, is what's malformed here.
+        let sheet = AdamAstParser::new()
+            .parse_str(
+                "sheet s { cell good_before: i32 = 1; cell bad: Pair(i32 i32); cell good_after: i32 = 2; }",
+            )
             .unwrap();
         assert_eq!(sheet.errors.len(), 1);
         assert_eq!(sheet.items.len(), 3);

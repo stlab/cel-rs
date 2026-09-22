@@ -11,9 +11,9 @@ use slotmap::SlotMap;
 use crate::{
     cell::{CellData, CellId, CellKind},
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
-    error::Error,
+    error::{Error, ErrorSite},
     filter::{Filter, FilterKind, FilterViolation},
-    planner::PlanStep,
+    planner::{PlanStep, Seeds},
     relationship::{Method, RelationshipData, RelationshipId},
     requirement::{Requirement, RequirementData, RequirementId},
 };
@@ -45,12 +45,15 @@ pub struct Sheet {
     /// later and cells written later have strictly higher strength, making the
     /// default method-selection direction deterministic.
     next_strength: u64,
+    /// The execution order from the last `propagate()` call, retained so the
+    /// display-only accessors ([`Sheet::is_source`], [`Sheet::selected_method`],
+    /// [`Sheet::is_forced`]) can report which method the planner picked for each
+    /// relationship without re-planning.
     last_plan: Option<Vec<PlanStep>>,
-    /// Cells reported forced (see [`Sheet::is_forced`]) by the last full `propagate()`
-    /// call. Not recomputed by `propagate_without_replan`.
+    /// Cells reported forced (see [`Sheet::is_forced`]) by the last `propagate()` call.
     last_forced: Option<HashSet<CellId>>,
     /// Relationships reported forced (see [`Sheet::is_relationship_forced`]) by the
-    /// last full `propagate()` call. Not recomputed by `propagate_without_replan`.
+    /// last `propagate()` call.
     last_forced_relationships: Option<HashSet<RelationshipId>>,
     /// All conditionals registered on this sheet.
     pub(crate) conditionals: SlotMap<ConditionalId, ConditionalData>,
@@ -60,12 +63,10 @@ pub struct Sheet {
     /// All requirements registered on this sheet, across all cells.
     requirements: SlotMap<RequirementId, RequirementData>,
     /// Requirements that evaluated `false` as of the last `propagate()` call, grouped
-    /// by cell. Sparse: a cell with no entry had all its requirements hold. Not
-    /// recomputed by `propagate_without_replan`.
+    /// by cell. Sparse: a cell with no entry had all its requirements hold.
     last_requirement_violations: HashMap<CellId, Vec<RequirementId>>,
     /// Filter violations recorded against a derived value as of the last `propagate()`
-    /// call. Not recomputed by `propagate_without_replan`, consistent with
-    /// `last_requirement_violations`.
+    /// call.
     last_filter_violations: HashMap<CellId, FilterViolation>,
     /// Reverse index of `filter_args`: for each cell, the live cells whose filter
     /// references it as one of its dynamic arguments. Built incrementally in
@@ -183,19 +184,23 @@ impl Sheet {
     ///   maximum number of cells per method (due to duplicate output set comparison).
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
-            return Err(Error::InvalidMethod);
+            return Err(Error::InvalidMethod { sites: vec![] });
         }
 
-        for method in &methods {
+        for (idx, method) in methods.iter().enumerate() {
             if method.outputs.is_empty() {
-                return Err(Error::InvalidMethod);
+                return Err(Error::InvalidMethod {
+                    sites: vec![ErrorSite::MethodIndex(idx)],
+                });
             }
 
             // declared type counts must match cell-id counts
             if method.inputs.len() != method.input_types.len()
                 || method.outputs.len() != method.output_types.len()
             {
-                return Err(Error::InvalidMethod);
+                return Err(Error::InvalidMethod {
+                    sites: vec![ErrorSite::MethodIndex(idx)],
+                });
             }
 
             for (&cell_id, &declared) in method.inputs.iter().zip(method.input_types.iter()) {
@@ -204,6 +209,7 @@ impl Sheet {
                     return Err(Error::TypeMismatch {
                         expected: cell.type_id,
                         found: declared,
+                        sites: vec![ErrorSite::MethodIndex(idx)],
                     });
                 }
             }
@@ -211,12 +217,15 @@ impl Sheet {
             for (&cell_id, &declared) in method.outputs.iter().zip(method.output_types.iter()) {
                 let cell = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
                 if cell.kind == CellKind::Source {
-                    return Err(Error::InvalidCellKind);
+                    return Err(Error::InvalidCellKind {
+                        sites: vec![ErrorSite::MethodIndex(idx), ErrorSite::Cell(cell_id)],
+                    });
                 }
                 if cell.type_id != declared {
                     return Err(Error::TypeMismatch {
                         expected: cell.type_id,
                         found: declared,
+                        sites: vec![ErrorSite::MethodIndex(idx)],
                     });
                 }
             }
@@ -231,21 +240,47 @@ impl Sheet {
             .iter()
             .map(|m| m.inputs.iter().chain(m.outputs.iter()).copied().collect())
             .collect();
-        if cell_sets[1..].iter().any(|set| set != &cell_sets[0]) {
-            return Err(Error::MismatchedMethodCells);
+        if let Some(rel_idx) = cell_sets[1..].iter().position(|set| set != &cell_sets[0]) {
+            let diverging = rel_idx + 1;
+            let mut sites = vec![ErrorSite::MethodIndex(diverging), ErrorSite::MethodIndex(0)];
+            // Symmetric difference of the two cell sets, in a stable order.
+            for &c in cell_sets[diverging].symmetric_difference(&cell_sets[0]) {
+                sites.push(ErrorSite::Cell(c));
+            }
+            return Err(Error::MismatchedMethodCells { sites });
         }
 
         // A method's own outputs must be duplicate-free, and no two methods in a
         // relationship may claim the same output set: the planner's matching stage
         // treats a method's pure-output set as an indivisible claim, so two methods
         // sharing an output set would make that claim ambiguous.
-        let mut seen_output_sets: Vec<HashSet<CellId>> = Vec::with_capacity(methods.len());
-        for method in &methods {
+        let mut seen_output_sets: Vec<(usize, HashSet<CellId>)> = Vec::with_capacity(methods.len());
+        for (idx, method) in methods.iter().enumerate() {
             let output_set: HashSet<CellId> = method.outputs.iter().copied().collect();
-            if output_set.len() != method.outputs.len() || seen_output_sets.contains(&output_set) {
-                return Err(Error::DuplicateMethodOutputs);
+            if output_set.len() != method.outputs.len() {
+                // A cell repeated within this method's own outputs. Report each
+                // distinct repeated cell once, no matter how many times it repeats.
+                let mut sites = vec![ErrorSite::MethodIndex(idx)];
+                let mut seen = HashSet::new();
+                let mut reported = HashSet::new();
+                for &o in &method.outputs {
+                    if !seen.insert(o) && reported.insert(o) {
+                        sites.push(ErrorSite::Cell(o));
+                    }
+                }
+                return Err(Error::DuplicateMethodOutputs { sites });
             }
-            seen_output_sets.push(output_set);
+            if let Some((earlier, _)) = seen_output_sets.iter().find(|(_, s)| *s == output_set) {
+                let mut sites = vec![
+                    ErrorSite::MethodIndex(idx),
+                    ErrorSite::MethodIndex(*earlier),
+                ];
+                for &o in &method.outputs {
+                    sites.push(ErrorSite::Cell(o));
+                }
+                return Err(Error::DuplicateMethodOutputs { sites });
+            }
+            seen_output_sets.push((idx, output_set));
         }
 
         // Collect the union of all adjacent cells in insertion order, deduplicated.
@@ -308,13 +343,15 @@ impl Sheet {
             MatchSource::Cell(cell) => {
                 let cell_data = self.cells.get(*cell).ok_or(Error::InvalidId)?;
                 if cell_data.type_id != TypeId::of::<T>() {
-                    return Err(Error::InvalidConditional);
+                    return Err(Error::InvalidConditional {
+                        sites: vec![ErrorSite::Cell(*cell)],
+                    });
                 }
                 vec![*cell]
             }
             MatchSource::Expr(expr) => {
                 if expr.output_type != TypeId::of::<T>() {
-                    return Err(Error::InvalidConditional);
+                    return Err(Error::InvalidConditional { sites: vec![] });
                 }
                 for (&cell_id, &declared) in expr.inputs.iter().zip(expr.input_types.iter()) {
                     let cell_data = self.cells.get(cell_id).ok_or(Error::InvalidId)?;
@@ -322,6 +359,7 @@ impl Sheet {
                         return Err(Error::TypeMismatch {
                             expected: cell_data.type_id,
                             found: declared,
+                            sites: vec![],
                         });
                     }
                 }
@@ -378,19 +416,29 @@ impl Sheet {
             let rel = self
                 .relationships
                 .get(rel_id)
-                .ok_or(Error::InvalidConditional)?;
+                .ok_or(Error::InvalidConditional { sites: vec![] })?;
             if rel.adj.iter().any(|c| contributing_cells.contains(c)) && rel.methods.len() != 1 {
-                return Err(Error::InvalidConditional);
+                return Err(Error::InvalidConditional {
+                    sites: {
+                        let mut s = vec![ErrorSite::Relationship(rel_id)];
+                        if let Some(&c) = rel.adj.iter().find(|c| contributing_cells.contains(c)) {
+                            s.push(ErrorSite::Cell(c));
+                        }
+                        s
+                    },
+                });
             }
             if self.conditional_relationships.contains(&rel_id) {
-                return Err(Error::InvalidConditional);
+                return Err(Error::InvalidConditional {
+                    sites: vec![ErrorSite::Relationship(rel_id)],
+                });
             }
         }
 
         // Validate branch keys are non-empty.
         for (keys, _) in &branches {
             if keys.is_empty() {
-                return Err(Error::InvalidConditional);
+                return Err(Error::InvalidConditional { sites: vec![] });
             }
         }
 
@@ -398,7 +446,9 @@ impl Sheet {
         let mut seen: HashSet<RelationshipId> = HashSet::new();
         for &rel_id in &all_rels {
             if !seen.insert(rel_id) {
-                return Err(Error::InvalidConditional);
+                return Err(Error::InvalidConditional {
+                    sites: vec![ErrorSite::Relationship(rel_id)],
+                });
             }
         }
 
@@ -450,8 +500,8 @@ impl Sheet {
     ///   live cell in this sheet.
     /// - `Error::TypeMismatch` — an input's declared type does not match its cell's
     ///   registered type.
-    /// - `Error::InvalidRequirement` — `name` is empty, `cell` already has a
-    ///   same-named requirement, or (`Cell`/`Source` kind only) evaluating
+    /// - `Error::InvalidRequirement` — `name` is `Some` and `cell` already has a
+    ///   requirement with that same name, or (`Cell`/`Source` kind only) evaluating
     ///   `requirement` against the referenced cells' current effective values
     ///   returns `Ok(false)`.
     /// - `Error::MethodFailed` — (`Cell`/`Source` kind only) evaluating `requirement`
@@ -461,18 +511,15 @@ impl Sheet {
     pub fn add_requirement(
         &mut self,
         cell: CellId,
-        name: impl Into<String>,
+        name: Option<&str>,
         requirement: Requirement,
     ) -> Result<RequirementId, Error> {
-        let name = name.into();
-        if name.is_empty() {
-            return Err(Error::InvalidRequirement);
-        }
         let cell_data = self.cells.get(cell).ok_or(Error::InvalidId)?;
-        if cell_data
-            .requirements
-            .iter()
-            .any(|&rid| self.requirements[rid].name == name)
+        if let Some(name) = name
+            && cell_data
+                .requirements
+                .iter()
+                .any(|&rid| self.requirements[rid].name.as_deref() == Some(name))
         {
             return Err(Error::InvalidRequirement);
         }
@@ -489,6 +536,7 @@ impl Sheet {
                 return Err(Error::TypeMismatch {
                     expected: input_cell.type_id,
                     found: declared,
+                    sites: vec![],
                 });
             }
         }
@@ -499,14 +547,17 @@ impl Sheet {
                 .iter()
                 .map(|&id| self.cells[id].effective())
                 .collect();
-            let holds = (requirement.function)(&inputs).map_err(Error::MethodFailed)?;
+            let holds = (requirement.function)(&inputs).map_err(|error| Error::MethodFailed {
+                error,
+                sites: vec![],
+            })?;
             if !holds {
                 return Err(Error::InvalidRequirement);
             }
         }
 
         let rid = self.requirements.insert(RequirementData {
-            name,
+            name: name.map(str::to_string),
             cell,
             inputs: requirement.inputs,
             function: requirement.function,
@@ -539,7 +590,7 @@ impl Sheet {
     pub fn add_out(
         &mut self,
         writer: Method,
-        requirements: Vec<(&str, Requirement)>,
+        requirements: Vec<(Option<&str>, Requirement)>,
     ) -> Result<CellId, Error> {
         if writer.outputs.len() != 1 {
             return Err(Error::InvalidOutput);
@@ -548,7 +599,7 @@ impl Sheet {
 
         let kind = self.cells.get(out_cell).ok_or(Error::InvalidId)?.kind;
         if kind != CellKind::Cell || self.cell_has_prior_use(out_cell) {
-            return Err(Error::InvalidCellKind);
+            return Err(Error::InvalidCellKind { sites: vec![] });
         }
 
         self.add_relationship(vec![writer])?;
@@ -561,7 +612,7 @@ impl Sheet {
         Ok(out_cell)
     }
 
-    /// Attaches `filter` to `cell` under `name`.
+    /// Attaches `filter` to `cell`.
     ///
     /// Never evaluates `filter`'s function — attaching a filter is not a fresh
     /// external input, so it never changes `cell`'s current effective value. The next
@@ -573,23 +624,14 @@ impl Sheet {
     ///
     /// - `Error::InvalidId` — `cell`, or one of `filter`'s argument cells, is not a
     ///   live cell in this sheet.
-    /// - `Error::InvalidFilter` — `name` is empty, `cell` already has a filter,
-    ///   `filter`'s own value type does not match `cell`'s registered type, or
-    ///   `filter`'s argument list names `cell` itself.
+    /// - `Error::InvalidFilter` — `cell` already has a filter, `filter`'s own value
+    ///   type does not match `cell`'s registered type, or `filter`'s argument list
+    ///   names `cell` itself.
     /// - `Error::TypeMismatch` — an argument cell's registered type does not match the
     ///   type `filter` declared for it.
     ///
     /// - Complexity: O(a) where a is the number of `filter`'s argument cells.
-    pub fn add_filter(
-        &mut self,
-        cell: CellId,
-        name: impl Into<String>,
-        mut filter: Filter,
-    ) -> Result<(), Error> {
-        let name = name.into();
-        if name.is_empty() {
-            return Err(Error::InvalidFilter);
-        }
+    pub fn add_filter(&mut self, cell: CellId, filter: Filter) -> Result<(), Error> {
         let cell_type = self.cells.get(cell).ok_or(Error::InvalidId)?.type_id;
         if self.cells[cell].filter.is_some() {
             return Err(Error::InvalidFilter);
@@ -606,23 +648,16 @@ impl Sheet {
                 return Err(Error::TypeMismatch {
                     expected: arg_cell.type_id,
                     found: declared,
+                    sites: vec![],
                 });
             }
         }
 
-        filter.0.name = name;
         for &arg in &filter.0.args {
             self.filter_dependents.entry(arg).or_default().push(cell);
         }
         self.cells[cell].filter = Some(filter.0);
         Ok(())
-    }
-
-    /// Returns the name of `id`'s filter, if it has one.
-    ///
-    /// Returns `None` if `id` is not a live cell in this sheet, or has no filter.
-    pub fn filter_name(&self, id: CellId) -> Option<&str> {
-        self.cells.get(id)?.filter.as_ref().map(|f| f.name.as_str())
     }
 
     /// Returns the argument cells of `id`'s filter, in declaration order.
@@ -732,7 +767,7 @@ impl Sheet {
     ///
     /// Returns `None` if `id` is not a live requirement in this sheet.
     pub fn requirement_name(&self, id: RequirementId) -> Option<&str> {
-        self.requirements.get(id).map(|c| c.name.as_str())
+        self.requirements.get(id)?.name.as_deref()
     }
 
     /// Returns the cell requirement `id` is attached to.
@@ -945,13 +980,14 @@ impl Sheet {
     /// - `Error::InvalidCellKind` — `id` is `Out`-kind.
     pub fn write<T: Any + 'static>(&mut self, id: CellId, value: T) -> Result<(), Error> {
         if self.cells.get(id).is_some_and(|c| c.kind == CellKind::Out) {
-            return Err(Error::InvalidCellKind);
+            return Err(Error::InvalidCellKind { sites: vec![] });
         }
         let cell_type = self.cells.get(id).ok_or(Error::InvalidId)?.type_id;
         if cell_type != TypeId::of::<T>() {
             return Err(Error::TypeMismatch {
                 expected: cell_type,
                 found: TypeId::of::<T>(),
+                sites: vec![],
             });
         }
 
@@ -976,6 +1012,7 @@ impl Sheet {
             return Err(Error::TypeMismatch {
                 expected: cell.type_id,
                 found: TypeId::of::<T>(),
+                sites: vec![],
             });
         }
         Ok(cell
@@ -1011,6 +1048,7 @@ impl Sheet {
             return Err(Error::TypeMismatch {
                 expected: cell.type_id,
                 found: TypeId::of::<T>(),
+                sites: vec![],
             });
         }
         Ok(cell.source.downcast_ref::<T>().expect("type checked above"))
@@ -1137,7 +1175,10 @@ impl Sheet {
                     .iter()
                     .map(|&id| self.cells[id].effective())
                     .collect();
-                let value = (expr.function)(&args).map_err(Error::MethodFailed)?;
+                let value = (expr.function)(&args).map_err(|error| Error::MethodFailed {
+                    error,
+                    sites: vec![],
+                })?;
                 Ok(MatchValue::Owned(value))
             }
         }
@@ -1206,8 +1247,16 @@ impl Sheet {
     /// execution order. Cells evaluated first receive the highest derived strength.
     /// Source cells (not the output of any selected method) are not modified.
     ///
-    /// - Complexity: O(R·K) where R is the number of entries and K is the maximum
-    ///   outputs per method.
+    /// A cell claimed *self-referencingly* (its claiming method reads the cell as one of
+    /// its own inputs) keeps a live explicit strength rather than being demoted: such a
+    /// method computes the cell from its own `source` aspiration (see
+    /// [`crate::planner::build_seeds`]), so an explicit `write()` to that cell is still
+    /// the authority behind the value and must keep outranking never-written cells in
+    /// later rounds. Demoting it would discard the edit the next time the cell is
+    /// re-seeded.
+    ///
+    /// - Complexity: O(R·K²) where R is the number of entries and K is the maximum
+    ///   inputs or outputs per method.
     fn post_process_strengths(&mut self, execution_order: &[PlanStep]) {
         let mut derived_strength = u64::MAX >> 1; // 0x7FFF_FFFF_FFFF_FFFF
         let mut seen: std::collections::HashSet<CellId> = std::collections::HashSet::new();
@@ -1219,15 +1268,41 @@ impl Sheet {
                 && let Some(method) = rel.methods.get(*method_idx)
             {
                 for &output in &method.outputs {
+                    let self_referencing = method.inputs.contains(&output);
                     if seen.insert(output)
                         && let Some(cell) = self.cells.get_mut(output)
                     {
+                        if self_referencing && cell.has_explicit_strength() {
+                            continue;
+                        }
                         cell.strength = derived_strength;
                         derived_strength = derived_strength.saturating_sub(1);
                     }
                 }
             }
         }
+    }
+
+    /// Returns the cells with a live derived override (for Phase 5's revert tracking),
+    /// then clears every cell's derived override so no self-referencing method this round
+    /// observes a value left over from a previous round. A self-referencing input's value
+    /// is instead reconstructed from `source` by [`crate::planner::build_seeds`], so no
+    /// per-round derived snapshot needs to survive planning.
+    ///
+    /// - Postcondition: every cell's `derived` is `None`.
+    ///
+    /// - Complexity: O(cells).
+    fn reset_derived(&mut self) -> Vec<CellId> {
+        let previously_derived: Vec<CellId> = self
+            .cells
+            .iter()
+            .filter(|(_, cell)| cell.derived.is_some())
+            .map(|(id, _)| id)
+            .collect();
+        for (_, cell) in self.cells.iter_mut() {
+            cell.derived = None;
+        }
+        previously_derived
     }
 
     /// Runs the planning pass and executes the selected methods.
@@ -1251,7 +1326,9 @@ impl Sheet {
     /// **Phase 3 — General plan:** the Adam algorithm runs on the active set.
     ///
     /// **Phase 4 — Strength post-processing:** derived cells receive low-order strengths
-    /// in evaluation order, enforcing the stability invariant.
+    /// in evaluation order, enforcing the stability invariant. A cell claimed
+    /// self-referencingly keeps any live explicit strength instead, since its own written
+    /// value is still the authority behind the result.
     ///
     /// **Phase 5 — Reversion change-tracking:** a cell whose derived override existed
     /// before this round but wasn't reclaimed by any method this round has effectively
@@ -1274,17 +1351,9 @@ impl Sheet {
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.clear_changed();
 
-        // Phase 0: snapshot cells with a live derived override (for Phase 5 only),
-        // then reset every cell's derived override before planning begins.
-        let previously_derived: Vec<CellId> = self
-            .cells
-            .iter()
-            .filter(|(_, cell)| cell.derived.is_some())
-            .map(|(id, _)| id)
-            .collect();
-        for (_, cell) in self.cells.iter_mut() {
-            cell.derived = None;
-        }
+        // Phase 0: record cells with a live derived override (for Phase 5), then clear
+        // every derived override before planning begins. See `reset_derived`.
+        let previously_derived = self.reset_derived();
 
         // Phase 1: pre-plan for derived match cells.
         if !self.conditionals.is_empty() {
@@ -1296,7 +1365,17 @@ impl Sheet {
             let pre_active = self.match_cell_subgraph(&match_cells);
             if !pre_active.is_empty() {
                 let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
-                self.execute_plan(&pre_plan.execution_order, &mut Vec::new())?;
+                let seeds = crate::planner::build_seeds(
+                    &pre_plan.execution_order,
+                    &self.cells,
+                    &self.relationships,
+                );
+                self.execute_plan(
+                    &pre_plan.execution_order,
+                    &seeds,
+                    &pre_plan.forced_outputs,
+                    &mut Vec::new(),
+                )?;
             }
         }
 
@@ -1305,8 +1384,15 @@ impl Sheet {
 
         // Phase 3: general plan on the active set.
         let plan = crate::planner::plan(&self.cells, &self.relationships, &active)?;
+        let seeds =
+            crate::planner::build_seeds(&plan.execution_order, &self.cells, &self.relationships);
         let mut source_filter_violations: Vec<(CellId, FilterViolation)> = Vec::new();
-        self.execute_plan(&plan.execution_order, &mut source_filter_violations)?;
+        self.execute_plan(
+            &plan.execution_order,
+            &seeds,
+            &plan.forced_outputs,
+            &mut source_filter_violations,
+        )?;
 
         // Phase 4: assign derived-cell strengths in evaluation order.
         self.post_process_strengths(&plan.execution_order);
@@ -1331,7 +1417,10 @@ impl Sheet {
                 .iter()
                 .map(|&id| self.cells[id].effective())
                 .collect();
-            let holds = (requirement.function)(&inputs).map_err(Error::MethodFailed)?;
+            let holds = (requirement.function)(&inputs).map_err(|error| Error::MethodFailed {
+                error,
+                sites: vec![],
+            })?;
             if !holds {
                 last_requirement_violations
                     .entry(requirement.cell)
@@ -1408,10 +1497,17 @@ impl Sheet {
     /// into `id`'s `derived` unconditionally — `source` is never touched by this step,
     /// exactly as it's never touched by any other self-referencing method's output. A
     /// `PlanStep::Method` step's outputs follow the existing shadow/non-shadow rule,
-    /// unchanged. A reclamp whose filter returns `Err`, or a value of the wrong type, is
-    /// pushed into `filter_violations` instead of aborting; the cell's stored value is
-    /// left untouched in that case (its `derived` stays unset, so `read()` falls back to
-    /// `source`).
+    /// unchanged; a non-shadow output also clears any leftover `derived` from an earlier
+    /// step in this same call (e.g. Phase 1 shadowing a cell that a later Phase 3 step
+    /// then claims as a plain output), so `effective()` reflects the fresh `source` write
+    /// rather than a stale override. A reclamp whose filter returns `Err`, or a value of
+    /// the wrong type, is pushed into `filter_violations` instead of aborting; the cell's
+    /// stored value is left untouched in that case (its `derived` stays unset, so
+    /// `read()` falls back to `source`).
+    ///
+    /// A `PlanStep::Method` step's self-referencing input reads its precomputed `seeds`
+    /// value (see [`crate::planner::build_seeds`]) if present, else its own `source` —
+    /// never a `derived` override from this same execution.
     ///
     /// # Errors
     ///
@@ -1425,12 +1521,13 @@ impl Sheet {
     fn execute_plan(
         &mut self,
         execution_order: &[PlanStep],
+        seeds: &Seeds,
+        forced_outputs: &HashSet<CellId>,
         filter_violations: &mut Vec<(CellId, FilterViolation)>,
     ) -> Result<(), Error> {
         for step in execution_order {
             match *step {
                 PlanStep::Method(rel_id, method_idx) => {
-                    let is_conditional = self.conditional_relationships.contains(&rel_id);
                     let (outputs, output_ids, shadow_outputs) = {
                         let method = &self.relationships[rel_id].methods[method_idx];
                         let inputs: Vec<&dyn Any> = method
@@ -1438,31 +1535,41 @@ impl Sheet {
                             .iter()
                             .map(|&id| {
                                 if method.outputs.contains(&id) {
-                                    // Self-referencing input: always the pre-execution
-                                    // source, never a derived override from a previous
-                                    // execution.
-                                    self.cells[id].source.as_ref()
+                                    // Self-referencing input: its precomputed seed, else
+                                    // its own source -- never a derived override from
+                                    // this same execution. See build_seeds.
+                                    seeds
+                                        .get(&id)
+                                        .map(|value| value.as_ref())
+                                        .unwrap_or_else(|| self.cells[id].source.as_ref())
                                 } else {
                                     self.cells[id].effective()
                                 }
                             })
                             .collect();
-                        let outputs = (method.function)(&inputs).map_err(Error::MethodFailed)?;
+                        let outputs =
+                            (method.function)(&inputs).map_err(|error| Error::MethodFailed {
+                                error,
+                                sites: vec![ErrorSite::Method(rel_id, method_idx)],
+                            })?;
                         let output_ids = method.outputs.clone();
                         let shadow_outputs: Vec<bool> = method
                             .outputs
                             .iter()
-                            .map(|o| method.inputs.contains(o) || is_conditional)
+                            .map(|o| method.inputs.contains(o) || forced_outputs.contains(o))
                             .collect();
                         (outputs, output_ids, shadow_outputs)
                     };
 
                     if outputs.len() != output_ids.len() {
-                        return Err(Error::MethodFailed(anyhow::anyhow!(
-                            "method produced {} outputs but relationship expects {}",
-                            outputs.len(),
-                            output_ids.len()
-                        )));
+                        return Err(Error::MethodFailed {
+                            error: anyhow::anyhow!(
+                                "method produced {} outputs but relationship expects {}",
+                                outputs.len(),
+                                output_ids.len()
+                            ),
+                            sites: vec![ErrorSite::Method(rel_id, method_idx)],
+                        });
                     }
 
                     for ((cell_id, new_value), shadow) in
@@ -1474,12 +1581,14 @@ impl Sheet {
                             return Err(Error::TypeMismatch {
                                 expected: cell.type_id,
                                 found,
+                                sites: vec![ErrorSite::Method(rel_id, method_idx)],
                             });
                         }
                         if shadow {
                             cell.derived = Some(new_value);
                         } else {
                             cell.source = new_value;
+                            cell.derived = None;
                         }
                         if !cell.changed {
                             cell.changed = true;
@@ -1714,47 +1823,6 @@ impl Sheet {
             .find(|(_, branch)| branch.keys.iter().any(|key| eq_fn(value_ref, key.as_ref())))
             .map(|(i, _)| i))
     }
-
-    /// Re-executes the cached plan without invoking the planner.
-    ///
-    /// - Precondition: Every cell written since the last successful `propagate()` or
-    ///   `propagate_without_replan()` call satisfies `is_source(id)`. Violation produces
-    ///   incorrect output values but no panic.
-    /// - Precondition: If the sheet has conditionals, no match-cell value has changed
-    ///   since the last `propagate()`. Violation produces incorrect branch activation.
-    ///
-    /// `is_forced` and `forced_cells` continue to reflect the last full `propagate()`
-    /// call; this method does not recompute them. Likewise, `cell_requirements_valid` and
-    /// `violated_requirements` continue to reflect the last full `propagate()` call; this
-    /// method does not re-evaluate requirements.
-    ///
-    /// A cached `PlanStep::FilterReclamp` step is still re-executed on every call,
-    /// using each argument's *current* effective value — only the `last_filter_violations`
-    /// diagnostic map stays pinned, not the reclamp's mutation itself.
-    ///
-    /// # Errors
-    ///
-    /// - `Error::Conflict` — `propagate()` has not yet been called; no plan is cached.
-    /// - `Error::MethodFailed` — a method's function returned an error.
-    /// - `Error::TypeMismatch` — a method output's runtime type does not match the cell's
-    ///   registered type.
-    ///
-    /// - Complexity: O(R·K) where R is the number of relationships in the cached plan and K is the maximum cells per method, plus per-method execution cost.
-    pub fn propagate_without_replan(&mut self) -> Result<(), Error> {
-        let Some(execution_order) = self.last_plan.take() else {
-            return Err(Error::Conflict);
-        };
-        self.clear_changed();
-        // Discarded: this replays any cached FilterReclamp step's mutation
-        // unconditionally, but last_filter_violations stays pinned to the last full
-        // propagate()'s result, per this method's documented contract.
-        let result = self.execute_plan(&execution_order, &mut Vec::new());
-        if result.is_ok() {
-            self.post_process_strengths(&execution_order);
-        }
-        self.last_plan = Some(execution_order);
-        result
-    }
 }
 
 impl Default for Sheet {
@@ -1769,10 +1837,13 @@ mod tests {
     use crate::{
         CellKind, ConditionalId, Error, MatchExpr, Method, Requirement, Sheet,
         cell::CellId,
+        error::ErrorSite,
         filter::{Filter, FilterKind, FilterViolation},
+        planner::{PlanStep, Seeds},
         relationship::RelationshipId,
     };
     use std::any::{Any, TypeId};
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn add_cell_has_cell_kind() {
@@ -1803,6 +1874,53 @@ mod tests {
     }
 
     #[test]
+    fn execute_plan_clears_a_stale_derived_override_on_a_later_plain_write() {
+        // Simulates two execute_plan calls within one propagate() (e.g. Phase 1 then
+        // Phase 3) without an intervening Phase 0 reset: the first shadows `x` via a
+        // self-referencing method; the second claims `x` as a plain (non-self,
+        // non-conditional) output of a different relationship. `x`'s stale `derived`
+        // override from the first call must not survive to mask the second call's
+        // fresh `source` write.
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(1_i32);
+        let y = sheet.add_cell(2_i32);
+        let z = sheet.add_cell(10_i32);
+        let self_ref = sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([x, y], x, |a: &i32, b: &i32| Ok((*a).min(*b))),
+                Method::from_fn_2_1([x, y], y, |a: &i32, b: &i32| Ok((*a).max(*b))),
+            ])
+            .unwrap();
+        let plain = sheet
+            .add_relationship(vec![Method::from_fn_1_1(z, x, |v: &i32| Ok(*v + 1))])
+            .unwrap();
+
+        let no_seeds: Seeds = HashMap::new();
+        let no_forced: HashSet<CellId> = HashSet::new();
+        sheet
+            .execute_plan(
+                &[PlanStep::Method(self_ref, 0)],
+                &no_seeds,
+                &no_forced,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(*sheet.read::<i32>(x).unwrap(), 1);
+
+        sheet.write(z, 41_i32).unwrap();
+        sheet
+            .execute_plan(
+                &[PlanStep::Method(plain, 0)],
+                &no_seeds,
+                &no_forced,
+                &mut Vec::new(),
+            )
+            .unwrap();
+
+        assert_eq!(*sheet.read::<i32>(x).unwrap(), 42);
+    }
+
+    #[test]
     fn add_conditional_returns_error_for_invalid_cell() {
         let mut sheet = Sheet::new();
         let result = sheet.add_conditional(
@@ -1820,7 +1938,7 @@ mod tests {
         // Branch keys are f64 but cell holds i32.
         let result =
             sheet.add_conditional(MatchExpr::cell(a), vec![(vec![0.0_f64], vec![])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional)));
+        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
     }
 
     #[test]
@@ -1832,7 +1950,7 @@ mod tests {
             vec![(vec![0_i32], vec![RelationshipId::default()])],
             vec![],
         );
-        assert!(matches!(result, Err(Error::InvalidConditional)));
+        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
     }
 
     #[test]
@@ -1850,7 +1968,28 @@ mod tests {
             .unwrap();
         let result =
             sheet.add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional)));
+        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
+    }
+
+    #[test]
+    fn invalid_conditional_multi_method_branch_names_the_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        // Relationship has two methods and involves `a` (the match cell).
+        let branch_rel = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+                Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
+            ])
+            .unwrap();
+        let result = sheet.add_conditional(
+            MatchExpr::cell(a),
+            vec![(vec![0_i32], vec![branch_rel])],
+            vec![],
+        );
+        let err = result.unwrap_err();
+        assert!(err.sites().contains(&ErrorSite::Relationship(branch_rel)));
     }
 
     #[test]
@@ -1872,7 +2011,7 @@ mod tests {
             .unwrap();
         let result =
             sheet.add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional)));
+        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
     }
 
     #[test]
@@ -1896,7 +2035,7 @@ mod tests {
             .unwrap();
         let expr = MatchExpr::from_fn_2([p, q], |x: &i32, y: &i32| Ok(*x + *y));
         let result = sheet.add_conditional(expr, vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional)));
+        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
     }
 
     #[test]
@@ -1931,7 +2070,7 @@ mod tests {
         // Expression computes an i32, but branch keys below are f64.
         let expr = MatchExpr::from_fn_2([a, b], |x: &i32, y: &i32| Ok(x + y));
         let result = sheet.add_conditional::<f64>(expr, vec![(vec![0.0], vec![])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional)));
+        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
     }
 
     #[test]
@@ -1954,7 +2093,7 @@ mod tests {
             .add_conditional::<i32>(expr, vec![(vec![0], vec![])], vec![])
             .unwrap();
         let result = sheet.propagate();
-        assert!(matches!(result, Err(Error::MethodFailed(_))));
+        assert!(matches!(result, Err(Error::MethodFailed { .. })));
     }
 
     #[test]
@@ -1991,7 +2130,7 @@ mod tests {
         // Empty key list is invalid.
         let result =
             sheet.add_conditional::<i32>(MatchExpr::cell(a), vec![(vec![], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional)));
+        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
     }
 
     #[test]
@@ -2009,7 +2148,34 @@ mod tests {
         // Try to add the same rel to a second conditional.
         let result =
             sheet.add_conditional(MatchExpr::cell(a), vec![(vec![1_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional)));
+        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
+    }
+
+    #[test]
+    fn invalid_conditional_duplicate_relationship_names_that_relationship() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let dup_rel = sheet
+            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+            .unwrap();
+        // Add dup_rel to the first conditional.
+        sheet
+            .add_conditional(
+                MatchExpr::cell(a),
+                vec![(vec![0_i32], vec![dup_rel])],
+                vec![],
+            )
+            .unwrap();
+        // Try to add the same relationship to a second conditional.
+        let result = sheet.add_conditional(
+            MatchExpr::cell(a),
+            vec![(vec![1_i32], vec![dup_rel])],
+            vec![],
+        );
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::InvalidConditional { .. }));
+        assert!(err.sites().contains(&ErrorSite::Relationship(dup_rel)));
     }
 
     #[test]
@@ -2048,7 +2214,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             sheet.write(out, 5_i32),
-            Err(Error::InvalidCellKind)
+            Err(Error::InvalidCellKind { .. })
         ));
     }
 
@@ -2058,7 +2224,24 @@ mod tests {
         let a = sheet.add_source(0_i32);
         let b = sheet.add_cell(0_i32);
         let result = sheet.add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))]);
-        assert!(matches!(result, Err(Error::InvalidCellKind)));
+        assert!(matches!(result, Err(Error::InvalidCellKind { .. })));
+        assert_eq!(
+            result.unwrap_err().sites().first().copied(),
+            Some(ErrorSite::MethodIndex(0))
+        );
+    }
+
+    #[test]
+    fn invalid_cell_kind_names_the_method_and_the_source_output_cell() {
+        let mut sheet = Sheet::new();
+        let s = sheet.add_source(0_i32); // Source-kind cell
+        // A Source-kind output is rejected.
+        let err = sheet
+            .add_relationship(vec![Method::from_fn_1_1(s, s, |x: &i32| Ok(*x))])
+            .unwrap_err();
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(0));
+        assert!(sites[1..].contains(&ErrorSite::Cell(s)));
     }
 
     #[test]
@@ -2081,7 +2264,7 @@ mod tests {
     fn error_variant_is_invalid_cell_kind_not_terminal_cell() {
         // Compile-time check that the rename landed; exercised for real once Task 3
         // wires up the CellKind-based checks that actually return this variant.
-        let _err = Error::InvalidCellKind;
+        let _err = Error::InvalidCellKind { sites: vec![] };
     }
 
     #[test]
@@ -2151,10 +2334,9 @@ mod tests {
     #[test]
     fn add_relationship_empty_methods_returns_invalid_method() {
         let mut sheet = Sheet::new();
-        assert!(matches!(
-            sheet.add_relationship(vec![]),
-            Err(Error::InvalidMethod)
-        ));
+        let result = sheet.add_relationship(vec![]);
+        assert!(matches!(result, Err(Error::InvalidMethod { .. })));
+        assert!(result.unwrap_err().sites().is_empty());
     }
 
     #[test]
@@ -2164,10 +2346,59 @@ mod tests {
         let b = sheet.add_cell(0_i32);
         // Method declares f64 input but cell holds i32.
         let method = Method::from_fn_1_1(a, b, |x: &f64| Ok(*x * 2.0));
-        assert!(matches!(
-            sheet.add_relationship(vec![method]),
-            Err(Error::TypeMismatch { .. })
-        ));
+        let result = sheet.add_relationship(vec![method]);
+        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
+        assert_eq!(
+            result.unwrap_err().sites().first().copied(),
+            Some(ErrorSite::MethodIndex(0))
+        );
+    }
+
+    #[test]
+    fn execute_plan_type_mismatch_reports_the_method_that_produced_it() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(false); // bool cell
+        // Declares an i32 output (matching nothing about `b`'s actual bool type at
+        // add_relationship time -- add_relationship validates output_types against the cell,
+        // so declare bool here to pass that check, then lie about it at runtime below).
+        let method = Method::new(
+            vec![a],
+            vec![b],
+            vec![TypeId::of::<i32>()],
+            vec![TypeId::of::<bool>()],
+            |args| {
+                let x = *args[0].downcast_ref::<i32>().unwrap();
+                // Lies: returns an i32 though output_types declared bool, reproducing the
+                // execute_plan runtime type-mismatch path (add_relationship can't catch this --
+                // it only checks the declared TypeId, not what the closure actually returns).
+                Ok(vec![Box::new(x) as Box<dyn std::any::Any>])
+            },
+        );
+        let rel_id = sheet.add_relationship(vec![method]).unwrap();
+        let result = sheet.propagate();
+        assert!(matches!(result, Err(Error::TypeMismatch { .. })));
+        assert_eq!(
+            result.unwrap_err().sites().first().copied(),
+            Some(ErrorSite::Method(rel_id, 0))
+        );
+    }
+
+    #[test]
+    fn execute_plan_method_failed_reports_the_method_that_produced_it() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let method = Method::from_fn_1_1(a, b, |_: &i32| -> Result<i32, anyhow::Error> {
+            Err(anyhow::anyhow!("boom"))
+        });
+        let rel_id = sheet.add_relationship(vec![method]).unwrap();
+        let result = sheet.propagate();
+        assert!(matches!(result, Err(Error::MethodFailed { .. })));
+        assert_eq!(
+            result.unwrap_err().sites().first().copied(),
+            Some(ErrorSite::Method(rel_id, 0))
+        );
     }
 
     #[test]
@@ -2197,10 +2428,12 @@ mod tests {
             vec![],
             |_| Ok(vec![]),
         );
-        assert!(matches!(
-            sheet.add_relationship(vec![method]),
-            Err(Error::InvalidMethod)
-        ));
+        let result = sheet.add_relationship(vec![method]);
+        assert!(matches!(result, Err(Error::InvalidMethod { .. })));
+        assert_eq!(
+            result.unwrap_err().sites().first().copied(),
+            Some(ErrorSite::MethodIndex(0))
+        );
     }
 
     #[test]
@@ -2229,7 +2462,11 @@ mod tests {
             Method::from_fn_1_1(a, b, |v: &i32| Ok(*v)),
             Method::from_fn_1_1(b, c, |v: &i32| Ok(*v)),
         ]);
-        assert!(matches!(result, Err(Error::MismatchedMethodCells)));
+        assert!(matches!(result, Err(Error::MismatchedMethodCells { .. })));
+        assert_eq!(
+            result.unwrap_err().sites().first().copied(),
+            Some(ErrorSite::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2260,7 +2497,11 @@ mod tests {
             Method::from_fn_2_1([a, b], b, |x: &i32, _y: &i32| Ok(*x)),
             Method::from_fn_2_1([a, b], b, |_x: &i32, y: &i32| Ok(*y)),
         ]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert_eq!(
+            result.unwrap_err().sites().first().copied(),
+            Some(ErrorSite::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2290,7 +2531,11 @@ mod tests {
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
             Method::from_fn_1_1(c, d, |x: &i32| Ok(*x)),
         ]);
-        assert!(matches!(result, Err(Error::MismatchedMethodCells)));
+        assert!(matches!(result, Err(Error::MismatchedMethodCells { .. })));
+        assert_eq!(
+            result.unwrap_err().sites().first().copied(),
+            Some(ErrorSite::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2304,7 +2549,11 @@ mod tests {
             Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x + *y)),
             Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x - *y)),
         ]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert_eq!(
+            result.unwrap_err().sites().first().copied(),
+            Some(ErrorSite::MethodIndex(1))
+        );
     }
 
     #[test]
@@ -2324,7 +2573,104 @@ mod tests {
             },
         );
         let result = sheet.add_relationship(vec![method]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs)));
+        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert_eq!(
+            result.unwrap_err().sites().first().copied(),
+            Some(ErrorSite::MethodIndex(0))
+        );
+    }
+
+    #[test]
+    fn mismatched_method_cells_names_both_methods_and_the_differing_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // method 0 references {a,b}; method 1 references {a,c}: c (and b) diverge.
+        let err = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+                Method::from_fn_1_1(a, c, |x: &i32| Ok(*x)),
+            ])
+            .unwrap_err();
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(1));
+        assert_eq!(sites[1], ErrorSite::MethodIndex(0));
+        assert!(sites[2..].contains(&ErrorSite::Cell(c)));
+    }
+
+    #[test]
+    fn duplicate_output_set_across_methods_names_both_methods_and_the_shared_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        // both methods reference {a,b} and both output b.
+        let err = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
+                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x + 1)),
+            ])
+            .unwrap_err();
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(1));
+        assert_eq!(sites[1], ErrorSite::MethodIndex(0));
+        assert!(sites[2..].contains(&ErrorSite::Cell(b)));
+    }
+
+    #[test]
+    fn duplicate_cell_within_own_outputs_names_the_method_and_the_repeated_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let i32_ty = std::any::TypeId::of::<i32>();
+        // one method whose outputs name b twice.
+        let err = sheet
+            .add_relationship(vec![Method::new(
+                vec![a],
+                vec![b, b],
+                vec![i32_ty],
+                vec![i32_ty, i32_ty],
+                |args| {
+                    let v = *args[0].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(v), Box::new(v)])
+                },
+            )])
+            .unwrap_err();
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(0));
+        assert!(sites[1..].contains(&ErrorSite::Cell(b)));
+    }
+
+    #[test]
+    fn duplicate_cell_repeated_three_times_reports_cell_once() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let i32_ty = std::any::TypeId::of::<i32>();
+        // one method whose outputs name b three times.
+        let err = sheet
+            .add_relationship(vec![Method::new(
+                vec![a],
+                vec![b, b, b],
+                vec![i32_ty],
+                vec![i32_ty, i32_ty, i32_ty],
+                |args| {
+                    let v = *args[0].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(v), Box::new(v), Box::new(v)])
+                },
+            )])
+            .unwrap_err();
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(0));
+        let cell_sites: Vec<_> = sites[1..]
+            .iter()
+            .filter(|&&s| s == ErrorSite::Cell(b))
+            .collect();
+        assert_eq!(
+            cell_sites.len(),
+            1,
+            "expected exactly one Cell(b) site for a triple repeat, got {sites:?}"
+        );
     }
 
     #[test]
@@ -2558,153 +2904,6 @@ mod tests {
         assert!(!sheet.is_source(b));
     }
 
-    #[test]
-    fn propagate_without_replan_returns_conflict_before_propagate() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
-            .unwrap();
-        assert!(matches!(
-            sheet.propagate_without_replan(),
-            Err(Error::Conflict)
-        ));
-    }
-
-    #[test]
-    fn propagate_without_replan_executes_cached_plan() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
-            .unwrap();
-        // Write to `a` so it has the highest strength and becomes the source.
-        sheet.write(a, 0_i32).unwrap();
-        sheet.propagate().unwrap();
-        sheet.write(a, 5_i32).unwrap();
-        sheet.propagate_without_replan().unwrap();
-        assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
-    }
-
-    #[test]
-    fn selected_method_returns_none_for_invalid_id() {
-        let sheet = Sheet::new();
-        assert!(sheet.selected_method(RelationshipId::default()).is_none());
-    }
-
-    #[test]
-    fn add_cell_and_write_set_high_order_bit_on_strength() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        assert!(
-            sheet.cells[a].strength & (1u64 << 63) != 0,
-            "add_cell must set high-order bit"
-        );
-        sheet.write(a, 1_i32).unwrap();
-        assert!(
-            sheet.cells[a].strength & (1u64 << 63) != 0,
-            "write must set high-order bit"
-        );
-    }
-
-    #[test]
-    fn propagate_assigns_low_order_strength_to_derived_cells() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
-            .unwrap();
-        sheet.write(a, 1_i32).unwrap();
-        sheet.propagate().unwrap();
-        assert!(
-            sheet.cells[a].strength & (1u64 << 63) != 0,
-            "source cell must keep high-order strength"
-        );
-        assert!(
-            sheet.cells[b].strength & (1u64 << 63) == 0,
-            "derived cell must have low-order strength"
-        );
-        assert!(sheet.cells[a].strength > sheet.cells[b].strength);
-    }
-
-    #[test]
-    fn propagate_without_replan_keeps_derived_strengths_in_low_partition() {
-        // Set up a sheet with a conditional: mode=1 → rel_on active (a→b).
-        let mut sheet = Sheet::new();
-        let mode = sheet.add_cell(0_i32);
-        let a = sheet.add_cell(10_i32);
-        let b = sheet.add_cell(0_i32);
-
-        let rel_on = sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
-            .unwrap();
-        sheet
-            .add_conditional(
-                MatchExpr::cell(mode),
-                vec![(vec![1_i32], vec![rel_on])],
-                vec![],
-            )
-            .unwrap();
-
-        // Full propagation with mode=1 (conditional active).
-        sheet.write(mode, 1_i32).unwrap();
-        sheet.write(a, 10_i32).unwrap();
-        sheet.propagate().unwrap();
-        assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
-
-        // b should have a low-order derived strength (high-bit clear).
-        assert_eq!(
-            sheet.cells[b].strength & (1u64 << 63),
-            0,
-            "derived cell b must have low-order strength after propagate"
-        );
-
-        // Re-execute the plan without replanning. b should still be derived correctly.
-        sheet.propagate_without_replan().unwrap();
-        assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
-
-        // b's strength should still be in the low partition after propagate_without_replan.
-        assert_eq!(
-            sheet.cells[b].strength & (1u64 << 63),
-            0,
-            "derived cell b must have low-order strength after propagate_without_replan"
-        );
-    }
-
-    #[test]
-    fn propagate_without_replan_correct_after_plan_switch() {
-        // Setup: two cells, b added last (higher strength), so b→a method is selected.
-        // Sheet has two methods: b→a and a→b.
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(0_i32);
-        let b = sheet.add_cell(0_i32);
-        sheet
-            .add_relationship(vec![
-                Method::from_fn_1_1(b, a, |x: &i32| Ok(*x * 2)),
-                Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 3)),
-            ])
-            .unwrap();
-        // First propagate: b is source (added last, higher strength). b→a selected.
-        sheet.write(b, 5_i32).unwrap();
-        sheet.propagate().unwrap();
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 10); // a = b * 2 = 10
-        assert!(!sheet.is_source(a)); // a is output
-
-        // Write to a: raises a's strength above b, plan switches to a→b.
-        sheet.write(a, 4_i32).unwrap();
-        sheet.propagate().unwrap(); // plan now: a→b selected (a*3)
-        assert_eq!(*sheet.read::<i32>(b).unwrap(), 12); // b = a * 3 = 12
-        assert!(sheet.is_source(a)); // a is now a source
-
-        // Second write to a: is_source(a) is true → propagate_without_replan is safe.
-        sheet.write(a, 7_i32).unwrap();
-        sheet.propagate_without_replan().unwrap();
-        assert_eq!(*sheet.read::<i32>(b).unwrap(), 21); // b = a * 3 = 21
-    }
-
     // ── Conditional accessor tests ─────────────────────────────────────────
 
     fn sheet_with_two_branch_conditional() -> (Sheet, ConditionalId) {
@@ -2873,11 +3072,7 @@ mod tests {
     #[test]
     fn add_filter_returns_invalid_id_for_missing_cell() {
         let mut sheet = Sheet::new();
-        let result = sheet.add_filter(
-            CellId::default(),
-            "test_filter",
-            Filter::from_fn_0(|x: &i32| Ok(*x)),
-        );
+        let result = sheet.add_filter(CellId::default(), Filter::from_fn_0(|x: &i32| Ok(*x)));
         assert!(matches!(result, Err(Error::InvalidId)));
     }
 
@@ -2886,11 +3081,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         // add_filter never evaluates the function against the current value: the raw
         // out-of-range value survives until the next propagate().
@@ -2902,11 +3093,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(500_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         assert_eq!(*sheet.read::<i32>(a).unwrap(), 500);
         sheet.propagate().unwrap();
@@ -2920,9 +3107,9 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
         sheet
-            .add_filter(a, "test_filter", Filter::from_fn_0(|x: &i32| Ok(*x)))
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
             .unwrap();
-        let result = sheet.add_filter(a, "test_filter", Filter::from_fn_0(|x: &i32| Ok(*x)));
+        let result = sheet.add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)));
         assert!(matches!(result, Err(Error::InvalidFilter)));
     }
 
@@ -2930,7 +3117,7 @@ mod tests {
     fn add_filter_returns_invalid_filter_for_mismatched_value_type() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
-        let result = sheet.add_filter(a, "test_filter", Filter::from_fn_0(|x: &f64| Ok(*x)));
+        let result = sheet.add_filter(a, Filter::from_fn_0(|x: &f64| Ok(*x)));
         assert!(matches!(result, Err(Error::InvalidFilter)));
     }
 
@@ -2940,7 +3127,6 @@ mod tests {
         let a = sheet.add_cell(5_i32);
         let result = sheet.add_filter(
             a,
-            "test_filter",
             Filter::from_fn_1(a, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
         );
         assert!(matches!(result, Err(Error::InvalidFilter)));
@@ -2952,7 +3138,6 @@ mod tests {
         let a = sheet.add_cell(5_i32);
         let result = sheet.add_filter(
             a,
-            "test_filter",
             Filter::from_fn_1(CellId::default(), |x: &i32, bound: &i32| {
                 Ok((*x).min(*bound))
             }),
@@ -2967,39 +3152,9 @@ mod tests {
         let bound = sheet.add_cell(1.0_f64); // wrong type: filter declares i32
         let result = sheet.add_filter(
             a,
-            "test_filter",
             Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
         );
         assert!(matches!(result, Err(Error::TypeMismatch { .. })));
-    }
-
-    #[test]
-    fn add_filter_stores_and_reports_its_name() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        sheet
-            .add_filter(
-                a,
-                "clamp",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 10))),
-            )
-            .unwrap();
-        assert_eq!(sheet.filter_name(a), Some("clamp"));
-    }
-
-    #[test]
-    fn filter_name_returns_none_for_an_unfiltered_cell() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        assert_eq!(sheet.filter_name(a), None);
-    }
-
-    #[test]
-    fn add_filter_returns_invalid_filter_for_an_empty_name() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        let result = sheet.add_filter(a, "", Filter::from_fn_0(|x: &i32| Ok(*x)));
-        assert!(matches!(result, Err(Error::InvalidFilter)));
     }
 
     #[test]
@@ -3008,11 +3163,7 @@ mod tests {
         let a = sheet.add_source(5_i32);
         assert!(
             sheet
-                .add_filter(
-                    a,
-                    "clamp",
-                    Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 10)))
-                )
+                .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 10))))
                 .is_ok()
         );
     }
@@ -3026,7 +3177,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_2([lo, hi], |x: &i32, lo: &i32, hi: &i32| {
                     Ok((*x).clamp(*lo, *hi))
                 }),
@@ -3053,11 +3203,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet.write(a, 500_i32).unwrap();
         // write() no longer runs the filter: the raw value stands until propagate().
@@ -3072,11 +3218,7 @@ mod tests {
         let a = sheet.add_cell(10_i32);
         let b = sheet.add_cell(0_i32);
         sheet
-            .add_filter(
-                b,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
@@ -3092,11 +3234,7 @@ mod tests {
         let a = sheet.add_cell(60_i32);
         let b = sheet.add_cell(0_i32);
         sheet
-            .add_filter(
-                b,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
@@ -3122,7 +3260,6 @@ mod tests {
         sheet
             .add_filter(
                 b,
-                "test_filter",
                 Filter::from_fn_0(|x: &i32| {
                     if *x == 0 {
                         Ok(*x)
@@ -3160,7 +3297,7 @@ mod tests {
                 Ok(Box::new(1.5_f64) as Box<dyn Any>)
             }
         });
-        sheet.add_filter(b, "test_filter", filter).unwrap();
+        sheet.add_filter(b, filter).unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
             .unwrap();
@@ -3178,11 +3315,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(60_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet.propagate().unwrap();
         assert!(sheet.last_filter_violations.is_empty());
@@ -3197,7 +3330,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
             )
             .unwrap();
@@ -3224,7 +3356,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, bnd: &i32| Ok((*v).min(*bnd))),
             )
             .unwrap();
@@ -3253,7 +3384,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
             )
             .unwrap();
@@ -3292,7 +3422,7 @@ mod tests {
                 }
             },
         );
-        sheet.add_filter(a, "test_filter", filter).unwrap();
+        sheet.add_filter(a, filter).unwrap();
 
         // trigger changes, causing reclamp where the filter returns wrong type
         sheet.write(trigger, 1_i32).unwrap();
@@ -3316,7 +3446,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, b: &i32| {
                     if *v <= *b {
                         Ok(*v)
@@ -3339,60 +3468,6 @@ mod tests {
     }
 
     #[test]
-    fn propagate_without_replan_reapplies_a_cached_filter_reclamp_but_does_not_touch_last_filter_violations()
-     {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(50_i32);
-        let bound = sheet.add_cell(100_i32);
-        sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
-            )
-            .unwrap();
-        sheet.propagate().unwrap();
-        assert!(sheet.filter_violation(a).is_none());
-
-        // bound is itself a plain source (is_source(bound) holds), so rewriting it and
-        // re-running only the cached plan is exactly propagate_without_replan's
-        // documented precondition.
-        sheet.write(bound, 10_i32).unwrap();
-        sheet.propagate_without_replan().unwrap();
-
-        assert_eq!(*sheet.read::<i32>(a).unwrap(), 10);
-        // last_filter_violations is not recomputed by propagate_without_replan.
-        assert!(sheet.filter_violation(a).is_none());
-    }
-
-    #[test]
-    fn propagate_without_replan_does_not_recompute_filter_violations() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(60_i32);
-        let b = sheet.add_cell(0_i32);
-        sheet
-            .add_filter(
-                b,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
-            .unwrap();
-        sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
-            .unwrap();
-        sheet.propagate().unwrap();
-        assert!(sheet.last_filter_violations.contains_key(&b));
-
-        // Rewrite `a` back into range and re-run only the cached plan.
-        sheet.write(a, 10_i32).unwrap();
-        sheet.propagate_without_replan().unwrap();
-        assert_eq!(*sheet.read::<i32>(b).unwrap(), 20);
-        // Still reports the *old* violation: propagate_without_replan doesn't
-        // recompute it, matching last_requirement_violations's existing behavior.
-        assert!(sheet.last_filter_violations.contains_key(&b));
-    }
-
-    #[test]
     fn filter_args_returns_the_filters_argument_cells() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
@@ -3400,7 +3475,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
             )
             .unwrap();
@@ -3432,11 +3506,7 @@ mod tests {
         let a = sheet.add_cell(60_i32);
         let b = sheet.add_cell(0_i32);
         sheet
-            .add_filter(
-                b,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(b, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet
             .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x * 2))])
@@ -3454,11 +3524,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(10_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 100))))
             .unwrap();
         sheet.propagate().unwrap();
         assert!(sheet.filter_violation_cells().is_empty());
@@ -3473,7 +3539,6 @@ mod tests {
         sheet
             .add_filter(
                 b,
-                "test_filter",
                 Filter::from_fn_1(bound, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
             )
             .unwrap();
@@ -3502,7 +3567,6 @@ mod tests {
         sheet
             .add_filter(
                 b,
-                "test_filter",
                 Filter::from_fn_1(bound, |x: &i32, _bound: &i32| {
                     if *x == 0 {
                         Ok(*x)
@@ -3535,7 +3599,6 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, b: &i32| Ok((*v).min(*b))),
             )
             .unwrap();
@@ -3548,11 +3611,7 @@ mod tests {
         let bound = sheet.add_cell(10_i32);
         let a = sheet.add_cell(5_i32);
         sheet
-            .add_filter(
-                a,
-                "test_filter",
-                Filter::from_fn_0(|v: &i32| Ok((*v).clamp(0, 100))),
-            )
+            .add_filter(a, Filter::from_fn_0(|v: &i32| Ok((*v).clamp(0, 100))))
             .unwrap();
         assert!(sheet.filter_dependents(bound).is_empty());
     }
@@ -3572,14 +3631,12 @@ mod tests {
         sheet
             .add_filter(
                 a,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, bd: &i32| Ok((*v).min(*bd))),
             )
             .unwrap();
         sheet
             .add_filter(
                 b,
-                "test_filter",
                 Filter::from_fn_1(bound, |v: &i32, bd: &i32| Ok((*v).min(*bd))),
             )
             .unwrap();
@@ -3601,7 +3658,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         sheet
-            .add_filter(a, "test_filter", Filter::from_fn_0(|x: &i32| Ok(*x)))
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
             .unwrap();
         assert!(matches!(sheet.filter_kind(a), Some(FilterKind::Opaque)));
     }
@@ -3622,7 +3679,7 @@ mod tests {
                 ))
             },
         );
-        sheet.add_filter(a, "test_filter", filter).unwrap();
+        sheet.add_filter(a, filter).unwrap();
         assert!(matches!(
             sheet.filter_kind(a),
             Some(FilterKind::Range { .. })
@@ -3652,7 +3709,7 @@ mod tests {
                 ))
             },
         );
-        sheet.add_filter(a, "test_filter", filter).unwrap();
+        sheet.add_filter(a, filter).unwrap();
         assert_eq!(sheet.filter_range::<i32>(a), Some((0, 100)));
         sheet.write(hi, 10_i32).unwrap();
         assert_eq!(sheet.filter_range::<i32>(a), Some((0, 10)));
@@ -3688,7 +3745,7 @@ mod tests {
                 ))
             },
         );
-        sheet.add_filter(a, "test_filter", filter).unwrap();
+        sheet.add_filter(a, filter).unwrap();
         sheet.write(hi_source, 20_i32).unwrap();
         sheet.propagate().unwrap();
         assert_eq!(sheet.filter_range::<i32>(a), Some((0, 20)));
@@ -3699,7 +3756,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         sheet
-            .add_filter(a, "test_filter", Filter::from_fn_0(|x: &i32| Ok(*x)))
+            .add_filter(a, Filter::from_fn_0(|x: &i32| Ok(*x)))
             .unwrap();
         assert!(sheet.filter_range::<i32>(a).is_none());
     }
@@ -3710,18 +3767,10 @@ mod tests {
         let a = sheet.add_cell(5_i32);
         let result = sheet.add_requirement(
             a,
-            "positive",
+            Some("positive"),
             Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
         );
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn add_requirement_returns_invalid_requirement_for_empty_name() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        let result = sheet.add_requirement(a, "", Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)));
-        assert!(matches!(result, Err(Error::InvalidRequirement)));
     }
 
     #[test]
@@ -3731,16 +3780,28 @@ mod tests {
         sheet
             .add_requirement(
                 a,
-                "positive",
+                Some("positive"),
                 Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
             )
             .unwrap();
         let result = sheet.add_requirement(
             a,
-            "positive",
+            Some("positive"),
             Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)),
         );
         assert!(matches!(result, Err(Error::InvalidRequirement)));
+    }
+
+    #[test]
+    fn add_requirement_allows_two_unnamed_requirements_on_the_same_cell() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(5_i32);
+        sheet
+            .add_requirement(a, None, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)))
+            .unwrap();
+        let result =
+            sheet.add_requirement(a, None, Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -3749,7 +3810,7 @@ mod tests {
         let a = sheet.add_cell(-5_i32);
         let result = sheet.add_requirement(
             a,
-            "positive",
+            Some("positive"),
             Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
         );
         assert!(matches!(result, Err(Error::InvalidRequirement)));
@@ -3761,7 +3822,7 @@ mod tests {
         let a = sheet.add_source(-5_i32);
         let result = sheet.add_requirement(
             a,
-            "positive",
+            Some("positive"),
             Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
         );
         assert!(matches!(result, Err(Error::InvalidRequirement)));
@@ -3773,10 +3834,10 @@ mod tests {
         let a = sheet.add_cell(5_i32);
         let result = sheet.add_requirement(
             a,
-            "always_errors",
+            Some("always_errors"),
             Requirement::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("boom"))),
         );
-        assert!(matches!(result, Err(Error::MethodFailed(_))));
+        assert!(matches!(result, Err(Error::MethodFailed { .. })));
     }
 
     #[test]
@@ -3786,7 +3847,7 @@ mod tests {
         let rid = sheet
             .add_requirement(
                 a,
-                "positive",
+                Some("positive"),
                 Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
             )
             .unwrap();
@@ -3860,7 +3921,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             sheet.write(area, 99_i32),
-            Err(Error::InvalidCellKind)
+            Err(Error::InvalidCellKind { .. })
         ));
     }
 
@@ -3874,7 +3935,7 @@ mod tests {
             .add_out(Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)), vec![])
             .unwrap();
         let result = sheet.add_out(Method::from_fn_1_1(height, area, |h: &i32| Ok(*h)), vec![]);
-        assert!(matches!(result, Err(Error::InvalidCellKind)));
+        assert!(matches!(result, Err(Error::InvalidCellKind { .. })));
     }
 
     #[test]
@@ -3899,7 +3960,7 @@ mod tests {
             .add_out(
                 Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)),
                 vec![(
-                    "too_small",
+                    Some("too_small"),
                     Requirement::from_fn_1(area, |a: &i32| Ok(*a > 100)),
                 )],
             )
@@ -3929,11 +3990,7 @@ mod tests {
         let out_cell = sheet
             .add_out(Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)), vec![])
             .unwrap();
-        let result = sheet.add_filter(
-            out_cell,
-            "clamp",
-            Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 10))),
-        );
+        let result = sheet.add_filter(out_cell, Filter::from_fn_0(|x: &i32| Ok((*x).clamp(0, 10))));
         assert!(result.is_ok());
     }
 
@@ -3944,7 +4001,7 @@ mod tests {
         sheet
             .add_requirement(
                 a,
-                "positive",
+                Some("positive"),
                 Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
             )
             .unwrap();
@@ -3964,7 +4021,7 @@ mod tests {
         sheet
             .add_requirement(
                 a,
-                "too_big",
+                Some("too_big"),
                 Requirement::from_fn_1(a, |x: &i32| Ok(*x > 100)),
             )
             .unwrap();

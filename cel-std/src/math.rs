@@ -1,9 +1,9 @@
 //! Numeric CEL standard-library functions.
 //!
-//! Each function follows the pattern `cel-parser`'s built-in `round` uses: a marker
+//! Each function follows the marker-and-call pattern used by CEL functions: a marker
 //! struct is pushed for the bare-identifier (arity-0) lookup of the function's name, and
 //! consumed by the paired `"()"` call lookup once the marker confirms this call's callee
-//! is that function (see `cel-parser/src/op_table.rs`'s `round_scope`).
+//! is that function.
 
 use anyhow::Result;
 use cel_parser::SourceSpan;
@@ -38,11 +38,11 @@ pub(crate) fn min_max_scope(
         }
         ("()", 3) => {
             let top = segment.peek_stack_infos(3);
-            if top.len() != 3 || top[1].type_id != top[2].type_id {
+            if top.len() != 3 || top[1].value_type.type_id() != top[2].value_type.type_id() {
                 return Ok(false);
             }
-            let callee_type = top[0].type_id;
-            let operand_type = top[1].type_id;
+            let callee_type = top[0].value_type.type_id();
+            let operand_type = top[1].value_type.type_id();
 
             macro_rules! dispatch {
                 ($marker:ty, $method:ident, [$($t:ty),+ $(,)?]) => {
@@ -105,13 +105,13 @@ pub(crate) fn clamp_scope(
         ("()", 4) => {
             let top = segment.peek_stack_infos(4);
             if top.len() != 4
-                || top[0].type_id != TypeId::of::<ClampFn>()
-                || top[1].type_id != top[2].type_id
-                || top[1].type_id != top[3].type_id
+                || top[0].value_type.type_id() != TypeId::of::<ClampFn>()
+                || top[1].value_type.type_id() != top[2].value_type.type_id()
+                || top[1].value_type.type_id() != top[3].value_type.type_id()
             {
                 return Ok(false);
             }
-            let operand_type = top[1].type_id;
+            let operand_type = top[1].value_type.type_id();
 
             macro_rules! dispatch {
                 ([$($t:ty),+ $(,)?]) => {
@@ -162,10 +162,10 @@ pub(crate) fn abs_scope(
         }
         ("()", 2) => {
             let top = segment.peek_stack_infos(2);
-            if top.len() != 2 || top[0].type_id != TypeId::of::<AbsFn>() {
+            if top.len() != 2 || top[0].value_type.type_id() != TypeId::of::<AbsFn>() {
                 return Ok(false);
             }
-            let operand_type = top[1].type_id;
+            let operand_type = top[1].value_type.type_id();
 
             macro_rules! dispatch_checked {
                 ([$($t:ty),+ $(,)?]) => {
@@ -209,10 +209,14 @@ struct FloorFn;
 struct CeilFn;
 /// Marker pushed for a bare `trunc` lookup; consumed by the paired `"()"` call.
 struct TruncFn;
+/// Marker pushed for a bare `fract` lookup; consumed by the paired `"()"` call.
+struct FractFn;
+/// Marker pushed for a bare `round_ties_even` lookup; consumed by the paired `"()"` call.
+struct RoundTiesEvenFn;
 
-/// `signum(x)` (signed integers and floats), `sqrt(x)`/`floor(x)`/`ceil(x)`/`trunc(x)`
-/// (floats only) — all infallible, matching the semantics of Rust's method of the same
-/// name (e.g. `sqrt` of a negative float yields `NaN`, not an error).
+/// `signum(x)` (signed integers and floats), and `sqrt(x)`, `floor(x)`, `ceil(x)`,
+/// `trunc(x)`, `fract(x)`, and `round_ties_even(x)` (floats only) — all infallible,
+/// matching the semantics of Rust's method of the same name.
 pub(crate) fn unary_math_scope(
     name: &str,
     segment: &mut DynSegment,
@@ -240,13 +244,21 @@ pub(crate) fn unary_math_scope(
             segment.op0(|| TruncFn);
             Ok(true)
         }
+        ("fract", 0) => {
+            segment.op0(|| FractFn);
+            Ok(true)
+        }
+        ("round_ties_even", 0) => {
+            segment.op0(|| RoundTiesEvenFn);
+            Ok(true)
+        }
         ("()", 2) => {
             let top = segment.peek_stack_infos(2);
             if top.len() != 2 {
                 return Ok(false);
             }
-            let callee_type = top[0].type_id;
-            let operand_type = top[1].type_id;
+            let callee_type = top[0].value_type.type_id();
+            let operand_type = top[1].value_type.type_id();
 
             macro_rules! dispatch {
                 ($marker:ty, $method:ident, [$($t:ty),+ $(,)?]) => {
@@ -267,6 +279,8 @@ pub(crate) fn unary_math_scope(
             dispatch!(FloorFn, floor, [f32, f64]);
             dispatch!(CeilFn, ceil, [f32, f64]);
             dispatch!(TruncFn, trunc, [f32, f64]);
+            dispatch!(FractFn, fract, [f32, f64]);
+            dispatch!(RoundTiesEvenFn, round_ties_even, [f32, f64]);
             Ok(false)
         }
         _ => Ok(false),
@@ -755,6 +769,42 @@ mod tests {
             .lookup("()", &mut segment, 2, Span::call_site(), Span::call_site())
             .map_err(|_| anyhow::anyhow!("lookup failed"))?;
         assert_eq!(segment.call0::<f64>()?, -3.0);
+        Ok(())
+    }
+
+    #[test]
+    fn round_is_not_a_standard_library_function() {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+
+        assert!(
+            cel_parser::CELParser::new(lookup)
+                .parse_str("round(-3.5)")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn round_ties_even_rounds_halfway_values_to_the_nearest_even_integer() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = cel_parser::CELParser::new(lookup)
+            .parse_str("round_ties_even(2.5)")
+            .unwrap();
+
+        assert_eq!(segment.call0::<f64>()?, 2.0);
+        Ok(())
+    }
+
+    #[test]
+    fn fract_returns_the_fractional_part_of_a_float() -> Result<()> {
+        let mut lookup = OpLookup::new();
+        install(&mut lookup);
+        let mut segment = cel_parser::CELParser::new(lookup)
+            .parse_str("fract(-3.75f32)")
+            .unwrap();
+
+        assert_eq!(segment.call0::<f32>()?, -0.75);
         Ok(())
     }
 }

@@ -12,6 +12,10 @@
 //!
 //! # Grammar
 //!
+//! For a prose reference manual with the same grammar, see the standalone
+//! [CEL book](../cel-book/index.html) and its
+//! [reference chapter](../cel-book/reference.html).
+//!
 //! ```text
 //! expression = range_expression.
 //! range_expression = or_expression [ ".." [ or_expression ] | "..=" or_expression ]
@@ -30,13 +34,18 @@
 //! cast_expression = unary_expression { "as" identifier }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
 //! postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." unsuffixed_integer }.
-//! primary_expression = literal | identifier | tuple_or_group | if_expression | closure_expression.
-//! tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".
-//! if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].
+//! primary_expression = literal | identifier | tuple_or_group | array_expression
+//!                    | if_expression | closure_expression.
+//! tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".
+//! array_expression = "[" [ expression { "," expression } ] "]" [ ":" type_expression ].
+//! if_expression = "if" expression "{" expression "}" [ "else" ( "{" expression "}" | if_expression ) ].
 //! closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression.
-//! closure_param = identifier ":" closure_type_expression.
-//! closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")".
-//! parameter_list = or_expression { "," or_expression }.
+//! closure_param = identifier ":" type_expression.
+//! parameter_list = expression { "," expression }.
+//!
+//! type_expression = identifier [ "(" [ type_expression { "," type_expression } ] ")" ]
+//!                  | "[" type_expression "]"
+//!                  | "(" [ type_expression ["," [ type_expression { "," type_expression } ]] ] ")".
 //!
 //! literal_pattern = ["-"] literal.
 //! ```
@@ -46,6 +55,19 @@
 //! and need Rust's own `LiteralPattern` rule: a bare literal, or one directly negated by a
 //! leading `-` (no `!`, no chained `--`, no arbitrary unary/postfix operand) — see
 //! <https://doc.rust-lang.org/reference/patterns.html#literal-patterns>.
+//!
+//! `type_expression` is the single, reusable recursive type grammar shared by array type
+//! ascriptions (`[i32]: [...]`), closure parameters (`|x: RangeInclusive(f64)| ...`), and
+//! adam-lang cell/source/out type annotations (`cell x: (i32, f64);`). A bare identifier
+//! resolves through the configured [`TypeResolver`] (array/closure contexts) or a host
+//! `TypeRegistry` (adam-lang cell contexts); `Name(args)` names a parameterized/generic type
+//! (e.g. `RangeInclusive(f64)`, the type produced by CEL's own `..=` range operator) resolved
+//! against the same [`TypeResolver`]; `[T]` composes nested array types (`[i32]`, `[[i32]]`);
+//! and parenthesized tuple syntax names a (possibly nested) tuple type. Every context that
+//! accepts `type_expression` documents its own narrower support boundary where one exists (for
+//! example, closure parameters do not yet support `[T]` — see
+//! <https://github.com/stlab/cel-rs/issues/228> — and adam-lang cell types do not yet support
+//! `[T]` or `Name(args)` — see <https://github.com/stlab/cel-rs/issues/227>).
 //!
 //! # Examples
 //!
@@ -71,6 +93,103 @@
 //! let result = parser.parse_tokens(input.into_iter());
 //! assert!(result.is_ok());
 //! ```
+//!
+//! ## Array Literals
+//!
+//! A `[...]` literal evaluates to one [`cel_runtime::DynamicArray`] owning every element.
+//! Unannotated non-empty arrays keep their existing inference, while postfix annotations let
+//! callers state the complete scalar, nested-array, custom-registry, or empty-array type
+//! explicitly. Elements must share one complete recursive runtime type — a heterogeneous literal
+//! such as `[1i32, 2.0f64]`, an unannotated empty literal `[]`, or a trailing comma is a parse
+//! error — and the evaluated array converts to the corresponding `Vec<T>` without moving or
+//! reallocating its elements:
+//!
+//! ```rust
+//! use cel_parser::{CELParser, OpLookup};
+//! use cel_runtime::DynamicArray;
+//!
+//! let mut segment = CELParser::new(OpLookup::new())
+//!     .parse_str("[0, 1, 2]: [i32]")
+//!     .unwrap();
+//! let array: DynamicArray = segment.call0().unwrap();
+//! assert_eq!(array.try_into_vec::<i32>().unwrap(), vec![0, 1, 2]);
+//!
+//! let mut segment = CELParser::new(OpLookup::new()).parse_str("[]: [i32]").unwrap();
+//! let array: DynamicArray = segment.call0().unwrap();
+//! assert!(array.try_into_vec::<i32>().unwrap().is_empty());
+//! ```
+//!
+//! Hosts may also resolve custom registry-backed leaf names by constructing the parser with
+//! [`CELParser::with_type_resolver`]:
+//!
+//! ```rust
+//! use cel_parser::{CELParser, OpLookup, ResolvedLeafType};
+//! use cel_runtime::{ArrayElementType, DynamicArray};
+//!
+//! #[derive(Clone)]
+//! struct Custom;
+//!
+//! let resolver = [(
+//!     "Custom",
+//!     ResolvedLeafType::new("Custom", ArrayElementType::leaf::<Custom>().unwrap()),
+//! )];
+//! let mut segment = CELParser::with_type_resolver(OpLookup::new(), resolver)
+//!     .parse_str("[]: [Custom]")
+//!     .unwrap();
+//! let array: DynamicArray = segment.call0().unwrap();
+//! assert!(array.try_into_vec::<Custom>().unwrap().is_empty());
+//! ```
+//!
+//! Nested literals accept recursive array annotations, so each inner value is itself a
+//! `DynamicArray` with its own checked element descriptor:
+//!
+//! ```rust
+//! use cel_parser::{CELParser, OpLookup};
+//! use cel_runtime::DynamicArray;
+//!
+//! let mut segment = CELParser::new(OpLookup::new())
+//!     .parse_str("[[0], [1]]: [[i32]]")
+//!     .unwrap();
+//! let array: DynamicArray = segment.call0().unwrap();
+//! let rows = array.try_into_vec::<DynamicArray>().unwrap();
+//! assert_eq!(rows.len(), 2);
+//! assert_eq!(rows[0].try_as_slice::<i32>().unwrap(), &[0]);
+//! ```
+//!
+//! Exact annotation failures stay precise:
+//!
+//! ```rust
+//! use cel_parser::{CELParser, OpLookup};
+//!
+//! let err = match CELParser::new(OpLookup::new()).parse_str("[0, 1]: [f64]") {
+//!     Ok(_) => panic!("the annotation should reject i32 elements"),
+//!     Err(err) => err,
+//! };
+//! assert_eq!(
+//!     err.message(),
+//!     "array element 0 has type i32, expected f64"
+//! );
+//!
+//! let err = match CELParser::new(OpLookup::new()).parse_str("[0]: [Nope]") {
+//!     Ok(_) => panic!("the unknown leaf name should be rejected"),
+//!     Err(err) => err,
+//! };
+//! assert_eq!(err.message(), "unknown type `Nope`");
+//! ```
+//!
+//! ### Known limitations
+//!
+//! - An unannotated empty literal (`[]`) is a parse error: with no element there is nothing to
+//!   infer the array's element type from (<https://github.com/stlab/cel-rs/issues/212>).
+//! - A CEL tuple cannot be an array element, so both `[(0i32, 1i32)]` and `[]: [(i32, i32)]`
+//!   are rejected with the explicit tuple-array diagnostic: a tuple is a stack-layout
+//!   pseudo-value with no concrete Rust element representation
+//!   (<https://github.com/stlab/cel-rs/issues/213>).
+//! - A type-mismatch diagnostic from the compiling path ([`CELParser`], which type-checks
+//!   elements against their compiled runtime types) spans the whole `[...]` literal and names the
+//!   offending element only in its message text (`array element 1 has type ...`). The static
+//!   [`ty::check_expr`] checker, which runs over an [`AstContext`] tree instead, already reports
+//!   the offending element's own span (<https://github.com/stlab/cel-rs/issues/215>).
 //!
 //! ## Error Formatting
 //!
@@ -100,15 +219,24 @@ mod fmt;
 pub mod lex_lexer;
 pub mod op_table;
 pub mod parser_context;
+pub mod trivia;
 pub mod ty;
+pub mod type_expr;
 
-pub use ast::{AstContext, ClosureParam, ClosureParamTypeExpr, Expr, ExprSpan, Literal, LogicalOp};
-pub use error::{CELError, FormatRustcStyle, ParseError, SourceSpan, SpanContext};
+pub use ast::{AstContext, ClosureParam, Expr, ExprSpan, Literal, LogicalOp};
+pub use error::{
+    CELError, FormatRustcStyle, ParseError, SourceSpan, SpanContext, SpanLabel, format_multi_span,
+};
 pub use fmt::format_expr;
 pub use op_table::{OpLookup, OperandTypes, builtin_operand_types};
 pub use parser_context::{DynSegmentContext, ParserContext};
 pub use proc_macro2::LineColumn;
+pub use trivia::Comment;
 pub use ty::Ty;
+pub use type_expr::{
+    ResolvedArrayType, ResolvedLeafType, ResolvedType, TypeExpr, TypeResolver,
+    builtin_type_resolver, resolve_builtin_named_type,
+};
 
 use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};
 
@@ -118,6 +246,7 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::iter::Peekable;
 use std::str::FromStr;
+use std::sync::Arc;
 
 /// Parser result type.
 pub type Result<T> = std::result::Result<T, ParseError>;
@@ -321,12 +450,12 @@ pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
     push_literal_token(&mut DynSegmentContext::new_context(), lit.clone())
 }
 
-/// One resolved closure parameter type: a built-in scalar, or a (possibly nested) tuple of them
-/// — the result of resolving a `closure_type_expression` production (see
-/// [`Parser::parse_closure_type_expression`]).
+/// One resolved closure parameter type: a built-in scalar or generic, or a (possibly nested)
+/// tuple of them — the result of resolving a parsed [`TypeExpr`] (see
+/// [`closure_param_type_from_type_expr`]).
 enum ClosureParamType {
-    /// A single built-in scalar type (e.g. `i32`, `bool`).
-    Scalar(crate::op_table::BuiltinScalarType),
+    /// A single built-in scalar or generic type (e.g. `i32`, `RangeInclusive(f64)`).
+    Named(crate::op_table::BuiltinScalarType),
     /// A (possibly nested) tuple of closure parameter types.
     Tuple(Vec<ClosureParamType>),
 }
@@ -347,43 +476,82 @@ impl ClosureParamType {
     /// `AssociatedType` list built by [`elements_to_associated`], not in this `TypeId`.
     fn type_id(&self) -> TypeId {
         match self {
-            ClosureParamType::Scalar(s) => s.type_id,
+            ClosureParamType::Named(s) => s.type_id,
             ClosureParamType::Tuple(_) => TypeId::of::<cel_runtime::DynamicSequence>(),
         }
     }
 }
 
 /// Builds a fresh `AssociatedType` prototype list from resolved closure parameter element
-/// types, for [`cel_runtime::DynSegment::push_arg_as_dynamic_sequence_tuple`] — leaf
-/// `size`/`align` are the scalar's real values (that method's own precondition), while a nested
-/// tuple's are placeholders (`push_arg_as_dynamic_sequence_tuple` recomputes them recursively
-/// from `associated`).
+/// types, for [`cel_runtime::DynSegment::push_arg_as_dynamic_sequence_tuple`] — each leaf
+/// carries the scalar's own registered layout, and each nested tuple carries its own
+/// recursively-built elements (whose layout that method recomputes).
 ///
 /// - Complexity: O(n) in the total (nested) element count.
 fn elements_to_associated(elements: &[ClosureParamType]) -> Vec<cel_runtime::AssociatedType> {
     elements
         .iter()
-        .map(|ty| match ty {
-            ClosureParamType::Scalar(s) => cel_runtime::AssociatedType {
-                type_id: s.type_id,
-                type_name: std::borrow::Cow::Borrowed(s.type_name),
-                offset: 0,
-                size: s.size,
-                align: s.align,
-                dropper: s.dropper,
-                associated: Vec::new(),
-            },
-            ClosureParamType::Tuple(nested) => cel_runtime::AssociatedType {
-                type_id: TypeId::of::<cel_runtime::DynTuple>(),
-                type_name: std::borrow::Cow::Borrowed("tuple"),
-                offset: 0,
-                size: 0,
-                align: 1,
-                dropper: cel_runtime::drop_tuple,
-                associated: elements_to_associated(nested),
+        .map(|ty| cel_runtime::AssociatedType {
+            offset: 0,
+            value_type: match ty {
+                ClosureParamType::Named(s) => cel_runtime::ValueType::leaf_from_parts(
+                    s.type_id,
+                    std::borrow::Cow::Borrowed(s.type_name),
+                    s.size,
+                    s.align,
+                    s.dropper,
+                ),
+                ClosureParamType::Tuple(nested) => {
+                    cel_runtime::ValueType::tuple(elements_to_associated(nested))
+                }
             },
         })
         .collect()
+}
+
+/// Builds a closure parameter's runtime-dispatch [`ClosureParamType`] from its already-parsed
+/// [`TypeExpr`]. Closures only ever support built-in scalar/generic/tuple types — never
+/// host-registered custom types — so this resolves directly against `op_table`'s built-in
+/// tables rather than through a [`TypeResolver`].
+///
+/// # Errors
+///
+/// Returns an error if a named leaf (or its single type argument) names no recognized built-in
+/// type, or if `type_expr` contains an [`TypeExpr::Array`] (closure parameters cannot yet be
+/// array-typed; see <https://github.com/stlab/cel-rs/issues/228>).
+fn closure_param_type_from_type_expr(type_expr: &TypeExpr) -> Result<ClosureParamType> {
+    match type_expr {
+        TypeExpr::Named { name, args, span } => {
+            let scalar = match args.as_slice() {
+                [] => crate::op_table::builtin_scalar_type(name)
+                    .or_else(|| crate::op_table::builtin_generic_type_0(name)),
+                [
+                    TypeExpr::Named {
+                        name: arg_name,
+                        args: arg_args,
+                        ..
+                    },
+                ] if arg_args.is_empty() => crate::op_table::builtin_generic_type(name, arg_name),
+                _ => None,
+            };
+            scalar.map(ClosureParamType::Named).ok_or_else(|| {
+                ParseError::new_range(format!("unknown type `{name}`"), span.start, span.end)
+            })
+        }
+        TypeExpr::Tuple { elements, .. } => Ok(ClosureParamType::Tuple(
+            elements
+                .iter()
+                .map(closure_param_type_from_type_expr)
+                .collect::<Result<Vec<_>>>()?,
+        )),
+        TypeExpr::Array { span, .. } => Err(ParseError::new_range(
+            "array-typed closure parameters are not yet supported; \
+             see https://github.com/stlab/cel-rs/issues/228"
+                .to_string(),
+            span.start,
+            span.end,
+        )),
+    }
 }
 
 /// A recursive descent parser for expressions, generic over the [`ParserContext`] it emits
@@ -434,7 +602,14 @@ pub struct Parser<C: ParserContext> {
     tokens: Option<Peekable<LexLexer>>,
     context: C,
     op_lookup: OpLookup,
+    type_resolver: Arc<dyn TypeResolver>,
     last_span: Span,
+    /// Net count of `Delimiter::Brace`/`Delimiter::Bracket`/`Delimiter::Parenthesis` tokens
+    /// consumed since the last [`set_tokens`](Self::set_tokens)/
+    /// [`set_lex_tokens`](Self::set_lex_tokens) call that remain unmatched: incremented for an
+    /// `OpenDelim`, decremented for a `CloseDelim`. See
+    /// [`unbalanced_delimiter_count`](Self::unbalanced_delimiter_count).
+    unbalanced_delimiters: i32,
 }
 
 /// A recursive descent parser that executes directly into a [`DynSegment`].
@@ -454,12 +629,92 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// * `op_lookup` - Operation lookup for resolving operators and identifiers
     pub fn new(op_lookup: OpLookup) -> Self {
+        Self::with_shared_type_resolver(op_lookup, type_expr::builtin_type_resolver())
+    }
+
+    /// Creates a new CEL parser with the given operation lookup and leaf type resolver.
+    ///
+    /// Existing callers that need only the built-in CEL scalar types should continue to use
+    /// [`new`](Self::new); this constructor is for hosts that want additional named CEL types
+    /// without coupling `cel-parser` to their own registry implementation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{CELParser, OpLookup, ResolvedLeafType};
+    /// use cel_runtime::ArrayElementType;
+    ///
+    /// #[derive(Clone)]
+    /// struct Celsius(i32);
+    ///
+    /// let resolver = [(
+    ///     "Celsius",
+    ///     ResolvedLeafType::new("Celsius", ArrayElementType::leaf::<Celsius>().unwrap()),
+    /// )];
+    /// let mut segment = CELParser::with_type_resolver(OpLookup::new(), resolver)
+    ///     .parse_str("[]: [Celsius]")
+    ///     .unwrap();
+    /// let array: cel_runtime::DynamicArray = segment.call0().unwrap();
+    /// assert!(array.try_into_vec::<Celsius>().unwrap().is_empty());
+    /// ```
+    pub fn with_type_resolver<R>(op_lookup: OpLookup, type_resolver: R) -> Self
+    where
+        R: TypeResolver + 'static,
+    {
+        Self::with_shared_type_resolver(op_lookup, Arc::new(type_resolver))
+    }
+
+    fn with_shared_type_resolver(
+        op_lookup: OpLookup,
+        type_resolver: Arc<dyn TypeResolver>,
+    ) -> Self {
         Parser {
             tokens: None,
             context: C::new_context(),
             op_lookup,
+            type_resolver,
             last_span: Span::call_site(),
+            unbalanced_delimiters: 0,
         }
+    }
+
+    /// Replaces this parser's named-type resolver.
+    ///
+    /// Every subsequent parse resolves annotation type names through `type_resolver` instead of
+    /// the one this parser was built with.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{CELParser, OpLookup, ResolvedLeafType};
+    /// use cel_runtime::ArrayElementType;
+    ///
+    /// #[derive(Clone)]
+    /// struct Celsius(i32);
+    ///
+    /// let mut parser = CELParser::new(OpLookup::new());
+    /// assert!(parser.parse_str("[]: [Celsius]").is_err());
+    ///
+    /// parser.set_type_resolver([(
+    ///     "Celsius",
+    ///     ResolvedLeafType::new("Celsius", ArrayElementType::leaf::<Celsius>().unwrap()),
+    /// )]);
+    /// assert!(parser.parse_str("[]: [Celsius]").is_ok());
+    /// ```
+    pub fn set_type_resolver<R>(&mut self, type_resolver: R)
+    where
+        R: TypeResolver + 'static,
+    {
+        self.type_resolver = Arc::new(type_resolver);
+    }
+
+    /// Resolves `expr` through this parser's configured leaf type resolver.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if some named leaf in `expr` is not recognized.
+    pub fn resolve_type_expr(&self, expr: &TypeExpr) -> Result<ResolvedType> {
+        expr.resolve(self.type_resolver.as_ref())
     }
 
     /// Sets the token stream for parsing, resetting internal state.
@@ -470,6 +725,7 @@ impl<C: ParserContext> Parser<C> {
         self.tokens = Some(LexLexer::new(tokens).peekable());
         self.context = C::new_context();
         self.last_span = Span::call_site();
+        self.unbalanced_delimiters = 0;
     }
 
     /// Sets the token stream from an existing [`LexLexer`] iterator for inline expression parsing.
@@ -481,6 +737,30 @@ impl<C: ParserContext> Parser<C> {
         self.tokens = Some(tokens);
         self.context = C::new_context();
         self.last_span = Span::call_site();
+        self.unbalanced_delimiters = 0;
+    }
+
+    /// Returns the net number of opening delimiters this parser has consumed since the last
+    /// [`set_tokens`](Self::set_tokens)/[`set_lex_tokens`](Self::set_lex_tokens) call, that
+    /// remain unmatched by a corresponding closing delimiter.
+    ///
+    /// Always `0` after a successful top-level parse: every delimiter this grammar opens (an
+    /// `if`-expression's branch braces, a tuple/group literal's or call's parens), it also
+    /// closes. Positive after a parse that returned `Err` from partway through a production that
+    /// had already consumed one or more opening delimiters before failing — e.g. an
+    /// `if`-expression whose then-branch fails to parse consumes the branch's opening `{` before
+    /// erroring out, never reaching the matching `}`.
+    ///
+    /// An embedding caller that shares its own token stream with this parser (via
+    /// [`set_lex_tokens`](Self::set_lex_tokens)/[`take_lex_tokens`](Self::take_lex_tokens)), and
+    /// tracks its own nesting depth over that same stream, cannot otherwise tell a delimiter this
+    /// parser left dangling apart from one still genuinely open in the caller's own grammar,
+    /// since both use the same `Delimiter` kinds. Reading this count immediately after reclaiming
+    /// the stream — regardless of whether the parse succeeded or failed — and folding it into the
+    /// caller's own depth counter keeps that counter consistent with the physical nesting left
+    /// behind in the stream.
+    pub fn unbalanced_delimiter_count(&self) -> i32 {
+        self.unbalanced_delimiters
     }
 
     /// Parses one `expression` from the current token stream and returns the built context.
@@ -584,6 +864,44 @@ impl<C: ParserContext> Parser<C> {
         self.parse_tokens_ctx(input.into_iter())
     }
 
+    /// Parses one complete `type_expr` from the current token stream.
+    ///
+    /// Unlike [`parse_type_expr_str`](Self::parse_type_expr_str), this method does not require
+    /// ownership of the whole source string; it consumes only as many tokens as the type
+    /// expression itself needs from the current stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the current token stream does not begin with a valid type expression.
+    pub fn parse_type_expr(&mut self) -> Result<TypeExpr> {
+        self.parse_type_expression()
+    }
+
+    /// Parses one complete `type_expr` from `tokens`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `tokens` does not contain a valid complete type expression.
+    pub fn parse_type_expr_tokens(&mut self, tokens: TokenStreamIter) -> Result<TypeExpr> {
+        self.set_tokens(tokens);
+        let expr = self.parse_type_expr()?;
+        if self.peek_token().is_some() {
+            return Err(self.error_at("unexpected token"));
+        }
+        Ok(expr)
+    }
+
+    /// Parses one complete `type_expr` from `s`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on lex failure or if `s` does not contain a valid complete type
+    /// expression.
+    pub fn parse_type_expr_str(&mut self, s: &str) -> Result<TypeExpr> {
+        let input = TokenStream::from_str(s).map_err(|e| ParseError::from_lex_error(s, e))?;
+        self.parse_type_expr_tokens(input.into_iter())
+    }
+
     /// Returns a mutable reference to the operation lookup.
     ///
     /// This allows customization of the operations available during parsing,
@@ -604,7 +922,7 @@ impl<C: ParserContext> Parser<C> {
     /// lookup.push_scope(|name, segment, num_operands, _span| {
     ///     let matches = {
     ///         let top = segment.peek_stack_infos(num_operands);
-    ///         name == "+" && top.len() == 2 && top[0].type_id == TypeId::of::<i32>()
+    ///         name == "+" && top.len() == 2 && top[0].value_type.type_id() == TypeId::of::<i32>()
     ///     };
     ///     if matches {
     ///         segment.op2(|a: i32, b: i32| a + b + 1)?; // Custom addition
@@ -622,18 +940,35 @@ impl<C: ParserContext> Parser<C> {
 
     /// Advances past the current token, recording its span in `last_span`.
     ///
+    /// - Postcondition: [`unbalanced_delimiter_count`](Self::unbalanced_delimiter_count) is
+    ///   incremented if the consumed token is an `OpenDelim`, decremented if it is a
+    ///   `CloseDelim` (of `Delimiter::Brace`, `Delimiter::Bracket`, or `Delimiter::Parenthesis`;
+    ///   `Delimiter::None` never appears in a token stream this parser is given, since it only
+    ///   ever arises from `proc_macro2`'s macro-hygiene groups, not from parsing source text).
+    ///
     /// # Panics
     ///
     /// Panics if no token stream has been set or if there is no current token.
     fn advance(&mut self) {
         use lex_lexer::HasSpan;
-        self.last_span = self
+        let token = self
             .tokens
             .as_mut()
             .expect("tokens set")
             .next()
-            .expect("token required to advance")
-            .span();
+            .expect("token required to advance");
+        match &token {
+            Token::OpenDelim {
+                delimiter: Delimiter::Brace | Delimiter::Bracket | Delimiter::Parenthesis,
+                ..
+            } => self.unbalanced_delimiters += 1,
+            Token::CloseDelim {
+                delimiter: Delimiter::Brace | Delimiter::Bracket | Delimiter::Parenthesis,
+                ..
+            } => self.unbalanced_delimiters -= 1,
+            _ => {}
+        }
+        self.last_span = token.span();
     }
 
     /// Returns the span of the next token without consuming it, or `None` if exhausted.
@@ -723,6 +1058,22 @@ impl<C: ParserContext> Parser<C> {
             self.peek_token(),
             Some(Token::CloseDelim {
                 delimiter: Delimiter::Parenthesis,
+                ..
+            })
+        ) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consumes and returns `true` if the next token is a closing bracket `]`.
+    fn is_close_bracket(&mut self) -> bool {
+        if matches!(
+            self.peek_token(),
+            Some(Token::CloseDelim {
+                delimiter: Delimiter::Bracket,
                 ..
             })
         ) {
@@ -1324,24 +1675,24 @@ impl<C: ParserContext> Parser<C> {
         Ok(())
     }
 
-    /// `parameter_list = or_expression { "," or_expression }.`
+    /// `parameter_list = expression { "," expression }.`
     ///
-    /// Always parses at least one `or_expression` — callers that need to allow zero
+    /// Always parses at least one `expression` — callers that need to allow zero
     /// arguments (`postfix_expression`'s `"(" [ parameter_list ] ")"`) check for that
     /// possibility themselves before calling, rather than `parameter_list` swallowing it.
     ///
     /// Returns the argument count.
     ///
     /// # Errors
-    /// Returns an error if the first token can't start an `or_expression`, or if a comma
+    /// Returns an error if the first token can't start an `expression`, or if a comma
     /// isn't followed by one.
     fn parameter_list(&mut self) -> Result<usize> {
-        if !self.is_or_expression()? {
+        if !self.is_expression()? {
             return Err(self.error_at("expected expression"));
         }
         let mut count = 1;
         while self.is_punctuation(",") {
-            if !self.is_or_expression()? {
+            if !self.is_expression()? {
                 return Err(self.error_at("expected expression after comma"));
             }
             count += 1;
@@ -1349,11 +1700,12 @@ impl<C: ParserContext> Parser<C> {
         Ok(count)
     }
 
-    /// `primary_expression = literal | identifier | tuple_or_group | if_expression |
-    /// closure_expression.`
+    /// `primary_expression = literal | identifier | tuple_or_group | array_expression |
+    /// if_expression | closure_expression.`
     ///
     /// Dispatches to [`is_if_expression`](Self::is_if_expression) when the `if` keyword is seen,
-    /// to [`is_tuple_or_group`](Self::is_tuple_or_group) when `(` is seen, and to
+    /// to [`is_tuple_or_group`](Self::is_tuple_or_group) when `(` is seen, to
+    /// [`is_array_expression`](Self::is_array_expression) when `[` is seen, and to
     /// [`is_closure_expression`](Self::is_closure_expression) when `|` or `||` is seen.
     ///
     /// A zero-parameter closure's opening and closing pipes (`||`) have nothing between them to
@@ -1367,6 +1719,7 @@ impl<C: ParserContext> Parser<C> {
     /// - A literal value cannot be parsed (e.g., integer out of range).
     /// - An identifier is not found in the op lookup table.
     /// - A tuple-or-group expression fails to parse.
+    /// - An array literal fails to parse or is rejected by the context it emits into.
     /// - An `if` expression fails to parse.
     /// - A closure expression fails to parse.
     fn is_primary_expression(&mut self) -> Result<bool> {
@@ -1401,11 +1754,15 @@ impl<C: ParserContext> Parser<C> {
                 delimiter: Delimiter::Parenthesis,
                 ..
             }) => self.is_tuple_or_group(),
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Bracket,
+                ..
+            }) => self.is_array_expression(),
             _ => Ok(false),
         }
     }
 
-    /// `tuple_or_group = "(" [ or_expression ["," [ or_expression { "," or_expression } ]] ] ")".`
+    /// `tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".`
     ///
     /// `()` parses as unit, `(expr)` as grouping, `(expr,)` as a 1-tuple, and
     /// `(expr, expr, ...)` as an n-tuple.
@@ -1434,7 +1791,7 @@ impl<C: ParserContext> Parser<C> {
             return Ok(true);
         }
         let ambient_start = self.context.current_stack_offset();
-        if !self.is_or_expression()? {
+        if !self.is_expression()? {
             return Err(self.error_at("expected expression"));
         }
         if matches!(
@@ -1466,7 +1823,7 @@ impl<C: ParserContext> Parser<C> {
             return Ok(true);
         }
         loop {
-            if !self.is_or_expression()? {
+            if !self.is_expression()? {
                 return Err(self.error_at("expected expression after ','"));
             }
             count += 1;
@@ -1489,8 +1846,227 @@ impl<C: ParserContext> Parser<C> {
         Ok(true)
     }
 
+    /// `array_expression = "[" [ expression { "," expression } ] "]" [ ":" type_expr ] .`
+    ///
+    /// Every comma requires another element, so the production stays Wirth-style LL(1) — each
+    /// decision is made by inspecting exactly the current token — and a trailing comma
+    /// (`[0i32,]`) is a parse error, unlike the 1-tuple form `(0i32,)` where the comma is what
+    /// distinguishes a tuple from a grouping.
+    ///
+    /// - Precondition: The next token is `Token::OpenDelim` with `Delimiter::Bracket`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the literal is empty and unannotated (`[]` has no inferable element
+    /// type; see <https://github.com/stlab/cel-rs/issues/212>), if an element expression is
+    /// missing or malformed, if a comma or the closing `]` is missing, if the type annotation is
+    /// malformed or names a non-array type, or if the context this emits into rejects the
+    /// collected elements (e.g. heterogeneous element types).
+    ///
+    /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
+    fn is_array_expression(&mut self) -> Result<bool> {
+        let open_span = self
+            .peek_span()
+            .expect("array_expression requires an opening '[' token");
+        self.advance();
+        let ambient_start = self.context.current_stack_offset();
+        let mut count = 0usize;
+        if !self.is_close_bracket() {
+            if !self.is_expression()? {
+                return Err(self.error_at("expected expression"));
+            }
+            count = 1;
+            loop {
+                if self.is_close_bracket() {
+                    break;
+                }
+                if !self.is_punctuation(",") {
+                    return Err(self.error_at("expected ',' or closing ']'"));
+                }
+                // A comma always requires another element: `]` here (a trailing comma) can't
+                // start an `expression`, so this is where `[0i32,]` is rejected.
+                if !self.is_expression()? {
+                    return Err(self.error_at("expected expression after ','"));
+                }
+                count += 1;
+            }
+        }
+
+        let mut type_annotation = None;
+        let mut annotation_span = None;
+        if self.is_punctuation(":") {
+            let colon_span = self.last_span;
+            let annotation = self.parse_type_expression()?;
+            let annotation_end = annotation.span().end;
+            annotation_span = Some(ExprSpan {
+                start: colon_span,
+                end: annotation_end,
+            });
+            type_annotation = Some(annotation);
+        }
+
+        if count == 0 && type_annotation.is_none() {
+            return Err(ParseError::new_range(
+                "an empty array literal has no inferable element type; \
+                 see https://github.com/stlab/cel-rs/issues/212"
+                    .to_string(),
+                open_span,
+                self.last_span,
+            ));
+        }
+
+        let type_resolver = Arc::clone(&self.type_resolver);
+        let mut resolve_array_type = |type_expr: &TypeExpr| {
+            let resolved = type_expr.resolve(type_resolver.as_ref())?;
+            ResolvedArrayType::from_resolved_type(resolved, type_expr.span())
+        };
+        self.context.make_annotated_array(
+            count,
+            ambient_start,
+            parser_context::AnnotatedArray::new(
+                &mut resolve_array_type,
+                type_annotation,
+                annotation_span,
+            ),
+            open_span,
+            self.last_span,
+        )?;
+        Ok(true)
+    }
+
+    /// `type_expression = identifier [ "(" [ type_expression { "," type_expression } ] ")" ]
+    ///                  | "[" type_expression "]"
+    ///                  | "(" [ type_expression ["," [ type_expression { "," type_expression } ]] ] ")" .`
+    ///
+    /// `()` is the empty tuple type (0 elements); `(T)` is grouping (same as bare `T`); `(T,)`
+    /// is a 1-element tuple; `(T, U, ...)` is n-element, no trailing comma. `[T]` names an
+    /// array type whose elements have type `T`. `Name(A, B)` applies zero or more type
+    /// arguments to a named (generic) type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a named leaf is missing, if an array, tuple, or type-argument list is
+    /// malformed, or if a closing `]`/`)` is missing.
+    pub fn parse_type_expression(&mut self) -> Result<TypeExpr> {
+        if let Some(Token::Identifier(_)) = self.peek_token() {
+            let name = self.expect_identifier("expected a type name")?;
+            let name_span = self.last_span;
+            let mut args = Vec::new();
+            let mut end_span = name_span;
+            if self.is_open_paren() {
+                if !self.is_close_paren() {
+                    args.push(self.parse_type_expression()?);
+                    while self.is_punctuation(",") {
+                        args.push(self.parse_type_expression()?);
+                    }
+                    if !self.is_close_paren() {
+                        return Err(
+                            self.error_at("expected ',' or closing ')' in type argument list")
+                        );
+                    }
+                }
+                end_span = self.last_span;
+            }
+            return Ok(TypeExpr::Named {
+                name,
+                args,
+                span: ExprSpan {
+                    start: name_span,
+                    end: end_span,
+                },
+            });
+        }
+
+        if matches!(
+            self.peek_token(),
+            Some(Token::OpenDelim {
+                delimiter: Delimiter::Bracket,
+                ..
+            })
+        ) {
+            let open_span = self
+                .peek_span()
+                .expect("array type expression requires an opening '[' token");
+            self.advance();
+            if self.is_close_bracket() {
+                return Err(ParseError::new_range(
+                    "expected a type expression after '['".to_string(),
+                    open_span,
+                    self.last_span,
+                ));
+            }
+            let element = self.parse_type_expression()?;
+            if !self.is_close_bracket() {
+                return Err(self.error_at("expected closing ']' after array type expression"));
+            }
+            return Ok(TypeExpr::Array {
+                element: Box::new(element),
+                span: ExprSpan {
+                    start: open_span,
+                    end: self.last_span,
+                },
+            });
+        }
+
+        if !self.is_open_paren() {
+            return Err(self.error_at("expected a type name, '[' or '('"));
+        }
+        let open_span = self.last_span;
+        if self.is_close_paren() {
+            return Ok(TypeExpr::Tuple {
+                elements: Vec::new(),
+                span: ExprSpan {
+                    start: open_span,
+                    end: self.last_span,
+                },
+            });
+        }
+
+        let first = self.parse_type_expression()?;
+        if self.is_close_paren() {
+            let span = ExprSpan {
+                start: open_span,
+                end: self.last_span,
+            };
+            return Ok(match first {
+                TypeExpr::Named { name, args, .. } => TypeExpr::Named { name, args, span },
+                TypeExpr::Array { element, .. } => TypeExpr::Array { element, span },
+                TypeExpr::Tuple { elements, .. } => TypeExpr::Tuple { elements, span },
+            });
+        }
+        if !self.is_punctuation(",") {
+            return Err(self.error_at("expected ',' or closing ')'"));
+        }
+        if self.is_close_paren() {
+            return Ok(TypeExpr::Tuple {
+                elements: vec![first],
+                span: ExprSpan {
+                    start: open_span,
+                    end: self.last_span,
+                },
+            });
+        }
+        let mut elements = vec![first];
+        loop {
+            elements.push(self.parse_type_expression()?);
+            if self.is_close_paren() {
+                break;
+            }
+            if !self.is_punctuation(",") {
+                return Err(self.error_at("expected ',' or closing ')'"));
+            }
+        }
+        Ok(TypeExpr::Tuple {
+            elements,
+            span: ExprSpan {
+                start: open_span,
+                end: self.last_span,
+            },
+        })
+    }
+
     /// `closure_expression = ("||" | "|" [ closure_param { "," closure_param } ] "|") expression .`
-    /// `closure_param = identifier ":" closure_type_expression .`
+    /// `closure_param = identifier ":" type_expression .`
     ///
     /// Compiles the body as a fully independent nested context (via
     /// [`parse_nested_context`](Self::parse_nested_context)) whose only visible names are its
@@ -1501,10 +2077,10 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// Each parameter's declared type is threaded through in two parallel forms: the existing
     /// runtime-facing `ClosureParamType` (which `DynSegmentContext`'s `push_closure` needs a
-    /// concrete `TypeId` from) and the unresolved, span-carrying `ClosureParamTypeExpr` (which
-    /// `AstContext`'s needs instead) — both built from the same tokens in the same
-    /// [`parse_closure_type_expression`](Self::parse_closure_type_expression) call, so nothing
-    /// is parsed twice.
+    /// concrete `TypeId` from, built from the parsed [`TypeExpr`] by
+    /// [`closure_param_type_from_type_expr`]) and the unresolved, span-carrying `TypeExpr`
+    /// itself (which `AstContext` needs instead) — both derived from the same
+    /// [`parse_type_expression`](Self::parse_type_expression) call, so nothing is parsed twice.
     ///
     /// - Precondition: the opening `|` (`params_already_closed == false`) or the combined `||`
     ///   token naming an empty parameter list (`params_already_closed == true`) has already been
@@ -1514,14 +2090,15 @@ impl<C: ParserContext> Parser<C> {
     /// # Errors
     ///
     /// Returns an error if a parameter name, its `:`, its type, or the closing `|` is malformed
-    /// or missing; if a parameter's type names an unrecognized type; if the body expression is
-    /// missing or malformed; or if this `ParserContext` implementation's `push_closure` rejects
-    /// the closure (e.g. `DynSegmentContext` when the body doesn't produce exactly one value).
+    /// or missing; if a parameter's type names an unrecognized type or is array-typed (see
+    /// [`closure_param_type_from_type_expr`]); if the body expression is missing or malformed;
+    /// or if this `ParserContext` implementation's `push_closure` rejects the closure (e.g.
+    /// `DynSegmentContext` when the body doesn't produce exactly one value).
     ///
     /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
     fn is_closure_expression(&mut self, params_already_closed: bool) -> Result<bool> {
         let start_span = self.last_span;
-        let mut params: Vec<(String, Span, ClosureParamType, ClosureParamTypeExpr)> = Vec::new();
+        let mut params: Vec<(String, Span, ClosureParamType, TypeExpr)> = Vec::new();
         if !params_already_closed {
             loop {
                 let name = self.expect_identifier("expected closure parameter name")?;
@@ -1529,7 +2106,8 @@ impl<C: ParserContext> Parser<C> {
                 if !self.is_punctuation(":") {
                     return Err(self.error_at("expected ':' after closure parameter name"));
                 }
-                let (ty, ty_ast) = self.parse_closure_type_expression()?;
+                let ty_ast = self.parse_type_expression()?;
+                let ty = closure_param_type_from_type_expr(&ty_ast)?;
                 params.push((name, name_span, ty, ty_ast));
                 if self.is_punctuation(",") {
                     continue;
@@ -1568,14 +2146,14 @@ impl<C: ParserContext> Parser<C> {
                     return Ok(false);
                 };
                 match ty {
-                    ClosureParamType::Scalar(scalar) => (scalar.push_arg)(segment, *idx),
+                    ClosureParamType::Named(scalar) => (scalar.push_arg)(segment, *idx),
                     ClosureParamType::Tuple(elements) => segment
                         .push_arg_as_dynamic_sequence_tuple(*idx, elements_to_associated(elements)),
                 }
                 Ok(true)
             });
 
-        let body_result = self.parse_nested_context(|p| p.is_or_expression());
+        let body_result = self.parse_nested_context(|p| p.is_expression());
         self.op_lookup.pop_scope();
         self.op_lookup.restore_scopes(isolated);
         let body = body_result?;
@@ -1585,74 +2163,7 @@ impl<C: ParserContext> Parser<C> {
         Ok(true)
     }
 
-    /// `closure_type_expression = identifier | "(" [ closure_type_expression { "," closure_type_expression } ] ")" .`
-    ///
-    /// Builds both the runtime-facing `ClosureParamType` and the unresolved, span-carrying
-    /// `ClosureParamTypeExpr` from the same tokens in one pass (see
-    /// [`is_closure_expression`](Self::is_closure_expression)'s doc comment for why both are
-    /// needed). Note this production has no 1-element-tuple form (unlike
-    /// `adam_lang::ast::TypeExpr`): the element loop here continues on a trailing `,` rather
-    /// than treating one as a terminator, so `(i32,)` fails to parse as a closure parameter
-    /// type — an existing grammar quirk, unchanged by this addition.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if a bare identifier doesn't name a recognized built-in scalar type, or
-    /// if the parenthesized element list is malformed or missing its closing `)`.
-    fn parse_closure_type_expression(
-        &mut self,
-    ) -> Result<(ClosureParamType, ClosureParamTypeExpr)> {
-        if let Some(Token::Identifier(ident)) = self.peek_token() {
-            let name = ident.to_string();
-            self.advance();
-            let name_span = self.last_span;
-            let scalar = crate::op_table::builtin_scalar_type(&name)
-                .ok_or_else(|| self.error_at(&format!("unknown type `{name}`")))?;
-            return Ok((
-                ClosureParamType::Scalar(scalar),
-                ClosureParamTypeExpr::Named(
-                    name,
-                    ExprSpan {
-                        start: name_span,
-                        end: name_span,
-                    },
-                ),
-            ));
-        }
-        if !self.is_open_paren() {
-            return Err(self.error_at("expected a type name or '('"));
-        }
-        let open_span = self.last_span;
-        let mut elements = Vec::new();
-        let mut element_asts = Vec::new();
-        if !self.is_close_paren() {
-            loop {
-                let (ty, ty_ast) = self.parse_closure_type_expression()?;
-                elements.push(ty);
-                element_asts.push(ty_ast);
-                if self.is_punctuation(",") {
-                    continue;
-                }
-                break;
-            }
-            if !self.is_close_paren() {
-                return Err(self.error_at("expected ',' or closing ')'"));
-            }
-        }
-        let close_span = self.last_span;
-        Ok((
-            ClosureParamType::Tuple(elements),
-            ClosureParamTypeExpr::Tuple(
-                element_asts,
-                ExprSpan {
-                    start: open_span,
-                    end: close_span,
-                },
-            ),
-        ))
-    }
-
-    /// `if_expression = "if" or_expression "{" or_expression "}" [ "else" ( "{" or_expression "}" | if_expression ) ].`
+    /// `if_expression = "if" expression "{" expression "}" [ "else" ( "{" expression "}" | if_expression ) ].`
     ///
     /// - Precondition: The `if` keyword has already been consumed by the caller; `if_span` is
     ///   its span.
@@ -1665,7 +2176,7 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
     fn is_if_expression(&mut self, if_span: Span) -> Result<bool> {
-        if !self.is_or_expression()? {
+        if !self.is_expression()? {
             return Err(self.error_at("expected condition after `if`"));
         }
         match self.peek_token() {
@@ -1679,7 +2190,7 @@ impl<C: ParserContext> Parser<C> {
         }
         let mut then_fragment = self.context.new_fragment();
         std::mem::swap(&mut self.context, &mut then_fragment);
-        if !self.is_or_expression()? {
+        if !self.is_expression()? {
             return Err(self.error_at("expected expression in then-branch"));
         }
         std::mem::swap(&mut self.context, &mut then_fragment);
@@ -1714,7 +2225,7 @@ impl<C: ParserContext> Parser<C> {
                 }
                 let mut fragment = self.context.new_fragment();
                 std::mem::swap(&mut self.context, &mut fragment);
-                if !self.is_or_expression()? {
+                if !self.is_expression()? {
                     return Err(self.error_at("expected expression in else-branch"));
                 }
                 std::mem::swap(&mut self.context, &mut fragment);
@@ -1885,6 +2396,50 @@ mod tests {
         // The nested context has its own, independently-evaluated result.
         assert_eq!(nested.into_inner().call0::<i32>()?, 3);
         Ok(())
+    }
+
+    #[test]
+    fn unbalanced_delimiter_count_is_zero_before_any_parse() {
+        let parser = CELParser::new(OpLookup::new());
+        assert_eq!(parser.unbalanced_delimiter_count(), 0);
+    }
+
+    #[test]
+    fn unbalanced_delimiter_count_is_zero_after_a_successful_parse() {
+        let mut parser = CELParser::new(OpLookup::new());
+        parser.parse_str("(1 + 2)").unwrap();
+        assert_eq!(parser.unbalanced_delimiter_count(), 0);
+    }
+
+    #[test]
+    fn unbalanced_delimiter_count_reports_a_brace_left_dangling_by_a_failed_if_expression() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = match parser.parse_str("if true { }") {
+            Err(e) => e,
+            Ok(_) => panic!("an empty then-branch must fail to parse"),
+        };
+        assert!(err.message().contains("then-branch"));
+        assert_eq!(parser.unbalanced_delimiter_count(), 1);
+    }
+
+    #[test]
+    fn unbalanced_delimiter_count_reports_a_paren_left_dangling_by_a_failed_tuple_literal() {
+        let mut parser = CELParser::new(OpLookup::new());
+        if parser.parse_str("(+)").is_ok() {
+            panic!("`+` alone cannot start an expression");
+        }
+        assert_eq!(parser.unbalanced_delimiter_count(), 1);
+    }
+
+    #[test]
+    fn unbalanced_delimiter_count_resets_when_a_new_parse_begins() {
+        let mut parser = CELParser::new(OpLookup::new());
+        if parser.parse_str("(+)").is_ok() {
+            panic!("`+` alone cannot start an expression");
+        }
+        assert_eq!(parser.unbalanced_delimiter_count(), 1);
+        parser.parse_str("1 + 2").unwrap();
+        assert_eq!(parser.unbalanced_delimiter_count(), 0);
     }
 
     #[test]
@@ -3244,6 +3799,35 @@ mod tests {
     }
 
     #[test]
+    fn closure_param_accepts_a_builtin_generic_type() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("|r: RangeInclusive(f64)| r")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let closure: cel_runtime::DynClosure = segment.call0()?;
+        let range = 1.0f64..=2.0f64;
+        assert_eq!(
+            closure.call::<std::ops::RangeInclusive<f64>>(&[&range])?,
+            1.0..=2.0
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn closure_param_rejects_an_array_type_citing_issue_228() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let err = match parser.parse_str("|xs: [i32]| xs") {
+            Ok(_) => panic!("expected array-typed closure parameter to be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message().contains("issues/228"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
     fn closure_body_referencing_an_undeclared_name_is_a_parse_error() {
         let mut parser = CELParser::new(OpLookup::new());
         let err = parser.parse_str("|x: i32| x + y");
@@ -3298,7 +3882,7 @@ mod tests {
         assert_eq!(params[0].name, "x");
         assert!(matches!(
             &params[0].type_expr,
-            ClosureParamTypeExpr::Named(n, _) if n == "i32"
+            TypeExpr::Named { name, args, .. } if name == "i32" && args.is_empty()
         ));
         assert!(matches!(*body, Expr::Ident { ref name, .. } if name == "x"));
     }
@@ -3321,7 +3905,7 @@ mod tests {
             panic!("expected Closure");
         };
         match &params[0].type_expr {
-            ClosureParamTypeExpr::Tuple(elements, _) => assert_eq!(elements.len(), 2),
+            TypeExpr::Tuple { elements, .. } => assert_eq!(elements.len(), 2),
             other => panic!("expected Tuple, got {other:?}"),
         }
     }
@@ -3426,6 +4010,607 @@ mod tests {
              to an already-built range) — got: {message}"
         );
     }
+
+    #[test]
+    fn parameter_list_accepts_a_range_expression() -> anyhow::Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                ("()", 2) => {
+                    segment.op2(|_callee: i32, arg: std::ops::Range<i32>| arg)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
+        let mut parser = CELParser::new(lookup);
+        let mut segment = parser
+            .parse_str("f(1i32..5i32)")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(segment.call0::<std::ops::Range<i32>>()?, 1i32..5i32);
+        Ok(())
+    }
+
+    #[test]
+    fn tuple_or_group_accepts_a_range_expression() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser.parse_str("(1i32..5i32)").unwrap();
+        assert_eq!(seg.call0::<std::ops::Range<i32>>().unwrap(), 1i32..5i32);
+        Ok(())
+    }
+
+    #[test]
+    fn if_expression_branches_accept_range_expressions() {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut seg = parser
+            .parse_str("if true { 1i32..5i32 } else { 2i32..6i32 }")
+            .unwrap();
+        assert_eq!(seg.call0::<std::ops::Range<i32>>().unwrap(), 1i32..5i32);
+    }
+
+    #[test]
+    fn closure_body_accepts_a_range_expression() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("|| 1i32..5i32")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let closure: cel_runtime::DynClosure = segment.call0()?;
+        assert_eq!(closure.call::<std::ops::Range<i32>>(&[])?, 1i32..5i32);
+        Ok(())
+    }
+
+    /// Returns the [`ParseError`] the runtime-executing parser must produce for `source`.
+    fn array_parse_error(source: &str) -> ParseError {
+        let mut parser = CELParser::new(OpLookup::new());
+        match parser.parse_str(source) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a parse error for `{source}`"),
+        }
+    }
+
+    #[test]
+    fn array_literal_evaluates_to_its_elements_in_source_order() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[0i32, 1i32, 2i32]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![0, 1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_annotation_preserves_unsuffixed_non_empty_inference() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[0, 1]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![0, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_annotation_evaluates_to_the_declared_scalar_type() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[0, 1]: [i32]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![0, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_annotation_evaluates_to_the_declared_f64_type() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[1.0, 42.5]: [f64]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<f64>()?, vec![1.0, 42.5]);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_annotation_constructs_a_typed_empty_array() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[]: [i32]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert!(array.try_into_vec::<i32>()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_annotation_constructs_a_nested_typed_empty_array() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[]: [[i32]]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert!(
+            array
+                .try_into_vec::<cel_runtime::DynamicArray>()?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn single_element_array_literal_needs_no_trailing_comma() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[7i32]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![7]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_elements_can_be_arbitrary_expressions() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[1i32 + 2i32, if true { 4i32 } else { 5i32 }]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![3, 4]);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_array_literal_is_rejected_with_a_dedicated_diagnostic() {
+        let err = array_parse_error("[]");
+        assert!(
+            err.message().contains("empty array"),
+            "got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("issues/212"),
+            "the diagnostic must reference the contextual-typing issue, got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn array_literal_rejects_a_trailing_comma() {
+        let err = array_parse_error("[0i32,]");
+        assert!(
+            err.message().contains("expected expression after ','"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn array_literal_requires_a_comma_between_elements() {
+        let err = array_parse_error("[0i32 1i32]");
+        assert!(
+            err.message().contains("expected ',' or closing ']'"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn array_literal_rejects_a_mismatched_element_naming_its_index() {
+        let err = array_parse_error("[0i32, 1.0f64]");
+        assert!(
+            err.message().contains("array element 1"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn array_literal_rejects_a_tuple_element() {
+        let err = array_parse_error("[(0i32, 1i32)]");
+        assert!(err.message().contains("tuple"), "got: {}", err.message());
+        assert!(
+            err.message().contains("issues/213"),
+            "the diagnostic must reference the tuple-element issue, got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn nested_array_literal_evaluates_to_an_array_of_arrays() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("[[0i32], [1i32]]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        let inner = array.try_into_vec::<cel_runtime::DynamicArray>()?;
+        assert_eq!(inner.len(), 2);
+        let mut values = Vec::new();
+        for element in inner {
+            values.extend(element.try_into_vec::<i32>()?);
+        }
+        assert_eq!(values, vec![0, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_array_literal_rejects_a_recursive_element_mismatch() {
+        let err = array_parse_error("[[0i32], [1.0f64]]");
+        assert!(
+            err.message().contains("array element 1"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn nested_array_literal_rejects_a_depth_mismatch() {
+        let err = array_parse_error("[[0i32], [[1i32]]]");
+        assert!(
+            err.message().contains("array element 1"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_rejects_an_exact_element_type_mismatch() {
+        let err = array_parse_error("[0, 1]: [f64]");
+        assert!(
+            err.message().contains("expected f64"),
+            "got: {}",
+            err.message()
+        );
+        assert!(err.message().contains("type i32"), "got: {}", err.message());
+    }
+
+    #[test]
+    fn typed_array_annotation_rejects_a_recursive_element_type_mismatch() {
+        // The annotation's mismatch is one level below the outer array: the values are nested
+        // `i32` arrays, the annotation names nested `f64` arrays.
+        let err = array_parse_error("[[0, 1]]: [[f64]]");
+        assert!(
+            err.message().contains("expected [f64]"),
+            "got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("type [i32]"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_mismatch_names_the_registered_type_not_its_rust_path() {
+        let resolver = [(
+            "Celsius",
+            ResolvedLeafType::new(
+                "Celsius",
+                cel_runtime::ArrayElementType::leaf::<Celsius>().unwrap(),
+            ),
+        )];
+        let mut parser = CELParser::with_type_resolver(OpLookup::new(), resolver);
+        let err = match parser.parse_str("[0]: [Celsius]") {
+            Err(e) => e,
+            Ok(_) => panic!("expected `[0]: [Celsius]` to reject its `i32` element"),
+        };
+        assert!(
+            err.message().contains("expected Celsius"),
+            "the registered annotation name must survive into the diagnostic, got: {}",
+            err.message()
+        );
+        assert!(
+            !err.message().contains("::"),
+            "no Rust type path may leak into the diagnostic, got: {}",
+            err.message()
+        );
+    }
+
+    /// The runtime rejects a nested literal whose own annotation names a different custom element
+    /// type — the mismatch `ty::check_expr` must also report statically.
+    #[test]
+    fn typed_array_annotation_rejects_a_nested_custom_element_type_mismatch() {
+        #[derive(Clone)]
+        struct CustomB;
+
+        let resolver = [
+            (
+                "Celsius",
+                ResolvedLeafType::new(
+                    "Celsius",
+                    cel_runtime::ArrayElementType::leaf::<Celsius>().unwrap(),
+                ),
+            ),
+            (
+                "CustomB",
+                ResolvedLeafType::new(
+                    "CustomB",
+                    cel_runtime::ArrayElementType::leaf::<CustomB>().unwrap(),
+                ),
+            ),
+        ];
+        let mut parser = CELParser::with_type_resolver(OpLookup::new(), resolver);
+        let err = match parser.parse_str("[[]: [Celsius]]: [[CustomB]]") {
+            Err(e) => e,
+            Ok(_) => panic!("expected the inner annotation to conflict with the outer one"),
+        };
+        assert!(
+            err.message().contains("expected [CustomB]"),
+            "got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("[Celsius]"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_rejects_an_unknown_type_name() {
+        let err = array_parse_error("[0]: [Nope]");
+        assert!(
+            err.message().contains("unknown type `Nope`"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_requires_a_complete_array_type() {
+        let err = array_parse_error("[0]: i32");
+        assert!(
+            err.message()
+                .contains("array annotations must name a complete array type"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn typed_array_annotation_keeps_tuple_type_syntax_but_rejects_tuple_array_elements() {
+        let err = array_parse_error("[]: [(i32, f64)]");
+        assert!(err.message().contains("tuple"), "got: {}", err.message());
+        assert!(
+            err.message().contains("issues/213"),
+            "the diagnostic must reference the tuple-element issue, got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn array_literal_is_accepted_as_a_call_argument() -> anyhow::Result<()> {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(
+            |name, segment, num_operands, _span| match (name, num_operands) {
+                ("len", 0) => {
+                    segment.op0(|| 0i32);
+                    Ok(true)
+                }
+                ("()", 2) => {
+                    segment.op2(|_callee: i32, arg: cel_runtime::DynamicArray| arg.len() as i32)?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
+        let mut parser = CELParser::new(lookup);
+        let mut segment = parser
+            .parse_str("len([1i32, 2i32, 3i32])")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        assert_eq!(segment.call0::<i32>()?, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn array_literal_is_accepted_as_a_tuple_element() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("([1i32, 2i32], 3i32).0")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_literal_is_accepted_inside_an_if_branch() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("if true { [1i32, 2i32] } else { [3i32, 4i32] }")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_literal_is_accepted_as_a_closure_body() -> anyhow::Result<()> {
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("|x: i32| [x, x]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let closure: cel_runtime::DynClosure = segment.call0()?;
+        let x = 5i32;
+        let array = closure.call::<cel_runtime::DynamicArray>(&[&x])?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![5, 5]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_ambient_start_is_correct_after_a_sibling_expression() -> anyhow::Result<()> {
+        // Regression guard mirroring `tuple_ambient_start_correct_after_sibling_expression`: the
+        // array literal is deliberately *not* the first sub-expression, and its sibling has a
+        // different alignment than its element type. The `u8` sum is pushed first (offset 0,
+        // align 1), so the `i32` elements start at a nonzero offset that is only correct if the
+        // ambient start is both threaded through from the sibling and padded up to `i32`'s
+        // alignment.
+        let mut parser = CELParser::new(OpLookup::new());
+        let mut segment = parser
+            .parse_str("(1u8 + 2u8, [3i32, 4i32]).1")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        assert_eq!(array.try_into_vec::<i32>()?, vec![3, 4]);
+        Ok(())
+    }
+
+    /// A custom element type implementing no trait beyond `'static` — not `Copy`, `Clone`,
+    /// `Debug`, or `PartialEq` — so an array of it exercises the minimum element bound.
+    struct Celsius(i32);
+
+    /// A second custom element type, distinct from [`Celsius`], so one call in an otherwise
+    /// homogeneous literal can return a different type.
+    struct Fahrenheit(i32);
+
+    /// The unapplied nullary function `f`.
+    struct FName;
+
+    /// The unapplied nullary function `g`.
+    struct GName;
+
+    /// The unapplied nullary function `h`.
+    struct HName;
+
+    /// Returns an [`OpLookup`] resolving the nullary calls `f()`, `g()`, and `h()`, where `f`
+    /// and `g` return [`Celsius`] values and `h` returns a [`Celsius`] when `homogeneous` and a
+    /// [`Fahrenheit`] otherwise.
+    fn temperature_lookup(homogeneous: bool) -> OpLookup {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(
+            move |name, segment, num_operands, _span| match (name, num_operands) {
+                ("f", 0) => {
+                    segment.op0(|| FName);
+                    Ok(true)
+                }
+                ("g", 0) => {
+                    segment.op0(|| GName);
+                    Ok(true)
+                }
+                ("h", 0) => {
+                    segment.op0(|| HName);
+                    Ok(true)
+                }
+                ("()", 1) => {
+                    let Some(callee) = segment
+                        .peek_stack_infos(1)
+                        .first()
+                        .map(|i| i.value_type.type_id())
+                    else {
+                        return Ok(false);
+                    };
+                    if callee == TypeId::of::<FName>() {
+                        segment.op1(|_: FName| Celsius(0))?;
+                    } else if callee == TypeId::of::<GName>() {
+                        segment.op1(|_: GName| Celsius(1))?;
+                    } else if callee == TypeId::of::<HName>() {
+                        if homogeneous {
+                            segment.op1(|_: HName| Celsius(2))?;
+                        } else {
+                            segment.op1(|_: HName| Fahrenheit(2))?;
+                        }
+                    } else {
+                        return Ok(false);
+                    }
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+        );
+        lookup
+    }
+
+    #[test]
+    fn array_literal_of_calls_returning_a_custom_type_converts_to_its_vector() -> anyhow::Result<()>
+    {
+        let mut parser = CELParser::new(temperature_lookup(true));
+        let mut segment = parser
+            .parse_str("[f(), g(), h()]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        let degrees: Vec<i32> = array
+            .try_into_vec::<Celsius>()?
+            .into_iter()
+            .map(|c| c.0)
+            .collect();
+        assert_eq!(degrees, vec![0, 1, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_literal_of_one_custom_typed_call_evaluates_to_that_type() -> anyhow::Result<()> {
+        // The same registration the mismatch test below uses: `h` alone is a perfectly good
+        // array element, so that test's failure is about element homogeneity, not about `h`.
+        let mut parser = CELParser::new(temperature_lookup(false));
+        let mut segment = parser
+            .parse_str("[h()]")
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        let degrees: Vec<i32> = array
+            .try_into_vec::<Fahrenheit>()?
+            .into_iter()
+            .map(|f| f.0)
+            .collect();
+        assert_eq!(degrees, vec![2]);
+        Ok(())
+    }
+
+    #[test]
+    fn array_literal_of_calls_rejects_a_mismatched_return_type_before_execution() {
+        // `parse_str` compiles the literal, so a mismatch is reported here — the segment is
+        // never built and therefore never executed.
+        let mut parser = CELParser::new(temperature_lookup(false));
+        let err = match parser.parse_str("[f(), g(), h()]") {
+            Err(e) => e,
+            Ok(_) => panic!("expected `[f(), g(), h()]` with a mismatched `h` to fail"),
+        };
+        let message = err.message();
+        assert!(message.contains("array element 2"), "got: {message}");
+        assert!(message.contains("Fahrenheit"), "got: {message}");
+        assert!(message.contains("Celsius"), "got: {message}");
+    }
+
+    #[test]
+    fn static_check_and_execution_agree_on_a_nested_custom_typed_array() -> anyhow::Result<()> {
+        const SOURCE: &str = "[[f(), g()], [h()]]";
+
+        // The static checker sees only the AST, where `Celsius` — a host-registered type with no
+        // `Ty` variant — infers as `Ty::Any`, so the literal infers as an array of arrays of it:
+        // an under-approximation of the runtime type, reported without diagnostics.
+        let mut ast_parser = Parser::<AstContext>::new(OpLookup::new());
+        let expr = ast_parser
+            .parse_str_ast(SOURCE)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let (ty, diagnostics) = ty::check_expr(&expr, &|_name| Ty::Any);
+        let messages: Vec<String> = diagnostics
+            .iter()
+            .map(|d| d.message().to_string())
+            .collect();
+        assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Array(Box::new(Ty::Any)))));
+
+        // The same source, compiled and executed, produces the value the checker accepted.
+        let mut parser = CELParser::new(temperature_lookup(true));
+        let mut segment = parser
+            .parse_str(SOURCE)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let array: cel_runtime::DynamicArray = segment.call0()?;
+        let mut rows: Vec<Vec<i32>> = Vec::new();
+        for row in array.try_into_vec::<cel_runtime::DynamicArray>()? {
+            rows.push(
+                row.try_into_vec::<Celsius>()?
+                    .into_iter()
+                    .map(|c| c.0)
+                    .collect(),
+            );
+        }
+        assert_eq!(rows, vec![vec![0, 1], vec![2]]);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -3456,6 +4641,21 @@ mod playground {
             ),
         }
         Ok(())
+    }
+    #[test]
+    fn literal_types() {
+        use CELParser;
+        use op_table::OpLookup;
+        let source = r#"
+            b'a'
+        "#;
+        println!(
+            "{:?}",
+            CELParser::new(OpLookup::new())
+                .parse_str(source)
+                .unwrap()
+                .call0::<u8>()
+        )
     }
 
     #[test]

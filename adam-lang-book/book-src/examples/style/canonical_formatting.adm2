@@ -1,1 +1,4 @@
-sheet s{cell x:i32=1;cell y:i32=2;}
+sheet s {
+    cell x: i32 = 1;
+    cell y: i32 = 2;
+}
