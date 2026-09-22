@@ -5,7 +5,10 @@
 mod app;
 mod canvas;
 mod file_io;
+mod history;
+mod menu;
 mod side_panel;
 mod toolbar;
 
 pub use app::App;
+pub use menu::build_menu;

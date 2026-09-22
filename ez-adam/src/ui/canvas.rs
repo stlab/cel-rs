@@ -7,8 +7,12 @@ use crate::model::conditional_group::{CellValueLiteral, ConditionalGroupId};
 use crate::model::document::Document;
 use crate::model::geometry::Point;
 use crate::model::relationship_group::RelationshipGroupId;
+use crate::ops::cells::delete_cell_node;
 use crate::ops::conditionals;
-use crate::ops::relationships::{add_member, create_relationship, duplicate_relationship_group};
+use crate::ops::conditionals::delete_conditional_group;
+use crate::ops::relationships::{
+    add_member, create_relationship, delete_relationship_group, duplicate_relationship_group,
+};
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
@@ -181,6 +185,23 @@ pub fn compute_edges(doc: &Document) -> Vec<Edge> {
                 edges.push(Edge {
                     from: cond.position,
                     to: doc.relationship_groups[group_id].position,
+                });
+            }
+        }
+
+        // An edge from the conditional group to each cell its condition
+        // depends on (the cells it auto-enumerates a truth table over, or
+        // the cells a `Formula`-mode expression references) — without
+        // this, nothing visually shows which cell(s) actually drive the
+        // conditional. A cell can have more than one `CellNode` (see
+        // `CellNode`'s own doc comment); an edge is drawn to the first one
+        // found, since any of a cell's placements represents the same
+        // underlying value.
+        for &cell_id in cond.condition.referenced_cells() {
+            if let Some((_, node)) = doc.cell_nodes.iter().find(|(_, n)| n.cell == cell_id) {
+                edges.push(Edge {
+                    from: cond.position,
+                    to: node.position,
                 });
             }
         }
@@ -477,6 +498,24 @@ pub fn Canvas(
                 let zoom_delta = wheel_zoom_delta(delta_y);
                 let transform = *view_transform.read();
                 view_transform.set(zoom_at(&transform, cursor_point, zoom_delta));
+            },
+            // `tabindex` makes the (otherwise non-focusable) `<svg>` a
+            // valid keyboard-event target — clicking it (already handled
+            // by `onmousedown` above) also gives it focus, which is what
+            // lets `onkeydown` below actually fire.
+            tabindex: "0",
+            onkeydown: move |evt: Event<KeyboardData>| {
+                // macOS's own "Delete" key (to the left of the Return
+                // key) is reported as `Key::Backspace`, per
+                // `keyboard_types::Key::Backspace`'s own doc comment;
+                // `Key::Delete` is the separate forward-delete key
+                // (Fn+Delete on a Mac keyboard). Both should delete the
+                // current selection.
+                let key = evt.data().key();
+                if key == dioxus::html::Key::Backspace || key == dioxus::html::Key::Delete {
+                    delete_selection(&mut document.write(), &selection.read());
+                    selection.write().clear();
+                }
             },
             if let Some((x, y, width, height)) = band {
                 rect {
@@ -775,6 +814,42 @@ pub fn duplicate_selection(
             _ => None,
         })
         .collect()
+}
+
+/// Deletes every node in `selection` from `doc`, dispatching by kind to
+/// [`delete_cell_node`] / [`delete_relationship_group`] /
+/// [`delete_conditional_group`]. Each of those already keeps `doc`
+/// internally consistent as part of its own cascade (see their doc
+/// comments), so the only thing this function needs to guard against is a
+/// node whose deletion was already triggered as a side effect of deleting
+/// an earlier entry in the same `selection` (e.g. selecting both a
+/// relationship group and the last cell node bound to it — deleting the
+/// cell node cascades to delete the now-empty group first) — skipping any
+/// entry that's no longer a valid key makes the overall result independent
+/// of `selection`'s (unspecified) iteration order.
+///
+/// - Complexity: O(n·m) — O(n) selected nodes, each triggering an O(m)
+///   cascade through the rest of `doc`.
+pub fn delete_selection(doc: &mut Document, selection: &HashSet<NodeId>) {
+    for node in selection {
+        match node {
+            NodeId::CellNode(id) => {
+                if doc.cell_nodes.contains_key(*id) {
+                    delete_cell_node(doc, *id);
+                }
+            }
+            NodeId::RelationshipGroup(id) => {
+                if doc.relationship_groups.contains_key(*id) {
+                    delete_relationship_group(doc, *id);
+                }
+            }
+            NodeId::ConditionalGroup(id) => {
+                if doc.conditional_groups.contains_key(*id) {
+                    delete_conditional_group(doc, *id);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1296,6 +1371,79 @@ mod tests {
 
         assert!(duplicated.is_empty());
     }
+
+    #[test]
+    fn delete_selection_deletes_a_selected_cell_node() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let mut selection = std::collections::HashSet::new();
+        selection.insert(NodeId::CellNode(a_node));
+
+        delete_selection(&mut doc, &selection);
+
+        assert!(!doc.cell_nodes.contains_key(a_node));
+        assert!(!doc.cells.contains_key(a));
+    }
+
+    #[test]
+    fn delete_selection_deletes_a_selected_relationship_group() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        let mut selection = std::collections::HashSet::new();
+        selection.insert(NodeId::RelationshipGroup(group));
+
+        delete_selection(&mut doc, &selection);
+
+        assert!(!doc.relationship_groups.contains_key(group));
+        // The member cell nodes are untouched.
+        assert!(doc.cell_nodes.contains_key(a_node));
+        assert!(doc.cell_nodes.contains_key(b_node));
+    }
+
+    #[test]
+    fn delete_selection_deletes_a_selected_conditional_group() {
+        use crate::ops::conditionals::add_conditional_with_formula;
+
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "x", CT::f64());
+        let cond = add_conditional_with_formula(&mut doc, vec![x], "x > 1.0", Point::new(0.0, 0.0));
+        let mut selection = std::collections::HashSet::new();
+        selection.insert(NodeId::ConditionalGroup(cond));
+
+        delete_selection(&mut doc, &selection);
+
+        assert!(!doc.conditional_groups.contains_key(cond));
+    }
+
+    #[test]
+    fn delete_selection_handles_cross_invalidation_without_panicking() {
+        // Selecting both a relationship group AND its only two cell nodes:
+        // deleting the second cell node cascades to delete the
+        // now-emptied group before `delete_selection` ever processes the
+        // group's own entry in `selection` — this must not panic
+        // regardless of `HashSet`'s iteration order.
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        let mut selection = std::collections::HashSet::new();
+        selection.insert(NodeId::CellNode(a_node));
+        selection.insert(NodeId::CellNode(b_node));
+        selection.insert(NodeId::RelationshipGroup(group));
+
+        delete_selection(&mut doc, &selection);
+
+        assert!(!doc.relationship_groups.contains_key(group));
+        assert!(!doc.cell_nodes.contains_key(a_node));
+        assert!(!doc.cell_nodes.contains_key(b_node));
+    }
 }
 
 #[cfg(test)]
@@ -1353,5 +1501,30 @@ mod edge_tests {
             })
             .count();
         assert_eq!(cond_to_group, 1);
+    }
+
+    #[test]
+    fn compute_edges_connects_conditional_group_to_its_condition_cell() {
+        use crate::ops::conditionals::add_conditional_from_bool_cells;
+
+        let mut doc = Document::new("demo");
+        let flag = add_cell(&mut doc, "flag", CellType::Bool);
+        let flag_node = add_cell_node(&mut doc, flag, Point::new(50.0, 50.0));
+        let a = add_cell(&mut doc, "a", CellType::i64());
+        let b = add_cell(&mut doc, "b", CellType::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        let cond =
+            add_conditional_from_bool_cells(&mut doc, vec![flag], group, Point::new(0.0, 20.0));
+
+        let edges = compute_edges(&doc);
+        let cond_position = doc.conditional_groups[cond].position;
+        let flag_position = doc.cell_nodes[flag_node].position;
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.from == cond_position && e.to == flag_position)
+        );
     }
 }

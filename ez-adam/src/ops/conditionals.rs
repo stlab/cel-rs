@@ -208,6 +208,19 @@ pub fn toggle_enabled_group(
     }
 }
 
+/// Removes `conditional` from `doc`. Nothing else in a [`Document`] ever
+/// references a [`ConditionalGroupId`], so no further cleanup is needed.
+///
+/// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
+pub fn delete_conditional_group(doc: &mut Document, conditional: ConditionalGroupId) {
+    debug_assert!(
+        doc.conditional_groups.contains_key(conditional),
+        "conditional is not a valid key"
+    );
+    doc.conditional_groups.remove(conditional);
+    doc.conditional_group_order.retain(|c| *c != conditional);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +428,17 @@ mod formula_tests {
                 .enabled_groups
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn delete_conditional_group_removes_it_from_the_document() {
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "x", CellType::f64());
+        let cond = add_conditional_with_formula(&mut doc, vec![x], "x > 1.0", Point::new(0.0, 0.0));
+
+        delete_conditional_group(&mut doc, cond);
+
+        assert!(doc.conditional_groups_in_order().next().is_none());
+        assert!(!doc.conditional_group_order.contains(&cond));
     }
 }

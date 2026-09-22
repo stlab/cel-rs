@@ -67,6 +67,17 @@ pub fn Toolbar(
     ];
     let mut selection = selection;
     rsx! {
+        // No stylesheet pipeline exists yet (tracked in issue #177), so
+        // the `"tool"`/`"tool-active"` classes `tool_button_class` returns
+        // need their own visual rules here to actually show which tool is
+        // active — without this, the classes exist in the markup but have
+        // no associated style at all.
+        style {
+            "
+            .tool {{ padding: 4px 10px; margin: 2px; border: 1px solid #999; border-radius: 4px; background: #f0f0f0; cursor: pointer; }}
+            .tool-active {{ padding: 4px 10px; margin: 2px; border: 2px solid #2266cc; border-radius: 4px; background: #cfe2ff; cursor: pointer; }}
+            "
+        }
         div {
             class: "toolbar",
             for tool in tools {
