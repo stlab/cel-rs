@@ -762,19 +762,57 @@ pub fn add_conditional_drag(
     target: NodeId,
     position: Point,
 ) -> Result<(), &'static str> {
-    let NodeId::CellNode(node) = target else {
-        return Err("Add Conditional target must be a cell");
-    };
-    let cell_id = doc.cell_nodes[node].cell;
-    if matches!(doc.cells[cell_id].ty, CellType::Bool) {
-        let _ = conditionals::add_conditional_from_bool_cells(doc, vec![cell_id], group, position);
-    } else {
-        let cond_id =
-            conditionals::add_conditional_with_formula(doc, vec![cell_id], String::new(), position);
-        let branch_index =
-            conditionals::add_branch(doc, cond_id, vec![CellValueLiteral::Bool(true)]);
-        conditionals::toggle_enabled_group(doc, cond_id, branch_index, group);
+    match target {
+        NodeId::CellNode(node) => {
+            let cell_id = doc.cell_nodes[node].cell;
+            if matches!(doc.cells[cell_id].ty, CellType::Bool) {
+                let _ = conditionals::add_conditional_from_bool_cells(
+                    doc,
+                    vec![cell_id],
+                    group,
+                    position,
+                );
+            } else {
+                let cond_id = conditionals::add_conditional_with_formula(
+                    doc,
+                    vec![cell_id],
+                    String::new(),
+                    position,
+                );
+                let branch_index =
+                    conditionals::add_branch(doc, cond_id, vec![CellValueLiteral::Bool(true)]);
+                conditionals::toggle_enabled_group(doc, cond_id, branch_index, group);
+            }
+            Ok(())
+        }
+        NodeId::ConditionalGroup(existing) => attach_group_to_conditional(doc, existing, group),
+        _ => Err("Add Conditional target must be a cell or an existing conditional group"),
     }
+}
+
+/// Attaches `group` to `conditional`'s enable-table, toggling it on the
+/// last branch — the branch enumeration order [`conditionals::add_conditional_from_bool_cells`]
+/// and the drag-created single-branch case in [`add_conditional_drag`]
+/// both put their "most relevant" branch last (an all-cells-true
+/// combination, or the one placeholder branch a fresh drag-created
+/// conditional starts with), so this is the most useful default target
+/// for a group dragged onto an already-existing conditional. The side
+/// panel's enable-table lets the user move it to a different branch
+/// afterward.
+///
+/// # Errors
+///
+/// Returns `Err` if `conditional` has no branches yet to attach to.
+fn attach_group_to_conditional(
+    doc: &mut Document,
+    conditional: ConditionalGroupId,
+    group: RelationshipGroupId,
+) -> Result<(), &'static str> {
+    let branch_count = doc.conditional_groups[conditional].branches.len();
+    let Some(last_branch) = branch_count.checked_sub(1) else {
+        return Err("Add Conditional target has no branches to attach a group to yet");
+    };
+    conditionals::toggle_enabled_group(doc, conditional, last_branch, group);
     Ok(())
 }
 
@@ -925,6 +963,71 @@ mod tests {
             group,
             NodeId::RelationshipGroup(group),
             Point::new(0.0, 40.0),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_conditional_drag_onto_an_existing_conditional_attaches_the_group() {
+        let mut doc = Document::new("demo");
+        let flag = add_cell(&mut doc, "flag", CT::Bool);
+        let a = add_cell(&mut doc, "a", CT::i64());
+        let b = add_cell(&mut doc, "b", CT::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let first_group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        let flag_node = add_cell_node(&mut doc, flag, Point::new(0.0, 20.0));
+        add_conditional_drag(
+            &mut doc,
+            first_group,
+            NodeId::CellNode(flag_node),
+            Point::new(0.0, 40.0),
+        )
+        .unwrap();
+        let (cond_id, _) = doc.conditional_groups_in_order().next().unwrap();
+
+        let c = add_cell(&mut doc, "c", CT::i64());
+        let d = add_cell(&mut doc, "d", CT::i64());
+        let c_node = add_cell_node(&mut doc, c, Point::new(0.0, 100.0));
+        let d_node = add_cell_node(&mut doc, d, Point::new(10.0, 100.0));
+        let second_group = create_relationship(&mut doc, c_node, d_node, Point::new(5.0, 105.0));
+
+        let result = add_conditional_drag(
+            &mut doc,
+            second_group,
+            NodeId::ConditionalGroup(cond_id),
+            Point::new(0.0, 40.0),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(doc.conditional_groups_in_order().count(), 1);
+        let last_branch = doc.conditional_groups[cond_id].branches.len() - 1;
+        assert!(
+            doc.conditional_groups[cond_id].branches[last_branch]
+                .enabled_groups
+                .contains(&second_group)
+        );
+    }
+
+    #[test]
+    fn add_conditional_drag_onto_a_conditional_with_no_branches_errors() {
+        use crate::ops::conditionals::add_conditional_with_formula;
+
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "x", CT::f64());
+        let cond = add_conditional_with_formula(&mut doc, vec![x], "x > 1.0", Point::new(0.0, 0.0));
+        let a = add_cell(&mut doc, "a", CT::i64());
+        let b = add_cell(&mut doc, "b", CT::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+
+        let result = add_conditional_drag(
+            &mut doc,
+            group,
+            NodeId::ConditionalGroup(cond),
+            Point::new(0.0, 0.0),
         );
 
         assert!(result.is_err());
