@@ -325,21 +325,21 @@ pub fn Canvas(
     let mut pending_first_click = use_signal(|| None::<NodeId>);
     let mut pending_conditional_source = use_signal(|| None::<RelationshipGroupId>);
 
-    // Add-Relationship's click-sequence state spans two separate mousedown
-    // events (click A, then later click B), unlike `pending_conditional_source`
-    // (a single mousedown-to-mouseup drag). So it can't be reset at the top
-    // of `onmousedown` the same way — that handler's own `AddRelationship`
-    // arm reads `pending_first_click` back a few lines later to decide
-    // whether the current click is the first or second of the gesture, and
-    // an unconditional reset there would make every click look like a fresh
-    // first click, breaking the tool entirely. Instead, clear it whenever
-    // `active_tool` changes (via this effect) so switching away and back
-    // between click A and click B can't resume a stale first click, while a
-    // same-tool two-click sequence (no tool change in between) is left
-    // untouched and completes normally.
+    // Both Add-Relationship's and Add-Conditional's click-sequence state
+    // span two separate mousedown events (click A, then later click B).
+    // Each is read back within the SAME `onmousedown` handler that writes
+    // it (to decide whether the current click is the first or second of
+    // the gesture), so an unconditional reset at the top of `onmousedown`
+    // would make every click look like a fresh first click, breaking both
+    // tools entirely. Instead, clear both whenever `active_tool` changes
+    // (via this effect) so switching away and back between click A and
+    // click B can't resume a stale first click, while a same-tool
+    // two-click sequence (no tool change in between) is left untouched and
+    // completes normally.
     use_effect(move || {
         active_tool.read();
         pending_first_click.set(None);
+        pending_conditional_source.set(None);
     });
 
     let doc = document.read();
@@ -374,18 +374,6 @@ pub fn Canvas(
                 let shift_held = data.modifiers().shift();
                 let transform = *view_transform.read();
 
-                // Any new mousedown invalidates a previous, uncompleted
-                // Add-Conditional drag's pending source (e.g. the user
-                // switched tools, or released the mouse outside the SVG,
-                // so the AddConditional arm of `onmouseup` never ran to
-                // clear it) — reset unconditionally before dispatching so
-                // a later, unrelated AddConditional gesture can never fire
-                // against a stale group. Unlike `pending_first_click` (see
-                // the `use_effect` above this `rsx!` block), nothing in this
-                // handler reads `pending_conditional_source` back, so an
-                // unconditional reset here is safe.
-                pending_conditional_source.set(None);
-
                 match *active_tool.read() {
                     crate::ui::toolbar::Tool::Select => {
                         let doc = document.read();
@@ -409,8 +397,15 @@ pub fn Canvas(
                     }
                     crate::ui::toolbar::Tool::AddConditional => {
                         let hit = hit_test(&document.read(), &transform, screen_point);
-                        if let Some(NodeId::RelationshipGroup(group)) = hit {
-                            pending_conditional_source.set(Some(group));
+                        if let Some(clicked) = hit {
+                            let canvas_point = screen_to_canvas(&transform, screen_point);
+                            let new_pending = add_conditional_click(
+                                &mut document.write(),
+                                *pending_conditional_source.read(),
+                                clicked,
+                                canvas_point,
+                            );
+                            pending_conditional_source.set(new_pending);
                         }
                     }
                     crate::ui::toolbar::Tool::Duplicate => {}
@@ -458,32 +453,12 @@ pub fn Canvas(
                     }
                 }
             },
-            onmouseup: move |evt: Event<MouseData>| {
+            onmouseup: move |_evt: Event<MouseData>| {
                 if let Some(DragMode::RubberBand { start_canvas, current_canvas }) = *drag_mode.read() {
                     let found = nodes_in_rect(&document.read(), start_canvas, current_canvas);
                     *selection.write() = found.into_iter().collect();
                 }
                 drag_mode.set(None);
-
-                if *active_tool.read() == crate::ui::toolbar::Tool::AddConditional {
-                    let source = *pending_conditional_source.read();
-                    if let Some(group) = source {
-                        let data = evt.data();
-                        let client_pt = data.client_coordinates();
-                        let mouseup_screen_point = Point::new(client_pt.x, client_pt.y);
-                        let transform = *view_transform.read();
-                        let hit = hit_test(&document.read(), &transform, mouseup_screen_point);
-                        if let Some(target) = hit {
-                            let _ = add_conditional_drag(
-                                &mut document.write(),
-                                group,
-                                target,
-                                screen_to_canvas(&transform, mouseup_screen_point),
-                            );
-                        }
-                        pending_conditional_source.set(None);
-                    }
-                }
             },
             onwheel: move |evt: Event<WheelData>| {
                 // Without this, the wheel event also triggers the browser's
@@ -731,9 +706,45 @@ pub fn add_relationship_click(
     }
 }
 
-/// Completes an Add-Conditional drag from `group` onto `target`: wraps
+/// Advances the Add-Conditional tool's click sequence: given whatever
+/// relationship group was clicked previously (`pending_source`, `None` if
+/// this is a fresh sequence) and what was just clicked (`clicked`), either
+/// records a fresh pending source or completes the gesture against the
+/// newly clicked target via [`add_conditional_target`], returning the new
+/// pending state.
+///
+/// - `(None, RelationshipGroup(g))` → pending becomes `Some(g)`.
+/// - `(Some(g), CellNode(_))` or `(Some(g), ConditionalGroup(_))` →
+///   completes the gesture (see [`add_conditional_target`]; any error it
+///   returns — e.g. an existing conditional with no branches yet — is
+///   swallowed here the same way [`add_relationship_click`] never surfaces
+///   one, since neither tool has an error-reporting UI path today),
+///   returns `None`.
+/// - Any other combination (e.g. a bare first click on a cell, or two
+///   relationship groups) → returns `None` with no mutation — not a
+///   meaningful gesture.
+pub fn add_conditional_click(
+    doc: &mut Document,
+    pending_source: Option<RelationshipGroupId>,
+    clicked: NodeId,
+    position: Point,
+) -> Option<RelationshipGroupId> {
+    match (pending_source, clicked) {
+        (None, NodeId::RelationshipGroup(g)) => Some(g),
+        (None, _) => None,
+        (Some(g), NodeId::CellNode(_)) | (Some(g), NodeId::ConditionalGroup(_)) => {
+            let _ = add_conditional_target(doc, g, clicked, position);
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Completes an Add-Conditional connection from `group` to `target`: wraps
 /// `group` in a new conditional group at `position`, `Cells`-mode if
-/// `target` is a `Bool` cell, `Formula`-mode otherwise.
+/// `target` is a `Bool` cell, `Formula`-mode otherwise — or, if `target` is
+/// an existing conditional group, attaches `group` to it instead (see
+/// [`attach_group_to_conditional`]).
 ///
 /// In `Formula`-mode, the formula expression itself starts empty (filled in
 /// later via the side panel), but a single placeholder branch with value
@@ -753,10 +764,10 @@ pub fn add_relationship_click(
 ///
 /// # Errors
 ///
-/// Returns `Err` if `target` is not a cell node at all (e.g. dropping onto
-/// another relationship or conditional group is not a meaningful gesture
-/// for this tool).
-pub fn add_conditional_drag(
+/// Returns `Err` if `target` is not a cell node or an existing conditional
+/// group (e.g. targeting another relationship group is not a meaningful
+/// gesture for this tool).
+pub fn add_conditional_target(
     doc: &mut Document,
     group: RelationshipGroupId,
     target: NodeId,
@@ -792,13 +803,12 @@ pub fn add_conditional_drag(
 
 /// Attaches `group` to `conditional`'s enable-table, toggling it on the
 /// last branch — the branch enumeration order [`conditionals::add_conditional_from_bool_cells`]
-/// and the drag-created single-branch case in [`add_conditional_drag`]
-/// both put their "most relevant" branch last (an all-cells-true
-/// combination, or the one placeholder branch a fresh drag-created
-/// conditional starts with), so this is the most useful default target
-/// for a group dragged onto an already-existing conditional. The side
-/// panel's enable-table lets the user move it to a different branch
-/// afterward.
+/// and the single-branch case in [`add_conditional_target`] both put their
+/// "most relevant" branch last (an all-cells-true combination, or the one
+/// placeholder branch a freshly created conditional starts with), so this
+/// is the most useful default target for a group newly connected to an
+/// already-existing conditional. The side panel's enable-table lets the
+/// user move it to a different branch afterward.
 ///
 /// # Errors
 ///
@@ -900,7 +910,7 @@ mod tests {
     use crate::ops::relationships::create_relationship;
 
     #[test]
-    fn add_conditional_drag_onto_a_bool_cell_creates_a_cells_mode_conditional() {
+    fn add_conditional_target_onto_a_bool_cell_creates_a_cells_mode_conditional() {
         let mut doc = Document::new("demo");
         let flag = add_cell(&mut doc, "flag", CT::Bool);
         let a = add_cell(&mut doc, "a", CT::i64());
@@ -910,7 +920,7 @@ mod tests {
         let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
 
         let flag_node = add_cell_node(&mut doc, flag, Point::new(0.0, 20.0));
-        let result = add_conditional_drag(
+        let result = add_conditional_target(
             &mut doc,
             group,
             NodeId::CellNode(flag_node),
@@ -922,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn add_conditional_drag_onto_a_non_bool_cell_starts_formula_mode() {
+    fn add_conditional_target_onto_a_non_bool_cell_starts_formula_mode() {
         let mut doc = Document::new("demo");
         let threshold = add_cell(&mut doc, "threshold", CT::f64());
         let a = add_cell(&mut doc, "a", CT::i64());
@@ -932,7 +942,7 @@ mod tests {
         let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
         let threshold_node = add_cell_node(&mut doc, threshold, Point::new(0.0, 20.0));
 
-        let result = add_conditional_drag(
+        let result = add_conditional_target(
             &mut doc,
             group,
             NodeId::CellNode(threshold_node),
@@ -950,7 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn add_conditional_drag_onto_a_non_cell_target_errors() {
+    fn add_conditional_target_onto_a_non_cell_target_errors() {
         let mut doc = Document::new("demo");
         let a = add_cell(&mut doc, "a", CT::i64());
         let b = add_cell(&mut doc, "b", CT::i64());
@@ -958,7 +968,7 @@ mod tests {
         let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
         let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
 
-        let result = add_conditional_drag(
+        let result = add_conditional_target(
             &mut doc,
             group,
             NodeId::RelationshipGroup(group),
@@ -969,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn add_conditional_drag_onto_an_existing_conditional_attaches_the_group() {
+    fn add_conditional_target_onto_an_existing_conditional_attaches_the_group() {
         let mut doc = Document::new("demo");
         let flag = add_cell(&mut doc, "flag", CT::Bool);
         let a = add_cell(&mut doc, "a", CT::i64());
@@ -978,7 +988,7 @@ mod tests {
         let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
         let first_group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
         let flag_node = add_cell_node(&mut doc, flag, Point::new(0.0, 20.0));
-        add_conditional_drag(
+        add_conditional_target(
             &mut doc,
             first_group,
             NodeId::CellNode(flag_node),
@@ -993,7 +1003,7 @@ mod tests {
         let d_node = add_cell_node(&mut doc, d, Point::new(10.0, 100.0));
         let second_group = create_relationship(&mut doc, c_node, d_node, Point::new(5.0, 105.0));
 
-        let result = add_conditional_drag(
+        let result = add_conditional_target(
             &mut doc,
             second_group,
             NodeId::ConditionalGroup(cond_id),
@@ -1011,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn add_conditional_drag_onto_a_conditional_with_no_branches_errors() {
+    fn add_conditional_target_onto_a_conditional_with_no_branches_errors() {
         use crate::ops::conditionals::add_conditional_with_formula;
 
         let mut doc = Document::new("demo");
@@ -1023,7 +1033,7 @@ mod tests {
         let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
         let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
 
-        let result = add_conditional_drag(
+        let result = add_conditional_target(
             &mut doc,
             group,
             NodeId::ConditionalGroup(cond),
@@ -1031,6 +1041,129 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_conditional_click_first_click_on_a_relationship_group_sets_pending() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CT::i64());
+        let b = add_cell(&mut doc, "b", CT::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+
+        let pending = add_conditional_click(
+            &mut doc,
+            None,
+            NodeId::RelationshipGroup(group),
+            Point::new(5.0, 5.0),
+        );
+
+        assert_eq!(pending, Some(group));
+        assert!(doc.conditional_groups_in_order().next().is_none());
+    }
+
+    #[test]
+    fn add_conditional_click_first_click_on_a_non_group_is_a_no_op() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CT::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+
+        let pending = add_conditional_click(
+            &mut doc,
+            None,
+            NodeId::CellNode(a_node),
+            Point::new(0.0, 0.0),
+        );
+
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn add_conditional_click_second_click_on_a_bool_cell_creates_a_conditional() {
+        let mut doc = Document::new("demo");
+        let flag = add_cell(&mut doc, "flag", CT::Bool);
+        let flag_node = add_cell_node(&mut doc, flag, Point::new(0.0, 20.0));
+        let a = add_cell(&mut doc, "a", CT::i64());
+        let b = add_cell(&mut doc, "b", CT::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+
+        let pending = add_conditional_click(
+            &mut doc,
+            Some(group),
+            NodeId::CellNode(flag_node),
+            Point::new(0.0, 40.0),
+        );
+
+        assert_eq!(pending, None);
+        assert_eq!(doc.conditional_groups_in_order().count(), 1);
+    }
+
+    #[test]
+    fn add_conditional_click_second_click_on_an_existing_conditional_attaches_the_group() {
+        let mut doc = Document::new("demo");
+        let flag = add_cell(&mut doc, "flag", CT::Bool);
+        let flag_node = add_cell_node(&mut doc, flag, Point::new(0.0, 20.0));
+        let a = add_cell(&mut doc, "a", CT::i64());
+        let b = add_cell(&mut doc, "b", CT::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let first_group = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        add_conditional_click(
+            &mut doc,
+            Some(first_group),
+            NodeId::CellNode(flag_node),
+            Point::new(0.0, 40.0),
+        );
+        let (cond_id, _) = doc.conditional_groups_in_order().next().unwrap();
+
+        let c = add_cell(&mut doc, "c", CT::i64());
+        let d = add_cell(&mut doc, "d", CT::i64());
+        let c_node = add_cell_node(&mut doc, c, Point::new(0.0, 100.0));
+        let d_node = add_cell_node(&mut doc, d, Point::new(10.0, 100.0));
+        let second_group = create_relationship(&mut doc, c_node, d_node, Point::new(5.0, 105.0));
+
+        let pending = add_conditional_click(
+            &mut doc,
+            Some(second_group),
+            NodeId::ConditionalGroup(cond_id),
+            Point::new(0.0, 40.0),
+        );
+
+        assert_eq!(pending, None);
+        let last_branch = doc.conditional_groups[cond_id].branches.len() - 1;
+        assert!(
+            doc.conditional_groups[cond_id].branches[last_branch]
+                .enabled_groups
+                .contains(&second_group)
+        );
+    }
+
+    #[test]
+    fn add_conditional_click_mismatched_second_click_clears_pending_with_no_mutation() {
+        let mut doc = Document::new("demo");
+        let a = add_cell(&mut doc, "a", CT::i64());
+        let b = add_cell(&mut doc, "b", CT::i64());
+        let a_node = add_cell_node(&mut doc, a, Point::new(0.0, 0.0));
+        let b_node = add_cell_node(&mut doc, b, Point::new(10.0, 0.0));
+        let group_a = create_relationship(&mut doc, a_node, b_node, Point::new(5.0, 5.0));
+        let c = add_cell(&mut doc, "c", CT::i64());
+        let d = add_cell(&mut doc, "d", CT::i64());
+        let c_node = add_cell_node(&mut doc, c, Point::new(0.0, 20.0));
+        let d_node = add_cell_node(&mut doc, d, Point::new(10.0, 20.0));
+        let group_b = create_relationship(&mut doc, c_node, d_node, Point::new(5.0, 25.0));
+
+        let pending = add_conditional_click(
+            &mut doc,
+            Some(group_a),
+            NodeId::RelationshipGroup(group_b),
+            Point::new(5.0, 25.0),
+        );
+
+        assert_eq!(pending, None);
+        assert!(doc.conditional_groups_in_order().next().is_none());
     }
 
     #[test]
