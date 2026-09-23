@@ -42,6 +42,18 @@ pub fn set_restrict(doc: &mut Document, cell: CellId, restrict: Option<String>) 
     doc.cells[cell].restrict = restrict;
 }
 
+/// Sets `cell`'s name.
+///
+/// - Precondition: `cell` is a valid key in `doc.cells`.
+/// - Postcondition: every [`crate::model::cell_node::CellNode`] placing
+///   `cell` reflects the new name, since a `Cell`'s data is shared by all
+///   of its placements (see [`Cell`]'s own doc comment) — this does not,
+///   however, rewrite any formula text that referenced the old name.
+pub fn set_name(doc: &mut Document, cell: CellId, name: impl Into<String>) {
+    debug_assert!(doc.cells.contains_key(cell), "cell is not a valid key");
+    doc.cells[cell].name = name.into();
+}
+
 /// Removes `node` (a canvas placement) from `doc`, cascading to keep the
 /// document consistent:
 /// - `node` is removed from every relationship group's `members`; any
@@ -131,6 +143,27 @@ mod tests {
         let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
         set_restrict(&mut doc, cell, Some("_ > 0".to_string()));
         assert_eq!(doc.cells[cell].restrict.as_deref(), Some("_ > 0"));
+    }
+
+    #[test]
+    fn set_name_updates_the_cells_name() {
+        let mut doc = Document::new("demo");
+        let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
+        set_name(&mut doc, cell, "w");
+        assert_eq!(doc.cells[cell].name, "w");
+    }
+
+    #[test]
+    fn set_name_is_visible_through_every_node_placing_the_shared_cell() {
+        let mut doc = Document::new("demo");
+        let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
+        let node_a = add_cell_node(&mut doc, cell, Point::new(0.0, 0.0));
+        let node_b = add_cell_node(&mut doc, cell, Point::new(10.0, 0.0));
+
+        set_name(&mut doc, cell, "w");
+
+        assert_eq!(doc.cells[doc.cell_nodes[node_a].cell].name, "w");
+        assert_eq!(doc.cells[doc.cell_nodes[node_b].cell].name, "w");
     }
 
     #[test]

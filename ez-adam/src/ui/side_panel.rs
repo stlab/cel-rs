@@ -5,14 +5,16 @@ use crate::model::cell::{CellId, CellType};
 use crate::model::conditional_group::{ConditionExpr, ConditionalBranch, ConditionalGroupId};
 use crate::model::document::Document;
 use crate::model::relationship_group::RelationshipGroupId;
-use crate::ops::cells::{set_output, set_restrict};
-use crate::ops::conditionals::{set_condition_formula, toggle_enabled_group};
-use crate::ops::relationships::set_member_formula;
+use crate::ops::cells::{set_name, set_output, set_restrict};
+use crate::ops::conditionals::{
+    set_condition_formula, set_display_name as set_conditional_display_name, toggle_enabled_group,
+};
+use crate::ops::relationships::{
+    set_display_name as set_relationship_display_name, set_member_formula,
+};
 use crate::ui::canvas::NodeId;
 use crate::validation::validate_cel_expression;
-use adam_web_ui::spectrum::{
-    SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpNumberfield, SpTextfield,
-};
+use adam_web_ui::spectrum::{SpCheckbox, SpDivider, SpFieldLabel, SpNumberfield, SpTextfield};
 use annotate_snippets::Renderer;
 use dioxus::prelude::*;
 
@@ -71,12 +73,32 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
         )
     };
     let bounds = clamp_bounds_text(&ty);
+    let name_id = format!("name-{cell:?}");
     let restrict_id = format!("restrict-{cell:?}");
+    let clamp_min_id = format!("clamp-min-{cell:?}");
+    let clamp_max_id = format!("clamp-max-{cell:?}");
 
     rsx! {
         div {
             class: "cell-panel",
-            SpHeading { "{name}" }
+            SpFieldLabel { for_: "{name_id}", "Name" }
+            SpTextfield {
+                id: name_id.clone(),
+                value: name,
+                invalid: false,
+                disabled: false,
+                oninput: move |_| {
+                    let id = name_id.clone();
+                    spawn(async move {
+                        let mut eval = document::eval(&read_value_js(&id));
+                        if let Ok(text) = eval.recv::<String>().await {
+                            set_name(&mut document.write(), cell, text);
+                        }
+                    });
+                },
+                onfocus: move |_| {},
+                onblur: move |_| {},
+            }
             SpCheckbox {
                 id: format!("output-{cell:?}"),
                 checked: output,
@@ -86,14 +108,18 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
                 "Output"
             }
             if let Some((min, max)) = bounds {
+                // Not yet wired to any `ops::cells` mutation (clamp editing
+                // was never implemented) -- `readonly` makes that honest
+                // instead of looking editable and silently discarding
+                // whatever's typed. Each field gets its own wrapping `div`
+                // (matching `RelationshipPanel`/`ConditionalPanel`'s
+                // label+field pairs) rather than sharing one, so the pair
+                // stacks vertically instead of running the label and a
+                // now-full-width field together on one cramped line.
                 div {
-                    // Not yet wired to any `ops::cells` mutation (clamp
-                    // editing was never implemented) -- `readonly` makes
-                    // that honest instead of looking editable and silently
-                    // discarding whatever's typed.
-                    SpFieldLabel { for_: "clamp-min".to_string(), "Clamp min" }
+                    SpFieldLabel { for_: "{clamp_min_id}", "Clamp min" }
                     SpNumberfield {
-                        id: "clamp-min".to_string(),
+                        id: clamp_min_id,
                         value: min,
                         min: None,
                         max: None,
@@ -105,9 +131,11 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
                         onfocus: move |_| {},
                         onblur: move |_| {},
                     }
-                    SpFieldLabel { for_: "clamp-max".to_string(), "Clamp max" }
+                }
+                div {
+                    SpFieldLabel { for_: "{clamp_max_id}", "Clamp max" }
                     SpNumberfield {
-                        id: "clamp-max".to_string(),
+                        id: clamp_max_id,
                         value: max,
                         min: None,
                         max: None,
@@ -251,21 +279,43 @@ fn union_preserving_known_order(
 /// live via [`formula_diagnostic`].
 #[component]
 pub fn RelationshipPanel(mut document: Signal<Document>, group: RelationshipGroupId) -> Element {
-    let members: Vec<_> = {
+    let (display_name, members) = {
         let doc = document.read();
-        doc.relationship_groups[group]
+        let g = &doc.relationship_groups[group];
+        let members: Vec<_> = g
             .members
             .iter()
             .map(|(node, formula)| {
                 let cell = doc.cells[doc.cell_nodes[*node].cell].name.clone();
                 (*node, cell, formula.clone())
             })
-            .collect()
+            .collect();
+        (g.display_name.clone(), members)
     };
+    let name_id = format!("name-{group:?}");
 
     rsx! {
         div {
             class: "relationship-panel",
+            SpFieldLabel { for_: "{name_id}", "Name" }
+            SpTextfield {
+                id: name_id.clone(),
+                value: display_name,
+                invalid: false,
+                disabled: false,
+                oninput: move |_| {
+                    let id = name_id.clone();
+                    spawn(async move {
+                        let mut eval = document::eval(&read_value_js(&id));
+                        if let Ok(text) = eval.recv::<String>().await {
+                            set_relationship_display_name(&mut document.write(), group, text);
+                        }
+                    });
+                },
+                onfocus: move |_| {},
+                onblur: move |_| {},
+            }
+            SpDivider {}
             for (node, cell_name, formula) in members {
                 {
                     let field_id = format!("member-formula-{node:?}");
@@ -339,17 +389,41 @@ pub fn ConditionalPanel(
         }
     });
 
-    let (branches, formula_expr) = {
+    let (display_name, branches, formula_expr) = {
         let doc = document.read();
         let cond = &doc.conditional_groups[conditional];
         let formula_expr = formula_expr_for_display(&cond.condition).map(str::to_owned);
-        (cond.branches.clone(), formula_expr)
+        (
+            cond.display_name.clone(),
+            cond.branches.clone(),
+            formula_expr,
+        )
     };
     let all_groups = known_groups.read().clone();
 
+    let name_id = format!("name-{conditional:?}");
     let formula_id = format!("conditional-formula-{conditional:?}");
 
     rsx! {
+        SpFieldLabel { for_: "{name_id}", "Name" }
+        SpTextfield {
+            id: name_id.clone(),
+            value: display_name,
+            invalid: false,
+            disabled: false,
+            oninput: move |_| {
+                let id = name_id.clone();
+                spawn(async move {
+                    let mut eval = document::eval(&read_value_js(&id));
+                    if let Ok(text) = eval.recv::<String>().await {
+                        set_conditional_display_name(&mut document.write(), conditional, text);
+                    }
+                });
+            },
+            onfocus: move |_| {},
+            onblur: move |_| {},
+        }
+        SpDivider {}
         if let Some(expr) = formula_expr {
             div {
                 class: "conditional-formula",

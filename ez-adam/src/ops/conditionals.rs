@@ -173,6 +173,22 @@ pub fn set_condition_formula(
     *current_expr = expr.into();
 }
 
+/// Sets `conditional`'s display name — UI bookkeeping only, never emitted
+/// to `.adm2`.
+///
+/// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
+pub fn set_display_name(
+    doc: &mut Document,
+    conditional: ConditionalGroupId,
+    name: impl Into<String>,
+) {
+    debug_assert!(
+        doc.conditional_groups.contains_key(conditional),
+        "conditional is not a valid key"
+    );
+    doc.conditional_groups[conditional].display_name = name.into();
+}
+
 /// Toggles whether `group` is active on `conditional`'s branch at
 /// `branch_index` — enables it if absent, disables it if present.
 ///
@@ -394,6 +410,17 @@ mod formula_tests {
             panic!("expected a Formula-mode condition");
         };
         assert_eq!(expr, "aspect_ratio > 2.0");
+    }
+
+    #[test]
+    fn set_display_name_updates_the_conditionals_display_name() {
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+        let cond = add_conditional_with_formula(&mut doc, vec![x], "", Point::new(0.0, 0.0));
+
+        set_display_name(&mut doc, cond, "aspect gate");
+
+        assert_eq!(doc.conditional_groups[cond].display_name, "aspect gate");
     }
 
     #[test]
