@@ -5,7 +5,7 @@ use crate::model::cell::{CellId, CellType};
 use crate::model::conditional_group::{ConditionExpr, ConditionalBranch, ConditionalGroupId};
 use crate::model::document::Document;
 use crate::model::relationship_group::RelationshipGroupId;
-use crate::ops::cells::{set_name, set_output, set_restrict};
+use crate::ops::cells::{set_clamp_max, set_clamp_min, set_name, set_output, set_restrict};
 use crate::ops::conditionals::{
     set_condition_formula, set_display_name as set_conditional_display_name, toggle_enabled_group,
 };
@@ -73,6 +73,7 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
         )
     };
     let bounds = clamp_bounds_text(&ty);
+    let is_integer = matches!(ty, CellType::I64 { .. });
     let name_id = format!("name-{cell:?}");
     let restrict_id = format!("restrict-{cell:?}");
     let clamp_min_id = format!("clamp-min-{cell:?}");
@@ -108,26 +109,38 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
                 "Output"
             }
             if let Some((min, max)) = bounds {
-                // Not yet wired to any `ops::cells` mutation (clamp editing
-                // was never implemented) -- `readonly` makes that honest
-                // instead of looking editable and silently discarding
-                // whatever's typed. Each field gets its own wrapping `div`
-                // (matching `RelationshipPanel`/`ConditionalPanel`'s
-                // label+field pairs) rather than sharing one, so the pair
-                // stacks vertically instead of running the label and a
+                // Each field gets its own wrapping `div` (matching
+                // `RelationshipPanel`/`ConditionalPanel`'s label+field
+                // pairs) rather than sharing one, so the pair stacks
+                // vertically instead of running the label and a
                 // now-full-width field together on one cramped line.
+                //
+                // `set_clamp_min`/`set_clamp_max` silently ignore text that
+                // doesn't parse (e.g. a lone "-" mid-typed) rather than
+                // clearing the bound, so this deliberately doesn't reset
+                // the field to the committed value on a rejected keystroke
+                // — doing so from `document.read()` on every render would
+                // otherwise fight the user's typing.
                 div {
                     SpFieldLabel { for_: "{clamp_min_id}", "Clamp min" }
                     SpNumberfield {
-                        id: clamp_min_id,
+                        id: clamp_min_id.clone(),
                         value: min,
                         min: None,
                         max: None,
-                        step: None,
+                        step: is_integer.then(|| "1".to_string()),
                         invalid: false,
                         disabled: false,
-                        readonly: true,
-                        oninput: move |_| {},
+                        readonly: false,
+                        oninput: move |_| {
+                            let id = clamp_min_id.clone();
+                            spawn(async move {
+                                let mut eval = document::eval(&read_value_js(&id));
+                                if let Ok(text) = eval.recv::<String>().await {
+                                    set_clamp_min(&mut document.write(), cell, &text);
+                                }
+                            });
+                        },
                         onfocus: move |_| {},
                         onblur: move |_| {},
                     }
@@ -135,15 +148,23 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
                 div {
                     SpFieldLabel { for_: "{clamp_max_id}", "Clamp max" }
                     SpNumberfield {
-                        id: clamp_max_id,
+                        id: clamp_max_id.clone(),
                         value: max,
                         min: None,
                         max: None,
-                        step: None,
+                        step: is_integer.then(|| "1".to_string()),
                         invalid: false,
                         disabled: false,
-                        readonly: true,
-                        oninput: move |_| {},
+                        readonly: false,
+                        oninput: move |_| {
+                            let id = clamp_max_id.clone();
+                            spawn(async move {
+                                let mut eval = document::eval(&read_value_js(&id));
+                                if let Ok(text) = eval.recv::<String>().await {
+                                    set_clamp_max(&mut document.write(), cell, &text);
+                                }
+                            });
+                        },
                         onfocus: move |_| {},
                         onblur: move |_| {},
                     }

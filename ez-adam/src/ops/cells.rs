@@ -54,6 +54,69 @@ pub fn set_name(doc: &mut Document, cell: CellId, name: impl Into<String>) {
     doc.cells[cell].name = name.into();
 }
 
+/// Parses clamp-bound input text into the new bound value to apply.
+///
+/// - Postcondition: returns `Some(None)` ("clear the bound") for an empty
+///   `text`, `Some(Some(v))` ("set the bound to `v`") for text that parses
+///   as `T`, or `None` ("leave the existing bound alone") for anything
+///   else — an in-progress or malformed number (e.g. a lone `"-"` while
+///   typing a negative value) shouldn't silently erase an already-valid
+///   bound.
+fn parse_clamp_bound<T: std::str::FromStr>(text: &str) -> Option<Option<T>> {
+    if text.is_empty() {
+        return Some(None);
+    }
+    text.parse::<T>().ok().map(Some)
+}
+
+/// Sets `cell`'s clamp minimum from `text` (see [`parse_clamp_bound`] for
+/// how `text` is interpreted).
+///
+/// - Precondition: `cell` is a valid key in `doc.cells`.
+/// - Precondition: `cell`'s type is `F64` or `I64` (has a clamp to set).
+pub fn set_clamp_min(doc: &mut Document, cell: CellId, text: &str) {
+    debug_assert!(doc.cells.contains_key(cell), "cell is not a valid key");
+    match &mut doc.cells[cell].ty {
+        CellType::F64 { clamp } => {
+            if let Some(new_min) = parse_clamp_bound::<f64>(text) {
+                clamp.min = new_min;
+            }
+        }
+        CellType::I64 { clamp } => {
+            if let Some(new_min) = parse_clamp_bound::<i64>(text) {
+                clamp.min = new_min;
+            }
+        }
+        CellType::Bool | CellType::Text => {
+            debug_assert!(false, "set_clamp_min requires a numeric cell type");
+        }
+    }
+}
+
+/// Sets `cell`'s clamp maximum from `text` (see [`parse_clamp_bound`] for
+/// how `text` is interpreted).
+///
+/// - Precondition: `cell` is a valid key in `doc.cells`.
+/// - Precondition: `cell`'s type is `F64` or `I64` (has a clamp to set).
+pub fn set_clamp_max(doc: &mut Document, cell: CellId, text: &str) {
+    debug_assert!(doc.cells.contains_key(cell), "cell is not a valid key");
+    match &mut doc.cells[cell].ty {
+        CellType::F64 { clamp } => {
+            if let Some(new_max) = parse_clamp_bound::<f64>(text) {
+                clamp.max = new_max;
+            }
+        }
+        CellType::I64 { clamp } => {
+            if let Some(new_max) = parse_clamp_bound::<i64>(text) {
+                clamp.max = new_max;
+            }
+        }
+        CellType::Bool | CellType::Text => {
+            debug_assert!(false, "set_clamp_max requires a numeric cell type");
+        }
+    }
+}
+
 /// Removes `node` (a canvas placement) from `doc`, cascading to keep the
 /// document consistent:
 /// - `node` is removed from every relationship group's `members`; any
@@ -164,6 +227,87 @@ mod tests {
 
         assert_eq!(doc.cells[doc.cell_nodes[node_a].cell].name, "w");
         assert_eq!(doc.cells[doc.cell_nodes[node_b].cell].name, "w");
+    }
+
+    #[test]
+    fn set_clamp_min_parses_and_sets_an_f64_bound() {
+        let mut doc = Document::new("demo");
+        let cell = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+        set_clamp_min(&mut doc, cell, "0.5");
+        let CellType::F64 { clamp } = &doc.cells[cell].ty else {
+            panic!("expected F64");
+        };
+        assert_eq!(clamp.min, Some(0.5));
+    }
+
+    #[test]
+    fn set_clamp_min_parses_and_sets_an_i64_bound() {
+        let mut doc = Document::new("demo");
+        let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
+        set_clamp_min(&mut doc, cell, "10");
+        let CellType::I64 { clamp } = &doc.cells[cell].ty else {
+            panic!("expected I64");
+        };
+        assert_eq!(clamp.min, Some(10));
+    }
+
+    #[test]
+    fn set_clamp_min_with_empty_text_clears_the_bound() {
+        let mut doc = Document::new("demo");
+        let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
+        set_clamp_min(&mut doc, cell, "10");
+        set_clamp_min(&mut doc, cell, "");
+        let CellType::I64 { clamp } = &doc.cells[cell].ty else {
+            panic!("expected I64");
+        };
+        assert_eq!(clamp.min, None);
+    }
+
+    #[test]
+    fn set_clamp_min_with_unparseable_text_leaves_the_bound_unchanged() {
+        let mut doc = Document::new("demo");
+        let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
+        set_clamp_min(&mut doc, cell, "10");
+        set_clamp_min(&mut doc, cell, "-");
+        let CellType::I64 { clamp } = &doc.cells[cell].ty else {
+            panic!("expected I64");
+        };
+        assert_eq!(clamp.min, Some(10));
+    }
+
+    #[test]
+    fn set_clamp_max_parses_and_sets_an_f64_bound() {
+        let mut doc = Document::new("demo");
+        let cell = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+        set_clamp_max(&mut doc, cell, "2.5");
+        let CellType::F64 { clamp } = &doc.cells[cell].ty else {
+            panic!("expected F64");
+        };
+        assert_eq!(clamp.max, Some(2.5));
+    }
+
+    #[test]
+    fn set_clamp_max_with_empty_text_clears_the_bound() {
+        let mut doc = Document::new("demo");
+        let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
+        set_clamp_max(&mut doc, cell, "100");
+        set_clamp_max(&mut doc, cell, "");
+        let CellType::I64 { clamp } = &doc.cells[cell].ty else {
+            panic!("expected I64");
+        };
+        assert_eq!(clamp.max, None);
+    }
+
+    #[test]
+    fn set_clamp_max_with_unparseable_text_leaves_the_bound_unchanged() {
+        let mut doc = Document::new("demo");
+        let cell = add_cell(&mut doc, "width_pixels", CellType::i64());
+        set_clamp_max(&mut doc, cell, "100");
+        set_clamp_max(&mut doc, cell, "abc");
+        let CellType::I64 { clamp } = &doc.cells[cell].ty else {
+            panic!("expected I64");
+        };
+        assert_eq!(clamp.max, Some(100));
     }
 
     #[test]
