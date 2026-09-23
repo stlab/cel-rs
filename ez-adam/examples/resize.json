@@ -1,0 +1,242 @@
+{
+  "format_version": 1,
+  "sheet_name": "resize",
+  "cells": [
+    {
+      "value": null,
+      "version": 0
+    },
+    {
+      "value": {
+        "name": "width_pixels",
+        "ty": {
+          "I64": {
+            "clamp": {
+              "min": null,
+              "max": null
+            }
+          }
+        },
+        "output": false,
+        "restrict": null
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "name": "height_pixels",
+        "ty": {
+          "I64": {
+            "clamp": {
+              "min": null,
+              "max": null
+            }
+          }
+        },
+        "output": false,
+        "restrict": null
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "name": "constrain_proportions",
+        "ty": "Bool",
+        "output": false,
+        "restrict": null
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "name": "aspect_ratio",
+        "ty": {
+          "F64": {
+            "clamp": {
+              "min": null,
+              "max": null
+            }
+          }
+        },
+        "output": false,
+        "restrict": null
+      },
+      "version": 1
+    }
+  ],
+  "cell_order": [
+    {
+      "idx": 1,
+      "version": 1
+    },
+    {
+      "idx": 2,
+      "version": 1
+    },
+    {
+      "idx": 3,
+      "version": 1
+    },
+    {
+      "idx": 4,
+      "version": 1
+    }
+  ],
+  "cell_nodes": [
+    {
+      "value": null,
+      "version": 0
+    },
+    {
+      "value": {
+        "cell": {
+          "idx": 1,
+          "version": 1
+        },
+        "position": {
+          "x": 50.0,
+          "y": 50.0
+        }
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "cell": {
+          "idx": 2,
+          "version": 1
+        },
+        "position": {
+          "x": 300.0,
+          "y": 50.0
+        }
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "cell": {
+          "idx": 3,
+          "version": 1
+        },
+        "position": {
+          "x": 175.0,
+          "y": 300.0
+        }
+      },
+      "version": 1
+    },
+    {
+      "value": {
+        "cell": {
+          "idx": 4,
+          "version": 1
+        },
+        "position": {
+          "x": 450.0,
+          "y": 50.0
+        }
+      },
+      "version": 1
+    }
+  ],
+  "relationship_groups": [
+    {
+      "value": null,
+      "version": 0
+    },
+    {
+      "value": {
+        "display_name": "r1",
+        "position": {
+          "x": 175.0,
+          "y": 150.0
+        },
+        "members": [
+          [
+            {
+              "idx": 1,
+              "version": 1
+            },
+            "height_pixels * 2i64"
+          ],
+          [
+            {
+              "idx": 2,
+              "version": 1
+            },
+            "width_pixels / 2i64"
+          ],
+          [
+            {
+              "idx": 4,
+              "version": 1
+            },
+            "width_pixels as f64 / height_pixels as f64"
+          ]
+        ]
+      },
+      "version": 1
+    }
+  ],
+  "relationship_group_order": [
+    {
+      "idx": 1,
+      "version": 1
+    }
+  ],
+  "conditional_groups": [
+    {
+      "value": null,
+      "version": 0
+    },
+    {
+      "value": {
+        "display_name": "c1",
+        "position": {
+          "x": 175.0,
+          "y": 225.0
+        },
+        "condition": {
+          "Cells": [
+            {
+              "idx": 3,
+              "version": 1
+            }
+          ]
+        },
+        "branches": [
+          {
+            "values": [
+              {
+                "Bool": false
+              }
+            ],
+            "enabled_groups": []
+          },
+          {
+            "values": [
+              {
+                "Bool": true
+              }
+            ],
+            "enabled_groups": [
+              {
+                "idx": 1,
+                "version": 1
+              }
+            ]
+          }
+        ],
+        "default": []
+      },
+      "version": 1
+    }
+  ],
+  "conditional_group_order": [
+    {
+      "idx": 1,
+      "version": 1
+    }
+  ]
+}
