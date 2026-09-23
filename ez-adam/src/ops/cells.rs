@@ -69,8 +69,9 @@ fn parse_clamp_bound<T: std::str::FromStr>(text: &str) -> Option<Option<T>> {
     text.parse::<T>().ok().map(Some)
 }
 
-/// Sets `cell`'s clamp minimum from `text` (see [`parse_clamp_bound`] for
-/// how `text` is interpreted).
+/// Sets `cell`'s clamp minimum from `text`: empty text clears the bound,
+/// text that parses as `cell`'s numeric type sets it, and anything else
+/// leaves the existing bound unchanged (see `parse_clamp_bound`).
 ///
 /// - Precondition: `cell` is a valid key in `doc.cells`.
 /// - Precondition: `cell`'s type is `F64` or `I64` (has a clamp to set).
@@ -93,8 +94,9 @@ pub fn set_clamp_min(doc: &mut Document, cell: CellId, text: &str) {
     }
 }
 
-/// Sets `cell`'s clamp maximum from `text` (see [`parse_clamp_bound`] for
-/// how `text` is interpreted).
+/// Sets `cell`'s clamp maximum from `text`: empty text clears the bound,
+/// text that parses as `cell`'s numeric type sets it, and anything else
+/// leaves the existing bound unchanged (see `parse_clamp_bound`).
 ///
 /// - Precondition: `cell` is a valid key in `doc.cells`.
 /// - Precondition: `cell`'s type is `F64` or `I64` (has a clamp to set).
