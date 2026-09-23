@@ -1,6 +1,7 @@
 //! The top-level component: owns all UI state, composes the toolbar,
 //! canvas, and side panel.
 
+use adam_web_ui::spectrum::SpTheme;
 use dioxus::desktop::use_muda_event_handler;
 use dioxus::prelude::*;
 use std::collections::HashSet;
@@ -175,43 +176,58 @@ pub fn App() -> Element {
     });
 
     rsx! {
-        // No stylesheet pipeline exists yet (tracked in issue #177). This
-        // neutralizes the browser's default `<body>` margin, which would
-        // otherwise offset the canvas's `<svg>` a few pixels from the
-        // viewport's true top-left and reintroduce the coordinate
+        // Bundled via `cargo xtask build-js` (ez-adam/package.json +
+        // ez-adam/js/spectrum-entry.js) into one esbuild module, mirroring
+        // `begin`'s own Spectrum Web Components integration — see
+        // docs/superpowers/specs/2026-07-11-begin-spectrum2-theme-tokens-design.md
+        // for why this must be a single compiled bundle rather than
+        // separate vendored/live files.
+        document::Script { r#type: "module", src: asset!("/assets/swc.js") }
+        // This neutralizes the browser's default `<body>` margin, which
+        // would otherwise offset the canvas's `<svg>` a few pixels from
+        // the viewport's true top-left and reintroduce the coordinate
         // mismatch `Canvas`'s `<svg>` doc comment describes fixing.
         style { "html, body {{ margin: 0; padding: 0; overflow: hidden; }}" }
-        div {
-            class: "app",
-            // Fills the viewport and clips anything that would otherwise
-            // scroll it (native wheel-scroll is also prevented in
-            // `Canvas`'s `onwheel`, but this is cheap defensive insurance).
-            style: "position: relative; width: 100vw; height: 100vh; overflow: hidden;",
-            if let Some(msg) = error_message.read().as_deref() {
-                div {
-                    class: "error",
-                    style: "position: absolute; top: 0; left: 0; z-index: 10; background: #fee; padding: 4px;",
-                    "{msg}"
-                }
-            }
+        SpTheme {
+            color: "light".to_string(),
+            scale: "medium".to_string(),
+            system: "spectrum-two".to_string(),
             div {
-                style: "position: absolute; top: 0; left: 0; z-index: 10;",
-                Toolbar { active_tool, document, selection }
-            }
-            div {
-                class: "workspace",
-                style: "position: absolute; top: 0; left: 0; width: 100%; height: 100%;",
-                Canvas { document, view_transform, selection, active_tool }
-                // Only occupies (and intercepts clicks/drags over) screen
-                // space when there's actually something to show — an
-                // always-present strip here, even showing nothing but "No
-                // selection" text, would permanently block canvas
-                // interaction underneath it (e.g. dragging a relationship
-                // group onto a conditional that happens to fall under it).
-                if panel_target(&selection.read()).is_some() {
+                class: "app",
+                // Fills the viewport and clips anything that would otherwise
+                // scroll it (native wheel-scroll is also prevented in
+                // `Canvas`'s `onwheel`, but this is cheap defensive insurance).
+                style: "position: relative; width: 100vw; height: 100vh; overflow: hidden;",
+                // Bottom-left rather than sharing the toolbar's top-left
+                // corner: the two would otherwise overlap whenever both are
+                // showing at once, since neither reserves space for the
+                // other in this absolute-overlay layout.
+                if let Some(msg) = error_message.read().as_deref() {
                     div {
-                        style: "position: absolute; top: 0; right: 0; z-index: 10; background: white; border-left: 1px solid #ccc; max-width: 300px; max-height: 100%; overflow: auto;",
-                        SidePanel { document, selection }
+                        class: "error",
+                        style: "position: absolute; bottom: 12px; left: 12px; z-index: 10; background: #fee; color: #900; border: 1px solid #f5c2c2; border-radius: 6px; padding: 8px 12px; max-width: 400px;",
+                        "{msg}"
+                    }
+                }
+                div {
+                    style: "position: absolute; top: 12px; left: 12px; z-index: 10; background: white; border-radius: 8px; padding: 4px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);",
+                    Toolbar { active_tool, document, selection }
+                }
+                div {
+                    class: "workspace",
+                    style: "position: absolute; top: 0; left: 0; width: 100%; height: 100%;",
+                    Canvas { document, view_transform, selection, active_tool }
+                    // Only occupies (and intercepts clicks/drags over) screen
+                    // space when there's actually something to show — an
+                    // always-present strip here, even showing nothing but "No
+                    // selection" text, would permanently block canvas
+                    // interaction underneath it (e.g. dragging a relationship
+                    // group onto a conditional that happens to fall under it).
+                    if panel_target(&selection.read()).is_some() {
+                        div {
+                            style: "position: absolute; top: 0; right: 0; z-index: 10; background: white; border-left: 1px solid #ccc; max-width: 320px; max-height: 100%; overflow: auto; padding: 12px; box-sizing: border-box;",
+                            SidePanel { document, selection }
+                        }
                     }
                 }
             }

@@ -6,7 +6,7 @@ description = "Standalone visual editor for adam-rs property models"
 
 [features]
 default = ["desktop"]
-desktop = ["dioxus/desktop", "dep:rfd"]
+desktop = ["dioxus/desktop", "dep:rfd", "adam-web-ui/desktop"]
 web = ["dioxus/web"]
 
 [[bin]]
@@ -22,6 +22,7 @@ annotate-snippets = "0.12"
 cel-parser = { path = "../cel-parser" }
 cel-std = { path = "../cel-std" }
 adam-lang = { path = "../adam-lang" }
+adam-web-ui = { path = "../adam-web-ui" }
 dioxus = { version = "0.7.10", features = [] }
 rfd = { version = "0.17.2", optional = true }
 

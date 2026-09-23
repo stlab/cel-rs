@@ -10,8 +10,25 @@ use crate::ops::conditionals::{set_condition_formula, toggle_enabled_group};
 use crate::ops::relationships::set_member_formula;
 use crate::ui::canvas::NodeId;
 use crate::validation::validate_cel_expression;
+use adam_web_ui::spectrum::{
+    SpCheckbox, SpDivider, SpFieldLabel, SpHeading, SpNumberfield, SpTextfield,
+};
 use annotate_snippets::Renderer;
 use dioxus::prelude::*;
+
+/// Builds the JS snippet that reads the DOM element with id `id`'s live
+/// `.value` and sends it back via `dioxus.send`, for use with
+/// `document::eval`.
+///
+/// Needed because Dioxus's event serializer only populates
+/// `event.target.value` for a native `HTMLInputElement` — a Spectrum Web
+/// Components custom element (e.g. `SpTextfield`) always reports an empty
+/// string on its synthetic `input` event, so the live value has to be read
+/// directly off the DOM instead (see `SpTextfield`'s own doc comment, and
+/// `adam_web_ui::inspector`'s identical pattern).
+fn read_value_js(id: &str) -> String {
+    format!(r#"dioxus.send(document.getElementById("{id}").value)"#)
+}
 
 /// Returns `(min_text, max_text)` for `ty`'s clamp bounds if it's numeric,
 /// or `None` if `ty` is `Bool`/`Text` (no clamp fields to show). Each
@@ -54,36 +71,74 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
         )
     };
     let bounds = clamp_bounds_text(&ty);
+    let restrict_id = format!("restrict-{cell:?}");
 
     rsx! {
         div {
             class: "cell-panel",
-            div { "Name: {name}" }
-            label {
-                input {
-                    r#type: "checkbox",
-                    checked: output,
-                    onchange: move |evt| set_output(&mut document.write(), cell, evt.checked()),
-                }
+            SpHeading { "{name}" }
+            SpCheckbox {
+                id: format!("output-{cell:?}"),
+                checked: output,
+                invalid: false,
+                disabled: false,
+                onclick: move |_| set_output(&mut document.write(), cell, !output),
                 "Output"
             }
             if let Some((min, max)) = bounds {
                 div {
-                    "Clamp min: "
-                    input { value: "{min}" }
-                    " max: "
-                    input { value: "{max}" }
+                    // Not yet wired to any `ops::cells` mutation (clamp
+                    // editing was never implemented) -- `readonly` makes
+                    // that honest instead of looking editable and silently
+                    // discarding whatever's typed.
+                    SpFieldLabel { for_: "clamp-min".to_string(), "Clamp min" }
+                    SpNumberfield {
+                        id: "clamp-min".to_string(),
+                        value: min,
+                        min: None,
+                        max: None,
+                        step: None,
+                        invalid: false,
+                        disabled: false,
+                        readonly: true,
+                        oninput: move |_| {},
+                        onfocus: move |_| {},
+                        onblur: move |_| {},
+                    }
+                    SpFieldLabel { for_: "clamp-max".to_string(), "Clamp max" }
+                    SpNumberfield {
+                        id: "clamp-max".to_string(),
+                        value: max,
+                        min: None,
+                        max: None,
+                        step: None,
+                        invalid: false,
+                        disabled: false,
+                        readonly: true,
+                        oninput: move |_| {},
+                        onfocus: move |_| {},
+                        onblur: move |_| {},
+                    }
                 }
             }
-            div {
-                "Restrict: "
-                input {
-                    value: "{restrict}",
-                    onchange: move |evt| {
-                        let text = evt.value();
-                        set_restrict(&mut document.write(), cell, parse_restrict_input(text));
-                    },
-                }
+            SpDivider {}
+            SpFieldLabel { for_: "{restrict_id}", "Restrict" }
+            SpTextfield {
+                id: restrict_id.clone(),
+                value: restrict,
+                invalid: false,
+                disabled: false,
+                oninput: move |_| {
+                    let id = restrict_id.clone();
+                    spawn(async move {
+                        let mut eval = document::eval(&read_value_js(&id));
+                        if let Ok(text) = eval.recv::<String>().await {
+                            set_restrict(&mut document.write(), cell, parse_restrict_input(text));
+                        }
+                    });
+                },
+                onfocus: move |_| {},
+                onblur: move |_| {},
             }
         }
     }
@@ -212,14 +267,33 @@ pub fn RelationshipPanel(mut document: Signal<Document>, group: RelationshipGrou
         div {
             class: "relationship-panel",
             for (node, cell_name, formula) in members {
-                div {
-                    "{cell_name} := "
-                    input {
-                        value: "{formula}",
-                        onchange: move |evt| set_member_formula(&mut document.write(), group, node, evt.value()),
-                    }
-                    if let Some(diagnostic) = formula_diagnostic(&formula) {
-                        div { class: "diagnostic", "{diagnostic}" }
+                {
+                    let field_id = format!("member-formula-{node:?}");
+                    rsx! {
+                        div {
+                            key: "{node:?}",
+                            SpFieldLabel { for_: "{field_id}", "{cell_name} :=" }
+                            SpTextfield {
+                                id: field_id.clone(),
+                                value: formula.clone(),
+                                invalid: formula_diagnostic(&formula).is_some(),
+                                disabled: false,
+                                oninput: move |_| {
+                                    let id = field_id.clone();
+                                    spawn(async move {
+                                        let mut eval = document::eval(&read_value_js(&id));
+                                        if let Ok(text) = eval.recv::<String>().await {
+                                            set_member_formula(&mut document.write(), group, node, text);
+                                        }
+                                    });
+                                },
+                                onfocus: move |_| {},
+                                onblur: move |_| {},
+                            }
+                            if let Some(diagnostic) = formula_diagnostic(&formula) {
+                                div { class: "diagnostic", "{diagnostic}" }
+                            }
+                        }
                     }
                 }
             }
@@ -273,21 +347,35 @@ pub fn ConditionalPanel(
     };
     let all_groups = known_groups.read().clone();
 
+    let formula_id = format!("conditional-formula-{conditional:?}");
+
     rsx! {
         if let Some(expr) = formula_expr {
             div {
                 class: "conditional-formula",
-                "Condition: "
-                input {
-                    value: "{expr}",
-                    onchange: move |evt| {
-                        set_condition_formula(&mut document.write(), conditional, evt.value());
+                SpFieldLabel { for_: "{formula_id}", "Condition" }
+                SpTextfield {
+                    id: formula_id.clone(),
+                    value: expr.clone(),
+                    invalid: formula_diagnostic(&expr).is_some(),
+                    disabled: false,
+                    oninput: move |_| {
+                        let id = formula_id.clone();
+                        spawn(async move {
+                            let mut eval = document::eval(&read_value_js(&id));
+                            if let Ok(text) = eval.recv::<String>().await {
+                                set_condition_formula(&mut document.write(), conditional, text);
+                            }
+                        });
                     },
+                    onfocus: move |_| {},
+                    onblur: move |_| {},
                 }
                 if let Some(diagnostic) = formula_diagnostic(&expr) {
                     div { class: "diagnostic", "{diagnostic}" }
                 }
             }
+            SpDivider {}
         }
         table {
             class: "enable-table",
@@ -314,10 +402,12 @@ pub fn ConditionalPanel(
                                 rsx! {
                                     td {
                                         key: "{group:?}",
-                                        input {
-                                            r#type: "checkbox",
-                                            checked: checked,
-                                            onchange: move |_| toggle_enabled_group(&mut document.write(), conditional, branch_index, group),
+                                        SpCheckbox {
+                                            id: format!("enable-{conditional:?}-{branch_index}-{group:?}"),
+                                            checked,
+                                            invalid: false,
+                                            disabled: false,
+                                            onclick: move |_| toggle_enabled_group(&mut document.write(), conditional, branch_index, group),
                                         }
                                     }
                                 }
@@ -396,6 +486,15 @@ mod formula_tests {
 mod tests {
     use super::*;
     use crate::model::cell::ClampRange;
+
+    #[test]
+    fn read_value_js_embeds_the_given_id_in_a_getelementbyid_lookup() {
+        let js = read_value_js("restrict-abc");
+        assert_eq!(
+            js,
+            r#"dioxus.send(document.getElementById("restrict-abc").value)"#
+        );
+    }
 
     #[test]
     fn clamp_bounds_text_is_none_for_bool_and_text() {

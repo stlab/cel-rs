@@ -4,6 +4,7 @@
 use crate::model::document::Document;
 use crate::model::geometry::Point;
 use crate::ui::canvas::{NodeId, duplicate_selection};
+use adam_web_ui::spectrum::{SpActionButton, SpActionGroup};
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
@@ -33,26 +34,16 @@ fn tool_label(tool: Tool) -> &'static str {
     }
 }
 
-/// Returns the CSS class name for a tool button based on whether it is the active tool.
-///
-/// Returns `"tool-active"` if `active == tool`, `"tool"` otherwise.
-fn tool_button_class(active: Tool, tool: Tool) -> &'static str {
-    if active == tool {
-        "tool-active"
-    } else {
-        "tool"
-    }
-}
-
-/// Renders one button per [`Tool`], highlighting whichever is currently
-/// active in `active_tool`, and updates it on click — except `Tool::Duplicate`,
+/// Renders one `SpActionButton` per [`Tool`] in an `SpActionGroup`,
+/// highlighting whichever is currently active in `active_tool` via
+/// `SpActionButton`'s own `selected` state — except `Tool::Duplicate`,
 /// which is a one-shot action rather than a persistent mode: its button
 /// instead calls `duplicate_selection` on the current `selection` and
 /// replaces `selection` with the newly-duplicated groups, without ever
-/// making `Duplicate` the active tool. The `Duplicate`-vs-other branch in
-/// each button's `onclick` is simple dispatch onto the already-tested
-/// `duplicate_selection`, not new decision logic of its own; the button
-/// class decision is delegated to `tool_button_class`.
+/// making `Duplicate` the active tool (so it never renders `selected`).
+/// The `Duplicate`-vs-other branch in each button's `onclick` is simple
+/// dispatch onto the already-tested `duplicate_selection`, not new
+/// decision logic of its own.
 #[component]
 pub fn Toolbar(
     active_tool: Signal<Tool>,
@@ -67,22 +58,11 @@ pub fn Toolbar(
     ];
     let mut selection = selection;
     rsx! {
-        // No stylesheet pipeline exists yet (tracked in issue #177), so
-        // the `"tool"`/`"tool-active"` classes `tool_button_class` returns
-        // need their own visual rules here to actually show which tool is
-        // active — without this, the classes exist in the markup but have
-        // no associated style at all.
-        style {
-            "
-            .tool {{ padding: 4px 10px; margin: 2px; border: 1px solid #999; border-radius: 4px; background: #f0f0f0; cursor: pointer; }}
-            .tool-active {{ padding: 4px 10px; margin: 2px; border: 2px solid #2266cc; border-radius: 4px; background: #cfe2ff; cursor: pointer; }}
-            "
-        }
-        div {
-            class: "toolbar",
+        SpActionGroup {
+            compact: false,
             for tool in tools {
-                button {
-                    class: tool_button_class(*active_tool.read(), tool),
+                SpActionButton {
+                    selected: tool == *active_tool.read(),
                     onclick: move |_| {
                         if tool == Tool::Duplicate {
                             let duplicated = duplicate_selection(
@@ -137,26 +117,5 @@ mod tests {
         ];
         let unique: std::collections::HashSet<_> = labels.iter().collect();
         assert_eq!(unique.len(), labels.len());
-    }
-
-    #[test]
-    fn tool_button_class_active_tool_returns_tool_active() {
-        assert_eq!(tool_button_class(Tool::Select, Tool::Select), "tool-active");
-        assert_eq!(
-            tool_button_class(Tool::AddRelationship, Tool::AddRelationship),
-            "tool-active"
-        );
-    }
-
-    #[test]
-    fn tool_button_class_inactive_tool_returns_tool() {
-        assert_eq!(
-            tool_button_class(Tool::Select, Tool::AddRelationship),
-            "tool"
-        );
-        assert_eq!(
-            tool_button_class(Tool::AddConditional, Tool::Duplicate),
-            "tool"
-        );
     }
 }

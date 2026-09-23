@@ -1816,6 +1816,7 @@ name = "ez-adam"
 version = "0.1.0"
 dependencies = [
  "adam-lang",
+ "adam-web-ui",
  "annotate-snippets",
  "cel-parser",
  "cel-std",
