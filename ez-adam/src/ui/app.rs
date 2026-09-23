@@ -187,7 +187,20 @@ pub fn App() -> Element {
         // would otherwise offset the canvas's `<svg>` a few pixels from
         // the viewport's true top-left and reintroduce the coordinate
         // mismatch `Canvas`'s `<svg>` doc comment describes fixing.
-        style { "html, body {{ margin: 0; padding: 0; overflow: hidden; }}" }
+        //
+        // `sp-textfield`/`sp-number-field` are plain custom elements with
+        // their own intrinsic (narrow, fixed) width by default -- Shadow
+        // DOM style encapsulation only isolates an element's *internal*
+        // markup, not host-level box-model properties like `width`, so a
+        // page-level rule targeting the element tag directly is enough to
+        // stretch every text/number field in the side panel to fill its
+        // container instead of clipping the formula text it holds.
+        style {
+            "
+            html, body {{ margin: 0; padding: 0; overflow: hidden; }}
+            sp-textfield, sp-number-field {{ width: 100%; box-sizing: border-box; }}
+            "
+        }
         SpTheme {
             color: "light".to_string(),
             scale: "medium".to_string(),
