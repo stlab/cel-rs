@@ -225,7 +225,7 @@ pub fn App() -> Element {
                     // group onto a conditional that happens to fall under it).
                     if panel_target(&selection.read()).is_some() {
                         div {
-                            style: "position: absolute; top: 0; right: 0; z-index: 10; background: white; border-left: 1px solid #ccc; max-width: 320px; max-height: 100%; overflow: auto; padding: 12px; box-sizing: border-box;",
+                            style: "position: absolute; top: 0; right: 0; bottom: 0; z-index: 10; background: white; border-left: 1px solid #ccc; width: 420px; max-width: 40vw; overflow: auto; padding: 12px; box-sizing: border-box;",
                             SidePanel { document, selection }
                         }
                     }
