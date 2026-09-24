@@ -4,6 +4,7 @@
 .claude/worktrees/
 .superpowers/
 /begin/node_modules
+/ez-adam/node_modules
 /editors/vscode-adam-lang/node_modules
 /editors/vscode-adam-lang/out
 /editors/vscode-adam-lang/*.vsix

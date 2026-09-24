@@ -42,6 +42,20 @@ pub enum ConditionExpr {
     },
 }
 
+impl ConditionExpr {
+    /// Returns the cells this condition depends on: the auto-enumerated
+    /// cells for `Cells`, or the referenced cells for `Formula`.
+    #[must_use]
+    pub fn referenced_cells(&self) -> &[CellId] {
+        match self {
+            ConditionExpr::Cells(cells) => cells,
+            ConditionExpr::Formula {
+                referenced_cells, ..
+            } => referenced_cells,
+        }
+    }
+}
+
 /// One row of a conditional group's enable-table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConditionalBranch {
@@ -88,6 +102,25 @@ mod tests {
         let b = cells.insert(());
         let condition = ConditionExpr::Cells(vec![a, b]);
         assert_eq!(condition, ConditionExpr::Cells(vec![a, b]));
+    }
+
+    #[test]
+    fn referenced_cells_returns_cells_variants_own_list() {
+        let mut cells: SlotMap<CellId, ()> = SlotMap::with_key();
+        let a = cells.insert(());
+        let condition = ConditionExpr::Cells(vec![a]);
+        assert_eq!(condition.referenced_cells(), &[a]);
+    }
+
+    #[test]
+    fn referenced_cells_returns_formulas_referenced_cells() {
+        let mut cells: SlotMap<CellId, ()> = SlotMap::with_key();
+        let a = cells.insert(());
+        let condition = ConditionExpr::Formula {
+            referenced_cells: vec![a],
+            expr: "a > 1.0".to_string(),
+        };
+        assert_eq!(condition.referenced_cells(), &[a]);
     }
 
     #[test]
