@@ -10,61 +10,51 @@ use crate::relationship::{RelationshipData, RelationshipId};
 use super::digraph::Node;
 use super::matching::Assignment;
 
-/// Returns one simple cycle within `component`, as an ordered node list whose consecutive
+/// Returns one simple cycle within `nodes`, as an ordered node list whose consecutive
 /// entries (wrapping from last to first) are edges of `adj`.
 ///
-/// - Precondition: `component`'s nodes contain at least one cycle reachable within the set
-///   (true for any strongly connected component of size > 1).
-/// - Complexity: worst case superlinear in the size of `component`. This iterative DFS
-///   tracks only an `on_path` set, not a global visited/dead-end set, so a node's subtree
-///   can be re-explored after backtracking. Acceptable because this runs only on the cold
-///   error path, over a single small strongly connected component of the planner digraph.
-pub(crate) fn recover_cycle(adj: &HashMap<Node, Vec<Node>>, component: &[Node]) -> Vec<Node> {
-    let members: HashSet<Node> = component.iter().copied().collect();
-    let start = match component.first() {
-        Some(&n) => n,
-        None => return Vec::new(),
-    };
-    let mut path: Vec<Node> = Vec::new();
-    let mut on_path: HashSet<Node> = HashSet::new();
-    let mut stack: Vec<(Node, usize)> = vec![(start, 0)];
-    while let Some(&mut (node, ref mut next)) = stack.last_mut() {
-        if *next == 0 {
-            // `node` is never in `on_path` here: the only ways a node lands on the
-            // stack are as `start` (checked against an empty `on_path`, just below)
-            // or via `stack.push((w, 0))` in the successor loop, which only happens
-            // after that same loop has already checked `!on_path.contains(&w)` and
-            // returned early otherwise -- so this frame is always seeing `node` for
-            // the first time.
-            path.push(node);
-            on_path.insert(node);
+/// Returns an empty vector when the induced subgraph contains no cycle.
+///
+/// - Complexity: O(V + E), where V is the number of supplied nodes and E is the number
+///   of edges between them.
+pub(crate) fn recover_cycle(adj: &HashMap<Node, Vec<Node>>, nodes: &[Node]) -> Vec<Node> {
+    let members: HashSet<Node> = nodes.iter().copied().collect();
+    let mut visited = HashSet::new();
+
+    for &start in nodes {
+        if !visited.insert(start) {
+            continue;
         }
-        let successors = adj.get(&node).map(|v| v.as_slice()).unwrap_or(&[]);
-        let mut advanced = false;
-        while *next < successors.len() {
-            let w = successors[*next];
-            *next += 1;
-            if !members.contains(&w) {
-                continue;
+
+        let mut path = vec![start];
+        let mut on_path: HashSet<Node> = [start].into_iter().collect();
+        let mut stack: Vec<(Node, usize)> = vec![(start, 0)];
+        while let Some(&mut (node, ref mut next)) = stack.last_mut() {
+            let successors = adj.get(&node).map(|v| v.as_slice()).unwrap_or(&[]);
+            let mut advanced = false;
+            while *next < successors.len() {
+                let successor = successors[*next];
+                *next += 1;
+                if !members.contains(&successor) {
+                    continue;
+                }
+                if on_path.contains(&successor) {
+                    let at = path.iter().position(|&n| n == successor).unwrap();
+                    return path[at..].to_vec();
+                }
+                if visited.insert(successor) {
+                    path.push(successor);
+                    on_path.insert(successor);
+                    stack.push((successor, 0));
+                    advanced = true;
+                    break;
+                }
             }
-            if on_path.contains(&w) {
-                let at = path.iter().position(|&n| n == w).unwrap();
-                let cycle = path[at..].to_vec();
-                debug_assert!(
-                    cycle.len() >= 2,
-                    "recover_cycle: a real cycle in a bipartite relationship/cell digraph has \
-                     no self-loops, so a located loop must have at least 2 members"
-                );
-                return cycle;
+            if !advanced {
+                on_path.remove(&node);
+                path.pop();
+                stack.pop();
             }
-            stack.push((w, 0));
-            advanced = true;
-            break;
-        }
-        if !advanced {
-            on_path.remove(&node);
-            path.pop();
-            stack.pop();
         }
     }
     Vec::new()
@@ -130,6 +120,34 @@ mod tests {
         let cycle = recover_cycle(&adj, &component);
         assert_eq!(cycle.len(), 4);
         // consecutive-with-wraparound edges all exist in adj
+        for i in 0..cycle.len() {
+            let from = cycle[i];
+            let to = cycle[(i + 1) % cycle.len()];
+            assert!(adj[&from].contains(&to), "missing edge {from:?}->{to:?}");
+        }
+    }
+
+    #[test]
+    fn recover_cycle_skips_acyclic_components_before_the_cycle() {
+        let mut cmap: SlotMap<CellId, ()> = SlotMap::with_key();
+        let source = cmap.insert(());
+        let sink = cmap.insert(());
+        let x = cmap.insert(());
+        let y = cmap.insert(());
+        let mut adj: HashMap<Node, Vec<Node>> = HashMap::new();
+        adj.insert(Node::Cell(source), vec![Node::Cell(sink)]);
+        adj.insert(Node::Cell(x), vec![Node::Cell(y)]);
+        adj.insert(Node::Cell(y), vec![Node::Cell(x)]);
+        let nodes = vec![
+            Node::Cell(source),
+            Node::Cell(sink),
+            Node::Cell(x),
+            Node::Cell(y),
+        ];
+
+        let cycle = recover_cycle(&adj, &nodes);
+
+        assert_eq!(cycle.len(), 2);
         for i in 0..cycle.len() {
             let from = cycle[i];
             let to = cycle[(i + 1) % cycle.len()];
