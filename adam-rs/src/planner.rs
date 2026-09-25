@@ -20,9 +20,7 @@
 //! not through a value-aware assignment choice.
 //!
 //! Once [`release::resolve`] succeeds, its result's induced digraph is guaranteed
-//! acyclic, so a plain topological sort (reusing [`scc::tarjan_scc`], which produces
-//! components in reverse topological order on an acyclic graph -- each component is
-//! then a single node) yields `execution_order` directly.
+//! acyclic, so Kahn's topological sort yields `execution_order` directly.
 //!
 //! A separate fixpoint, [`forced_output_cells`], computes cells that can never be a
 //! source (a relationship's method structure guarantees the cell is always produced),
@@ -45,11 +43,10 @@ use crate::{
 mod digraph;
 mod matching;
 mod release;
-mod scc;
 mod seed;
 mod trace;
 
-use digraph::{Node, add_filter_edges, build_digraph};
+use digraph::{Node, add_filter_edges, build_digraph, topological_order};
 use matching::pure_outputs;
 use release::ReleaseFailure;
 
@@ -136,19 +133,20 @@ pub(crate) fn plan(
         .map(|(id, _)| id)
         .collect();
 
-    let mut components = scc::tarjan_scc(&adj);
-    components.reverse();
-
     let mut execution_order: Vec<PlanStep> = Vec::new();
-    for component in components {
-        if component.len() != 1 {
-            let sites = trace::recover_cycle(&adj, &component)
+    let order = match topological_order(&adj) {
+        Some(order) => order,
+        None => {
+            let nodes: Vec<Node> = adj.keys().copied().collect();
+            let sites = trace::recover_cycle(&adj, &nodes)
                 .into_iter()
                 .map(node_to_site)
                 .collect();
             return Err(Error::FilterCycle { sites });
         }
-        match component[0] {
+    };
+    for node in order {
+        match node {
             Node::Relationship(rel_id) => {
                 execution_order.push(PlanStep::Method(rel_id, assignment.chosen[&rel_id]));
             }
@@ -163,10 +161,10 @@ pub(crate) fn plan(
         .iter()
         .filter(|step| matches!(step, PlanStep::Method(..)))
         .count();
-    // Believed unreachable: every active relationship lands in its own singleton
-    // `tarjan_scc` component here, since the `FilterCycle` branch above already
-    // returned on any component of size > 1 -- so `method_count == active.len()`
-    // always holds and `active` is never actually infeasible when this branch runs.
+    // Believed unreachable: every active relationship appears in the topological
+    // order here, since the `FilterCycle` branch above already returned on a cycle
+    // -- so `method_count == active.len()` always holds and `active` is never
+    // actually infeasible when this branch runs.
     // `minimal_infeasible_set`'s own `debug_assert!` guards that assumption in
     // debug/test builds.
     if method_count != active.len() {
@@ -191,17 +189,14 @@ pub(crate) fn plan(
 /// Maps a cyclic assignment to `Relationship`/`Cell` sites in loop order.
 ///
 /// - Complexity: O(V + E) over the digraph induced by `assignment` (dominated by
-///   [`build_digraph`] and [`scc::tarjan_scc`]).
+///   [`build_digraph`] and [`topological_order`]).
 fn cycle_sites(
     assignment: &matching::Assignment,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
 ) -> Vec<ErrorSite> {
     let adj = build_digraph(assignment, relationships);
-    let component = scc::tarjan_scc(&adj)
-        .into_iter()
-        .find(|c| c.len() > 1)
-        .unwrap_or_default();
-    trace::recover_cycle(&adj, &component)
+    let nodes: Vec<Node> = adj.keys().copied().collect();
+    trace::recover_cycle(&adj, &nodes)
         .into_iter()
         .map(node_to_site)
         .collect()
