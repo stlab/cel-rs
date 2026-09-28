@@ -166,8 +166,10 @@ impl Sheet {
             };
             for &relationship in &self.cells[cell].adj {
                 for (method, data) in self.relationships[relationship].methods.iter().enumerate() {
-                    if data.inputs.contains(&cell) {
-                        for &output in data.outputs.iter().filter(|&&o| o != cell) {
+                    // A self-referencing input is read at its pre-round value and
+                    // contributes no edge, matching the planner's digraph.
+                    if data.inputs.contains(&cell) && !data.outputs.contains(&cell) {
+                        for &output in &data.outputs {
                             visit(
                                 output,
                                 Hop::Method {

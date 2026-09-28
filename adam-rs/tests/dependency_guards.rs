@@ -100,6 +100,34 @@ fn add_filter_accepts_an_upstream_argument_and_conforms_on_propagate() {
 }
 
 #[test]
+fn add_filter_accepts_an_argument_computed_from_a_self_referencing_input() {
+    // (x, y) <- (x, q) reads x at its pre-round value, so y does not depend on x and
+    // filtering x by y closes no cycle.
+    use std::any::{Any, TypeId};
+    let mut sheet = Sheet::new();
+    let x = sheet.add_cell(5_i32);
+    let q = sheet.add_cell(1_i32);
+    let y = sheet.add_cell(0_i32);
+    let ids = vec![TypeId::of::<i32>(); 2];
+    sheet
+        .add_relationship(vec![Method::new(
+            vec![x, q],
+            vec![x, y],
+            ids.clone(),
+            ids,
+            |args: &[&dyn Any]| {
+                let x = *args[0].downcast_ref::<i32>().unwrap();
+                let q = *args[1].downcast_ref::<i32>().unwrap();
+                Ok(vec![Box::new(x) as Box<dyn Any>, Box::new(x + q)])
+            },
+        )])
+        .unwrap();
+    sheet.add_filter(x, min_filter(y)).unwrap();
+    assert_eq!(sheet.filter_args(x), Some(&[y][..]));
+    sheet.propagate().unwrap();
+}
+
+#[test]
 fn add_filter_rejects_a_filter_closing_an_existing_conditional_guard() {
     // Conditional on m governs k -> o; filtering m by o closes m -gate-> o -filter-> m.
     let mut sheet = Sheet::new();
