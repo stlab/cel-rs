@@ -2573,6 +2573,22 @@ fn seed_cycle_leaves_values_and_changed_state_unchanged() {
     assert_eq!(sheet.changed().count(), 0);
 }
 
+#[test]
+fn conditional_seed_cycle_leaves_preplan_mutations_unexposed() {
+    let (mut sheet, mode, selected, a, b, c, d) = conditional_seed_cycle_sheet();
+
+    let err = sheet.propagate().unwrap_err();
+
+    assert!(matches!(err, Error::SeedCycle { .. }));
+    assert_eq!(*sheet.read::<i32>(mode).unwrap(), 1);
+    assert_eq!(*sheet.read::<i32>(selected).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), -1);
+    assert_eq!(*sheet.read::<i32>(d).unwrap(), -2);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
 fn seed_cycle_sheet() -> (
     Sheet,
     CellId,
@@ -2659,4 +2675,21 @@ fn seed_cycle_sheet() -> (
         ])
         .unwrap();
     (sheet, a, b, c, d, s, rel1, rel2)
+}
+
+fn conditional_seed_cycle_sheet() -> (Sheet, CellId, CellId, CellId, CellId, CellId, CellId) {
+    let (mut sheet, a, b, c, d, _s, rel1, rel2) = seed_cycle_sheet();
+    let mode = sheet.add_cell(1_i32);
+    let selected = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(mode, selected, |v: &i32| Ok(*v))])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(selected),
+            vec![(vec![1_i32], vec![rel1, rel2])],
+            vec![],
+        )
+        .unwrap();
+    (sheet, mode, selected, a, b, c, d)
 }

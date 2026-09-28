@@ -97,6 +97,42 @@ impl MatchValue<'_> {
     }
 }
 
+/// A source-only preview of propagation writes used for seed-cycle preflight.
+#[derive(Default)]
+struct PropagationPreview {
+    sources: HashMap<CellId, Box<dyn Any>>,
+    derived: HashMap<CellId, Box<dyn Any>>,
+}
+
+impl PropagationPreview {
+    /// Returns the previewed effective value for `id`, ignoring any live sheet `derived`.
+    fn effective<'a>(&'a self, cells: &'a SlotMap<CellId, CellData>, id: CellId) -> &'a dyn Any {
+        self.derived
+            .get(&id)
+            .map(|value| value.as_ref())
+            .or_else(|| self.sources.get(&id).map(|value| value.as_ref()))
+            .unwrap_or_else(|| cells[id].source.as_ref())
+    }
+
+    /// Returns the previewed source value for `id`, ignoring any live sheet `derived`.
+    fn source<'a>(&'a self, cells: &'a SlotMap<CellId, CellData>, id: CellId) -> &'a dyn Any {
+        self.sources
+            .get(&id)
+            .map(|value| value.as_ref())
+            .unwrap_or_else(|| cells[id].source.as_ref())
+    }
+
+    /// Applies a previewed write using the same shadow/non-shadow rule as `execute_plan`.
+    fn write(&mut self, id: CellId, value: Box<dyn Any>, shadow: bool) {
+        if shadow {
+            self.derived.insert(id, value);
+        } else {
+            self.sources.insert(id, value);
+            self.derived.remove(&id);
+        }
+    }
+}
+
 impl Sheet {
     /// Creates an empty sheet with no cells or relationships.
     pub fn new() -> Self {
@@ -1208,6 +1244,38 @@ impl Sheet {
         }
     }
 
+    /// Evaluates conditional `cond` against a source-only preview state.
+    ///
+    /// Uses `preview`'s writes first, then falls back to each cell's `source` value,
+    /// matching the state visible after Phase 0's derived reset and any pre-plan steps
+    /// already previewed.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::MethodFailed` — the match subject is a [`MatchExpr`] whose function
+    ///   returned an error.
+    fn evaluate_match_source_preview<'a>(
+        &'a self,
+        cond: &ConditionalData,
+        preview: &'a PropagationPreview,
+    ) -> Result<MatchValue<'a>, Error> {
+        match &cond.source {
+            MatchSource::Cell(id) => Ok(MatchValue::Ref(preview.effective(&self.cells, *id))),
+            MatchSource::Expr(expr) => {
+                let args: Vec<&dyn Any> = expr
+                    .inputs
+                    .iter()
+                    .map(|&id| preview.effective(&self.cells, id))
+                    .collect();
+                let value = (expr.function)(&args).map_err(|error| Error::MethodFailed {
+                    error,
+                    sites: vec![],
+                })?;
+                Ok(MatchValue::Owned(value))
+            }
+        }
+    }
+
     /// Returns the equality function used to compare `cond`'s match value against branch
     /// keys: the match cell's own `eq_fn` for a plain match subject, or the expression's
     /// captured `eq_fn` for a computed one.
@@ -1262,6 +1330,220 @@ impl Sheet {
         }
 
         Ok(active)
+    }
+
+    /// Builds the active relationship set against a source-only preview state.
+    ///
+    /// Matches `build_active_set`, except every conditional reads `preview`'s writes
+    /// first and otherwise falls back to cell `source` values rather than any live
+    /// `derived` override already present on the sheet.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::MethodFailed` — an expression-sourced conditional's function returned an
+    ///   error.
+    fn build_active_set_preview(
+        &self,
+        preview: &PropagationPreview,
+    ) -> Result<HashSet<RelationshipId>, Error> {
+        let mut active: HashSet<RelationshipId> = self
+            .relationships
+            .keys()
+            .filter(|id| !self.conditional_relationships.contains(id))
+            .collect();
+
+        for (_, cond) in &self.conditionals {
+            let value = self.evaluate_match_source_preview(cond, preview)?;
+            let value_ref = value.as_dyn();
+            let eq_fn = self.match_eq_fn(cond);
+
+            let mut matched = false;
+            for branch in &cond.branches {
+                if branch.keys.iter().any(|key| eq_fn(value_ref, key.as_ref())) {
+                    for &rel_id in &branch.relationships {
+                        active.insert(rel_id);
+                    }
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                for &rel_id in &cond.default {
+                    active.insert(rel_id);
+                }
+            }
+        }
+
+        Ok(active)
+    }
+
+    /// Executes `execution_order` into a source-only preview state.
+    ///
+    /// This mirrors `execute_plan`'s value flow closely enough to determine which
+    /// conditional branches Phase 2 would activate after a real Phase 1 run, without
+    /// mutating the sheet. Filter failures remain non-fatal and leave the previewed cell
+    /// untouched, matching `execute_plan`.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::MethodFailed` — a `PlanStep::Method` step's function returned an error,
+    ///   or the method produced a different number of outputs than declared.
+    /// - `Error::TypeMismatch` — a `PlanStep::Method` step's output runtime type does
+    ///   not match the cell's registered type.
+    fn execute_plan_preview(
+        &self,
+        execution_order: &[PlanStep],
+        seeds: &Seeds,
+        forced_outputs: &HashSet<CellId>,
+        preview: &mut PropagationPreview,
+    ) -> Result<(), Error> {
+        for step in execution_order {
+            match *step {
+                PlanStep::Method(rel_id, method_idx) => {
+                    let (outputs, output_ids, shadow_outputs) = {
+                        let method = &self.relationships[rel_id].methods[method_idx];
+                        let inputs: Vec<&dyn Any> = method
+                            .inputs
+                            .iter()
+                            .map(|&id| {
+                                if method.outputs.contains(&id) {
+                                    seeds
+                                        .get(&id)
+                                        .map(|value| value.as_ref())
+                                        .unwrap_or_else(|| preview.source(&self.cells, id))
+                                } else {
+                                    preview.effective(&self.cells, id)
+                                }
+                            })
+                            .collect();
+                        let outputs =
+                            (method.function)(&inputs).map_err(|error| Error::MethodFailed {
+                                error,
+                                sites: vec![ErrorSite::Method(rel_id, method_idx)],
+                            })?;
+                        let output_ids = method.outputs.clone();
+                        let shadow_outputs: Vec<bool> = method
+                            .outputs
+                            .iter()
+                            .map(|o| method.inputs.contains(o) || forced_outputs.contains(o))
+                            .collect();
+                        (outputs, output_ids, shadow_outputs)
+                    };
+
+                    if outputs.len() != output_ids.len() {
+                        return Err(Error::MethodFailed {
+                            error: anyhow::anyhow!(
+                                "method produced {} outputs but relationship expects {}",
+                                outputs.len(),
+                                output_ids.len()
+                            ),
+                            sites: vec![ErrorSite::Method(rel_id, method_idx)],
+                        });
+                    }
+
+                    for ((cell_id, new_value), shadow) in
+                        output_ids.into_iter().zip(outputs).zip(shadow_outputs)
+                    {
+                        let found = new_value.as_ref().type_id();
+                        let cell = &self.cells[cell_id];
+                        if found != cell.type_id {
+                            return Err(Error::TypeMismatch {
+                                expected: cell.type_id,
+                                found,
+                                sites: vec![ErrorSite::Method(rel_id, method_idx)],
+                            });
+                        }
+                        preview.write(cell_id, new_value, shadow);
+                    }
+                }
+                PlanStep::FilterReclamp(id) => {
+                    let filter = self.cells[id]
+                        .filter
+                        .as_ref()
+                        .expect("plan() only emits FilterReclamp for a filtered cell");
+                    let args: Vec<&dyn Any> = filter
+                        .args
+                        .iter()
+                        .map(|&a| preview.effective(&self.cells, a))
+                        .collect();
+                    let current = preview.source(&self.cells, id);
+                    if let Ok(v) = (filter.function)(current, &args)
+                        && v.as_ref().type_id() == self.cells[id].type_id
+                    {
+                        preview.write(id, v, true);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the `SeedCycle` error propagation would encounter before any real writes.
+    ///
+    /// Replays Phase 1 into a source-only preview state, evaluates conditionals against
+    /// that preview, then checks the full active plan's seed construction. Any non-seed
+    /// error is ignored here and left to the real propagation pass, because this preflight
+    /// exists only to uphold the invariant that `Error::SeedCycle` exposes no propagation
+    /// mutations.
+    fn preflight_seed_cycle(&self) -> Option<Error> {
+        let mut preview = PropagationPreview::default();
+        if !self.conditionals.is_empty() {
+            let match_cells: Vec<CellId> = self
+                .conditionals
+                .values()
+                .flat_map(|c| c.match_cells().iter().copied())
+                .collect();
+            let pre_active = self.match_cell_subgraph(&match_cells);
+            if !pre_active.is_empty() {
+                let pre_plan =
+                    match crate::planner::plan(&self.cells, &self.relationships, &pre_active) {
+                        Ok(plan) => plan,
+                        Err(err @ Error::SeedCycle { .. }) => return Some(err),
+                        Err(_) => return None,
+                    };
+                let seeds = match crate::planner::build_seeds(
+                    &pre_plan.execution_order,
+                    &pre_plan.elimination_order,
+                    &self.cells,
+                    &self.relationships,
+                ) {
+                    Ok(seeds) => seeds,
+                    Err(err @ Error::SeedCycle { .. }) => return Some(err),
+                    Err(_) => return None,
+                };
+                if self
+                    .execute_plan_preview(
+                        &pre_plan.execution_order,
+                        &seeds,
+                        &pre_plan.forced_outputs,
+                        &mut preview,
+                    )
+                    .is_err()
+                {
+                    return None;
+                }
+            }
+        }
+
+        let active = match self.build_active_set_preview(&preview) {
+            Ok(active) => active,
+            Err(err @ Error::SeedCycle { .. }) => return Some(err),
+            Err(_) => return None,
+        };
+        let plan = match crate::planner::plan(&self.cells, &self.relationships, &active) {
+            Ok(plan) => plan,
+            Err(err @ Error::SeedCycle { .. }) => return Some(err),
+            Err(_) => return None,
+        };
+        match crate::planner::build_seeds(
+            &plan.execution_order,
+            &plan.elimination_order,
+            &self.cells,
+            &self.relationships,
+        ) {
+            Err(err @ Error::SeedCycle { .. }) => Some(err),
+            _ => None,
+        }
     }
 
     /// Assigns derived-cell strengths after a planning pass.
@@ -1378,6 +1660,9 @@ impl Sheet {
     ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.validate()?;
+        if let Some(err) = self.preflight_seed_cycle() {
+            return Err(err);
+        }
         self.clear_changed();
 
         // Phase 0: record cells with a live derived override (for Phase 5), then clear
