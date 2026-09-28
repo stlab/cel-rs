@@ -101,23 +101,33 @@ by the existing strength gate and only R2 folds.)
 
 A filter's argument cells must not depend on the filtered cell, and a conditional's
 match-subject cells must not depend on the relationships its branches enable, in the
-**static dependency graph**: every method of every relationship contributes
-`input → output` edges, and every filter contributes `argument → filtered` edges. The
-check is plan-independent: deriving the filtered cell in some plan does not excuse the
-dependency, because any multi-way relationship containing both cells can route the
-filtered value into the argument.
+**static dependency graph** over cells:
 
-- `Sheet::add_filter` returns an error when the filtered cell reaches any argument.
-- `Sheet::add_conditional` returns an error when any branch/default relationship's
-  method output reaches a match-subject cell. This replaces the current
-  "contributing cells + more than one method" rule with the general reachability rule.
-- Relationships added after a filter/conditional are checked against existing
-  filters/conditionals too, so the invariant holds regardless of construction order.
-- adam-lang reports these errors at parse/type-check time via `error_labels`.
+- every method of every relationship contributes `input → output` edges (a
+  self-referencing input contributes no edge);
+- every filter contributes *guard* edges `argument → filtered`;
+- every conditional contributes *guard* edges `match cell → o` for every output `o` of
+  every method of its branch and default relationships.
+
+Invariant: no guard edge `g → t` lies on a cycle, i.e. `t` never reaches `g`. Cycles made
+only of method edges are ordinary multi-way relationships and are allowed. The check is
+plan-independent: deriving the filtered cell in some plan does not excuse the dependency,
+because any multi-way relationship containing both cells can route the filtered value
+into the argument.
+
+- `Sheet::add_filter`, `Sheet::add_conditional`, and `Sheet::add_relationship` (whose new
+  method edges may close a path for an existing guard) each re-check the invariant and
+  return the new `Error::DependencyCycle { sites }` on violation, leaving the sheet
+  unchanged. `sites` is the violating cycle in dependency order, guard target first:
+  `[Cell(t), Relationship(r₁), Cell(c₁), …, Cell(g)]`.
+- This subsumes `add_conditional`'s "branch relationship with more than one method
+  touching a match-subject contributor" rule, which is removed.
+- adam-lang already maps these calls' errors onto the declaration's span, so they are
+  reported at parse time.
 
 Consequences: a filter-induced cycle can no longer arise at plan time, so
-`Error::FilterCycle` and the planner's post-filter-edge cycle check are removed (a
-`debug_assert!` may remain as an invariant check). `release::resolve` needs no
+`Error::FilterCycle` is removed and the planner's post-filter-edge topological sort
+treats a cycle as an unreachable invariant violation. `release::resolve` needs no
 filter-aware search, and the module/error docs that reference #153 are updated.
 
 Tests: both invalid #153 examples (`z = x + y` with filter on `y` by `z`, and the
