@@ -169,6 +169,8 @@ struct ParseContext {
     /// Accumulates spans for every declared cell's name, for exposing to callers via
     /// `ParsedSheet::cell_spans`.
     cell_spans: HashMap<CellId, SourceSpan>,
+    /// Accumulates proc-macro spans for every declared cell's name, for primary parser errors.
+    cell_token_spans: HashMap<CellId, Span>,
 }
 
 impl std::ops::Deref for ParseContext {
@@ -247,12 +249,16 @@ impl AdamParser {
             method_spans: HashMap::new(),
             relationship_spans: HashMap::new(),
             cell_spans: HashMap::new(),
+            cell_token_spans: HashMap::new(),
         };
         let _ = ctx.consume_doc_comment_run(true); // sheet-level `//!` docs (ignored at runtime)
         self.parse_sheet(&mut ctx)?;
         if let Some(tok) = ctx.peek_token() {
             return Err(ParseError::new("unexpected token", tok.span()));
         }
+        ctx.sheet
+            .validate()
+            .map_err(|e| Self::validated_sheet_error(&ctx, e))?;
         Ok(ParsedSheet {
             sheet: ctx.sheet,
             cell_names: ctx.cell_names,
@@ -355,6 +361,7 @@ impl AdamParser {
         };
         ctx.cell_spans
             .insert(cell_id, SourceSpan::from_proc_macro2(name_span));
+        ctx.cell_token_spans.insert(cell_id, name_span);
 
         let filter = if ctx.is_keyword("filter") {
             Some(self.parse_cell_filter(ctx, &name, name_span, &shape)?)
@@ -385,7 +392,7 @@ impl AdamParser {
         if let Some(filter) = filter {
             ctx.sheet
                 .add_filter(cell_id, filter)
-                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+                .map_err(|e| Self::sheet_error(ctx, name_span, e))?;
         }
         for (req_name, requirement) in require_names_and_reqs {
             ctx.sheet
@@ -450,6 +457,7 @@ impl AdamParser {
         };
         ctx.cell_spans
             .insert(cell_id, SourceSpan::from_proc_macro2(name_span));
+        ctx.cell_token_spans.insert(cell_id, name_span);
 
         let filter = if ctx.is_keyword("filter") {
             Some(self.parse_cell_filter(ctx, &name, name_span, &shape)?)
@@ -478,7 +486,7 @@ impl AdamParser {
         if let Some(filter) = filter {
             ctx.sheet
                 .add_filter(cell_id, filter)
-                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+                .map_err(|e| Self::sheet_error(ctx, name_span, e))?;
         }
         for (req_name, requirement) in require_names_and_reqs {
             ctx.sheet
@@ -918,12 +926,10 @@ impl AdamParser {
                 //
                 // Resolved strictly from `sites().first()`, not by scanning for the first
                 // `MethodIndex` anywhere in the list: every `Error` variant `add_relationship`
-                // can return leads with a `MethodIndex` identifying the primary offending
-                // binding (see `Sheet::add_relationship`'s `sites` construction, in
-                // adam-rs/src/sheet.rs). Making that dependence explicit means a future variant
-                // that leads with some other site kind fails safe here (falls back to the whole
-                // block) instead of this code silently treating a later, unrelated `MethodIndex`
-                // site as primary.
+                // currently returns with a `MethodIndex` identifying the primary offending
+                // binding. Making that dependence explicit means variants that lead with some
+                // other site kind fail safe here (fall back to the whole block) instead of this
+                // code silently treating a later, unrelated `MethodIndex` site as primary.
                 let primary_idx = match e.sites().first() {
                     Some(ErrorSite::MethodIndex(i)) => Some(*i),
                     _ => None,
@@ -1327,7 +1333,7 @@ impl AdamParser {
                     })?
                     .add_conditional_fn;
                 add_cond_fn(&mut ctx.sheet, match_expr, branches, default_rel_ids)
-                    .map_err(|e| Self::conditional_error(ctx, match_span, e))?;
+                    .map_err(|e| Self::sheet_error(ctx, match_span, e))?;
             }
             TypeShape::Tuple(_) => {
                 let typed_branches: Vec<(Vec<cel_runtime::DynamicSequence>, Vec<RelationshipId>)> =
@@ -1347,20 +1353,19 @@ impl AdamParser {
                         typed_branches,
                         default_rel_ids,
                     )
-                    .map_err(|e| Self::conditional_error(ctx, match_span, e))?;
+                    .map_err(|e| Self::sheet_error(ctx, match_span, e))?;
             }
         }
 
         Ok(())
     }
 
-    /// Turns an `add_conditional`/`add_cond_fn` failure into a `ParseError`: `match_span` (the
-    /// conditional's own match-subject expression — the most specific span available at this
-    /// point in parsing) is the primary site, and every one of `e`'s `Relationship`/`Cell`
-    /// sites that resolves against `ctx`'s span tables becomes a secondary label.
+    /// Turns a `Sheet` construction failure into a `ParseError` with `primary` as the primary
+    /// span and every one of `e`'s `Relationship`/`Cell` sites that resolves against `ctx`'s
+    /// span tables as a secondary label.
     ///
     /// - Complexity: O(s) in the number of `e`'s sites.
-    fn conditional_error(ctx: &ParseContext, match_span: Span, e: adam_rs::Error) -> ParseError {
+    fn sheet_error(ctx: &ParseContext, primary: Span, e: adam_rs::Error) -> ParseError {
         let by_id: HashMap<CellId, String> = ctx
             .cell_names
             .iter()
@@ -1384,7 +1389,51 @@ impl AdamParser {
             })
             .collect();
         let message = e.to_string();
-        ParseError::new(message, match_span).with_secondary(secondary)
+        ParseError::new(message, primary).with_secondary(secondary)
+    }
+
+    /// Turns a post-construction validation failure into a `ParseError`.
+    ///
+    /// The first resolvable site is the primary label, which for `DependencyCycle` is the
+    /// governed cell declaration. Remaining resolvable sites become secondary labels.
+    ///
+    /// - Complexity: O(C + s), where C is the number of declared cells (each name is
+    ///   copied into a lookup map) and s is the number of `e`'s sites.
+    fn validated_sheet_error(ctx: &ParseContext, e: adam_rs::Error) -> ParseError {
+        let by_id: HashMap<CellId, String> = ctx
+            .cell_names
+            .iter()
+            .map(|(n, (id, _))| (*id, n.clone()))
+            .collect();
+        let name = |id: CellId| by_id.get(&id).cloned();
+        let primary_index = e.sites().iter().position(|s| match s {
+            ErrorSite::Cell(c) => ctx.cell_token_spans.contains_key(c),
+            _ => false,
+        });
+        let primary = primary_index
+            .and_then(|i| match e.sites()[i] {
+                ErrorSite::Cell(c) => ctx.cell_token_spans.get(&c).copied(),
+                _ => None,
+            })
+            .unwrap_or_else(Span::call_site);
+        let secondary: Vec<cel_parser::SpanLabel> = e
+            .sites()
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != primary_index)
+            .filter_map(|(i, s)| {
+                let span = match s {
+                    ErrorSite::Relationship(r) => ctx.relationship_spans.get(r).copied(),
+                    ErrorSite::Cell(c) => ctx.cell_spans.get(c).copied(),
+                    _ => None,
+                }?;
+                Some(cel_parser::SpanLabel {
+                    span,
+                    label: crate::error_labels::site_label(&e, i, &name),
+                })
+            })
+            .collect();
+        ParseError::new(e.to_string(), primary).with_secondary(secondary)
     }
 
     /// Parses one `conditional_branch`/`default_branch`'s shared body: `"{" { relationship_decl }
@@ -1472,6 +1521,7 @@ impl AdamParser {
         let cell_id = self.build_default_cell(&out_shape, name_span, ctx)?;
         ctx.cell_spans
             .insert(cell_id, SourceSpan::from_proc_macro2(name_span));
+        ctx.cell_token_spans.insert(cell_id, name_span);
 
         let filter = if ctx.is_keyword("filter") {
             Some(self.parse_cell_filter(ctx, &name, name_span, &out_shape)?)
@@ -1529,7 +1579,7 @@ impl AdamParser {
         if let Some(filter) = filter {
             ctx.sheet
                 .add_filter(out_cell, filter)
-                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+                .map_err(|e| Self::sheet_error(ctx, name_span, e))?;
         }
         ctx.output_names.insert(name, out_cell);
 
@@ -2170,6 +2220,24 @@ mod tests {
         parsed.sheet.write(a_id, 27i32).unwrap();
         parsed.sheet.propagate().unwrap();
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 20);
+    }
+
+    #[test]
+    fn filter_dependency_cycle_reported_with_secondary_labels() {
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        let ok_source = "sheet s {\n    cell b: i32 = 0;\n    cell a: i32 = 5;\n    relationship { b := a; }\n    cell c: i32 = 0 filter _ + b - b;\n}";
+        assert!(parser.parse_str(ok_source).is_ok());
+
+        let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
+        // The parser only lets a filter reference already-declared cells, so the cycle becomes
+        // visible when the later relationship adds the reverse dependency edge.
+        let source = "sheet s {\n    cell b: i32 = 0;\n    cell a: i32 = 5 filter _ + b - b;\n    relationship { b := a; }\n}";
+        let err = parser.parse_str(source).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "a filter or conditional depends on a cell it governs (dependency cycle)"
+        );
+        assert!(!err.secondary().is_empty());
     }
 
     #[test]
@@ -3734,15 +3802,13 @@ mod tests {
     }
 
     #[test]
-    fn conditional_structural_error_spans_the_conditional_not_the_sheet() {
+    fn dependency_cycle_validation_error_spans_the_governed_cell() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        // The branch relationship shares `mode` (the match cell) and has 2 methods --
-        // add_conditional's InvalidConditional ("a branch relationship that shares a cell with
-        // the match cell ... has more than one method") fires here, on line 5 (`conditional
-        // mode {`), not the sheet's opening line.
+        // The branch writes the match cell `mode`, so whole-sheet validation returns
+        // DependencyCycle on line 2 (`cell mode`), the governed cell that starts the cycle.
         let source = "sheet s {\n    cell mode: i32 = 0;\n    cell other: i32 = 0;\n\n    conditional mode {\n        0i32 => {\n            relationship {\n                mode := other;\n                other := mode;\n            }\n        }\n    }\n}";
         let err = parser.parse_str(source).unwrap_err();
-        assert_eq!(err.span().start().line, 5);
+        assert_eq!(err.span().start().line, 2);
     }
 
     // NOTE on coverage: `add_conditional`'s other `InvalidConditional` case with a
@@ -3758,19 +3824,14 @@ mod tests {
     #[test]
     fn conditional_invalid_relationship_and_cell_sites_render_as_secondary_labels() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        // Same structural error as the test above (a multi-method branch relationship sharing
-        // the match cell `mode`): this time asserting on the *rendered* diagnostic, to confirm
-        // the offending relationship's own block and the shared cell's declaration are attached
-        // as secondary spans, not just that the primary span moved off the sheet line.
-        let source = "sheet s {\n    cell mode: i32 = 0;\n    cell other: i32 = 0;\n\n    conditional mode {\n        0i32 => {\n            relationship {\n                mode := other;\n                other := mode;\n            }\n        }\n    }\n}";
+        // The governed branch output `a` reaches match cell `p` through the unconditional
+        // relationship, so the diagnostic should use `a` as primary and attach the
+        // remaining cycle sites as secondary labels.
+        let source = "sheet s {\n    cell a: i32 = 0;\n    cell b: i32 = 0;\n    cell p: i32 = 0;\n    relationship {\n        p := a;\n    }\n\n    conditional p {\n        0i32 => {\n            relationship {\n                a := b;\n            }\n        }\n    }\n}";
         let err = parser.parse_str(source).unwrap_err();
         let out =
             err.format_rustc_style(source, "t.adm2", 1, &annotate_snippets::Renderer::plain());
-        assert!(
-            out.contains("this relationship makes the conditional invalid"),
-            "{out}"
-        );
-        assert!(out.contains("cell `mode`"), "{out}");
+        assert!(out.contains("cell `p` is part of the cycle"), "{out}");
     }
 
     #[test]

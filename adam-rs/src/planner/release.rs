@@ -10,15 +10,10 @@
 //! at execution time, not from a value-aware planning choice (see
 //! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`).
 //!
-//! This module has no visibility into a filter's dynamic-argument dependencies —
-//! `digraph::add_filter_edges` adds those edges to the digraph only *after* `resolve` has
-//! already finished searching (see
-//! `docs/superpowers/specs/2026-08-25-adam-rs-filter-revalidation-design.md` §3).
-//! `resolve`'s acyclicity guarantee therefore holds only for the relationship-only
-//! subgraph; `plan()` re-checks acyclicity once more after filter edges are added,
-//! returning `Error::FilterCycle` (distinct from this module's own `Error::Cycle`)
-//! if that combined graph turns out cyclic. Generalizing `resolve` itself to search
-//! around filter edges is tracked as issue #153.
+//! Filter edges never need to be considered here: `Sheet::validate`, which
+//! `Sheet::propagate` runs before planning, reports any filter whose arguments depend
+//! on the filtered cell (`Error::DependencyCycle`), so adding a filtered source's
+//! argument edges to an acyclic relationship assignment can never close a cycle.
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
