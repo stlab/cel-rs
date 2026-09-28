@@ -177,9 +177,9 @@ impl Sheet {
     /// - `Error::InvalidMethod` — `methods` is empty, or a method has no outputs.
     /// - `Error::MismatchedMethodCells` — some method's `inputs ∪ outputs` differs
     ///   from another method's in the same relationship.
-    /// - `Error::DuplicateMethodOutputs` — a method's own `outputs` list names a cell
-    ///   more than once, or two methods in the same relationship have identical
-    ///   `outputs` sets.
+    /// - `Error::InvalidMethodOutputs` — a method's own `outputs` list names a cell
+    ///   more than once, or two methods in the same relationship have identical or
+    ///   nested `outputs` sets.
     /// - `Error::InvalidId` — a `CellId` in any method is not found in this sheet.
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
@@ -189,7 +189,7 @@ impl Sheet {
     /// not by this mutator.
     ///
     /// - Complexity: O(m² × c) where m is the total number of methods and c is the
-    ///   maximum number of cells per method, due to duplicate output set comparison.
+    ///   maximum number of cells per method, due to pairwise output-set comparison.
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
             return Err(Error::InvalidMethod { sites: vec![] });
@@ -259,10 +259,12 @@ impl Sheet {
         }
 
         // A method's own outputs must be duplicate-free, and no two methods in a
-        // relationship may claim the same output set: the planner's matching stage
-        // treats a method's pure-output set as an indivisible claim, so two methods
-        // sharing an output set would make that claim ambiguous.
-        let mut seen_output_sets: Vec<(usize, HashSet<CellId>)> = Vec::with_capacity(methods.len());
+        // relationship may claim identical or nested output sets: the planner's
+        // matching stage treats a method's pure-output set as an indivisible claim,
+        // so nested claims would make that claim ambiguous while still allowing
+        // overlapping non-nested sets.
+        let mut seen_output_sets: Vec<(usize, HashSet<CellId>, &[CellId])> =
+            Vec::with_capacity(methods.len());
         for (idx, method) in methods.iter().enumerate() {
             let output_set: HashSet<CellId> = method.outputs.iter().copied().collect();
             if output_set.len() != method.outputs.len() {
@@ -276,19 +278,29 @@ impl Sheet {
                         sites.push(ErrorSite::Cell(o));
                     }
                 }
-                return Err(Error::DuplicateMethodOutputs { sites });
+                return Err(Error::InvalidMethodOutputs { sites });
             }
-            if let Some((earlier, _)) = seen_output_sets.iter().find(|(_, s)| *s == output_set) {
-                let mut sites = vec![
-                    ErrorSite::MethodIndex(idx),
-                    ErrorSite::MethodIndex(*earlier),
-                ];
-                for &o in &method.outputs {
-                    sites.push(ErrorSite::Cell(o));
+            for (earlier, earlier_set, earlier_outputs) in &seen_output_sets {
+                if output_set == *earlier_set
+                    || (output_set.len() < earlier_set.len() && output_set.is_subset(earlier_set))
+                    || (earlier_set.len() < output_set.len() && earlier_set.is_subset(&output_set))
+                {
+                    let mut sites = vec![
+                        ErrorSite::MethodIndex(idx),
+                        ErrorSite::MethodIndex(*earlier),
+                    ];
+                    let offending_outputs: &[CellId] = if output_set.len() <= earlier_set.len() {
+                        &method.outputs
+                    } else {
+                        earlier_outputs
+                    };
+                    for &o in offending_outputs {
+                        sites.push(ErrorSite::Cell(o));
+                    }
+                    return Err(Error::InvalidMethodOutputs { sites });
                 }
-                return Err(Error::DuplicateMethodOutputs { sites });
             }
-            seen_output_sets.push((idx, output_set));
+            seen_output_sets.push((idx, output_set, &method.outputs));
         }
 
         // Collect the union of all adjacent cells in insertion order, deduplicated.
@@ -2512,7 +2524,7 @@ mod tests {
     }
 
     #[test]
-    fn add_relationship_duplicate_output_set_across_methods_returns_duplicate_method_outputs() {
+    fn add_relationship_duplicate_output_set_across_methods_returns_invalid_method_outputs() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -2523,11 +2535,73 @@ mod tests {
             Method::from_fn_2_1([a, b], b, |x: &i32, _y: &i32| Ok(*x)),
             Method::from_fn_2_1([a, b], b, |_x: &i32, y: &i32| Ok(*y)),
         ]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert!(matches!(result, Err(Error::InvalidMethodOutputs { .. })));
         assert_eq!(
             result.unwrap_err().sites().first().copied(),
             Some(ErrorSite::MethodIndex(1))
         );
+    }
+
+    #[test]
+    fn add_relationship_rejects_strictly_nested_method_outputs() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // Both methods span {a, b, c}; one outputs {b}, the other outputs {b, c}.
+        let result = sheet.add_relationship(vec![
+            Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok(x + y)),
+            Method::new(
+                vec![a],
+                vec![b, c],
+                vec![std::any::TypeId::of::<i32>()],
+                vec![std::any::TypeId::of::<i32>(), std::any::TypeId::of::<i32>()],
+                |args| {
+                    let x = *args[0].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(x), Box::new(x)])
+                },
+            ),
+        ]);
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::InvalidMethodOutputs { .. }));
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(1));
+        assert_eq!(sites[1], ErrorSite::MethodIndex(0));
+        assert_eq!(sites[2..], [ErrorSite::Cell(b)]);
+    }
+
+    #[test]
+    fn add_relationship_accepts_overlapping_non_nested_method_outputs() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // Both methods span {a, b, c}; outputs overlap at b but neither set nests the other.
+        let result = sheet.add_relationship(vec![
+            Method::new(
+                vec![a, c],
+                vec![a, b],
+                vec![std::any::TypeId::of::<i32>(), std::any::TypeId::of::<i32>()],
+                vec![std::any::TypeId::of::<i32>(), std::any::TypeId::of::<i32>()],
+                |args| {
+                    let x = *args[0].downcast_ref::<i32>().unwrap();
+                    let y = *args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(x), Box::new(y)])
+                },
+            ),
+            Method::new(
+                vec![a, b],
+                vec![b, c],
+                vec![std::any::TypeId::of::<i32>(), std::any::TypeId::of::<i32>()],
+                vec![std::any::TypeId::of::<i32>(), std::any::TypeId::of::<i32>()],
+                |args| {
+                    let x = *args[0].downcast_ref::<i32>().unwrap();
+                    let y = *args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(y), Box::new(x)])
+                },
+            ),
+        ]);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -2575,7 +2649,7 @@ mod tests {
             Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x + *y)),
             Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x - *y)),
         ]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert!(matches!(result, Err(Error::InvalidMethodOutputs { .. })));
         assert_eq!(
             result.unwrap_err().sites().first().copied(),
             Some(ErrorSite::MethodIndex(1))
@@ -2599,7 +2673,7 @@ mod tests {
             },
         );
         let result = sheet.add_relationship(vec![method]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert!(matches!(result, Err(Error::InvalidMethodOutputs { .. })));
         assert_eq!(
             result.unwrap_err().sites().first().copied(),
             Some(ErrorSite::MethodIndex(0))

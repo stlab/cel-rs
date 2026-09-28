@@ -91,13 +91,13 @@ pub enum Error {
     },
 
     /// A method's own `outputs` list names a cell more than once, or two methods in
-    /// the same relationship have identical `outputs` sets.
-    DuplicateMethodOutputs {
+    /// the same relationship have identical or nested `outputs` sets.
+    InvalidMethodOutputs {
         /// `sites[0]` is the method (by index within the `Vec` passed to
         /// `add_relationship`) whose output set collided. For a method's own outputs
         /// repeating a cell, further entries are the repeated cell(s). For two methods
-        /// sharing an output set, `sites[1]` is the earlier method's index and further
-        /// entries are the shared output cell(s).
+        /// with identical or nested output sets, `sites[1]` is the earlier method's
+        /// index and further entries are the smaller output set's cell(s).
         sites: Vec<ErrorSite>,
     },
 
@@ -175,10 +175,10 @@ impl std::fmt::Display for Error {
                 f,
                 "methods in a relationship must reference the same set of cells"
             ),
-            Error::DuplicateMethodOutputs { .. } => write!(
+            Error::InvalidMethodOutputs { .. } => write!(
                 f,
                 "a method's outputs must be duplicate-free, and no two methods in a \
-                 relationship may share an outputs set"
+                 relationship may have identical or nested output sets"
             ),
             Error::InvalidConditional { .. } => write!(f, "conditional is structurally invalid"),
             Error::InvalidOutput => write!(f, "output is structurally invalid"),
@@ -218,7 +218,7 @@ impl Error {
             | Error::MethodFailed { sites, .. }
             | Error::InvalidMethod { sites }
             | Error::MismatchedMethodCells { sites }
-            | Error::DuplicateMethodOutputs { sites }
+            | Error::InvalidMethodOutputs { sites }
             | Error::InvalidCellKind { sites }
             | Error::Conflict { sites }
             | Error::Cycle { sites }
@@ -337,7 +337,7 @@ mod tests {
             std::error::Error::source(&Error::MismatchedMethodCells { sites: vec![] }).is_none()
         );
         assert!(
-            std::error::Error::source(&Error::DuplicateMethodOutputs { sites: vec![] }).is_none()
+            std::error::Error::source(&Error::InvalidMethodOutputs { sites: vec![] }).is_none()
         );
     }
 
@@ -365,9 +365,9 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_method_outputs_display_contains_outputs() {
+    fn invalid_method_outputs_display_contains_outputs() {
         assert!(
-            Error::DuplicateMethodOutputs { sites: vec![] }
+            Error::InvalidMethodOutputs { sites: vec![] }
                 .to_string()
                 .contains("outputs")
         );
