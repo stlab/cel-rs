@@ -7,3 +7,6 @@ pub mod model;
 pub mod ops;
 pub mod persistence;
 pub mod validation;
+
+#[cfg(any(feature = "desktop", feature = "web"))]
+pub mod ui;

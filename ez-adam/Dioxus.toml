@@ -1,0 +1,9 @@
+[application]
+name = "ez-adam"
+default_platform = "desktop"
+
+[web.app]
+title = "ez-adam"
+
+[desktop.app]
+title = "ez-adam"

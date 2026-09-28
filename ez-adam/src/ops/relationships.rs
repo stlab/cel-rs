@@ -73,6 +73,18 @@ pub fn set_member_formula(
     entry.unwrap().1 = formula.into();
 }
 
+/// Sets `group`'s display name — UI bookkeeping only, never emitted to
+/// `.adm2` (see [`RelationshipGroup`]'s own doc comment).
+///
+/// - Precondition: `group` is a valid key in `doc.relationship_groups`.
+pub fn set_display_name(doc: &mut Document, group: RelationshipGroupId, name: impl Into<String>) {
+    debug_assert!(
+        doc.relationship_groups.contains_key(group),
+        "group is not a valid key"
+    );
+    doc.relationship_groups[group].display_name = name.into();
+}
+
 /// Creates a copy of `group`'s formula "shape": a new relationship group
 /// bound to new [`CellNode`]s over the *same* underlying cells as `group`'s
 /// members (offset by `offset`), with formula text cleared.
@@ -121,6 +133,30 @@ pub fn duplicate_relationship_group(
     let id = doc.relationship_groups.insert(new_group);
     doc.relationship_group_order.push(id);
     id
+}
+
+/// Removes `group` from `doc`, and removes it from every conditional
+/// group's `default` and every branch's `enabled_groups` so nothing is
+/// left referencing a dangling [`RelationshipGroupId`]. Does not touch the
+/// cell nodes bound as `group`'s members — those may still be placed
+/// independently elsewhere on the canvas.
+///
+/// - Precondition: `group` is a valid key in `doc.relationship_groups`.
+///
+/// - Complexity: O(n) in the total number of conditional-group branches.
+pub fn delete_relationship_group(doc: &mut Document, group: RelationshipGroupId) {
+    debug_assert!(
+        doc.relationship_groups.contains_key(group),
+        "group is not a valid key"
+    );
+    doc.relationship_groups.remove(group);
+    doc.relationship_group_order.retain(|g| *g != group);
+    for (_, cond) in &mut doc.conditional_groups {
+        cond.default.retain(|g| *g != group);
+        for branch in &mut cond.branches {
+            branch.enabled_groups.retain(|g| *g != group);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -264,5 +300,71 @@ mod tests {
             "height_pixels * 2"
         );
         assert_eq!(doc.relationship_groups[group].members[1].1, "");
+    }
+
+    #[test]
+    fn set_display_name_updates_the_groups_display_name() {
+        let mut doc = Document::new("demo");
+        let (a, b) = two_nodes(&mut doc);
+        let group = create_relationship(&mut doc, a, b, Point::new(0.0, 0.0));
+        set_display_name(&mut doc, group, "aspect ratio link");
+        assert_eq!(
+            doc.relationship_groups[group].display_name,
+            "aspect ratio link"
+        );
+    }
+
+    #[test]
+    fn delete_relationship_group_removes_it_from_the_document() {
+        let mut doc = Document::new("demo");
+        let (a, b) = two_nodes(&mut doc);
+        let group = create_relationship(&mut doc, a, b, Point::new(0.0, 0.0));
+
+        delete_relationship_group(&mut doc, group);
+
+        assert!(doc.relationship_groups_in_order().next().is_none());
+        assert!(!doc.relationship_group_order.contains(&group));
+    }
+
+    #[test]
+    fn delete_relationship_group_removes_it_from_a_conditionals_default() {
+        use crate::model::cell::CellType as CT;
+        use crate::ops::conditionals::add_conditional_with_formula;
+
+        let mut doc = Document::new("demo");
+        let (a, b) = two_nodes(&mut doc);
+        let group = create_relationship(&mut doc, a, b, Point::new(0.0, 0.0));
+        let x = add_cell(&mut doc, "x", CT::f64());
+        let cond = add_conditional_with_formula(&mut doc, vec![x], "x > 1.0", Point::new(0.0, 0.0));
+        doc.conditional_groups[cond].default.push(group);
+
+        delete_relationship_group(&mut doc, group);
+
+        assert!(doc.conditional_groups[cond].default.is_empty());
+    }
+
+    #[test]
+    fn delete_relationship_group_removes_it_from_a_conditionals_branch() {
+        use crate::model::cell::CellType as CT;
+        use crate::model::conditional_group::CellValueLiteral;
+        use crate::ops::conditionals::{
+            add_branch, add_conditional_with_formula, toggle_enabled_group,
+        };
+
+        let mut doc = Document::new("demo");
+        let (a, b) = two_nodes(&mut doc);
+        let group = create_relationship(&mut doc, a, b, Point::new(0.0, 0.0));
+        let x = add_cell(&mut doc, "x", CT::f64());
+        let cond = add_conditional_with_formula(&mut doc, vec![x], "x > 1.0", Point::new(0.0, 0.0));
+        add_branch(&mut doc, cond, vec![CellValueLiteral::Bool(true)]);
+        toggle_enabled_group(&mut doc, cond, 0, group);
+
+        delete_relationship_group(&mut doc, group);
+
+        assert!(
+            doc.conditional_groups[cond].branches[0]
+                .enabled_groups
+                .is_empty()
+        );
     }
 }
