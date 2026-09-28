@@ -1290,6 +1290,190 @@ fn guard_seed_callback_is_reused_for_matching_provenance() {
     assert_eq!(seed_calls.load(Ordering::SeqCst), 1);
 }
 
+/// Builds a guarded sheet whose `guard` seed callback reads `staged` (optionally through a
+/// recursively seeded `inner` cell) while a guard prerequisite restages `staged`'s source.
+///
+/// Returns the sheet, the `staged` cell, the seed relationship reading it, the outer guard
+/// cell, and the shared seed-callback counter.
+fn restaged_seed_input_sheet(
+    recursive: bool,
+) -> (Sheet, CellId, RelationshipId, CellId, Arc<AtomicUsize>) {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(5_i32);
+    let staged = sheet.add_cell(0_i32);
+    let guard = sheet.add_cell(0_i32);
+    let sink = sheet.add_cell(0_i32);
+    let output = sheet.add_cell(0_i32);
+    let seed_calls = Arc::new(AtomicUsize::new(0));
+
+    // Two methods keep `staged` unforced, so its selected producer restages its source.
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(mode, staged, |value: &i32| Ok(*value)),
+            Method::from_fn_1_1(staged, mode, |value: &i32| Ok(*value)),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(guard, guard, |value: &i32| {
+            Ok(*value)
+        })])
+        .unwrap();
+    let guard_seed_input = if recursive {
+        let inner = sheet.add_cell(0_i32);
+        let inner_sink = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(inner, inner, |value: &i32| {
+                Ok(*value)
+            })])
+            .unwrap();
+        let calls = Arc::clone(&seed_calls);
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([staged, inner_sink], inner, move |value: &i32, _: &i32| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(*value + 10)
+                }),
+                Method::from_fn_2_1([staged, inner], inner_sink, |_: &i32, value: &i32| {
+                    Ok(*value)
+                }),
+            ])
+            .unwrap();
+        inner
+    } else {
+        staged
+    };
+    let calls = Arc::clone(&seed_calls);
+    let seed_relationship = sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1(
+                [guard_seed_input, sink],
+                guard,
+                move |value: &i32, _: &i32| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(*value + 1)
+                },
+            ),
+            Method::from_fn_2_1([guard_seed_input, guard], sink, |_: &i32, value: &i32| {
+                Ok(*value)
+            }),
+        ])
+        .unwrap();
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(mode, output, |value: &i32| {
+            Ok(*value)
+        })])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![1_i32, 11_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional::<i32>(MatchExpr::cell(staged), vec![], vec![])
+        .unwrap();
+    sheet.write(mode, 5_i32).unwrap();
+    (sheet, staged, seed_relationship, guard, seed_calls)
+}
+
+/// Asserts that restaging a seed callback's source input conflicts without replay or commit.
+fn assert_restaged_seed_input_conflicts(recursive: bool) {
+    let (mut sheet, staged, seed_relationship, guard, seed_calls) =
+        restaged_seed_input_sheet(recursive);
+    let expected_calls = if recursive { 2 } else { 1 };
+
+    let error = sheet.propagate().unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            Error::Conflict { ref sites }
+                if sites.contains(&ErrorSite::Cell(staged))
+                    && (recursive || sites.contains(&ErrorSite::Relationship(seed_relationship)))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(seed_calls.load(Ordering::SeqCst), expected_calls);
+    assert_eq!(*sheet.read::<i32>(staged).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(guard).unwrap(), 0);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn restaged_guard_seed_source_input_conflicts_instead_of_reusing_stale_seed() {
+    assert_restaged_seed_input_conflicts(false);
+}
+
+#[test]
+fn restaged_recursive_guard_seed_input_conflicts_instead_of_reusing_stale_seed() {
+    assert_restaged_seed_input_conflicts(true);
+}
+#[test]
+fn multi_input_multi_output_guard_prerequisite_is_reused_once() {
+    let mut sheet = Sheet::new();
+    let total = sheet.add_cell(1_i32);
+    let sum = sheet.add_cell(0_i32);
+    let lhs = sheet.add_cell(2_i32);
+    let rhs = sheet.add_cell(3_i32);
+    let branch_output = sheet.add_cell(0_i32);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_method = Arc::clone(&calls);
+
+    sheet
+        .add_relationship(vec![
+            Method::new(
+                vec![lhs, rhs, total],
+                vec![total, sum],
+                vec![TypeId::of::<i32>(); 3],
+                vec![TypeId::of::<i32>(); 2],
+                move |inputs| {
+                    calls_for_method.fetch_add(1, Ordering::SeqCst);
+                    let lhs = *inputs[0].downcast_ref::<i32>().unwrap();
+                    let rhs = *inputs[1].downcast_ref::<i32>().unwrap();
+                    let total = *inputs[2].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(total + lhs + rhs), Box::new(lhs + rhs)])
+                },
+            ),
+            Method::new(
+                vec![total, sum],
+                vec![lhs, rhs],
+                vec![TypeId::of::<i32>(); 2],
+                vec![TypeId::of::<i32>(); 2],
+                |inputs| {
+                    let sum = *inputs[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(sum), Box::new(0_i32)])
+                },
+            ),
+        ])
+        .unwrap();
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            sum,
+            branch_output,
+            |value: &i32| Ok(*value * 10),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(sum),
+            vec![(vec![5_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional::<i32>(MatchExpr::cell(total), vec![], vec![])
+        .unwrap();
+    sheet.write(lhs, 2_i32).unwrap();
+    sheet.write(rhs, 3_i32).unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(total).unwrap(), 6);
+    assert_eq!(*sheet.read::<i32>(sum).unwrap(), 5);
+    assert_eq!(*sheet.read::<i32>(branch_output).unwrap(), 50);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
 #[test]
 fn self_referencing_guard_seed_cycle_is_reported_before_commit() {
     let (mut sheet, a, b, c, d, s, rel1, rel2) = seed_cycle_sheet();

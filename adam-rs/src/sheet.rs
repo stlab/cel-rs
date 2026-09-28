@@ -13,7 +13,7 @@ use crate::{
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::{Error, ErrorSite},
     filter::{Filter, FilterKind, FilterViolation},
-    planner::{Plan, PlanStep, SeedEvaluationCache, Seeds},
+    planner::{Plan, PlanStep, SeedEvaluationCache, SeedSource, Seeds},
     relationship::{Method, RelationshipData, RelationshipId},
     requirement::{Requirement, RequirementData, RequirementId},
 };
@@ -127,6 +127,9 @@ struct PlanProvenance {
 #[derive(Default)]
 struct PropagationStage {
     sources: HashMap<CellId, Box<dyn Any>>,
+    /// Version of each staged source value; an absent cell reads its live source (version 0).
+    source_versions: HashMap<CellId, u64>,
+    last_source_version: u64,
     derived: HashMap<CellId, Box<dyn Any>>,
     executed_methods: HashSet<(RelationshipId, usize)>,
     executed_filters: HashSet<CellId>,
@@ -153,12 +156,34 @@ impl PropagationStage {
             .unwrap_or_else(|| cells[id].source.as_ref())
     }
 
+    /// Returns the staged source value for `id` with a version identifying that value.
+    ///
+    /// - Postcondition: two calls return equal versions only if no staged source write or
+    ///   reclassification changed `id`'s source value between them.
+    fn seed_source<'a>(
+        &'a self,
+        cells: &'a SlotMap<CellId, CellData>,
+        id: CellId,
+    ) -> SeedSource<'a> {
+        SeedSource {
+            value: self.source(cells, id),
+            version: self.source_versions.get(&id).copied().unwrap_or(0),
+        }
+    }
+
+    /// Records a new staged source value for `id` under a fresh version.
+    fn insert_source(&mut self, id: CellId, value: Box<dyn Any>) {
+        self.last_source_version += 1;
+        self.source_versions.insert(id, self.last_source_version);
+        self.sources.insert(id, value);
+    }
+
     /// Applies a staged write using the same shadow/non-shadow rule as `execute_plan`.
     fn write(&mut self, id: CellId, value: Box<dyn Any>, shadow: bool) {
         if shadow {
             self.derived.insert(id, value);
         } else {
-            self.sources.insert(id, value);
+            self.insert_source(id, value);
             self.derived.remove(&id);
         }
         if self.changed_set.insert(id) {
@@ -172,10 +197,11 @@ impl PropagationStage {
     fn reclassify(&mut self, id: CellId, shadow: bool) {
         if shadow {
             if let Some(value) = self.sources.remove(&id) {
+                self.source_versions.remove(&id);
                 self.derived.insert(id, value);
             }
         } else if let Some(value) = self.derived.remove(&id) {
-            self.sources.insert(id, value);
+            self.insert_source(id, value);
         }
     }
 }
@@ -1334,8 +1360,8 @@ impl Sheet {
 
     /// Records the actual dependency producers and write classifications for `plan`.
     ///
-    /// - Complexity: O(V + E), where V is the number of selected steps and E is the
-    ///   number of method inputs, outputs, and filter arguments.
+    /// - Complexity: expected O(V + E), where V is the number of selected steps and E is
+    ///   the number of method inputs, outputs, and filter arguments.
     fn plan_provenance(&self, plan: &Plan) -> PlanProvenance {
         let mut provenance = PlanProvenance::default();
         let mut effective_producers = HashMap::new();
@@ -1345,10 +1371,12 @@ impl Sheet {
             let step_provenance = match step {
                 PlanStep::Method(rel_id, method_index) => {
                     let method = &self.relationships[rel_id].methods[method_index];
+                    let method_inputs: HashSet<CellId> = method.inputs.iter().copied().collect();
+                    let method_outputs: HashSet<CellId> = method.outputs.iter().copied().collect();
                     let mut input_producers = Vec::with_capacity(method.inputs.len());
                     let mut seed_inputs = Vec::new();
                     for &input in &method.inputs {
-                        if method.outputs.contains(&input) {
+                        if method_outputs.contains(&input) {
                             seed_inputs.push(input);
                             input_producers.push(None);
                         } else {
@@ -1361,7 +1389,7 @@ impl Sheet {
                         .map(|&output| {
                             (
                                 output,
-                                if method.inputs.contains(&output)
+                                if method_inputs.contains(&output)
                                     || plan.forced_outputs.contains(&output)
                                 {
                                     OutputClassification::Derived
@@ -1728,6 +1756,9 @@ impl Sheet {
     /// evaluated in Phase 1 is reused only when the final plan preserves its selected
     /// method, input producers, and output classification. A mismatched plan returns a
     /// conservative conflict rather than replaying the callback or committing stale values.
+    /// A Phase 1 seed callback is likewise reused only when every input reads the same staged
+    /// source version, recursive seed result, or accumulated value; otherwise propagation
+    /// returns a conflict instead of reusing a stale seed or evaluating the callback again.
     ///
     /// **Phase 4 — Commit and strength post-processing:** after planning, seed
     /// validation, and staged method execution all succeed, staged writes are published
@@ -1783,7 +1814,7 @@ impl Sheet {
             let prerequisite_steps = self.guard_prerequisite_steps(&pre_plan.execution_order)?;
             let provenance = self.plan_provenance(&pre_plan);
             let seeds = {
-                let source = |id| stage.source(&self.cells, id);
+                let source = |id| stage.seed_source(&self.cells, id);
                 crate::planner::build_seeds_for_steps(
                     &pre_plan.execution_order,
                     &prerequisite_steps,
@@ -1821,7 +1852,7 @@ impl Sheet {
             }
         }
         let seeds = {
-            let source = |id| stage.source(&self.cells, id);
+            let source = |id| stage.seed_source(&self.cells, id);
             crate::planner::build_seeds(
                 &plan.execution_order,
                 &plan.elimination_order,

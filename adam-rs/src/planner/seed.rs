@@ -44,7 +44,19 @@ struct SeedBuildContext<'context, 'source> {
     elimination_order: &'context [CellId],
     cells: &'context SlotMap<CellId, CellData>,
     relationships: &'context SlotMap<RelationshipId, RelationshipData>,
-    source: &'context dyn Fn(CellId) -> &'source dyn Any,
+    source: &'context dyn Fn(CellId) -> SeedSource<'source>,
+}
+
+/// One cell's staged source value and the version identifying that exact value.
+///
+/// Within one propagation call, two reads of the same cell with equal `version`s observe
+/// the same source value; a staged source write produces a different version.
+#[derive(Clone, Copy)]
+pub(crate) struct SeedSource<'source> {
+    /// The cell's current staged source value.
+    pub(crate) value: &'source dyn Any,
+    /// Identifies `value` among every source value the cell holds during one propagation.
+    pub(crate) version: u64,
 }
 
 /// Stores the mutable memoization and DFS path state for one seed-construction pass.
@@ -77,15 +89,35 @@ struct SeedCallbackId {
     method_index: usize,
 }
 
-/// Identifies where one seed callback input came from without comparing dynamic values.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Identifies the exact value one seed callback input read without comparing dynamic values.
+#[derive(Clone)]
 enum SeedInputProvenance {
-    /// Reads the cell's frozen `source` value.
-    Source(CellId),
-    /// Reads the seed computed for the referenced cell.
-    Seed(CellId),
-    /// Reads the current accumulation for the self-referencing target.
-    Accumulated(CellId),
+    /// Reads the cell's staged `source` value at the given source version.
+    Source(CellId, u64),
+    /// Reads the seed computed for the referenced cell; equal only for the same allocation.
+    Seed(CellId, Rc<dyn Any>),
+    /// Reads the current accumulation for the self-referencing target; equal only for the
+    /// same allocation.
+    Accumulated(CellId, Rc<dyn Any>),
+}
+
+impl PartialEq for SeedInputProvenance {
+    /// Returns whether both inputs name the same cell and the identical value.
+    ///
+    /// Seed values are compared by allocation identity: every cached seed result is kept
+    /// alive by the cache, so an equal address always denotes the same evaluation result.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Source(lhs, lhs_version), Self::Source(rhs, rhs_version)) => {
+                lhs == rhs && lhs_version == rhs_version
+            }
+            (Self::Seed(lhs, lhs_value), Self::Seed(rhs, rhs_value))
+            | (Self::Accumulated(lhs, lhs_value), Self::Accumulated(rhs, rhs_value)) => {
+                lhs == rhs && Rc::ptr_eq(lhs_value, rhs_value)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// A seed callback's recorded input origins and reusable target output.
@@ -117,9 +149,10 @@ struct SeedFoldOrderKey {
 /// - Precondition: `elimination_order` is the exact cell order the planner's release pass
 ///   evaluated for tentative elimination this round; `build_seeds` consumes that
 ///   elimination state verbatim when selecting sibling seed methods.
-/// - Precondition: `source(id)` returns a value of `cells[id].type_id` for every live
+/// - Precondition: `source(id).value` is a value of `cells[id].type_id` for every live
 ///   `id` referenced by `execution_order`.
-/// - Precondition: `cache` is shared only across planning phases for one propagation call.
+/// - Precondition: `cache` is shared only across planning phases for one propagation call,
+///   and `source(id).version` identifies the returned value across all of those phases.
 ///
 /// # Errors
 ///
@@ -127,8 +160,10 @@ struct SeedFoldOrderKey {
 ///   has no method compatible with the planner's elimination state, or two sibling seed
 ///   folds are still structurally indistinguishable after comparing primary strength,
 ///   selected method signature, and full relationship signature.
-/// - `Error::Conflict` — a cached seed claimant, sibling selection, or callback input
-///   provenance differs from the earlier prerequisite evaluation.
+/// - `Error::Conflict` — a cached seed claimant or sibling selection differs from the
+///   earlier prerequisite evaluation, or a cached callback's input would now read a
+///   different source version or a different recursive seed or accumulated value. The
+///   cached callback is never evaluated again.
 /// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle instead of
 ///   falling back to any revisited cell's `source` value.
 ///
@@ -140,7 +175,7 @@ pub(crate) fn build_seeds<'source>(
     elimination_order: &[CellId],
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
-    source: &dyn Fn(CellId) -> &'source dyn Any,
+    source: &dyn Fn(CellId) -> SeedSource<'source>,
     cache: &mut SeedEvaluationCache,
 ) -> Result<Seeds, Error> {
     build_seeds_for_steps(
@@ -163,15 +198,17 @@ pub(crate) fn build_seeds<'source>(
 /// - Precondition: `seed_steps` is a subset of `execution_order`.
 /// - Precondition: The execution and elimination orders satisfy [`build_seeds`]'s
 ///   preconditions.
-/// - Precondition: `cache` is shared only across planning phases for one propagation call.
+/// - Precondition: `cache` is shared only across planning phases for one propagation call,
+///   and `source(id).version` identifies the returned value across all of those phases.
 ///
 /// # Errors
 ///
 /// - `Error::Conflict` — a sibling relationship that can seed a self-referencing cell
 ///   has no method compatible with the planner's elimination state, or two sibling seed
 ///   folds are structurally indistinguishable.
-/// - `Error::Conflict` — a cached seed claimant, sibling selection, or callback input
-///   provenance differs from the earlier prerequisite evaluation.
+/// - `Error::Conflict` — a cached seed claimant or sibling selection differs from the
+///   earlier prerequisite evaluation, or a cached callback's input would now read a
+///   different source version or a different recursive seed or accumulated value.
 /// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle.
 ///
 /// - Complexity: O(V + S · A · M · K²) where V = complete-plan steps, S = requested
@@ -183,7 +220,7 @@ pub(crate) fn build_seeds_for_steps<'source>(
     elimination_order: &[CellId],
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
-    source: &dyn Fn(CellId) -> &'source dyn Any,
+    source: &dyn Fn(CellId) -> SeedSource<'source>,
     cache: &mut SeedEvaluationCache,
 ) -> Result<Seeds, Error> {
     #[cfg(debug_assertions)]
@@ -251,7 +288,10 @@ fn build_seeds_live(
         elimination_order,
         cells,
         relationships,
-        &|id| cells[id].source.as_ref(),
+        &|id| SeedSource {
+            value: cells[id].source.as_ref(),
+            version: 0,
+        },
         &mut cache,
     )
 }
@@ -418,19 +458,21 @@ fn compute_seed(
             .iter()
             .map(|&input| {
                 if input == x {
-                    if let Some(value) = accumulated.as_deref() {
-                        input_provenance.push(SeedInputProvenance::Accumulated(x));
-                        value
+                    if let Some(value) = accumulated.as_ref() {
+                        input_provenance.push(SeedInputProvenance::Accumulated(x, value.clone()));
+                        value.as_ref()
                     } else {
-                        input_provenance.push(SeedInputProvenance::Source(x));
-                        (context.source)(x)
+                        let source = (context.source)(x);
+                        input_provenance.push(SeedInputProvenance::Source(x, source.version));
+                        source.value
                     }
                 } else if let Some(value) = traversal.seeds.get(&input) {
-                    input_provenance.push(SeedInputProvenance::Seed(input));
+                    input_provenance.push(SeedInputProvenance::Seed(input, value.clone()));
                     value.as_ref()
                 } else {
-                    input_provenance.push(SeedInputProvenance::Source(input));
-                    (context.source)(input)
+                    let source = (context.source)(input);
+                    input_provenance.push(SeedInputProvenance::Source(input, source.version));
+                    source.value
                 }
             })
             .collect();
@@ -786,7 +828,10 @@ mod tests {
             &[a, x],
             &sheet.cells,
             &sheet.relationships,
-            &|id| sheet.cells[id].source.as_ref(),
+            &|id| SeedSource {
+                value: sheet.cells[id].source.as_ref(),
+                version: 0,
+            },
             &mut cache,
         )
         .unwrap();
@@ -802,7 +847,10 @@ mod tests {
             &[a, b, x],
             &sheet.cells,
             &sheet.relationships,
-            &|id| sheet.cells[id].source.as_ref(),
+            &|id| SeedSource {
+                value: sheet.cells[id].source.as_ref(),
+                version: 0,
+            },
             &mut cache,
         )
         .unwrap_err();
