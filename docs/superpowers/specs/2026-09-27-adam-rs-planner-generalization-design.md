@@ -1,7 +1,7 @@
 # adam-rs planner generalization design
 
 Date: 2026-09-27
-Status: Draft (sections 1–3 approved in brainstorming; open points resolved)
+Status: Phase A implemented; Phases B–C pending
 Issues: #186 (seedfill generalization), #152 (automatic plan reuse). #153 was closed as
 not applicable (see §2); #18 was closed as a duplicate of #152.
 
