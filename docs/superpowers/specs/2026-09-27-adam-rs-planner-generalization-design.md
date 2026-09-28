@@ -75,7 +75,10 @@ visiting each cell once; the result is deterministic given the fold order below.
 When a cell has several sibling relationships, their seed methods are folded in
 **ascending strength** of each sibling's strongest non-`x` input, so the strongest
 influence is applied last. The order is independent of relationship insertion order;
-ties cannot occur because cell strengths are distinct.
+equal-primary ties are broken first by the selected method's ordered signature and then
+by the relationship's full ordered method-signature sequence. If two equal-primary
+siblings are still structurally identical under that comparison, propagation reports
+`Error::Conflict` naming both relationships rather than folding in arbitrary order.
 
 Example: cells `a=5, x=4, b=3, c=10` with strengths `c > b > a > x`; R0 `x ≤ c` claims
 `x` via `x := min(x, c)`; siblings R1 `a ≤ x` (seed method `x := max(a, x)`) and R2

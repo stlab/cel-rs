@@ -33,6 +33,17 @@ pub(crate) fn site_label(
             _ => generic_site_label(site, cell_name),
         },
 
+        Error::SeedCycle { .. } => match site {
+            ErrorSite::Relationship(_) => {
+                "this relationship is part of the seed dependency cycle".to_string()
+            }
+            ErrorSite::Cell(c) => match cell_name(*c) {
+                Some(name) => format!("cell `{name}` is part of the seed dependency cycle"),
+                None => "this cell is part of the seed dependency cycle".to_string(),
+            },
+            _ => generic_site_label(site, cell_name),
+        },
+
         Error::Conflict { .. } => match site {
             ErrorSite::Relationship(_) => {
                 "this relationship is part of an overconstrained group".to_string()
@@ -50,14 +61,16 @@ pub(crate) fn site_label(
             _ => generic_site_label(site, cell_name),
         },
 
-        // Two site shapes share this variant: self-duplicate (a method's own outputs list
-        // repeats a cell) is `[Method/MethodIndex, Cell(repeated output)]`; cross-method
-        // (two methods claim the same output set) is `[Method(later), Method(earlier),
-        // Cell(shared)…]`. A `Cell` site always means "this cell is claimed more than
-        // once", in *both* shapes — checking it before the numeric-index arms below is
-        // what keeps the self-duplicate case (whose `sites[1]` is a `Cell`, not the
-        // earlier method) from being mislabelled as "collides with this earlier method".
-        Error::DuplicateMethodOutputs { .. } => match site {
+        // Three site shapes share this variant: self-duplicate (a method's own outputs
+        // list repeats a cell) is `[Method/MethodIndex, Cell(repeated output)]`;
+        // identical output sets are `[Method(later), Method(earlier), Cell(shared)…]`;
+        // nested output sets are `[Method(later), Method(earlier), Cell(shared subset)…]`.
+        // Overlapping non-nested output sets are valid and never reach this branch.
+        // A `Cell` site always means "this cell is claimed more than once", in *all*
+        // shapes — checking it before the numeric-index arms below keeps the self-duplicate
+        // case (whose `sites[1]` is a `Cell`, not the earlier method) from being
+        // mislabelled as "collides with this earlier method".
+        Error::InvalidMethodOutputs { .. } => match site {
             ErrorSite::Cell(c) => match cell_name(*c) {
                 Some(name) => format!("output cell `{name}` is claimed more than once"),
                 None => "this output cell is claimed more than once".to_string(),
@@ -140,6 +153,22 @@ mod tests {
     }
 
     #[test]
+    fn seed_cycle_sites_are_labelled_as_part_of_the_seed_cycle() {
+        let relationship = adam_rs::RelationshipId::default();
+        let cell = CellId::default();
+        let e = adam_rs::Error::SeedCycle {
+            sites: vec![ErrorSite::Relationship(relationship), ErrorSite::Cell(cell)],
+        };
+        let relationship_label = site_label(&e, 0, &|_| Some("x".to_string()));
+        let cell_label = site_label(&e, 1, &|_| Some("x".to_string()));
+        assert_eq!(
+            relationship_label,
+            "this relationship is part of the seed dependency cycle"
+        );
+        assert_eq!(cell_label, "cell `x` is part of the seed dependency cycle");
+    }
+
+    #[test]
     fn site_label_describes_mismatched_method_cells() {
         let e = adam_rs::Error::MismatchedMethodCells {
             sites: vec![
@@ -155,8 +184,8 @@ mod tests {
     }
 
     #[test]
-    fn site_label_describes_duplicate_method_outputs() {
-        let e = adam_rs::Error::DuplicateMethodOutputs {
+    fn site_label_describes_invalid_method_outputs() {
+        let e = adam_rs::Error::InvalidMethodOutputs {
             sites: vec![
                 adam_rs::ErrorSite::MethodIndex(1),
                 adam_rs::ErrorSite::MethodIndex(0),
@@ -169,15 +198,15 @@ mod tests {
         assert!(site_label(&e, 2, &name).contains("out"));
     }
 
-    // Regression test for the self-duplicate shape of `DuplicateMethodOutputs`: a method's own
+    // Regression test for the self-duplicate shape of `InvalidMethodOutputs`: a method's own
     // `outputs` list repeats a cell (e.g. `relationship { (b, b) := (a, a2); }`), which
     // `Sheet::add_relationship` reports as `sites: vec![MethodIndex(idx), Cell(o)]` -- only two
     // sites, with `sites[1]` a `Cell`, not a second method. Labelling `index == 1` by raw
     // position (as the cross-method case does) would wrongly print "collides with this earlier
     // method" onto the cell caret, even though there is no earlier method here.
     #[test]
-    fn site_label_describes_duplicate_method_outputs_self_duplicate() {
-        let e = adam_rs::Error::DuplicateMethodOutputs {
+    fn site_label_describes_invalid_method_outputs_self_duplicate() {
+        let e = adam_rs::Error::InvalidMethodOutputs {
             sites: vec![
                 adam_rs::ErrorSite::MethodIndex(0),
                 adam_rs::ErrorSite::Cell(adam_rs::CellId::default()),

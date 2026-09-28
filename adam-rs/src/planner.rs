@@ -15,7 +15,10 @@
 //!
 //! Method selection is value-blind, including for self-referencing components: a
 //! self-referencing chain reaches the correct values through [`build_seeds`], which
-//! reconstructs each self-referencing input's value at execution time (see
+//! replays the release pass's elimination state to choose sibling seed methods,
+//! reconstructs each self-referencing input's value at execution time, and reports
+//! non-self seed dependency cycles as [`Error::SeedCycle`] rather than substituting a
+//! revisited source value (see
 //! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`),
 //! not through a value-aware assignment choice.
 //!
@@ -31,6 +34,7 @@
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use slotmap::SlotMap;
 
@@ -50,18 +54,18 @@ use digraph::{Node, add_filter_edges, build_digraph, topological_order};
 use matching::pure_outputs;
 use release::ReleaseFailure;
 
-pub(crate) use seed::build_seeds;
+pub(crate) use seed::{SeedEvaluationCache, SeedSource, build_seeds, build_seeds_for_steps};
 
 /// The seed value each self-referencing input should read this round, keyed by cell. A
 /// cell absent from the map reads its own `source`. See [`seed`] and
 /// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`.
-pub(crate) type Seeds = HashMap<CellId, Box<dyn Any>>;
+pub(crate) type Seeds = HashMap<CellId, Rc<dyn Any>>;
 
 /// One step of a [`Plan`]'s `execution_order`: either a selected method, or reapplying a
 /// source cell's filter against its (now-settled) current argument values.
 ///
 /// See `docs/superpowers/specs/2026-08-25-adam-rs-filter-revalidation-design.md` §2.2.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum PlanStep {
     /// Execute method `usize` of relationship `RelationshipId`.
     Method(RelationshipId, usize),
@@ -77,6 +81,11 @@ pub(crate) enum PlanStep {
 pub(crate) struct Plan {
     /// Selected steps (methods and filter reclamps) in execution order.
     pub(crate) execution_order: Vec<PlanStep>,
+    /// The exact deterministic cell sequence the release pass evaluated when
+    /// tentatively eliminating sources; [`seed::build_seeds`] replays sibling-local
+    /// elimination against this order when choosing seed methods, so sibling selection
+    /// follows actual elimination state rather than declaration order.
+    pub(crate) elimination_order: Vec<CellId>,
     /// Cells that can never be a source under the relationships this plan considered.
     /// See [`forced_output_cells`].
     pub(crate) forced_outputs: HashSet<CellId>,
@@ -110,8 +119,8 @@ pub(crate) fn plan(
 ) -> Result<Plan, Error> {
     let (forced_outputs, alive) = forced_output_cells(relationships, active);
 
-    let assignment = match release::resolve(cells, relationships, active) {
-        Ok(a) => a,
+    let release = match release::resolve(cells, relationships, active) {
+        Ok(result) => result,
         Err(ReleaseFailure::NoAssignment) => {
             return Err(Error::Conflict {
                 sites: conflict_sites(relationships, active),
@@ -123,6 +132,7 @@ pub(crate) fn plan(
             });
         }
     };
+    let assignment = release.assignment;
 
     let mut adj = build_digraph(&assignment, relationships);
     add_filter_edges(&mut adj, cells, &assignment);
@@ -171,11 +181,14 @@ pub(crate) fn plan(
         .map(|(&rel_id, _)| rel_id)
         .collect();
 
-    Ok(Plan {
+    let plan = Plan {
         execution_order,
+        elimination_order: release.elimination_order,
         forced_outputs,
         forced_relationships,
-    })
+    };
+    debug_assert_eq!(plan.elimination_order.len(), cells.len());
+    Ok(plan)
 }
 
 /// Maps a cyclic assignment to `Relationship`/`Cell` sites in loop order.
@@ -593,6 +606,27 @@ mod tests {
         let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         assert_eq!(plan.execution_order, vec![PlanStep::Method(rel, 0)]);
+    }
+
+    #[test]
+    fn plan_retains_release_elimination_order() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x + *y)),
+                Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok(*y - *x)),
+                Method::from_fn_2_1([b, c], a, |x: &i32, y: &i32| Ok(*y - *x)),
+            ])
+            .unwrap();
+        sheet.write(a, 5_i32).unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        assert_eq!(plan.elimination_order, vec![a, c, b]);
     }
 
     #[test]

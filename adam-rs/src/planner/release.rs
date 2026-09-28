@@ -27,6 +27,15 @@ use crate::{
 
 use super::matching::Assignment;
 
+/// The deterministic release pass result used by later planner stages.
+pub(crate) struct ReleaseResult {
+    /// The strength-optimal acyclic assignment compatible with the accepted releases.
+    pub(crate) assignment: Assignment,
+    /// Every cell [`resolve`] evaluated for tentative release, in the exact
+    /// deterministic order the release pass considered them.
+    pub(crate) elimination_order: Vec<CellId>,
+}
+
 /// Why [`resolve`] could not find a strength-optimal acyclic assignment.
 #[derive(Debug)]
 pub(crate) enum ReleaseFailure {
@@ -40,9 +49,12 @@ pub(crate) enum ReleaseFailure {
     NoAcyclicAssignment(Assignment),
 }
 
-/// Finds the strength-optimal acyclic assignment for `active`: an [`Assignment`] where
-/// the set of cells left unclaimed (sources) is lexicographically maximal in descending
-/// strength order among all assignments whose induced digraph is acyclic.
+/// Finds the strength-optimal acyclic assignment for `active`, plus the exact
+/// strength-ordered cell sequence the release pass evaluated.
+///
+/// The returned [`ReleaseResult::assignment`] is an [`Assignment`] where the set of
+/// cells left unclaimed (sources) is lexicographically maximal in descending strength
+/// order among all assignments whose induced digraph is acyclic.
 ///
 /// Processes every cell in descending strength order, tentatively adding it to the
 /// forbidden set and searching for an assignment that is both valid (no double claims)
@@ -73,7 +85,7 @@ pub(crate) fn resolve(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     active: &HashSet<RelationshipId>,
-) -> Result<Assignment, ReleaseFailure> {
+) -> Result<ReleaseResult, ReleaseFailure> {
     let mut released: HashSet<CellId> = HashSet::new();
     let Some(mut current) = Assignment::solve_acyclic(relationships, active, &released) else {
         return Err(match Assignment::solve(relationships, active, &released) {
@@ -85,7 +97,7 @@ pub(crate) fn resolve(
     let mut cells_sorted: Vec<CellId> = cells.keys().collect();
     cells_sorted.sort_by_key(|&id| Reverse(cells[id].strength));
 
-    for cell in cells_sorted {
+    for &cell in &cells_sorted {
         let mut candidate_released = released.clone();
         candidate_released.insert(cell);
 
@@ -97,7 +109,10 @@ pub(crate) fn resolve(
         }
     }
 
-    Ok(current)
+    Ok(ReleaseResult {
+        assignment: current,
+        elimination_order: cells_sorted,
+    })
 }
 
 #[cfg(test)]
@@ -163,7 +178,9 @@ mod tests {
         sheet.write(a, 2.0).unwrap();
         sheet.write(b, 3.0).unwrap();
         let active: HashSet<_> = [rel].into_iter().collect();
-        let assignment = resolve(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let assignment = resolve(&sheet.cells, &sheet.relationships, &active)
+            .unwrap()
+            .assignment;
         assert_eq!(assignment.claimed[&c], rel);
         assert!(!assignment.claimed.contains_key(&a));
         assert!(!assignment.claimed.contains_key(&b));
@@ -200,6 +217,7 @@ mod tests {
         let active: HashSet<_> = [r1, r2].into_iter().collect();
         let assignment = resolve(&sheet.cells, &sheet.relationships, &active)
             .expect("a valid acyclic assignment exists for this structure");
+        let assignment = assignment.assignment;
         assert_eq!(assignment.chosen.len(), 2);
         let unique: HashSet<_> = assignment.claimed.values().collect();
         assert_eq!(unique.len(), assignment.claimed.len());
@@ -245,7 +263,9 @@ mod tests {
         sheet.write(c, 40_i32).unwrap();
 
         let active: HashSet<_> = [rel1, rel2].into_iter().collect();
-        let assignment = resolve(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let assignment = resolve(&sheet.cells, &sheet.relationships, &active)
+            .unwrap()
+            .assignment;
 
         assert!(
             !assignment.claimed.contains_key(&c),
@@ -283,12 +303,80 @@ mod tests {
         sheet.write(q, 3.0).unwrap();
 
         let active: HashSet<_> = [rel1, rel2].into_iter().collect();
-        let assignment = resolve(&sheet.cells, &sheet.relationships, &active).unwrap();
+        let assignment = resolve(&sheet.cells, &sheet.relationships, &active)
+            .unwrap()
+            .assignment;
 
         assert_eq!(assignment.chosen.len(), 2);
         assert_eq!(
             assignment.claimed[&r], rel2,
             "the functional diamond must still pick r as the derived cell"
+        );
+    }
+
+    #[test]
+    fn elimination_order_follows_strength_order_not_method_declaration_order() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x + *y)),
+                Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok(*y - *x)),
+                Method::from_fn_2_1([b, c], a, |x: &i32, y: &i32| Ok(*y - *x)),
+            ])
+            .unwrap();
+        sheet.write(a, 5_i32).unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let result = resolve(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        assert_eq!(
+            result.elimination_order,
+            vec![a, c, b],
+            "release decisions must follow descending cell strength, not method declaration order"
+        );
+    }
+
+    #[test]
+    fn elimination_order_retains_cells_whose_tentative_release_is_rejected() {
+        // This is the same collision pattern as the diamond test above: d is released,
+        // a is considered next but rejected because {d, a} cannot both stay sources,
+        // then c is accepted. The recorded elimination order must still include a.
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0.0_f64);
+        let b = sheet.add_cell(0.0_f64);
+        let c = sheet.add_cell(0.0_f64);
+        let d = sheet.add_cell(0.0_f64);
+        let r1 = sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([a, b], c, |x: &f64, y: &f64| Ok(x * y)),
+                Method::from_fn_2_1([a, c], b, |x: &f64, y: &f64| Ok(y / x)),
+                Method::from_fn_2_1([b, c], a, |x: &f64, y: &f64| Ok(y / x)),
+            ])
+            .unwrap();
+        let r2 = sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([b, c], d, |x: &f64, y: &f64| Ok(x * y)),
+                Method::from_fn_2_1([b, d], c, |x: &f64, y: &f64| Ok(y / x)),
+                Method::from_fn_2_1([c, d], b, |x: &f64, y: &f64| Ok(y / x)),
+            ])
+            .unwrap();
+        sheet.write(a, 3.0).unwrap();
+        sheet.write(d, 24.0).unwrap();
+
+        let active: HashSet<_> = [r1, r2].into_iter().collect();
+        let result = resolve(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        assert_eq!(result.elimination_order, vec![d, a, c, b]);
+        assert!(
+            result.assignment.claimed.contains_key(&a),
+            "a was evaluated for release but rejected, so it must remain derived"
+        );
+        assert!(
+            result.elimination_order.contains(&a),
+            "rejected tentative releases must still be recorded"
         );
     }
 
