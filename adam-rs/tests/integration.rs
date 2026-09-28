@@ -2540,6 +2540,95 @@ fn sibling_seed_fold_uses_strength_order() {
     assert_eq!(*reversed.read::<i32>(x_rev).unwrap(), 3);
 }
 
+#[test]
+fn sibling_seed_fold_ties_ignore_relationship_insertion_order() {
+    fn max_with_phantom(lhs: CellId, rhs: CellId, phantom: CellId, output: CellId) -> Method {
+        Method::new(
+            vec![lhs, rhs, phantom],
+            vec![output],
+            vec![
+                TypeId::of::<i32>(),
+                TypeId::of::<i32>(),
+                TypeId::of::<i32>(),
+            ],
+            vec![TypeId::of::<i32>()],
+            |args| {
+                let lhs = args[0]
+                    .downcast_ref::<i32>()
+                    .expect("type checked at add_relationship");
+                let rhs = args[1]
+                    .downcast_ref::<i32>()
+                    .expect("type checked at add_relationship");
+                Ok(vec![Box::new((*lhs).max(*rhs))])
+            },
+        )
+    }
+
+    fn min_with_phantom(lhs: CellId, rhs: CellId, phantom: CellId, output: CellId) -> Method {
+        Method::new(
+            vec![lhs, rhs, phantom],
+            vec![output],
+            vec![
+                TypeId::of::<i32>(),
+                TypeId::of::<i32>(),
+                TypeId::of::<i32>(),
+            ],
+            vec![TypeId::of::<i32>()],
+            |args| {
+                let lhs = args[0]
+                    .downcast_ref::<i32>()
+                    .expect("type checked at add_relationship");
+                let rhs = args[1]
+                    .downcast_ref::<i32>()
+                    .expect("type checked at add_relationship");
+                Ok(vec![Box::new((*lhs).min(*rhs))])
+            },
+        )
+    }
+
+    fn build_sheet(reverse_siblings: bool) -> (Sheet, CellId) {
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(4_i32);
+        let a = sheet.add_cell(5_i32);
+        let b = sheet.add_cell(3_i32);
+        let c = sheet.add_cell(10_i32);
+        let shared_strongest = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([x, c], x, |lhs: &i32, rhs: &i32| Ok((*lhs).min(*rhs))),
+                Method::from_fn_2_1([x, c], c, |lhs: &i32, rhs: &i32| Ok((*lhs).max(*rhs))),
+            ])
+            .unwrap();
+
+        let a_le_x = vec![
+            min_with_phantom(a, x, shared_strongest, a),
+            max_with_phantom(a, x, shared_strongest, x),
+        ];
+        let x_le_b = vec![
+            min_with_phantom(x, b, shared_strongest, x),
+            max_with_phantom(x, b, shared_strongest, b),
+        ];
+        if reverse_siblings {
+            sheet.add_relationship(x_le_b).unwrap();
+            sheet.add_relationship(a_le_x).unwrap();
+        } else {
+            sheet.add_relationship(a_le_x).unwrap();
+            sheet.add_relationship(x_le_b).unwrap();
+        }
+
+        (sheet, x)
+    }
+
+    let (mut forward, x) = build_sheet(false);
+    let (mut reversed, x_rev) = build_sheet(true);
+
+    forward.propagate().unwrap();
+    reversed.propagate().unwrap();
+
+    assert_eq!(*forward.read::<i32>(x).unwrap(), 3);
+    assert_eq!(*reversed.read::<i32>(x_rev).unwrap(), 3);
+}
+
 /// Builds the `a <= b <= c` tutorial chain (`inequality.adm2`) with declared values
 /// 10, 20, 30, already propagated once.
 fn inequality_chain() -> (Sheet, CellId, CellId, CellId) {

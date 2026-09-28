@@ -28,7 +28,7 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
-use slotmap::SlotMap;
+use slotmap::{Key, SlotMap};
 
 use crate::cell::{CellData, CellId};
 use crate::error::{Error, ErrorSite};
@@ -157,30 +157,32 @@ fn compute_seed(
     path_cells.push(x);
 
     let own_claimant = claimant.get(&x).copied();
-    let mut sibling_methods: Vec<(RelationshipId, usize, u64)> = cells[x]
+    let mut sibling_methods: Vec<(RelationshipId, usize, u64, Vec<u64>)> = cells[x]
         .adj
         .iter()
         .filter(|&&rel_id| active.contains(&rel_id) && Some(rel_id) != own_claimant)
         .filter_map(|&rel_id| {
             match select_seed_method(rel_id, x, elimination_order, relationships) {
                 Ok(Some(idx)) => {
-                    let strongest_input = relationships[rel_id].methods[idx]
+                    let method = &relationships[rel_id].methods[idx];
+                    let strongest_input = method
                         .inputs
                         .iter()
                         .filter(|&&input| input != x)
                         .map(|&input| cells[input].strength)
                         .max()
                         .unwrap_or(0);
-                    Some(Ok((rel_id, idx, strongest_input)))
+                    let content_key = method_content_key(method);
+                    Some(Ok((rel_id, idx, strongest_input, content_key)))
                 }
                 Ok(None) => None,
                 Err(err) => Some(Err(err)),
             }
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    sibling_methods.sort_by_key(|&(_, _, strongest_input)| strongest_input);
+    sibling_methods.sort_by(|lhs, rhs| lhs.2.cmp(&rhs.2).then_with(|| lhs.3.cmp(&rhs.3)));
 
-    for &(rel_id, method_idx, _) in &sibling_methods {
+    for &(rel_id, method_idx, _, _) in &sibling_methods {
         for &input in &relationships[rel_id].methods[method_idx].inputs {
             if input != x {
                 if let Some(&cycle_start) = path_indices.get(&input) {
@@ -214,7 +216,7 @@ fn compute_seed(
     }
 
     let mut accumulated: Option<Box<dyn Any>> = None;
-    for &(rel_id, method_idx, _) in &sibling_methods {
+    for &(rel_id, method_idx, _, _) in &sibling_methods {
         let method = &relationships[rel_id].methods[method_idx];
 
         let has_weaker_self_referenced_input = cells[x].has_explicit_strength()
@@ -264,6 +266,44 @@ fn compute_seed(
         seeds.insert(x, value);
     }
     Ok(())
+}
+
+/// Returns a deterministic lexicographic key for a method's canonical cell content.
+///
+/// The key encodes the input and output arities, then the referenced input and output
+/// cell IDs in ascending order, so equal-strength sibling folds break ties by stable
+/// relationship content rather than relationship insertion order or argument position.
+///
+/// - Complexity: O(k) where k = `method.inputs.len() + method.outputs.len()`.
+fn method_content_key(method: &crate::relationship::Method) -> Vec<u64> {
+    let mut canonical_inputs: Vec<u64> = method
+        .inputs
+        .iter()
+        .map(|&input| cell_sort_key(input))
+        .collect();
+    canonical_inputs.sort_unstable();
+    let mut canonical_outputs: Vec<u64> = method
+        .outputs
+        .iter()
+        .map(|&output| cell_sort_key(output))
+        .collect();
+    canonical_outputs.sort_unstable();
+
+    let mut key = Vec::with_capacity(2 + method.inputs.len() + method.outputs.len());
+    key.push(method.inputs.len() as u64);
+    key.extend(canonical_inputs);
+    key.push(method.outputs.len() as u64);
+    key.extend(canonical_outputs);
+    key
+}
+
+/// Returns a stable numeric sort key for a cell handle within one sheet.
+///
+/// `slotmap` keys carry both slot and generation; `as_ffi()` exposes that stable payload
+/// as an opaque integer suitable for deterministic ordering without relying on debug
+/// formatting or relationship insertion order.
+fn cell_sort_key(cell: CellId) -> u64 {
+    cell.data().as_ffi()
 }
 
 /// Returns `Error::SeedCycle` sites for a revisited path cell.
