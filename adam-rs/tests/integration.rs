@@ -2576,16 +2576,28 @@ fn seed_cycle_leaves_values_and_changed_state_unchanged() {
 #[test]
 fn conditional_seed_cycle_leaves_preplan_mutations_unexposed() {
     let (mut sheet, mode, selected, a, b, c, d) = conditional_seed_cycle_sheet();
+    sheet.write(mode, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    let changed_after_success: Vec<_> = sheet.changed().collect();
+    assert!(changed_after_success.contains(&selected));
+    assert!(!changed_after_success.is_empty());
+    let selected_before_error = *sheet.read::<i32>(selected).unwrap();
+    let a_before_error = *sheet.read::<i32>(a).unwrap();
+    let b_before_error = *sheet.read::<i32>(b).unwrap();
+    let c_before_error = *sheet.read::<i32>(c).unwrap();
+    let d_before_error = *sheet.read::<i32>(d).unwrap();
+
+    sheet.write(mode, 1_i32).unwrap();
 
     let err = sheet.propagate().unwrap_err();
 
     assert!(matches!(err, Error::SeedCycle { .. }));
     assert_eq!(*sheet.read::<i32>(mode).unwrap(), 1);
-    assert_eq!(*sheet.read::<i32>(selected).unwrap(), 0);
-    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
-    assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
-    assert_eq!(*sheet.read::<i32>(c).unwrap(), -1);
-    assert_eq!(*sheet.read::<i32>(d).unwrap(), -2);
+    assert_eq!(*sheet.read::<i32>(selected).unwrap(), selected_before_error);
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), a_before_error);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), b_before_error);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), c_before_error);
+    assert_eq!(*sheet.read::<i32>(d).unwrap(), d_before_error);
     assert_eq!(sheet.changed().count(), 0);
 }
 

@@ -1660,10 +1660,10 @@ impl Sheet {
     ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.validate()?;
+        self.clear_changed();
         if let Some(err) = self.preflight_seed_cycle() {
             return Err(err);
         }
-        self.clear_changed();
 
         // Phase 0: record cells with a live derived override (for Phase 5), then clear
         // every derived override before planning begins. See `reset_derived`.
