@@ -50,6 +50,24 @@ Rewritten invalid-sheet tests/examples:
 - `adam-lang` diagnostic tests now expect whole-sheet validation to surface dependency cycles
   with the governed cell as primary.
 
+**Phase B (§1 seedfill, #186) is implemented on this branch.** The planner/runtime now treat
+self-referencing seed construction as part of the same deterministic release-state story:
+
+- `Error::InvalidMethodOutputs { sites }` now documents and enforces the intended antichain rule:
+  duplicate per-method outputs and identical/nested sibling output sets are rejected, while
+  overlapping non-nested output sets remain valid.
+- `adam-rs/src/planner/seed.rs`'s `build_seeds` consumes the planner's recorded elimination order
+  and replays that elimination state when choosing each sibling seed method, rather than picking
+  whichever declaration appears first in the relationship.
+- Seed DFS now reports `Error::SeedCycle { sites }` for non-self sibling cycles instead of
+  substituting any revisited cell's `source` value.
+- When multiple sibling folds survive, they run in ascending order of strongest non-target input
+  strength; equal-strength ties break by a deterministic ordered-signature key for the selected
+  method, not by relationship insertion order.
+- `Sheet::propagate()` clears stale `changed()` state before seed-cycle preflight and returns
+  `Error::SeedCycle` before any pre-plan or execution writes, so conditional preflight cannot leak
+  mutations and a seed-cycle failure leaves `changed()` empty for that call.
+
 Full verification for this handoff completed with no `warning:` lines observed:
 
 - `cargo fmt --all`
@@ -71,14 +89,6 @@ Full verification for this handoff completed with no `warning:` lines observed:
   because the LSP never builds a live `Sheet`. This gap predates Phase A and is tracked as #239.
 
 ## Remaining
-
-**Phase B (§1 seedfill, #186):**
-
-- Enforce antichain output sets for sibling relationship methods.
-- Select seed methods from the planner's elimination state instead of declaration order.
-- Report non-self-reference seed dependency cycles as `Error::SeedCycle`.
-- Fold sibling seed methods in ascending-strength order so the strongest influence is applied
-  last.
 
 **Phase C (§3 automatic plan reuse, #152):**
 

@@ -215,7 +215,7 @@ impl Sheet {
     ///   from another method's in the same relationship.
     /// - `Error::InvalidMethodOutputs` — a method's own `outputs` list names a cell
     ///   more than once, or two methods in the same relationship have identical or
-    ///   nested `outputs` sets.
+    ///   nested `outputs` sets. Overlapping non-nested output sets are allowed.
     /// - `Error::InvalidId` — a `CellId` in any method is not found in this sheet.
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
@@ -1073,7 +1073,9 @@ impl Sheet {
     /// source values because the relationship that had been shadowing them (self-referencing
     /// or conditionally forced) is no longer producing them this round (Phase 5), even though
     /// no method wrote to them this round. It does not attempt to compare old/new values for
-    /// equality.
+    /// equality. A `propagate()` call that returns `Error::SeedCycle` leaves this iterator
+    /// empty: propagation clears stale changed-state before seed-cycle preflight and aborts
+    /// before any writes.
     ///
     /// - Complexity: O(n) where n is the number of changed cells.
     pub fn changed(&self) -> impl Iterator<Item = CellId> + '_ {
@@ -1484,7 +1486,7 @@ impl Sheet {
     /// that preview, then checks the full active plan's seed construction. Any non-seed
     /// error is ignored here and left to the real propagation pass, because this preflight
     /// exists only to uphold the invariant that `Error::SeedCycle` exposes no propagation
-    /// mutations.
+    /// mutations, including conditional Phase 1 pre-plan writes.
     fn preflight_seed_cycle(&self) -> Option<Error> {
         let mut preview = PropagationPreview::default();
         if !self.conditionals.is_empty() {
@@ -1614,7 +1616,8 @@ impl Sheet {
     /// Runs the planning pass and executes the selected methods.
     ///
     /// Validates static guard independence before mutating state, then clears the
-    /// changed-cell set from the previous `propagate()` call before planning.
+    /// changed-cell set from the previous `propagate()` call before seed-cycle
+    /// preflight or planning.
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
@@ -1646,6 +1649,12 @@ impl Sheet {
     /// against current cell values, rebuilding `last_requirement_violations` from
     /// scratch, so [`Sheet::cell_requirements_valid`] and [`Sheet::violated_requirements`]
     /// reflect this round.
+    ///
+    /// If seed preflight detects a non-self sibling dependency cycle, `propagate()`
+    /// returns `Error::SeedCycle` after validation and changed-state clearing but before
+    /// any derived reset, pre-plan execution, conditional write, or selected-method
+    /// write. Live cell values therefore remain untouched and [`Sheet::changed`] stays
+    /// empty for that failing call.
     ///
     /// # Errors
     ///

@@ -36,23 +36,45 @@ use crate::relationship::{RelationshipData, RelationshipId};
 
 use super::{PlanStep, Seeds, matching::pure_outputs};
 
-/// Computes the seed value for every self-referencing input `execution_order` will read.
+/// Bundles the immutable planner state one seed-construction pass reuses.
+struct SeedBuildContext<'a> {
+    claimant: &'a HashMap<CellId, RelationshipId>,
+    active: &'a HashSet<RelationshipId>,
+    elimination_order: &'a [CellId],
+    cells: &'a SlotMap<CellId, CellData>,
+    relationships: &'a SlotMap<RelationshipId, RelationshipData>,
+}
+
+/// Stores the mutable memoization and DFS path state for one seed-construction pass.
+struct SeedTraversal {
+    seeds: Seeds,
+    path_cells: Vec<CellId>,
+    path_relationships: Vec<RelationshipId>,
+    path_indices: HashMap<CellId, usize>,
+}
+
+/// Replays the planner's elimination state to compute the seed for each self-referencing
+/// input `execution_order` will read.
 ///
 /// A cell absent from the result reads its own `source` during execution (the common
 /// case: no other relationship pushes it). Only a cell that is both claimed by a
 /// self-referencing method this round *and* produced by some other incident relationship
-/// gets an entry.
+/// gets an entry. For each such cell, sibling `target`-producing methods are selected by
+/// replaying the planner's elimination order against that relationship's pure-output
+/// claims, never by relationship or method declaration order.
 ///
 /// - Precondition: `execution_order`'s `PlanStep::Method` steps name valid method indices
 ///   in `relationships`.
 /// - Precondition: `elimination_order` is the exact cell order the planner's release pass
-///   evaluated for tentative elimination this round.
+///   evaluated for tentative elimination this round; `build_seeds` consumes that
+///   elimination state verbatim when selecting sibling seed methods.
 ///
 /// # Errors
 ///
 /// - `Error::Conflict` — a sibling relationship that can seed a self-referencing cell
 ///   has no method compatible with the planner's elimination state.
-/// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle.
+/// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle instead of
+///   falling back to any revisited cell's `source` value.
 ///
 /// - Complexity: O(S · A · M · K²) where S = self-referencing claimed cells, A =
 ///   relationships incident to each, M = methods per sibling relationship, K = cells per
@@ -80,25 +102,23 @@ pub(crate) fn build_seeds(
         }
     }
 
-    let mut seeds: Seeds = HashMap::new();
-    let mut path_cells: Vec<CellId> = Vec::new();
-    let mut path_relationships: Vec<RelationshipId> = Vec::new();
-    let mut path_indices: HashMap<CellId, usize> = HashMap::new();
+    let context = SeedBuildContext {
+        claimant: &claimant,
+        active: &active,
+        elimination_order,
+        cells,
+        relationships,
+    };
+    let mut traversal = SeedTraversal {
+        seeds: HashMap::new(),
+        path_cells: Vec::new(),
+        path_relationships: Vec::new(),
+        path_indices: HashMap::new(),
+    };
     for &cell in &self_ref_cells {
-        compute_seed(
-            cell,
-            &claimant,
-            &active,
-            elimination_order,
-            cells,
-            relationships,
-            &mut seeds,
-            &mut path_cells,
-            &mut path_relationships,
-            &mut path_indices,
-        )?;
+        compute_seed(cell, &context, &mut traversal)?;
     }
-    Ok(seeds)
+    Ok(traversal.seeds)
 }
 
 /// Populates `seeds[x]` with `x`'s aspiration, computed by folding every incident
@@ -108,12 +128,13 @@ pub(crate) fn build_seeds(
 /// (recursively). Leaves `x` absent when no such relationship exists (its seed is just
 /// `source`) or when every candidate method errors or mistypes its output.
 ///
-/// Only relationships in `active` (those the current plan actually runs) count as
+/// Only relationships in `context.active` (those the current plan actually runs) count as
 /// siblings: an inactive conditional branch that happens to name `x` must not seed it.
 ///
-/// `path_cells`/`path_relationships` record the active seed dependency path. A sibling
-/// input that reaches a cell already on that path reports `Error::SeedCycle` naming the
-/// participating cells and sibling relationships in traversal order.
+/// `traversal.path_cells`/`traversal.path_relationships` record the active seed
+/// dependency path. A sibling input that reaches a cell already on that path reports
+/// `Error::SeedCycle` naming the participating cells and sibling relationships in
+/// traversal order.
 ///
 /// A sibling method is skipped (contributes nothing) when `x` itself holds a live
 /// explicit strength (a `write()`/`add_cell` not yet superseded by a later claim) *and*
@@ -130,7 +151,8 @@ pub(crate) fn build_seeds(
 /// relative-strength test `release::resolve` uses elsewhere, not a comparison of
 /// candidate values. Among the sibling methods that survive that gate, weaker
 /// relationships fold first and the strongest surviving influence folds last so the
-/// final seed respects strength rather than relationship insertion order.
+/// final seed respects strength rather than relationship insertion order; equal-strength
+/// folds break ties by a deterministic ordered-signature key for the selected method.
 ///
 /// # Errors
 ///
@@ -139,37 +161,30 @@ pub(crate) fn build_seeds(
 /// - `Error::SeedCycle` — a sibling seed dependency reaches a currently visiting cell.
 fn compute_seed(
     x: CellId,
-    claimant: &HashMap<CellId, RelationshipId>,
-    active: &HashSet<RelationshipId>,
-    elimination_order: &[CellId],
-    cells: &SlotMap<CellId, CellData>,
-    relationships: &SlotMap<RelationshipId, RelationshipData>,
-    seeds: &mut Seeds,
-    path_cells: &mut Vec<CellId>,
-    path_relationships: &mut Vec<RelationshipId>,
-    path_indices: &mut HashMap<CellId, usize>,
+    context: &SeedBuildContext<'_>,
+    traversal: &mut SeedTraversal,
 ) -> Result<(), Error> {
-    if seeds.contains_key(&x) {
+    if traversal.seeds.contains_key(&x) {
         return Ok(());
     }
-    debug_assert!(!path_indices.contains_key(&x));
-    path_indices.insert(x, path_cells.len());
-    path_cells.push(x);
+    debug_assert!(!traversal.path_indices.contains_key(&x));
+    traversal.path_indices.insert(x, traversal.path_cells.len());
+    traversal.path_cells.push(x);
 
-    let own_claimant = claimant.get(&x).copied();
-    let mut sibling_methods: Vec<(RelationshipId, usize, u64, Vec<u64>)> = cells[x]
+    let own_claimant = context.claimant.get(&x).copied();
+    let mut sibling_methods: Vec<(RelationshipId, usize, u64, Vec<u64>)> = context.cells[x]
         .adj
         .iter()
-        .filter(|&&rel_id| active.contains(&rel_id) && Some(rel_id) != own_claimant)
+        .filter(|&&rel_id| context.active.contains(&rel_id) && Some(rel_id) != own_claimant)
         .filter_map(|&rel_id| {
-            match select_seed_method(rel_id, x, elimination_order, relationships) {
+            match select_seed_method(rel_id, x, context.elimination_order, context.relationships) {
                 Ok(Some(idx)) => {
-                    let method = &relationships[rel_id].methods[idx];
+                    let method = &context.relationships[rel_id].methods[idx];
                     let strongest_input = method
                         .inputs
                         .iter()
                         .filter(|&&input| input != x)
-                        .map(|&input| cells[input].strength)
+                        .map(|&input| context.cells[input].strength)
                         .max()
                         .unwrap_or(0);
                     let content_key = method_content_key(method);
@@ -183,32 +198,26 @@ fn compute_seed(
     sibling_methods.sort_by(|lhs, rhs| lhs.2.cmp(&rhs.2).then_with(|| lhs.3.cmp(&rhs.3)));
 
     for &(rel_id, method_idx, _, _) in &sibling_methods {
-        for &input in &relationships[rel_id].methods[method_idx].inputs {
+        for &input in &context.relationships[rel_id].methods[method_idx].inputs {
             if input != x {
-                if let Some(&cycle_start) = path_indices.get(&input) {
-                    let sites =
-                        seed_cycle_sites(path_cells, path_relationships, cycle_start, rel_id, x);
-                    path_indices.remove(&x);
-                    path_cells.pop();
+                if let Some(&cycle_start) = traversal.path_indices.get(&input) {
+                    let sites = seed_cycle_sites(
+                        &traversal.path_cells,
+                        &traversal.path_relationships,
+                        cycle_start,
+                        rel_id,
+                        x,
+                    );
+                    traversal.path_indices.remove(&x);
+                    traversal.path_cells.pop();
                     return Err(Error::SeedCycle { sites });
                 }
-                path_relationships.push(rel_id);
-                let result = compute_seed(
-                    input,
-                    claimant,
-                    active,
-                    elimination_order,
-                    cells,
-                    relationships,
-                    seeds,
-                    path_cells,
-                    path_relationships,
-                    path_indices,
-                );
-                path_relationships.pop();
+                traversal.path_relationships.push(rel_id);
+                let result = compute_seed(input, context, traversal);
+                traversal.path_relationships.pop();
                 if let Err(err) = result {
-                    path_indices.remove(&x);
-                    path_cells.pop();
+                    traversal.path_indices.remove(&x);
+                    traversal.path_cells.pop();
                     return Err(err);
                 }
             }
@@ -217,13 +226,13 @@ fn compute_seed(
 
     let mut accumulated: Option<Box<dyn Any>> = None;
     for &(rel_id, method_idx, _, _) in &sibling_methods {
-        let method = &relationships[rel_id].methods[method_idx];
+        let method = &context.relationships[rel_id].methods[method_idx];
 
-        let has_weaker_self_referenced_input = cells[x].has_explicit_strength()
+        let has_weaker_self_referenced_input = context.cells[x].has_explicit_strength()
             && method.inputs.iter().any(|&input| {
                 input != x
-                    && claimant.get(&input) == Some(&rel_id)
-                    && cells[input].strength <= cells[x].strength
+                    && context.claimant.get(&input) == Some(&rel_id)
+                    && context.cells[input].strength <= context.cells[x].strength
             });
         if has_weaker_self_referenced_input {
             continue;
@@ -237,12 +246,13 @@ fn compute_seed(
                     if input == x {
                         accumulated
                             .as_deref()
-                            .unwrap_or_else(|| cells[x].source.as_ref())
+                            .unwrap_or_else(|| context.cells[x].source.as_ref())
                     } else {
-                        seeds
+                        traversal
+                            .seeds
                             .get(&input)
                             .map(|value| value.as_ref())
-                            .unwrap_or_else(|| cells[input].source.as_ref())
+                            .unwrap_or_else(|| context.cells[input].source.as_ref())
                     }
                 })
                 .collect();
@@ -253,17 +263,17 @@ fn compute_seed(
                     let pos = method.outputs.iter().position(|&o| o == x)?;
                     Some(outputs.swap_remove(pos))
                 })
-                .filter(|value| value.as_ref().type_id() == cells[x].type_id)
+                .filter(|value| value.as_ref().type_id() == context.cells[x].type_id)
         };
         if produced.is_some() {
             accumulated = produced;
         }
     }
 
-    path_indices.remove(&x);
-    path_cells.pop();
+    traversal.path_indices.remove(&x);
+    traversal.path_cells.pop();
     if let Some(value) = accumulated {
-        seeds.insert(x, value);
+        traversal.seeds.insert(x, value);
     }
     Ok(())
 }
@@ -325,7 +335,9 @@ fn seed_cycle_sites(
 /// Starts from every method in `rel_id` whose declared outputs contain `target`, then
 /// replays elimination across the relationship's other referenced cells in
 /// `elimination_order`. Eliminating a cell removes any candidate method that would still
-/// purely claim that cell under the matching layer's semantics ([`pure_outputs`]).
+/// purely claim that cell under the matching layer's semantics ([`pure_outputs`]). The
+/// surviving method is therefore the one consistent with the planner's actual release
+/// decisions this round, never simply the first declaration that mentions `target`.
 ///
 /// Returns `Ok(None)` when `rel_id` has no `target`-producing method.
 ///

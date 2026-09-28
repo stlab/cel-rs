@@ -15,7 +15,10 @@
 //!
 //! Method selection is value-blind, including for self-referencing components: a
 //! self-referencing chain reaches the correct values through [`build_seeds`], which
-//! reconstructs each self-referencing input's value at execution time (see
+//! replays the release pass's elimination state to choose sibling seed methods,
+//! reconstructs each self-referencing input's value at execution time, and reports
+//! non-self seed dependency cycles as [`Error::SeedCycle`] rather than substituting a
+//! revisited source value (see
 //! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`),
 //! not through a value-aware assignment choice.
 //!
@@ -79,7 +82,8 @@ pub(crate) struct Plan {
     pub(crate) execution_order: Vec<PlanStep>,
     /// The exact deterministic cell sequence the release pass evaluated when
     /// tentatively eliminating sources; [`seed::build_seeds`] replays sibling-local
-    /// elimination against this order when choosing seed methods.
+    /// elimination against this order when choosing seed methods, so sibling selection
+    /// follows actual elimination state rather than declaration order.
     pub(crate) elimination_order: Vec<CellId>,
     /// Cells that can never be a source under the relationships this plan considered.
     /// See [`forced_output_cells`].

@@ -100,13 +100,14 @@ pub enum Error {
     },
 
     /// A method's own `outputs` list names a cell more than once, or two methods in
-    /// the same relationship have identical or nested `outputs` sets.
+    /// the same relationship have identical or nested `outputs` sets. Overlapping
+    /// output sets are allowed when neither set nests the other.
     InvalidMethodOutputs {
         /// `sites[0]` is the method (by index within the `Vec` passed to
         /// `add_relationship`) whose output set collided. For a method's own outputs
         /// repeating a cell, further entries are the repeated cell(s). For two methods
         /// with identical or nested output sets, `sites[1]` is the earlier method's
-        /// index and further entries are the smaller output set's cell(s).
+        /// index and further entries are the duplicate or nested subset cell(s).
         sites: Vec<ErrorSite>,
     },
 

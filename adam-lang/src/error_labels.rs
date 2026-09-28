@@ -33,6 +33,17 @@ pub(crate) fn site_label(
             _ => generic_site_label(site, cell_name),
         },
 
+        Error::SeedCycle { .. } => match site {
+            ErrorSite::Relationship(_) => {
+                "this relationship is part of the seed dependency cycle".to_string()
+            }
+            ErrorSite::Cell(c) => match cell_name(*c) {
+                Some(name) => format!("cell `{name}` is part of the seed dependency cycle"),
+                None => "this cell is part of the seed dependency cycle".to_string(),
+            },
+            _ => generic_site_label(site, cell_name),
+        },
+
         Error::Conflict { .. } => match site {
             ErrorSite::Relationship(_) => {
                 "this relationship is part of an overconstrained group".to_string()
@@ -54,6 +65,7 @@ pub(crate) fn site_label(
         // list repeats a cell) is `[Method/MethodIndex, Cell(repeated output)]`;
         // identical output sets are `[Method(later), Method(earlier), Cell(shared)…]`;
         // nested output sets are `[Method(later), Method(earlier), Cell(shared subset)…]`.
+        // Overlapping non-nested output sets are valid and never reach this branch.
         // A `Cell` site always means "this cell is claimed more than once", in *all*
         // shapes — checking it before the numeric-index arms below keeps the self-duplicate
         // case (whose `sites[1]` is a `Cell`, not the earlier method) from being
@@ -138,6 +150,22 @@ mod tests {
         };
         let label = site_label(&e, 0, &|_| Some("mode".to_string()));
         assert_eq!(label, "cell `mode` is part of the cycle");
+    }
+
+    #[test]
+    fn seed_cycle_sites_are_labelled_as_part_of_the_seed_cycle() {
+        let relationship = adam_rs::RelationshipId::default();
+        let cell = CellId::default();
+        let e = adam_rs::Error::SeedCycle {
+            sites: vec![ErrorSite::Relationship(relationship), ErrorSite::Cell(cell)],
+        };
+        let relationship_label = site_label(&e, 0, &|_| Some("x".to_string()));
+        let cell_label = site_label(&e, 1, &|_| Some("x".to_string()));
+        assert_eq!(
+            relationship_label,
+            "this relationship is part of the seed dependency cycle"
+        );
+        assert_eq!(cell_label, "cell `x` is part of the seed dependency cycle");
     }
 
     #[test]
