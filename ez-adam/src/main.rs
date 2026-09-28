@@ -1,8 +1,10 @@
-//! Entry point for the `ez-adam` desktop editor.
+//! Entry point for the `ez-adam` editor.
 
+#[cfg(any(feature = "desktop", feature = "web"))]
 use dioxus::prelude::*;
 
-/// Launches the desktop UI.
+/// Launches the desktop UI when the `desktop` feature is enabled.
+#[cfg(feature = "desktop")]
 fn main() {
     #[allow(deprecated)]
     LaunchBuilder::new()
@@ -11,3 +13,13 @@ fn main() {
         })
         .launch(ez_adam::ui::App);
 }
+
+/// Launches the browser UI when only the `web` feature is enabled.
+#[cfg(all(not(feature = "desktop"), feature = "web"))]
+fn main() {
+    LaunchBuilder::new().launch(ez_adam::ui::App);
+}
+
+/// Provides no application entry point without a renderer feature.
+#[cfg(not(any(feature = "desktop", feature = "web")))]
+fn main() {}

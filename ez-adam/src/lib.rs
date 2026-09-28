@@ -8,5 +8,5 @@ pub mod ops;
 pub mod persistence;
 pub mod validation;
 
-#[cfg(feature = "desktop")]
+#[cfg(any(feature = "desktop", feature = "web"))]
 pub mod ui;

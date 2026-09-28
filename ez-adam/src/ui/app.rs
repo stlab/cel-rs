@@ -2,21 +2,57 @@
 //! canvas, and side panel.
 
 use adam_web_ui::spectrum::SpTheme;
+#[cfg(feature = "desktop")]
 use dioxus::desktop::use_muda_event_handler;
 use dioxus::prelude::*;
 use std::collections::HashSet;
+#[cfg(feature = "desktop")]
 use std::path::PathBuf;
 
 use crate::model::document::Document;
 use crate::ui::canvas::{Canvas, NodeId, ViewTransform};
+#[cfg(feature = "desktop")]
 use crate::ui::file_io::{
     pick_export_path, pick_open_path, pick_save_path, read_document_file, write_adm2_file,
     write_document_file,
 };
-use crate::ui::history::{record_history, redo_target, undo_target};
+use crate::ui::history::record_history;
+#[cfg(feature = "desktop")]
+use crate::ui::history::{redo_target, undo_target};
+#[cfg(feature = "desktop")]
 use crate::ui::menu::{MENU_EXPORT, MENU_OPEN, MENU_REDO, MENU_SAVE, MENU_SAVE_AS, MENU_UNDO};
 use crate::ui::side_panel::{SidePanel, panel_target};
 use crate::ui::toolbar::{Tool, Toolbar};
+
+/// Returns whether opening another document must first preserve or discard
+/// the current document's changes.
+#[cfg(any(feature = "desktop", test))]
+fn has_unsaved_changes(document: &Document, saved_document: &Document) -> bool {
+    document != saved_document
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::cell::CellType;
+    use crate::ops::cells::add_cell;
+
+    #[test]
+    fn has_unsaved_changes_is_false_for_the_saved_snapshot() {
+        let document = Document::new("untitled");
+
+        assert!(!has_unsaved_changes(&document, &document));
+    }
+
+    #[test]
+    fn has_unsaved_changes_is_true_after_an_edit() {
+        let saved_document = Document::new("untitled");
+        let mut document = saved_document.clone();
+        let _ = add_cell(&mut document, "value", CellType::i64());
+
+        assert!(has_unsaved_changes(&document, &saved_document));
+    }
+}
 
 /// The application's root component: owns all top-level state and
 /// composes the native menu bar's command dispatch, the toolbar, canvas,
@@ -31,6 +67,10 @@ use crate::ui::toolbar::{Tool, Toolbar};
 /// error) is surfaced via `error_message` rather than silently dropped,
 /// and cleared on the next successful operation.
 ///
+/// Open compares the current document against the most recently saved
+/// snapshot. When they differ, it presents Save, Discard, and Cancel before
+/// invoking the native picker, so no open operation can silently lose edits.
+///
 /// Undo/redo is a linear history of `Document` snapshots
 /// (`crate::ui::history`): a `use_effect` watching `document` records a
 /// new entry whenever it changes to something other than what's already
@@ -41,7 +81,12 @@ use crate::ui::toolbar::{Tool, Toolbar};
 #[component]
 pub fn App() -> Element {
     let document = use_signal(|| Document::new("untitled"));
+    #[cfg(feature = "desktop")]
     let document_path: Signal<Option<PathBuf>> = use_signal(|| None);
+    #[cfg(feature = "desktop")]
+    let saved_document = use_signal(|| Document::new("untitled"));
+    #[cfg(feature = "desktop")]
+    let mut pending_open = use_signal(|| false);
     let selection: Signal<HashSet<NodeId>> = use_signal(HashSet::new);
     let active_tool = use_signal(Tool::default);
     let view_transform = use_signal(ViewTransform::identity);
@@ -64,100 +109,166 @@ pub fn App() -> Element {
         });
     }
 
-    let mut document_for_open = document;
-    let mut document_path_for_open = document_path;
-    let mut error_message_for_open = error_message;
-    let mut history_for_open = history;
-    let mut history_index_for_open = history_index;
-    let open = move || {
-        spawn(async move {
-            if let Some(path) = pick_open_path().await {
-                match read_document_file(&path) {
-                    Ok(doc) => {
-                        // Opening a different file starts a fresh undo
-                        // history rather than appending to the previous
-                        // file's — undoing past the point of opening a
-                        // new document back into unrelated content would
-                        // be confusing.
-                        history_for_open.set(vec![doc.clone()]);
-                        history_index_for_open.set(0);
-                        document_for_open.set(doc);
-                        document_path_for_open.set(Some(path));
-                        error_message_for_open.set(None);
+    #[cfg(feature = "desktop")]
+    let open_from_picker = {
+        let mut document_for_open = document;
+        let mut document_path_for_open = document_path;
+        let mut saved_document_for_open = saved_document;
+        let mut error_message_for_open = error_message;
+        let mut history_for_open = history;
+        let mut history_index_for_open = history_index;
+        move || {
+            spawn(async move {
+                if let Some(path) = pick_open_path().await {
+                    match read_document_file(&path) {
+                        Ok(doc) => {
+                            // Opening a different file starts a fresh undo
+                            // history rather than appending to the previous
+                            // file's — undoing past the point of opening a
+                            // new document back into unrelated content would
+                            // be confusing.
+                            history_for_open.set(vec![doc.clone()]);
+                            history_index_for_open.set(0);
+                            saved_document_for_open.set(doc.clone());
+                            document_for_open.set(doc);
+                            document_path_for_open.set(Some(path));
+                            error_message_for_open.set(None);
+                        }
+                        Err(e) => error_message_for_open.set(Some(e)),
                     }
-                    Err(e) => error_message_for_open.set(Some(e)),
                 }
-            }
-        });
+            });
+        }
     };
 
-    let document_for_save = document;
-    let mut document_path_for_save = document_path;
-    let mut error_message_for_save = error_message;
-    let save = move |force_new_path: bool| {
-        let doc = document_for_save.read().clone();
-        let existing_path = document_path_for_save.read().clone();
-        spawn(async move {
-            let path = if force_new_path {
-                pick_save_path().await
+    #[cfg(feature = "desktop")]
+    let mut open = {
+        let document_for_open = document;
+        let saved_document_for_open = saved_document;
+        let mut pending_open_for_open = pending_open;
+        move || {
+            if has_unsaved_changes(&document_for_open.read(), &saved_document_for_open.read()) {
+                pending_open_for_open.set(true);
             } else {
-                match existing_path {
-                    Some(p) => Some(p),
-                    None => pick_save_path().await,
-                }
-            };
-            if let Some(path) = path {
-                match write_document_file(&path, &doc) {
-                    Ok(()) => {
-                        document_path_for_save.set(Some(path));
-                        error_message_for_save.set(None);
+                open_from_picker();
+            }
+        }
+    };
+
+    #[cfg(feature = "desktop")]
+    let save = {
+        let document_for_save = document;
+        let mut document_path_for_save = document_path;
+        let mut saved_document_for_save = saved_document;
+        let mut error_message_for_save = error_message;
+        move |force_new_path: bool| {
+            let doc = document_for_save.read().clone();
+            let existing_path = document_path_for_save.read().clone();
+            spawn(async move {
+                let path = if force_new_path {
+                    pick_save_path().await
+                } else {
+                    match existing_path {
+                        Some(path) => Some(path),
+                        None => pick_save_path().await,
                     }
-                    Err(e) => error_message_for_save.set(Some(e)),
+                };
+                if let Some(path) = path {
+                    match write_document_file(&path, &doc) {
+                        Ok(()) => {
+                            document_path_for_save.set(Some(path));
+                            saved_document_for_save.set(doc);
+                            error_message_for_save.set(None);
+                        }
+                        Err(e) => error_message_for_save.set(Some(e)),
+                    }
                 }
-            }
-        });
-    };
-
-    let document_for_export = document;
-    let mut error_message_for_export = error_message;
-    let export = move || {
-        let doc = document_for_export.read().clone();
-        spawn(async move {
-            if let Some(path) = pick_export_path().await {
-                match crate::codegen::generate_adm2(&doc) {
-                    Ok(text) => match write_adm2_file(&path, &text) {
-                        Ok(()) => error_message_for_export.set(None),
-                        Err(e) => error_message_for_export.set(Some(e)),
-                    },
-                    Err(e) => error_message_for_export.set(Some(format!("{e:?}"))),
-                }
-            }
-        });
-    };
-
-    let mut document_for_undo = document;
-    let mut history_index_for_undo = history_index;
-    let mut undo = move || {
-        let idx = *history_index_for_undo.read();
-        if let Some(target) = undo_target(idx) {
-            let snapshot = history.read()[target].clone();
-            history_index_for_undo.set(target);
-            document_for_undo.set(snapshot);
+            });
         }
     };
 
-    let mut document_for_redo = document;
-    let mut history_index_for_redo = history_index;
-    let mut redo = move || {
-        let idx = *history_index_for_redo.read();
-        let len = history.read().len();
-        if let Some(target) = redo_target(idx, len) {
-            let snapshot = history.read()[target].clone();
-            history_index_for_redo.set(target);
-            document_for_redo.set(snapshot);
+    #[cfg(feature = "desktop")]
+    let save_then_open = {
+        let document_for_save = document;
+        let document_path_for_save = document_path;
+        let mut saved_document_for_save = saved_document;
+        let mut document_path_after_save = document_path;
+        let mut error_message_for_save = error_message;
+        let mut pending_open_after_save = pending_open;
+        move || {
+            let doc = document_for_save.read().clone();
+            let existing_path = document_path_for_save.read().clone();
+            spawn(async move {
+                let path = match existing_path {
+                    Some(path) => Some(path),
+                    None => pick_save_path().await,
+                };
+                if let Some(path) = path {
+                    match write_document_file(&path, &doc) {
+                        Ok(()) => {
+                            document_path_after_save.set(Some(path));
+                            saved_document_for_save.set(doc);
+                            pending_open_after_save.set(false);
+                            error_message_for_save.set(None);
+                            open_from_picker();
+                        }
+                        Err(e) => error_message_for_save.set(Some(e)),
+                    }
+                }
+            });
         }
     };
 
+    #[cfg(feature = "desktop")]
+    let export = {
+        let document_for_export = document;
+        let mut error_message_for_export = error_message;
+        move || {
+            let doc = document_for_export.read().clone();
+            spawn(async move {
+                if let Some(path) = pick_export_path().await {
+                    match crate::codegen::generate_adm2(&doc) {
+                        Ok(text) => match write_adm2_file(&path, &text) {
+                            Ok(()) => error_message_for_export.set(None),
+                            Err(e) => error_message_for_export.set(Some(e)),
+                        },
+                        Err(e) => error_message_for_export.set(Some(format!("{e:?}"))),
+                    }
+                }
+            });
+        }
+    };
+
+    #[cfg(feature = "desktop")]
+    let mut undo = {
+        let mut document_for_undo = document;
+        let mut history_index_for_undo = history_index;
+        move || {
+            let idx = *history_index_for_undo.read();
+            if let Some(target) = undo_target(idx) {
+                let snapshot = history.read()[target].clone();
+                history_index_for_undo.set(target);
+                document_for_undo.set(snapshot);
+            }
+        }
+    };
+
+    #[cfg(feature = "desktop")]
+    let mut redo = {
+        let mut document_for_redo = document;
+        let mut history_index_for_redo = history_index;
+        move || {
+            let idx = *history_index_for_redo.read();
+            let len = history.read().len();
+            if let Some(target) = redo_target(idx, len) {
+                let snapshot = history.read()[target].clone();
+                history_index_for_redo.set(target);
+                document_for_redo.set(snapshot);
+            }
+        }
+    };
+
+    #[cfg(feature = "desktop")]
     use_muda_event_handler(move |event| {
         let id = event.id().as_ref();
         if id == MENU_OPEN {
@@ -174,6 +285,42 @@ pub fn App() -> Element {
             redo();
         }
     });
+
+    #[cfg(feature = "desktop")]
+    let unsaved_open_dialog = rsx! {
+        if *pending_open.read() {
+            div {
+                role: "dialog",
+                aria_label: "Unsaved changes",
+                style: "position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(0, 0, 0, 0.35);",
+                div {
+                    style: "width: min(420px, calc(100vw - 48px)); background: white; border-radius: 8px; padding: 20px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);",
+                    h2 { "Save changes before opening another document?" }
+                    p { "Your unsaved edits will be lost if you discard them." }
+                    div {
+                        style: "display: flex; justify-content: flex-end; gap: 8px;",
+                        button {
+                            onclick: move |_| save_then_open(),
+                            "Save"
+                        }
+                        button {
+                            onclick: move |_| {
+                                pending_open.set(false);
+                                open_from_picker();
+                            },
+                            "Discard"
+                        }
+                        button {
+                            onclick: move |_| pending_open.set(false),
+                            "Cancel"
+                        }
+                    }
+                }
+            }
+        }
+    };
+    #[cfg(not(feature = "desktop"))]
+    let unsaved_open_dialog = rsx! {};
 
     rsx! {
         // Bundled via `cargo xtask build-js` (ez-adam/package.json +
@@ -242,6 +389,7 @@ pub fn App() -> Element {
                             SidePanel { document, selection }
                         }
                     }
+                    {unsaved_open_dialog}
                 }
             }
         }

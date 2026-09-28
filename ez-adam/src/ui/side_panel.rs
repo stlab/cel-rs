@@ -17,6 +17,7 @@ use crate::validation::validate_cel_expression;
 use adam_web_ui::spectrum::{SpCheckbox, SpDivider, SpFieldLabel, SpNumberfield, SpTextfield};
 use annotate_snippets::Renderer;
 use dioxus::prelude::*;
+use std::collections::HashMap;
 
 /// Builds the JS snippet that reads the DOM element with id `id`'s live
 /// `.value` and sends it back via `dioxus.send`, for use with
@@ -30,6 +31,32 @@ use dioxus::prelude::*;
 /// `adam_web_ui::inspector`'s identical pattern).
 fn read_value_js(id: &str) -> String {
     format!(r#"dioxus.send(document.getElementById("{id}").value)"#)
+}
+
+/// Records and returns the next input revision for `field_id`.
+///
+/// Every browser DOM-value read captures this revision before awaiting. A
+/// response applies only while [`is_current_input_revision`] still accepts
+/// it, preventing an older asynchronous response from replacing newer text.
+fn next_input_revision(revisions: &mut HashMap<String, u64>, field_id: &str) -> u64 {
+    let revision = revisions
+        .get(field_id)
+        .copied()
+        .unwrap_or(0)
+        .checked_add(1)
+        .expect("input revision must not overflow");
+    revisions.insert(field_id.to_owned(), revision);
+    revision
+}
+
+/// Returns whether `response_revision` is the latest dispatched revision for
+/// `field_id`.
+fn is_current_input_revision(
+    revisions: &HashMap<String, u64>,
+    field_id: &str,
+    response_revision: u64,
+) -> bool {
+    revisions.get(field_id) == Some(&response_revision)
 }
 
 /// Returns `(min_text, max_text)` for `ty`'s clamp bounds if it's numeric,
@@ -61,7 +88,11 @@ fn parse_restrict_input(text: String) -> Option<String> {
 /// min/max (numeric types only, via [`clamp_bounds_text`]), and restrict
 /// expression text.
 #[component]
-pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
+pub fn CellPanel(
+    mut document: Signal<Document>,
+    cell: CellId,
+    mut input_revisions: Signal<HashMap<String, u64>>,
+) -> Element {
     let (name, ty, output, restrict) = {
         let doc = document.read();
         let c = &doc.cells[cell];
@@ -90,11 +121,14 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
                 disabled: false,
                 oninput: move |_| {
                     let id = name_id.clone();
+                    let revision = next_input_revision(&mut input_revisions.write(), &id);
+                    let input_revisions = input_revisions;
                     spawn(async move {
                         let mut eval = document::eval(&read_value_js(&id));
-                        if let Ok(text) = eval.recv::<String>().await {
-                            set_name(&mut document.write(), cell, text);
-                        }
+                        if let Ok(text) = eval.recv::<String>().await
+                            && is_current_input_revision(&input_revisions.read(), &id, revision) {
+                                set_name(&mut document.write(), cell, text);
+                            }
                     });
                 },
                 onfocus: move |_| {},
@@ -134,11 +168,18 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
                         readonly: false,
                         oninput: move |_| {
                             let id = clamp_min_id.clone();
+                            let revision = next_input_revision(&mut input_revisions.write(), &id);
+                            let input_revisions = input_revisions;
                             spawn(async move {
                                 let mut eval = document::eval(&read_value_js(&id));
-                                if let Ok(text) = eval.recv::<String>().await {
-                                    set_clamp_min(&mut document.write(), cell, &text);
-                                }
+                                if let Ok(text) = eval.recv::<String>().await
+                                    && is_current_input_revision(
+                                        &input_revisions.read(),
+                                        &id,
+                                        revision,
+                                    ) {
+                                        set_clamp_min(&mut document.write(), cell, &text);
+                                    }
                             });
                         },
                         onfocus: move |_| {},
@@ -158,11 +199,18 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
                         readonly: false,
                         oninput: move |_| {
                             let id = clamp_max_id.clone();
+                            let revision = next_input_revision(&mut input_revisions.write(), &id);
+                            let input_revisions = input_revisions;
                             spawn(async move {
                                 let mut eval = document::eval(&read_value_js(&id));
-                                if let Ok(text) = eval.recv::<String>().await {
-                                    set_clamp_max(&mut document.write(), cell, &text);
-                                }
+                                if let Ok(text) = eval.recv::<String>().await
+                                    && is_current_input_revision(
+                                        &input_revisions.read(),
+                                        &id,
+                                        revision,
+                                    ) {
+                                        set_clamp_max(&mut document.write(), cell, &text);
+                                    }
                             });
                         },
                         onfocus: move |_| {},
@@ -179,11 +227,18 @@ pub fn CellPanel(mut document: Signal<Document>, cell: CellId) -> Element {
                 disabled: false,
                 oninput: move |_| {
                     let id = restrict_id.clone();
+                    let revision = next_input_revision(&mut input_revisions.write(), &id);
+                    let input_revisions = input_revisions;
                     spawn(async move {
                         let mut eval = document::eval(&read_value_js(&id));
-                        if let Ok(text) = eval.recv::<String>().await {
-                            set_restrict(&mut document.write(), cell, parse_restrict_input(text));
-                        }
+                        if let Ok(text) = eval.recv::<String>().await
+                            && is_current_input_revision(&input_revisions.read(), &id, revision) {
+                                set_restrict(
+                                    &mut document.write(),
+                                    cell,
+                                    parse_restrict_input(text),
+                                );
+                            }
                     });
                 },
                 onfocus: move |_| {},
@@ -299,7 +354,11 @@ fn union_preserving_known_order(
 /// Renders `group`'s member formulas as an editable list, each validated
 /// live via [`formula_diagnostic`].
 #[component]
-pub fn RelationshipPanel(mut document: Signal<Document>, group: RelationshipGroupId) -> Element {
+pub fn RelationshipPanel(
+    mut document: Signal<Document>,
+    group: RelationshipGroupId,
+    mut input_revisions: Signal<HashMap<String, u64>>,
+) -> Element {
     let (display_name, members) = {
         let doc = document.read();
         let g = &doc.relationship_groups[group];
@@ -326,11 +385,14 @@ pub fn RelationshipPanel(mut document: Signal<Document>, group: RelationshipGrou
                 disabled: false,
                 oninput: move |_| {
                     let id = name_id.clone();
+                    let revision = next_input_revision(&mut input_revisions.write(), &id);
+                    let input_revisions = input_revisions;
                     spawn(async move {
                         let mut eval = document::eval(&read_value_js(&id));
-                        if let Ok(text) = eval.recv::<String>().await {
-                            set_relationship_display_name(&mut document.write(), group, text);
-                        }
+                        if let Ok(text) = eval.recv::<String>().await
+                            && is_current_input_revision(&input_revisions.read(), &id, revision) {
+                                set_relationship_display_name(&mut document.write(), group, text);
+                            }
                     });
                 },
                 onfocus: move |_| {},
@@ -351,11 +413,23 @@ pub fn RelationshipPanel(mut document: Signal<Document>, group: RelationshipGrou
                                 disabled: false,
                                 oninput: move |_| {
                                     let id = field_id.clone();
+                                    let revision = next_input_revision(&mut input_revisions.write(), &id);
+                                    let input_revisions = input_revisions;
                                     spawn(async move {
                                         let mut eval = document::eval(&read_value_js(&id));
-                                        if let Ok(text) = eval.recv::<String>().await {
-                                            set_member_formula(&mut document.write(), group, node, text);
-                                        }
+                                        if let Ok(text) = eval.recv::<String>().await
+                                            && is_current_input_revision(
+                                                &input_revisions.read(),
+                                                &id,
+                                                revision,
+                                            ) {
+                                                set_member_formula(
+                                                    &mut document.write(),
+                                                    group,
+                                                    node,
+                                                    text,
+                                                );
+                                            }
                                     });
                                 },
                                 onfocus: move |_| {},
@@ -395,6 +469,7 @@ fn formula_expr_for_display(condition: &ConditionExpr) -> Option<&str> {
 pub fn ConditionalPanel(
     mut document: Signal<Document>,
     conditional: ConditionalGroupId,
+    mut input_revisions: Signal<HashMap<String, u64>>,
 ) -> Element {
     let mut known_groups = use_signal(Vec::<RelationshipGroupId>::new);
 
@@ -434,11 +509,14 @@ pub fn ConditionalPanel(
             disabled: false,
             oninput: move |_| {
                 let id = name_id.clone();
+                let revision = next_input_revision(&mut input_revisions.write(), &id);
+                let input_revisions = input_revisions;
                 spawn(async move {
                     let mut eval = document::eval(&read_value_js(&id));
-                    if let Ok(text) = eval.recv::<String>().await {
-                        set_conditional_display_name(&mut document.write(), conditional, text);
-                    }
+                    if let Ok(text) = eval.recv::<String>().await
+                        && is_current_input_revision(&input_revisions.read(), &id, revision) {
+                            set_conditional_display_name(&mut document.write(), conditional, text);
+                        }
                 });
             },
             onfocus: move |_| {},
@@ -456,11 +534,18 @@ pub fn ConditionalPanel(
                     disabled: false,
                     oninput: move |_| {
                         let id = formula_id.clone();
+                        let revision = next_input_revision(&mut input_revisions.write(), &id);
+                        let input_revisions = input_revisions;
                         spawn(async move {
                             let mut eval = document::eval(&read_value_js(&id));
-                            if let Ok(text) = eval.recv::<String>().await {
-                                set_condition_formula(&mut document.write(), conditional, text);
-                            }
+                            if let Ok(text) = eval.recv::<String>().await
+                                && is_current_input_revision(
+                                    &input_revisions.read(),
+                                    &id,
+                                    revision,
+                                ) {
+                                    set_condition_formula(&mut document.write(), conditional, text);
+                                }
                         });
                     },
                     onfocus: move |_| {},
@@ -523,6 +608,7 @@ pub fn SidePanel(
     document: Signal<Document>,
     selection: Signal<std::collections::HashSet<NodeId>>,
 ) -> Element {
+    let input_revisions = use_signal(HashMap::new);
     let target = panel_target(&selection.read());
     rsx! {
         div {
@@ -530,14 +616,17 @@ pub fn SidePanel(
             match target {
                 Some(NodeId::CellNode(node)) => {
                     let cell = document.read().cell_nodes[node].cell;
-                    rsx! { CellPanel { document, cell } }
+                    rsx! { CellPanel { document, cell, input_revisions } }
                 }
-                Some(NodeId::RelationshipGroup(group)) => rsx! { RelationshipPanel { document, group } },
+                Some(NodeId::RelationshipGroup(group)) => {
+                    rsx! { RelationshipPanel { document, group, input_revisions } }
+                }
                 Some(NodeId::ConditionalGroup(conditional)) => rsx! {
                     ConditionalPanel {
                         key: "{conditional:?}",
                         document,
                         conditional,
+                        input_revisions,
                     }
                 },
                 None => rsx! { div { "No selection" } },
@@ -589,6 +678,30 @@ mod tests {
             js,
             r#"dioxus.send(document.getElementById("restrict-abc").value)"#
         );
+    }
+
+    #[test]
+    fn input_response_is_current_only_for_the_latest_revision() {
+        let mut revisions = HashMap::new();
+        let first = next_input_revision(&mut revisions, "name-abc");
+        let second = next_input_revision(&mut revisions, "name-abc");
+
+        assert!(!is_current_input_revision(&revisions, "name-abc", first));
+        assert!(is_current_input_revision(&revisions, "name-abc", second));
+    }
+
+    #[test]
+    fn input_response_revisions_are_independent_per_field() {
+        let mut revisions = HashMap::new();
+        let name = next_input_revision(&mut revisions, "name-abc");
+        let restrict = next_input_revision(&mut revisions, "restrict-abc");
+
+        assert!(is_current_input_revision(&revisions, "name-abc", name));
+        assert!(is_current_input_revision(
+            &revisions,
+            "restrict-abc",
+            restrict
+        ));
     }
 
     #[test]

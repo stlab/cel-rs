@@ -7,6 +7,7 @@ use crate::model::document::Document;
 
 /// Returns the history index to restore for an undo from `current_index`,
 /// or `None` if already at the oldest recorded state.
+#[cfg(any(feature = "desktop", test))]
 #[must_use]
 pub(crate) fn undo_target(current_index: usize) -> Option<usize> {
     current_index.checked_sub(1)
@@ -15,6 +16,7 @@ pub(crate) fn undo_target(current_index: usize) -> Option<usize> {
 /// Returns the history index to restore for a redo from `current_index`
 /// within a history of `history_len` entries, or `None` if already at the
 /// newest recorded state.
+#[cfg(any(feature = "desktop", test))]
 #[must_use]
 pub(crate) fn redo_target(current_index: usize, history_len: usize) -> Option<usize> {
     let next = current_index + 1;
