@@ -298,7 +298,9 @@ fn search_acyclic(
         }
         assignment.chosen.insert(rel_id, method_idx);
 
-        if search_acyclic(order, idx + 1, relationships, forbidden, assignment) {
+        if super::digraph::is_acyclic(assignment, relationships)
+            && search_acyclic(order, idx + 1, relationships, forbidden, assignment)
+        {
             return true;
         }
 

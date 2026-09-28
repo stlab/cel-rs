@@ -1,7 +1,7 @@
 //! Builds the planner's dependency digraph from a chosen [`Assignment`], and checks
 //! whether it is acyclic.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use slotmap::SlotMap;
 
@@ -9,8 +9,6 @@ use crate::cell::{CellData, CellId};
 use crate::relationship::{RelationshipData, RelationshipId};
 
 use super::matching::Assignment;
-use super::scc::tarjan_scc;
-
 /// A node in the planner's dependency digraph: either a cell or a relationship.
 ///
 /// Modeling relationships as their own nodes (rather than only cells) allows a
@@ -91,8 +89,7 @@ pub(crate) fn add_filter_edges(
         }
         // Ensures the filtered cell is a node even when it has no args and belongs to
         // no relationship (a zero-argument filter contributes no edges below), so it
-        // always lands in its own trivial tarjan_scc component and always gets a
-        // PlanStep::FilterReclamp.
+        // always gets a PlanStep::FilterReclamp.
         adj.entry(Node::Cell(cell_id)).or_default();
         for &arg in &filter.args {
             adj.entry(Node::Cell(arg))
@@ -112,9 +109,46 @@ pub(crate) fn is_acyclic(
     relationships: &SlotMap<RelationshipId, RelationshipData>,
 ) -> bool {
     let adj = build_digraph(assignment, relationships);
-    tarjan_scc(&adj)
+    topological_order(&adj).is_some()
+}
+
+/// Returns every graph node in dependency order, or `None` when the graph contains a cycle.
+///
+/// Nodes that only appear as successors are included in the returned order.
+///
+/// - Complexity: O(V + E), where V is the number of nodes and E is the number of edges.
+pub(crate) fn topological_order<N>(adj: &HashMap<N, Vec<N>>) -> Option<Vec<N>>
+where
+    N: Copy + Eq + std::hash::Hash,
+{
+    let mut indegree = HashMap::new();
+    for (&node, successors) in adj {
+        indegree.entry(node).or_insert(0);
+        for &successor in successors {
+            *indegree.entry(successor).or_insert(0) += 1;
+        }
+    }
+
+    let mut ready: VecDeque<N> = indegree
         .iter()
-        .all(|component| component.len() == 1)
+        .filter_map(|(&node, &degree)| (degree == 0).then_some(node))
+        .collect();
+    let mut order = Vec::with_capacity(indegree.len());
+
+    while let Some(node) = ready.pop_front() {
+        order.push(node);
+        for &successor in adj.get(&node).into_iter().flatten() {
+            let degree = indegree
+                .get_mut(&successor)
+                .expect("every successor has an indegree entry");
+            *degree -= 1;
+            if *degree == 0 {
+                ready.push_back(successor);
+            }
+        }
+    }
+
+    (order.len() == indegree.len()).then_some(order)
 }
 
 #[cfg(test)]
@@ -241,5 +275,36 @@ mod tests {
         // otherwise ever insert it into the digraph — without this, plan() would
         // never emit a FilterReclamp step for it.
         assert!(adj.contains_key(&Node::Cell(a)));
+    }
+
+    #[test]
+    fn topological_order_returns_forward_order_for_a_dag() {
+        let ids = {
+            let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
+            (0..3).map(|_| map.insert(())).collect::<Vec<_>>()
+        };
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let mut adj = HashMap::new();
+        adj.insert(Node::Cell(a), vec![Node::Cell(b)]);
+        adj.insert(Node::Cell(b), vec![Node::Cell(c)]);
+
+        assert_eq!(
+            topological_order(&adj),
+            Some(vec![Node::Cell(a), Node::Cell(b), Node::Cell(c)])
+        );
+    }
+
+    #[test]
+    fn topological_order_returns_none_for_a_cycle() {
+        let ids = {
+            let mut map: SlotMap<CellId, ()> = SlotMap::with_key();
+            (0..2).map(|_| map.insert(())).collect::<Vec<_>>()
+        };
+        let (a, b) = (ids[0], ids[1]);
+        let mut adj = HashMap::new();
+        adj.insert(Node::Cell(a), vec![Node::Cell(b)]);
+        adj.insert(Node::Cell(b), vec![Node::Cell(a)]);
+
+        assert_eq!(topological_order(&adj), None);
     }
 }

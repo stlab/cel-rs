@@ -24,7 +24,7 @@ pub(crate) fn site_label(
     };
 
     match e {
-        Error::Cycle { .. } | Error::FilterCycle { .. } => match site {
+        Error::Cycle { .. } | Error::DependencyCycle { .. } => match site {
             ErrorSite::Relationship(_) => "this relationship is part of the cycle".to_string(),
             ErrorSite::Cell(c) => match cell_name(*c) {
                 Some(name) => format!("cell `{name}` is part of the cycle"),
@@ -85,8 +85,8 @@ pub(crate) fn site_label(
                 "this relationship makes the conditional invalid".to_string()
             }
             ErrorSite::Cell(c) => match cell_name(*c) {
-                Some(name) => format!("cell `{name}` is upstream of the match subject"),
-                None => "this cell is upstream of the match subject".to_string(),
+                Some(name) => format!("cell `{name}` is the match subject"),
+                None => "this cell is the match subject".to_string(),
             },
             _ => generic_site_label(site, cell_name),
         },
@@ -127,6 +127,16 @@ mod tests {
         let l1 = site_label(&e, 1, &name);
         assert!(!l0.is_empty());
         assert!(l1.contains("x")); // the cell step names the cell
+    }
+
+    #[test]
+    fn dependency_cycle_cell_sites_are_labelled_as_part_of_the_cycle() {
+        let cell = CellId::default();
+        let e = adam_rs::Error::DependencyCycle {
+            sites: vec![ErrorSite::Cell(cell)],
+        };
+        let label = site_label(&e, 0, &|_| Some("mode".to_string()));
+        assert_eq!(label, "cell `mode` is part of the cycle");
     }
 
     #[test]

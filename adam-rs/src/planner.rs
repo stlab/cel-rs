@@ -20,9 +20,7 @@
 //! not through a value-aware assignment choice.
 //!
 //! Once [`release::resolve`] succeeds, its result's induced digraph is guaranteed
-//! acyclic, so a plain topological sort (reusing [`scc::tarjan_scc`], which produces
-//! components in reverse topological order on an acyclic graph -- each component is
-//! then a single node) yields `execution_order` directly.
+//! acyclic, so Kahn's topological sort yields `execution_order` directly.
 //!
 //! A separate fixpoint, [`forced_output_cells`], computes cells that can never be a
 //! source (a relationship's method structure guarantees the cell is always produced),
@@ -45,11 +43,10 @@ use crate::{
 mod digraph;
 mod matching;
 mod release;
-mod scc;
 mod seed;
 mod trace;
 
-use digraph::{Node, add_filter_edges, build_digraph};
+use digraph::{Node, add_filter_edges, build_digraph, topological_order};
 use matching::pure_outputs;
 use release::ReleaseFailure;
 
@@ -136,19 +133,13 @@ pub(crate) fn plan(
         .map(|(id, _)| id)
         .collect();
 
-    let mut components = scc::tarjan_scc(&adj);
-    components.reverse();
-
     let mut execution_order: Vec<PlanStep> = Vec::new();
-    for component in components {
-        if component.len() != 1 {
-            let sites = trace::recover_cycle(&adj, &component)
-                .into_iter()
-                .map(node_to_site)
-                .collect();
-            return Err(Error::FilterCycle { sites });
-        }
-        match component[0] {
+    let order = topological_order(&adj).expect(
+        "release::resolve returns an acyclic relationship assignment, and \
+         Sheet::validate establishes the static guard invariant before propagate plans",
+    );
+    for node in order {
+        match node {
             Node::Relationship(rel_id) => {
                 execution_order.push(PlanStep::Method(rel_id, assignment.chosen[&rel_id]));
             }
@@ -163,9 +154,8 @@ pub(crate) fn plan(
         .iter()
         .filter(|step| matches!(step, PlanStep::Method(..)))
         .count();
-    // Believed unreachable: every active relationship lands in its own singleton
-    // `tarjan_scc` component here, since the `FilterCycle` branch above already
-    // returned on any component of size > 1 -- so `method_count == active.len()`
+    // Believed unreachable: every active relationship appears in the topological
+    // order here, since the sort cannot fail -- so `method_count == active.len()`
     // always holds and `active` is never actually infeasible when this branch runs.
     // `minimal_infeasible_set`'s own `debug_assert!` guards that assumption in
     // debug/test builds.
@@ -191,17 +181,14 @@ pub(crate) fn plan(
 /// Maps a cyclic assignment to `Relationship`/`Cell` sites in loop order.
 ///
 /// - Complexity: O(V + E) over the digraph induced by `assignment` (dominated by
-///   [`build_digraph`] and [`scc::tarjan_scc`]).
+///   [`build_digraph`] and [`topological_order`]).
 fn cycle_sites(
     assignment: &matching::Assignment,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
 ) -> Vec<ErrorSite> {
     let adj = build_digraph(assignment, relationships);
-    let component = scc::tarjan_scc(&adj)
-        .into_iter()
-        .find(|c| c.len() > 1)
-        .unwrap_or_default();
-    trace::recover_cycle(&adj, &component)
+    let nodes: Vec<Node> = adj.keys().copied().collect();
+    trace::recover_cycle(&adj, &nodes)
         .into_iter()
         .map(node_to_site)
         .collect()
@@ -693,58 +680,6 @@ mod tests {
             .position(|s| matches!(s, PlanStep::Method(r, _) if *r == bound_rel))
             .expect("bound_rel must be in the execution order");
         assert!(method_pos < reclamp_pos);
-    }
-
-    #[test]
-    fn a_filter_argument_cycle_returns_filter_cycle_error() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        let b = sheet.add_cell(0_i32);
-        sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
-            .unwrap();
-        sheet
-            .add_filter(
-                a,
-                Filter::from_fn_1(b, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
-            )
-            .unwrap();
-
-        let active: HashSet<_> = sheet.relationships().collect();
-        let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
-        assert!(matches!(result, Err(Error::FilterCycle { .. })));
-    }
-
-    #[test]
-    fn filter_cycle_error_names_its_members() {
-        use crate::error::ErrorSite;
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        let b = sheet.add_cell(0_i32);
-        sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
-            .unwrap();
-        sheet
-            .add_filter(
-                a,
-                Filter::from_fn_1(b, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
-            )
-            .unwrap();
-
-        let active: HashSet<_> = sheet.relationships().collect();
-        let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
-        let sites = match result {
-            Err(Error::FilterCycle { sites }) => sites,
-            Err(other) => panic!("{other:?}"),
-            Ok(_) => panic!("expected FilterCycle error"),
-        };
-        assert!(!sites.is_empty());
-        assert!(sites.iter().any(|s| matches!(s, ErrorSite::Cell(_))));
-        assert!(
-            sites
-                .iter()
-                .any(|s| matches!(s, ErrorSite::Relationship(_)))
-        );
     }
 
     #[test]

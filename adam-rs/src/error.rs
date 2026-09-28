@@ -102,16 +102,14 @@ pub enum Error {
     },
 
     /// A conditional is structurally invalid: the cell was not found, a referenced
-    /// relationship was not found, a branch relationship that shares a cell with the match
-    /// cell or any of its unconditional upstream contributors has more than one method, a
-    /// relationship appears in more than one conditional branch, a branch key's type does
-    /// not match the cell's registered type, or a branch has no keys.
+    /// relationship was not found, a relationship appears in more than one conditional
+    /// branch, a branch key's type does not match the cell's registered type, or a branch
+    /// has no keys.
     InvalidConditional {
         /// Empty for the expression-output type-mismatch case; the match-cell
         /// type-mismatch case names the cell (`sites = [Cell(match_cell)]`). The
-        /// duplicate-relationship and multi-method-branch cases name the offending
-        /// relationship(s) (and, for the multi-method case, the contributing cell).
-        /// Empty for the missing-relationship and empty-branch-keys cases.
+        /// duplicate-relationship case names the offending relationship. Empty for the
+        /// missing-relationship and empty-branch-keys cases.
         sites: Vec<ErrorSite>,
     },
 
@@ -144,18 +142,18 @@ pub enum Error {
     /// evaluating the requirement against current values returns `Ok(false)`.
     InvalidRequirement,
 
-    /// The combined dependency digraph — relationship edges plus a filtered source
-    /// cell's argument edges (see `Sheet::propagate`'s planning pass) — has a
-    /// non-trivial strongly connected component that is not purely a relationship
-    /// cycle (that case is `Error::Cycle`). `release::resolve` guarantees the
-    /// relationship-only subgraph is acyclic but has no visibility into filter edges,
-    /// so this is sound but incomplete: a different, equally-valid relationship
-    /// assignment might have avoided the cycle. See issue #153.
-    FilterCycle {
-        /// The cycle's members in loop-traversal order, alternating `Relationship` and
-        /// `Cell` entries (either kind may be `sites[0]`, for the same reason as
-        /// `Cycle::sites`), including the filtered `Cell` and the `Cell` → `Cell` edge
-        /// from its filter argument.
+    /// A filter's argument, or a conditional's match subject, depends on a cell that
+    /// filter or conditional governs, in the sheet's static dependency graph: every
+    /// method's `input → output` edges (a self-referencing input adds none), each
+    /// filter's `argument → filtered` guard edges, and each conditional's
+    /// `match cell → output` guard edges for every method output of its branch and
+    /// default relationships. Returned by `Sheet::validate` and by `Sheet::propagate`,
+    /// which validates before mutating propagation state.
+    DependencyCycle {
+        /// The cycle in dependency order, starting at the governed cell `t` and ending at
+        /// the guard cell `g` whose guard edge `g → t` closes it. `Cell` entries are
+        /// separated by the `Relationship` each method hop runs through. Two consecutive
+        /// `Cell` entries are a guard hop.
         sites: Vec<ErrorSite>,
     },
 }
@@ -189,9 +187,9 @@ impl std::fmt::Display for Error {
             }
             Error::InvalidFilter => write!(f, "filter is structurally invalid"),
             Error::InvalidRequirement => write!(f, "requirement is structurally invalid"),
-            Error::FilterCycle { .. } => write!(
+            Error::DependencyCycle { .. } => write!(
                 f,
-                "a filter's argument dependency closes a cycle with the selected methods"
+                "a filter or conditional depends on a cell it governs (dependency cycle)"
             ),
         }
     }
@@ -224,7 +222,7 @@ impl Error {
             | Error::InvalidCellKind { sites }
             | Error::Conflict { sites }
             | Error::Cycle { sites }
-            | Error::FilterCycle { sites }
+            | Error::DependencyCycle { sites }
             | Error::InvalidConditional { sites } => sites,
             _ => &[],
         }
@@ -436,17 +434,24 @@ mod tests {
     }
 
     #[test]
-    fn filter_cycle_display_contains_cycle() {
+    fn dependency_cycle_display_contains_cycle() {
         assert!(
-            Error::FilterCycle { sites: vec![] }
+            Error::DependencyCycle { sites: vec![] }
                 .to_string()
                 .contains("cycle")
         );
     }
 
     #[test]
-    fn filter_cycle_has_no_source() {
-        assert!(std::error::Error::source(&Error::FilterCycle { sites: vec![] }).is_none());
+    fn dependency_cycle_has_no_source() {
+        assert!(std::error::Error::source(&Error::DependencyCycle { sites: vec![] }).is_none());
+    }
+
+    #[test]
+    fn dependency_cycle_exposes_its_sites() {
+        let site = ErrorSite::Cell(CellId::default());
+        let e = Error::DependencyCycle { sites: vec![site] };
+        assert_eq!(e.sites(), &[site]);
     }
 
     #[test]

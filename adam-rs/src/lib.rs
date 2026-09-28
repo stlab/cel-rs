@@ -120,7 +120,7 @@
 //!   self-referencing outputs are claimed exactly like any other
 //!   ([`Error::Conflict`] when infeasible).
 //! - The selected methods' induced dependency digraph is acyclic before execution
-//!   ([`Error::Cycle`]/[`Error::FilterCycle`] when not).
+//!   ([`Error::Cycle`] when not).
 //! - A self-referencing input never reads a same-round derived value. Instead it reads a
 //!   seed reconstructed from `source`: `planner::build_seeds` folds every other
 //!   relationship incident to the cell (excluding its own claimant) through that

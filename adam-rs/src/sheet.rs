@@ -18,6 +18,8 @@ use crate::{
     requirement::{Requirement, RequirementData, RequirementId},
 };
 
+mod dependency;
+
 /// Owns a complete property model constraint graph.
 ///
 /// Create cells with [`Sheet::add_cell`], define multi-way constraints with
@@ -74,6 +76,8 @@ pub struct Sheet {
     /// invalidation, matching every other per-cell set/map `Sheet` already maintains
     /// for its own lifetime.
     filter_dependents: HashMap<CellId, Vec<CellId>>,
+    /// Whether static guard independence has been validated for the current structure.
+    guard_independent: bool,
 }
 
 /// A conditional's evaluated match value: borrowed (existing cell, no allocation) or owned
@@ -110,6 +114,7 @@ impl Sheet {
             last_requirement_violations: HashMap::new(),
             last_filter_violations: HashMap::new(),
             filter_dependents: HashMap::new(),
+            guard_independent: true,
         }
     }
 
@@ -180,8 +185,11 @@ impl Sheet {
     ///   cell's registered `TypeId`.
     /// - `Error::InvalidCellKind` — a method's output cell is `Source`-kind.
     ///
+    /// Guard independence is checked by [`Sheet::validate`] and by [`Sheet::propagate`],
+    /// not by this mutator.
+    ///
     /// - Complexity: O(m² × c) where m is the total number of methods and c is the
-    ///   maximum number of cells per method (due to duplicate output set comparison).
+    ///   maximum number of cells per method, due to duplicate output set comparison.
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
             return Err(Error::InvalidMethod { sites: vec![] });
@@ -307,6 +315,7 @@ impl Sheet {
             }
         }
 
+        self.guard_independent = false;
         Ok(rel_id)
     }
 
@@ -326,10 +335,11 @@ impl Sheet {
     /// - `Error::TypeMismatch` — (expression match subject only) an input cell's registered
     ///   type doesn't match the expression's declared type for that input.
     /// - `Error::InvalidConditional` — the match subject's output type does not match `T`;
-    ///   a branch relationship shares a cell with the match subject or any of its
-    ///   unconditional upstream contributors and has more than one method; a referenced
-    ///   relationship does not exist; a relationship already appears in another
-    ///   conditional branch; or a branch has no keys.
+    ///   a referenced relationship does not exist; a relationship already appears in
+    ///   another conditional branch; or a branch has no keys.
+    ///
+    /// Guard independence is checked by [`Sheet::validate`] and by [`Sheet::propagate`],
+    /// not by this mutator.
     ///
     /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R =
     ///   relationships per branch.
@@ -339,7 +349,7 @@ impl Sheet {
         branches: Vec<(Vec<T>, Vec<RelationshipId>)>,
         default: Vec<RelationshipId>,
     ) -> Result<ConditionalId, Error> {
-        let match_cells: Vec<CellId> = match &source.0 {
+        match &source.0 {
             MatchSource::Cell(cell) => {
                 let cell_data = self.cells.get(*cell).ok_or(Error::InvalidId)?;
                 if cell_data.type_id != TypeId::of::<T>() {
@@ -347,7 +357,6 @@ impl Sheet {
                         sites: vec![ErrorSite::Cell(*cell)],
                     });
                 }
-                vec![*cell]
             }
             MatchSource::Expr(expr) => {
                 if expr.output_type != TypeId::of::<T>() {
@@ -363,7 +372,6 @@ impl Sheet {
                         });
                     }
                 }
-                expr.inputs.clone()
             }
         };
 
@@ -373,60 +381,10 @@ impl Sheet {
             .flat_map(|(_, rels)| rels.iter().copied())
             .chain(default.iter().copied())
             .collect();
-        let all_rels_set: HashSet<RelationshipId> = all_rels.iter().copied().collect();
-
-        // Compute the set of cells that contribute to the match subject: BFS upstream
-        // through unconditional relationships (excluding already-committed conditional
-        // relationships and the relationships currently being added), seeded from *every*
-        // match cell. A branch relationship with multiple methods is invalid if any of its
-        // adjacent cells is in this contributing set, because the branch could then flip
-        // method selection in the match subject's upstream subgraph.
-        let contributing_cells: HashSet<CellId> = {
-            let mut cells: HashSet<CellId> = HashSet::new();
-            let mut queue: std::collections::VecDeque<CellId> = std::collections::VecDeque::new();
-            for &cell in &match_cells {
-                if cells.insert(cell) {
-                    queue.push_back(cell);
-                }
-            }
-            while let Some(c) = queue.pop_front() {
-                if let Some(cell_data) = self.cells.get(c) {
-                    for &rel_id in &cell_data.adj {
-                        if self.conditional_relationships.contains(&rel_id)
-                            || all_rels_set.contains(&rel_id)
-                        {
-                            continue;
-                        }
-                        let rel = &self.relationships[rel_id];
-                        if !rel.methods.iter().any(|m| m.outputs.contains(&c)) {
-                            continue;
-                        }
-                        for &adj_cell in &rel.adj {
-                            if cells.insert(adj_cell) {
-                                queue.push_back(adj_cell);
-                            }
-                        }
-                    }
-                }
-            }
-            cells
-        };
 
         for &rel_id in &all_rels {
-            let rel = self
-                .relationships
-                .get(rel_id)
-                .ok_or(Error::InvalidConditional { sites: vec![] })?;
-            if rel.adj.iter().any(|c| contributing_cells.contains(c)) && rel.methods.len() != 1 {
-                return Err(Error::InvalidConditional {
-                    sites: {
-                        let mut s = vec![ErrorSite::Relationship(rel_id)];
-                        if let Some(&c) = rel.adj.iter().find(|c| contributing_cells.contains(c)) {
-                            s.push(ErrorSite::Cell(c));
-                        }
-                        s
-                    },
-                });
+            if !self.relationships.contains_key(rel_id) {
+                return Err(Error::InvalidConditional { sites: vec![] });
             }
             if self.conditional_relationships.contains(&rel_id) {
                 return Err(Error::InvalidConditional {
@@ -470,11 +428,14 @@ impl Sheet {
             self.conditional_relationships.insert(rel_id);
         }
 
-        Ok(self.conditionals.insert(ConditionalData {
+        let id = self.conditionals.insert(ConditionalData {
             source: source.0,
             branches: typed_branches,
             default,
-        }))
+        });
+
+        self.guard_independent = false;
+        Ok(id)
     }
 
     /// Returns `true` if `id` is already claimed as some existing method's output —
@@ -630,7 +591,10 @@ impl Sheet {
     /// - `Error::TypeMismatch` — an argument cell's registered type does not match the
     ///   type `filter` declared for it.
     ///
-    /// - Complexity: O(a) where a is the number of `filter`'s argument cells.
+    /// Guard independence is checked by [`Sheet::validate`] and by [`Sheet::propagate`],
+    /// not by this mutator.
+    ///
+    /// - Complexity: O(a) where a is the number of filter argument cells.
     pub fn add_filter(&mut self, cell: CellId, filter: Filter) -> Result<(), Error> {
         let cell_type = self.cells.get(cell).ok_or(Error::InvalidId)?.type_id;
         if self.cells[cell].filter.is_some() {
@@ -657,6 +621,7 @@ impl Sheet {
             self.filter_dependents.entry(arg).or_default().push(cell);
         }
         self.cells[cell].filter = Some(filter.0);
+        self.guard_independent = false;
         Ok(())
     }
 
@@ -1080,6 +1045,53 @@ impl Sheet {
         }
     }
 
+    /// Validates static guard independence for the current sheet structure.
+    ///
+    /// A filter's argument cells and a conditional's match cells must not depend on any
+    /// cell governed by that filter or conditional in the static dependency graph. A
+    /// successful call records the current structure as validated; a failed call leaves
+    /// it unvalidated, so the same structure reports the dependency cycle again on the
+    /// next [`Sheet::validate`] or [`Sheet::propagate`] call.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::DependencyCycle` — a guard edge lies on a cycle in the static
+    ///   dependency graph.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use adam_rs::{Filter, Method, Sheet};
+    ///
+    /// let mut sheet = Sheet::new();
+    /// let limit = sheet.add_cell(10_i32);
+    /// let value = sheet.add_cell(5_i32);
+    /// let copy = sheet.add_cell(0_i32);
+    /// sheet
+    ///     .add_relationship(vec![Method::from_fn_1_1(value, copy, |x: &i32| Ok(*x))])
+    ///     .unwrap();
+    /// sheet
+    ///     .add_filter(value, Filter::from_fn_1(limit, |v: &i32, hi: &i32| Ok((*v).min(*hi))))
+    ///     .unwrap();
+    /// sheet.validate().unwrap();
+    /// ```
+    ///
+    /// - Complexity: O(1) when no structural mutation has happened since the last
+    ///   successful validation; otherwise O(V + E), where V is the number of cells and
+    ///   E is the number of static method and guard edges.
+    pub fn validate(&mut self) -> Result<(), Error> {
+        if self.guard_independent {
+            return Ok(());
+        }
+        if let Some(path) = self.guard_violation() {
+            return Err(Error::DependencyCycle {
+                sites: path.into_sites(),
+            });
+        }
+        self.guard_independent = true;
+        Ok(())
+    }
+
     /// Iterates all live cell IDs in the sheet.
     ///
     /// - Complexity: O(n) where n is the number of cells.
@@ -1307,7 +1319,8 @@ impl Sheet {
 
     /// Runs the planning pass and executes the selected methods.
     ///
-    /// Clears the changed-cell set from the previous `propagate()` call before planning.
+    /// Validates static guard independence before mutating state, then clears the
+    /// changed-cell set from the previous `propagate()` call before planning.
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
@@ -1342,6 +1355,8 @@ impl Sheet {
     ///
     /// # Errors
     ///
+    /// - `Error::DependencyCycle` — a filter or conditional guard edge lies on a cycle in
+    ///   the static dependency graph.
     /// - `Error::Conflict` — no valid method assignment exists.
     /// - `Error::MethodFailed` — a method's function returned an error, a method
     ///   produced the wrong number of outputs, or a requirement's function returned
@@ -1349,6 +1364,7 @@ impl Sheet {
     /// - `Error::TypeMismatch` — a method output's runtime type does not match the
     ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
+        self.validate()?;
         self.clear_changed();
 
         // Phase 0: record cells with a live derived override (for Phase 5), then clear
@@ -1954,8 +1970,7 @@ mod tests {
     }
 
     #[test]
-    fn add_conditional_returns_invalid_conditional_for_multi_method_relationship_involving_match_cell()
-     {
+    fn validate_returns_dependency_cycle_for_multi_method_relationship_involving_match_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -1966,34 +1981,36 @@ mod tests {
                 Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
             ])
             .unwrap();
-        let result =
-            sheet.add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
+        sheet
+            .add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        assert!(matches!(
+            sheet.validate(),
+            Err(Error::DependencyCycle { .. })
+        ));
     }
 
     #[test]
-    fn invalid_conditional_multi_method_branch_names_the_relationship() {
+    fn dependency_cycle_from_a_conditional_names_the_match_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
         // Relationship has two methods and involves `a` (the match cell).
-        let branch_rel = sheet
+        let rel = sheet
             .add_relationship(vec![
                 Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
                 Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
             ])
             .unwrap();
-        let result = sheet.add_conditional(
-            MatchExpr::cell(a),
-            vec![(vec![0_i32], vec![branch_rel])],
-            vec![],
-        );
-        let err = result.unwrap_err();
-        assert!(err.sites().contains(&ErrorSite::Relationship(branch_rel)));
+        sheet
+            .add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        let err = sheet.validate().unwrap_err();
+        assert!(err.sites().contains(&ErrorSite::Cell(a)));
     }
 
     #[test]
-    fn add_conditional_returns_error_when_branch_rel_involves_cell_upstream_of_match_cell() {
+    fn add_conditional_returns_error_when_branch_rel_writes_a_cell_upstream_of_match_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -2009,13 +2026,17 @@ mod tests {
                 Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
             ])
             .unwrap();
-        let result =
-            sheet.add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
+        sheet
+            .add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        assert!(matches!(
+            sheet.validate(),
+            Err(Error::DependencyCycle { .. })
+        ));
     }
 
     #[test]
-    fn add_conditional_returns_error_when_branch_rel_involves_cell_upstream_of_either_expr_input() {
+    fn add_conditional_returns_error_when_branch_rel_writes_a_cell_upstream_of_either_expr_input() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -2034,8 +2055,13 @@ mod tests {
             ])
             .unwrap();
         let expr = MatchExpr::from_fn_2([p, q], |x: &i32, y: &i32| Ok(*x + *y));
-        let result = sheet.add_conditional(expr, vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
+        sheet
+            .add_conditional(expr, vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        assert!(matches!(
+            sheet.validate(),
+            Err(Error::DependencyCycle { .. })
+        ));
     }
 
     #[test]
@@ -2103,7 +2129,7 @@ mod tests {
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
         // Relationship has two methods but does not involve `mode` (the match cell).
-        // Branch relationships that don't contribute to the match cell may have any
+        // Branch relationships whose outputs do not reach the match cell may have any
         // number of methods.
         let rel = sheet
             .add_relationship(vec![
