@@ -238,8 +238,8 @@ fn compute_seed(
 ///
 /// # Errors
 ///
-/// - `Error::Conflict` — `rel_id` could seed `target`, but no candidate method survives
-///   the elimination replay.
+/// - `Error::Conflict` — `rel_id` could seed `target`, but the elimination replay leaves
+///   either no candidate method or more than one surviving candidate.
 ///
 /// - Complexity: O(E · M · K²) where E = `rel_id`'s non-`target` referenced cells, M =
 ///   methods in the relationship, K = cells per method.
@@ -272,12 +272,12 @@ fn select_seed_method(
         }
     }
 
-    debug_assert_eq!(
-        candidates.len(),
-        1,
-        "antichain outputs must leave exactly one sibling seed method per target",
-    );
-    Ok(candidates.into_iter().next())
+    match candidates.as_slice() {
+        [survivor] => Ok(Some(*survivor)),
+        _ => Err(Error::Conflict {
+            sites: vec![ErrorSite::Relationship(rel_id)],
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -331,6 +331,56 @@ mod tests {
         let err = build_seeds(
             &[PlanStep::Method(sibling, 2), PlanStep::Method(claimant, 0)],
             &[a, b, x],
+            &sheet.cells,
+            &sheet.relationships,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::Error::Conflict {
+                sites
+            } if sites == vec![ErrorSite::Relationship(sibling)]
+        ));
+    }
+
+    #[test]
+    fn build_seeds_reports_conflict_when_multiple_sibling_methods_survive() {
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(0_i32);
+        let a = sheet.add_cell(5_i32);
+        let b = sheet.add_cell(7_i32);
+        let i32_type = TypeId::of::<i32>();
+
+        let sibling = sheet
+            .add_relationship(vec![
+                Method::new(
+                    vec![x, b],
+                    vec![x, a],
+                    vec![i32_type, i32_type],
+                    vec![i32_type, i32_type],
+                    |_| Ok(vec![Box::new(11_i32), Box::new(13_i32)]),
+                ),
+                Method::new(
+                    vec![x, a],
+                    vec![x, b],
+                    vec![i32_type, i32_type],
+                    vec![i32_type, i32_type],
+                    |_| Ok(vec![Box::new(17_i32), Box::new(19_i32)]),
+                ),
+            ])
+            .unwrap();
+        let claimant = sheet
+            .add_relationship(vec![Method::from_fn_1_1(
+                x,
+                x,
+                |value: &i32| Ok(*value + 1),
+            )])
+            .unwrap();
+
+        let err = build_seeds(
+            &[PlanStep::Method(sibling, 0), PlanStep::Method(claimant, 0)],
+            &[x],
             &sheet.cells,
             &sheet.relationships,
         )
