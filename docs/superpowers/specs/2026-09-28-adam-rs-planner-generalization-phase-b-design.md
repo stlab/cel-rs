@@ -67,8 +67,11 @@ for the selected sibling method.
 
 ## Data flow and error handling
 
-`Sheet::propagate` obtains the plan and then calls fallible `build_seeds`. A seed-cycle
-error is returned before execution mutates propagation state. The error uses the same
+`Sheet::propagate` evaluates the conditional pre-plan and conditional expressions once
+into private staged propagation state. The general plan and fallible `build_seeds` read
+that staged state; propagation publishes staged writes only after planning, seed
+validation, and staged method execution succeed. A seed-cycle error therefore leaves live
+values untouched without replaying arbitrary callbacks. The error uses the same
 `Error::sites()` mechanism as dependency and planner cycles, and its `Display` text
 identifies a seed dependency cycle.
 

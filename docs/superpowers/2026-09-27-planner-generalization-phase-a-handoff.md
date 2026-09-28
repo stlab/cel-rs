@@ -67,9 +67,9 @@ self-referencing seed construction as part of the same deterministic release-sta
 - If two equal-primary sibling folds are still structurally identical under that comparison,
   `build_seeds` returns `Error::Conflict` naming the ambiguous relationships instead of silently
   preserving adjacency order.
-- `Sheet::propagate()` clears stale `changed()` state before seed-cycle preflight and returns
-  `Error::SeedCycle` before any pre-plan or execution writes, so conditional preflight cannot leak
-  mutations and a seed-cycle failure leaves `changed()` empty for that call.
+- `Sheet::propagate()` evaluates pre-plan methods and conditional expressions once into private
+  staged state, validates the active plan and seeds against that state, and commits only after
+  validation succeeds. A seed-cycle failure exposes no staged writes and leaves `changed()` empty.
 
 ### 2026-09-28 Task 6 final-review follow-up
 

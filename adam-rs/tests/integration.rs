@@ -2,6 +2,10 @@
 
 use std::any::TypeId;
 use std::collections::HashSet;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use adam_rs::{
     CellId, CellKind, Error, ErrorSite, MatchExpr, Method, RelationshipId, Requirement,
@@ -2760,6 +2764,89 @@ fn conditional_seed_cycle_leaves_preplan_mutations_unexposed() {
     assert_eq!(*sheet.read::<i32>(b).unwrap(), b_before_error);
     assert_eq!(*sheet.read::<i32>(c).unwrap(), c_before_error);
     assert_eq!(*sheet.read::<i32>(d).unwrap(), d_before_error);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn propagation_evaluates_preplan_and_conditional_callbacks_once() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(1_i32);
+    let selected = sheet.add_cell(0_i32);
+    let output = sheet.add_cell(0_i32);
+    let method_calls = Arc::new(AtomicUsize::new(0));
+    let method_calls_for_callback = Arc::clone(&method_calls);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            mode,
+            selected,
+            move |_value: &i32| {
+                Ok(method_calls_for_callback.fetch_add(1, Ordering::SeqCst) as i32 + 1)
+            },
+        )])
+        .unwrap();
+    let active = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            selected,
+            output,
+            |value: &i32| Ok(*value),
+        )])
+        .unwrap();
+    let conditional_calls = Arc::new(AtomicUsize::new(0));
+    let conditional_calls_for_callback = Arc::clone(&conditional_calls);
+    sheet
+        .add_conditional(
+            MatchExpr::from_fn_1(selected, move |value: &i32| {
+                conditional_calls_for_callback.fetch_add(1, Ordering::SeqCst);
+                Ok(*value)
+            }),
+            vec![(vec![1_i32], vec![active])],
+            vec![],
+        )
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(method_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(conditional_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*sheet.read::<i32>(selected).unwrap(), 1);
+    assert_eq!(*sheet.read::<i32>(output).unwrap(), 1);
+}
+
+#[test]
+fn stateful_conditional_seed_cycle_leaves_sheet_unchanged() {
+    let (mut sheet, a, b, c, d, _s, rel1, rel2) = seed_cycle_sheet();
+    let mode = sheet.add_cell(0_i32);
+    let selected = sheet.add_cell(0_i32);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_callback = Arc::clone(&calls);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            mode,
+            selected,
+            move |_value: &i32| {
+                calls_for_callback.fetch_add(1, Ordering::SeqCst);
+                Ok(1_i32)
+            },
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(selected),
+            vec![(vec![1_i32], vec![rel1, rel2])],
+            vec![],
+        )
+        .unwrap();
+
+    let err = sheet.propagate().unwrap_err();
+
+    assert!(matches!(err, Error::SeedCycle { .. }));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*sheet.read::<i32>(mode).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(selected).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), -1);
+    assert_eq!(*sheet.read::<i32>(d).unwrap(), -2);
     assert_eq!(sheet.changed().count(), 0);
 }
 

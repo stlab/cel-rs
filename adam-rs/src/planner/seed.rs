@@ -37,12 +37,13 @@ use crate::relationship::{RelationshipData, RelationshipId};
 use super::{PlanStep, Seeds, matching::pure_outputs};
 
 /// Bundles the immutable planner state one seed-construction pass reuses.
-struct SeedBuildContext<'a> {
-    claimant: &'a HashMap<CellId, RelationshipId>,
-    active: &'a HashSet<RelationshipId>,
-    elimination_order: &'a [CellId],
-    cells: &'a SlotMap<CellId, CellData>,
-    relationships: &'a SlotMap<RelationshipId, RelationshipData>,
+struct SeedBuildContext<'context, 'source> {
+    claimant: &'context HashMap<CellId, RelationshipId>,
+    active: &'context HashSet<RelationshipId>,
+    elimination_order: &'context [CellId],
+    cells: &'context SlotMap<CellId, CellData>,
+    relationships: &'context SlotMap<RelationshipId, RelationshipData>,
+    source: &'context dyn Fn(CellId) -> &'source dyn Any,
 }
 
 /// Stores the mutable memoization and DFS path state for one seed-construction pass.
@@ -76,6 +77,8 @@ struct SeedFoldOrderKey {
 /// - Precondition: `elimination_order` is the exact cell order the planner's release pass
 ///   evaluated for tentative elimination this round; `build_seeds` consumes that
 ///   elimination state verbatim when selecting sibling seed methods.
+/// - Precondition: `source(id)` returns a value of `cells[id].type_id` for every live
+///   `id` referenced by `execution_order`.
 ///
 /// # Errors
 ///
@@ -89,11 +92,12 @@ struct SeedFoldOrderKey {
 /// - Complexity: O(S · A · M · K²) where S = self-referencing claimed cells, A =
 ///   relationships incident to each, M = methods per sibling relationship, K = cells per
 ///   method; the recursion visits each cell once (memoized).
-pub(crate) fn build_seeds(
+pub(crate) fn build_seeds<'source>(
     execution_order: &[PlanStep],
     elimination_order: &[CellId],
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
+    source: &dyn Fn(CellId) -> &'source dyn Any,
 ) -> Result<Seeds, Error> {
     let mut claimant: HashMap<CellId, RelationshipId> = HashMap::new();
     let mut active: HashSet<RelationshipId> = HashSet::new();
@@ -118,6 +122,7 @@ pub(crate) fn build_seeds(
         elimination_order,
         cells,
         relationships,
+        source,
     };
     let mut traversal = SeedTraversal {
         seeds: HashMap::new(),
@@ -129,6 +134,23 @@ pub(crate) fn build_seeds(
         compute_seed(cell, &context, &mut traversal)?;
     }
     Ok(traversal.seeds)
+}
+
+/// Computes seeds against the sheet's live source values for unit tests.
+#[cfg(test)]
+fn build_seeds_live(
+    execution_order: &[PlanStep],
+    elimination_order: &[CellId],
+    cells: &SlotMap<CellId, CellData>,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+) -> Result<Seeds, Error> {
+    build_seeds(
+        execution_order,
+        elimination_order,
+        cells,
+        relationships,
+        &|id| cells[id].source.as_ref(),
+    )
 }
 
 /// Populates `seeds[x]` with `x`'s aspiration, computed by folding every incident
@@ -176,7 +198,7 @@ pub(crate) fn build_seeds(
 /// - `Error::SeedCycle` — a sibling seed dependency reaches a currently visiting cell.
 fn compute_seed(
     x: CellId,
-    context: &SeedBuildContext<'_>,
+    context: &SeedBuildContext<'_, '_>,
     traversal: &mut SeedTraversal,
 ) -> Result<(), Error> {
     if traversal.seeds.contains_key(&x) {
@@ -264,13 +286,13 @@ fn compute_seed(
                     if input == x {
                         accumulated
                             .as_deref()
-                            .unwrap_or_else(|| context.cells[x].source.as_ref())
+                            .unwrap_or_else(|| (context.source)(x))
                     } else {
                         traversal
                             .seeds
                             .get(&input)
                             .map(|value| value.as_ref())
-                            .unwrap_or_else(|| context.cells[input].source.as_ref())
+                            .unwrap_or_else(|| (context.source)(input))
                     }
                 })
                 .collect();
@@ -484,7 +506,7 @@ mod tests {
             )])
             .unwrap();
 
-        let err = build_seeds(
+        let err = build_seeds_live(
             &[PlanStep::Method(sibling, 2), PlanStep::Method(claimant, 0)],
             &[a, b, x],
             &sheet.cells,
@@ -534,7 +556,7 @@ mod tests {
             )])
             .unwrap();
 
-        let err = build_seeds(
+        let err = build_seeds_live(
             &[PlanStep::Method(sibling, 0), PlanStep::Method(claimant, 0)],
             &[x],
             &sheet.cells,
@@ -651,7 +673,7 @@ mod tests {
 
         let (forward_sheet, forward_up, forward_down, forward_claimant, forward_x) =
             build_sheet(false);
-        let forward_seeds = build_seeds(
+        let forward_seeds = build_seeds_live(
             &[
                 PlanStep::Method(forward_up, 0),
                 PlanStep::Method(forward_down, 1),
@@ -665,7 +687,7 @@ mod tests {
 
         let (reversed_sheet, reversed_up, reversed_down, reversed_claimant, reversed_x) =
             build_sheet(true);
-        let reversed_seeds = build_seeds(
+        let reversed_seeds = build_seeds_live(
             &[
                 PlanStep::Method(reversed_up, 0),
                 PlanStep::Method(reversed_down, 1),
@@ -774,7 +796,7 @@ mod tests {
             .add_relationship(vec![Method::from_fn_1_1(x, x, |value: &i32| Ok(*value))])
             .unwrap();
 
-        let err = build_seeds(
+        let err = build_seeds_live(
             &[
                 PlanStep::Method(first, 0),
                 PlanStep::Method(second, 0),
