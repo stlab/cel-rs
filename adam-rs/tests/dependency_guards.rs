@@ -118,3 +118,56 @@ fn add_filter_rejects_a_filter_closing_an_existing_conditional_guard() {
     ));
     assert_eq!(sheet.filter_args(m), None);
 }
+
+#[test]
+fn add_relationship_rejects_a_relationship_that_makes_a_filter_argument_dependent() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(5_i32);
+    let b = sheet.add_cell(0_i32);
+    sheet.add_filter(a, min_filter(b)).unwrap();
+    let err = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
+        .unwrap_err();
+    match err {
+        Error::DependencyCycle { sites } => assert_eq!(
+            sites,
+            vec![
+                ErrorSite::Cell(a),
+                ErrorSite::MethodIndex(0),
+                ErrorSite::Cell(b)
+            ]
+        ),
+        other => panic!("expected DependencyCycle, got {other:?}"),
+    }
+    assert_eq!(
+        sheet.relationships().count(),
+        0,
+        "the sheet must be left unchanged"
+    );
+    sheet.propagate().unwrap();
+    assert_eq!(
+        *sheet.read::<i32>(a).unwrap(),
+        0,
+        "filter still clamps a to b"
+    );
+}
+
+#[test]
+fn add_relationship_rejects_a_relationship_that_feeds_a_match_cell_from_its_branch() {
+    // Conditional on p governs k -> o; a later unconditional o -> p closes the cycle.
+    let mut sheet = Sheet::new();
+    let p = sheet.add_cell(0_i32);
+    let k = sheet.add_cell(0_i32);
+    let o = sheet.add_cell(0_i32);
+    let r = sheet
+        .add_relationship(vec![Method::from_fn_1_1(k, o, |x: &i32| Ok(*x))])
+        .unwrap();
+    sheet
+        .add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![r])], vec![])
+        .unwrap();
+    assert!(matches!(
+        sheet.add_relationship(vec![Method::from_fn_1_1(o, p, |x: &i32| Ok(*x))]),
+        Err(Error::DependencyCycle { .. })
+    ));
+    assert_eq!(sheet.relationships().count(), 1);
+}

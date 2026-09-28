@@ -918,12 +918,13 @@ impl AdamParser {
                 //
                 // Resolved strictly from `sites().first()`, not by scanning for the first
                 // `MethodIndex` anywhere in the list: every `Error` variant `add_relationship`
-                // can return leads with a `MethodIndex` identifying the primary offending
-                // binding (see `Sheet::add_relationship`'s `sites` construction, in
-                // adam-rs/src/sheet.rs). Making that dependence explicit means a future variant
-                // that leads with some other site kind fails safe here (falls back to the whole
-                // block) instead of this code silently treating a later, unrelated `MethodIndex`
-                // site as primary.
+                // returns with a `MethodIndex` identifying the primary offending binding except
+                // `DependencyCycle`, which can lead with a `Cell` when the path starts at an
+                // existing governed cell (see `Sheet::add_relationship`'s `sites` construction,
+                // in adam-rs/src/sheet.rs). Making that dependence explicit means variants that
+                // lead with some other site kind fail safe here (fall back to the whole block)
+                // instead of this code silently treating a later, unrelated `MethodIndex` site as
+                // primary.
                 let primary_idx = match e.sites().first() {
                     Some(ErrorSite::MethodIndex(i)) => Some(*i),
                     _ => None,

@@ -181,9 +181,15 @@ impl Sheet {
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
     /// - `Error::InvalidCellKind` — a method's output cell is `Source`-kind.
+    /// - `Error::DependencyCycle` — the relationship's methods would make some filter's
+    ///   argument or conditional's match subject depend on a cell it governs; method hops
+    ///   through this relationship are reported as `MethodIndex`. The sheet is left
+    ///   unchanged.
     ///
-    /// - Complexity: O(m² × c) where m is the total number of methods and c is the
-    ///   maximum number of cells per method (due to duplicate output set comparison).
+    /// - Complexity: O(m² × c) + O(G · (V + E)) where m is the total number of
+    ///   methods, c is the maximum number of cells per method (due to duplicate
+    ///   output set comparison), G = filters + conditionals, V = cells, and E =
+    ///   dependency edges.
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
             return Err(Error::InvalidMethod { sites: vec![] });
@@ -307,6 +313,20 @@ impl Sheet {
             {
                 cell.adj.push(rel_id);
             }
+        }
+
+        if let Some(path) = self.guard_violation() {
+            let rel = self.relationships.remove(rel_id).expect("inserted above");
+            for cell_id in rel.adj {
+                if let Some(cell) = self.cells.get_mut(cell_id)
+                    && cell.adj.last() == Some(&rel_id)
+                {
+                    cell.adj.pop();
+                }
+            }
+            return Err(Error::DependencyCycle {
+                sites: path.into_sites(Some(rel_id)),
+            });
         }
 
         Ok(rel_id)
