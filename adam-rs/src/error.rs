@@ -42,11 +42,11 @@ pub enum Error {
     /// A `CellId` or `RelationshipId` was not found in the sheet.
     InvalidId,
 
-    /// No valid method assignment exists (overconstrained).
+    /// No valid method assignment exists, or staged prerequisite provenance conflicts
+    /// with the final selected plan.
     Conflict {
-        /// A subset-minimal group of relationships that together admit no valid
-        /// method assignment: removing any member of the group makes the remainder
-        /// feasible. Every entry is `ErrorSite::Relationship`.
+        /// Relationships, methods, and cells involved in an impossible assignment or
+        /// an incompatible staged prerequisite reuse.
         sites: Vec<ErrorSite>,
     },
 
@@ -56,6 +56,15 @@ pub enum Error {
         /// `Cell` entries for the length of the loop. Either kind may be `sites[0]`:
         /// the loop is reported starting at the first node revisited during recovery,
         /// which is not necessarily a `Relationship`.
+        sites: Vec<ErrorSite>,
+    },
+
+    /// The seed dependency graph contains a non-self cycle.
+    SeedCycle {
+        /// The cycle's members in deterministic traversal order, starting at the first
+        /// revisited `Cell` and alternating through the sibling `Relationship`s that
+        /// force the cycle. The closing relationship appears last; the starting cell is
+        /// not repeated at the end.
         sites: Vec<ErrorSite>,
     },
 
@@ -91,13 +100,14 @@ pub enum Error {
     },
 
     /// A method's own `outputs` list names a cell more than once, or two methods in
-    /// the same relationship have identical `outputs` sets.
-    DuplicateMethodOutputs {
+    /// the same relationship have identical or nested `outputs` sets. Overlapping
+    /// output sets are allowed when neither set nests the other.
+    InvalidMethodOutputs {
         /// `sites[0]` is the method (by index within the `Vec` passed to
         /// `add_relationship`) whose output set collided. For a method's own outputs
         /// repeating a cell, further entries are the repeated cell(s). For two methods
-        /// sharing an output set, `sites[1]` is the earlier method's index and further
-        /// entries are the shared output cell(s).
+        /// with identical or nested output sets, `sites[1]` is the earlier method's
+        /// index and further entries are the duplicate or nested subset cell(s).
         sites: Vec<ErrorSite>,
     },
 
@@ -169,16 +179,17 @@ impl std::fmt::Display for Error {
             Error::InvalidId => write!(f, "invalid cell or relationship id"),
             Error::Conflict { .. } => write!(f, "no valid method assignment (overconstrained)"),
             Error::Cycle { .. } => write!(f, "selected methods form a cycle"),
+            Error::SeedCycle { .. } => write!(f, "seed dependency cycle"),
             Error::MethodFailed { error, .. } => write!(f, "method execution failed: {error}"),
             Error::InvalidMethod { .. } => write!(f, "method is structurally invalid"),
             Error::MismatchedMethodCells { .. } => write!(
                 f,
                 "methods in a relationship must reference the same set of cells"
             ),
-            Error::DuplicateMethodOutputs { .. } => write!(
+            Error::InvalidMethodOutputs { .. } => write!(
                 f,
                 "a method's outputs must be duplicate-free, and no two methods in a \
-                 relationship may share an outputs set"
+                 relationship may have identical or nested output sets"
             ),
             Error::InvalidConditional { .. } => write!(f, "conditional is structurally invalid"),
             Error::InvalidOutput => write!(f, "output is structurally invalid"),
@@ -218,10 +229,11 @@ impl Error {
             | Error::MethodFailed { sites, .. }
             | Error::InvalidMethod { sites }
             | Error::MismatchedMethodCells { sites }
-            | Error::DuplicateMethodOutputs { sites }
+            | Error::InvalidMethodOutputs { sites }
             | Error::InvalidCellKind { sites }
             | Error::Conflict { sites }
             | Error::Cycle { sites }
+            | Error::SeedCycle { sites }
             | Error::DependencyCycle { sites }
             | Error::InvalidConditional { sites } => sites,
             _ => &[],
@@ -324,6 +336,7 @@ mod tests {
         assert!(std::error::Error::source(&Error::InvalidId).is_none());
         assert!(std::error::Error::source(&Error::Conflict { sites: vec![] }).is_none());
         assert!(std::error::Error::source(&Error::Cycle { sites: vec![] }).is_none());
+        assert!(std::error::Error::source(&Error::SeedCycle { sites: vec![] }).is_none());
         assert!(std::error::Error::source(&Error::InvalidMethod { sites: vec![] }).is_none());
         assert!(
             std::error::Error::source(&Error::TypeMismatch {
@@ -337,7 +350,7 @@ mod tests {
             std::error::Error::source(&Error::MismatchedMethodCells { sites: vec![] }).is_none()
         );
         assert!(
-            std::error::Error::source(&Error::DuplicateMethodOutputs { sites: vec![] }).is_none()
+            std::error::Error::source(&Error::InvalidMethodOutputs { sites: vec![] }).is_none()
         );
     }
 
@@ -365,9 +378,9 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_method_outputs_display_contains_outputs() {
+    fn invalid_method_outputs_display_contains_outputs() {
         assert!(
-            Error::DuplicateMethodOutputs { sites: vec![] }
+            Error::InvalidMethodOutputs { sites: vec![] }
                 .to_string()
                 .contains("outputs")
         );
@@ -443,6 +456,15 @@ mod tests {
     }
 
     #[test]
+    fn seed_cycle_display_mentions_seed_dependency_cycle() {
+        assert!(
+            Error::SeedCycle { sites: vec![] }
+                .to_string()
+                .contains("seed dependency cycle")
+        );
+    }
+
+    #[test]
     fn dependency_cycle_has_no_source() {
         assert!(std::error::Error::source(&Error::DependencyCycle { sites: vec![] }).is_none());
     }
@@ -451,6 +473,13 @@ mod tests {
     fn dependency_cycle_exposes_its_sites() {
         let site = ErrorSite::Cell(CellId::default());
         let e = Error::DependencyCycle { sites: vec![site] };
+        assert_eq!(e.sites(), &[site]);
+    }
+
+    #[test]
+    fn seed_cycle_exposes_its_sites() {
+        let site = ErrorSite::Cell(CellId::default());
+        let e = Error::SeedCycle { sites: vec![site] };
         assert_eq!(e.sites(), &[site]);
     }
 

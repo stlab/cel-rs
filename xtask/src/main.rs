@@ -58,15 +58,27 @@ fn fetch_assets() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Runs `npm ci` then `npm run build` in `begin/` to regenerate the vendored
-/// Spectrum Web Components bundle (`begin/assets/swc.js`) from `begin/package.json`
-/// and `begin/js/spectrum-entry.js`.
+/// Runs `npm ci` then `npm run build` in `begin/` and `ez-adam/` to regenerate each
+/// crate's vendored Spectrum Web Components bundle (`assets/swc.js`) from that
+/// crate's own `package.json` and `js/spectrum-entry.js`.
+///
+/// # Errors
+/// Returns `Err` if `npm` is not on `PATH`, or if any command exits non-zero.
+fn build_js() -> Result<(), Box<dyn std::error::Error>> {
+    let root = project_root();
+    for crate_name in ["begin", "ez-adam"] {
+        build_js_for(&root.join(crate_name))?;
+    }
+    Ok(())
+}
+
+/// Runs `npm ci` then `npm run build` in `crate_dir` to regenerate that crate's
+/// vendored Spectrum Web Components bundle (`crate_dir/assets/swc.js`) from
+/// `crate_dir/package.json` and `crate_dir/js/spectrum-entry.js`.
 ///
 /// # Errors
 /// Returns `Err` if `npm` is not on `PATH`, or if either command exits non-zero.
-fn build_js() -> Result<(), Box<dyn std::error::Error>> {
-    let root = project_root();
-    let begin_dir = root.join("begin");
+fn build_js_for(crate_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
 
     let steps: [&[&str]; 2] = [&["ci"], &["run", "build"]];
@@ -74,11 +86,11 @@ fn build_js() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "Running `npm {}` in {} ...",
             args.join(" "),
-            begin_dir.display()
+            crate_dir.display()
         );
         let status = std::process::Command::new(npm)
             .args(args)
-            .current_dir(&begin_dir)
+            .current_dir(crate_dir)
             .status()?;
         if !status.success() {
             return Err(format!("npm {} failed with {status}", args.join(" ")).into());

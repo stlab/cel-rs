@@ -2,8 +2,15 @@
 
 use std::any::TypeId;
 use std::collections::HashSet;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
-use adam_rs::{CellId, CellKind, Error, MatchExpr, Method, Requirement, RequirementId, Sheet};
+use adam_rs::{
+    CellId, CellKind, Error, ErrorSite, Filter, MatchExpr, Method, RelationshipId, Requirement,
+    RequirementId, Sheet,
+};
 
 fn sheet_with_area_output() -> (Sheet, CellId, CellId, CellId, CellId) {
     let mut sheet = Sheet::new();
@@ -1032,6 +1039,571 @@ fn conditional_match_cell_is_derived_from_unconditional_relationship() {
     assert!(!*sheet.read::<bool>(flag).unwrap());
     // b has no active relationship; it reverts to its source value (0).
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 0);
+}
+
+#[test]
+fn guard_prerequisite_reuse_invokes_the_selected_producer_once() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(true);
+    let guard = sheet.add_cell(false);
+    let output = sheet.add_cell(false);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_method = Arc::clone(&calls);
+
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            mode,
+            guard,
+            move |value: &bool| {
+                calls_for_method.fetch_add(1, Ordering::SeqCst);
+                Ok(*value)
+            },
+        )])
+        .unwrap();
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(mode, output, |value: &bool| {
+            Ok(*value)
+        })])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![true], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert!(*sheet.read::<bool>(guard).unwrap());
+    assert!(*sheet.read::<bool>(output).unwrap());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn incompatible_guard_assignment_conflicts_without_committing_prerequisites() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(false);
+    let guard = sheet.add_cell(false);
+    let switch = sheet.add_cell(true);
+    let selected_output = sheet.add_cell(false);
+
+    let shared = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(mode, guard, |value: &bool| Ok(*value)),
+            Method::from_fn_1_1(guard, mode, |value: &bool| Ok(*value)),
+        ])
+        .unwrap();
+    let competing = sheet
+        .add_relationship(vec![Method::from_fn_1_1(switch, guard, |value: &bool| {
+            Ok(*value)
+        })])
+        .unwrap();
+    let selected_branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            switch,
+            selected_output,
+            |value: &bool| Ok(*value),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![true], vec![selected_branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(switch),
+            vec![(vec![true], vec![competing])],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(mode, true).unwrap();
+
+    let error = sheet.propagate().unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::Conflict { ref sites }
+            if sites.contains(&ErrorSite::Relationship(shared))
+                && sites.contains(&ErrorSite::Relationship(competing))
+                && sites.contains(&ErrorSite::Cell(guard))
+    ));
+    assert!(!*sheet.read::<bool>(guard).unwrap());
+    assert!(!*sheet.read::<bool>(selected_output).unwrap());
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn changed_guard_method_input_producer_conflicts_without_committing() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(false);
+    let guard = sheet.add_cell(false);
+    let switch = sheet.add_cell(true);
+    let selected_output = sheet.add_cell(false);
+
+    let prerequisite = sheet
+        .add_relationship(vec![Method::from_fn_1_1(mode, guard, |value: &bool| {
+            Ok(*value)
+        })])
+        .unwrap();
+    let new_mode_producer = sheet
+        .add_relationship(vec![Method::from_fn_1_1(switch, mode, |value: &bool| {
+            Ok(!*value)
+        })])
+        .unwrap();
+    let selected_branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            switch,
+            selected_output,
+            |value: &bool| Ok(*value),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![true], vec![selected_branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(switch),
+            vec![(vec![true], vec![new_mode_producer])],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(mode, true).unwrap();
+
+    let error = sheet.propagate().unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::Conflict { ref sites }
+            if sites.contains(&ErrorSite::Relationship(prerequisite))
+                && sites.contains(&ErrorSite::Relationship(new_mode_producer))
+                && sites.contains(&ErrorSite::Cell(mode))
+    ));
+    assert!(!*sheet.read::<bool>(guard).unwrap());
+    assert!(!*sheet.read::<bool>(selected_output).unwrap());
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn changed_filter_argument_producer_conflicts_without_reclamping_stale_value() {
+    let mut sheet = Sheet::new();
+    let switch = sheet.add_cell(true);
+    let bound = sheet.add_cell(3_i32);
+    let guard = sheet.add_cell(8_i32);
+    let branch_output = sheet.add_cell(false);
+
+    sheet
+        .add_filter(
+            guard,
+            Filter::from_fn_1(bound, |value: &i32, bound: &i32| Ok((*value).min(*bound))),
+        )
+        .unwrap();
+    let new_bound_producer = sheet
+        .add_relationship(vec![Method::from_fn_1_1(switch, bound, |value: &bool| {
+            Ok(if *value { 5 } else { 3 })
+        })])
+        .unwrap();
+    let guard_branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            switch,
+            branch_output,
+            |value: &bool| Ok(*value),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![3_i32], vec![guard_branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(switch),
+            vec![(vec![true], vec![new_bound_producer])],
+            vec![],
+        )
+        .unwrap();
+
+    sheet.write(switch, false).unwrap();
+    sheet.propagate().unwrap();
+    assert!(!sheet.changed().collect::<Vec<_>>().is_empty());
+    let guard_before_error = *sheet.read::<i32>(guard).unwrap();
+    let bound_before_error = *sheet.read::<i32>(bound).unwrap();
+
+    sheet.write(switch, true).unwrap();
+    let error = sheet.propagate().unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::Conflict { ref sites }
+            if sites.contains(&ErrorSite::Relationship(new_bound_producer))
+                && sites.contains(&ErrorSite::Cell(guard))
+                && sites.contains(&ErrorSite::Cell(bound))
+    ));
+    assert_eq!(*sheet.read::<i32>(guard).unwrap(), guard_before_error);
+    assert_eq!(*sheet.read::<i32>(bound).unwrap(), bound_before_error);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn guard_seed_callback_is_reused_for_matching_provenance() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(2_i32);
+    let guard = sheet.add_cell(0_i32);
+    let output = sheet.add_cell(0_i32);
+    let seed_calls = Arc::new(AtomicUsize::new(0));
+    let seed_calls_for_method = Arc::clone(&seed_calls);
+
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(guard, guard, |value: &i32| {
+            Ok(*value)
+        })])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(mode, guard, move |value: &i32| {
+                seed_calls_for_method.fetch_add(1, Ordering::SeqCst);
+                Ok(*value + 1)
+            }),
+            Method::from_fn_1_1(guard, mode, |value: &i32| Ok(*value)),
+        ])
+        .unwrap();
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(mode, output, |value: &i32| {
+            Ok(*value)
+        })])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![3_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(mode, 2_i32).unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(guard).unwrap(), 3);
+    assert_eq!(*sheet.read::<i32>(output).unwrap(), 3);
+    assert_eq!(seed_calls.load(Ordering::SeqCst), 1);
+}
+
+/// Builds a guarded sheet whose `guard` seed callback reads `staged` (optionally through a
+/// recursively seeded `inner` cell) while a guard prerequisite restages `staged`'s source.
+///
+/// Returns the sheet, the `staged` cell, the seed relationship reading it, the outer guard
+/// cell, and the shared seed-callback counter.
+fn restaged_seed_input_sheet(
+    recursive: bool,
+) -> (Sheet, CellId, RelationshipId, CellId, Arc<AtomicUsize>) {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(5_i32);
+    let staged = sheet.add_cell(0_i32);
+    let guard = sheet.add_cell(0_i32);
+    let sink = sheet.add_cell(0_i32);
+    let output = sheet.add_cell(0_i32);
+    let seed_calls = Arc::new(AtomicUsize::new(0));
+
+    // Two methods keep `staged` unforced, so its selected producer restages its source.
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(mode, staged, |value: &i32| Ok(*value)),
+            Method::from_fn_1_1(staged, mode, |value: &i32| Ok(*value)),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(guard, guard, |value: &i32| {
+            Ok(*value)
+        })])
+        .unwrap();
+    let guard_seed_input = if recursive {
+        let inner = sheet.add_cell(0_i32);
+        let inner_sink = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![Method::from_fn_1_1(inner, inner, |value: &i32| {
+                Ok(*value)
+            })])
+            .unwrap();
+        let calls = Arc::clone(&seed_calls);
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([staged, inner_sink], inner, move |value: &i32, _: &i32| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(*value + 10)
+                }),
+                Method::from_fn_2_1([staged, inner], inner_sink, |_: &i32, value: &i32| {
+                    Ok(*value)
+                }),
+            ])
+            .unwrap();
+        inner
+    } else {
+        staged
+    };
+    let calls = Arc::clone(&seed_calls);
+    let seed_relationship = sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1(
+                [guard_seed_input, sink],
+                guard,
+                move |value: &i32, _: &i32| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(*value + 1)
+                },
+            ),
+            Method::from_fn_2_1([guard_seed_input, guard], sink, |_: &i32, value: &i32| {
+                Ok(*value)
+            }),
+        ])
+        .unwrap();
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(mode, output, |value: &i32| {
+            Ok(*value)
+        })])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![1_i32, 11_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional::<i32>(MatchExpr::cell(staged), vec![], vec![])
+        .unwrap();
+    sheet.write(mode, 5_i32).unwrap();
+    (sheet, staged, seed_relationship, guard, seed_calls)
+}
+
+/// Asserts that restaging a seed callback's source input conflicts without replay or commit.
+fn assert_restaged_seed_input_conflicts(recursive: bool) {
+    let (mut sheet, staged, seed_relationship, guard, seed_calls) =
+        restaged_seed_input_sheet(recursive);
+    let expected_calls = if recursive { 2 } else { 1 };
+
+    let error = sheet.propagate().unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            Error::Conflict { ref sites }
+                if sites.contains(&ErrorSite::Cell(staged))
+                    && (recursive || sites.contains(&ErrorSite::Relationship(seed_relationship)))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(seed_calls.load(Ordering::SeqCst), expected_calls);
+    assert_eq!(*sheet.read::<i32>(staged).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(guard).unwrap(), 0);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn restaged_guard_seed_source_input_conflicts_instead_of_reusing_stale_seed() {
+    assert_restaged_seed_input_conflicts(false);
+}
+
+#[test]
+fn restaged_recursive_guard_seed_input_conflicts_instead_of_reusing_stale_seed() {
+    assert_restaged_seed_input_conflicts(true);
+}
+#[test]
+fn multi_input_multi_output_guard_prerequisite_is_reused_once() {
+    let mut sheet = Sheet::new();
+    let total = sheet.add_cell(1_i32);
+    let sum = sheet.add_cell(0_i32);
+    let lhs = sheet.add_cell(2_i32);
+    let rhs = sheet.add_cell(3_i32);
+    let branch_output = sheet.add_cell(0_i32);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_method = Arc::clone(&calls);
+
+    sheet
+        .add_relationship(vec![
+            Method::new(
+                vec![lhs, rhs, total],
+                vec![total, sum],
+                vec![TypeId::of::<i32>(); 3],
+                vec![TypeId::of::<i32>(); 2],
+                move |inputs| {
+                    calls_for_method.fetch_add(1, Ordering::SeqCst);
+                    let lhs = *inputs[0].downcast_ref::<i32>().unwrap();
+                    let rhs = *inputs[1].downcast_ref::<i32>().unwrap();
+                    let total = *inputs[2].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(total + lhs + rhs), Box::new(lhs + rhs)])
+                },
+            ),
+            Method::new(
+                vec![total, sum],
+                vec![lhs, rhs],
+                vec![TypeId::of::<i32>(); 2],
+                vec![TypeId::of::<i32>(); 2],
+                |inputs| {
+                    let sum = *inputs[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(sum), Box::new(0_i32)])
+                },
+            ),
+        ])
+        .unwrap();
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            sum,
+            branch_output,
+            |value: &i32| Ok(*value * 10),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(sum),
+            vec![(vec![5_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional::<i32>(MatchExpr::cell(total), vec![], vec![])
+        .unwrap();
+    sheet.write(lhs, 2_i32).unwrap();
+    sheet.write(rhs, 3_i32).unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(total).unwrap(), 6);
+    assert_eq!(*sheet.read::<i32>(sum).unwrap(), 5);
+    assert_eq!(*sheet.read::<i32>(branch_output).unwrap(), 50);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+#[test]
+fn self_referencing_guard_seed_cycle_is_reported_before_commit() {
+    let (mut sheet, a, b, c, d, s, rel1, rel2) = seed_cycle_sheet();
+    let output = sheet.add_cell(false);
+    let branch_output = sheet.add_cell(false);
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            output,
+            branch_output,
+            |value: &bool| Ok(*value),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(a),
+            vec![(vec![0_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+
+    let error = sheet.propagate().unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::SeedCycle { ref sites }
+            if sites.contains(&ErrorSite::Relationship(rel1))
+                && sites.contains(&ErrorSite::Relationship(rel2))
+    ));
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), -1);
+    assert_eq!(*sheet.read::<i32>(d).unwrap(), -2);
+    assert_eq!(*sheet.read::<i32>(s).unwrap(), 7);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn conditional_bound_filter_runs_after_branch() {
+    for reverse_relationship_order in [false, true] {
+        let mut sheet = Sheet::new();
+        let mode = sheet.add_cell(1_i32);
+        let matched = sheet.add_cell(false);
+        let x = sheet.add_cell(8_i32);
+        let bound = sheet.add_cell(10_i32);
+
+        let filter_calls = Arc::new(AtomicUsize::new(0));
+        let filter_calls_for_callback = Arc::clone(&filter_calls);
+        sheet
+            .add_filter(
+                x,
+                Filter::from_fn_1(bound, move |value: &i32, bound: &i32| {
+                    filter_calls_for_callback.fetch_add(1, Ordering::SeqCst);
+                    Ok((*value).min(*bound))
+                }),
+            )
+            .unwrap();
+
+        let derive_match = || Method::from_fn_1_1(mode, matched, |value: &i32| Ok(*value > 0));
+        let branch = if reverse_relationship_order {
+            sheet.add_relationship(vec![derive_match()]).unwrap();
+            sheet
+                .add_relationship(vec![Method::from_fn_1_1(mode, bound, |_: &i32| Ok(3_i32))])
+                .unwrap()
+        } else {
+            let branch = sheet
+                .add_relationship(vec![Method::from_fn_1_1(mode, bound, |_: &i32| Ok(3_i32))])
+                .unwrap();
+            sheet.add_relationship(vec![derive_match()]).unwrap();
+            branch
+        };
+        sheet
+            .add_conditional(
+                MatchExpr::cell(matched),
+                vec![(vec![true], vec![branch])],
+                vec![],
+            )
+            .unwrap();
+
+        sheet.propagate().unwrap();
+
+        assert_eq!(*sheet.read::<i32>(bound).unwrap(), 3);
+        assert_eq!(*sheet.read::<i32>(x).unwrap(), 3);
+        assert_eq!(filter_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn filtered_guard_runs_before_branch_selection_once() {
+    let mut sheet = Sheet::new();
+    let guard = sheet.add_cell(8_i32);
+    let bound = sheet.add_cell(3_i32);
+    let output = sheet.add_cell(0_i32);
+
+    let filter_calls = Arc::new(AtomicUsize::new(0));
+    let filter_calls_for_callback = Arc::clone(&filter_calls);
+    sheet
+        .add_filter(
+            guard,
+            Filter::from_fn_1(bound, move |value: &i32, bound: &i32| {
+                filter_calls_for_callback.fetch_add(1, Ordering::SeqCst);
+                Ok((*value).min(*bound))
+            }),
+        )
+        .unwrap();
+
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(guard, output, |value: &i32| {
+            Ok(*value)
+        })])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![3_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(guard).unwrap(), 3);
+    assert_eq!(*sheet.read::<i32>(output).unwrap(), 3);
+    assert_eq!(filter_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -2247,6 +2819,60 @@ fn issue_182_inequality_chain_later_edit_below_earlier_one_repropagates() {
 }
 
 #[test]
+fn seed_method_selection_follows_elimination_state() {
+    let mut sheet = Sheet::new();
+    let x = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(3_i32);
+    let a = sheet.add_cell(10_i32);
+    let i32_type = TypeId::of::<i32>();
+
+    sheet
+        .add_relationship(vec![
+            Method::new(
+                vec![b],
+                vec![x, a],
+                vec![i32_type],
+                vec![i32_type, i32_type],
+                |_| Ok(vec![Box::new(100_i32), Box::new(1_i32)]),
+            ),
+            Method::new(
+                vec![a, b],
+                vec![x, b],
+                vec![i32_type, i32_type],
+                vec![i32_type, i32_type],
+                |args| {
+                    let aa = *args[0].downcast_ref::<i32>().unwrap();
+                    let bb = *args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(aa + bb), Box::new(bb)])
+                },
+            ),
+            Method::new(
+                vec![x, b],
+                vec![a, b],
+                vec![i32_type, i32_type],
+                vec![i32_type, i32_type],
+                |args| {
+                    let xx = *args[0].downcast_ref::<i32>().unwrap();
+                    let bb = *args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(xx - bb), Box::new(bb)])
+                },
+            ),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            x,
+            x,
+            |value: &i32| Ok(*value + 1),
+        )])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(x).unwrap(), 14);
+}
+
+#[test]
 fn issue_182_inequality_chain_survives_two_consecutive_edits_to_the_same_cell() {
     // a<=b<=c again. Writing a=25 raises b to 25. Writing c=24 correctly pulls a and b
     // down to 24 (issue_182_inequality_chain_later_edit_below_earlier_one_repropagates).
@@ -2410,6 +3036,168 @@ fn issue_182_inequality_chain_writing_the_middle_cell_then_an_untouched_endpoint
     assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
 }
 
+#[test]
+fn sibling_seed_fold_uses_strength_order() {
+    // Build the cells in x,a,b,c order so the values stay the required 4,5,3,10 while
+    // the explicit strengths satisfy a < b < c and both sibling inputs outrank x. That
+    // forces x's seed to fold both a<=x and x<=b, making the result depend on sibling
+    // fold order unless seedfill sorts them by input strength.
+    let mut forward = Sheet::new();
+    let x = forward.add_cell(4_i32);
+    let a = forward.add_cell(5_i32);
+    let b = forward.add_cell(3_i32);
+    let c = forward.add_cell(10_i32);
+    forward
+        .add_relationship(vec![
+            Method::from_fn_2_1([x, c], x, |lhs: &i32, rhs: &i32| Ok((*lhs).min(*rhs))),
+            Method::from_fn_2_1([x, c], c, |lhs: &i32, rhs: &i32| Ok((*lhs).max(*rhs))),
+        ])
+        .unwrap();
+    forward
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, x], a, |lhs: &i32, rhs: &i32| Ok((*lhs).min(*rhs))),
+            Method::from_fn_2_1([a, x], x, |lhs: &i32, rhs: &i32| Ok((*lhs).max(*rhs))),
+        ])
+        .unwrap();
+    forward
+        .add_relationship(vec![
+            Method::from_fn_2_1([x, b], x, |lhs: &i32, rhs: &i32| Ok((*lhs).min(*rhs))),
+            Method::from_fn_2_1([x, b], b, |lhs: &i32, rhs: &i32| Ok((*lhs).max(*rhs))),
+        ])
+        .unwrap();
+
+    let mut reversed = Sheet::new();
+    let x_rev = reversed.add_cell(4_i32);
+    let a_rev = reversed.add_cell(5_i32);
+    let b_rev = reversed.add_cell(3_i32);
+    let c_rev = reversed.add_cell(10_i32);
+    reversed
+        .add_relationship(vec![
+            Method::from_fn_2_1([x_rev, c_rev], x_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).min(*rhs))
+            }),
+            Method::from_fn_2_1([x_rev, c_rev], c_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).max(*rhs))
+            }),
+        ])
+        .unwrap();
+    reversed
+        .add_relationship(vec![
+            Method::from_fn_2_1([x_rev, b_rev], x_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).min(*rhs))
+            }),
+            Method::from_fn_2_1([x_rev, b_rev], b_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).max(*rhs))
+            }),
+        ])
+        .unwrap();
+    reversed
+        .add_relationship(vec![
+            Method::from_fn_2_1([a_rev, x_rev], a_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).min(*rhs))
+            }),
+            Method::from_fn_2_1([a_rev, x_rev], x_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).max(*rhs))
+            }),
+        ])
+        .unwrap();
+
+    forward.propagate().unwrap();
+    reversed.propagate().unwrap();
+
+    assert_eq!(*forward.read::<i32>(x).unwrap(), 3);
+    assert_eq!(*reversed.read::<i32>(x_rev).unwrap(), 3);
+}
+
+#[test]
+fn sibling_seed_fold_ties_ignore_relationship_insertion_order() {
+    fn max_with_phantom(lhs: CellId, rhs: CellId, phantom: CellId, output: CellId) -> Method {
+        Method::new(
+            vec![lhs, rhs, phantom],
+            vec![output],
+            vec![
+                TypeId::of::<i32>(),
+                TypeId::of::<i32>(),
+                TypeId::of::<i32>(),
+            ],
+            vec![TypeId::of::<i32>()],
+            |args| {
+                let lhs = args[0]
+                    .downcast_ref::<i32>()
+                    .expect("type checked at add_relationship");
+                let rhs = args[1]
+                    .downcast_ref::<i32>()
+                    .expect("type checked at add_relationship");
+                Ok(vec![Box::new((*lhs).max(*rhs))])
+            },
+        )
+    }
+
+    fn min_with_phantom(lhs: CellId, rhs: CellId, phantom: CellId, output: CellId) -> Method {
+        Method::new(
+            vec![lhs, rhs, phantom],
+            vec![output],
+            vec![
+                TypeId::of::<i32>(),
+                TypeId::of::<i32>(),
+                TypeId::of::<i32>(),
+            ],
+            vec![TypeId::of::<i32>()],
+            |args| {
+                let lhs = args[0]
+                    .downcast_ref::<i32>()
+                    .expect("type checked at add_relationship");
+                let rhs = args[1]
+                    .downcast_ref::<i32>()
+                    .expect("type checked at add_relationship");
+                Ok(vec![Box::new((*lhs).min(*rhs))])
+            },
+        )
+    }
+
+    fn build_sheet(reverse_siblings: bool) -> (Sheet, CellId) {
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(4_i32);
+        let a = sheet.add_cell(5_i32);
+        let b = sheet.add_cell(3_i32);
+        let c = sheet.add_cell(10_i32);
+        let shared_strongest = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([x, c], x, |lhs: &i32, rhs: &i32| Ok((*lhs).min(*rhs))),
+                Method::from_fn_2_1([x, c], c, |lhs: &i32, rhs: &i32| Ok((*lhs).max(*rhs))),
+            ])
+            .unwrap();
+
+        let a_le_x = vec![
+            min_with_phantom(a, x, shared_strongest, a),
+            max_with_phantom(a, x, shared_strongest, x),
+        ];
+        let x_le_b = vec![
+            min_with_phantom(b, x, shared_strongest, x),
+            max_with_phantom(b, x, shared_strongest, b),
+        ];
+        if reverse_siblings {
+            sheet.add_relationship(x_le_b).unwrap();
+            sheet.add_relationship(a_le_x).unwrap();
+        } else {
+            sheet.add_relationship(a_le_x).unwrap();
+            sheet.add_relationship(x_le_b).unwrap();
+        }
+
+        (sheet, x)
+    }
+
+    let (mut forward, x) = build_sheet(false);
+    let (mut reversed, x_rev) = build_sheet(true);
+
+    forward.propagate().unwrap();
+    reversed.propagate().unwrap();
+
+    assert_eq!(*forward.read::<i32>(x).unwrap(), 3);
+    assert_eq!(*reversed.read::<i32>(x_rev).unwrap(), 3);
+}
+
 /// Builds the `a <= b <= c` tutorial chain (`inequality.adm2`) with declared values
 /// 10, 20, 30, already propagated once.
 fn inequality_chain() -> (Sheet, CellId, CellId, CellId) {
@@ -2481,4 +3269,253 @@ fn inequality_chain_dragging_the_low_end_keeps_the_middle_cells_edit() {
         assert_eq!(*sheet.read::<i32>(b).unwrap(), expected, "b at a={a_val}");
         assert_eq!(*sheet.read::<i32>(c).unwrap(), expected, "c at a={a_val}");
     }
+}
+
+#[test]
+fn seed_cycle_reports_exact_sites() {
+    let (mut sheet, a, b, _c, _d, _s, rel1, rel2) = seed_cycle_sheet();
+
+    let err = sheet.propagate().unwrap_err();
+
+    assert!(matches!(
+        err,
+        Error::SeedCycle { sites }
+            if sites
+                == vec![
+                    ErrorSite::Cell(a),
+                    ErrorSite::Relationship(rel1),
+                    ErrorSite::Cell(b),
+                    ErrorSite::Relationship(rel2),
+                ]
+    ));
+}
+
+#[test]
+fn seed_cycle_leaves_values_and_changed_state_unchanged() {
+    let (mut sheet, a, b, c, d, _s, _rel1, _rel2) = seed_cycle_sheet();
+
+    let err = sheet.propagate().unwrap_err();
+
+    assert!(matches!(err, Error::SeedCycle { .. }));
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), -1);
+    assert_eq!(*sheet.read::<i32>(d).unwrap(), -2);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn conditional_seed_cycle_leaves_preplan_mutations_unexposed() {
+    let (mut sheet, mode, selected, a, b, c, d) = conditional_seed_cycle_sheet();
+    sheet.write(mode, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    let changed_after_success: Vec<_> = sheet.changed().collect();
+    assert!(changed_after_success.contains(&selected));
+    assert!(!changed_after_success.is_empty());
+    let selected_before_error = *sheet.read::<i32>(selected).unwrap();
+    let a_before_error = *sheet.read::<i32>(a).unwrap();
+    let b_before_error = *sheet.read::<i32>(b).unwrap();
+    let c_before_error = *sheet.read::<i32>(c).unwrap();
+    let d_before_error = *sheet.read::<i32>(d).unwrap();
+
+    sheet.write(mode, 1_i32).unwrap();
+
+    let err = sheet.propagate().unwrap_err();
+
+    assert!(matches!(err, Error::SeedCycle { .. }));
+    assert_eq!(*sheet.read::<i32>(mode).unwrap(), 1);
+    assert_eq!(*sheet.read::<i32>(selected).unwrap(), selected_before_error);
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), a_before_error);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), b_before_error);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), c_before_error);
+    assert_eq!(*sheet.read::<i32>(d).unwrap(), d_before_error);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn propagation_evaluates_preplan_and_conditional_callbacks_once() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(1_i32);
+    let selected = sheet.add_cell(0_i32);
+    let output = sheet.add_cell(0_i32);
+    let method_calls = Arc::new(AtomicUsize::new(0));
+    let method_calls_for_callback = Arc::clone(&method_calls);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            mode,
+            selected,
+            move |_value: &i32| {
+                Ok(method_calls_for_callback.fetch_add(1, Ordering::SeqCst) as i32 + 1)
+            },
+        )])
+        .unwrap();
+    let active = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            selected,
+            output,
+            |value: &i32| Ok(*value),
+        )])
+        .unwrap();
+    let conditional_calls = Arc::new(AtomicUsize::new(0));
+    let conditional_calls_for_callback = Arc::clone(&conditional_calls);
+    sheet
+        .add_conditional(
+            MatchExpr::from_fn_1(selected, move |value: &i32| {
+                conditional_calls_for_callback.fetch_add(1, Ordering::SeqCst);
+                Ok(*value)
+            }),
+            vec![(vec![1_i32], vec![active])],
+            vec![],
+        )
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(method_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(conditional_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*sheet.read::<i32>(selected).unwrap(), 1);
+    assert_eq!(*sheet.read::<i32>(output).unwrap(), 1);
+}
+
+#[test]
+fn stateful_conditional_seed_cycle_leaves_sheet_unchanged() {
+    let (mut sheet, a, b, c, d, _s, rel1, rel2) = seed_cycle_sheet();
+    let mode = sheet.add_cell(0_i32);
+    let selected = sheet.add_cell(0_i32);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_callback = Arc::clone(&calls);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            mode,
+            selected,
+            move |_value: &i32| {
+                calls_for_callback.fetch_add(1, Ordering::SeqCst);
+                Ok(1_i32)
+            },
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(selected),
+            vec![(vec![1_i32], vec![rel1, rel2])],
+            vec![],
+        )
+        .unwrap();
+
+    let err = sheet.propagate().unwrap_err();
+
+    assert!(matches!(err, Error::SeedCycle { .. }));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*sheet.read::<i32>(mode).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(selected).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), -1);
+    assert_eq!(*sheet.read::<i32>(d).unwrap(), -2);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+fn seed_cycle_sheet() -> (
+    Sheet,
+    CellId,
+    CellId,
+    CellId,
+    CellId,
+    CellId,
+    RelationshipId,
+    RelationshipId,
+) {
+    let mut sheet = Sheet::new();
+    let c = sheet.add_cell(-1_i32);
+    let d = sheet.add_cell(-2_i32);
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(10_i32);
+    let s = sheet.add_cell(7_i32);
+    sheet
+        .add_relationship(vec![Method::new(
+            vec![a, s],
+            vec![a],
+            vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+            vec![TypeId::of::<i32>()],
+            |args| Ok(vec![Box::new(*args[1].downcast_ref::<i32>().unwrap())]),
+        )])
+        .unwrap();
+    let rel1 = sheet
+        .add_relationship(vec![
+            Method::new(
+                vec![a, b, c],
+                vec![a],
+                vec![
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                ],
+                vec![TypeId::of::<i32>()],
+                |args| Ok(vec![Box::new(*args[1].downcast_ref::<i32>().unwrap())]),
+            ),
+            Method::new(
+                vec![a, b, c],
+                vec![c],
+                vec![
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                ],
+                vec![TypeId::of::<i32>()],
+                |args| {
+                    Ok(vec![Box::new(
+                        *args[2].downcast_ref::<i32>().unwrap() + 1000,
+                    )])
+                },
+            ),
+        ])
+        .unwrap();
+    let rel2 = sheet
+        .add_relationship(vec![
+            Method::new(
+                vec![b, a, d],
+                vec![b],
+                vec![
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                ],
+                vec![TypeId::of::<i32>()],
+                |args| Ok(vec![Box::new(*args[1].downcast_ref::<i32>().unwrap())]),
+            ),
+            Method::new(
+                vec![b, a, d],
+                vec![d],
+                vec![
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                ],
+                vec![TypeId::of::<i32>()],
+                |args| {
+                    Ok(vec![Box::new(
+                        *args[2].downcast_ref::<i32>().unwrap() + 2000,
+                    )])
+                },
+            ),
+        ])
+        .unwrap();
+    (sheet, a, b, c, d, s, rel1, rel2)
+}
+
+fn conditional_seed_cycle_sheet() -> (Sheet, CellId, CellId, CellId, CellId, CellId, CellId) {
+    let (mut sheet, a, b, c, d, _s, rel1, rel2) = seed_cycle_sheet();
+    let mode = sheet.add_cell(1_i32);
+    let selected = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(mode, selected, |v: &i32| Ok(*v))])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(selected),
+            vec![(vec![1_i32], vec![rel1, rel2])],
+            vec![],
+        )
+        .unwrap();
+    (sheet, mode, selected, a, b, c, d)
 }

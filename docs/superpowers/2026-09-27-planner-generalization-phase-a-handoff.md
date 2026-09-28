@@ -50,6 +50,46 @@ Rewritten invalid-sheet tests/examples:
 - `adam-lang` diagnostic tests now expect whole-sheet validation to surface dependency cycles
   with the governed cell as primary.
 
+**Phase B (§1 seedfill, #186) is implemented on this branch.** The planner/runtime now treat
+self-referencing seed construction as part of the same deterministic release-state story:
+
+- `Error::InvalidMethodOutputs { sites }` now documents and enforces the intended antichain rule:
+  duplicate per-method outputs and identical/nested sibling output sets are rejected, while
+  overlapping non-nested output sets remain valid.
+- `adam-rs/src/planner/seed.rs`'s `build_seeds` consumes the planner's recorded elimination order
+  and replays that elimination state when choosing each sibling seed method, rather than picking
+  whichever declaration appears first in the relationship.
+- Seed DFS now reports `Error::SeedCycle { sites }` for non-self sibling cycles instead of
+  substituting any revisited cell's `source` value.
+- When multiple sibling folds survive, they run in ascending order of strongest non-target input
+  strength; equal-primary ties break by the selected method's ordered signature and then the
+  relationship's full ordered method-signature sequence, not by relationship insertion order.
+- If two equal-primary sibling folds are still structurally identical under that comparison,
+  `build_seeds` returns `Error::Conflict` naming the ambiguous relationships instead of silently
+  preserving adjacency order.
+- `Sheet::propagate()` evaluates pre-plan methods and conditional expressions once into private
+  staged state, validates the active plan and seeds against that state, and commits only after
+  validation succeeds. A seed-cycle failure exposes no staged writes and leaves `changed()` empty.
+
+### 2026-09-28 Task 6 final-review follow-up
+
+The final Task 6 review found one remaining determinism gap in `adam-rs/src/planner/seed.rs`:
+two equal-primary siblings could share the same selected-method signature while still differing as
+relationships, letting the stable sort preserve `cells[x].adj` insertion order. This follow-up
+fix closes that gap by:
+
+- sorting equal-primary siblings by a lexicographic key of
+  `(strongest_input_strength, selected_method_signature, full_relationship_signature)`;
+- rejecting the only remaining ambiguous shape — structurally identical equal-primary siblings —
+  with `Error::Conflict` naming the participating relationships; and
+- locking both cases with new `planner::seed` unit coverage.
+
+Verification for this follow-up:
+
+- `cargo fmt --all`
+- `cargo test -p adam-rs --lib planner::` (48 passed)
+- `cargo test -p adam-rs --test integration` (102 passed)
+
 Full verification for this handoff completed with no `warning:` lines observed:
 
 - `cargo fmt --all`
@@ -70,15 +110,28 @@ Full verification for this handoff completed with no `warning:` lines observed:
 - `adam-lsp` diagnostics do not yet report `DependencyCycle` or other sheet-construction errors,
   because the LSP never builds a live `Sheet`. This gap predates Phase A and is tracked as #239.
 
+## Phase B follow-up — selected guard prerequisites
+
+Phase B now executes only the selected unconditional-plan cone needed to resolve conditional
+guards. The reverse producer index includes selected method outputs and filter reclamps, and the
+backward walk follows non-self method inputs and filter arguments in O(V + E) bookkeeping per
+selected plan. Unrelated filters remain deferred until the final active plan, so their callbacks
+observe branch-produced arguments regardless of relationship insertion order.
+
+Staged methods, filters, and seed callbacks carry producer provenance. A final plan reuses a
+pre-executed step only when its selected method, producer path, output classification, and seed
+inputs are identical; otherwise propagation returns a conservative `Error::Conflict` with
+implicated sites instead of replaying a stateful callback or publishing stale staged values.
+Callbacks with genuinely different inputs are distinct logical evaluations and may each run once.
+Failed prerequisite and seed-cycle propagation remains transactional: prior live values are
+preserved and `changed()` is empty for the failing call.
+
+The all-method static guard-independence validation remains unchanged, and Phase C automatic plan
+reuse remains deferred. Contract coverage preserves filtered-guard ordering, one logical callback
+evaluation, inequality chains, direct self-reference, insertion-order independence, and rollback
+after both seed-cycle and prerequisite-conflict failures.
+
 ## Remaining
-
-**Phase B (§1 seedfill, #186):**
-
-- Enforce antichain output sets for sibling relationship methods.
-- Select seed methods from the planner's elimination state instead of declaration order.
-- Report non-self-reference seed dependency cycles as `Error::SeedCycle`.
-- Fold sibling seed methods in ascending-strength order so the strongest influence is applied
-  last.
 
 **Phase C (§3 automatic plan reuse, #152):**
 

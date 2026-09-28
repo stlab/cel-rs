@@ -149,6 +149,46 @@ pub fn add_branch(
     group.branches.len() - 1
 }
 
+/// Sets `conditional`'s `Formula`-mode condition expression text.
+///
+/// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
+/// - Precondition: `conditional`'s condition is `ConditionExpr::Formula` (not
+///   `Cells`).
+pub fn set_condition_formula(
+    doc: &mut Document,
+    conditional: ConditionalGroupId,
+    expr: impl Into<String>,
+) {
+    let group = &mut doc.conditional_groups[conditional];
+    let ConditionExpr::Formula {
+        expr: current_expr, ..
+    } = &mut group.condition
+    else {
+        debug_assert!(
+            false,
+            "set_condition_formula requires a Formula-mode condition"
+        );
+        return;
+    };
+    *current_expr = expr.into();
+}
+
+/// Sets `conditional`'s display name — UI bookkeeping only, never emitted
+/// to `.adm2`.
+///
+/// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
+pub fn set_display_name(
+    doc: &mut Document,
+    conditional: ConditionalGroupId,
+    name: impl Into<String>,
+) {
+    debug_assert!(
+        doc.conditional_groups.contains_key(conditional),
+        "conditional is not a valid key"
+    );
+    doc.conditional_groups[conditional].display_name = name.into();
+}
+
 /// Toggles whether `group` is active on `conditional`'s branch at
 /// `branch_index` — enables it if absent, disables it if present.
 ///
@@ -182,6 +222,19 @@ pub fn toggle_enabled_group(
     } else {
         branch.enabled_groups.push(group);
     }
+}
+
+/// Removes `conditional` from `doc`. Nothing else in a [`Document`] ever
+/// references a [`ConditionalGroupId`], so no further cleanup is needed.
+///
+/// - Precondition: `conditional` is a valid key in `doc.conditional_groups`.
+pub fn delete_conditional_group(doc: &mut Document, conditional: ConditionalGroupId) {
+    debug_assert!(
+        doc.conditional_groups.contains_key(conditional),
+        "conditional is not a valid key"
+    );
+    doc.conditional_groups.remove(conditional);
+    doc.conditional_group_order.retain(|c| *c != conditional);
 }
 
 #[cfg(test)]
@@ -346,6 +399,31 @@ mod formula_tests {
     }
 
     #[test]
+    fn set_condition_formula_updates_the_formula_expr() {
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+        let cond = add_conditional_with_formula(&mut doc, vec![x], "", Point::new(0.0, 0.0));
+
+        set_condition_formula(&mut doc, cond, "aspect_ratio > 2.0");
+
+        let ConditionExpr::Formula { expr, .. } = &doc.conditional_groups[cond].condition else {
+            panic!("expected a Formula-mode condition");
+        };
+        assert_eq!(expr, "aspect_ratio > 2.0");
+    }
+
+    #[test]
+    fn set_display_name_updates_the_conditionals_display_name() {
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
+        let cond = add_conditional_with_formula(&mut doc, vec![x], "", Point::new(0.0, 0.0));
+
+        set_display_name(&mut doc, cond, "aspect gate");
+
+        assert_eq!(doc.conditional_groups[cond].display_name, "aspect gate");
+    }
+
+    #[test]
     fn toggle_enabled_group_enables_then_disables() {
         let mut doc = Document::new("demo");
         let x = add_cell(&mut doc, "aspect_ratio", CellType::f64());
@@ -377,5 +455,17 @@ mod formula_tests {
                 .enabled_groups
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn delete_conditional_group_removes_it_from_the_document() {
+        let mut doc = Document::new("demo");
+        let x = add_cell(&mut doc, "x", CellType::f64());
+        let cond = add_conditional_with_formula(&mut doc, vec![x], "x > 1.0", Point::new(0.0, 0.0));
+
+        delete_conditional_group(&mut doc, cond);
+
+        assert!(doc.conditional_groups_in_order().next().is_none());
+        assert!(!doc.conditional_group_order.contains(&cond));
     }
 }

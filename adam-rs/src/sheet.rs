@@ -13,12 +13,13 @@ use crate::{
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::{Error, ErrorSite},
     filter::{Filter, FilterKind, FilterViolation},
-    planner::{PlanStep, Seeds},
+    planner::{Plan, PlanStep, SeedEvaluationCache, SeedSource, Seeds},
     relationship::{Method, RelationshipData, RelationshipId},
     requirement::{Requirement, RequirementData, RequirementId},
 };
 
 mod dependency;
+mod prerequisites;
 
 /// Owns a complete property model constraint graph.
 ///
@@ -93,6 +94,119 @@ impl MatchValue<'_> {
         match self {
             MatchValue::Ref(r) => *r,
             MatchValue::Owned(b) => b.as_ref(),
+        }
+    }
+}
+
+/// Provenance needed to decide whether a staged guard-cone step can be reused.
+///
+/// Reuse is intentionally conservative: a step is reusable only when the final plan selects the
+/// same method, producer path, source/derived classification, and seed inputs. A mismatch returns
+/// `Error::Conflict` rather than guessing a compatible assignment or invoking a stateful callback
+/// again.
+#[derive(Clone, PartialEq, Eq)]
+struct StepProvenance {
+    input_producers: Vec<Option<PlanStep>>,
+    seed_inputs: Vec<CellId>,
+    source_producer: Option<PlanStep>,
+    output_classes: Vec<(CellId, OutputClassification)>,
+}
+
+/// Whether a selected step writes a cell's staged value as source or derived.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputClassification {
+    /// The write replaces the staged source value.
+    Source,
+    /// The write shadows the staged source value.
+    Derived,
+}
+
+/// Selected producer paths for every step and output in one execution plan.
+#[derive(Default)]
+struct PlanProvenance {
+    steps: HashMap<PlanStep, StepProvenance>,
+    output_producers: HashMap<CellId, PlanStep>,
+}
+
+/// Transactional propagation state whose writes remain private until commit.
+#[derive(Default)]
+struct PropagationStage {
+    sources: HashMap<CellId, Box<dyn Any>>,
+    /// Version of each staged source value; an absent cell reads its live source (version 0).
+    source_versions: HashMap<CellId, u64>,
+    last_source_version: u64,
+    derived: HashMap<CellId, Box<dyn Any>>,
+    executed_methods: HashSet<(RelationshipId, usize)>,
+    executed_filters: HashSet<CellId>,
+    step_provenance: HashMap<PlanStep, StepProvenance>,
+    changed: Vec<CellId>,
+    changed_set: HashSet<CellId>,
+}
+
+impl PropagationStage {
+    /// Returns the staged effective value for `id`, ignoring any live sheet `derived`.
+    fn effective<'a>(&'a self, cells: &'a SlotMap<CellId, CellData>, id: CellId) -> &'a dyn Any {
+        self.derived
+            .get(&id)
+            .map(|value| value.as_ref())
+            .or_else(|| self.sources.get(&id).map(|value| value.as_ref()))
+            .unwrap_or_else(|| cells[id].source.as_ref())
+    }
+
+    /// Returns the staged source value for `id`, ignoring any live sheet `derived`.
+    fn source<'a>(&'a self, cells: &'a SlotMap<CellId, CellData>, id: CellId) -> &'a dyn Any {
+        self.sources
+            .get(&id)
+            .map(|value| value.as_ref())
+            .unwrap_or_else(|| cells[id].source.as_ref())
+    }
+
+    /// Returns the staged source value for `id` with a version identifying that value.
+    ///
+    /// - Postcondition: two calls return equal versions only if no staged source write or
+    ///   reclassification changed `id`'s source value between them.
+    fn seed_source<'a>(
+        &'a self,
+        cells: &'a SlotMap<CellId, CellData>,
+        id: CellId,
+    ) -> SeedSource<'a> {
+        SeedSource {
+            value: self.source(cells, id),
+            version: self.source_versions.get(&id).copied().unwrap_or(0),
+        }
+    }
+
+    /// Records a new staged source value for `id` under a fresh version.
+    fn insert_source(&mut self, id: CellId, value: Box<dyn Any>) {
+        self.last_source_version += 1;
+        self.source_versions.insert(id, self.last_source_version);
+        self.sources.insert(id, value);
+    }
+
+    /// Applies a staged write using the same shadow/non-shadow rule as `execute_plan`.
+    fn write(&mut self, id: CellId, value: Box<dyn Any>, shadow: bool) {
+        if shadow {
+            self.derived.insert(id, value);
+        } else {
+            self.insert_source(id, value);
+            self.derived.remove(&id);
+        }
+        if self.changed_set.insert(id) {
+            self.changed.push(id);
+        }
+    }
+
+    /// Reclassifies an existing staged output for the general plan's shadowing rule.
+    ///
+    /// - Precondition: `id` has a staged source or derived value.
+    fn reclassify(&mut self, id: CellId, shadow: bool) {
+        if shadow {
+            if let Some(value) = self.sources.remove(&id) {
+                self.source_versions.remove(&id);
+                self.derived.insert(id, value);
+            }
+        } else if let Some(value) = self.derived.remove(&id) {
+            self.insert_source(id, value);
         }
     }
 }
@@ -177,9 +291,9 @@ impl Sheet {
     /// - `Error::InvalidMethod` — `methods` is empty, or a method has no outputs.
     /// - `Error::MismatchedMethodCells` — some method's `inputs ∪ outputs` differs
     ///   from another method's in the same relationship.
-    /// - `Error::DuplicateMethodOutputs` — a method's own `outputs` list names a cell
-    ///   more than once, or two methods in the same relationship have identical
-    ///   `outputs` sets.
+    /// - `Error::InvalidMethodOutputs` — a method's own `outputs` list names a cell
+    ///   more than once, or two methods in the same relationship have identical or
+    ///   nested `outputs` sets. Overlapping non-nested output sets are allowed.
     /// - `Error::InvalidId` — a `CellId` in any method is not found in this sheet.
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
@@ -189,7 +303,7 @@ impl Sheet {
     /// not by this mutator.
     ///
     /// - Complexity: O(m² × c) where m is the total number of methods and c is the
-    ///   maximum number of cells per method, due to duplicate output set comparison.
+    ///   maximum number of cells per method, due to pairwise output-set comparison.
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
             return Err(Error::InvalidMethod { sites: vec![] });
@@ -259,10 +373,12 @@ impl Sheet {
         }
 
         // A method's own outputs must be duplicate-free, and no two methods in a
-        // relationship may claim the same output set: the planner's matching stage
-        // treats a method's pure-output set as an indivisible claim, so two methods
-        // sharing an output set would make that claim ambiguous.
-        let mut seen_output_sets: Vec<(usize, HashSet<CellId>)> = Vec::with_capacity(methods.len());
+        // relationship may claim identical or nested output sets: the planner's
+        // matching stage treats a method's pure-output set as an indivisible claim,
+        // so nested claims would make that claim ambiguous while still allowing
+        // overlapping non-nested sets.
+        let mut seen_output_sets: Vec<(usize, HashSet<CellId>, &[CellId])> =
+            Vec::with_capacity(methods.len());
         for (idx, method) in methods.iter().enumerate() {
             let output_set: HashSet<CellId> = method.outputs.iter().copied().collect();
             if output_set.len() != method.outputs.len() {
@@ -276,19 +392,29 @@ impl Sheet {
                         sites.push(ErrorSite::Cell(o));
                     }
                 }
-                return Err(Error::DuplicateMethodOutputs { sites });
+                return Err(Error::InvalidMethodOutputs { sites });
             }
-            if let Some((earlier, _)) = seen_output_sets.iter().find(|(_, s)| *s == output_set) {
-                let mut sites = vec![
-                    ErrorSite::MethodIndex(idx),
-                    ErrorSite::MethodIndex(*earlier),
-                ];
-                for &o in &method.outputs {
-                    sites.push(ErrorSite::Cell(o));
+            for (earlier, earlier_set, earlier_outputs) in &seen_output_sets {
+                if output_set == *earlier_set
+                    || (output_set.len() < earlier_set.len() && output_set.is_subset(earlier_set))
+                    || (earlier_set.len() < output_set.len() && earlier_set.is_subset(&output_set))
+                {
+                    let mut sites = vec![
+                        ErrorSite::MethodIndex(idx),
+                        ErrorSite::MethodIndex(*earlier),
+                    ];
+                    let offending_outputs: &[CellId] = if output_set.len() <= earlier_set.len() {
+                        &method.outputs
+                    } else {
+                        earlier_outputs
+                    };
+                    for &o in offending_outputs {
+                        sites.push(ErrorSite::Cell(o));
+                    }
+                    return Err(Error::InvalidMethodOutputs { sites });
                 }
-                return Err(Error::DuplicateMethodOutputs { sites });
             }
-            seen_output_sets.push((idx, output_set));
+            seen_output_sets.push((idx, output_set, &method.outputs));
         }
 
         // Collect the union of all adjacent cells in insertion order, deduplicated.
@@ -1025,7 +1151,9 @@ impl Sheet {
     /// source values because the relationship that had been shadowing them (self-referencing
     /// or conditionally forced) is no longer producing them this round (Phase 5), even though
     /// no method wrote to them this round. It does not attempt to compare old/new values for
-    /// equality.
+    /// equality. A `propagate()` call that returns `Error::SeedCycle` leaves this iterator
+    /// empty: propagation clears stale changed-state before staged seed validation and
+    /// aborts before committing any writes.
     ///
     /// - Complexity: O(n) where n is the number of changed cells.
     pub fn changed(&self) -> impl Iterator<Item = CellId> + '_ {
@@ -1124,55 +1252,7 @@ impl Sheet {
         self.relationships.get(id).map(|r| r.adj.as_slice())
     }
 
-    /// Returns the set of unconditional relationships transitively needed to derive
-    /// the given `match_cells`.
-    ///
-    /// Walks upstream (from each match cell, through relationships whose outputs include
-    /// the cell) collecting only relationships not in `self.conditional_relationships`.
-    /// Relationships that only take a match cell as *input* (not output) are skipped.
-    ///
-    /// - Complexity: O(C·R) in the worst case where C = cells and R = relationships.
-    fn match_cell_subgraph(&self, match_cells: &[CellId]) -> HashSet<RelationshipId> {
-        let mut result: HashSet<RelationshipId> = HashSet::new();
-        let mut visited: HashSet<CellId> = HashSet::new();
-        let mut queue: std::collections::VecDeque<CellId> = match_cells.iter().copied().collect();
-
-        for &cell in match_cells {
-            visited.insert(cell);
-        }
-
-        while let Some(cell) = queue.pop_front() {
-            for &rel_id in &self.cells[cell].adj {
-                if self.conditional_relationships.contains(&rel_id) {
-                    continue;
-                }
-                if result.contains(&rel_id) {
-                    continue;
-                }
-                let rel = &self.relationships[rel_id];
-                // Only include relationships that output this cell.
-                let outputs_cell = rel.methods.iter().any(|m| m.outputs.contains(&cell));
-                if !outputs_cell {
-                    continue;
-                }
-                result.insert(rel_id);
-                // Enqueue all inputs of this relationship for upstream BFS.
-                for method in &rel.methods {
-                    for &input in &method.inputs {
-                        if visited.insert(input) {
-                            queue.push_back(input);
-                        }
-                    }
-                }
-            }
-        }
-
-        result
-    }
-
-    /// Evaluates conditional `cond`'s current match value: borrows the cell directly for a
-    /// plain match subject (no allocation), or calls the expression's function once for a
-    /// computed match subject.
+    /// Evaluates conditional `cond`'s current live match value.
     ///
     /// # Errors
     ///
@@ -1196,6 +1276,38 @@ impl Sheet {
         }
     }
 
+    /// Evaluates conditional `cond` against staged propagation state.
+    ///
+    /// Uses `stage`'s writes first, then falls back to each cell's `source` value,
+    /// matching the state visible after Phase 0 excludes old derived overrides and any
+    /// pre-plan steps already staged.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::MethodFailed` — the match subject is a [`MatchExpr`] whose function
+    ///   returned an error.
+    fn evaluate_match_source_staged<'a>(
+        &'a self,
+        cond: &ConditionalData,
+        stage: &'a PropagationStage,
+    ) -> Result<MatchValue<'a>, Error> {
+        match &cond.source {
+            MatchSource::Cell(id) => Ok(MatchValue::Ref(stage.effective(&self.cells, *id))),
+            MatchSource::Expr(expr) => {
+                let args: Vec<&dyn Any> = expr
+                    .inputs
+                    .iter()
+                    .map(|&id| stage.effective(&self.cells, id))
+                    .collect();
+                let value = (expr.function)(&args).map_err(|error| Error::MethodFailed {
+                    error,
+                    sites: vec![],
+                })?;
+                Ok(MatchValue::Owned(value))
+            }
+        }
+    }
+
     /// Returns the equality function used to compare `cond`'s match value against branch
     /// keys: the match cell's own `eq_fn` for a plain match subject, or the expression's
     /// captured `eq_fn` for a computed one.
@@ -1206,21 +1318,20 @@ impl Sheet {
         }
     }
 
-    /// Builds the active relationship set for the general planning pass.
+    /// Builds the active relationship set against staged propagation state.
     ///
-    /// Starts with all unconditional relationships (those not in
-    /// `self.conditional_relationships`), then evaluates each conditional: the first
-    /// branch whose keys contain the match subject's current value is selected, and its
-    /// relationships are added. If no branch matches, the default relationships are added.
+    /// Every conditional reads `stage`'s writes first and otherwise falls back to cell
+    /// `source` values rather than any live
+    /// `derived` override already present on the sheet.
     ///
     /// # Errors
     ///
     /// - `Error::MethodFailed` — an expression-sourced conditional's function returned an
     ///   error.
-    ///
-    /// - Complexity: O(R + C·B·K) where R = total relationships, C = conditionals,
-    ///   B = branches per conditional, K = keys per branch.
-    fn build_active_set(&self) -> Result<HashSet<RelationshipId>, Error> {
+    fn build_active_set_staged(
+        &self,
+        stage: &PropagationStage,
+    ) -> Result<HashSet<RelationshipId>, Error> {
         let mut active: HashSet<RelationshipId> = self
             .relationships
             .keys()
@@ -1228,7 +1339,7 @@ impl Sheet {
             .collect();
 
         for (_, cond) in &self.conditionals {
-            let value = self.evaluate_match_source(cond)?;
+            let value = self.evaluate_match_source_staged(cond, stage)?;
             let value_ref = value.as_dyn();
             let eq_fn = self.match_eq_fn(cond);
 
@@ -1250,6 +1361,306 @@ impl Sheet {
         }
 
         Ok(active)
+    }
+
+    /// Records the actual dependency producers and write classifications for `plan`.
+    ///
+    /// - Complexity: expected O(V + E), where V is the number of selected steps and E is
+    ///   the number of method inputs, outputs, and filter arguments.
+    fn plan_provenance(&self, plan: &Plan) -> PlanProvenance {
+        let mut provenance = PlanProvenance::default();
+        let mut effective_producers = HashMap::new();
+        let mut source_producers = HashMap::new();
+
+        for &step in &plan.execution_order {
+            let step_provenance = match step {
+                PlanStep::Method(rel_id, method_index) => {
+                    let method = &self.relationships[rel_id].methods[method_index];
+                    let method_inputs: HashSet<CellId> = method.inputs.iter().copied().collect();
+                    let method_outputs: HashSet<CellId> = method.outputs.iter().copied().collect();
+                    let mut input_producers = Vec::with_capacity(method.inputs.len());
+                    let mut seed_inputs = Vec::new();
+                    for &input in &method.inputs {
+                        if method_outputs.contains(&input) {
+                            seed_inputs.push(input);
+                            input_producers.push(None);
+                        } else {
+                            input_producers.push(effective_producers.get(&input).copied());
+                        }
+                    }
+                    let output_classes: Vec<_> = method
+                        .outputs
+                        .iter()
+                        .map(|&output| {
+                            (
+                                output,
+                                if method_inputs.contains(&output)
+                                    || plan.forced_outputs.contains(&output)
+                                {
+                                    OutputClassification::Derived
+                                } else {
+                                    OutputClassification::Source
+                                },
+                            )
+                        })
+                        .collect();
+                    let step_provenance = StepProvenance {
+                        input_producers,
+                        seed_inputs,
+                        source_producer: None,
+                        output_classes: output_classes.clone(),
+                    };
+                    for &(output, _) in &output_classes {
+                        effective_producers.insert(output, step);
+                    }
+                    for &(output, classification) in &output_classes {
+                        if classification == OutputClassification::Source {
+                            source_producers.insert(output, step);
+                        }
+                    }
+                    step_provenance
+                }
+                PlanStep::FilterReclamp(cell) => {
+                    let filter = self.cells[cell]
+                        .filter
+                        .as_ref()
+                        .expect("plan() only emits FilterReclamp for a filtered cell");
+                    let input_producers = filter
+                        .args
+                        .iter()
+                        .map(|input| effective_producers.get(input).copied())
+                        .collect();
+                    let step_provenance = StepProvenance {
+                        input_producers,
+                        seed_inputs: Vec::new(),
+                        source_producer: source_producers.get(&cell).copied(),
+                        output_classes: vec![(cell, OutputClassification::Derived)],
+                    };
+                    effective_producers.insert(cell, step);
+                    step_provenance
+                }
+            };
+            provenance.steps.insert(step, step_provenance);
+        }
+        provenance.output_producers = effective_producers;
+        provenance
+    }
+
+    /// Checks that a staged prerequisite step has identical selected producer paths in both plans.
+    ///
+    /// - Postcondition: `true` implies the selected method/filter, its input producers,
+    ///   seed inputs, source producer, and output classifications all match.
+    fn prerequisite_step_is_compatible(
+        &self,
+        pre_plan: &PlanProvenance,
+        final_plan: &PlanProvenance,
+        step: PlanStep,
+        stage: &PropagationStage,
+    ) -> bool {
+        let Some(staged) = stage.step_provenance.get(&step) else {
+            return false;
+        };
+        pre_plan.steps.get(&step) == Some(staged) && final_plan.steps.get(&step) == Some(staged)
+    }
+
+    /// Returns concrete cells and relationships implicated by a staged-step mismatch.
+    ///
+    /// - Complexity: O(K) sites for the step's cells and producer edges.
+    fn conflict_sites_for_step(
+        &self,
+        step: PlanStep,
+        pre_plan: &PlanProvenance,
+        final_plan: &PlanProvenance,
+    ) -> Vec<ErrorSite> {
+        let mut sites = Vec::new();
+        let mut seen_sites = HashSet::new();
+        let mut add_site = |site| {
+            if seen_sites.insert(site) {
+                sites.push(site);
+            }
+        };
+        let mut cells = Vec::new();
+
+        match step {
+            PlanStep::Method(rel_id, method_index) => {
+                add_site(ErrorSite::Relationship(rel_id));
+                add_site(ErrorSite::Method(rel_id, method_index));
+                let method = &self.relationships[rel_id].methods[method_index];
+                cells.extend(method.inputs.iter().copied());
+                cells.extend(method.outputs.iter().copied());
+            }
+            PlanStep::FilterReclamp(cell) => {
+                cells.push(cell);
+                if let Some(filter) = &self.cells[cell].filter {
+                    cells.extend(filter.args.iter().copied());
+                }
+            }
+        }
+
+        for provenance in [pre_plan.steps.get(&step), final_plan.steps.get(&step)]
+            .into_iter()
+            .flatten()
+        {
+            for producer in provenance
+                .input_producers
+                .iter()
+                .copied()
+                .flatten()
+                .chain(provenance.source_producer)
+            {
+                Self::add_step_relationship_site(producer, &mut add_site);
+            }
+        }
+        for cell in cells {
+            add_site(ErrorSite::Cell(cell));
+            for plan in [pre_plan, final_plan] {
+                if let Some(&producer) = plan.output_producers.get(&cell) {
+                    Self::add_step_relationship_site(producer, &mut add_site);
+                }
+            }
+        }
+        sites
+    }
+
+    /// Adds the relationship site associated with a selected method producer.
+    fn add_step_relationship_site(step: PlanStep, add_site: &mut impl FnMut(ErrorSite)) {
+        match step {
+            PlanStep::Method(rel_id, _) => add_site(ErrorSite::Relationship(rel_id)),
+            PlanStep::FilterReclamp(cell) => add_site(ErrorSite::Cell(cell)),
+        }
+    }
+
+    /// Executes `execution_order` once into transactional staged state.
+    ///
+    /// A method or filter step already evaluated by the conditional pre-plan is reused
+    /// when the general plan contains the same step, so stateful callbacks are never
+    /// invoked twice in one propagation call. Filter failures remain non-fatal and leave
+    /// the staged cell untouched, matching `execute_plan`.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::MethodFailed` — a `PlanStep::Method` step's function returned an error,
+    ///   or the method produced a different number of outputs than declared.
+    /// - `Error::TypeMismatch` — a `PlanStep::Method` step's output runtime type does
+    ///   not match the cell's registered type.
+    fn execute_plan_staged(
+        &self,
+        execution_order: &[PlanStep],
+        seeds: &Seeds,
+        forced_outputs: &HashSet<CellId>,
+        plan_provenance: &PlanProvenance,
+        stage: &mut PropagationStage,
+        filter_violations: &mut Vec<(CellId, FilterViolation)>,
+    ) -> Result<(), Error> {
+        for step in execution_order {
+            match *step {
+                PlanStep::Method(rel_id, method_idx) => {
+                    if stage.executed_methods.contains(&(rel_id, method_idx)) {
+                        let method = &self.relationships[rel_id].methods[method_idx];
+                        for &output in &method.outputs {
+                            stage.reclassify(
+                                output,
+                                method.inputs.contains(&output) || forced_outputs.contains(&output),
+                            );
+                        }
+                        continue;
+                    }
+                    let (outputs, output_ids, shadow_outputs) = {
+                        let method = &self.relationships[rel_id].methods[method_idx];
+                        let inputs: Vec<&dyn Any> = method
+                            .inputs
+                            .iter()
+                            .map(|&id| {
+                                if method.outputs.contains(&id) {
+                                    seeds
+                                        .get(&id)
+                                        .map(|value| value.as_ref())
+                                        .unwrap_or_else(|| stage.source(&self.cells, id))
+                                } else {
+                                    stage.effective(&self.cells, id)
+                                }
+                            })
+                            .collect();
+                        let outputs =
+                            (method.function)(&inputs).map_err(|error| Error::MethodFailed {
+                                error,
+                                sites: vec![ErrorSite::Method(rel_id, method_idx)],
+                            })?;
+                        let output_ids = method.outputs.clone();
+                        let shadow_outputs: Vec<bool> = method
+                            .outputs
+                            .iter()
+                            .map(|o| method.inputs.contains(o) || forced_outputs.contains(o))
+                            .collect();
+                        (outputs, output_ids, shadow_outputs)
+                    };
+
+                    if outputs.len() != output_ids.len() {
+                        return Err(Error::MethodFailed {
+                            error: anyhow::anyhow!(
+                                "method produced {} outputs but relationship expects {}",
+                                outputs.len(),
+                                output_ids.len()
+                            ),
+                            sites: vec![ErrorSite::Method(rel_id, method_idx)],
+                        });
+                    }
+
+                    for ((cell_id, new_value), shadow) in
+                        output_ids.into_iter().zip(outputs).zip(shadow_outputs)
+                    {
+                        let found = new_value.as_ref().type_id();
+                        let cell = &self.cells[cell_id];
+                        if found != cell.type_id {
+                            return Err(Error::TypeMismatch {
+                                expected: cell.type_id,
+                                found,
+                                sites: vec![ErrorSite::Method(rel_id, method_idx)],
+                            });
+                        }
+                        stage.write(cell_id, new_value, shadow);
+                    }
+                    stage.executed_methods.insert((rel_id, method_idx));
+                    stage
+                        .step_provenance
+                        .insert(*step, plan_provenance.steps[step].clone());
+                }
+                PlanStep::FilterReclamp(id) => {
+                    if stage.executed_filters.contains(&id) {
+                        continue;
+                    }
+                    let filter = self.cells[id]
+                        .filter
+                        .as_ref()
+                        .expect("plan() only emits FilterReclamp for a filtered cell");
+                    let args: Vec<&dyn Any> = filter
+                        .args
+                        .iter()
+                        .map(|&a| stage.effective(&self.cells, a))
+                        .collect();
+                    let current = stage.source(&self.cells, id);
+                    match (filter.function)(current, &args) {
+                        Ok(v) if v.as_ref().type_id() == self.cells[id].type_id => {
+                            stage.write(id, v, true);
+                        }
+                        Ok(_) => filter_violations.push((
+                            id,
+                            FilterViolation::Failed(anyhow::anyhow!(
+                                "filter returned a value of a different type than the cell"
+                            )),
+                        )),
+                        Err(error) => {
+                            filter_violations.push((id, FilterViolation::Failed(error)));
+                        }
+                    }
+                    stage.executed_filters.insert(id);
+                    stage
+                        .step_provenance
+                        .insert(*step, plan_provenance.steps[step].clone());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Assigns derived-cell strengths after a planning pass.
@@ -1295,16 +1706,13 @@ impl Sheet {
         }
     }
 
-    /// Returns the cells with a live derived override (for Phase 5's revert tracking),
-    /// then clears every cell's derived override so no self-referencing method this round
-    /// observes a value left over from a previous round. A self-referencing input's value
-    /// is instead reconstructed from `source` by [`crate::planner::build_seeds`], so no
-    /// per-round derived snapshot needs to survive planning.
+    /// Publishes a fully validated propagation stage and returns previously derived cells.
     ///
-    /// - Postcondition: every cell's `derived` is `None`.
+    /// Clears every old derived override, applies staged source and derived writes, and
+    /// records each staged output in [`Sheet::changed`]. No callback is evaluated here.
     ///
     /// - Complexity: O(cells).
-    fn reset_derived(&mut self) -> Vec<CellId> {
+    fn commit_stage(&mut self, stage: PropagationStage) -> Vec<CellId> {
         let previously_derived: Vec<CellId> = self
             .cells
             .iter()
@@ -1314,34 +1722,58 @@ impl Sheet {
         for (_, cell) in self.cells.iter_mut() {
             cell.derived = None;
         }
+        for (id, value) in stage.sources {
+            self.cells[id].source = value;
+        }
+        for (id, value) in stage.derived {
+            self.cells[id].derived = Some(value);
+        }
+        for id in stage.changed {
+            let cell = &mut self.cells[id];
+            if !cell.changed {
+                cell.changed = true;
+                self.changed_cells.push(id);
+            }
+        }
         previously_derived
     }
 
     /// Runs the planning pass and executes the selected methods.
     ///
     /// Validates static guard independence before mutating state, then clears the
-    /// changed-cell set from the previous `propagate()` call before planning.
+    /// changed-cell set from the previous `propagate()` call before staged planning.
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
-    /// **Phase 0 — Derived reset:** every cell's derived override is cleared before
-    /// planning begins, so no pure-input read this round can observe a derived value
-    /// left over from a previous round.
+    /// **Phase 0 — Staging:** propagation starts from each cell's source value, excluding
+    /// every derived override from the previous round, but does not mutate live cells.
     ///
     /// **Phase 1 — Pre-plan:** if any conditional match cells are derived (have an
-    /// in-edge in the unconditional relationship graph), the minimal unconditional
-    /// subgraph needed to compute them is planned and executed so their values are
-    /// current before branch evaluation.
+    /// in-edge in the unconditional relationship graph), the unconditional plan's selected
+    /// guard-prerequisite cone is executed so their values are current before branch evaluation.
+    /// Unrelated filters remain deferred until the final active plan, after the relationships
+    /// that produce their arguments.
     ///
     /// **Phase 2 — Conditional evaluation:** each conditional's match cell value is
     /// read and compared against branch keys; the active relationship set is built.
     ///
-    /// **Phase 3 — General plan:** the Adam algorithm runs on the active set.
+    /// **Phase 3 — General plan:** the Adam algorithm runs on the active set. Seed-cycle
+    /// validation and method execution consume staged Phase 1 values. A callback already
+    /// evaluated in Phase 1 is reused only when the final plan preserves its selected
+    /// method, input producers, and output classification. A mismatched plan returns a
+    /// conservative conflict rather than replaying the callback or committing stale values. This
+    /// boundary may reject a sheet even when another assignment could have avoided the mismatch;
+    /// propagation reports the implicated sites instead of attempting that alternate assignment.
+    /// A Phase 1 seed callback is likewise reused only when every input reads the same staged
+    /// source version, recursive seed result, or accumulated value; otherwise propagation
+    /// returns a conflict instead of reusing a stale seed or evaluating the callback again.
     ///
-    /// **Phase 4 — Strength post-processing:** derived cells receive low-order strengths
-    /// in evaluation order, enforcing the stability invariant. A cell claimed
-    /// self-referencingly keeps any live explicit strength instead, since its own written
-    /// value is still the authority behind the result.
+    /// **Phase 4 — Commit and strength post-processing:** after planning, seed
+    /// validation, and staged method execution all succeed, staged writes are published
+    /// atomically. Derived cells then receive low-order strengths in evaluation order,
+    /// enforcing the stability invariant. A cell claimed self-referencingly keeps any
+    /// live explicit strength instead, since its own written value is still the authority
+    /// behind the result.
     ///
     /// **Phase 5 — Reversion change-tracking:** a cell whose derived override existed
     /// before this round but wasn't reclaimed by any method this round has effectively
@@ -1353,11 +1785,23 @@ impl Sheet {
     /// scratch, so [`Sheet::cell_requirements_valid`] and [`Sheet::violated_requirements`]
     /// reflect this round.
     ///
+    /// If staged seed validation detects a non-self sibling dependency cycle, or compatibility
+    /// checking returns a prerequisite conflict, `propagate()` returns its error after validation
+    /// and changed-state clearing but before commit. Live cell values therefore remain untouched
+    /// and [`Sheet::changed`] stays empty for that failing call. Method and conditional callbacks
+    /// evaluated while reaching that error are each invoked at most once per distinct input set.
+    ///
+    /// - Complexity: prerequisite-cone indexing, traversal, and staged producer compatibility
+    ///   checks are O(V + E) per selected plan, distinct from the planner's existing assignment
+    ///   matching complexity.
+    ///
     /// # Errors
     ///
     /// - `Error::DependencyCycle` — a filter or conditional guard edge lies on a cycle in
     ///   the static dependency graph.
-    /// - `Error::Conflict` — no valid method assignment exists.
+    /// - `Error::Conflict` — no valid method assignment exists, or a pre-executed guard
+    ///   prerequisite is incompatible with the final selected plan.
+    /// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle.
     /// - `Error::MethodFailed` — a method's function returned an error, a method
     ///   produced the wrong number of outputs, or a requirement's function returned
     ///   an error.
@@ -1366,51 +1810,81 @@ impl Sheet {
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.validate()?;
         self.clear_changed();
+        let mut stage = PropagationStage::default();
+        let mut source_filter_violations: Vec<(CellId, FilterViolation)> = Vec::new();
+        let mut seed_evaluation_cache = SeedEvaluationCache::default();
+        let mut pre_plan_provenance = None;
 
-        // Phase 0: record cells with a live derived override (for Phase 5), then clear
-        // every derived override before planning begins. See `reset_derived`.
-        let previously_derived = self.reset_derived();
-
-        // Phase 1: pre-plan for derived match cells.
+        // Phases 0-1: evaluate the conditional pre-plan into private staged state.
         if !self.conditionals.is_empty() {
-            let match_cells: Vec<CellId> = self
-                .conditionals
-                .values()
-                .flat_map(|c| c.match_cells().iter().copied())
+            let pre_active: HashSet<RelationshipId> = self
+                .relationships
+                .keys()
+                .filter(|id| !self.conditional_relationships.contains(id))
                 .collect();
-            let pre_active = self.match_cell_subgraph(&match_cells);
-            if !pre_active.is_empty() {
-                let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
-                let seeds = crate::planner::build_seeds(
+            let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
+            let prerequisite_steps = self.guard_prerequisite_steps(&pre_plan.execution_order)?;
+            let provenance = self.plan_provenance(&pre_plan);
+            let seeds = {
+                let source = |id| stage.seed_source(&self.cells, id);
+                crate::planner::build_seeds_for_steps(
                     &pre_plan.execution_order,
+                    &prerequisite_steps,
+                    &pre_plan.elimination_order,
                     &self.cells,
                     &self.relationships,
-                );
-                self.execute_plan(
-                    &pre_plan.execution_order,
-                    &seeds,
-                    &pre_plan.forced_outputs,
-                    &mut Vec::new(),
-                )?;
-            }
+                    &source,
+                    &mut seed_evaluation_cache,
+                )?
+            };
+            self.execute_plan_staged(
+                &prerequisite_steps,
+                &seeds,
+                &pre_plan.forced_outputs,
+                &provenance,
+                &mut stage,
+                &mut source_filter_violations,
+            )?;
+            pre_plan_provenance = Some((provenance, prerequisite_steps));
         }
 
-        // Phase 2: evaluate conditionals and build the active relationship set.
-        let active = self.build_active_set()?;
+        // Phase 2: evaluate each conditional once against staged Phase 1 values.
+        let active = self.build_active_set_staged(&stage)?;
 
-        // Phase 3: general plan on the active set.
+        // Phase 3: validate seeds and execute the general plan into the same stage.
         let plan = crate::planner::plan(&self.cells, &self.relationships, &active)?;
-        let seeds =
-            crate::planner::build_seeds(&plan.execution_order, &self.cells, &self.relationships);
-        let mut source_filter_violations: Vec<(CellId, FilterViolation)> = Vec::new();
-        self.execute_plan(
+        let provenance = self.plan_provenance(&plan);
+        if let Some((pre_plan, prerequisite_steps)) = &pre_plan_provenance {
+            for &step in prerequisite_steps {
+                if !self.prerequisite_step_is_compatible(pre_plan, &provenance, step, &stage) {
+                    return Err(Error::Conflict {
+                        sites: self.conflict_sites_for_step(step, pre_plan, &provenance),
+                    });
+                }
+            }
+        }
+        let seeds = {
+            let source = |id| stage.seed_source(&self.cells, id);
+            crate::planner::build_seeds(
+                &plan.execution_order,
+                &plan.elimination_order,
+                &self.cells,
+                &self.relationships,
+                &source,
+                &mut seed_evaluation_cache,
+            )?
+        };
+        self.execute_plan_staged(
             &plan.execution_order,
             &seeds,
             &plan.forced_outputs,
+            &provenance,
+            &mut stage,
             &mut source_filter_violations,
         )?;
 
-        // Phase 4: assign derived-cell strengths in evaluation order.
+        // Phase 4: publish only after every staged callback and seed validation succeeds.
+        let previously_derived = self.commit_stage(stage);
         self.post_process_strengths(&plan.execution_order);
 
         // Phase 5: cells that reverted (had a derived override, didn't get a fresh one
@@ -1534,6 +2008,7 @@ impl Sheet {
     ///
     /// - Complexity: O(R·K) where R is the number of entries and K is the max cells per method,
     ///   plus per-method execution cost.
+    #[cfg(test)]
     fn execute_plan(
         &mut self,
         execution_order: &[PlanStep],
@@ -2512,7 +2987,7 @@ mod tests {
     }
 
     #[test]
-    fn add_relationship_duplicate_output_set_across_methods_returns_duplicate_method_outputs() {
+    fn add_relationship_duplicate_output_set_across_methods_returns_invalid_method_outputs() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -2523,11 +2998,73 @@ mod tests {
             Method::from_fn_2_1([a, b], b, |x: &i32, _y: &i32| Ok(*x)),
             Method::from_fn_2_1([a, b], b, |_x: &i32, y: &i32| Ok(*y)),
         ]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert!(matches!(result, Err(Error::InvalidMethodOutputs { .. })));
         assert_eq!(
             result.unwrap_err().sites().first().copied(),
             Some(ErrorSite::MethodIndex(1))
         );
+    }
+
+    #[test]
+    fn add_relationship_rejects_strictly_nested_method_outputs() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // Both methods span {a, b, c}; one outputs {b}, the other outputs {b, c}.
+        let result = sheet.add_relationship(vec![
+            Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok(x + y)),
+            Method::new(
+                vec![a],
+                vec![b, c],
+                vec![std::any::TypeId::of::<i32>()],
+                vec![std::any::TypeId::of::<i32>(), std::any::TypeId::of::<i32>()],
+                |args| {
+                    let x = *args[0].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(x), Box::new(x)])
+                },
+            ),
+        ]);
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::InvalidMethodOutputs { .. }));
+        let sites = err.sites();
+        assert_eq!(sites[0], ErrorSite::MethodIndex(1));
+        assert_eq!(sites[1], ErrorSite::MethodIndex(0));
+        assert_eq!(sites[2..], [ErrorSite::Cell(b)]);
+    }
+
+    #[test]
+    fn add_relationship_accepts_overlapping_non_nested_method_outputs() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        // Both methods span {a, b, c}; outputs overlap at b but neither set nests the other.
+        let result = sheet.add_relationship(vec![
+            Method::new(
+                vec![a, c],
+                vec![a, b],
+                vec![std::any::TypeId::of::<i32>(), std::any::TypeId::of::<i32>()],
+                vec![std::any::TypeId::of::<i32>(), std::any::TypeId::of::<i32>()],
+                |args| {
+                    let x = *args[0].downcast_ref::<i32>().unwrap();
+                    let y = *args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(x), Box::new(y)])
+                },
+            ),
+            Method::new(
+                vec![a, b],
+                vec![b, c],
+                vec![std::any::TypeId::of::<i32>(), std::any::TypeId::of::<i32>()],
+                vec![std::any::TypeId::of::<i32>(), std::any::TypeId::of::<i32>()],
+                |args| {
+                    let x = *args[0].downcast_ref::<i32>().unwrap();
+                    let y = *args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(y), Box::new(x)])
+                },
+            ),
+        ]);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -2575,7 +3112,7 @@ mod tests {
             Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x + *y)),
             Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x - *y)),
         ]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert!(matches!(result, Err(Error::InvalidMethodOutputs { .. })));
         assert_eq!(
             result.unwrap_err().sites().first().copied(),
             Some(ErrorSite::MethodIndex(1))
@@ -2599,7 +3136,7 @@ mod tests {
             },
         );
         let result = sheet.add_relationship(vec![method]);
-        assert!(matches!(result, Err(Error::DuplicateMethodOutputs { .. })));
+        assert!(matches!(result, Err(Error::InvalidMethodOutputs { .. })));
         assert_eq!(
             result.unwrap_err().sites().first().copied(),
             Some(ErrorSite::MethodIndex(0))
