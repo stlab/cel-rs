@@ -3737,10 +3737,9 @@ mod tests {
     #[test]
     fn conditional_structural_error_spans_the_conditional_not_the_sheet() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        // The branch relationship shares `mode` (the match cell) and has 2 methods --
-        // add_conditional's InvalidConditional ("a branch relationship that shares a cell with
-        // the match cell ... has more than one method") fires here, on line 5 (`conditional
-        // mode {`), not the sheet's opening line.
+        // The branch writes the match cell `mode`, so add_conditional returns
+        // DependencyCycle here, on line 5 (`conditional mode {`), not the sheet's opening
+        // line.
         let source = "sheet s {\n    cell mode: i32 = 0;\n    cell other: i32 = 0;\n\n    conditional mode {\n        0i32 => {\n            relationship {\n                mode := other;\n                other := mode;\n            }\n        }\n    }\n}";
         let err = parser.parse_str(source).unwrap_err();
         assert_eq!(err.span().start().line, 5);
@@ -3759,19 +3758,14 @@ mod tests {
     #[test]
     fn conditional_invalid_relationship_and_cell_sites_render_as_secondary_labels() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        // Same structural error as the test above (a multi-method branch relationship sharing
-        // the match cell `mode`): this time asserting on the *rendered* diagnostic, to confirm
-        // the offending relationship's own block and the shared cell's declaration are attached
-        // as secondary spans, not just that the primary span moved off the sheet line.
+        // Same structural error as the test above: this time asserting on the rendered
+        // diagnostic, to confirm the shared cell's declaration is attached as a secondary
+        // span, not just that the primary span moved off the sheet line.
         let source = "sheet s {\n    cell mode: i32 = 0;\n    cell other: i32 = 0;\n\n    conditional mode {\n        0i32 => {\n            relationship {\n                mode := other;\n                other := mode;\n            }\n        }\n    }\n}";
         let err = parser.parse_str(source).unwrap_err();
         let out =
             err.format_rustc_style(source, "t.adm2", 1, &annotate_snippets::Renderer::plain());
-        assert!(
-            out.contains("this relationship makes the conditional invalid"),
-            "{out}"
-        );
-        assert!(out.contains("cell `mode`"), "{out}");
+        assert!(out.contains("cell `mode` is part of the cycle"), "{out}");
     }
 
     #[test]

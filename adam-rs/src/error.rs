@@ -102,16 +102,14 @@ pub enum Error {
     },
 
     /// A conditional is structurally invalid: the cell was not found, a referenced
-    /// relationship was not found, a branch relationship that shares a cell with the match
-    /// cell or any of its unconditional upstream contributors has more than one method, a
-    /// relationship appears in more than one conditional branch, a branch key's type does
-    /// not match the cell's registered type, or a branch has no keys.
+    /// relationship was not found, a relationship appears in more than one conditional
+    /// branch, a branch key's type does not match the cell's registered type, or a branch
+    /// has no keys.
     InvalidConditional {
         /// Empty for the expression-output type-mismatch case; the match-cell
         /// type-mismatch case names the cell (`sites = [Cell(match_cell)]`). The
-        /// duplicate-relationship and multi-method-branch cases name the offending
-        /// relationship(s) (and, for the multi-method case, the contributing cell).
-        /// Empty for the missing-relationship and empty-branch-keys cases.
+        /// duplicate-relationship case names the offending relationship. Empty for the
+        /// missing-relationship and empty-branch-keys cases.
         sites: Vec<ErrorSite>,
     },
 

@@ -171,3 +171,101 @@ fn add_relationship_rejects_a_relationship_that_feeds_a_match_cell_from_its_bran
     ));
     assert_eq!(sheet.relationships().count(), 1);
 }
+
+#[test]
+fn add_conditional_rejects_a_single_method_branch_that_writes_its_own_match_cell() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(0_i32);
+    let other = sheet.add_cell(0_i32);
+    let r = sheet
+        .add_relationship(vec![Method::from_fn_1_1(other, mode, |x: &i32| Ok(*x))])
+        .unwrap();
+    let err = sheet
+        .add_conditional(MatchExpr::cell(mode), vec![(vec![0_i32], vec![r])], vec![])
+        .unwrap_err();
+    match err {
+        Error::DependencyCycle { sites } => assert_eq!(sites, vec![ErrorSite::Cell(mode)]),
+        other => panic!("expected DependencyCycle, got {other:?}"),
+    }
+}
+
+#[test]
+fn add_conditional_rejects_a_branch_feeding_the_match_cell_through_another_relationship() {
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(0_i32);
+    let p = sheet.add_cell(0_i32);
+    let upstream = sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, p, |x: &i32| Ok(*x))])
+        .unwrap();
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(b, a, |x: &i32| Ok(*x))])
+        .unwrap();
+    let err = sheet
+        .add_conditional(
+            MatchExpr::cell(p),
+            vec![(vec![0_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap_err();
+    match err {
+        Error::DependencyCycle { sites } => assert_eq!(
+            sites,
+            vec![
+                ErrorSite::Cell(a),
+                ErrorSite::Relationship(upstream),
+                ErrorSite::Cell(p)
+            ]
+        ),
+        other => panic!("expected DependencyCycle, got {other:?}"),
+    }
+}
+
+#[test]
+fn add_conditional_accepts_a_multi_method_branch_that_only_reads_match_contributors() {
+    // a feeds p; the branch relationship over {a, b, c} always reads a and writes b or c,
+    // so nothing it governs reaches p.
+    let mut sheet = Sheet::new();
+    let a = sheet.add_cell(1_i32);
+    let b = sheet.add_cell(0_i32);
+    let c = sheet.add_cell(0_i32);
+    let p = sheet.add_cell(0_i32);
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(a, p, |x: &i32| Ok(*x))])
+        .unwrap();
+    let branch = sheet
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok(x + y)),
+            Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(y - x)),
+        ])
+        .unwrap();
+    let cid = sheet
+        .add_conditional(
+            MatchExpr::cell(p),
+            vec![(vec![1_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(sheet.conditional_active_branch(cid).unwrap(), Some(0));
+}
+
+#[test]
+fn add_conditional_rejects_a_conditional_closing_an_existing_filter_guard() {
+    // y filtered by z; a conditional on y governing k -> z closes y -gate-> z -filter-> y.
+    let mut sheet = Sheet::new();
+    let y = sheet.add_cell(0_i32);
+    let z = sheet.add_cell(0_i32);
+    let k = sheet.add_cell(7_i32);
+    sheet.add_filter(y, min_filter(z)).unwrap();
+    let r = sheet
+        .add_relationship(vec![Method::from_fn_1_1(k, z, |x: &i32| Ok(*x))])
+        .unwrap();
+    assert!(matches!(
+        sheet.add_conditional(MatchExpr::cell(y), vec![(vec![0_i32], vec![r])], vec![]),
+        Err(Error::DependencyCycle { .. })
+    ));
+    // Rolled back: r is still unconditional, so it runs.
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(z).unwrap(), 7);
+}

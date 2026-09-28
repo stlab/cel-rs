@@ -348,20 +348,22 @@ impl Sheet {
     /// - `Error::TypeMismatch` — (expression match subject only) an input cell's registered
     ///   type doesn't match the expression's declared type for that input.
     /// - `Error::InvalidConditional` — the match subject's output type does not match `T`;
-    ///   a branch relationship shares a cell with the match subject or any of its
-    ///   unconditional upstream contributors and has more than one method; a referenced
-    ///   relationship does not exist; a relationship already appears in another
-    ///   conditional branch; or a branch has no keys.
+    ///   a referenced relationship does not exist; a relationship already appears in
+    ///   another conditional branch; or a branch has no keys.
+    /// - `Error::DependencyCycle` — a method output of a branch or default relationship
+    ///   reaches a match-subject cell in the static dependency graph, or the new
+    ///   conditional closes a cycle through an existing filter or conditional. The sheet
+    ///   is left unchanged.
     ///
     /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R =
-    ///   relationships per branch.
+    ///   relationships per branch, plus O(G · (V + E)) for the guard-independence check.
     pub fn add_conditional<T: Any + PartialEq + 'static>(
         &mut self,
         source: MatchExpr,
         branches: Vec<(Vec<T>, Vec<RelationshipId>)>,
         default: Vec<RelationshipId>,
     ) -> Result<ConditionalId, Error> {
-        let match_cells: Vec<CellId> = match &source.0 {
+        match &source.0 {
             MatchSource::Cell(cell) => {
                 let cell_data = self.cells.get(*cell).ok_or(Error::InvalidId)?;
                 if cell_data.type_id != TypeId::of::<T>() {
@@ -369,7 +371,6 @@ impl Sheet {
                         sites: vec![ErrorSite::Cell(*cell)],
                     });
                 }
-                vec![*cell]
             }
             MatchSource::Expr(expr) => {
                 if expr.output_type != TypeId::of::<T>() {
@@ -385,7 +386,6 @@ impl Sheet {
                         });
                     }
                 }
-                expr.inputs.clone()
             }
         };
 
@@ -395,60 +395,10 @@ impl Sheet {
             .flat_map(|(_, rels)| rels.iter().copied())
             .chain(default.iter().copied())
             .collect();
-        let all_rels_set: HashSet<RelationshipId> = all_rels.iter().copied().collect();
-
-        // Compute the set of cells that contribute to the match subject: BFS upstream
-        // through unconditional relationships (excluding already-committed conditional
-        // relationships and the relationships currently being added), seeded from *every*
-        // match cell. A branch relationship with multiple methods is invalid if any of its
-        // adjacent cells is in this contributing set, because the branch could then flip
-        // method selection in the match subject's upstream subgraph.
-        let contributing_cells: HashSet<CellId> = {
-            let mut cells: HashSet<CellId> = HashSet::new();
-            let mut queue: std::collections::VecDeque<CellId> = std::collections::VecDeque::new();
-            for &cell in &match_cells {
-                if cells.insert(cell) {
-                    queue.push_back(cell);
-                }
-            }
-            while let Some(c) = queue.pop_front() {
-                if let Some(cell_data) = self.cells.get(c) {
-                    for &rel_id in &cell_data.adj {
-                        if self.conditional_relationships.contains(&rel_id)
-                            || all_rels_set.contains(&rel_id)
-                        {
-                            continue;
-                        }
-                        let rel = &self.relationships[rel_id];
-                        if !rel.methods.iter().any(|m| m.outputs.contains(&c)) {
-                            continue;
-                        }
-                        for &adj_cell in &rel.adj {
-                            if cells.insert(adj_cell) {
-                                queue.push_back(adj_cell);
-                            }
-                        }
-                    }
-                }
-            }
-            cells
-        };
 
         for &rel_id in &all_rels {
-            let rel = self
-                .relationships
-                .get(rel_id)
-                .ok_or(Error::InvalidConditional { sites: vec![] })?;
-            if rel.adj.iter().any(|c| contributing_cells.contains(c)) && rel.methods.len() != 1 {
-                return Err(Error::InvalidConditional {
-                    sites: {
-                        let mut s = vec![ErrorSite::Relationship(rel_id)];
-                        if let Some(&c) = rel.adj.iter().find(|c| contributing_cells.contains(c)) {
-                            s.push(ErrorSite::Cell(c));
-                        }
-                        s
-                    },
-                });
+            if !self.relationships.contains_key(rel_id) {
+                return Err(Error::InvalidConditional { sites: vec![] });
             }
             if self.conditional_relationships.contains(&rel_id) {
                 return Err(Error::InvalidConditional {
@@ -492,11 +442,22 @@ impl Sheet {
             self.conditional_relationships.insert(rel_id);
         }
 
-        Ok(self.conditionals.insert(ConditionalData {
+        let id = self.conditionals.insert(ConditionalData {
             source: source.0,
             branches: typed_branches,
             default,
-        }))
+        });
+
+        if let Some(path) = self.guard_violation() {
+            self.conditionals.remove(id);
+            for rel_id in &all_rels {
+                self.conditional_relationships.remove(rel_id);
+            }
+            return Err(Error::DependencyCycle {
+                sites: path.into_sites(None),
+            });
+        }
+        Ok(id)
     }
 
     /// Returns `true` if `id` is already claimed as some existing method's output —
@@ -1995,8 +1956,8 @@ mod tests {
     }
 
     #[test]
-    fn add_conditional_returns_invalid_conditional_for_multi_method_relationship_involving_match_cell()
-     {
+    fn add_conditional_returns_dependency_cycle_for_multi_method_relationship_involving_match_cell()
+    {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -2009,32 +1970,29 @@ mod tests {
             .unwrap();
         let result =
             sheet.add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
+        assert!(matches!(result, Err(Error::DependencyCycle { .. })));
     }
 
     #[test]
-    fn invalid_conditional_multi_method_branch_names_the_relationship() {
+    fn dependency_cycle_from_a_conditional_names_the_match_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
         // Relationship has two methods and involves `a` (the match cell).
-        let branch_rel = sheet
+        let rel = sheet
             .add_relationship(vec![
                 Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
                 Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
             ])
             .unwrap();
-        let result = sheet.add_conditional(
-            MatchExpr::cell(a),
-            vec![(vec![0_i32], vec![branch_rel])],
-            vec![],
-        );
+        let result =
+            sheet.add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![]);
         let err = result.unwrap_err();
-        assert!(err.sites().contains(&ErrorSite::Relationship(branch_rel)));
+        assert!(err.sites().contains(&ErrorSite::Cell(a)));
     }
 
     #[test]
-    fn add_conditional_returns_error_when_branch_rel_involves_cell_upstream_of_match_cell() {
+    fn add_conditional_returns_error_when_branch_rel_writes_a_cell_upstream_of_match_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -2052,11 +2010,11 @@ mod tests {
             .unwrap();
         let result =
             sheet.add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
+        assert!(matches!(result, Err(Error::DependencyCycle { .. })));
     }
 
     #[test]
-    fn add_conditional_returns_error_when_branch_rel_involves_cell_upstream_of_either_expr_input() {
+    fn add_conditional_returns_error_when_branch_rel_writes_a_cell_upstream_of_either_expr_input() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -2076,7 +2034,7 @@ mod tests {
             .unwrap();
         let expr = MatchExpr::from_fn_2([p, q], |x: &i32, y: &i32| Ok(*x + *y));
         let result = sheet.add_conditional(expr, vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::InvalidConditional { .. })));
+        assert!(matches!(result, Err(Error::DependencyCycle { .. })));
     }
 
     #[test]
@@ -2144,7 +2102,7 @@ mod tests {
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
         // Relationship has two methods but does not involve `mode` (the match cell).
-        // Branch relationships that don't contribute to the match cell may have any
+        // Branch relationships whose outputs do not reach the match cell may have any
         // number of methods.
         let rel = sheet
             .add_relationship(vec![
