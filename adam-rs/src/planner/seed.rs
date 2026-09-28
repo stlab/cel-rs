@@ -103,10 +103,10 @@ pub(crate) fn build_seeds(
 
 /// Populates `seeds[x]` with `x`'s aspiration, computed by folding every incident
 /// relationship other than `x`'s claimant through its elimination-compatible
-/// `x`-producing method, in `cells[x].adj` order, seeded from `x`'s `source` and each
-/// other input's own seed (recursively). Leaves `x` absent when no such relationship
-/// exists (its seed is just `source`) or when every candidate method errors or mistypes
-/// its output.
+/// `x`-producing method, ordered by the strongest non-`x` input's strength from weakest
+/// to strongest, seeded from `x`'s `source` and each other input's own seed
+/// (recursively). Leaves `x` absent when no such relationship exists (its seed is just
+/// `source`) or when every candidate method errors or mistypes its output.
 ///
 /// Only relationships in `active` (those the current plan actually runs) count as
 /// siblings: an inactive conditional branch that happens to name `x` must not seed it.
@@ -128,7 +128,9 @@ pub(crate) fn build_seeds(
 /// genuine priority signal -- treating it as one here would incorrectly suppress the
 /// aspiration fold for the ordinary case this module exists to handle. This is the same
 /// relative-strength test `release::resolve` uses elsewhere, not a comparison of
-/// candidate values.
+/// candidate values. Among the sibling methods that survive that gate, weaker
+/// relationships fold first and the strongest surviving influence folds last so the
+/// final seed respects strength rather than relationship insertion order.
 ///
 /// # Errors
 ///
@@ -155,20 +157,30 @@ fn compute_seed(
     path_cells.push(x);
 
     let own_claimant = claimant.get(&x).copied();
-    let sibling_methods: Vec<(RelationshipId, usize)> = cells[x]
+    let mut sibling_methods: Vec<(RelationshipId, usize, u64)> = cells[x]
         .adj
         .iter()
         .filter(|&&rel_id| active.contains(&rel_id) && Some(rel_id) != own_claimant)
         .filter_map(|&rel_id| {
             match select_seed_method(rel_id, x, elimination_order, relationships) {
-                Ok(Some(idx)) => Some(Ok((rel_id, idx))),
+                Ok(Some(idx)) => {
+                    let strongest_input = relationships[rel_id].methods[idx]
+                        .inputs
+                        .iter()
+                        .filter(|&&input| input != x)
+                        .map(|&input| cells[input].strength)
+                        .max()
+                        .unwrap_or(0);
+                    Some(Ok((rel_id, idx, strongest_input)))
+                }
                 Ok(None) => None,
                 Err(err) => Some(Err(err)),
             }
         })
         .collect::<Result<Vec<_>, Error>>()?;
+    sibling_methods.sort_by_key(|&(_, _, strongest_input)| strongest_input);
 
-    for &(rel_id, method_idx) in &sibling_methods {
+    for &(rel_id, method_idx, _) in &sibling_methods {
         for &input in &relationships[rel_id].methods[method_idx].inputs {
             if input != x {
                 if let Some(&cycle_start) = path_indices.get(&input) {
@@ -202,7 +214,7 @@ fn compute_seed(
     }
 
     let mut accumulated: Option<Box<dyn Any>> = None;
-    for &(rel_id, method_idx) in &sibling_methods {
+    for &(rel_id, method_idx, _) in &sibling_methods {
         let method = &relationships[rel_id].methods[method_idx];
 
         let has_weaker_self_referenced_input = cells[x].has_explicit_strength()

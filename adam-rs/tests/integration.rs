@@ -2467,6 +2467,79 @@ fn issue_182_inequality_chain_writing_the_middle_cell_then_an_untouched_endpoint
     assert_eq!(*sheet.read::<i32>(c).unwrap(), 100);
 }
 
+#[test]
+fn sibling_seed_fold_uses_strength_order() {
+    // Build the cells in x,a,b,c order so the values stay the required 4,5,3,10 while
+    // the explicit strengths satisfy a < b < c and both sibling inputs outrank x. That
+    // forces x's seed to fold both a<=x and x<=b, making the result depend on sibling
+    // fold order unless seedfill sorts them by input strength.
+    let mut forward = Sheet::new();
+    let x = forward.add_cell(4_i32);
+    let a = forward.add_cell(5_i32);
+    let b = forward.add_cell(3_i32);
+    let c = forward.add_cell(10_i32);
+    forward
+        .add_relationship(vec![
+            Method::from_fn_2_1([x, c], x, |lhs: &i32, rhs: &i32| Ok((*lhs).min(*rhs))),
+            Method::from_fn_2_1([x, c], c, |lhs: &i32, rhs: &i32| Ok((*lhs).max(*rhs))),
+        ])
+        .unwrap();
+    forward
+        .add_relationship(vec![
+            Method::from_fn_2_1([a, x], a, |lhs: &i32, rhs: &i32| Ok((*lhs).min(*rhs))),
+            Method::from_fn_2_1([a, x], x, |lhs: &i32, rhs: &i32| Ok((*lhs).max(*rhs))),
+        ])
+        .unwrap();
+    forward
+        .add_relationship(vec![
+            Method::from_fn_2_1([x, b], x, |lhs: &i32, rhs: &i32| Ok((*lhs).min(*rhs))),
+            Method::from_fn_2_1([x, b], b, |lhs: &i32, rhs: &i32| Ok((*lhs).max(*rhs))),
+        ])
+        .unwrap();
+
+    let mut reversed = Sheet::new();
+    let x_rev = reversed.add_cell(4_i32);
+    let a_rev = reversed.add_cell(5_i32);
+    let b_rev = reversed.add_cell(3_i32);
+    let c_rev = reversed.add_cell(10_i32);
+    reversed
+        .add_relationship(vec![
+            Method::from_fn_2_1([x_rev, c_rev], x_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).min(*rhs))
+            }),
+            Method::from_fn_2_1([x_rev, c_rev], c_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).max(*rhs))
+            }),
+        ])
+        .unwrap();
+    reversed
+        .add_relationship(vec![
+            Method::from_fn_2_1([x_rev, b_rev], x_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).min(*rhs))
+            }),
+            Method::from_fn_2_1([x_rev, b_rev], b_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).max(*rhs))
+            }),
+        ])
+        .unwrap();
+    reversed
+        .add_relationship(vec![
+            Method::from_fn_2_1([a_rev, x_rev], a_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).min(*rhs))
+            }),
+            Method::from_fn_2_1([a_rev, x_rev], x_rev, |lhs: &i32, rhs: &i32| {
+                Ok((*lhs).max(*rhs))
+            }),
+        ])
+        .unwrap();
+
+    forward.propagate().unwrap();
+    reversed.propagate().unwrap();
+
+    assert_eq!(*forward.read::<i32>(x).unwrap(), 3);
+    assert_eq!(*reversed.read::<i32>(x_rev).unwrap(), 3);
+}
+
 /// Builds the `a <= b <= c` tutorial chain (`inequality.adm2`) with declared values
 /// 10, 20, 30, already propagated once.
 fn inequality_chain() -> (Sheet, CellId, CellId, CellId) {
