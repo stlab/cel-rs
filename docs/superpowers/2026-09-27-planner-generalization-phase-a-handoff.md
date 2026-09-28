@@ -67,6 +67,8 @@ Full verification for this handoff completed with no `warning:` lines observed:
 - Analyzer validation for rule 3 ("Every method is reachable"). The runtime now rejects static
   guard cycles, but deeper method-reachability checks remain analyzer scope.
 - The 2D containment scenario remains a later stress test rather than a Phase A fixture.
+- `adam-lsp` diagnostics do not yet report `DependencyCycle` or other sheet-construction errors,
+  because the LSP never builds a live `Sheet`. This gap predates Phase A and is tracked as #239.
 
 ## Remaining
 

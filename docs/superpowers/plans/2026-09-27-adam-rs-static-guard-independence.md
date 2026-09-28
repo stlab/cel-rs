@@ -8,6 +8,13 @@
 
 **Tech Stack:** Rust 2024, `slotmap`, workspace crates `adam-rs`, `adam-lang`, `begin`.
 
+> **Superseded after execution (PR #238 review):** the per-mutator check made sheet construction
+> superlinear, so it was replaced by a lazy, linear check. Mutators now only mark the structure
+> unvalidated; `Sheet::validate` (run first by `propagate`, and once by adam-lang after parsing)
+> finds guard cycles with a single SCC pass in O(V + E). Nothing is rolled back, and every method hop
+> is reported as `Relationship`. The spec §2 and the Phase A handoff describe the final design; the
+> tasks below record the original execution.
+
 **Spec:** `docs/superpowers/specs/2026-09-27-adam-rs-planner-generalization-design.md` (§2 and "Validity rules"). Phases B (§1 seedfill, #186) and C (§3 plan reuse, #152) get their own plans after this phase merges.
 
 ## Global Constraints
