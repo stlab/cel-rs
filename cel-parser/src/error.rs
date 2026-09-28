@@ -546,6 +546,24 @@ impl ParseError {
         self
     }
 
+    /// Returns the secondary labelled spans attached to this error.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cel_parser::{ParseError, SourceSpan, SpanLabel};
+    /// use proc_macro2::Span;
+    ///
+    /// let e = ParseError::new("bad", Span::call_site()).with_secondary(vec![SpanLabel {
+    ///     span: SourceSpan::new(1, 0, 1, 3),
+    ///     label: "related".into(),
+    /// }]);
+    /// assert_eq!(e.secondary().len(), 1);
+    /// ```
+    pub fn secondary(&self) -> &[SpanLabel] {
+        &self.secondary
+    }
+
     /// Converts a lex failure (e.g. from `proc_macro2::TokenStream::from_str`) into a
     /// `ParseError` with a message describing the likely cause.
     ///
