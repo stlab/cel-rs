@@ -8,43 +8,47 @@ what's left before the whole design is complete.
 
 ## Done
 
-**Phase A (§2 static guard independence) is implemented on this branch.** The sheet now rejects
+**Phase A (§2 static guard independence) is implemented on this branch.** The sheet now reports
 any filter or conditional whose guard inputs can depend on a cell the guard governs:
 
 - `Error::DependencyCycle { sites }` replaces the old plan-time `Error::FilterCycle`. Guard
-  violations are construction-time errors instead of planner failures.
+  violations are reported by `Sheet::validate` and by `Sheet::propagate`, which validates before
+  mutating propagation state.
 - `adam-rs/src/sheet/dependency.rs` contains the private static dependency graph traversal.
   The graph includes method `input -> output` edges, filter guard `arg -> filtered` edges, and
   conditional guard `match subject -> governed output` edges.
-- `Sheet::add_filter`, `Sheet::add_relationship`, and `Sheet::add_conditional` tentatively apply
-  their mutation, run the guard-independence check, and roll back before returning
-  `DependencyCycle` when a guard edge closes a cycle.
+- `Sheet::add_filter`, `Sheet::add_relationship`, and `Sheet::add_conditional` no longer run the
+  guard check or roll back. They mark the current structure unvalidated; `Sheet::validate` builds
+  the static graph once, computes SCCs once with an iterative Tarjan pass, scans guard edges in a
+  deterministic order, and runs BFS only on the error path to reconstruct `sites`.
+- The lazy structural-validation flag added for Phase A can be shared with Phase C's plan-reuse
+  structural-change flag.
 - `Sheet::add_conditional` no longer uses the old multi-method branch relationship
   contributing-cells rule. It accepts read-only multi-method branches and rejects only the static
   dependency cycles that violate rule 5.
 - The planner treats a post-filter-edge cycle as an internal invariant: valid sheets should not
   reach that branch because the static guard check rejects them during construction.
-- `adam-lang` reports `DependencyCycle` from sheet construction with primary labels on the
-  relevant declaration and secondary labels for cycle sites, including cell labels when an
-  `add_filter` or `add_conditional` error path leads with a cell.
+- `adam-lang` calls `Sheet::validate` once after parsing the whole sheet and reports
+  `DependencyCycle` with the governed cell declaration as the primary label and remaining cycle
+  sites as secondary labels.
 
 Rewritten invalid-sheet tests/examples:
 
 - No bundled `begin` example required rewriting; `every_bundled_example_parses_successfully`
   passed unchanged.
-- `adam-rs::sheet` tests that previously expected `InvalidConditional` for branch guard cycles
-  now assert `DependencyCycle`:
-  - `add_conditional_returns_dependency_cycle_for_multi_method_relationship_involving_match_cell`
+- `adam-rs::sheet` tests that previously expected `InvalidConditional` or per-add
+  `DependencyCycle` for branch guard cycles now assert `validate`/`propagate`
+  `DependencyCycle`:
+  - `validate_returns_dependency_cycle_for_multi_method_relationship_involving_match_cell`
   - `dependency_cycle_from_a_conditional_names_the_match_cell`
   - `add_conditional_returns_error_when_branch_rel_writes_a_cell_upstream_of_match_cell`
   - `add_conditional_returns_error_when_branch_rel_writes_a_cell_upstream_of_either_expr_input`
 - `adam-rs/tests/dependency_guards.rs` adds public-API coverage for invalid sheets that close
   guard cycles through filters, relationships, and conditionals, plus accepted upstream/read-only
-  cases.
-- `adam-lang` diagnostic tests now expect a conditional writing its match cell to surface as a
-  dependency cycle with secondary cell labels rather than as the old structural conditional rule.
-  Direct `add_filter`-time cycles remain unreachable through the adam-lang grammar because forward
-  cell references are rejected; the `add_relationship` path is covered.
+  cases, repeated validation failures, invalid propagation leaving values and `changed()` intact,
+  and mutation after a successful validation.
+- `adam-lang` diagnostic tests now expect whole-sheet validation to surface dependency cycles
+  with the governed cell as primary.
 
 Full verification for this handoff completed with no `warning:` lines observed:
 

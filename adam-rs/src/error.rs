@@ -147,14 +147,13 @@ pub enum Error {
     /// method's `input → output` edges (a self-referencing input adds none), each
     /// filter's `argument → filtered` guard edges, and each conditional's
     /// `match cell → output` guard edges for every method output of its branch and
-    /// default relationships. Returned by `Sheet::add_filter`, `Sheet::add_conditional`,
-    /// and `Sheet::add_relationship`, which leave the sheet unchanged when they return it.
+    /// default relationships. Returned by `Sheet::validate` and by `Sheet::propagate`,
+    /// which validates before mutating propagation state.
     DependencyCycle {
         /// The cycle in dependency order, starting at the governed cell `t` and ending at
         /// the guard cell `g` whose guard edge `g → t` closes it. `Cell` entries are
-        /// separated by the `Relationship` each method hop runs through — or, for a
-        /// relationship still being added by `add_relationship`, that method's
-        /// `MethodIndex`. Two consecutive `Cell` entries are a guard hop.
+        /// separated by the `Relationship` each method hop runs through. Two consecutive
+        /// `Cell` entries are a guard hop.
         sites: Vec<ErrorSite>,
     },
 }

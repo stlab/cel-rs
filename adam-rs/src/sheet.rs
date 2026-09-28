@@ -76,6 +76,8 @@ pub struct Sheet {
     /// invalidation, matching every other per-cell set/map `Sheet` already maintains
     /// for its own lifetime.
     filter_dependents: HashMap<CellId, Vec<CellId>>,
+    /// Whether static guard independence has been validated for the current structure.
+    guard_independent: bool,
 }
 
 /// A conditional's evaluated match value: borrowed (existing cell, no allocation) or owned
@@ -112,6 +114,7 @@ impl Sheet {
             last_requirement_violations: HashMap::new(),
             last_filter_violations: HashMap::new(),
             filter_dependents: HashMap::new(),
+            guard_independent: true,
         }
     }
 
@@ -181,15 +184,12 @@ impl Sheet {
     /// - `Error::TypeMismatch` — a method's declared `TypeId` does not match the
     ///   cell's registered `TypeId`.
     /// - `Error::InvalidCellKind` — a method's output cell is `Source`-kind.
-    /// - `Error::DependencyCycle` — the relationship's methods would make some filter's
-    ///   argument or conditional's match subject depend on a cell it governs; method hops
-    ///   through this relationship are reported as `MethodIndex`. The sheet is left
-    ///   unchanged.
     ///
-    /// - Complexity: O(m² × c) + O(G · (V + E)) where m is the total number of
-    ///   methods, c is the maximum number of cells per method (due to duplicate
-    ///   output set comparison), G = filters + conditionals, V = cells, and E =
-    ///   dependency edges.
+    /// Guard independence is checked by [`Sheet::validate`] and by [`Sheet::propagate`],
+    /// not by this mutator.
+    ///
+    /// - Complexity: O(m² × c) where m is the total number of methods and c is the
+    ///   maximum number of cells per method, due to duplicate output set comparison.
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
             return Err(Error::InvalidMethod { sites: vec![] });
@@ -315,20 +315,7 @@ impl Sheet {
             }
         }
 
-        if let Some(path) = self.guard_violation() {
-            let rel = self.relationships.remove(rel_id).expect("inserted above");
-            for cell_id in rel.adj {
-                if let Some(cell) = self.cells.get_mut(cell_id)
-                    && cell.adj.last() == Some(&rel_id)
-                {
-                    cell.adj.pop();
-                }
-            }
-            return Err(Error::DependencyCycle {
-                sites: path.into_sites(Some(rel_id)),
-            });
-        }
-
+        self.guard_independent = false;
         Ok(rel_id)
     }
 
@@ -350,13 +337,12 @@ impl Sheet {
     /// - `Error::InvalidConditional` — the match subject's output type does not match `T`;
     ///   a referenced relationship does not exist; a relationship already appears in
     ///   another conditional branch; or a branch has no keys.
-    /// - `Error::DependencyCycle` — a method output of a branch or default relationship
-    ///   reaches a match-subject cell in the static dependency graph, or the new
-    ///   conditional closes a cycle through an existing filter or conditional. The sheet
-    ///   is left unchanged.
+    ///
+    /// Guard independence is checked by [`Sheet::validate`] and by [`Sheet::propagate`],
+    /// not by this mutator.
     ///
     /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R =
-    ///   relationships per branch, plus O(G · (V + E)) for the guard-independence check.
+    ///   relationships per branch.
     pub fn add_conditional<T: Any + PartialEq + 'static>(
         &mut self,
         source: MatchExpr,
@@ -448,15 +434,7 @@ impl Sheet {
             default,
         });
 
-        if let Some(path) = self.guard_violation() {
-            self.conditionals.remove(id);
-            for rel_id in &all_rels {
-                self.conditional_relationships.remove(rel_id);
-            }
-            return Err(Error::DependencyCycle {
-                sites: path.into_sites(None),
-            });
-        }
+        self.guard_independent = false;
         Ok(id)
     }
 
@@ -612,13 +590,11 @@ impl Sheet {
     ///   names `cell` itself.
     /// - `Error::TypeMismatch` — an argument cell's registered type does not match the
     ///   type `filter` declared for it.
-    /// - `Error::DependencyCycle` — with `filter` attached, some filter's or conditional's
-    ///   inputs would depend on a cell it governs (see `Error::DependencyCycle`); e.g.
-    ///   one of `filter`'s arguments is reachable from `cell` through method edges. The
-    ///   sheet is left unchanged.
     ///
-    /// - Complexity: O(G · (V + E)) for the dependency check; G = filters +
-    ///   conditionals, V = cells, E = dependency edges.
+    /// Guard independence is checked by [`Sheet::validate`] and by [`Sheet::propagate`],
+    /// not by this mutator.
+    ///
+    /// - Complexity: O(a) where a is the number of filter argument cells.
     pub fn add_filter(&mut self, cell: CellId, filter: Filter) -> Result<(), Error> {
         let cell_type = self.cells.get(cell).ok_or(Error::InvalidId)?.type_id;
         if self.cells[cell].filter.is_some() {
@@ -645,20 +621,7 @@ impl Sheet {
             self.filter_dependents.entry(arg).or_default().push(cell);
         }
         self.cells[cell].filter = Some(filter.0);
-        if let Some(path) = self.guard_violation() {
-            let filter = self.cells[cell].filter.take().expect("attached above");
-            for arg in &filter.args {
-                if let Some(dependents) = self.filter_dependents.get_mut(arg) {
-                    dependents.pop();
-                    if dependents.is_empty() {
-                        self.filter_dependents.remove(arg);
-                    }
-                }
-            }
-            return Err(Error::DependencyCycle {
-                sites: path.into_sites(None),
-            });
-        }
+        self.guard_independent = false;
         Ok(())
     }
 
@@ -1082,6 +1045,53 @@ impl Sheet {
         }
     }
 
+    /// Validates static guard independence for the current sheet structure.
+    ///
+    /// A filter's argument cells and a conditional's match cells must not depend on any
+    /// cell governed by that filter or conditional in the static dependency graph. A
+    /// successful call records the current structure as validated; a failed call leaves
+    /// it unvalidated, so the same structure reports the dependency cycle again on the
+    /// next [`Sheet::validate`] or [`Sheet::propagate`] call.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::DependencyCycle` — a guard edge lies on a cycle in the static
+    ///   dependency graph.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use adam_rs::{Filter, Method, Sheet};
+    ///
+    /// let mut sheet = Sheet::new();
+    /// let limit = sheet.add_cell(10_i32);
+    /// let value = sheet.add_cell(5_i32);
+    /// let copy = sheet.add_cell(0_i32);
+    /// sheet
+    ///     .add_relationship(vec![Method::from_fn_1_1(value, copy, |x: &i32| Ok(*x))])
+    ///     .unwrap();
+    /// sheet
+    ///     .add_filter(value, Filter::from_fn_1(limit, |v: &i32, hi: &i32| Ok((*v).min(*hi))))
+    ///     .unwrap();
+    /// sheet.validate().unwrap();
+    /// ```
+    ///
+    /// - Complexity: O(1) when no structural mutation has happened since the last
+    ///   successful validation; otherwise O(V + E), where V is the number of cells and
+    ///   E is the number of static method and guard edges.
+    pub fn validate(&mut self) -> Result<(), Error> {
+        if self.guard_independent {
+            return Ok(());
+        }
+        if let Some(path) = self.guard_violation() {
+            return Err(Error::DependencyCycle {
+                sites: path.into_sites(),
+            });
+        }
+        self.guard_independent = true;
+        Ok(())
+    }
+
     /// Iterates all live cell IDs in the sheet.
     ///
     /// - Complexity: O(n) where n is the number of cells.
@@ -1309,7 +1319,8 @@ impl Sheet {
 
     /// Runs the planning pass and executes the selected methods.
     ///
-    /// Clears the changed-cell set from the previous `propagate()` call before planning.
+    /// Validates static guard independence before mutating state, then clears the
+    /// changed-cell set from the previous `propagate()` call before planning.
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
@@ -1344,6 +1355,8 @@ impl Sheet {
     ///
     /// # Errors
     ///
+    /// - `Error::DependencyCycle` — a filter or conditional guard edge lies on a cycle in
+    ///   the static dependency graph.
     /// - `Error::Conflict` — no valid method assignment exists.
     /// - `Error::MethodFailed` — a method's function returned an error, a method
     ///   produced the wrong number of outputs, or a requirement's function returned
@@ -1351,6 +1364,7 @@ impl Sheet {
     /// - `Error::TypeMismatch` — a method output's runtime type does not match the
     ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
+        self.validate()?;
         self.clear_changed();
 
         // Phase 0: record cells with a live derived override (for Phase 5), then clear
@@ -1956,8 +1970,7 @@ mod tests {
     }
 
     #[test]
-    fn add_conditional_returns_dependency_cycle_for_multi_method_relationship_involving_match_cell()
-    {
+    fn validate_returns_dependency_cycle_for_multi_method_relationship_involving_match_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(0_i32);
         let b = sheet.add_cell(0_i32);
@@ -1968,9 +1981,13 @@ mod tests {
                 Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
             ])
             .unwrap();
-        let result =
-            sheet.add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::DependencyCycle { .. })));
+        sheet
+            .add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        assert!(matches!(
+            sheet.validate(),
+            Err(Error::DependencyCycle { .. })
+        ));
     }
 
     #[test]
@@ -1985,9 +2002,10 @@ mod tests {
                 Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
             ])
             .unwrap();
-        let result =
-            sheet.add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![]);
-        let err = result.unwrap_err();
+        sheet
+            .add_conditional(MatchExpr::cell(a), vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        let err = sheet.validate().unwrap_err();
         assert!(err.sites().contains(&ErrorSite::Cell(a)));
     }
 
@@ -2008,9 +2026,13 @@ mod tests {
                 Method::from_fn_1_1(b, a, |x: &i32| Ok(*x)),
             ])
             .unwrap();
-        let result =
-            sheet.add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::DependencyCycle { .. })));
+        sheet
+            .add_conditional(MatchExpr::cell(p), vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        assert!(matches!(
+            sheet.validate(),
+            Err(Error::DependencyCycle { .. })
+        ));
     }
 
     #[test]
@@ -2033,8 +2055,13 @@ mod tests {
             ])
             .unwrap();
         let expr = MatchExpr::from_fn_2([p, q], |x: &i32, y: &i32| Ok(*x + *y));
-        let result = sheet.add_conditional(expr, vec![(vec![0_i32], vec![rel])], vec![]);
-        assert!(matches!(result, Err(Error::DependencyCycle { .. })));
+        sheet
+            .add_conditional(expr, vec![(vec![0_i32], vec![rel])], vec![])
+            .unwrap();
+        assert!(matches!(
+            sheet.validate(),
+            Err(Error::DependencyCycle { .. })
+        ));
     }
 
     #[test]

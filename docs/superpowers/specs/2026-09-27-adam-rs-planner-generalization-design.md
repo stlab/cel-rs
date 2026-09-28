@@ -116,14 +116,21 @@ because any multi-way relationship containing both cells can route the filtered 
 into the argument.
 
 - `Sheet::add_filter`, `Sheet::add_conditional`, and `Sheet::add_relationship` (whose new
-  method edges may close a path for an existing guard) each re-check the invariant and
-  return the new `Error::DependencyCycle { sites }` on violation, leaving the sheet
-  unchanged. `sites` is the violating cycle in dependency order, guard target first:
+  method edges may close a path for an existing guard) no longer re-check the invariant
+  or roll back. They mark the structure as not yet validated. `Sheet::validate` and
+  `Sheet::propagate` report the new `Error::DependencyCycle { sites }` on violation.
+  `sites` is the violating cycle in dependency order, guard target first:
   `[Cell(t), Relationship(r₁), Cell(c₁), …, Cell(g)]`.
+- Validation builds the static graph once, computes strongly connected components once,
+  then checks each guard edge: `g → t` violates iff `g == t` or both endpoints share an
+  SCC. Only the error path runs a BFS to recover the shortest `t → ... → g` path for
+  labels. This avoids the previous superlinear sheet-construction cost from running a
+  full reachability search after every guard-affecting mutator.
 - This subsumes `add_conditional`'s "branch relationship with more than one method
   touching a match-subject contributor" rule, which is removed.
-- adam-lang already maps these calls' errors onto the declaration's span, so they are
-  reported at parse time.
+- adam-lang validates once after parsing the whole sheet and reports the first cycle with
+  the governed cell declaration as the primary label and the remaining sites as
+  secondary labels.
 
 Consequences: a filter-induced cycle can no longer arise at plan time, so
 `Error::FilterCycle` is removed and the planner's post-filter-edge topological sort
@@ -131,10 +138,11 @@ treats a cycle as an unreachable invariant violation. `release::resolve` needs n
 filter-aware search, and the module/error docs that reference #153 are updated.
 
 Tests: both invalid #153 examples (`z = x + y` with filter on `y` by `z`, and the
-`R1{x,y,z} + R2{w,y}` variant) are rejected at `add_filter`; a filter whose argument is
-genuinely upstream-independent is accepted; a relationship added after the filter that
-creates the dependency is rejected; a conditional whose branch feeds its own match cell
-is rejected.
+`R1{x,y,z} + R2{w,y}` variant) are accepted by their mutators and rejected by
+`validate`/`propagate`; a filter whose argument is genuinely upstream-independent is
+accepted; a relationship added after the filter that creates the dependency is reported
+by the next validation; a conditional whose branch feeds its own match cell is reported
+by validation.
 
 ## §3 Automatic plan reuse (#152)
 
@@ -155,6 +163,8 @@ receives the same accept/reject decision. No matroid property is required.
 2. A validity flag is cleared by any structural mutation (cells, relationships, filters,
    conditionals, requirements) and by any `write`/strength change to a cell that was not
    a released source in the cached plan (derived, forced, or self-referencing claimant).
+   The structural-mutation flag introduced for §2 guard validation can be shared with
+   this plan-reuse invalidation state.
 3. `propagate()` always runs Phases 0–2. It skips `planner::plan` and `build_seeds` only
    when the flag is set and the rebuilt active set equals the cached one. Phases 4–6
    always run.

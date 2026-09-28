@@ -10,10 +10,10 @@
 //! at execution time, not from a value-aware planning choice (see
 //! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`).
 //!
-//! Filter edges never need to be considered here: `Sheet` rejects, at construction,
-//! any filter whose arguments depend on the filtered cell (`Error::DependencyCycle`),
-//! so adding a filtered source's argument edges to an acyclic relationship assignment
-//! can never close a cycle.
+//! Filter edges never need to be considered here: `Sheet::validate`, which
+//! `Sheet::propagate` runs before planning, reports any filter whose arguments depend
+//! on the filtered cell (`Error::DependencyCycle`), so adding a filtered source's
+//! argument edges to an acyclic relationship assignment can never close a cycle.
 
 use std::cmp::Reverse;
 use std::collections::HashSet;

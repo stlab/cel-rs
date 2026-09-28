@@ -136,7 +136,7 @@ pub(crate) fn plan(
     let mut execution_order: Vec<PlanStep> = Vec::new();
     let order = topological_order(&adj).expect(
         "release::resolve returns an acyclic relationship assignment, and \
-         Sheet's static guard check rules out any cycle through a filter edge",
+         Sheet::validate establishes the static guard invariant before propagate plans",
     );
     for node in order {
         match node {
