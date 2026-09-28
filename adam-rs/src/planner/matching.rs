@@ -536,14 +536,15 @@ mod tests {
         let p_b = sheet.add_cell(0_i32);
         let u = sheet.add_cell(0_i32);
         let v = sheet.add_cell(0_i32);
+        let w = sheet.add_cell(0_i32);
         let i32_ty = std::any::TypeId::of::<i32>();
 
         let r_b = sheet
             .add_relationship(vec![
                 Method::new(
-                    vec![p_b],
+                    vec![p_b, w],
                     vec![u, v],
-                    vec![i32_ty],
+                    vec![i32_ty, i32_ty],
                     vec![i32_ty, i32_ty],
                     |args| {
                         let p = *args[0].downcast_ref::<i32>().unwrap();
@@ -552,12 +553,12 @@ mod tests {
                 ),
                 Method::new(
                     vec![p_b, v],
-                    vec![u],
+                    vec![u, w],
                     vec![i32_ty, i32_ty],
-                    vec![i32_ty],
+                    vec![i32_ty, i32_ty],
                     |args| {
                         let p = *args[0].downcast_ref::<i32>().unwrap();
-                        Ok(vec![Box::new(p)])
+                        Ok(vec![Box::new(p), Box::new(p)])
                     },
                 ),
             ])
