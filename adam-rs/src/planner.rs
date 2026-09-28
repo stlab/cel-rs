@@ -77,6 +77,9 @@ pub(crate) enum PlanStep {
 pub(crate) struct Plan {
     /// Selected steps (methods and filter reclamps) in execution order.
     pub(crate) execution_order: Vec<PlanStep>,
+    /// The exact deterministic cell sequence the release pass evaluated when
+    /// tentatively eliminating sources.
+    pub(crate) elimination_order: Vec<CellId>,
     /// Cells that can never be a source under the relationships this plan considered.
     /// See [`forced_output_cells`].
     pub(crate) forced_outputs: HashSet<CellId>,
@@ -110,8 +113,8 @@ pub(crate) fn plan(
 ) -> Result<Plan, Error> {
     let (forced_outputs, alive) = forced_output_cells(relationships, active);
 
-    let assignment = match release::resolve(cells, relationships, active) {
-        Ok(a) => a,
+    let release = match release::resolve(cells, relationships, active) {
+        Ok(result) => result,
         Err(ReleaseFailure::NoAssignment) => {
             return Err(Error::Conflict {
                 sites: conflict_sites(relationships, active),
@@ -123,6 +126,7 @@ pub(crate) fn plan(
             });
         }
     };
+    let assignment = release.assignment;
 
     let mut adj = build_digraph(&assignment, relationships);
     add_filter_edges(&mut adj, cells, &assignment);
@@ -171,11 +175,14 @@ pub(crate) fn plan(
         .map(|(&rel_id, _)| rel_id)
         .collect();
 
-    Ok(Plan {
+    let plan = Plan {
         execution_order,
+        elimination_order: release.elimination_order,
         forced_outputs,
         forced_relationships,
-    })
+    };
+    debug_assert_eq!(plan.elimination_order.len(), cells.len());
+    Ok(plan)
 }
 
 /// Maps a cyclic assignment to `Relationship`/`Cell` sites in loop order.
@@ -593,6 +600,27 @@ mod tests {
         let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
 
         assert_eq!(plan.execution_order, vec![PlanStep::Method(rel, 0)]);
+    }
+
+    #[test]
+    fn plan_retains_release_elimination_order() {
+        let mut sheet = Sheet::new();
+        let a = sheet.add_cell(0_i32);
+        let b = sheet.add_cell(0_i32);
+        let c = sheet.add_cell(0_i32);
+        sheet
+            .add_relationship(vec![
+                Method::from_fn_2_1([a, b], c, |x: &i32, y: &i32| Ok(*x + *y)),
+                Method::from_fn_2_1([a, c], b, |x: &i32, y: &i32| Ok(*y - *x)),
+                Method::from_fn_2_1([b, c], a, |x: &i32, y: &i32| Ok(*y - *x)),
+            ])
+            .unwrap();
+        sheet.write(a, 5_i32).unwrap();
+
+        let active: HashSet<_> = sheet.relationships().collect();
+        let plan = crate::planner::plan(&sheet.cells, &sheet.relationships, &active).unwrap();
+
+        assert_eq!(plan.elimination_order, vec![a, c, b]);
     }
 
     #[test]
