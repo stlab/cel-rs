@@ -8,7 +8,7 @@ use std::sync::{
 };
 
 use adam_rs::{
-    CellId, CellKind, Error, ErrorSite, MatchExpr, Method, RelationshipId, Requirement,
+    CellId, CellKind, Error, ErrorSite, Filter, MatchExpr, Method, RelationshipId, Requirement,
     RequirementId, Sheet,
 };
 
@@ -1039,6 +1039,95 @@ fn conditional_match_cell_is_derived_from_unconditional_relationship() {
     assert!(!*sheet.read::<bool>(flag).unwrap());
     // b has no active relationship; it reverts to its source value (0).
     assert_eq!(*sheet.read::<i32>(b).unwrap(), 0);
+}
+
+#[test]
+fn conditional_bound_filter_runs_after_branch() {
+    for reverse_relationship_order in [false, true] {
+        let mut sheet = Sheet::new();
+        let mode = sheet.add_cell(1_i32);
+        let matched = sheet.add_cell(false);
+        let x = sheet.add_cell(8_i32);
+        let bound = sheet.add_cell(10_i32);
+
+        let filter_calls = Arc::new(AtomicUsize::new(0));
+        let filter_calls_for_callback = Arc::clone(&filter_calls);
+        sheet
+            .add_filter(
+                x,
+                Filter::from_fn_1(bound, move |value: &i32, bound: &i32| {
+                    filter_calls_for_callback.fetch_add(1, Ordering::SeqCst);
+                    Ok((*value).min(*bound))
+                }),
+            )
+            .unwrap();
+
+        let derive_match = || Method::from_fn_1_1(mode, matched, |value: &i32| Ok(*value > 0));
+        let branch = if reverse_relationship_order {
+            sheet.add_relationship(vec![derive_match()]).unwrap();
+            sheet
+                .add_relationship(vec![Method::from_fn_1_1(mode, bound, |_: &i32| Ok(3_i32))])
+                .unwrap()
+        } else {
+            let branch = sheet
+                .add_relationship(vec![Method::from_fn_1_1(mode, bound, |_: &i32| Ok(3_i32))])
+                .unwrap();
+            sheet.add_relationship(vec![derive_match()]).unwrap();
+            branch
+        };
+        sheet
+            .add_conditional(
+                MatchExpr::cell(matched),
+                vec![(vec![true], vec![branch])],
+                vec![],
+            )
+            .unwrap();
+
+        sheet.propagate().unwrap();
+
+        assert_eq!(*sheet.read::<i32>(bound).unwrap(), 3);
+        assert_eq!(*sheet.read::<i32>(x).unwrap(), 3);
+        assert_eq!(filter_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn filtered_guard_runs_before_branch_selection_once() {
+    let mut sheet = Sheet::new();
+    let guard = sheet.add_cell(8_i32);
+    let bound = sheet.add_cell(3_i32);
+    let output = sheet.add_cell(0_i32);
+
+    let filter_calls = Arc::new(AtomicUsize::new(0));
+    let filter_calls_for_callback = Arc::clone(&filter_calls);
+    sheet
+        .add_filter(
+            guard,
+            Filter::from_fn_1(bound, move |value: &i32, bound: &i32| {
+                filter_calls_for_callback.fetch_add(1, Ordering::SeqCst);
+                Ok((*value).min(*bound))
+            }),
+        )
+        .unwrap();
+
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(guard, output, |value: &i32| {
+            Ok(*value)
+        })])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![3_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(guard).unwrap(), 3);
+    assert_eq!(*sheet.read::<i32>(output).unwrap(), 3);
+    assert_eq!(filter_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]

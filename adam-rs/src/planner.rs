@@ -53,7 +53,7 @@ use digraph::{Node, add_filter_edges, build_digraph, topological_order};
 use matching::pure_outputs;
 use release::ReleaseFailure;
 
-pub(crate) use seed::build_seeds;
+pub(crate) use seed::{build_seeds, build_seeds_for_steps};
 
 /// The seed value each self-referencing input should read this round, keyed by cell. A
 /// cell absent from the map reads its own `source`. See [`seed`] and
@@ -64,7 +64,7 @@ pub(crate) type Seeds = HashMap<CellId, Box<dyn Any>>;
 /// source cell's filter against its (now-settled) current argument values.
 ///
 /// See `docs/superpowers/specs/2026-08-25-adam-rs-filter-revalidation-design.md` §2.2.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum PlanStep {
     /// Execute method `usize` of relationship `RelationshipId`.
     Method(RelationshipId, usize),

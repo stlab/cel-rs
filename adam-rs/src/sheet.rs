@@ -19,6 +19,7 @@ use crate::{
 };
 
 mod dependency;
+mod prerequisites;
 
 /// Owns a complete property model constraint graph.
 ///
@@ -1194,52 +1195,6 @@ impl Sheet {
         self.relationships.get(id).map(|r| r.adj.as_slice())
     }
 
-    /// Returns the set of unconditional relationships transitively needed to derive
-    /// the given `match_cells`.
-    ///
-    /// Walks upstream (from each match cell, through relationships whose outputs include
-    /// the cell) collecting only relationships not in `self.conditional_relationships`.
-    /// Relationships that only take a match cell as *input* (not output) are skipped.
-    ///
-    /// - Complexity: O(C·R) in the worst case where C = cells and R = relationships.
-    fn match_cell_subgraph(&self, match_cells: &[CellId]) -> HashSet<RelationshipId> {
-        let mut result: HashSet<RelationshipId> = HashSet::new();
-        let mut visited: HashSet<CellId> = HashSet::new();
-        let mut queue: std::collections::VecDeque<CellId> = match_cells.iter().copied().collect();
-
-        for &cell in match_cells {
-            visited.insert(cell);
-        }
-
-        while let Some(cell) = queue.pop_front() {
-            for &rel_id in &self.cells[cell].adj {
-                if self.conditional_relationships.contains(&rel_id) {
-                    continue;
-                }
-                if result.contains(&rel_id) {
-                    continue;
-                }
-                let rel = &self.relationships[rel_id];
-                // Only include relationships that output this cell.
-                let outputs_cell = rel.methods.iter().any(|m| m.outputs.contains(&cell));
-                if !outputs_cell {
-                    continue;
-                }
-                result.insert(rel_id);
-                // Enqueue all inputs of this relationship for upstream BFS.
-                for method in &rel.methods {
-                    for &input in &method.inputs {
-                        if visited.insert(input) {
-                            queue.push_back(input);
-                        }
-                    }
-                }
-            }
-        }
-
-        result
-    }
-
     /// Evaluates conditional `cond`'s current live match value.
     ///
     /// # Errors
@@ -1616,32 +1571,31 @@ impl Sheet {
 
         // Phases 0-1: evaluate the conditional pre-plan into private staged state.
         if !self.conditionals.is_empty() {
-            let match_cells: Vec<CellId> = self
-                .conditionals
-                .values()
-                .flat_map(|c| c.match_cells().iter().copied())
+            let pre_active: HashSet<RelationshipId> = self
+                .relationships
+                .keys()
+                .filter(|id| !self.conditional_relationships.contains(id))
                 .collect();
-            let pre_active = self.match_cell_subgraph(&match_cells);
-            if !pre_active.is_empty() {
-                let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
-                let seeds = {
-                    let source = |id| stage.source(&self.cells, id);
-                    crate::planner::build_seeds(
-                        &pre_plan.execution_order,
-                        &pre_plan.elimination_order,
-                        &self.cells,
-                        &self.relationships,
-                        &source,
-                    )?
-                };
-                self.execute_plan_staged(
+            let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
+            let prerequisite_steps = self.guard_prerequisite_steps(&pre_plan.execution_order)?;
+            let seeds = {
+                let source = |id| stage.source(&self.cells, id);
+                crate::planner::build_seeds_for_steps(
                     &pre_plan.execution_order,
-                    &seeds,
-                    &pre_plan.forced_outputs,
-                    &mut stage,
-                    &mut source_filter_violations,
-                )?;
-            }
+                    &prerequisite_steps,
+                    &pre_plan.elimination_order,
+                    &self.cells,
+                    &self.relationships,
+                    &source,
+                )?
+            };
+            self.execute_plan_staged(
+                &prerequisite_steps,
+                &seeds,
+                &pre_plan.forced_outputs,
+                &mut stage,
+                &mut source_filter_violations,
+            )?;
         }
 
         // Phase 2: evaluate each conditional once against staged Phase 1 values.

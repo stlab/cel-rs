@@ -89,9 +89,9 @@ struct SeedFoldOrderKey {
 /// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle instead of
 ///   falling back to any revisited cell's `source` value.
 ///
-/// - Complexity: O(S · A · M · K²) where S = self-referencing claimed cells, A =
-///   relationships incident to each, M = methods per sibling relationship, K = cells per
-///   method; the recursion visits each cell once (memoized).
+/// - Complexity: O(V + S · A · M · K²) where V = plan steps, S = self-referencing
+///   claimed cells, A = relationships incident to each, M = methods per sibling
+///   relationship, and K = cells per method; seed dependencies are memoized.
 pub(crate) fn build_seeds<'source>(
     execution_order: &[PlanStep],
     elimination_order: &[CellId],
@@ -99,6 +99,50 @@ pub(crate) fn build_seeds<'source>(
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     source: &dyn Fn(CellId) -> &'source dyn Any,
 ) -> Result<Seeds, Error> {
+    build_seeds_for_steps(
+        execution_order,
+        execution_order,
+        elimination_order,
+        cells,
+        relationships,
+        source,
+    )
+}
+
+/// Builds seeds for selected steps using the complete plan as claimant and sibling context.
+///
+/// `execution_order` supplies the complete selected assignment; only self-referencing methods
+/// in `seed_steps` become seed roots. Recursive seed dependencies still use the complete
+/// assignment.
+///
+/// - Precondition: `seed_steps` is a subset of `execution_order`.
+/// - Precondition: The execution and elimination orders satisfy [`build_seeds`]'s
+///   preconditions.
+///
+/// # Errors
+///
+/// - `Error::Conflict` — a sibling relationship that can seed a self-referencing cell
+///   has no method compatible with the planner's elimination state, or two sibling seed
+///   folds are structurally indistinguishable.
+/// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle.
+///
+/// - Complexity: O(V + S · A · M · K²) where V = complete-plan steps, S = requested
+///   self-referencing claimed cells, A = relationships incident to each, M = methods
+///   per sibling relationship, and K = cells per method; seed dependencies are memoized.
+pub(crate) fn build_seeds_for_steps<'source>(
+    execution_order: &[PlanStep],
+    seed_steps: &[PlanStep],
+    elimination_order: &[CellId],
+    cells: &SlotMap<CellId, CellData>,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+    source: &dyn Fn(CellId) -> &'source dyn Any,
+) -> Result<Seeds, Error> {
+    #[cfg(debug_assertions)]
+    {
+        let execution_steps: HashSet<PlanStep> = execution_order.iter().copied().collect();
+        debug_assert!(seed_steps.iter().all(|step| execution_steps.contains(step)));
+    }
+
     let mut claimant: HashMap<CellId, RelationshipId> = HashMap::new();
     let mut active: HashSet<RelationshipId> = HashSet::new();
     let mut self_ref_cells: Vec<CellId> = Vec::new();
@@ -110,6 +154,14 @@ pub(crate) fn build_seeds<'source>(
         let method = &relationships[rel_id].methods[method_idx];
         for &output in &method.outputs {
             claimant.insert(output, rel_id);
+        }
+    }
+    for step in seed_steps {
+        let PlanStep::Method(rel_id, method_idx) = *step else {
+            continue;
+        };
+        let method = &relationships[rel_id].methods[method_idx];
+        for &output in &method.outputs {
             if method.inputs.contains(&output) {
                 self_ref_cells.push(output);
             }
