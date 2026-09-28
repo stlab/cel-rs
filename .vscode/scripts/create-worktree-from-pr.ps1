@@ -1,3 +1,14 @@
+<#
+.SYNOPSIS
+Creates a worktree for an open pull request and preserves its upstream branch.
+
+.PARAMETER Selection
+Uses the zero-based pull request selection without prompting when provided.
+#>
+param(
+    [string]$Selection
+)
+
 $prsJson = gh pr list --state open --json number,title,headRefName --limit 100
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
@@ -18,7 +29,10 @@ for ($i = 0; $i -lt $prs.Count; $i++) {
 }
 Write-Host ""
 
-$selection = Read-Host "Enter number to create worktree from (or press Enter to cancel)"
+if ([string]::IsNullOrWhiteSpace($Selection)) {
+    $Selection = Read-Host "Enter number to create worktree from (or press Enter to cancel)"
+}
+
 if ([string]::IsNullOrWhiteSpace($selection)) {
     Write-Host "Cancelled."
     exit 0
@@ -39,12 +53,7 @@ if (Test-Path $worktreePath) {
     exit 1
 }
 
-git fetch origin "pull/$($pr.number)/head:$branch"
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
-
-git worktree add $worktreePath $branch
+gh pr checkout $pr.number --branch $branch --worktree $worktreePath
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
