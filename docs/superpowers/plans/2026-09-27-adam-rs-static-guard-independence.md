@@ -51,7 +51,7 @@
 **Interfaces:**
 - Produces: `adam_rs::Error::DependencyCycle { sites: Vec<ErrorSite> }` (listed in `Error::sites()`).
 
-- [ ] **Step 1: Update the error unit tests to the new variant (failing)**
+- [x] **Step 1: Update the error unit tests to the new variant (failing)**
 
 In `adam-rs/src/error.rs` tests, rename `filter_cycle_display_contains_cycle` / `filter_cycle_has_no_source` to `dependency_cycle_display_contains_cycle` / `dependency_cycle_has_no_source` and replace `Error::FilterCycle { sites: vec![] }` with `Error::DependencyCycle { sites: vec![] }` in both. Add:
 
@@ -64,12 +64,12 @@ In `adam-rs/src/error.rs` tests, rename `filter_cycle_display_contains_cycle` / 
     }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p adam-rs --lib error::tests`
 Expected: compile error `no variant named DependencyCycle`.
 
-- [ ] **Step 3: Replace the variant**
+- [x] **Step 3: Replace the variant**
 
 Replace the `FilterCycle` variant and its doc with:
 
@@ -102,7 +102,7 @@ Replace the `FilterCycle` variant and its doc with:
 
 In `sites()`, replace `Error::FilterCycle { sites }` with `Error::DependencyCycle { sites }`.
 
-- [ ] **Step 4: Make the planner's filter-edge sort an invariant**
+- [x] **Step 4: Make the planner's filter-edge sort an invariant**
 
 In `adam-rs/src/planner.rs` `plan()`, replace the `match topological_order(&adj) { ... None => { ... FilterCycle ... } }` block with:
 
@@ -128,12 +128,12 @@ In `adam-rs/src/lib.rs:123`, change ``([`Error::Cycle`]/[`Error::FilterCycle`] w
 
 In `adam-lang/src/error_labels.rs:27`, change `Error::Cycle { .. } | Error::FilterCycle { .. }` to `Error::Cycle { .. } | Error::DependencyCycle { .. }`.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `cargo test -p adam-rs --lib; cargo test -p adam-lang --lib`
 Expected: PASS. (No production path returns `DependencyCycle` yet; that is Tasks 2–5.)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cargo fmt --all
@@ -157,7 +157,7 @@ git commit -m "refactor(adam-rs): replace plan-time FilterCycle with DependencyC
   - `impl DependencyPath { pub(super) fn into_sites(self, pending: Option<RelationshipId>) -> Vec<ErrorSite> }`.
   - `impl Sheet { pub(super) fn guard_violation(&self) -> Option<DependencyPath> }`.
 
-- [ ] **Step 1: Write the module with unit tests first (tests fail to compile until implemented)**
+- [x] **Step 1: Write the module with unit tests first (tests fail to compile until implemented)**
 
 Create `adam-rs/src/sheet/dependency.rs`:
 
@@ -454,12 +454,12 @@ mod dependency;
 
 Violation-returning cases are covered through the public mutators in Tasks 3–5 (they cannot be constructed here once those tasks land, because the mutators reject them).
 
-- [ ] **Step 2: Run tests**
+- [x] **Step 2: Run tests**
 
 Run: `cargo test -p adam-rs --lib sheet::dependency`
 Expected: 4 PASS. If `guard_violation`/`Hop` trip `dead_code` warnings, that is expected until Task 3 wires them in; do not add `#[allow]` — proceed directly to Task 3 before running clippy.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cargo fmt --all
@@ -478,7 +478,7 @@ git commit -m "feat(adam-rs): static dependency graph traversal for guard indepe
 **Interfaces:**
 - Consumes: `Sheet::guard_violation`, `DependencyPath::into_sites` (Task 2); `Error::DependencyCycle` (Task 1).
 
-- [ ] **Step 1: Write failing integration tests**
+- [x] **Step 1: Write failing integration tests**
 
 Create `adam-rs/tests/dependency_guards.rs`:
 
@@ -597,12 +597,12 @@ fn add_filter_rejects_a_filter_closing_an_existing_conditional_guard() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p adam-rs --test dependency_guards`
 Expected: the four `rejects` tests FAIL (`add_filter` returns `Ok`); `accepts_an_upstream_argument` PASSES.
 
-- [ ] **Step 3: Implement the check with rollback**
+- [x] **Step 3: Implement the check with rollback**
 
 In `add_filter`, after the existing validation loop, replace the tail (`for &arg ... push(cell); self.cells[cell].filter = Some(filter.0); Ok(())`) with:
 
@@ -642,12 +642,12 @@ Update the `add_filter` doc: add to `# Errors`:
 
 and change the complexity line to `/// - Complexity: O(G · (V + E)) for the dependency check; see Error::DependencyCycle.` spelled out as `G = filters + conditionals, V = cells, E = dependency edges`.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test -p adam-rs`
 Expected: `dependency_guards` all PASS. Any *other* failing test must be triaged: if its sheet has a filter whose argument depends on the filtered cell (an invalid sheet under spec rule 5), rewrite it to assert `Error::DependencyCycle` at `add_filter` or restructure it so the argument is independent while keeping its original intent; record each such change in the commit message body. Do not weaken the check.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt --all
@@ -666,7 +666,7 @@ git commit -m "feat(adam-rs): add_filter rejects filters that depend on the filt
 **Interfaces:**
 - Consumes: `Sheet::guard_violation`, `DependencyPath::into_sites(Some(rel_id))`.
 
-- [ ] **Step 1: Write failing tests** (append to `adam-rs/tests/dependency_guards.rs`)
+- [x] **Step 1: Write failing tests** (append to `adam-rs/tests/dependency_guards.rs`)
 
 ```rust
 #[test]
@@ -711,12 +711,12 @@ fn add_relationship_rejects_a_relationship_that_feeds_a_match_cell_from_its_bran
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p adam-rs --test dependency_guards add_relationship`
 Expected: both FAIL (relationship accepted).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 At the end of `add_relationship`, replace the final `Ok(rel_id)` (after the `cell.adj.push(rel_id)` loop) with:
 
@@ -749,12 +749,12 @@ Add to its `# Errors`:
 
 and extend the complexity line with `+ O(G · (V + E))` for the dependency check.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test -p adam-rs; cargo test -p adam-lang`
 Expected: PASS. In adam-lang, `add_relationship` errors whose `sites()[0]` is not a `MethodIndex` fall back to the whole relationship block as the primary span (see the comment at `adam-lang/src/parser.rs:~915`) — that is the intended behavior for `DependencyCycle`; update that comment to name `DependencyCycle` as the variant that leads with a `Cell`. Triage other failures as in Task 3 Step 4.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt --all
@@ -775,7 +775,7 @@ git commit -m "feat(adam-rs): add_relationship rejects relationships that close 
 **Interfaces:**
 - Consumes: `Sheet::guard_violation`, `DependencyPath::into_sites(None)`.
 
-- [ ] **Step 1: Write failing tests** (append to `adam-rs/tests/dependency_guards.rs`)
+- [x] **Step 1: Write failing tests** (append to `adam-rs/tests/dependency_guards.rs`)
 
 ```rust
 #[test]
@@ -865,12 +865,12 @@ fn add_conditional_rejects_a_conditional_closing_an_existing_filter_guard() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p adam-rs --test dependency_guards add_conditional`
 Expected: `single_method_branch` FAILS (accepted today); `through_another_relationship` FAILS (accepted today, single-method branch); `multi_method_branch_that_only_reads` FAILS with `InvalidConditional`; `closing_an_existing_filter_guard` FAILS (accepted).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `add_conditional`:
 1. Delete the `contributing_cells` computation block and the `if rel.adj.iter().any(|c| contributing_cells.contains(c)) && rel.methods.len() != 1 { ... }` check inside the `for &rel_id in &all_rels` loop (keep the loop's existence check and the already-conditional check).
@@ -931,12 +931,12 @@ In `adam-rs/src/error.rs`, remove the same clause from `InvalidConditional`'s do
 
    - `parser.rs` `conditional_structural_error_spans_the_conditional_not_the_sheet`: update the comment to say the branch writes the match cell `mode`, so `add_conditional` returns `DependencyCycle`; the line-5 assertion is unchanged.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test -p adam-rs; cargo test -p adam-lang`
 Expected: PASS. Triage other failures as in Task 3 Step 4.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt --all
@@ -954,7 +954,7 @@ git commit -m "feat(adam-rs): conditionals use the static guard-independence che
 **Interfaces:**
 - Produces: `fn sheet_error(ctx: &ParseContext, primary: Span, e: adam_rs::Error) -> ParseError` (renamed from `conditional_error`, same body).
 
-- [ ] **Step 1: Write the failing test** (in `parser.rs` tests)
+- [x] **Step 1: Write the failing test** (in `parser.rs` tests)
 
 ```rust
     #[test]
@@ -974,21 +974,21 @@ git commit -m "feat(adam-rs): conditionals use the static guard-independence che
 
 Before writing it, check the exact grammar in existing `cell_filter_*` tests (~line 2176-2370) and adjust the filter expression and relationship syntax to forms those tests use (a filter body referencing `_` and another cell; a relationship referencing a cell declared later may be disallowed — if so, declare `a` first without a filter and use a `source`/`out` form that attaches a filter after the relationship, or restructure so the relationship follows the filtered cell and the violation is raised by `add_relationship` instead; in that case assert the message only). Check `ParseError`'s accessor name for secondary labels (`secondary()` or similar) in `cel-parser`.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p adam-lang --lib dependent_filter`
 Expected: FAIL on the secondary-label assertion (plain `ParseError::new` has none).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Rename `conditional_error` to `sheet_error` (update its doc: "Turns a `Sheet` construction failure into a `ParseError` with `primary` as the primary span ..."), update its two call sites, and change each `add_filter` call's `.map_err(|e| ParseError::new(e.to_string(), name_span))` to `.map_err(|e| Self::sheet_error(ctx, name_span, e))`. (If a borrow conflict arises because `ctx.sheet` is mutably borrowed, bind the result first: `let result = ctx.sheet.add_filter(..); result.map_err(|e| Self::sheet_error(ctx, name_span, e))?;`.)
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cargo test -p adam-lang`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cargo fmt --all
@@ -1004,7 +1004,7 @@ git commit -m "feat(adam-lang): label dependency-cycle sites on filter errors"
 - Create: `docs/superpowers/2026-09-27-planner-generalization-phase-a-handoff.md`
 - Modify: `docs/superpowers/specs/2026-09-27-adam-rs-planner-generalization-design.md` (Status line)
 
-- [ ] **Step 1: Run the full check suite** (each must pass; build/test output must contain no `warning:` lines)
+- [x] **Step 1: Run the full check suite** (each must pass; build/test output must contain no `warning:` lines)
 
 ```powershell
 cargo fmt --all
@@ -1020,11 +1020,11 @@ cargo test -p begin --no-default-features
 
 If `every_bundled_example_parses_successfully` fails, the named example is an invalid sheet under rule 5: fix the example (keep its demonstrated behavior with an independent filter argument/match subject) and note it in the handoff.
 
-- [ ] **Step 2: Write the handoff doc**
+- [x] **Step 2: Write the handoff doc**
 
 `docs/superpowers/2026-09-27-planner-generalization-phase-a-handoff.md` with sections: **Done** (static guard check in `add_filter`/`add_relationship`/`add_conditional`, `DependencyCycle` replacing `FilterCycle`, contributing-cells rule removed, adam-lang labels; list any tests/examples rewritten as invalid sheets), **Deferred** (analyzer: rule 3 method reachability; 2D containment stress test), **Remaining** (Phase B: spec §1 seedfill — antichain output sets, elimination-based seed method selection, `Error::SeedCycle`, ascending-strength sibling fold, #186; Phase C: spec §3 automatic plan reuse, #152). Set the spec's Status to `Phase A implemented; Phases B–C pending`.
 
-- [ ] **Step 3: Commit and open the PR**
+- [x] **Step 3: Commit and open the PR**
 
 ```bash
 git add -A
