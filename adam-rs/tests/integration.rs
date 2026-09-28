@@ -3,7 +3,10 @@
 use std::any::TypeId;
 use std::collections::HashSet;
 
-use adam_rs::{CellId, CellKind, Error, MatchExpr, Method, Requirement, RequirementId, Sheet};
+use adam_rs::{
+    CellId, CellKind, Error, ErrorSite, MatchExpr, Method, RelationshipId, Requirement,
+    RequirementId, Sheet,
+};
 
 fn sheet_with_area_output() -> (Sheet, CellId, CellId, CellId, CellId) {
     let mut sheet = Sheet::new();
@@ -2535,4 +2538,125 @@ fn inequality_chain_dragging_the_low_end_keeps_the_middle_cells_edit() {
         assert_eq!(*sheet.read::<i32>(b).unwrap(), expected, "b at a={a_val}");
         assert_eq!(*sheet.read::<i32>(c).unwrap(), expected, "c at a={a_val}");
     }
+}
+
+#[test]
+fn seed_cycle_reports_exact_sites() {
+    let (mut sheet, a, b, _c, _d, _s, rel1, rel2) = seed_cycle_sheet();
+
+    let err = sheet.propagate().unwrap_err();
+
+    assert!(matches!(
+        err,
+        Error::SeedCycle { sites }
+            if sites
+                == vec![
+                    ErrorSite::Cell(a),
+                    ErrorSite::Relationship(rel1),
+                    ErrorSite::Cell(b),
+                    ErrorSite::Relationship(rel2),
+                ]
+    ));
+}
+
+#[test]
+fn seed_cycle_leaves_values_and_changed_state_unchanged() {
+    let (mut sheet, a, b, c, d, _s, _rel1, _rel2) = seed_cycle_sheet();
+
+    let err = sheet.propagate().unwrap_err();
+
+    assert!(matches!(err, Error::SeedCycle { .. }));
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), -1);
+    assert_eq!(*sheet.read::<i32>(d).unwrap(), -2);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+fn seed_cycle_sheet() -> (
+    Sheet,
+    CellId,
+    CellId,
+    CellId,
+    CellId,
+    CellId,
+    RelationshipId,
+    RelationshipId,
+) {
+    let mut sheet = Sheet::new();
+    let c = sheet.add_cell(-1_i32);
+    let d = sheet.add_cell(-2_i32);
+    let a = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(10_i32);
+    let s = sheet.add_cell(7_i32);
+    sheet
+        .add_relationship(vec![Method::new(
+            vec![a, s],
+            vec![a],
+            vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+            vec![TypeId::of::<i32>()],
+            |args| Ok(vec![Box::new(*args[1].downcast_ref::<i32>().unwrap())]),
+        )])
+        .unwrap();
+    let rel1 = sheet
+        .add_relationship(vec![
+            Method::new(
+                vec![a, b, c],
+                vec![a],
+                vec![
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                ],
+                vec![TypeId::of::<i32>()],
+                |args| Ok(vec![Box::new(*args[1].downcast_ref::<i32>().unwrap())]),
+            ),
+            Method::new(
+                vec![a, b, c],
+                vec![c],
+                vec![
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                ],
+                vec![TypeId::of::<i32>()],
+                |args| {
+                    Ok(vec![Box::new(
+                        *args[2].downcast_ref::<i32>().unwrap() + 1000,
+                    )])
+                },
+            ),
+        ])
+        .unwrap();
+    let rel2 = sheet
+        .add_relationship(vec![
+            Method::new(
+                vec![b, a, d],
+                vec![b],
+                vec![
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                ],
+                vec![TypeId::of::<i32>()],
+                |args| Ok(vec![Box::new(*args[1].downcast_ref::<i32>().unwrap())]),
+            ),
+            Method::new(
+                vec![b, a, d],
+                vec![d],
+                vec![
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                ],
+                vec![TypeId::of::<i32>()],
+                |args| {
+                    Ok(vec![Box::new(
+                        *args[2].downcast_ref::<i32>().unwrap() + 2000,
+                    )])
+                },
+            ),
+        ])
+        .unwrap();
+    (sheet, a, b, c, d, s, rel1, rel2)
 }

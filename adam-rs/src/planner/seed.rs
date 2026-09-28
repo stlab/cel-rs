@@ -52,6 +52,7 @@ use super::{PlanStep, Seeds, matching::pure_outputs};
 ///
 /// - `Error::Conflict` — a sibling relationship that can seed a self-referencing cell
 ///   has no method compatible with the planner's elimination state.
+/// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle.
 ///
 /// - Complexity: O(S · A · M · K²) where S = self-referencing claimed cells, A =
 ///   relationships incident to each, M = methods per sibling relationship, K = cells per
@@ -80,7 +81,9 @@ pub(crate) fn build_seeds(
     }
 
     let mut seeds: Seeds = HashMap::new();
-    let mut visiting: HashSet<CellId> = HashSet::new();
+    let mut path_cells: Vec<CellId> = Vec::new();
+    let mut path_relationships: Vec<RelationshipId> = Vec::new();
+    let mut path_indices: HashMap<CellId, usize> = HashMap::new();
     for &cell in &self_ref_cells {
         compute_seed(
             cell,
@@ -90,7 +93,9 @@ pub(crate) fn build_seeds(
             cells,
             relationships,
             &mut seeds,
-            &mut visiting,
+            &mut path_cells,
+            &mut path_relationships,
+            &mut path_indices,
         )?;
     }
     Ok(seeds)
@@ -106,9 +111,9 @@ pub(crate) fn build_seeds(
 /// Only relationships in `active` (those the current plan actually runs) count as
 /// siblings: an inactive conditional branch that happens to name `x` must not seed it.
 ///
-/// `visiting` guards against a cyclic seed dependency (a cell reachable from itself
-/// through the incident-relationship graph): a cell already on the stack contributes its
-/// `source` value rather than recursing forever.
+/// `path_cells`/`path_relationships` record the active seed dependency path. A sibling
+/// input that reaches a cell already on that path reports `Error::SeedCycle` naming the
+/// participating cells and sibling relationships in traversal order.
 ///
 /// A sibling method is skipped (contributes nothing) when `x` itself holds a live
 /// explicit strength (a `write()`/`add_cell` not yet superseded by a later claim) *and*
@@ -129,6 +134,7 @@ pub(crate) fn build_seeds(
 ///
 /// - `Error::Conflict` — some sibling relationship that can seed `x` has no surviving
 ///   `x`-producing method after replaying the planner's elimination state.
+/// - `Error::SeedCycle` — a sibling seed dependency reaches a currently visiting cell.
 fn compute_seed(
     x: CellId,
     claimant: &HashMap<CellId, RelationshipId>,
@@ -137,11 +143,16 @@ fn compute_seed(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     seeds: &mut Seeds,
-    visiting: &mut HashSet<CellId>,
+    path_cells: &mut Vec<CellId>,
+    path_relationships: &mut Vec<RelationshipId>,
+    path_indices: &mut HashMap<CellId, usize>,
 ) -> Result<(), Error> {
-    if seeds.contains_key(&x) || !visiting.insert(x) {
+    if seeds.contains_key(&x) {
         return Ok(());
     }
+    debug_assert!(!path_indices.contains_key(&x));
+    path_indices.insert(x, path_cells.len());
+    path_cells.push(x);
 
     let own_claimant = claimant.get(&x).copied();
     let sibling_methods: Vec<(RelationshipId, usize)> = cells[x]
@@ -160,7 +171,15 @@ fn compute_seed(
     for &(rel_id, method_idx) in &sibling_methods {
         for &input in &relationships[rel_id].methods[method_idx].inputs {
             if input != x {
-                compute_seed(
+                if let Some(&cycle_start) = path_indices.get(&input) {
+                    let sites =
+                        seed_cycle_sites(path_cells, path_relationships, cycle_start, rel_id, x);
+                    path_indices.remove(&x);
+                    path_cells.pop();
+                    return Err(Error::SeedCycle { sites });
+                }
+                path_relationships.push(rel_id);
+                let result = compute_seed(
                     input,
                     claimant,
                     active,
@@ -168,8 +187,16 @@ fn compute_seed(
                     cells,
                     relationships,
                     seeds,
-                    visiting,
-                )?;
+                    path_cells,
+                    path_relationships,
+                    path_indices,
+                );
+                path_relationships.pop();
+                if let Err(err) = result {
+                    path_indices.remove(&x);
+                    path_cells.pop();
+                    return Err(err);
+                }
             }
         }
     }
@@ -219,11 +246,38 @@ fn compute_seed(
         }
     }
 
-    visiting.remove(&x);
+    path_indices.remove(&x);
+    path_cells.pop();
     if let Some(value) = accumulated {
         seeds.insert(x, value);
     }
     Ok(())
+}
+
+/// Returns `Error::SeedCycle` sites for a revisited path cell.
+///
+/// - Precondition: `cycle_start < path_cells.len()`.
+/// - Precondition: `path_cells.len() == path_relationships.len() + 1`.
+/// - Complexity: O(n) where n is the number of reported cycle members.
+fn seed_cycle_sites(
+    path_cells: &[CellId],
+    path_relationships: &[RelationshipId],
+    cycle_start: usize,
+    closing_relationship: RelationshipId,
+    current: CellId,
+) -> Vec<ErrorSite> {
+    debug_assert!(cycle_start < path_cells.len());
+    debug_assert_eq!(path_cells.len(), path_relationships.len() + 1);
+    debug_assert_eq!(path_cells.last().copied(), Some(current));
+
+    let mut sites = Vec::with_capacity((path_cells.len() - cycle_start) * 2);
+    sites.push(ErrorSite::Cell(path_cells[cycle_start]));
+    for index in cycle_start..path_relationships.len() {
+        sites.push(ErrorSite::Relationship(path_relationships[index]));
+        sites.push(ErrorSite::Cell(path_cells[index + 1]));
+    }
+    sites.push(ErrorSite::Relationship(closing_relationship));
+    sites
 }
 
 /// Selects `rel_id`'s unique `target`-producing seed method compatible with the

@@ -1370,6 +1370,7 @@ impl Sheet {
     /// - `Error::DependencyCycle` — a filter or conditional guard edge lies on a cycle in
     ///   the static dependency graph.
     /// - `Error::Conflict` — no valid method assignment exists.
+    /// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle.
     /// - `Error::MethodFailed` — a method's function returned an error, a method
     ///   produced the wrong number of outputs, or a requirement's function returned
     ///   an error.

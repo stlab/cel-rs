@@ -59,6 +59,15 @@ pub enum Error {
         sites: Vec<ErrorSite>,
     },
 
+    /// The seed dependency graph contains a non-self cycle.
+    SeedCycle {
+        /// The cycle's members in deterministic traversal order, starting at the first
+        /// revisited `Cell` and alternating through the sibling `Relationship`s that
+        /// force the cycle. The closing relationship appears last; the starting cell is
+        /// not repeated at the end.
+        sites: Vec<ErrorSite>,
+    },
+
     /// A method's function returned an error during execution.
     MethodFailed {
         /// The underlying error the method's function (or a requirement's/conditional's
@@ -169,6 +178,7 @@ impl std::fmt::Display for Error {
             Error::InvalidId => write!(f, "invalid cell or relationship id"),
             Error::Conflict { .. } => write!(f, "no valid method assignment (overconstrained)"),
             Error::Cycle { .. } => write!(f, "selected methods form a cycle"),
+            Error::SeedCycle { .. } => write!(f, "seed dependency cycle"),
             Error::MethodFailed { error, .. } => write!(f, "method execution failed: {error}"),
             Error::InvalidMethod { .. } => write!(f, "method is structurally invalid"),
             Error::MismatchedMethodCells { .. } => write!(
@@ -222,6 +232,7 @@ impl Error {
             | Error::InvalidCellKind { sites }
             | Error::Conflict { sites }
             | Error::Cycle { sites }
+            | Error::SeedCycle { sites }
             | Error::DependencyCycle { sites }
             | Error::InvalidConditional { sites } => sites,
             _ => &[],
@@ -324,6 +335,7 @@ mod tests {
         assert!(std::error::Error::source(&Error::InvalidId).is_none());
         assert!(std::error::Error::source(&Error::Conflict { sites: vec![] }).is_none());
         assert!(std::error::Error::source(&Error::Cycle { sites: vec![] }).is_none());
+        assert!(std::error::Error::source(&Error::SeedCycle { sites: vec![] }).is_none());
         assert!(std::error::Error::source(&Error::InvalidMethod { sites: vec![] }).is_none());
         assert!(
             std::error::Error::source(&Error::TypeMismatch {
@@ -443,6 +455,15 @@ mod tests {
     }
 
     #[test]
+    fn seed_cycle_display_mentions_seed_dependency_cycle() {
+        assert!(
+            Error::SeedCycle { sites: vec![] }
+                .to_string()
+                .contains("seed dependency cycle")
+        );
+    }
+
+    #[test]
     fn dependency_cycle_has_no_source() {
         assert!(std::error::Error::source(&Error::DependencyCycle { sites: vec![] }).is_none());
     }
@@ -451,6 +472,13 @@ mod tests {
     fn dependency_cycle_exposes_its_sites() {
         let site = ErrorSite::Cell(CellId::default());
         let e = Error::DependencyCycle { sites: vec![site] };
+        assert_eq!(e.sites(), &[site]);
+    }
+
+    #[test]
+    fn seed_cycle_exposes_its_sites() {
+        let site = ErrorSite::Cell(CellId::default());
+        let e = Error::SeedCycle { sites: vec![site] };
         assert_eq!(e.sites(), &[site]);
     }
 
