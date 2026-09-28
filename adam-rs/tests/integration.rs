@@ -1042,6 +1042,291 @@ fn conditional_match_cell_is_derived_from_unconditional_relationship() {
 }
 
 #[test]
+fn guard_prerequisite_reuse_invokes_the_selected_producer_once() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(true);
+    let guard = sheet.add_cell(false);
+    let output = sheet.add_cell(false);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_method = Arc::clone(&calls);
+
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            mode,
+            guard,
+            move |value: &bool| {
+                calls_for_method.fetch_add(1, Ordering::SeqCst);
+                Ok(*value)
+            },
+        )])
+        .unwrap();
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(mode, output, |value: &bool| {
+            Ok(*value)
+        })])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![true], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert!(*sheet.read::<bool>(guard).unwrap());
+    assert!(*sheet.read::<bool>(output).unwrap());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn incompatible_guard_assignment_conflicts_without_committing_prerequisites() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(false);
+    let guard = sheet.add_cell(false);
+    let switch = sheet.add_cell(true);
+    let selected_output = sheet.add_cell(false);
+
+    let shared = sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(mode, guard, |value: &bool| Ok(*value)),
+            Method::from_fn_1_1(guard, mode, |value: &bool| Ok(*value)),
+        ])
+        .unwrap();
+    let competing = sheet
+        .add_relationship(vec![Method::from_fn_1_1(switch, guard, |value: &bool| {
+            Ok(*value)
+        })])
+        .unwrap();
+    let selected_branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            switch,
+            selected_output,
+            |value: &bool| Ok(*value),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![true], vec![selected_branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(switch),
+            vec![(vec![true], vec![competing])],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(mode, true).unwrap();
+
+    let error = sheet.propagate().unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::Conflict { ref sites }
+            if sites.contains(&ErrorSite::Relationship(shared))
+                && sites.contains(&ErrorSite::Relationship(competing))
+                && sites.contains(&ErrorSite::Cell(guard))
+    ));
+    assert!(!*sheet.read::<bool>(guard).unwrap());
+    assert!(!*sheet.read::<bool>(selected_output).unwrap());
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn changed_guard_method_input_producer_conflicts_without_committing() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(false);
+    let guard = sheet.add_cell(false);
+    let switch = sheet.add_cell(true);
+    let selected_output = sheet.add_cell(false);
+
+    let prerequisite = sheet
+        .add_relationship(vec![Method::from_fn_1_1(mode, guard, |value: &bool| {
+            Ok(*value)
+        })])
+        .unwrap();
+    let new_mode_producer = sheet
+        .add_relationship(vec![Method::from_fn_1_1(switch, mode, |value: &bool| {
+            Ok(!*value)
+        })])
+        .unwrap();
+    let selected_branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            switch,
+            selected_output,
+            |value: &bool| Ok(*value),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![true], vec![selected_branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(switch),
+            vec![(vec![true], vec![new_mode_producer])],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(mode, true).unwrap();
+
+    let error = sheet.propagate().unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::Conflict { ref sites }
+            if sites.contains(&ErrorSite::Relationship(prerequisite))
+                && sites.contains(&ErrorSite::Relationship(new_mode_producer))
+                && sites.contains(&ErrorSite::Cell(mode))
+    ));
+    assert!(!*sheet.read::<bool>(guard).unwrap());
+    assert!(!*sheet.read::<bool>(selected_output).unwrap());
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn changed_filter_argument_producer_conflicts_without_reclamping_stale_value() {
+    let mut sheet = Sheet::new();
+    let switch = sheet.add_cell(true);
+    let bound = sheet.add_cell(3_i32);
+    let guard = sheet.add_cell(8_i32);
+    let branch_output = sheet.add_cell(false);
+
+    sheet
+        .add_filter(
+            guard,
+            Filter::from_fn_1(bound, |value: &i32, bound: &i32| Ok((*value).min(*bound))),
+        )
+        .unwrap();
+    let new_bound_producer = sheet
+        .add_relationship(vec![Method::from_fn_1_1(switch, bound, |value: &bool| {
+            Ok(if *value { 5 } else { 3 })
+        })])
+        .unwrap();
+    let guard_branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            switch,
+            branch_output,
+            |value: &bool| Ok(*value),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![3_i32], vec![guard_branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(switch),
+            vec![(vec![true], vec![new_bound_producer])],
+            vec![],
+        )
+        .unwrap();
+
+    let error = sheet.propagate().unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::Conflict { ref sites }
+            if sites.contains(&ErrorSite::Relationship(new_bound_producer))
+                && sites.contains(&ErrorSite::Cell(guard))
+                && sites.contains(&ErrorSite::Cell(bound))
+    ));
+    assert_eq!(*sheet.read::<i32>(guard).unwrap(), 8);
+    assert_eq!(*sheet.read::<i32>(bound).unwrap(), 3);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
+fn guard_seed_callback_is_reused_for_matching_provenance() {
+    let mut sheet = Sheet::new();
+    let mode = sheet.add_cell(2_i32);
+    let guard = sheet.add_cell(0_i32);
+    let output = sheet.add_cell(0_i32);
+    let seed_calls = Arc::new(AtomicUsize::new(0));
+    let seed_calls_for_method = Arc::clone(&seed_calls);
+
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(guard, guard, |value: &i32| {
+            Ok(*value)
+        })])
+        .unwrap();
+    sheet
+        .add_relationship(vec![
+            Method::from_fn_1_1(mode, guard, move |value: &i32| {
+                seed_calls_for_method.fetch_add(1, Ordering::SeqCst);
+                Ok(*value + 1)
+            }),
+            Method::from_fn_1_1(guard, mode, |value: &i32| Ok(*value)),
+        ])
+        .unwrap();
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(mode, output, |value: &i32| {
+            Ok(*value)
+        })])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(guard),
+            vec![(vec![3_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+    sheet.write(mode, 2_i32).unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(guard).unwrap(), 3);
+    assert_eq!(*sheet.read::<i32>(output).unwrap(), 3);
+    assert_eq!(seed_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn self_referencing_guard_seed_cycle_is_reported_before_commit() {
+    let (mut sheet, a, b, c, d, s, rel1, rel2) = seed_cycle_sheet();
+    let output = sheet.add_cell(false);
+    let branch_output = sheet.add_cell(false);
+    let branch = sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            output,
+            branch_output,
+            |value: &bool| Ok(*value),
+        )])
+        .unwrap();
+    sheet
+        .add_conditional(
+            MatchExpr::cell(a),
+            vec![(vec![0_i32], vec![branch])],
+            vec![],
+        )
+        .unwrap();
+
+    let error = sheet.propagate().unwrap_err();
+
+    assert!(matches!(
+        error,
+        Error::SeedCycle { ref sites }
+            if sites.contains(&ErrorSite::Relationship(rel1))
+                && sites.contains(&ErrorSite::Relationship(rel2))
+    ));
+    assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);
+    assert_eq!(*sheet.read::<i32>(b).unwrap(), 10);
+    assert_eq!(*sheet.read::<i32>(c).unwrap(), -1);
+    assert_eq!(*sheet.read::<i32>(d).unwrap(), -2);
+    assert_eq!(*sheet.read::<i32>(s).unwrap(), 7);
+    assert_eq!(sheet.changed().count(), 0);
+}
+
+#[test]
 fn conditional_bound_filter_runs_after_branch() {
     for reverse_relationship_order in [false, true] {
         let mut sheet = Sheet::new();

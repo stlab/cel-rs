@@ -34,6 +34,7 @@
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use slotmap::SlotMap;
 
@@ -53,12 +54,12 @@ use digraph::{Node, add_filter_edges, build_digraph, topological_order};
 use matching::pure_outputs;
 use release::ReleaseFailure;
 
-pub(crate) use seed::{build_seeds, build_seeds_for_steps};
+pub(crate) use seed::{SeedEvaluationCache, build_seeds, build_seeds_for_steps};
 
 /// The seed value each self-referencing input should read this round, keyed by cell. A
 /// cell absent from the map reads its own `source`. See [`seed`] and
 /// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`.
-pub(crate) type Seeds = HashMap<CellId, Box<dyn Any>>;
+pub(crate) type Seeds = HashMap<CellId, Rc<dyn Any>>;
 
 /// One step of a [`Plan`]'s `execution_order`: either a selected method, or reapplying a
 /// source cell's filter against its (now-settled) current argument values.

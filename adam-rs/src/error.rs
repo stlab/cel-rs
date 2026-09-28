@@ -42,11 +42,11 @@ pub enum Error {
     /// A `CellId` or `RelationshipId` was not found in the sheet.
     InvalidId,
 
-    /// No valid method assignment exists (overconstrained).
+    /// No valid method assignment exists, or staged prerequisite provenance conflicts
+    /// with the final selected plan.
     Conflict {
-        /// A subset-minimal group of relationships that together admit no valid
-        /// method assignment: removing any member of the group makes the remainder
-        /// feasible. Every entry is `ErrorSite::Relationship`.
+        /// Relationships, methods, and cells involved in an impossible assignment or
+        /// an incompatible staged prerequisite reuse.
         sites: Vec<ErrorSite>,
     },
 

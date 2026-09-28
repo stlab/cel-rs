@@ -13,7 +13,7 @@ use crate::{
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::{Error, ErrorSite},
     filter::{Filter, FilterKind, FilterViolation},
-    planner::{PlanStep, Seeds},
+    planner::{Plan, PlanStep, SeedEvaluationCache, Seeds},
     relationship::{Method, RelationshipData, RelationshipId},
     requirement::{Requirement, RequirementData, RequirementId},
 };
@@ -98,6 +98,31 @@ impl MatchValue<'_> {
     }
 }
 
+/// Provenance needed to decide whether a staged plan step can be reused.
+#[derive(Clone, PartialEq, Eq)]
+struct StepProvenance {
+    input_producers: Vec<Option<PlanStep>>,
+    seed_inputs: Vec<CellId>,
+    source_producer: Option<PlanStep>,
+    output_classes: Vec<(CellId, OutputClassification)>,
+}
+
+/// Whether a selected step writes a cell's staged value as source or derived.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputClassification {
+    /// The write replaces the staged source value.
+    Source,
+    /// The write shadows the staged source value.
+    Derived,
+}
+
+/// Selected producer paths for every step and output in one execution plan.
+#[derive(Default)]
+struct PlanProvenance {
+    steps: HashMap<PlanStep, StepProvenance>,
+    output_producers: HashMap<CellId, PlanStep>,
+}
+
 /// Transactional propagation state whose writes remain private until commit.
 #[derive(Default)]
 struct PropagationStage {
@@ -105,6 +130,7 @@ struct PropagationStage {
     derived: HashMap<CellId, Box<dyn Any>>,
     executed_methods: HashSet<(RelationshipId, usize)>,
     executed_filters: HashSet<CellId>,
+    step_provenance: HashMap<PlanStep, StepProvenance>,
     changed: Vec<CellId>,
     changed_set: HashSet<CellId>,
 }
@@ -1306,6 +1332,171 @@ impl Sheet {
         Ok(active)
     }
 
+    /// Records the actual dependency producers and write classifications for `plan`.
+    ///
+    /// - Complexity: O(V + E), where V is the number of selected steps and E is the
+    ///   number of method inputs, outputs, and filter arguments.
+    fn plan_provenance(&self, plan: &Plan) -> PlanProvenance {
+        let mut provenance = PlanProvenance::default();
+        let mut effective_producers = HashMap::new();
+        let mut source_producers = HashMap::new();
+
+        for &step in &plan.execution_order {
+            let step_provenance = match step {
+                PlanStep::Method(rel_id, method_index) => {
+                    let method = &self.relationships[rel_id].methods[method_index];
+                    let mut input_producers = Vec::with_capacity(method.inputs.len());
+                    let mut seed_inputs = Vec::new();
+                    for &input in &method.inputs {
+                        if method.outputs.contains(&input) {
+                            seed_inputs.push(input);
+                            input_producers.push(None);
+                        } else {
+                            input_producers.push(effective_producers.get(&input).copied());
+                        }
+                    }
+                    let output_classes: Vec<_> = method
+                        .outputs
+                        .iter()
+                        .map(|&output| {
+                            (
+                                output,
+                                if method.inputs.contains(&output)
+                                    || plan.forced_outputs.contains(&output)
+                                {
+                                    OutputClassification::Derived
+                                } else {
+                                    OutputClassification::Source
+                                },
+                            )
+                        })
+                        .collect();
+                    let step_provenance = StepProvenance {
+                        input_producers,
+                        seed_inputs,
+                        source_producer: None,
+                        output_classes: output_classes.clone(),
+                    };
+                    for &(output, _) in &output_classes {
+                        effective_producers.insert(output, step);
+                    }
+                    for &(output, classification) in &output_classes {
+                        if classification == OutputClassification::Source {
+                            source_producers.insert(output, step);
+                        }
+                    }
+                    step_provenance
+                }
+                PlanStep::FilterReclamp(cell) => {
+                    let filter = self.cells[cell]
+                        .filter
+                        .as_ref()
+                        .expect("plan() only emits FilterReclamp for a filtered cell");
+                    let input_producers = filter
+                        .args
+                        .iter()
+                        .map(|input| effective_producers.get(input).copied())
+                        .collect();
+                    let step_provenance = StepProvenance {
+                        input_producers,
+                        seed_inputs: Vec::new(),
+                        source_producer: source_producers.get(&cell).copied(),
+                        output_classes: vec![(cell, OutputClassification::Derived)],
+                    };
+                    effective_producers.insert(cell, step);
+                    step_provenance
+                }
+            };
+            provenance.steps.insert(step, step_provenance);
+        }
+        provenance.output_producers = effective_producers;
+        provenance
+    }
+
+    /// Checks that a staged prerequisite step has identical selected producer paths in both plans.
+    ///
+    /// - Postcondition: `true` implies the selected method/filter, its input producers,
+    ///   seed inputs, source producer, and output classifications all match.
+    fn prerequisite_step_is_compatible(
+        &self,
+        pre_plan: &PlanProvenance,
+        final_plan: &PlanProvenance,
+        step: PlanStep,
+        stage: &PropagationStage,
+    ) -> bool {
+        let Some(staged) = stage.step_provenance.get(&step) else {
+            return false;
+        };
+        pre_plan.steps.get(&step) == Some(staged) && final_plan.steps.get(&step) == Some(staged)
+    }
+
+    /// Returns concrete cells and relationships implicated by a staged-step mismatch.
+    ///
+    /// - Complexity: O(K) sites for the step's cells and producer edges.
+    fn conflict_sites_for_step(
+        &self,
+        step: PlanStep,
+        pre_plan: &PlanProvenance,
+        final_plan: &PlanProvenance,
+    ) -> Vec<ErrorSite> {
+        let mut sites = Vec::new();
+        let mut seen_sites = HashSet::new();
+        let mut add_site = |site| {
+            if seen_sites.insert(site) {
+                sites.push(site);
+            }
+        };
+        let mut cells = Vec::new();
+
+        match step {
+            PlanStep::Method(rel_id, method_index) => {
+                add_site(ErrorSite::Relationship(rel_id));
+                add_site(ErrorSite::Method(rel_id, method_index));
+                let method = &self.relationships[rel_id].methods[method_index];
+                cells.extend(method.inputs.iter().copied());
+                cells.extend(method.outputs.iter().copied());
+            }
+            PlanStep::FilterReclamp(cell) => {
+                cells.push(cell);
+                if let Some(filter) = &self.cells[cell].filter {
+                    cells.extend(filter.args.iter().copied());
+                }
+            }
+        }
+
+        for provenance in [pre_plan.steps.get(&step), final_plan.steps.get(&step)]
+            .into_iter()
+            .flatten()
+        {
+            for producer in provenance
+                .input_producers
+                .iter()
+                .copied()
+                .flatten()
+                .chain(provenance.source_producer)
+            {
+                Self::add_step_relationship_site(producer, &mut add_site);
+            }
+        }
+        for cell in cells {
+            add_site(ErrorSite::Cell(cell));
+            for plan in [pre_plan, final_plan] {
+                if let Some(&producer) = plan.output_producers.get(&cell) {
+                    Self::add_step_relationship_site(producer, &mut add_site);
+                }
+            }
+        }
+        sites
+    }
+
+    /// Adds the relationship site associated with a selected method producer.
+    fn add_step_relationship_site(step: PlanStep, add_site: &mut impl FnMut(ErrorSite)) {
+        match step {
+            PlanStep::Method(rel_id, _) => add_site(ErrorSite::Relationship(rel_id)),
+            PlanStep::FilterReclamp(cell) => add_site(ErrorSite::Cell(cell)),
+        }
+    }
+
     /// Executes `execution_order` once into transactional staged state.
     ///
     /// A method or filter step already evaluated by the conditional pre-plan is reused
@@ -1324,6 +1515,7 @@ impl Sheet {
         execution_order: &[PlanStep],
         seeds: &Seeds,
         forced_outputs: &HashSet<CellId>,
+        plan_provenance: &PlanProvenance,
         stage: &mut PropagationStage,
         filter_violations: &mut Vec<(CellId, FilterViolation)>,
     ) -> Result<(), Error> {
@@ -1396,6 +1588,9 @@ impl Sheet {
                         stage.write(cell_id, new_value, shadow);
                     }
                     stage.executed_methods.insert((rel_id, method_idx));
+                    stage
+                        .step_provenance
+                        .insert(*step, plan_provenance.steps[step].clone());
                 }
                 PlanStep::FilterReclamp(id) => {
                     if stage.executed_filters.contains(&id) {
@@ -1426,6 +1621,9 @@ impl Sheet {
                         }
                     }
                     stage.executed_filters.insert(id);
+                    stage
+                        .step_provenance
+                        .insert(*step, plan_provenance.steps[step].clone());
                 }
             }
         }
@@ -1527,7 +1725,9 @@ impl Sheet {
     ///
     /// **Phase 3 — General plan:** the Adam algorithm runs on the active set. Seed-cycle
     /// validation and method execution consume staged Phase 1 values. A callback already
-    /// evaluated in Phase 1 is reused rather than invoked again.
+    /// evaluated in Phase 1 is reused only when the final plan preserves its selected
+    /// method, input producers, and output classification. A mismatched plan returns a
+    /// conservative conflict rather than replaying the callback or committing stale values.
     ///
     /// **Phase 4 — Commit and strength post-processing:** after planning, seed
     /// validation, and staged method execution all succeed, staged writes are published
@@ -1556,7 +1756,8 @@ impl Sheet {
     ///
     /// - `Error::DependencyCycle` — a filter or conditional guard edge lies on a cycle in
     ///   the static dependency graph.
-    /// - `Error::Conflict` — no valid method assignment exists.
+    /// - `Error::Conflict` — no valid method assignment exists, or a pre-executed guard
+    ///   prerequisite is incompatible with the final selected plan.
     /// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle.
     /// - `Error::MethodFailed` — a method's function returned an error, a method
     ///   produced the wrong number of outputs, or a requirement's function returned
@@ -1568,6 +1769,8 @@ impl Sheet {
         self.clear_changed();
         let mut stage = PropagationStage::default();
         let mut source_filter_violations: Vec<(CellId, FilterViolation)> = Vec::new();
+        let mut seed_evaluation_cache = SeedEvaluationCache::default();
+        let mut pre_plan_provenance = None;
 
         // Phases 0-1: evaluate the conditional pre-plan into private staged state.
         if !self.conditionals.is_empty() {
@@ -1578,6 +1781,7 @@ impl Sheet {
                 .collect();
             let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
             let prerequisite_steps = self.guard_prerequisite_steps(&pre_plan.execution_order)?;
+            let provenance = self.plan_provenance(&pre_plan);
             let seeds = {
                 let source = |id| stage.source(&self.cells, id);
                 crate::planner::build_seeds_for_steps(
@@ -1587,15 +1791,18 @@ impl Sheet {
                     &self.cells,
                     &self.relationships,
                     &source,
+                    &mut seed_evaluation_cache,
                 )?
             };
             self.execute_plan_staged(
                 &prerequisite_steps,
                 &seeds,
                 &pre_plan.forced_outputs,
+                &provenance,
                 &mut stage,
                 &mut source_filter_violations,
             )?;
+            pre_plan_provenance = Some((provenance, prerequisite_steps));
         }
 
         // Phase 2: evaluate each conditional once against staged Phase 1 values.
@@ -1603,6 +1810,16 @@ impl Sheet {
 
         // Phase 3: validate seeds and execute the general plan into the same stage.
         let plan = crate::planner::plan(&self.cells, &self.relationships, &active)?;
+        let provenance = self.plan_provenance(&plan);
+        if let Some((pre_plan, prerequisite_steps)) = &pre_plan_provenance {
+            for &step in prerequisite_steps {
+                if !self.prerequisite_step_is_compatible(pre_plan, &provenance, step, &stage) {
+                    return Err(Error::Conflict {
+                        sites: self.conflict_sites_for_step(step, pre_plan, &provenance),
+                    });
+                }
+            }
+        }
         let seeds = {
             let source = |id| stage.source(&self.cells, id);
             crate::planner::build_seeds(
@@ -1611,12 +1828,14 @@ impl Sheet {
                 &self.cells,
                 &self.relationships,
                 &source,
+                &mut seed_evaluation_cache,
             )?
         };
         self.execute_plan_staged(
             &plan.execution_order,
             &seeds,
             &plan.forced_outputs,
+            &provenance,
             &mut stage,
             &mut source_filter_violations,
         )?;

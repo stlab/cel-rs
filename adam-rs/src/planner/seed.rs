@@ -27,6 +27,7 @@
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use slotmap::{Key, SlotMap};
 
@@ -54,6 +55,45 @@ struct SeedTraversal {
     path_indices: HashMap<CellId, usize>,
 }
 
+/// Memoizes prerequisite seed choices and callback results across planning phases.
+#[derive(Default)]
+pub(crate) struct SeedEvaluationCache {
+    shapes: HashMap<CellId, SeedShape>,
+    callbacks: HashMap<SeedCallbackId, CachedSeedCallback>,
+}
+
+/// The chosen sibling-method set that defines one cell's seed evaluation.
+#[derive(PartialEq, Eq)]
+struct SeedShape {
+    claimant: Option<RelationshipId>,
+    siblings: Vec<(RelationshipId, usize)>,
+}
+
+/// One seed callback invocation, distinguished from selected method execution.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SeedCallbackId {
+    target: CellId,
+    relationship: RelationshipId,
+    method_index: usize,
+}
+
+/// Identifies where one seed callback input came from without comparing dynamic values.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SeedInputProvenance {
+    /// Reads the cell's frozen `source` value.
+    Source(CellId),
+    /// Reads the seed computed for the referenced cell.
+    Seed(CellId),
+    /// Reads the current accumulation for the self-referencing target.
+    Accumulated(CellId),
+}
+
+/// A seed callback's recorded input origins and reusable target output.
+struct CachedSeedCallback {
+    inputs: Vec<SeedInputProvenance>,
+    value: Option<Rc<dyn Any>>,
+}
+
 /// Lexicographic tie-break data for one sibling seed fold.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SeedFoldOrderKey {
@@ -79,6 +119,7 @@ struct SeedFoldOrderKey {
 ///   elimination state verbatim when selecting sibling seed methods.
 /// - Precondition: `source(id)` returns a value of `cells[id].type_id` for every live
 ///   `id` referenced by `execution_order`.
+/// - Precondition: `cache` is shared only across planning phases for one propagation call.
 ///
 /// # Errors
 ///
@@ -86,6 +127,8 @@ struct SeedFoldOrderKey {
 ///   has no method compatible with the planner's elimination state, or two sibling seed
 ///   folds are still structurally indistinguishable after comparing primary strength,
 ///   selected method signature, and full relationship signature.
+/// - `Error::Conflict` — a cached seed claimant, sibling selection, or callback input
+///   provenance differs from the earlier prerequisite evaluation.
 /// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle instead of
 ///   falling back to any revisited cell's `source` value.
 ///
@@ -98,6 +141,7 @@ pub(crate) fn build_seeds<'source>(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     source: &dyn Fn(CellId) -> &'source dyn Any,
+    cache: &mut SeedEvaluationCache,
 ) -> Result<Seeds, Error> {
     build_seeds_for_steps(
         execution_order,
@@ -106,6 +150,7 @@ pub(crate) fn build_seeds<'source>(
         cells,
         relationships,
         source,
+        cache,
     )
 }
 
@@ -118,12 +163,15 @@ pub(crate) fn build_seeds<'source>(
 /// - Precondition: `seed_steps` is a subset of `execution_order`.
 /// - Precondition: The execution and elimination orders satisfy [`build_seeds`]'s
 ///   preconditions.
+/// - Precondition: `cache` is shared only across planning phases for one propagation call.
 ///
 /// # Errors
 ///
 /// - `Error::Conflict` — a sibling relationship that can seed a self-referencing cell
 ///   has no method compatible with the planner's elimination state, or two sibling seed
 ///   folds are structurally indistinguishable.
+/// - `Error::Conflict` — a cached seed claimant, sibling selection, or callback input
+///   provenance differs from the earlier prerequisite evaluation.
 /// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle.
 ///
 /// - Complexity: O(V + S · A · M · K²) where V = complete-plan steps, S = requested
@@ -136,6 +184,7 @@ pub(crate) fn build_seeds_for_steps<'source>(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     source: &dyn Fn(CellId) -> &'source dyn Any,
+    cache: &mut SeedEvaluationCache,
 ) -> Result<Seeds, Error> {
     #[cfg(debug_assertions)]
     {
@@ -183,7 +232,7 @@ pub(crate) fn build_seeds_for_steps<'source>(
         path_indices: HashMap::new(),
     };
     for &cell in &self_ref_cells {
-        compute_seed(cell, &context, &mut traversal)?;
+        compute_seed(cell, &context, &mut traversal, cache)?;
     }
     Ok(traversal.seeds)
 }
@@ -196,12 +245,14 @@ fn build_seeds_live(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
 ) -> Result<Seeds, Error> {
+    let mut cache = SeedEvaluationCache::default();
     build_seeds(
         execution_order,
         elimination_order,
         cells,
         relationships,
         &|id| cells[id].source.as_ref(),
+        &mut cache,
     )
 }
 
@@ -252,6 +303,7 @@ fn compute_seed(
     x: CellId,
     context: &SeedBuildContext<'_, '_>,
     traversal: &mut SeedTraversal,
+    cache: &mut SeedEvaluationCache,
 ) -> Result<(), Error> {
     if traversal.seeds.contains_key(&x) {
         return Ok(());
@@ -305,7 +357,7 @@ fn compute_seed(
                     return Err(Error::SeedCycle { sites });
                 }
                 traversal.path_relationships.push(rel_id);
-                let result = compute_seed(input, context, traversal);
+                let result = compute_seed(input, context, traversal, cache);
                 traversal.path_relationships.pop();
                 if let Err(err) = result {
                     traversal.path_indices.remove(&x);
@@ -316,7 +368,37 @@ fn compute_seed(
         }
     }
 
-    let mut accumulated: Option<Box<dyn Any>> = None;
+    let shape = SeedShape {
+        claimant: own_claimant,
+        siblings: sibling_methods
+            .iter()
+            .map(|&(relationship, method, _)| (relationship, method))
+            .collect(),
+    };
+    if let Some(previous) = cache.shapes.get(&x) {
+        if previous != &shape {
+            let mut sites = vec![ErrorSite::Cell(x)];
+            for relationship in [previous.claimant, own_claimant].into_iter().flatten() {
+                let site = ErrorSite::Relationship(relationship);
+                if !sites.contains(&site) {
+                    sites.push(site);
+                }
+            }
+            for &(relationship, _) in previous.siblings.iter().chain(shape.siblings.iter()) {
+                let site = ErrorSite::Relationship(relationship);
+                if !sites.contains(&site) {
+                    sites.push(site);
+                }
+            }
+            traversal.path_indices.remove(&x);
+            traversal.path_cells.pop();
+            return Err(Error::Conflict { sites });
+        }
+    } else {
+        cache.shapes.insert(x, shape);
+    }
+
+    let mut accumulated: Option<Rc<dyn Any>> = None;
     for &(rel_id, method_idx, _) in &sibling_methods {
         let method = &context.relationships[rel_id].methods[method_idx];
 
@@ -330,25 +412,50 @@ fn compute_seed(
             continue;
         }
 
-        let produced = {
-            let inputs: Vec<&dyn Any> = method
-                .inputs
-                .iter()
-                .map(|&input| {
-                    if input == x {
-                        accumulated
-                            .as_deref()
-                            .unwrap_or_else(|| (context.source)(x))
+        let mut input_provenance = Vec::with_capacity(method.inputs.len());
+        let inputs: Vec<&dyn Any> = method
+            .inputs
+            .iter()
+            .map(|&input| {
+                if input == x {
+                    if let Some(value) = accumulated.as_deref() {
+                        input_provenance.push(SeedInputProvenance::Accumulated(x));
+                        value
                     } else {
-                        traversal
-                            .seeds
-                            .get(&input)
-                            .map(|value| value.as_ref())
-                            .unwrap_or_else(|| (context.source)(input))
+                        input_provenance.push(SeedInputProvenance::Source(x));
+                        (context.source)(x)
                     }
-                })
-                .collect();
-            (method.function)(&inputs)
+                } else if let Some(value) = traversal.seeds.get(&input) {
+                    input_provenance.push(SeedInputProvenance::Seed(input));
+                    value.as_ref()
+                } else {
+                    input_provenance.push(SeedInputProvenance::Source(input));
+                    (context.source)(input)
+                }
+            })
+            .collect();
+
+        let callback_id = SeedCallbackId {
+            target: x,
+            relationship: rel_id,
+            method_index: method_idx,
+        };
+        let produced = if let Some(cached) = cache.callbacks.get(&callback_id) {
+            if cached.inputs != input_provenance {
+                let mut sites = vec![ErrorSite::Relationship(rel_id), ErrorSite::Cell(x)];
+                for &input in &method.inputs {
+                    let site = ErrorSite::Cell(input);
+                    if !sites.contains(&site) {
+                        sites.push(site);
+                    }
+                }
+                traversal.path_indices.remove(&x);
+                traversal.path_cells.pop();
+                return Err(Error::Conflict { sites });
+            }
+            cached.value.clone()
+        } else {
+            let value = (method.function)(&inputs)
                 .ok()
                 .filter(|outputs| outputs.len() == method.outputs.len())
                 .and_then(|mut outputs| {
@@ -356,6 +463,15 @@ fn compute_seed(
                     Some(outputs.swap_remove(pos))
                 })
                 .filter(|value| value.as_ref().type_id() == context.cells[x].type_id)
+                .map(Rc::from);
+            cache.callbacks.insert(
+                callback_id,
+                CachedSeedCallback {
+                    inputs: input_provenance,
+                    value: value.clone(),
+                },
+            );
+            value
         };
         if produced.is_some() {
             accumulated = produced;
@@ -622,6 +738,84 @@ mod tests {
                 sites
             } if sites == vec![ErrorSite::Relationship(sibling)]
         ));
+    }
+
+    #[test]
+    fn changed_cached_seed_selection_conflicts_before_replaying_callbacks() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(0_i32);
+        let a = sheet.add_cell(1_i32);
+        let b = sheet.add_cell(2_i32);
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let first_calls_for_method = Arc::clone(&first_calls);
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls_for_method = Arc::clone(&second_calls);
+
+        let first_sibling = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(a, x, move |value: &i32| {
+                    first_calls_for_method.fetch_add(1, Ordering::SeqCst);
+                    Ok(*value + 1)
+                }),
+                Method::from_fn_1_1(x, a, |value: &i32| Ok(*value)),
+            ])
+            .unwrap();
+        let second_sibling = sheet
+            .add_relationship(vec![
+                Method::from_fn_1_1(b, x, move |value: &i32| {
+                    second_calls_for_method.fetch_add(1, Ordering::SeqCst);
+                    Ok(*value + 1)
+                }),
+                Method::from_fn_1_1(x, b, |value: &i32| Ok(*value)),
+            ])
+            .unwrap();
+        let claimant = sheet
+            .add_relationship(vec![Method::from_fn_1_1(x, x, |value: &i32| Ok(*value))])
+            .unwrap();
+        let claimant_step = PlanStep::Method(claimant, 0);
+        let mut cache = SeedEvaluationCache::default();
+
+        build_seeds_for_steps(
+            &[PlanStep::Method(first_sibling, 1), claimant_step],
+            &[claimant_step],
+            &[a, x],
+            &sheet.cells,
+            &sheet.relationships,
+            &|id| sheet.cells[id].source.as_ref(),
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+
+        let error = build_seeds_for_steps(
+            &[
+                PlanStep::Method(first_sibling, 1),
+                PlanStep::Method(second_sibling, 1),
+                claimant_step,
+            ],
+            &[claimant_step],
+            &[a, b, x],
+            &sheet.cells,
+            &sheet.relationships,
+            &|id| sheet.cells[id].source.as_ref(),
+            &mut cache,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Conflict { sites }
+                if sites.contains(&ErrorSite::Cell(x))
+                    && sites.contains(&ErrorSite::Relationship(first_sibling))
+                    && sites.contains(&ErrorSite::Relationship(second_sibling))
+        ));
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(second_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
