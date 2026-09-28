@@ -56,9 +56,14 @@ an error.
 
 For each target `x`, sibling relationships are sorted in ascending strength of their
 strongest non-`x` input. The fold applies weaker influences first and the strongest
-influence last. Cell strengths are distinct, so this ordering is deterministic without an
-insertion-order tie-breaker. The current explicit-strength gate remains in force and is
-evaluated for the selected sibling method.
+influence last. Equal-primary ties are broken first by the selected sibling method's
+ordered input/output signature and then by the entire relationship's ordered
+method-signature sequence, so two different relationships with the same selected
+signature still sort deterministically without falling back to adjacency order. If two
+equal-primary siblings are still structurally identical under that comparison,
+propagation reports `Error::Conflict` naming both relationships instead of folding in
+arbitrary order. The current explicit-strength gate remains in force and is evaluated
+for the selected sibling method.
 
 ## Data flow and error handling
 

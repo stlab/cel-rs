@@ -62,11 +62,33 @@ self-referencing seed construction as part of the same deterministic release-sta
 - Seed DFS now reports `Error::SeedCycle { sites }` for non-self sibling cycles instead of
   substituting any revisited cell's `source` value.
 - When multiple sibling folds survive, they run in ascending order of strongest non-target input
-  strength; equal-strength ties break by a deterministic ordered-signature key for the selected
-  method, not by relationship insertion order.
+  strength; equal-primary ties break by the selected method's ordered signature and then the
+  relationship's full ordered method-signature sequence, not by relationship insertion order.
+- If two equal-primary sibling folds are still structurally identical under that comparison,
+  `build_seeds` returns `Error::Conflict` naming the ambiguous relationships instead of silently
+  preserving adjacency order.
 - `Sheet::propagate()` clears stale `changed()` state before seed-cycle preflight and returns
   `Error::SeedCycle` before any pre-plan or execution writes, so conditional preflight cannot leak
   mutations and a seed-cycle failure leaves `changed()` empty for that call.
+
+### 2026-09-28 Task 6 final-review follow-up
+
+The final Task 6 review found one remaining determinism gap in `adam-rs/src/planner/seed.rs`:
+two equal-primary siblings could share the same selected-method signature while still differing as
+relationships, letting the stable sort preserve `cells[x].adj` insertion order. This follow-up
+fix closes that gap by:
+
+- sorting equal-primary siblings by a lexicographic key of
+  `(strongest_input_strength, selected_method_signature, full_relationship_signature)`;
+- rejecting the only remaining ambiguous shape — structurally identical equal-primary siblings —
+  with `Error::Conflict` naming the participating relationships; and
+- locking both cases with new `planner::seed` unit coverage.
+
+Verification for this follow-up:
+
+- `cargo fmt --all`
+- `cargo test -p adam-rs --lib planner::` (48 passed)
+- `cargo test -p adam-rs --test integration` (102 passed)
 
 Full verification for this handoff completed with no `warning:` lines observed:
 

@@ -53,6 +53,14 @@ struct SeedTraversal {
     path_indices: HashMap<CellId, usize>,
 }
 
+/// Lexicographic tie-break data for one sibling seed fold.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SeedFoldOrderKey {
+    strongest_input: u64,
+    selected_method_signature: Vec<u64>,
+    relationship_signature: Vec<Vec<u64>>,
+}
+
 /// Replays the planner's elimination state to compute the seed for each self-referencing
 /// input `execution_order` will read.
 ///
@@ -72,7 +80,9 @@ struct SeedTraversal {
 /// # Errors
 ///
 /// - `Error::Conflict` — a sibling relationship that can seed a self-referencing cell
-///   has no method compatible with the planner's elimination state.
+///   has no method compatible with the planner's elimination state, or two sibling seed
+///   folds are still structurally indistinguishable after comparing primary strength,
+///   selected method signature, and full relationship signature.
 /// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle instead of
 ///   falling back to any revisited cell's `source` value.
 ///
@@ -151,13 +161,18 @@ pub(crate) fn build_seeds(
 /// relative-strength test `release::resolve` uses elsewhere, not a comparison of
 /// candidate values. Among the sibling methods that survive that gate, weaker
 /// relationships fold first and the strongest surviving influence folds last so the
-/// final seed respects strength rather than relationship insertion order; equal-strength
-/// folds break ties by a deterministic ordered-signature key for the selected method.
+/// final seed respects strength rather than relationship insertion order; equal-primary
+/// folds break ties by the selected method's ordered signature and then the
+/// relationship's full ordered method-signature sequence. If both relationships are
+/// still structurally identical under that comparison, propagation rejects the
+/// ambiguous shape instead of folding in adjacency order.
 ///
 /// # Errors
 ///
 /// - `Error::Conflict` — some sibling relationship that can seed `x` has no surviving
-///   `x`-producing method after replaying the planner's elimination state.
+///   `x`-producing method after replaying the planner's elimination state, or two
+///   equal-primary sibling folds remain structurally indistinguishable even after
+///   comparing the full ordered method-signature sequence of their relationships.
 /// - `Error::SeedCycle` — a sibling seed dependency reaches a currently visiting cell.
 fn compute_seed(
     x: CellId,
@@ -172,32 +187,35 @@ fn compute_seed(
     traversal.path_cells.push(x);
 
     let own_claimant = context.claimant.get(&x).copied();
-    let mut sibling_methods: Vec<(RelationshipId, usize, u64, Vec<u64>)> = context.cells[x]
+    let mut sibling_methods: Vec<(RelationshipId, usize, SeedFoldOrderKey)> = context.cells[x]
         .adj
         .iter()
         .filter(|&&rel_id| context.active.contains(&rel_id) && Some(rel_id) != own_claimant)
         .filter_map(|&rel_id| {
             match select_seed_method(rel_id, x, context.elimination_order, context.relationships) {
                 Ok(Some(idx)) => {
-                    let method = &context.relationships[rel_id].methods[idx];
-                    let strongest_input = method
-                        .inputs
-                        .iter()
-                        .filter(|&&input| input != x)
-                        .map(|&input| context.cells[input].strength)
-                        .max()
-                        .unwrap_or(0);
-                    let content_key = method_content_key(method);
-                    Some(Ok((rel_id, idx, strongest_input, content_key)))
+                    let order_key =
+                        seed_fold_order_key(rel_id, idx, x, context.cells, context.relationships);
+                    Some(Ok((rel_id, idx, order_key)))
                 }
                 Ok(None) => None,
                 Err(err) => Some(Err(err)),
             }
         })
         .collect::<Result<Vec<_>, Error>>()?;
-    sibling_methods.sort_by(|lhs, rhs| lhs.2.cmp(&rhs.2).then_with(|| lhs.3.cmp(&rhs.3)));
+    sibling_methods.sort_by(|lhs, rhs| lhs.2.cmp(&rhs.2));
+    for window in sibling_methods.windows(2) {
+        if window[0].2 == window[1].2 {
+            return Err(Error::Conflict {
+                sites: vec![
+                    ErrorSite::Relationship(window[0].0),
+                    ErrorSite::Relationship(window[1].0),
+                ],
+            });
+        }
+    }
 
-    for &(rel_id, method_idx, _, _) in &sibling_methods {
+    for &(rel_id, method_idx, _) in &sibling_methods {
         for &input in &context.relationships[rel_id].methods[method_idx].inputs {
             if input != x {
                 if let Some(&cycle_start) = traversal.path_indices.get(&input) {
@@ -225,7 +243,7 @@ fn compute_seed(
     }
 
     let mut accumulated: Option<Box<dyn Any>> = None;
-    for &(rel_id, method_idx, _, _) in &sibling_methods {
+    for &(rel_id, method_idx, _) in &sibling_methods {
         let method = &context.relationships[rel_id].methods[method_idx];
 
         let has_weaker_self_referenced_input = context.cells[x].has_explicit_strength()
@@ -278,11 +296,44 @@ fn compute_seed(
     Ok(())
 }
 
-/// Returns a deterministic lexicographic key for a method's ordered signature.
+/// Returns the deterministic ordering key for one sibling seed fold.
+///
+/// Equal-primary siblings compare the selected method's ordered signature first, then
+/// the relationship's full ordered method-signature sequence. Relationships that still
+/// compare equal under this key are structurally indistinguishable to seedfill and are
+/// therefore rejected rather than folded in adjacency order.
+fn seed_fold_order_key(
+    rel_id: RelationshipId,
+    method_idx: usize,
+    target: CellId,
+    cells: &SlotMap<CellId, CellData>,
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+) -> SeedFoldOrderKey {
+    let relationship = &relationships[rel_id];
+    let method = &relationship.methods[method_idx];
+    let strongest_input = method
+        .inputs
+        .iter()
+        .filter(|&&input| input != target)
+        .map(|&input| cells[input].strength)
+        .max()
+        .unwrap_or(0);
+    SeedFoldOrderKey {
+        strongest_input,
+        selected_method_signature: method_content_key(method),
+        relationship_signature: relationship
+            .methods
+            .iter()
+            .map(method_content_key)
+            .collect(),
+    }
+}
+
+/// Returns the selected-method component of a deterministic sibling-fold ordering key.
 ///
 /// The key encodes the input and output arities, then the referenced input and output
-/// cell IDs in their declared order, so equal-strength sibling folds break ties by the
-/// selected method's signature rather than by relationship insertion order.
+/// cell IDs in their declared order, so equal-primary sibling folds can compare the
+/// selected method before falling back to the whole relationship signature.
 ///
 /// - Complexity: O(k) where k = `method.inputs.len() + method.outputs.len()`.
 fn method_content_key(method: &crate::relationship::Method) -> Vec<u64> {
@@ -634,5 +685,115 @@ mod tests {
             .expect("seed should stay typed as i32");
         assert_eq!(*forward_seed, 3);
         assert_eq!(*reversed_seed, 3);
+    }
+
+    #[test]
+    fn seed_fold_order_key_uses_full_relationship_structure_after_selected_signature() {
+        fn selected_method(x: CellId, a: CellId, b: CellId) -> Method {
+            Method::new(
+                vec![x, a],
+                vec![x, b],
+                vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+                vec![TypeId::of::<i32>(), TypeId::of::<i32>()],
+                |_| Ok(vec![Box::new(0_i32), Box::new(0_i32)]),
+            )
+        }
+
+        fn inert_method(inputs: Vec<CellId>, outputs: Vec<CellId>) -> Method {
+            let output_len = outputs.len();
+            let input_len = inputs.len();
+            Method::new(
+                inputs,
+                outputs,
+                vec![TypeId::of::<i32>(); input_len],
+                vec![TypeId::of::<i32>(); output_len],
+                move |_| {
+                    Ok((0..output_len)
+                        .map(|_| Box::new(0_i32) as Box<dyn Any>)
+                        .collect())
+                },
+            )
+        }
+
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(1_i32);
+        let a = sheet.add_cell(9_i32);
+        let b = sheet.add_cell(0_i32);
+
+        let first = sheet
+            .add_relationship(vec![
+                selected_method(x, a, b),
+                inert_method(vec![x, b], vec![a, b]),
+                inert_method(vec![b], vec![a, x]),
+            ])
+            .unwrap();
+        let second = sheet
+            .add_relationship(vec![
+                selected_method(x, a, b),
+                inert_method(vec![b], vec![a, x]),
+                inert_method(vec![x, b], vec![a, b]),
+            ])
+            .unwrap();
+
+        let first_key = seed_fold_order_key(first, 0, x, &sheet.cells, &sheet.relationships);
+        let second_key = seed_fold_order_key(second, 0, x, &sheet.cells, &sheet.relationships);
+
+        assert_eq!(first_key.strongest_input, second_key.strongest_input);
+        assert_eq!(
+            first_key.selected_method_signature,
+            second_key.selected_method_signature
+        );
+        assert_ne!(
+            first_key.relationship_signature,
+            second_key.relationship_signature
+        );
+        assert_ne!(first_key, second_key);
+    }
+
+    #[test]
+    fn build_seeds_rejects_structurally_identical_equal_primary_siblings() {
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(1_i32);
+        let a = sheet.add_cell(9_i32);
+
+        let first = sheet
+            .add_relationship(vec![Method::from_fn_2_1(
+                [x, a],
+                x,
+                |value: &i32, _: &i32| Ok(*value + 1),
+            )])
+            .unwrap();
+        let second = sheet
+            .add_relationship(vec![Method::from_fn_2_1(
+                [x, a],
+                x,
+                |value: &i32, _: &i32| Ok(*value * 2),
+            )])
+            .unwrap();
+        let claimant = sheet
+            .add_relationship(vec![Method::from_fn_1_1(x, x, |value: &i32| Ok(*value))])
+            .unwrap();
+
+        let err = build_seeds(
+            &[
+                PlanStep::Method(first, 0),
+                PlanStep::Method(second, 0),
+                PlanStep::Method(claimant, 0),
+            ],
+            &[a, x],
+            &sheet.cells,
+            &sheet.relationships,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::Error::Conflict { sites }
+                if sites
+                    == vec![
+                        ErrorSite::Relationship(first),
+                        ErrorSite::Relationship(second),
+                    ]
+        ));
     }
 }
