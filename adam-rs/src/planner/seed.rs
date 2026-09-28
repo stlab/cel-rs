@@ -31,9 +31,10 @@ use std::collections::{HashMap, HashSet};
 use slotmap::SlotMap;
 
 use crate::cell::{CellData, CellId};
+use crate::error::{Error, ErrorSite};
 use crate::relationship::{RelationshipData, RelationshipId};
 
-use super::{PlanStep, Seeds};
+use super::{PlanStep, Seeds, matching::pure_outputs};
 
 /// Computes the seed value for every self-referencing input `execution_order` will read.
 ///
@@ -44,15 +45,23 @@ use super::{PlanStep, Seeds};
 ///
 /// - Precondition: `execution_order`'s `PlanStep::Method` steps name valid method indices
 ///   in `relationships`.
+/// - Precondition: `elimination_order` is the exact cell order the planner's release pass
+///   evaluated for tentative elimination this round.
 ///
-/// - Complexity: O(S · A · K) where S = self-referencing claimed cells, A = relationships
-///   incident to each, K = cells per method; the recursion visits each cell once
-///   (memoized).
+/// # Errors
+///
+/// - `Error::Conflict` — a sibling relationship that can seed a self-referencing cell
+///   has no method compatible with the planner's elimination state.
+///
+/// - Complexity: O(S · A · M · K²) where S = self-referencing claimed cells, A =
+///   relationships incident to each, M = methods per sibling relationship, K = cells per
+///   method; the recursion visits each cell once (memoized).
 pub(crate) fn build_seeds(
     execution_order: &[PlanStep],
+    elimination_order: &[CellId],
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
-) -> Seeds {
+) -> Result<Seeds, Error> {
     let mut claimant: HashMap<CellId, RelationshipId> = HashMap::new();
     let mut active: HashSet<RelationshipId> = HashSet::new();
     let mut self_ref_cells: Vec<CellId> = Vec::new();
@@ -77,20 +86,22 @@ pub(crate) fn build_seeds(
             cell,
             &claimant,
             &active,
+            elimination_order,
             cells,
             relationships,
             &mut seeds,
             &mut visiting,
-        );
+        )?;
     }
-    seeds
+    Ok(seeds)
 }
 
 /// Populates `seeds[x]` with `x`'s aspiration, computed by folding every incident
-/// relationship other than `x`'s claimant through its `x`-producing method, in
-/// `relationships`' natural order, seeded from `x`'s `source` and each other input's own
-/// seed (recursively). Leaves `x` absent when no such relationship exists (its seed is
-/// just `source`) or when every candidate method errors or mistypes its output.
+/// relationship other than `x`'s claimant through its elimination-compatible
+/// `x`-producing method, in `cells[x].adj` order, seeded from `x`'s `source` and each
+/// other input's own seed (recursively). Leaves `x` absent when no such relationship
+/// exists (its seed is just `source`) or when every candidate method errors or mistypes
+/// its output.
 ///
 /// Only relationships in `active` (those the current plan actually runs) count as
 /// siblings: an inactive conditional branch that happens to name `x` must not seed it.
@@ -113,17 +124,23 @@ pub(crate) fn build_seeds(
 /// aspiration fold for the ordinary case this module exists to handle. This is the same
 /// relative-strength test `release::resolve` uses elsewhere, not a comparison of
 /// candidate values.
+///
+/// # Errors
+///
+/// - `Error::Conflict` — some sibling relationship that can seed `x` has no surviving
+///   `x`-producing method after replaying the planner's elimination state.
 fn compute_seed(
     x: CellId,
     claimant: &HashMap<CellId, RelationshipId>,
     active: &HashSet<RelationshipId>,
+    elimination_order: &[CellId],
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,
     seeds: &mut Seeds,
     visiting: &mut HashSet<CellId>,
-) {
+) -> Result<(), Error> {
     if seeds.contains_key(&x) || !visiting.insert(x) {
-        return;
+        return Ok(());
     }
 
     let own_claimant = claimant.get(&x).copied();
@@ -132,13 +149,13 @@ fn compute_seed(
         .iter()
         .filter(|&&rel_id| active.contains(&rel_id) && Some(rel_id) != own_claimant)
         .filter_map(|&rel_id| {
-            relationships[rel_id]
-                .methods
-                .iter()
-                .position(|m| m.outputs.contains(&x))
-                .map(|idx| (rel_id, idx))
+            match select_seed_method(rel_id, x, elimination_order, relationships) {
+                Ok(Some(idx)) => Some(Ok((rel_id, idx))),
+                Ok(None) => None,
+                Err(err) => Some(Err(err)),
+            }
         })
-        .collect();
+        .collect::<Result<Vec<_>, Error>>()?;
 
     for &(rel_id, method_idx) in &sibling_methods {
         for &input in &relationships[rel_id].methods[method_idx].inputs {
@@ -147,11 +164,12 @@ fn compute_seed(
                     input,
                     claimant,
                     active,
+                    elimination_order,
                     cells,
                     relationships,
                     seeds,
                     visiting,
-                );
+                )?;
             }
         }
     }
@@ -204,5 +222,125 @@ fn compute_seed(
     visiting.remove(&x);
     if let Some(value) = accumulated {
         seeds.insert(x, value);
+    }
+    Ok(())
+}
+
+/// Selects `rel_id`'s unique `target`-producing seed method compatible with the
+/// planner's elimination order.
+///
+/// Starts from every method in `rel_id` whose declared outputs contain `target`, then
+/// replays elimination across the relationship's other referenced cells in
+/// `elimination_order`. Eliminating a cell removes any candidate method that would still
+/// purely claim that cell under the matching layer's semantics ([`pure_outputs`]).
+///
+/// Returns `Ok(None)` when `rel_id` has no `target`-producing method.
+///
+/// # Errors
+///
+/// - `Error::Conflict` — `rel_id` could seed `target`, but no candidate method survives
+///   the elimination replay.
+///
+/// - Complexity: O(E · M · K²) where E = `rel_id`'s non-`target` referenced cells, M =
+///   methods in the relationship, K = cells per method.
+fn select_seed_method(
+    rel_id: RelationshipId,
+    target: CellId,
+    elimination_order: &[CellId],
+    relationships: &SlotMap<RelationshipId, RelationshipData>,
+) -> Result<Option<usize>, Error> {
+    let rel = &relationships[rel_id];
+    let mut candidates: Vec<usize> = rel
+        .methods
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, method)| method.outputs.contains(&target).then_some(idx))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    for &eliminated in elimination_order
+        .iter()
+        .filter(|&&cell| cell != target && rel.adj.contains(&cell))
+    {
+        candidates.retain(|&idx| !pure_outputs(&rel.methods[idx]).contains(&eliminated));
+        if candidates.is_empty() {
+            return Err(Error::Conflict {
+                sites: vec![ErrorSite::Relationship(rel_id)],
+            });
+        }
+    }
+
+    debug_assert_eq!(
+        candidates.len(),
+        1,
+        "antichain outputs must leave exactly one sibling seed method per target",
+    );
+    Ok(candidates.into_iter().next())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::any::TypeId;
+
+    use crate::{ErrorSite, Method, Sheet};
+
+    #[test]
+    fn build_seeds_reports_conflict_when_elimination_rejects_every_sibling_method() {
+        let mut sheet = Sheet::new();
+        let x = sheet.add_cell(0_i32);
+        let a = sheet.add_cell(5_i32);
+        let b = sheet.add_cell(7_i32);
+        let i32_type = TypeId::of::<i32>();
+
+        let sibling = sheet
+            .add_relationship(vec![
+                Method::new(
+                    vec![b],
+                    vec![x, a],
+                    vec![i32_type],
+                    vec![i32_type, i32_type],
+                    |_| Ok(vec![Box::new(11_i32), Box::new(13_i32)]),
+                ),
+                Method::new(
+                    vec![a],
+                    vec![x, b],
+                    vec![i32_type],
+                    vec![i32_type, i32_type],
+                    |_| Ok(vec![Box::new(17_i32), Box::new(19_i32)]),
+                ),
+                Method::new(
+                    vec![x],
+                    vec![a, b],
+                    vec![i32_type],
+                    vec![i32_type, i32_type],
+                    |_| Ok(vec![Box::new(23_i32), Box::new(29_i32)]),
+                ),
+            ])
+            .unwrap();
+        let claimant = sheet
+            .add_relationship(vec![Method::from_fn_1_1(
+                x,
+                x,
+                |value: &i32| Ok(*value + 1),
+            )])
+            .unwrap();
+
+        let err = build_seeds(
+            &[PlanStep::Method(sibling, 2), PlanStep::Method(claimant, 0)],
+            &[a, b, x],
+            &sheet.cells,
+            &sheet.relationships,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::Error::Conflict {
+                sites
+            } if sites == vec![ErrorSite::Relationship(sibling)]
+        ));
     }
 }

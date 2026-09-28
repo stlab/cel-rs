@@ -1395,9 +1395,10 @@ impl Sheet {
                 let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
                 let seeds = crate::planner::build_seeds(
                     &pre_plan.execution_order,
+                    &pre_plan.elimination_order,
                     &self.cells,
                     &self.relationships,
-                );
+                )?;
                 self.execute_plan(
                     &pre_plan.execution_order,
                     &seeds,
@@ -1412,8 +1413,12 @@ impl Sheet {
 
         // Phase 3: general plan on the active set.
         let plan = crate::planner::plan(&self.cells, &self.relationships, &active)?;
-        let seeds =
-            crate::planner::build_seeds(&plan.execution_order, &self.cells, &self.relationships);
+        let seeds = crate::planner::build_seeds(
+            &plan.execution_order,
+            &plan.elimination_order,
+            &self.cells,
+            &self.relationships,
+        )?;
         let mut source_filter_violations: Vec<(CellId, FilterViolation)> = Vec::new();
         self.execute_plan(
             &plan.execution_order,

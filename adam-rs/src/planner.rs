@@ -78,7 +78,8 @@ pub(crate) struct Plan {
     /// Selected steps (methods and filter reclamps) in execution order.
     pub(crate) execution_order: Vec<PlanStep>,
     /// The exact deterministic cell sequence the release pass evaluated when
-    /// tentatively eliminating sources.
+    /// tentatively eliminating sources; [`seed::build_seeds`] replays sibling-local
+    /// elimination against this order when choosing seed methods.
     pub(crate) elimination_order: Vec<CellId>,
     /// Cells that can never be a source under the relationships this plan considered.
     /// See [`forced_output_cells`].

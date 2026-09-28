@@ -2247,6 +2247,60 @@ fn issue_182_inequality_chain_later_edit_below_earlier_one_repropagates() {
 }
 
 #[test]
+fn seed_method_selection_follows_elimination_state() {
+    let mut sheet = Sheet::new();
+    let x = sheet.add_cell(0_i32);
+    let b = sheet.add_cell(3_i32);
+    let a = sheet.add_cell(10_i32);
+    let i32_type = TypeId::of::<i32>();
+
+    sheet
+        .add_relationship(vec![
+            Method::new(
+                vec![b],
+                vec![x, a],
+                vec![i32_type],
+                vec![i32_type, i32_type],
+                |_| Ok(vec![Box::new(100_i32), Box::new(1_i32)]),
+            ),
+            Method::new(
+                vec![a, b],
+                vec![x, b],
+                vec![i32_type, i32_type],
+                vec![i32_type, i32_type],
+                |args| {
+                    let aa = *args[0].downcast_ref::<i32>().unwrap();
+                    let bb = *args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(aa + bb), Box::new(bb)])
+                },
+            ),
+            Method::new(
+                vec![x, b],
+                vec![a, b],
+                vec![i32_type, i32_type],
+                vec![i32_type, i32_type],
+                |args| {
+                    let xx = *args[0].downcast_ref::<i32>().unwrap();
+                    let bb = *args[1].downcast_ref::<i32>().unwrap();
+                    Ok(vec![Box::new(xx - bb), Box::new(bb)])
+                },
+            ),
+        ])
+        .unwrap();
+    sheet
+        .add_relationship(vec![Method::from_fn_1_1(
+            x,
+            x,
+            |value: &i32| Ok(*value + 1),
+        )])
+        .unwrap();
+
+    sheet.propagate().unwrap();
+
+    assert_eq!(*sheet.read::<i32>(x).unwrap(), 14);
+}
+
+#[test]
 fn issue_182_inequality_chain_survives_two_consecutive_edits_to_the_same_cell() {
     // a<=b<=c again. Writing a=25 raises b to 25. Writing c=24 correctly pulls a and b
     // down to 24 (issue_182_inequality_chain_later_edit_below_earlier_one_repropagates).
