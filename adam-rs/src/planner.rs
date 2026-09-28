@@ -134,17 +134,10 @@ pub(crate) fn plan(
         .collect();
 
     let mut execution_order: Vec<PlanStep> = Vec::new();
-    let order = match topological_order(&adj) {
-        Some(order) => order,
-        None => {
-            let nodes: Vec<Node> = adj.keys().copied().collect();
-            let sites = trace::recover_cycle(&adj, &nodes)
-                .into_iter()
-                .map(node_to_site)
-                .collect();
-            return Err(Error::FilterCycle { sites });
-        }
-    };
+    let order = topological_order(&adj).expect(
+        "release::resolve returns an acyclic relationship assignment, and \
+         Sheet's static guard check rules out any cycle through a filter edge",
+    );
     for node in order {
         match node {
             Node::Relationship(rel_id) => {
@@ -162,9 +155,8 @@ pub(crate) fn plan(
         .filter(|step| matches!(step, PlanStep::Method(..)))
         .count();
     // Believed unreachable: every active relationship appears in the topological
-    // order here, since the `FilterCycle` branch above already returned on a cycle
-    // -- so `method_count == active.len()` always holds and `active` is never
-    // actually infeasible when this branch runs.
+    // order here, since the sort cannot fail -- so `method_count == active.len()`
+    // always holds and `active` is never actually infeasible when this branch runs.
     // `minimal_infeasible_set`'s own `debug_assert!` guards that assumption in
     // debug/test builds.
     if method_count != active.len() {
@@ -688,58 +680,6 @@ mod tests {
             .position(|s| matches!(s, PlanStep::Method(r, _) if *r == bound_rel))
             .expect("bound_rel must be in the execution order");
         assert!(method_pos < reclamp_pos);
-    }
-
-    #[test]
-    fn a_filter_argument_cycle_returns_filter_cycle_error() {
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        let b = sheet.add_cell(0_i32);
-        sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
-            .unwrap();
-        sheet
-            .add_filter(
-                a,
-                Filter::from_fn_1(b, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
-            )
-            .unwrap();
-
-        let active: HashSet<_> = sheet.relationships().collect();
-        let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
-        assert!(matches!(result, Err(Error::FilterCycle { .. })));
-    }
-
-    #[test]
-    fn filter_cycle_error_names_its_members() {
-        use crate::error::ErrorSite;
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(5_i32);
-        let b = sheet.add_cell(0_i32);
-        sheet
-            .add_relationship(vec![Method::from_fn_1_1(a, b, |x: &i32| Ok(*x))])
-            .unwrap();
-        sheet
-            .add_filter(
-                a,
-                Filter::from_fn_1(b, |x: &i32, bound: &i32| Ok((*x).min(*bound))),
-            )
-            .unwrap();
-
-        let active: HashSet<_> = sheet.relationships().collect();
-        let result = crate::planner::plan(&sheet.cells, &sheet.relationships, &active);
-        let sites = match result {
-            Err(Error::FilterCycle { sites }) => sites,
-            Err(other) => panic!("{other:?}"),
-            Ok(_) => panic!("expected FilterCycle error"),
-        };
-        assert!(!sites.is_empty());
-        assert!(sites.iter().any(|s| matches!(s, ErrorSite::Cell(_))));
-        assert!(
-            sites
-                .iter()
-                .any(|s| matches!(s, ErrorSite::Relationship(_)))
-        );
     }
 
     #[test]

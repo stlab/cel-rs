@@ -24,7 +24,7 @@ pub(crate) fn site_label(
     };
 
     match e {
-        Error::Cycle { .. } | Error::FilterCycle { .. } => match site {
+        Error::Cycle { .. } | Error::DependencyCycle { .. } => match site {
             ErrorSite::Relationship(_) => "this relationship is part of the cycle".to_string(),
             ErrorSite::Cell(c) => match cell_name(*c) {
                 Some(name) => format!("cell `{name}` is part of the cycle"),
