@@ -110,6 +110,27 @@ Full verification for this handoff completed with no `warning:` lines observed:
 - `adam-lsp` diagnostics do not yet report `DependencyCycle` or other sheet-construction errors,
   because the LSP never builds a live `Sheet`. This gap predates Phase A and is tracked as #239.
 
+## Phase B follow-up — selected guard prerequisites
+
+Phase B now executes only the selected unconditional-plan cone needed to resolve conditional
+guards. The reverse producer index includes selected method outputs and filter reclamps, and the
+backward walk follows non-self method inputs and filter arguments in O(V + E) bookkeeping per
+selected plan. Unrelated filters remain deferred until the final active plan, so their callbacks
+observe branch-produced arguments regardless of relationship insertion order.
+
+Staged methods, filters, and seed callbacks carry producer provenance. A final plan reuses a
+pre-executed step only when its selected method, producer path, output classification, and seed
+inputs are identical; otherwise propagation returns a conservative `Error::Conflict` with
+implicated sites instead of replaying a stateful callback or publishing stale staged values.
+Callbacks with genuinely different inputs are distinct logical evaluations and may each run once.
+Failed prerequisite and seed-cycle propagation remains transactional: prior live values are
+preserved and `changed()` is empty for the failing call.
+
+The all-method static guard-independence validation remains unchanged, and Phase C automatic plan
+reuse remains deferred. Contract coverage preserves filtered-guard ordering, one logical callback
+evaluation, inequality chains, direct self-reference, insertion-order independence, and rollback
+after both seed-cycle and prerequisite-conflict failures.
+
 ## Remaining
 
 **Phase C (§3 automatic plan reuse, #152):**

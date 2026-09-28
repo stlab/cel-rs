@@ -98,7 +98,12 @@ impl MatchValue<'_> {
     }
 }
 
-/// Provenance needed to decide whether a staged plan step can be reused.
+/// Provenance needed to decide whether a staged guard-cone step can be reused.
+///
+/// Reuse is intentionally conservative: a step is reusable only when the final plan selects the
+/// same method, producer path, source/derived classification, and seed inputs. A mismatch returns
+/// `Error::Conflict` rather than guessing a compatible assignment or invoking a stateful callback
+/// again.
 #[derive(Clone, PartialEq, Eq)]
 struct StepProvenance {
     input_producers: Vec<Option<PlanStep>>,
@@ -1744,9 +1749,10 @@ impl Sheet {
     /// every derived override from the previous round, but does not mutate live cells.
     ///
     /// **Phase 1 — Pre-plan:** if any conditional match cells are derived (have an
-    /// in-edge in the unconditional relationship graph), the minimal unconditional
-    /// subgraph needed to compute them is planned and executed so their values are
-    /// current before branch evaluation.
+    /// in-edge in the unconditional relationship graph), the unconditional plan's selected
+    /// guard-prerequisite cone is executed so their values are current before branch evaluation.
+    /// Unrelated filters remain deferred until the final active plan, after the relationships
+    /// that produce their arguments.
     ///
     /// **Phase 2 — Conditional evaluation:** each conditional's match cell value is
     /// read and compared against branch keys; the active relationship set is built.
@@ -1755,7 +1761,9 @@ impl Sheet {
     /// validation and method execution consume staged Phase 1 values. A callback already
     /// evaluated in Phase 1 is reused only when the final plan preserves its selected
     /// method, input producers, and output classification. A mismatched plan returns a
-    /// conservative conflict rather than replaying the callback or committing stale values.
+    /// conservative conflict rather than replaying the callback or committing stale values. This
+    /// boundary may reject a sheet even when another assignment could have avoided the mismatch;
+    /// propagation reports the implicated sites instead of attempting that alternate assignment.
     /// A Phase 1 seed callback is likewise reused only when every input reads the same staged
     /// source version, recursive seed result, or accumulated value; otherwise propagation
     /// returns a conflict instead of reusing a stale seed or evaluating the callback again.
@@ -1777,11 +1785,15 @@ impl Sheet {
     /// scratch, so [`Sheet::cell_requirements_valid`] and [`Sheet::violated_requirements`]
     /// reflect this round.
     ///
-    /// If staged seed validation detects a non-self sibling dependency cycle,
-    /// `propagate()` returns `Error::SeedCycle` after validation and changed-state
-    /// clearing but before commit. Live cell values therefore remain untouched and
-    /// [`Sheet::changed`] stays empty for that failing call. Method and conditional
-    /// callbacks evaluated while reaching that error are each invoked at most once.
+    /// If staged seed validation detects a non-self sibling dependency cycle, or compatibility
+    /// checking returns a prerequisite conflict, `propagate()` returns its error after validation
+    /// and changed-state clearing but before commit. Live cell values therefore remain untouched
+    /// and [`Sheet::changed`] stays empty for that failing call. Method and conditional callbacks
+    /// evaluated while reaching that error are each invoked at most once per distinct input set.
+    ///
+    /// - Complexity: prerequisite-cone indexing, traversal, and staged producer compatibility
+    ///   checks are O(V + E) per selected plan, distinct from the planner's existing assignment
+    ///   matching complexity.
     ///
     /// # Errors
     ///

@@ -1232,6 +1232,13 @@ fn changed_filter_argument_producer_conflicts_without_reclamping_stale_value() {
         )
         .unwrap();
 
+    sheet.write(switch, false).unwrap();
+    sheet.propagate().unwrap();
+    assert!(!sheet.changed().collect::<Vec<_>>().is_empty());
+    let guard_before_error = *sheet.read::<i32>(guard).unwrap();
+    let bound_before_error = *sheet.read::<i32>(bound).unwrap();
+
+    sheet.write(switch, true).unwrap();
     let error = sheet.propagate().unwrap_err();
 
     assert!(matches!(
@@ -1241,8 +1248,8 @@ fn changed_filter_argument_producer_conflicts_without_reclamping_stale_value() {
                 && sites.contains(&ErrorSite::Cell(guard))
                 && sites.contains(&ErrorSite::Cell(bound))
     ));
-    assert_eq!(*sheet.read::<i32>(guard).unwrap(), 8);
-    assert_eq!(*sheet.read::<i32>(bound).unwrap(), 3);
+    assert_eq!(*sheet.read::<i32>(guard).unwrap(), guard_before_error);
+    assert_eq!(*sheet.read::<i32>(bound).unwrap(), bound_before_error);
     assert_eq!(sheet.changed().count(), 0);
 }
 

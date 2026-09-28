@@ -5,15 +5,19 @@ use std::collections::{HashMap, HashSet};
 use crate::{conditional::MatchSource, error::Error, planner::PlanStep, sheet::Sheet};
 
 impl Sheet {
-    /// Returns the selected unconditional steps needed to evaluate every conditional guard.
+    /// Returns the selected unconditional-plan cone needed to evaluate every conditional guard.
     ///
     /// The returned steps retain `order`'s topological order and omit selected methods and
-    /// filter reclamps outside the guards' transitive prerequisite cone.
+    /// filter reclamps outside the guards' transitive prerequisite cone. A method contributes
+    /// its non-self inputs, and a filter contributes its argument cells, so a guard observes
+    /// the selected producers and filter ordering that establish its value.
     ///
     /// - Precondition: `order` is the execution order from the complete unconditional plan.
-    ///
+    /// - Postcondition: every returned step is in `order`, and every selected guard input has
+    ///   its transitive selected producer steps included.
     /// - Complexity: O(V + E) time and space where V is the number of selected plan steps and
     ///   cells, and E is the number of their method outputs, method inputs, and filter arguments.
+    ///
     pub(crate) fn guard_prerequisite_steps(
         &self,
         order: &[PlanStep],
