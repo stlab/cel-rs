@@ -268,32 +268,19 @@ fn compute_seed(
     Ok(())
 }
 
-/// Returns a deterministic lexicographic key for a method's canonical cell content.
+/// Returns a deterministic lexicographic key for a method's ordered signature.
 ///
 /// The key encodes the input and output arities, then the referenced input and output
-/// cell IDs in ascending order, so equal-strength sibling folds break ties by stable
-/// relationship content rather than relationship insertion order or argument position.
+/// cell IDs in their declared order, so equal-strength sibling folds break ties by the
+/// selected method's signature rather than by relationship insertion order.
 ///
 /// - Complexity: O(k) where k = `method.inputs.len() + method.outputs.len()`.
 fn method_content_key(method: &crate::relationship::Method) -> Vec<u64> {
-    let mut canonical_inputs: Vec<u64> = method
-        .inputs
-        .iter()
-        .map(|&input| cell_sort_key(input))
-        .collect();
-    canonical_inputs.sort_unstable();
-    let mut canonical_outputs: Vec<u64> = method
-        .outputs
-        .iter()
-        .map(|&output| cell_sort_key(output))
-        .collect();
-    canonical_outputs.sort_unstable();
-
     let mut key = Vec::with_capacity(2 + method.inputs.len() + method.outputs.len());
     key.push(method.inputs.len() as u64);
-    key.extend(canonical_inputs);
+    key.extend(method.inputs.iter().map(|&input| cell_sort_key(input)));
     key.push(method.outputs.len() as u64);
-    key.extend(canonical_outputs);
+    key.extend(method.outputs.iter().map(|&output| cell_sort_key(output)));
     key
 }
 
@@ -498,5 +485,142 @@ mod tests {
                 sites
             } if sites == vec![ErrorSite::Relationship(sibling)]
         ));
+    }
+
+    #[test]
+    fn build_seeds_breaks_equal_strength_ties_by_ordered_signature() {
+        fn ordered_max(
+            first: CellId,
+            second: CellId,
+            third: CellId,
+            strongest: CellId,
+            output: CellId,
+        ) -> Method {
+            Method::new(
+                vec![first, second, third, strongest],
+                vec![output],
+                vec![
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                ],
+                vec![TypeId::of::<i32>()],
+                |args| {
+                    let lhs = args[0]
+                        .downcast_ref::<i32>()
+                        .expect("type checked at add_relationship");
+                    let rhs = args[1]
+                        .downcast_ref::<i32>()
+                        .expect("type checked at add_relationship");
+                    Ok(vec![Box::new((*lhs).max(*rhs))])
+                },
+            )
+        }
+
+        fn ordered_min(
+            first: CellId,
+            second: CellId,
+            third: CellId,
+            strongest: CellId,
+            output: CellId,
+        ) -> Method {
+            Method::new(
+                vec![first, second, third, strongest],
+                vec![output],
+                vec![
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                    TypeId::of::<i32>(),
+                ],
+                vec![TypeId::of::<i32>()],
+                |args| {
+                    let lhs = args[0]
+                        .downcast_ref::<i32>()
+                        .expect("type checked at add_relationship");
+                    let rhs = args[1]
+                        .downcast_ref::<i32>()
+                        .expect("type checked at add_relationship");
+                    Ok(vec![Box::new((*lhs).min(*rhs))])
+                },
+            )
+        }
+
+        fn build_sheet(
+            reverse_siblings: bool,
+        ) -> (
+            Sheet,
+            RelationshipId,
+            RelationshipId,
+            RelationshipId,
+            CellId,
+        ) {
+            let mut sheet = Sheet::new();
+            let x = sheet.add_cell(4_i32);
+            let a = sheet.add_cell(5_i32);
+            let b = sheet.add_cell(3_i32);
+            let shared_strongest = sheet.add_cell(0_i32);
+
+            let a_le_x = vec![
+                ordered_min(a, x, b, shared_strongest, a),
+                ordered_max(a, x, b, shared_strongest, x),
+            ];
+            let x_le_b = vec![
+                ordered_min(b, x, a, shared_strongest, x),
+                ordered_max(b, x, a, shared_strongest, b),
+            ];
+            let claimant = sheet
+                .add_relationship(vec![Method::from_fn_1_1(x, x, |value: &i32| Ok(*value))])
+                .unwrap();
+            let (a_le_x_rel, x_le_b_rel) = if reverse_siblings {
+                let x_le_b_rel = sheet.add_relationship(x_le_b).unwrap();
+                let a_le_x_rel = sheet.add_relationship(a_le_x).unwrap();
+                (a_le_x_rel, x_le_b_rel)
+            } else {
+                let a_le_x_rel = sheet.add_relationship(a_le_x).unwrap();
+                let x_le_b_rel = sheet.add_relationship(x_le_b).unwrap();
+                (a_le_x_rel, x_le_b_rel)
+            };
+
+            (sheet, a_le_x_rel, x_le_b_rel, claimant, x)
+        }
+
+        let (forward_sheet, forward_up, forward_down, forward_claimant, forward_x) =
+            build_sheet(false);
+        let forward_seeds = build_seeds(
+            &[
+                PlanStep::Method(forward_up, 0),
+                PlanStep::Method(forward_down, 1),
+                PlanStep::Method(forward_claimant, 0),
+            ],
+            &[forward_x],
+            &forward_sheet.cells,
+            &forward_sheet.relationships,
+        )
+        .expect("forward build_seeds should succeed");
+
+        let (reversed_sheet, reversed_up, reversed_down, reversed_claimant, reversed_x) =
+            build_sheet(true);
+        let reversed_seeds = build_seeds(
+            &[
+                PlanStep::Method(reversed_up, 0),
+                PlanStep::Method(reversed_down, 1),
+                PlanStep::Method(reversed_claimant, 0),
+            ],
+            &[reversed_x],
+            &reversed_sheet.cells,
+            &reversed_sheet.relationships,
+        )
+        .expect("reversed build_seeds should succeed");
+
+        let forward_seed = forward_seeds[&forward_x]
+            .downcast_ref::<i32>()
+            .expect("seed should stay typed as i32");
+        let reversed_seed = reversed_seeds[&reversed_x]
+            .downcast_ref::<i32>()
+            .expect("seed should stay typed as i32");
+        assert_eq!(*forward_seed, 3);
+        assert_eq!(*reversed_seed, 3);
     }
 }

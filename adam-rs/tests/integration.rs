@@ -2605,8 +2605,8 @@ fn sibling_seed_fold_ties_ignore_relationship_insertion_order() {
             max_with_phantom(a, x, shared_strongest, x),
         ];
         let x_le_b = vec![
-            min_with_phantom(x, b, shared_strongest, x),
-            max_with_phantom(x, b, shared_strongest, b),
+            min_with_phantom(b, x, shared_strongest, x),
+            max_with_phantom(b, x, shared_strongest, b),
         ];
         if reverse_siblings {
             sheet.add_relationship(x_le_b).unwrap();
