@@ -57,12 +57,13 @@ impl Sheet {
             match step {
                 PlanStep::Method(relationship, method_index) => {
                     let method = &self.relationships[relationship].methods[method_index];
+                    let outputs: HashSet<_> = method.outputs.iter().copied().collect();
                     pending.extend(
                         method
                             .inputs
                             .iter()
                             .copied()
-                            .filter(|input| !method.outputs.contains(input)),
+                            .filter(|input| !outputs.contains(input)),
                     );
                 }
                 PlanStep::FilterReclamp(cell) => {

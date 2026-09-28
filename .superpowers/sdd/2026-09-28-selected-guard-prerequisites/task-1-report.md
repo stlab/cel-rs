@@ -45,3 +45,18 @@ Producer lookup and prerequisite discovery use `HashMap`/`HashSet` from the Rust
 The selected producer map is built from the planner's complete unconditional order, so multi-method relationships contribute only their chosen method and source filters contribute only when the planner emitted a reclamp. Method inputs that are also outputs are excluded as self-references; selected filter arguments are traversed. Expression guards contribute every input cell. Existing planning cycle diagnostics remain the only cycle check.
 
 No Task 1 concerns remain.
+
+## Review finding — selected-method output membership
+
+`guard_prerequisite_steps` now builds a `HashSet` from each selected method's outputs before checking its inputs for self-references. Membership checks are expected O(1), so the selected method's bookkeeping is expected O(inputs + outputs) instead of O(inputs × outputs). This does not add producers or expand the selected prerequisite cone. No behavior-specific test was added because the finding changes lookup complexity only; existing self-reference and multi-output integration coverage remains unchanged.
+
+## Review-fix verification
+
+- `cargo fmt --all` — exited 0.
+- `cargo test -p adam-rs --lib sheet::` — exited 0; 152 passed, 0 failed, 103 filtered out.
+- `cargo test -p adam-rs --test integration conditional_bound_filter` — exited 0; 1 passed, 0 failed, 105 filtered out.
+- `cargo test -p adam-rs --test integration filtered_guard` — exited 0; 1 passed, 0 failed, 105 filtered out.
+- The three focused test commands were run sequentially; Cargo reported successful test results for each. There is no dedicated `prerequisites` unit-test module.
+- `git diff --check` — passed; no whitespace errors.
+
+No additional concerns identified.
