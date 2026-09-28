@@ -18,6 +18,8 @@ use crate::{
     requirement::{Requirement, RequirementData, RequirementId},
 };
 
+mod dependency;
+
 /// Owns a complete property model constraint graph.
 ///
 /// Create cells with [`Sheet::add_cell`], define multi-way constraints with
@@ -629,8 +631,13 @@ impl Sheet {
     ///   names `cell` itself.
     /// - `Error::TypeMismatch` — an argument cell's registered type does not match the
     ///   type `filter` declared for it.
+    /// - `Error::DependencyCycle` — with `filter` attached, some filter's or conditional's
+    ///   inputs would depend on a cell it governs (see `Error::DependencyCycle`); e.g.
+    ///   one of `filter`'s arguments is reachable from `cell` through method edges. The
+    ///   sheet is left unchanged.
     ///
-    /// - Complexity: O(a) where a is the number of `filter`'s argument cells.
+    /// - Complexity: O(G · (V + E)) for the dependency check; G = filters +
+    ///   conditionals, V = cells, E = dependency edges.
     pub fn add_filter(&mut self, cell: CellId, filter: Filter) -> Result<(), Error> {
         let cell_type = self.cells.get(cell).ok_or(Error::InvalidId)?.type_id;
         if self.cells[cell].filter.is_some() {
@@ -657,6 +664,20 @@ impl Sheet {
             self.filter_dependents.entry(arg).or_default().push(cell);
         }
         self.cells[cell].filter = Some(filter.0);
+        if let Some(path) = self.guard_violation() {
+            let filter = self.cells[cell].filter.take().expect("attached above");
+            for arg in &filter.args {
+                if let Some(dependents) = self.filter_dependents.get_mut(arg) {
+                    dependents.pop();
+                    if dependents.is_empty() {
+                        self.filter_dependents.remove(arg);
+                    }
+                }
+            }
+            return Err(Error::DependencyCycle {
+                sites: path.into_sites(None),
+            });
+        }
         Ok(())
     }
 
