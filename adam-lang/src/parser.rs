@@ -1397,7 +1397,8 @@ impl AdamParser {
     /// The first resolvable site is the primary label, which for `DependencyCycle` is the
     /// governed cell declaration. Remaining resolvable sites become secondary labels.
     ///
-    /// - Complexity: O(s) in the number of `e`'s sites.
+    /// - Complexity: O(C + s), where C is the number of declared cells (each name is
+    ///   copied into a lookup map) and s is the number of `e`'s sites.
     fn validated_sheet_error(ctx: &ParseContext, e: adam_rs::Error) -> ParseError {
         let by_id: HashMap<CellId, String> = ctx
             .cell_names
