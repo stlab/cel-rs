@@ -3,6 +3,8 @@ name: Docs
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 env:
@@ -12,7 +14,7 @@ env:
 # Only one Pages deployment may run at a time; let a newer push supersede an
 # in-flight one rather than queuing behind it.
 concurrency:
-  group: pages
+  group: docs-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -29,18 +31,13 @@ jobs:
     - name: Cache dependencies
       uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
 
-    # --lib skips `xtask` automatically (it has no library target). `begin` is excluded
-    # explicitly, not just left to `--lib`: `--lib` only filters which *targets* get
-    # documented, not which packages are selected for feature resolution, so `begin`
-    # staying selected via `--workspace` still unifies its `default = ["desktop"]`
-    # feature (-> `dioxus/desktop` -> wry/tao -> WebKitGTK/GTK) into the build even
-    # though nothing of `begin`'s ever gets documented -- and this workflow never
-    # installs those system libraries at all, so it fails outright on the
-    # ubuntu-latest runner despite building fine locally on Windows/macOS, neither of
-    # which route dioxus's desktop feature through GTK at all (confirmed against the
-    # `ci.yml` build job hitting the identical failure).
-    - name: Build documentation
-      run: cargo doc --workspace --exclude begin --no-deps --lib
+    # --lib skips `xtask` automatically (it has no library target). `begin` and `ez-adam`
+    # are excluded explicitly, not just left to `--lib`: either crate remaining selected
+    # via `--workspace` enables its desktop feature and requires WebKitGTK/GTK on Linux.
+    - name: Build documentation (deny warnings)
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo doc --workspace --exclude begin --exclude ez-adam --no-deps --lib
 
     - name: Redirect docs root to the cel-rs facade crate
       run: echo '<meta http-equiv="refresh" content="0; url=cel_rs/index.html">' > target/doc/index.html
@@ -85,11 +82,13 @@ jobs:
         cp -r cel-lang-book/book-dist target/doc/cel-book
 
     - uses: actions/upload-pages-artifact@v5
+      if: github.event_name == 'push'
       with:
         path: target/doc
 
   deploy:
     needs: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       pages: write
