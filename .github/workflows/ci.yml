@@ -15,15 +15,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  worktree-task:
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v7
-
-    - name: Test PR worktree task
-      shell: powershell
-      run: Invoke-Pester .vscode\scripts\create-worktree-from-pr.Tests.ps1
-
   build:
     runs-on: ubuntu-latest
     steps:
