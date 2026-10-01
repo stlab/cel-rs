@@ -47,6 +47,7 @@ use crate::{
 mod digraph;
 mod matching;
 mod release;
+mod reuse;
 mod seed;
 mod trace;
 
@@ -54,6 +55,7 @@ use digraph::{Node, add_filter_edges, build_digraph, topological_order};
 use matching::pure_outputs;
 use release::ReleaseFailure;
 
+pub(crate) use reuse::SourceCertificate;
 pub(crate) use seed::{SeedEvaluationCache, SeedSource, build_seeds, build_seeds_for_steps};
 
 /// The seed value each self-referencing input should read this round, keyed by cell. A
