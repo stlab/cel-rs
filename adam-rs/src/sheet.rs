@@ -5,6 +5,7 @@
 
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use slotmap::SlotMap;
 
@@ -13,13 +14,18 @@ use crate::{
     conditional::{Branch, ConditionalData, ConditionalId, MatchExpr, MatchSource},
     error::{Error, ErrorSite},
     filter::{Filter, FilterKind, FilterViolation},
-    planner::{Plan, PlanStep, SeedEvaluationCache, SeedSource, Seeds},
+    planner::{Plan, PlanStep, SeedSignatures, SeedSource, Seeds},
     relationship::{Method, RelationshipData, RelationshipId},
     requirement::{Requirement, RequirementData, RequirementId},
 };
 
+mod cached;
 mod dependency;
 mod prerequisites;
+
+#[cfg(test)]
+use cached::ReuseStats;
+use cached::{CachedPlan, PreparedPlan};
 
 /// Owns a complete property model constraint graph.
 ///
@@ -48,16 +54,20 @@ pub struct Sheet {
     /// later and cells written later have strictly higher strength, making the
     /// default method-selection direction deterministic.
     next_strength: u64,
-    /// The execution order from the last `propagate()` call, retained so the
+    /// The prepared snapshot from the last successful `propagate()` call, retained so the
     /// display-only accessors ([`Sheet::is_source`], [`Sheet::selected_method`],
     /// [`Sheet::is_forced`]) can report which method the planner picked for each
     /// relationship without re-planning.
-    last_plan: Option<Vec<PlanStep>>,
-    /// Cells reported forced (see [`Sheet::is_forced`]) by the last `propagate()` call.
-    last_forced: Option<HashSet<CellId>>,
-    /// Relationships reported forced (see [`Sheet::is_relationship_forced`]) by the
-    /// last `propagate()` call.
-    last_forced_relationships: Option<HashSet<RelationshipId>>,
+    last_plan: Option<Rc<PreparedPlan>>,
+    /// Eligible prepared unconditional plan, independent of the display snapshot.
+    pre_plan_cache: Option<CachedPlan>,
+    /// Eligible prepared final active plan, independent of the unconditional plan.
+    main_plan_cache: Option<CachedPlan>,
+    /// Ordered method signatures retained until the graph structure changes.
+    seed_signatures: Option<Rc<SeedSignatures>>,
+    /// Counts actual preparation and reuse-validation work for this sheet only.
+    #[cfg(test)]
+    reuse_stats: ReuseStats,
     /// All conditionals registered on this sheet.
     pub(crate) conditionals: SlotMap<ConditionalId, ConditionalData>,
     /// Union of all RelationshipIds assigned to any conditional branch or default.
@@ -219,8 +229,11 @@ impl Sheet {
             changed_cells: Vec::new(),
             next_strength: 0,
             last_plan: None,
-            last_forced: None,
-            last_forced_relationships: None,
+            pre_plan_cache: None,
+            main_plan_cache: None,
+            seed_signatures: None,
+            #[cfg(test)]
+            reuse_stats: ReuseStats::default(),
             conditionals: SlotMap::with_key(),
             conditional_relationships: HashSet::new(),
             requirements: SlotMap::with_key(),
@@ -241,6 +254,7 @@ impl Sheet {
     /// have higher strength than derived cells, ensuring stability across conditional
     /// branch switches.
     pub fn add_cell<T: Any + PartialEq + 'static>(&mut self, value: T) -> CellId {
+        self.invalidate_prepared_plans();
         self.next_strength += 1;
         let strength = self.next_strength | (1u64 << 63);
         self.cells.insert(CellData {
@@ -427,6 +441,7 @@ impl Sheet {
             }
         }
 
+        self.invalidate_prepared_plans();
         let rel_id = self.relationships.insert(RelationshipData {
             methods,
             adj: adj.clone(),
@@ -549,6 +564,7 @@ impl Sheet {
 
         // Record all relationships as conditional so they are excluded from the
         // unconditional active set in propagate().
+        self.invalidate_prepared_plans();
         for &rel_id in &all_rels {
             self.conditional_relationships.insert(rel_id);
         }
@@ -642,6 +658,7 @@ impl Sheet {
             }
         }
 
+        self.invalidate_prepared_plans();
         let rid = self.requirements.insert(RequirementData {
             name: name.map(str::to_string),
             cell,
@@ -742,6 +759,7 @@ impl Sheet {
             }
         }
 
+        self.invalidate_prepared_plans();
         for &arg in &filter.0.args {
             self.filter_dependents.entry(arg).or_default().push(cell);
         }
@@ -973,16 +991,15 @@ impl Sheet {
     }
 
     /// Returns `true` if `rel_id` was part of the active relationship set for the last
-    /// `propagate()` call — an unconditional relationship is always active; a conditional
+    /// successful `propagate()` call — an unconditional relationship is always active; a conditional
     /// branch/default relationship is active only while its conditional currently selects
     /// it.
     ///
     /// Returns `false` if no propagation has run yet.
     fn is_relationship_active(&self, rel_id: RelationshipId) -> bool {
-        self.last_plan.as_ref().is_some_and(|plan| {
-            plan.iter()
-                .any(|step| matches!(step, PlanStep::Method(r, _) if *r == rel_id))
-        })
+        self.last_plan
+            .as_ref()
+            .is_some_and(|plan| plan.active.contains(&rel_id))
     }
 
     /// Returns the match cells of every conditional with at least one branch (or default)
@@ -1081,6 +1098,7 @@ impl Sheet {
             });
         }
 
+        self.invalidate_after_write(id);
         self.next_strength += 1;
         let cell = &mut self.cells[id];
         cell.strength = self.next_strength | (1u64 << 63);
@@ -1680,7 +1698,9 @@ impl Sheet {
     ///
     /// - Complexity: O(R·K²) where R is the number of entries and K is the maximum
     ///   inputs or outputs per method.
-    fn post_process_strengths(&mut self, execution_order: &[PlanStep]) {
+    /// - Postcondition: returns whether any cell's strength actually changed.
+    fn post_process_strengths(&mut self, execution_order: &[PlanStep]) -> bool {
+        let mut changed = false;
         let mut derived_strength = u64::MAX >> 1; // 0x7FFF_FFFF_FFFF_FFFF
         let mut seen: std::collections::HashSet<CellId> = std::collections::HashSet::new();
         for step in execution_order {
@@ -1698,12 +1718,14 @@ impl Sheet {
                         if self_referencing && cell.has_explicit_strength() {
                             continue;
                         }
+                        changed |= cell.strength != derived_strength;
                         cell.strength = derived_strength;
                         derived_strength = derived_strength.saturating_sub(1);
                     }
                 }
             }
         }
+        changed
     }
 
     /// Publishes a fully validated propagation stage and returns previously derived cells.
@@ -1796,9 +1818,11 @@ impl Sheet {
     /// and changed-state clearing but before commit. Live cell values therefore remain untouched
     /// and [`Sheet::changed`] stays empty for that failing call.
     ///
-    /// - Complexity: prerequisite-cone indexing, traversal, and staged producer compatibility
-    ///   checks are O(V + E) per selected plan, distinct from the planner's existing assignment
-    ///   matching complexity.
+    /// - Complexity: on a cache miss, prerequisite-cone indexing, traversal, and producer
+    ///   preparation take O(V + E) per selected plan, distinct from assignment matching.
+    ///   Cache hits omit this preparation and assignment matching; a pending strength
+    ///   certificate takes O(C) for C cells. Fresh staged execution, seed evaluation,
+    ///   active-set comparison, and diagnostics still run for current values.
     ///
     /// # Errors
     ///
@@ -1813,186 +1837,14 @@ impl Sheet {
     /// - `Error::TypeMismatch` — a method output's runtime type does not match the
     ///   cell's registered type.
     pub fn propagate(&mut self) -> Result<(), Error> {
-        self.validate()?;
-        self.clear_changed();
-        let seed_signatures = crate::planner::SeedSignatures::new(&self.relationships);
-        let mut stage = PropagationStage::default();
-        let mut source_filter_violations: Vec<(CellId, FilterViolation)> = Vec::new();
-        let mut seed_evaluation_cache = SeedEvaluationCache::default();
-        let mut pre_plan_provenance = None;
-
-        // Phases 0-1: evaluate the conditional pre-plan into private staged state.
-        if !self.conditionals.is_empty() {
-            let pre_active: HashSet<RelationshipId> = self
-                .relationships
-                .keys()
-                .filter(|id| !self.conditional_relationships.contains(id))
-                .collect();
-            let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
-            let prerequisite_steps = self.guard_prerequisite_steps(&pre_plan.execution_order)?;
-            let provenance = self.plan_provenance(&pre_plan);
-            let seed_recipes = crate::planner::SeedRecipes::new(
-                &pre_plan.execution_order,
-                &prerequisite_steps,
-                &self.cells,
-                &self.relationships,
-            );
-            let seeds = {
-                let source = |id| stage.seed_source(&self.cells, id);
-                crate::planner::evaluate_seeds(
-                    &seed_recipes,
-                    &seed_signatures,
-                    &self.cells,
-                    &self.relationships,
-                    &source,
-                    &mut seed_evaluation_cache,
-                )?
-            };
-            self.execute_plan_staged(
-                &prerequisite_steps,
-                &seeds,
-                &pre_plan.forced_outputs,
-                &provenance,
-                &mut stage,
-                &mut source_filter_violations,
-            )?;
-            pre_plan_provenance = Some((provenance, prerequisite_steps));
+        let mut pre = self.pre_plan_cache.take();
+        let mut main = self.main_plan_cache.take();
+        let result = self.propagate_with_caches(&mut pre, &mut main);
+        if result.is_ok() {
+            self.pre_plan_cache = pre;
+            self.main_plan_cache = main;
         }
-
-        // Phase 2: evaluate each conditional once against staged Phase 1 values.
-        let active = self.build_active_set_staged(&stage)?;
-
-        // Phase 3: validate seeds and execute the general plan into the same stage.
-        let plan = crate::planner::plan(&self.cells, &self.relationships, &active)?;
-        let provenance = self.plan_provenance(&plan);
-        if let Some((pre_plan, prerequisite_steps)) = &pre_plan_provenance {
-            for &step in prerequisite_steps {
-                if !self.prerequisite_step_is_compatible(pre_plan, &provenance, step, &stage) {
-                    return Err(Error::Conflict {
-                        sites: self.conflict_sites_for_step(step, pre_plan, &provenance),
-                    });
-                }
-            }
-        }
-        let seed_recipes = crate::planner::SeedRecipes::new(
-            &plan.execution_order,
-            &plan.execution_order,
-            &self.cells,
-            &self.relationships,
-        );
-        let seeds = {
-            let source = |id| stage.seed_source(&self.cells, id);
-            crate::planner::evaluate_seeds(
-                &seed_recipes,
-                &seed_signatures,
-                &self.cells,
-                &self.relationships,
-                &source,
-                &mut seed_evaluation_cache,
-            )?
-        };
-        self.execute_plan_staged(
-            &plan.execution_order,
-            &seeds,
-            &plan.forced_outputs,
-            &provenance,
-            &mut stage,
-            &mut source_filter_violations,
-        )?;
-
-        // Phase 4: publish only after every staged callback and seed validation succeeds.
-        let previously_derived = self.commit_stage(stage);
-        self.post_process_strengths(&plan.execution_order);
-
-        // Phase 5: cells that reverted (had a derived override, didn't get a fresh one
-        // this round) need explicit change-tracking.
-        for id in previously_derived {
-            if let Some(cell) = self.cells.get_mut(id)
-                && cell.derived.is_none()
-                && !cell.changed
-            {
-                cell.changed = true;
-                self.changed_cells.push(id);
-            }
-        }
-
-        // Phase 6: evaluate every registered requirement against current cell values.
-        let mut last_requirement_violations: HashMap<CellId, Vec<RequirementId>> = HashMap::new();
-        for (requirement_id, requirement) in self.requirements.iter() {
-            let inputs: Vec<&dyn Any> = requirement
-                .inputs
-                .iter()
-                .map(|&id| self.cells[id].effective())
-                .collect();
-            let holds = (requirement.function)(&inputs).map_err(|error| Error::MethodFailed {
-                error,
-                sites: vec![],
-            })?;
-            if !holds {
-                last_requirement_violations
-                    .entry(requirement.cell)
-                    .or_default()
-                    .push(requirement_id);
-            }
-        }
-        self.last_requirement_violations = last_requirement_violations;
-
-        // Phase 6b: evaluate every filter against a value derived by a method this
-        // round — a non-gating diagnostic. A filter is never re-checked against a
-        // value that came from a plain external write: that case is handled earlier
-        // in this same `propagate()` call, by execute_plan's `PlanStep::FilterReclamp`
-        // step — nothing here ever mutates a cell.
-        let mut derived_this_round: HashSet<CellId> = HashSet::new();
-        for step in &plan.execution_order {
-            if let PlanStep::Method(rel_id, method_idx) = step
-                && let Some(method) = self
-                    .relationships
-                    .get(*rel_id)
-                    .and_then(|r| r.methods.get(*method_idx))
-            {
-                derived_this_round.extend(method.outputs.iter().copied());
-            }
-        }
-        // Seeded from execute_plan's source-cell reclamp failures above; disjoint keys
-        // from the derived-cell loop below (a cell is a source or derived this round,
-        // never both), so there's no merge conflict.
-        let mut last_filter_violations: HashMap<CellId, FilterViolation> =
-            source_filter_violations.into_iter().collect();
-        for &cell_id in &derived_this_round {
-            let Some(filter) = self.cells[cell_id].filter.as_ref() else {
-                continue;
-            };
-            let args: Vec<&dyn Any> = filter
-                .args
-                .iter()
-                .map(|&a| self.cells[a].effective())
-                .collect();
-            let current = self.cells[cell_id].effective();
-            match (filter.function)(current, &args) {
-                Ok(conformed) => {
-                    let cell = &self.cells[cell_id];
-                    if conformed.as_ref().type_id() != cell.type_id {
-                        last_filter_violations.insert(
-                            cell_id,
-                            FilterViolation::Failed(anyhow::anyhow!(
-                                "filter returned a value of a different type than the cell"
-                            )),
-                        );
-                    } else if !(cell.eq_fn)(conformed.as_ref(), current) {
-                        last_filter_violations.insert(cell_id, FilterViolation::NotConformed);
-                    }
-                }
-                Err(e) => {
-                    last_filter_violations.insert(cell_id, FilterViolation::Failed(e));
-                }
-            }
-        }
-        self.last_filter_violations = last_filter_violations;
-
-        self.last_forced = Some(plan.forced_outputs);
-        self.last_forced_relationships = Some(plan.forced_relationships);
-        self.last_plan = Some(plan.execution_order);
-        Ok(())
+        result
     }
 
     /// Executes `execution_order` without invoking the planner.
@@ -2152,15 +2004,20 @@ impl Sheet {
         Ok(())
     }
 
-    /// Returns the index of the method selected for `rel` in the last propagation.
+    /// Returns the index of the method selected for `rel` in the last successful propagation.
     ///
     /// Returns `None` if no propagation has run yet, `rel` is not in the cached plan,
     /// or `rel` was added after the last `propagate()` call.
     pub fn selected_method(&self, rel: RelationshipId) -> Option<usize> {
-        self.last_plan.as_ref()?.iter().find_map(|step| match step {
-            PlanStep::Method(r, idx) if *r == rel => Some(*idx),
-            _ => None,
-        })
+        self.last_plan
+            .as_ref()?
+            .plan
+            .execution_order
+            .iter()
+            .find_map(|step| match step {
+                PlanStep::Method(r, idx) if *r == rel => Some(*idx),
+                _ => None,
+            })
     }
 
     /// Returns the input cells of method `idx` in relationship `rel`.
@@ -2185,24 +2042,18 @@ impl Sheet {
             .map(|m| m.outputs.as_slice())
     }
 
-    /// Returns `true` if `id` was not written by any selected method in the last propagation.
+    /// Returns `true` if `id` was not written by any selected method in the last successful propagation.
     ///
     /// Returns `false` if no propagation has run yet (conservatively forces a full re-plan).
     ///
-    /// - Complexity: O(R·K) where R is the number of relationships in the cached plan and K is the maximum number of outputs per method.
+    /// Cells absent from the completed plan, including newly added cells, return `true`.
+    ///
+    /// - Complexity: Expected O(1).
     pub fn is_source(&self, id: CellId) -> bool {
         let Some(plan) = &self.last_plan else {
             return false;
         };
-        !plan.iter().any(|step| match step {
-            PlanStep::Method(rel_id, method_idx) => self
-                .relationships
-                .get(*rel_id)
-                .and_then(|r| r.methods.get(*method_idx))
-                .map(|m| m.outputs.contains(&id))
-                .unwrap_or(false),
-            PlanStep::FilterReclamp(_) => false,
-        })
+        !plan.certificate.contains_cell(id) || plan.certificate.is_released(id)
     }
 
     /// Returns `true` if `id` can never be a source, as of the last successful
@@ -2214,17 +2065,19 @@ impl Sheet {
     ///
     /// Returns `false` if no propagation has run yet.
     pub fn is_forced(&self, id: CellId) -> bool {
-        self.last_forced
+        self.last_plan
             .as_ref()
-            .is_some_and(|forced| forced.contains(&id))
+            .is_some_and(|prepared| prepared.plan.forced_outputs.contains(&id))
     }
 
     /// Iterates cells that are forced (see [`Sheet::is_forced`]) as of the last
-    /// `propagate()` call.
+    /// successful `propagate()` call.
     ///
     /// - Complexity: O(n) where n is the number of forced cells.
     pub fn forced_cells(&self) -> impl Iterator<Item = CellId> + '_ {
-        self.last_forced.iter().flatten().copied()
+        self.last_plan
+            .iter()
+            .flat_map(|prepared| prepared.plan.forced_outputs.iter().copied())
     }
 
     /// Returns `true` if `id` had exactly one viable method as of the last successful
@@ -2233,17 +2086,19 @@ impl Sheet {
     ///
     /// Returns `false` if no propagation has run yet.
     pub fn is_relationship_forced(&self, id: RelationshipId) -> bool {
-        self.last_forced_relationships
+        self.last_plan
             .as_ref()
-            .is_some_and(|forced| forced.contains(&id))
+            .is_some_and(|prepared| prepared.plan.forced_relationships.contains(&id))
     }
 
     /// Iterates relationships that are forced (see [`Sheet::is_relationship_forced`])
-    /// as of the last `propagate()` call.
+    /// as of the last successful `propagate()` call.
     ///
     /// - Complexity: O(n) where n is the number of forced relationships.
     pub fn forced_relationships(&self) -> impl Iterator<Item = RelationshipId> + '_ {
-        self.last_forced_relationships.iter().flatten().copied()
+        self.last_plan
+            .iter()
+            .flat_map(|prepared| prepared.plan.forced_relationships.iter().copied())
     }
 
     /// Iterates all live conditional IDs in the sheet.
