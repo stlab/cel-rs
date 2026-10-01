@@ -1,7 +1,7 @@
 # adam-rs planner generalization design
 
 Date: 2026-09-27
-Status: Phase A implemented; Phases B–C pending
+Status: Phases A–B implemented; Phase C design refined 2026-10-01, implementation pending
 Issues: #186 (seedfill generalization), #152 (automatic plan reuse). #153 was closed as
 not applicable (see §2); #18 was closed as a duplicate of #152.
 
@@ -150,7 +150,8 @@ by validation.
 ## §3 Automatic plan reuse (#152)
 
 `propagate()` replans every call today; `propagate_without_replan()` no longer exists.
-Plan reuse is an internal optimization with no API change.
+Plan reuse is an internal optimization with no API change. The 2026-10-01 refinement
+below incorporates Phase B's staged execution and strength-sensitive seed construction.
 
 **Lemma.** The plan depends on structure, the active relationship set, and the released
 source set (the assignment solver does not read strengths). Writing to a cell that is
@@ -161,20 +162,83 @@ receives the same accept/reject decision. No matroid property is required.
 
 **Design.**
 
-1. `Sheet` caches the last main plan with its seeds and active set, and the Phase 1
-   pre-plan keyed by its active subgraph.
-2. A validity flag is cleared by any structural mutation (cells, relationships, filters,
-   conditionals, requirements) and by any `write`/strength change to a cell that was not
-   a released source in the cached plan (derived, forced, or self-referencing claimant).
-   The structural-mutation flag introduced for §2 guard validation can be shared with
-   this plan-reuse invalidation state.
-3. `propagate()` always runs Phases 0–2. It skips `planner::plan` and `build_seeds` only
-   when the flag is set and the rebuilt active set equals the cached one. Phases 4–6
-   always run.
+1. `Sheet` caches the main selected plan and its active relationship set, and separately
+   caches the Phase 1 unconditional pre-plan. Each cache records its own released-source
+   set: cells not claimed by a selected method. A filtered released source remains a
+   released source even though a `FilterReclamp` step shadows its value. A
+   self-referencing claimant is not a released source.
+2. Any successful structural mutation (cells, relationships, filters, conditionals,
+   requirements, or output-cell construction) invalidates both caches. A successful
+   `write` invalidates each cache independently when its target was not a released
+   source in that cache. This distinction matters when a conditional branch claims a
+   cell that the unconditional pre-plan leaves released. Rejected writes do not
+   invalidate a cache. Structural guard-validation state and plan-cache validity have
+   separate lifetimes: `validate()` must not restore a stale plan's validity.
+   Internal strength post-processing must also preserve cache eligibility. A main-plan
+   output can be a released source in the unconditional pre-plan, so main-plan demotion
+   is not automatically harmless to the pre-plan. Invalidate a phase when an actual
+   strength change falls outside the proved released-source promotion rule, unless a
+   separate proof establishes that its assignment remains valid. A newly computed plan
+   can therefore require a stabilization replan after its first strength post-processing.
+3. `propagate()` always validates structure, clears changed-state, and runs staged
+   Phases 0–2. Phase 1 reuses an eligible unconditional assignment, but still executes
+   its selected guard-prerequisite cone. Phase 2 evaluates conditional callbacks and
+   rebuilds the active set every call. Phase 3 reuses an eligible main assignment only
+   when the rebuilt active set equals its cached active set; otherwise it replans.
+   Retain only the latest assignment for each phase, not a cache of branch combinations.
+4. Cache assignments, not seed values or callback results across propagation calls.
+   Rebuild seeds from current staged source values every call, using one fresh
+   `SeedEvaluationCache` shared only between phases of that call. Seed sibling selection
+   replays the current deterministic strength order, including on a reused assignment;
+   refresh that order without rerunning the assignment solver. Current strengths also
+   determine the sibling strength gate and fold order. The released-source lemma
+   justifies assignment reuse, not reuse of old elimination order or seed evaluations.
+5. Preserve Phase B's staged producer compatibility checks: a guard-prerequisite method,
+   filter, or seed callback already evaluated in this call is reusable only under the
+   existing provenance contract. Cache hits must not bypass seed-cycle checks, replay
+   stateful callbacks, publish stale staged values, or suppress prerequisite conflicts.
+6. Phases 4–6 always run: commit, strength post-processing, reversion change tracking,
+   requirement evaluation, and filter diagnostics retain their existing behavior.
+   Public selected-method, source, forced-cell, and forced-relationship queries reflect
+   the completed propagation exactly as on the full-replan path.
+7. Publish refreshed cache entries only after propagation succeeds. A failed propagation
+   conservatively invalidates reuse for both phases, including failures after commit.
+   Preserve the existing failure boundaries: static validation fails before clearing
+   changed-state; staged method, seed, and prerequisite failures do not commit values;
+   requirement evaluation retains its existing post-commit error behavior. Never
+   change these boundaries merely to make caching easier.
 
-**Tests.** Reuse equals forced full replan over write sequences; a derived-cell write
-replans; a branch-flipping match-cell change replans; a structural edit invalidates;
-optionally a debug-only replan-equality check.
+**Alternatives considered.** Retaining seed results, as the original wording suggested,
+can reuse stale values or obsolete strength-sensitive folds. Disabling reuse for all
+self-referencing plans avoids that risk but unnecessarily restricts the general library
+optimization. Reusing assignments while rebuilding seeds preserves the general behavior
+without introducing a new public execution mode.
+
+**Tests.**
+
+- Compare automatic reuse against a test-only forced-full-replan path over identical
+  write sequences. Compare effective and source values, selected methods, source and
+  forced classifications, changed-cell sets, requirement/filter diagnostics, and errors.
+- Test-only planner invocation counters establish actual optimization: initial
+  propagation plans, eligible repeats and released-source writes skip planning, and
+  writes to derived, forced, or self-referencing claimed cells replan. Instrumentation
+  remains private and must not interfere with parallel tests. Establish eligibility
+  after any required strength stabilization rather than assuming the first plan survives
+  its own post-processing.
+- Exercise main/pre-plan eligibility independently, source-priority reordering,
+  unchanged and flipped conditional branches, derived guard prerequisites, and
+  main-plan strength demotion of unconditional pre-plan sources.
+- Exercise successful structural mutators, including mutations followed by explicit
+  `validate()`, and rejected writes without accidental invalidation.
+- Exercise filtered released sources and changing filter arguments, requirements that
+  change validity, self-referencing seed values, strength-sensitive sibling selection
+  and fold order, and callback counts within and across propagation calls.
+- Exercise seed-cycle, prerequisite-conflict, callback, and requirement failures,
+  verifying existing transactional boundaries and successful recovery without stale
+  cache reuse.
+
+Update the public propagation contract and the dated phase handoff alongside implementation.
+No UI change or caller-side optimization decision is needed.
 
 ## Out of scope
 
