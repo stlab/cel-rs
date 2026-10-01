@@ -14,8 +14,8 @@
 //! design rationale and literature grounding.
 //!
 //! Method selection is value-blind, including for self-referencing components: a
-//! self-referencing chain reaches the correct values through [`build_seeds`], which
-//! replays the release pass's elimination state to choose sibling seed methods,
+//! self-referencing chain reaches the correct values through [`evaluate_seeds`], which
+//! evaluates structurally selected sibling seed methods using current strengths,
 //! reconstructs each self-referencing input's value at execution time, and reports
 //! non-self seed dependency cycles as [`Error::SeedCycle`] rather than substituting a
 //! revisited source value (see
@@ -56,7 +56,9 @@ use matching::pure_outputs;
 use release::ReleaseFailure;
 
 pub(crate) use reuse::SourceCertificate;
-pub(crate) use seed::{SeedEvaluationCache, SeedSource, build_seeds, build_seeds_for_steps};
+pub(crate) use seed::{
+    SeedEvaluationCache, SeedRecipes, SeedSignatures, SeedSource, evaluate_seeds,
+};
 
 /// The seed value each self-referencing input should read this round, keyed by cell. A
 /// cell absent from the map reads its own `source`. See [`seed`] and
@@ -83,10 +85,8 @@ pub(crate) enum PlanStep {
 pub(crate) struct Plan {
     /// Selected steps (methods and filter reclamps) in execution order.
     pub(crate) execution_order: Vec<PlanStep>,
-    /// The exact deterministic cell sequence the release pass evaluated when
-    /// tentatively eliminating sources; [`seed::build_seeds`] replays sibling-local
-    /// elimination against this order when choosing seed methods, so sibling selection
-    /// follows actual elimination state rather than declaration order.
+    /// The complete deterministic cell sequence the release pass evaluated when
+    /// tentatively eliminating sources, retained for source-prefix certificates.
     pub(crate) elimination_order: Vec<CellId>,
     /// Cells that can never be a source under the relationships this plan considered.
     /// See [`forced_output_cells`].
@@ -102,7 +102,7 @@ pub(crate) struct Plan {
 /// Only relationships in `active` are planned; relationships outside `active` are
 /// invisible to method selection. Method selection is purely strength-based and
 /// value-blind: a self-referencing chain reaches the correct values not by choosing a
-/// value-aware assignment, but by [`build_seeds`] reconstructing each self-referencing
+/// value-aware assignment, but by [`evaluate_seeds`] reconstructing each self-referencing
 /// input's value at execution time.
 ///
 /// # Errors

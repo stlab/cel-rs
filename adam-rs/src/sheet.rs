@@ -1673,7 +1673,7 @@ impl Sheet {
     /// A cell claimed *self-referencingly* (its claiming method reads the cell as one of
     /// its own inputs) keeps a live explicit strength rather than being demoted: such a
     /// method computes the cell from its own `source` aspiration (see
-    /// [`crate::planner::build_seeds`]), so an explicit `write()` to that cell is still
+    /// [`crate::planner::evaluate_seeds`]), so an explicit `write()` to that cell is still
     /// the authority behind the value and must keep outranking never-written cells in
     /// later rounds. Demoting it would discard the edit the next time the cell is
     /// re-seeded.
@@ -1815,6 +1815,7 @@ impl Sheet {
     pub fn propagate(&mut self) -> Result<(), Error> {
         self.validate()?;
         self.clear_changed();
+        let seed_signatures = crate::planner::SeedSignatures::new(&self.relationships);
         let mut stage = PropagationStage::default();
         let mut source_filter_violations: Vec<(CellId, FilterViolation)> = Vec::new();
         let mut seed_evaluation_cache = SeedEvaluationCache::default();
@@ -1830,12 +1831,17 @@ impl Sheet {
             let pre_plan = crate::planner::plan(&self.cells, &self.relationships, &pre_active)?;
             let prerequisite_steps = self.guard_prerequisite_steps(&pre_plan.execution_order)?;
             let provenance = self.plan_provenance(&pre_plan);
+            let seed_recipes = crate::planner::SeedRecipes::new(
+                &pre_plan.execution_order,
+                &prerequisite_steps,
+                &self.cells,
+                &self.relationships,
+            );
             let seeds = {
                 let source = |id| stage.seed_source(&self.cells, id);
-                crate::planner::build_seeds_for_steps(
-                    &pre_plan.execution_order,
-                    &prerequisite_steps,
-                    &pre_plan.elimination_order,
+                crate::planner::evaluate_seeds(
+                    &seed_recipes,
+                    &seed_signatures,
                     &self.cells,
                     &self.relationships,
                     &source,
@@ -1868,11 +1874,17 @@ impl Sheet {
                 }
             }
         }
+        let seed_recipes = crate::planner::SeedRecipes::new(
+            &plan.execution_order,
+            &plan.execution_order,
+            &self.cells,
+            &self.relationships,
+        );
         let seeds = {
             let source = |id| stage.seed_source(&self.cells, id);
-            crate::planner::build_seeds(
-                &plan.execution_order,
-                &plan.elimination_order,
+            crate::planner::evaluate_seeds(
+                &seed_recipes,
+                &seed_signatures,
                 &self.cells,
                 &self.relationships,
                 &source,
@@ -2001,7 +2013,7 @@ impl Sheet {
     /// `read()` falls back to `source`).
     ///
     /// A `PlanStep::Method` step's self-referencing input reads its precomputed `seeds`
-    /// value (see [`crate::planner::build_seeds`]) if present, else its own `source` —
+    /// value (see [`crate::planner::evaluate_seeds`]) if present, else its own `source` —
     /// never a `derived` override from this same execution.
     ///
     /// # Errors
@@ -2033,7 +2045,7 @@ impl Sheet {
                                 if method.outputs.contains(&id) {
                                     // Self-referencing input: its precomputed seed, else
                                     // its own source -- never a derived override from
-                                    // this same execution. See build_seeds.
+                                    // this same execution. See evaluate_seeds.
                                     seeds
                                         .get(&id)
                                         .map(|value| value.as_ref())

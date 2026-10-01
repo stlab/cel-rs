@@ -140,7 +140,7 @@
 //! - The selected methods' induced dependency digraph is acyclic before execution
 //!   ([`Error::Cycle`] when not).
 //! - A self-referencing input never reads a same-round derived value. Instead it reads a
-//!   seed reconstructed from `source`: `planner::build_seeds` folds every other
+//!   seed reconstructed from `source`: `planner::evaluate_seeds` folds every other
 //!   relationship incident to the cell (excluding its own claimant) through that
 //!   relationship's cell-producing method, giving the cell's aspiration before its
 //!   claimant tightens it; a cell no other relationship contributes to just reads its
@@ -167,7 +167,7 @@
 //! Capturing every cell's `source` value and reapplying the highest-strength sources
 //! reconstructs the sheet's *current* state, but not what a subsequent edit will do,
 //! since no method-selection state is captured, only values. This holds even for a
-//! self-referencing cell: `planner::build_seeds` reconstructs its contribution to a
+//! self-referencing cell: `planner::evaluate_seeds` reconstructs its contribution to a
 //! sibling relationship's method purely from current `source` values (recursively, for
 //! any other self-referencing cell that sibling method itself reads), so no state
 //! beyond `source` needs to be captured to reproduce the derived state.
