@@ -32,6 +32,14 @@ long-term direction behind each crate in this workspace.
 
 - Rust (stable), installed via [rustup](https://rustup.rs/)
 
+### VS Code worktree tasks
+
+The repository does not define `worktree:` tasks. Worktree creation, removal,
+and branch pruning live in each contributor's VS Code user tasks (**Tasks: Open
+User Tasks**) with their scripts under `~/.vscode/scripts`, so they work across
+repositories. Whatever tooling you use, create worktrees under
+`.claude/worktrees/` on a `worktree-<name>` branch.
+
 ### Clone and build
 
 ```bash

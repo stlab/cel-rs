@@ -1,66 +1,6 @@
 {
     "version": "2.0.0",
-    "inputs": [
-        {
-            "id": "worktreeName",
-            "type": "promptString",
-            "description": "Worktree name (e.g. my-feature) — branch will be worktree-<name>"
-        }
-    ],
     "tasks": [
-        // ============ Worktree Tasks ============
-        {
-            "label": "worktree: create",
-            "type": "shell",
-            "command": "git worktree add \".claude/worktrees/${input:worktreeName}\" -b \"worktree-${input:worktreeName}\" && tokensave init \".claude/worktrees/${input:worktreeName}\" && tokensave branch add \"worktree-${input:worktreeName}\" --path \".claude/worktrees/${input:worktreeName}\" && code --new-window \".claude/worktrees/${input:worktreeName}\"",
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "label": "worktree: create from PR",
-            "type": "shell",
-            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/.vscode/scripts/create-worktree-from-pr.ps1\"",
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "label": "worktree: remove",
-            "type": "shell",
-            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/.vscode/scripts/remove-worktree.ps1\"",
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "label": "worktree: prune branches",
-            "type": "shell",
-            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/.vscode/scripts/prune-worktree-branches.ps1\"",
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated"
-            }
-        },
         // ============ Begin Tasks ============
         {
             "label": "begin: serve (desktop)",
