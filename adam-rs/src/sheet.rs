@@ -102,8 +102,7 @@ impl MatchValue<'_> {
 ///
 /// Reuse is intentionally conservative: a step is reusable only when the final plan selects the
 /// same method, producer path, source/derived classification, and seed inputs. A mismatch returns
-/// `Error::Conflict` rather than guessing a compatible assignment or invoking a stateful callback
-/// again.
+/// `Error::Conflict` rather than guessing a compatible assignment or reusing stale values.
 #[derive(Clone, PartialEq, Eq)]
 struct StepProvenance {
     input_producers: Vec<Option<PlanStep>>,
@@ -1532,10 +1531,11 @@ impl Sheet {
 
     /// Executes `execution_order` once into transactional staged state.
     ///
-    /// A method or filter step already evaluated by the conditional pre-plan is reused
-    /// when the general plan contains the same step, so stateful callbacks are never
-    /// invoked twice in one propagation call. Filter failures remain non-fatal and leave
-    /// the staged cell untouched, matching `execute_plan`.
+    /// A method or filter step already evaluated by the conditional pre-plan reuses
+    /// its staged result when the general plan contains the same compatible step.
+    /// This is an internal optimization, not a callback invocation guarantee.
+    /// Filter failures remain non-fatal and leave the staged cell untouched,
+    /// matching `execute_plan`.
     ///
     /// # Errors
     ///
@@ -1745,6 +1745,12 @@ impl Sheet {
     /// After propagation, call [`Sheet::changed`] to inspect which cells were updated,
     /// and [`Sheet::clear_changed`] when done.
     ///
+    /// Method, filter, conditional-expression, and requirement callbacks must be
+    /// purely functional. There is no guarantee that any callback executes, or when
+    /// or how often it executes; results may be reused or recomputed while preserving
+    /// cell values and diagnostics. The phases below describe the current algorithm,
+    /// not a callback invocation contract.
+    ///
     /// **Phase 0 — Staging:** propagation starts from each cell's source value, excluding
     /// every derived override from the previous round, but does not mutate live cells.
     ///
@@ -1761,12 +1767,12 @@ impl Sheet {
     /// validation and method execution consume staged Phase 1 values. A callback already
     /// evaluated in Phase 1 is reused only when the final plan preserves its selected
     /// method, input producers, and output classification. A mismatched plan returns a
-    /// conservative conflict rather than replaying the callback or committing stale values. This
+    /// conservative conflict rather than committing stale values. This
     /// boundary may reject a sheet even when another assignment could have avoided the mismatch;
     /// propagation reports the implicated sites instead of attempting that alternate assignment.
     /// A Phase 1 seed callback is likewise reused only when every input reads the same staged
     /// source version, recursive seed result, or accumulated value; otherwise propagation
-    /// returns a conflict instead of reusing a stale seed or evaluating the callback again.
+    /// returns a conflict instead of reusing a stale seed.
     ///
     /// **Phase 4 — Commit and strength post-processing:** after planning, seed
     /// validation, and staged method execution all succeed, staged writes are published
@@ -1788,8 +1794,7 @@ impl Sheet {
     /// If staged seed validation detects a non-self sibling dependency cycle, or compatibility
     /// checking returns a prerequisite conflict, `propagate()` returns its error after validation
     /// and changed-state clearing but before commit. Live cell values therefore remain untouched
-    /// and [`Sheet::changed`] stays empty for that failing call. Method and conditional callbacks
-    /// evaluated while reaching that error are each invoked at most once per distinct input set.
+    /// and [`Sheet::changed`] stays empty for that failing call.
     ///
     /// - Complexity: prerequisite-cone indexing, traversal, and staged producer compatibility
     ///   checks are O(V + E) per selected plan, distinct from the planner's existing assignment

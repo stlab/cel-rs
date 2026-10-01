@@ -21,6 +21,12 @@ new_key_type! {
 type MethodFn = Box<dyn Fn(&[&dyn Any]) -> Result<Vec<Box<dyn Any>>, anyhow::Error>>;
 
 /// A single method within a relationship.
+///
+/// Its callback must be a pure, deterministic function of its input values and
+/// immutable captured constants, with no externally observable side effects.
+/// Equal inputs produce equivalent outputs or errors. There is no guarantee that
+/// the callback executes, or when or how often it executes.
+/// A self-referencing method must also be idempotent.
 pub struct Method {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) outputs: Vec<CellId>,
@@ -34,6 +40,7 @@ impl Method {
     ///
     /// - Precondition: `inputs.len() == input_types.len()` and `outputs.len() == output_types.len()`.
     /// - Precondition: The function must return exactly `outputs.len()` values in the correct order.
+    /// - Precondition: `f` satisfies [`Method`]'s purity and idempotence contract.
     pub fn new<F>(
         inputs: Vec<CellId>,
         outputs: Vec<CellId>,
@@ -59,6 +66,8 @@ impl Method {
     ///
     /// TypeIds for `A` and `B` are captured automatically. The method is validated
     /// against its cell registrations when passed to [`crate::sheet::Sheet::add_relationship`].
+    ///
+    /// - Precondition: `f` satisfies [`Method`]'s purity and idempotence contract.
     pub fn from_fn_1_1<A, B, F>(input: CellId, output: CellId, f: F) -> Self
     where
         A: Any + 'static,
@@ -84,6 +93,8 @@ impl Method {
     /// `inputs[0]` maps to `A` and `inputs[1]` maps to `B`. TypeIds are captured
     /// automatically. The method is validated when passed to
     /// [`crate::sheet::Sheet::add_relationship`].
+    ///
+    /// - Precondition: `f` satisfies [`Method`]'s purity and idempotence contract.
     pub fn from_fn_2_1<A, B, C, F>(inputs: [CellId; 2], output: CellId, f: F) -> Self
     where
         A: Any + 'static,

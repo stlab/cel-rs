@@ -2,10 +2,6 @@
 
 use std::any::TypeId;
 use std::collections::HashSet;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
 
 use adam_rs::{
     CellId, CellKind, Error, ErrorSite, Filter, MatchExpr, Method, RelationshipId, Requirement,
@@ -1042,23 +1038,15 @@ fn conditional_match_cell_is_derived_from_unconditional_relationship() {
 }
 
 #[test]
-fn guard_prerequisite_reuse_invokes_the_selected_producer_once() {
+fn guard_prerequisite_values_select_the_matching_branch() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(true);
     let guard = sheet.add_cell(false);
     let output = sheet.add_cell(false);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let calls_for_method = Arc::clone(&calls);
-
     sheet
-        .add_relationship(vec![Method::from_fn_1_1(
-            mode,
-            guard,
-            move |value: &bool| {
-                calls_for_method.fetch_add(1, Ordering::SeqCst);
-                Ok(*value)
-            },
-        )])
+        .add_relationship(vec![Method::from_fn_1_1(mode, guard, |value: &bool| {
+            Ok(*value)
+        })])
         .unwrap();
     let branch = sheet
         .add_relationship(vec![Method::from_fn_1_1(mode, output, |value: &bool| {
@@ -1077,7 +1065,6 @@ fn guard_prerequisite_reuse_invokes_the_selected_producer_once() {
 
     assert!(*sheet.read::<bool>(guard).unwrap());
     assert!(*sheet.read::<bool>(output).unwrap());
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -1254,14 +1241,11 @@ fn changed_filter_argument_producer_conflicts_without_reclamping_stale_value() {
 }
 
 #[test]
-fn guard_seed_callback_is_reused_for_matching_provenance() {
+fn guard_seed_values_are_preserved_for_matching_provenance() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(2_i32);
     let guard = sheet.add_cell(0_i32);
     let output = sheet.add_cell(0_i32);
-    let seed_calls = Arc::new(AtomicUsize::new(0));
-    let seed_calls_for_method = Arc::clone(&seed_calls);
-
     sheet
         .add_relationship(vec![Method::from_fn_1_1(guard, guard, |value: &i32| {
             Ok(*value)
@@ -1269,10 +1253,7 @@ fn guard_seed_callback_is_reused_for_matching_provenance() {
         .unwrap();
     sheet
         .add_relationship(vec![
-            Method::from_fn_1_1(mode, guard, move |value: &i32| {
-                seed_calls_for_method.fetch_add(1, Ordering::SeqCst);
-                Ok(*value + 1)
-            }),
+            Method::from_fn_1_1(mode, guard, |value: &i32| Ok(*value + 1)),
             Method::from_fn_1_1(guard, mode, |value: &i32| Ok(*value)),
         ])
         .unwrap();
@@ -1294,24 +1275,20 @@ fn guard_seed_callback_is_reused_for_matching_provenance() {
 
     assert_eq!(*sheet.read::<i32>(guard).unwrap(), 3);
     assert_eq!(*sheet.read::<i32>(output).unwrap(), 3);
-    assert_eq!(seed_calls.load(Ordering::SeqCst), 1);
 }
 
 /// Builds a guarded sheet whose `guard` seed callback reads `staged` (optionally through a
 /// recursively seeded `inner` cell) while a guard prerequisite restages `staged`'s source.
 ///
 /// Returns the sheet, the `staged` cell, the seed relationship reading it, the outer guard
-/// cell, and the shared seed-callback counter.
-fn restaged_seed_input_sheet(
-    recursive: bool,
-) -> (Sheet, CellId, RelationshipId, CellId, Arc<AtomicUsize>) {
+/// cell.
+fn restaged_seed_input_sheet(recursive: bool) -> (Sheet, CellId, RelationshipId, CellId) {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(5_i32);
     let staged = sheet.add_cell(0_i32);
     let guard = sheet.add_cell(0_i32);
     let sink = sheet.add_cell(0_i32);
     let output = sheet.add_cell(0_i32);
-    let seed_calls = Arc::new(AtomicUsize::new(0));
 
     // Two methods keep `staged` unforced, so its selected producer restages its source.
     sheet
@@ -1333,11 +1310,9 @@ fn restaged_seed_input_sheet(
                 Ok(*value)
             })])
             .unwrap();
-        let calls = Arc::clone(&seed_calls);
         sheet
             .add_relationship(vec![
-                Method::from_fn_2_1([staged, inner_sink], inner, move |value: &i32, _: &i32| {
-                    calls.fetch_add(1, Ordering::SeqCst);
+                Method::from_fn_2_1([staged, inner_sink], inner, |value: &i32, _: &i32| {
                     Ok(*value + 10)
                 }),
                 Method::from_fn_2_1([staged, inner], inner_sink, |_: &i32, value: &i32| {
@@ -1349,17 +1324,11 @@ fn restaged_seed_input_sheet(
     } else {
         staged
     };
-    let calls = Arc::clone(&seed_calls);
     let seed_relationship = sheet
         .add_relationship(vec![
-            Method::from_fn_2_1(
-                [guard_seed_input, sink],
-                guard,
-                move |value: &i32, _: &i32| {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(*value + 1)
-                },
-            ),
+            Method::from_fn_2_1([guard_seed_input, sink], guard, |value: &i32, _: &i32| {
+                Ok(*value + 1)
+            }),
             Method::from_fn_2_1([guard_seed_input, guard], sink, |_: &i32, value: &i32| {
                 Ok(*value)
             }),
@@ -1381,14 +1350,12 @@ fn restaged_seed_input_sheet(
         .add_conditional::<i32>(MatchExpr::cell(staged), vec![], vec![])
         .unwrap();
     sheet.write(mode, 5_i32).unwrap();
-    (sheet, staged, seed_relationship, guard, seed_calls)
+    (sheet, staged, seed_relationship, guard)
 }
 
-/// Asserts that restaging a seed callback's source input conflicts without replay or commit.
+/// Asserts that restaging a seed callback's source input conflicts without committing values.
 fn assert_restaged_seed_input_conflicts(recursive: bool) {
-    let (mut sheet, staged, seed_relationship, guard, seed_calls) =
-        restaged_seed_input_sheet(recursive);
-    let expected_calls = if recursive { 2 } else { 1 };
+    let (mut sheet, staged, seed_relationship, guard) = restaged_seed_input_sheet(recursive);
 
     let error = sheet.propagate().unwrap_err();
 
@@ -1401,7 +1368,6 @@ fn assert_restaged_seed_input_conflicts(recursive: bool) {
         ),
         "{error:?}"
     );
-    assert_eq!(seed_calls.load(Ordering::SeqCst), expected_calls);
     assert_eq!(*sheet.read::<i32>(staged).unwrap(), 0);
     assert_eq!(*sheet.read::<i32>(guard).unwrap(), 0);
     assert_eq!(sheet.changed().count(), 0);
@@ -1417,16 +1383,13 @@ fn restaged_recursive_guard_seed_input_conflicts_instead_of_reusing_stale_seed()
     assert_restaged_seed_input_conflicts(true);
 }
 #[test]
-fn multi_input_multi_output_guard_prerequisite_is_reused_once() {
+fn multi_input_multi_output_guard_prerequisite_preserves_values() {
     let mut sheet = Sheet::new();
     let total = sheet.add_cell(1_i32);
     let sum = sheet.add_cell(0_i32);
     let lhs = sheet.add_cell(2_i32);
     let rhs = sheet.add_cell(3_i32);
     let branch_output = sheet.add_cell(0_i32);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let calls_for_method = Arc::clone(&calls);
-
     sheet
         .add_relationship(vec![
             Method::new(
@@ -1434,8 +1397,7 @@ fn multi_input_multi_output_guard_prerequisite_is_reused_once() {
                 vec![total, sum],
                 vec![TypeId::of::<i32>(); 3],
                 vec![TypeId::of::<i32>(); 2],
-                move |inputs| {
-                    calls_for_method.fetch_add(1, Ordering::SeqCst);
+                |inputs| {
                     let lhs = *inputs[0].downcast_ref::<i32>().unwrap();
                     let rhs = *inputs[1].downcast_ref::<i32>().unwrap();
                     let total = *inputs[2].downcast_ref::<i32>().unwrap();
@@ -1479,7 +1441,6 @@ fn multi_input_multi_output_guard_prerequisite_is_reused_once() {
     assert_eq!(*sheet.read::<i32>(total).unwrap(), 6);
     assert_eq!(*sheet.read::<i32>(sum).unwrap(), 5);
     assert_eq!(*sheet.read::<i32>(branch_output).unwrap(), 50);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 #[test]
 fn self_referencing_guard_seed_cycle_is_reported_before_commit() {
@@ -1526,15 +1487,10 @@ fn conditional_bound_filter_runs_after_branch() {
         let x = sheet.add_cell(8_i32);
         let bound = sheet.add_cell(10_i32);
 
-        let filter_calls = Arc::new(AtomicUsize::new(0));
-        let filter_calls_for_callback = Arc::clone(&filter_calls);
         sheet
             .add_filter(
                 x,
-                Filter::from_fn_1(bound, move |value: &i32, bound: &i32| {
-                    filter_calls_for_callback.fetch_add(1, Ordering::SeqCst);
-                    Ok((*value).min(*bound))
-                }),
+                Filter::from_fn_1(bound, |value: &i32, bound: &i32| Ok((*value).min(*bound))),
             )
             .unwrap();
 
@@ -1563,26 +1519,20 @@ fn conditional_bound_filter_runs_after_branch() {
 
         assert_eq!(*sheet.read::<i32>(bound).unwrap(), 3);
         assert_eq!(*sheet.read::<i32>(x).unwrap(), 3);
-        assert_eq!(filter_calls.load(Ordering::SeqCst), 1);
     }
 }
 
 #[test]
-fn filtered_guard_runs_before_branch_selection_once() {
+fn filtered_guard_value_determines_branch_selection() {
     let mut sheet = Sheet::new();
     let guard = sheet.add_cell(8_i32);
     let bound = sheet.add_cell(3_i32);
     let output = sheet.add_cell(0_i32);
 
-    let filter_calls = Arc::new(AtomicUsize::new(0));
-    let filter_calls_for_callback = Arc::clone(&filter_calls);
     sheet
         .add_filter(
             guard,
-            Filter::from_fn_1(bound, move |value: &i32, bound: &i32| {
-                filter_calls_for_callback.fetch_add(1, Ordering::SeqCst);
-                Ok((*value).min(*bound))
-            }),
+            Filter::from_fn_1(bound, |value: &i32, bound: &i32| Ok((*value).min(*bound))),
         )
         .unwrap();
 
@@ -1603,7 +1553,6 @@ fn filtered_guard_runs_before_branch_selection_once() {
 
     assert_eq!(*sheet.read::<i32>(guard).unwrap(), 3);
     assert_eq!(*sheet.read::<i32>(output).unwrap(), 3);
-    assert_eq!(filter_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -3333,21 +3282,15 @@ fn conditional_seed_cycle_leaves_preplan_mutations_unexposed() {
 }
 
 #[test]
-fn propagation_evaluates_preplan_and_conditional_callbacks_once() {
+fn propagation_uses_current_preplan_and_conditional_values() {
     let mut sheet = Sheet::new();
     let mode = sheet.add_cell(1_i32);
     let selected = sheet.add_cell(0_i32);
     let output = sheet.add_cell(0_i32);
-    let method_calls = Arc::new(AtomicUsize::new(0));
-    let method_calls_for_callback = Arc::clone(&method_calls);
     sheet
-        .add_relationship(vec![Method::from_fn_1_1(
-            mode,
-            selected,
-            move |_value: &i32| {
-                Ok(method_calls_for_callback.fetch_add(1, Ordering::SeqCst) as i32 + 1)
-            },
-        )])
+        .add_relationship(vec![Method::from_fn_1_1(mode, selected, |value: &i32| {
+            Ok(*value)
+        })])
         .unwrap();
     let active = sheet
         .add_relationship(vec![Method::from_fn_1_1(
@@ -3356,14 +3299,9 @@ fn propagation_evaluates_preplan_and_conditional_callbacks_once() {
             |value: &i32| Ok(*value),
         )])
         .unwrap();
-    let conditional_calls = Arc::new(AtomicUsize::new(0));
-    let conditional_calls_for_callback = Arc::clone(&conditional_calls);
     sheet
         .add_conditional(
-            MatchExpr::from_fn_1(selected, move |value: &i32| {
-                conditional_calls_for_callback.fetch_add(1, Ordering::SeqCst);
-                Ok(*value)
-            }),
+            MatchExpr::from_fn_1(selected, |value: &i32| Ok(*value)),
             vec![(vec![1_i32], vec![active])],
             vec![],
         )
@@ -3371,28 +3309,19 @@ fn propagation_evaluates_preplan_and_conditional_callbacks_once() {
 
     sheet.propagate().unwrap();
 
-    assert_eq!(method_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(conditional_calls.load(Ordering::SeqCst), 1);
     assert_eq!(*sheet.read::<i32>(selected).unwrap(), 1);
     assert_eq!(*sheet.read::<i32>(output).unwrap(), 1);
 }
 
 #[test]
-fn stateful_conditional_seed_cycle_leaves_sheet_unchanged() {
+fn conditional_seed_cycle_leaves_sheet_unchanged() {
     let (mut sheet, a, b, c, d, _s, rel1, rel2) = seed_cycle_sheet();
     let mode = sheet.add_cell(0_i32);
     let selected = sheet.add_cell(0_i32);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let calls_for_callback = Arc::clone(&calls);
     sheet
-        .add_relationship(vec![Method::from_fn_1_1(
-            mode,
-            selected,
-            move |_value: &i32| {
-                calls_for_callback.fetch_add(1, Ordering::SeqCst);
-                Ok(1_i32)
-            },
-        )])
+        .add_relationship(vec![Method::from_fn_1_1(mode, selected, |_value: &i32| {
+            Ok(1_i32)
+        })])
         .unwrap();
     sheet
         .add_conditional(
@@ -3405,7 +3334,6 @@ fn stateful_conditional_seed_cycle_leaves_sheet_unchanged() {
     let err = sheet.propagate().unwrap_err();
 
     assert!(matches!(err, Error::SeedCycle { .. }));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(*sheet.read::<i32>(mode).unwrap(), 0);
     assert_eq!(*sheet.read::<i32>(selected).unwrap(), 0);
     assert_eq!(*sheet.read::<i32>(a).unwrap(), 0);

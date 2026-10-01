@@ -163,7 +163,8 @@ struct SeedFoldOrderKey {
 /// - `Error::Conflict` — a cached seed claimant or sibling selection differs from the
 ///   earlier prerequisite evaluation, or a cached callback's input would now read a
 ///   different source version or a different recursive seed or accumulated value. The
-///   cached callback is never evaluated again.
+///   current implementation reports the mismatch rather than recomputing the seed;
+///   this is not a public callback invocation guarantee.
 /// - `Error::SeedCycle` — sibling seed dependencies form a non-self cycle instead of
 ///   falling back to any revisited cell's `source` value.
 ///
@@ -783,36 +784,21 @@ mod tests {
     }
 
     #[test]
-    fn changed_cached_seed_selection_conflicts_before_replaying_callbacks() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-
+    fn changed_cached_seed_selection_reports_conflict() {
         let mut sheet = Sheet::new();
         let x = sheet.add_cell(0_i32);
         let a = sheet.add_cell(1_i32);
         let b = sheet.add_cell(2_i32);
-        let first_calls = Arc::new(AtomicUsize::new(0));
-        let first_calls_for_method = Arc::clone(&first_calls);
-        let second_calls = Arc::new(AtomicUsize::new(0));
-        let second_calls_for_method = Arc::clone(&second_calls);
 
         let first_sibling = sheet
             .add_relationship(vec![
-                Method::from_fn_1_1(a, x, move |value: &i32| {
-                    first_calls_for_method.fetch_add(1, Ordering::SeqCst);
-                    Ok(*value + 1)
-                }),
+                Method::from_fn_1_1(a, x, |value: &i32| Ok(*value + 1)),
                 Method::from_fn_1_1(x, a, |value: &i32| Ok(*value)),
             ])
             .unwrap();
         let second_sibling = sheet
             .add_relationship(vec![
-                Method::from_fn_1_1(b, x, move |value: &i32| {
-                    second_calls_for_method.fetch_add(1, Ordering::SeqCst);
-                    Ok(*value + 1)
-                }),
+                Method::from_fn_1_1(b, x, |value: &i32| Ok(*value + 1)),
                 Method::from_fn_1_1(x, b, |value: &i32| Ok(*value)),
             ])
             .unwrap();
@@ -822,7 +808,7 @@ mod tests {
         let claimant_step = PlanStep::Method(claimant, 0);
         let mut cache = SeedEvaluationCache::default();
 
-        build_seeds_for_steps(
+        let seeds = build_seeds_for_steps(
             &[PlanStep::Method(first_sibling, 1), claimant_step],
             &[claimant_step],
             &[a, x],
@@ -835,7 +821,7 @@ mod tests {
             &mut cache,
         )
         .unwrap();
-        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*seeds[&x].downcast_ref::<i32>().unwrap(), 2);
 
         let error = build_seeds_for_steps(
             &[
@@ -862,8 +848,6 @@ mod tests {
                     && sites.contains(&ErrorSite::Relationship(first_sibling))
                     && sites.contains(&ErrorSite::Relationship(second_sibling))
         ));
-        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(second_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

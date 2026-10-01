@@ -30,6 +30,7 @@ pub enum FilterKind {
     /// `(lo, hi)` as type-erased values of the filtered cell's own type `T`, or `None` if the
     /// underlying expression fails to evaluate (e.g. a fallible arithmetic op in a range
     /// endpoint, such as a `checked_*` operation overflowing).
+    /// The bound evaluator satisfies [`Filter`]'s purity and invocation contract.
     Range {
         /// Re-evaluates the range expression, returning `(lo, hi)` as type-erased values, or
         /// `None` if evaluation fails.
@@ -43,6 +44,12 @@ pub enum FilterKind {
 /// Constructed via [`Filter::from_fn_0`]/[`Filter::from_fn_1`]/[`Filter::from_fn_2`] for
 /// the common typed cases, or [`Filter::new`] for the fully type-erased form. Attached
 /// to a cell with [`crate::sheet::Sheet::add_filter`].
+///
+/// Its callbacks must be pure, deterministic functions of their input values and
+/// immutable captured constants, with no externally observable side effects.
+/// Equal inputs produce equivalent outputs or errors. There is no guarantee that
+/// a callback executes, or when or how often it executes. This includes range-bound
+/// evaluators; the conforming callback must also be idempotent.
 pub struct Filter(pub(crate) FilterData);
 
 /// Internal storage for a single filter.
@@ -66,6 +73,7 @@ impl Filter {
     ///
     /// - Precondition: `args.len() == arg_types.len()`.
     /// - Precondition: `f` returns a value whose runtime type matches `value_type`.
+    /// - Precondition: `f` satisfies [`Filter`]'s purity and idempotence contract.
     #[must_use]
     pub fn new<F>(value_type: TypeId, args: Vec<CellId>, arg_types: Vec<TypeId>, f: F) -> Self
     where
@@ -85,6 +93,8 @@ impl Filter {
     ///
     /// The `TypeId` for `T` is captured automatically. The filter is validated against
     /// its cell registration when passed to [`crate::sheet::Sheet::add_filter`].
+    ///
+    /// - Precondition: `f` satisfies [`Filter`]'s purity and idempotence contract.
     #[must_use]
     pub fn from_fn_0<T, F>(f: F) -> Self
     where
@@ -103,6 +113,8 @@ impl Filter {
     ///
     /// `TypeId`s for `A` and `T` are captured automatically. The filter is validated
     /// against its cell registration when passed to [`crate::sheet::Sheet::add_filter`].
+    ///
+    /// - Precondition: `f` satisfies [`Filter`]'s purity and idempotence contract.
     #[must_use]
     pub fn from_fn_1<A, T, F>(arg: CellId, f: F) -> Self
     where
@@ -131,6 +143,8 @@ impl Filter {
     /// `args[0]` maps to `A` and `args[1]` maps to `B`. `TypeId`s for `A`, `B`, and `T`
     /// are captured automatically. The filter is validated when passed to
     /// [`crate::sheet::Sheet::add_filter`].
+    ///
+    /// - Precondition: `f` satisfies [`Filter`]'s purity and idempotence contract.
     #[must_use]
     pub fn from_fn_2<A, B, T, F>(args: [CellId; 2], f: F) -> Self
     where
@@ -168,6 +182,8 @@ impl Filter {
     /// - Precondition: `clamp` returns a value whose runtime type matches `value_type`.
     /// - Precondition: when `bounds` returns `Some`, the pair's values have a runtime type
     ///   matching `value_type`.
+    /// - Precondition: `clamp` and `bounds` satisfy [`Filter`]'s purity contract;
+    ///   `clamp` is also idempotent.
     #[must_use]
     pub fn range<F, B>(
         value_type: TypeId,

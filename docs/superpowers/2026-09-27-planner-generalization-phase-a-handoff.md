@@ -67,7 +67,7 @@ self-referencing seed construction as part of the same deterministic release-sta
 - If two equal-primary sibling folds are still structurally identical under that comparison,
   `build_seeds` returns `Error::Conflict` naming the ambiguous relationships instead of silently
   preserving adjacency order.
-- `Sheet::propagate()` evaluates pre-plan methods and conditional expressions once into private
+- `Sheet::propagate()` evaluates pre-plan methods and conditional expressions into private
   staged state, validates the active plan and seeds against that state, and commits only after
   validation succeeds. A seed-cycle failure exposes no staged writes and leaves `changed()` empty.
 
@@ -121,20 +121,44 @@ observe branch-produced arguments regardless of relationship insertion order.
 Staged methods, filters, and seed callbacks carry producer provenance. A final plan reuses a
 pre-executed step only when its selected method, producer path, output classification, and seed
 inputs are identical; otherwise propagation returns a conservative `Error::Conflict` with
-implicated sites instead of replaying a stateful callback or publishing stale staged values.
-Callbacks with genuinely different inputs are distinct logical evaluations and may each run once.
+implicated sites instead of publishing stale staged values. This describes the current
+implementation's reuse boundary, not a public callback invocation guarantee.
 Failed prerequisite and seed-cycle propagation remains transactional: prior live values are
 preserved and `changed()` is empty for the failing call.
 
 The all-method static guard-independence validation remains unchanged, and Phase C automatic plan
-reuse remains deferred. Contract coverage preserves filtered-guard ordering, one logical callback
-evaluation, inequality chains, direct self-reference, insertion-order independence, and rollback
+reuse remains deferred. Contract coverage preserves filtered-guard ordering, current prerequisite
+values, inequality chains, direct self-reference, insertion-order independence, and rollback
 after both seed-cycle and prerequisite-conflict failures.
+
+### 2026-10-01 callback contract update
+
+All methods, filters, conditional expressions, and requirements must be purely functional:
+results depend only on explicit input values and immutable captured constants, equal inputs
+produce equivalent values or errors, and callbacks have no externally observable side effects.
+This includes range-bound evaluators and conditional equality functions. There is no guarantee
+that any callback executes, or when or how often it executes. Rust's `Fn` bound does not enforce
+this caller obligation. Self-referencing methods and conforming filters remain idempotent.
+
+Public integration coverage now asserts values, diagnostics, and rollback rather than invocation
+counts, and no method computes its result from an invocation counter. Earlier designs and
+implementation plans that required callback-once behavior are superseded on that point. Runtime
+execution is unchanged in this update; Phase C may optimize evaluation as well as planning when
+it preserves current values, diagnostics, and failure boundaries.
 
 ## Remaining
 
 **Phase C (§3 automatic plan reuse, #152):**
 
-- Fold cached-plan reuse into `propagate()` automatically.
-- Replace the explicit stale-plan fast path with planner-owned reuse that preserves current
-  semantics while avoiding unnecessary replanning.
+- Implement the refined §3 spec: cache prepared main/unconditional plans, including producer
+  metadata, selected guard cones, source membership, diagnostic-output membership, and structural
+  seed recipes.
+- Use source-prefix certificates for internal strength changes instead of blanket invalidation;
+  eligible released-source writes retain expected O(1) cache bookkeeping.
+- Replace complete seed-elimination replay with its equivalent structural survivor predicate;
+  retain current strength gates, local sibling-fold ordering, staged values, and errors.
+- Verify eligible propagation skips planning, repeated preparation, and global strength sorting
+  while matching full-replan values, diagnostics, change tracking, and failure boundaries.
+- `propagate_without_replan()` is already gone; no caller-side optimization API is needed.
+  Cross-propagation value memoization and incremental assignment repair remain separate scope,
+  enabled by purity but not included in the prepared-plan refinement.
