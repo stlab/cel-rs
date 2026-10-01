@@ -253,6 +253,9 @@ impl Sheet {
     /// of the result. This partitions the strength space: written/added cells always
     /// have higher strength than derived cells, ensuring stability across conditional
     /// branch switches.
+    ///
+    /// - Complexity: Amortized O(1), plus O(A) when invalidation releases the final
+    ///   owners of prepared artifacts of total size A.
     pub fn add_cell<T: Any + PartialEq + 'static>(&mut self, value: T) -> CellId {
         self.invalidate_prepared_plans();
         self.next_strength += 1;
@@ -274,7 +277,8 @@ impl Sheet {
     /// Registers a cell that can never be claimed as any method's output — always a
     /// planner source, forever.
     ///
-    /// - Complexity: O(1).
+    /// - Complexity: Amortized O(1), plus O(A) when invalidation releases the final
+    ///   owners of prepared artifacts of total size A.
     pub fn add_source<T: Any + PartialEq + 'static>(&mut self, value: T) -> CellId {
         let id = self.add_cell(value);
         self.cells[id].kind = CellKind::Source;
@@ -316,7 +320,9 @@ impl Sheet {
     /// not by this mutator.
     ///
     /// - Complexity: O(m² × c) where m is the total number of methods and c is the
-    ///   maximum number of cells per method, due to pairwise output-set comparison.
+    ///   maximum number of cells per method, due to pairwise output-set comparison,
+    ///   plus O(A) when invalidation releases the final owners of prepared artifacts
+    ///   of total size A.
     pub fn add_relationship(&mut self, methods: Vec<Method>) -> Result<RelationshipId, Error> {
         if methods.is_empty() {
             return Err(Error::InvalidMethod { sites: vec![] });
@@ -482,7 +488,8 @@ impl Sheet {
     /// not by this mutator.
     ///
     /// - Complexity: O(B·(K + R)) where B = branches, K = keys per branch, R =
-    ///   relationships per branch.
+    ///   relationships per branch, plus O(A) when invalidation releases the final
+    ///   owners of prepared artifacts of total size A.
     pub fn add_conditional<T: Any + PartialEq + 'static>(
         &mut self,
         source: MatchExpr,
@@ -609,7 +616,8 @@ impl Sheet {
     /// - `Error::MethodFailed` — (`Cell`/`Source` kind only) evaluating `requirement`
     ///   against current values returns `Err`.
     ///
-    /// - Complexity: O(k) where k is `requirement`'s input count.
+    /// - Complexity: O(k) where k is `requirement`'s input count, plus O(A) when
+    ///   invalidation releases the final owners of prepared artifacts of total size A.
     pub fn add_requirement(
         &mut self,
         cell: CellId,
@@ -689,7 +697,8 @@ impl Sheet {
     ///
     /// - Complexity: O(k + m²×c) where k is the number of requirements, plus the
     ///   cost of `add_relationship` for `writer` alone (m = 1 method, c = cells in
-    ///   that method).
+    ///   that method), plus O(A) when invalidation releases the final owners of
+    ///   prepared artifacts of total size A.
     pub fn add_out(
         &mut self,
         writer: Method,
@@ -736,7 +745,9 @@ impl Sheet {
     /// Guard independence is checked by [`Sheet::validate`] and by [`Sheet::propagate`],
     /// not by this mutator.
     ///
-    /// - Complexity: O(a) where a is the number of filter argument cells.
+    /// - Complexity: O(a) where a is the number of filter argument cells, plus O(A)
+    ///   when invalidation releases the final owners of prepared artifacts of total
+    ///   size A.
     pub fn add_filter(&mut self, cell: CellId, filter: Filter) -> Result<(), Error> {
         let cell_type = self.cells.get(cell).ok_or(Error::InvalidId)?.type_id;
         if self.cells[cell].filter.is_some() {
@@ -1079,6 +1090,9 @@ impl Sheet {
     /// has the highest strength.
     ///
     /// - Postcondition: any pending derived override is cleared, so the written value is immediately visible via `read()`.
+    /// - Complexity: Expected O(1) validation and phase-membership work, plus O(A)
+    ///   when a claimed-cell write releases the final owners of prepared artifacts
+    ///   of total size A, excluding destruction of replaced values.
     ///
     /// # Errors
     ///
