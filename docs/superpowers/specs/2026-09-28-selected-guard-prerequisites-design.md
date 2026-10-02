@@ -5,6 +5,13 @@ Status: Proposed for written-spec review
 Scope: Resolve the phase-B conditional pre-plan filter-cache regression without
 reintroducing repeated user callback evaluation.
 
+**2026-10-01 contract update:** the callback-count and stateful-callback requirements
+below describe historical implementation goals, not the current public contract.
+All methods, filters, conditional expressions, and requirements are purely functional,
+with no invocation guarantee. See rule 6 of
+`2026-09-27-adam-rs-planner-generalization-design.md`. Producer compatibility and
+transactional value correctness remain relevant; callback-count assertions do not.
+
 ## Goal and boundary
 
 An unconditional relationship may compute a conditional's match value. Only the

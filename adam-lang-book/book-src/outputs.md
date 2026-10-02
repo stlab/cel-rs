@@ -28,8 +28,9 @@ sheet can reference an earlier `out` by name in its own expression — as a rela
 conditional's match subject, a filter argument, or another `out`'s own initializer — exactly
 like referencing any other already-declared cell. What stays restricted is *writing*: an
 output's cell can never be produced by more than one method, and can never be written directly,
-not by a host write, not by a `relationship` binding, not by a second `out`. It's computed
-exactly once each time the sheet resolves, by its own initializer, and nothing else:
+not by a host write, not by a `relationship` binding, not by a second `out`. Its value
+comes from its own initializer and nothing else. The initializer is purely functional;
+resolving the sheet may reuse its result rather than evaluate it again:
 
 ```adam
 {{#include examples/outputs/output_cell_can_be_referenced.adm2}}
@@ -50,6 +51,12 @@ other cells it needs:
 ```adam
 {{#include examples/outputs/requirement_diagnostic.adm2}}
 ```
+
+Requirements are purely functional predicates of their input values and immutable
+constants, with no externally observable side effects or mutable external dependencies.
+Equal inputs produce equivalent results or errors. There is no guarantee that a
+requirement executes, or when or how often it executes; current diagnostics may use
+a previously computed result.
 
 A failed requirement never stops the sheet from resolving, and never stops `area` from being
 computed and readable; a host can query which requirements are currently failing precisely

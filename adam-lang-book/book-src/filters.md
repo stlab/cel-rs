@@ -25,6 +25,13 @@ A filter expression must reference `_` at least once (unless it's a range expres
 [range filters](#range-filters)) and must produce a value of exactly the filtered cell's own type; violating either is a
 parse-time error, not a runtime one.
 
+Filters, including range-bound evaluators, must be purely functional: equal candidate
+and argument values produce equivalent values or errors, without externally observable
+side effects or reads of mutable external state. A conforming filter must also be
+idempotent: filtering its result again with the same arguments leaves that result
+unchanged. There is no guarantee that a filter executes, or when or how often it
+executes. The sheet may reuse a result while preserving conformance and diagnostics.
+
 ## Writing never filters
 
 This is the single most important rule in this chapter: **writing a cell always stores exactly

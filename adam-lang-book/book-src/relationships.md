@@ -13,8 +13,10 @@ dependencies are [deduced](expressions.md#deduced-dependencies) from whichever
 already-declared cells it references, paired with the cell(s) named on its left of `:=`. A
 relationship's bindings are alternatives, not a sequence: at any moment, exactly one of them
 is *selected*, and only the selected one's output cell(s) are actually written when the sheet
-resolves. The other bindings simply aren't evaluated that round. A [`source`](source.md) cell
-can never be named on a binding's left-hand side — it's always a source, by construction, never
+resolves. Other bindings may contribute to self-referencing seed construction. Selection
+does not guarantee that an expression is evaluated; the runtime may reuse its result.
+A [`source`](source.md) cell can never be named on a binding's left-hand side —
+it's always a source, by construction, never
 a method's output — and an [`out`](outputs.md) cell can be a binding's *input* but never its
 output either, since an `out` already has its own fixed writer.
 
@@ -28,7 +30,32 @@ being stalest. The tutorial's [Cells and Relationships](tutorial.md#cells-and-re
 walks through the simplest case of this rule. A write never touches strength itself except to
 promote the written cell to "freshest of all"; reading a cell never changes it.
 
+## Automatic plan reuse
+
+Resolving the sheet does not always rerun method selection. The runtime retains one
+prepared unconditional plan for conditional guards and one prepared main plan for the
+current active relationships. A write to a released source can preserve a phase's plan;
+a write to a claimed cell, a changed active set, or a structural mutation can require
+planning again. A filtered source remains released, but a self-referencing method's
+output is claimed. The host calls the same `propagate` API either way.
+
+Reuse preserves assignments and structural seed choices, not old values. Resolution
+still uses current inputs, strength-sensitive seed gates and sibling ordering, and
+current diagnostics. Released-source membership bookkeeping takes expected constant
+time; comparing active sets takes time proportional to their size, and checking a
+pending source-priority certificate takes time proportional to the cell count.
+Local sibling sorting and fresh value evaluation retain their costs. Discarding a
+prepared plan can also take time proportional to its artifact size. This optimization
+does not add cross-resolution value memoization or incremental assignment repair.
+
 ## The rules a relationship's methods must satisfy
+
+Methods are purely functional: their results depend only on input values and immutable
+constants. Equal inputs produce equivalent values or errors. They have no externally
+observable side effects and do not read mutable external state. There is no guarantee
+that a method executes, or when or how often it executes. The same contract applies to
+filters, conditional expressions, and requirements, including callbacks supplied through
+the Rust host API. Represent changing dependencies as cells, not hidden callback state.
 
 Every method in the same `relationship` must reference exactly the same set of cells — the
 union of that method's own `inputs` and `outputs` — as every other method in that

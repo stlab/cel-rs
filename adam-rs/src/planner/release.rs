@@ -6,7 +6,7 @@
 //! no special handling here: a self-referencing output places no exclusive claim
 //! ([`super::matching::pure_outputs`]) and draws no self-dependency edge
 //! ([`super::digraph::build_digraph`]), so the same strength-lexicographic release finds
-//! the right *assignment*; the correct *values* then come from [`super::seed::build_seeds`]
+//! the right *assignment*; the correct *values* then come from [`super::seed::evaluate_seeds`]
 //! at execution time, not from a value-aware planning choice (see
 //! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`).
 //!
@@ -241,7 +241,7 @@ mod tests {
     fn resolve_releases_the_highest_strength_cell_in_a_self_referencing_chain() {
         // The issue #182 shape. Method selection is purely strength-based: c, written
         // last, is the highest-strength cell and is released as the source; a and b are
-        // both claimed. The correct *values* (a's edit surviving) come from build_seeds
+        // both claimed. The correct *values* (a's edit surviving) come from evaluate_seeds
         // at execution time, not from this assignment -- see the integration tests.
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(10_i32);

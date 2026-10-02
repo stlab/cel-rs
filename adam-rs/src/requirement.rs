@@ -1,7 +1,7 @@
 //! Named boolean checks attached to a cell.
 //!
-//! Each [`Requirement`] is a pure predicate over some set of cells, evaluated after every
-//! `Sheet::propagate` to determine whether a cell's preconditions currently hold. A
+//! Each [`Requirement`] is a pure predicate over some set of cells whose result after
+//! `Sheet::propagate` describes whether a cell's preconditions currently hold. A
 //! requirement's inputs may be any cells in the sheet, not only the cell it's attached to.
 //! See [`crate::sheet::Sheet::add_requirement`].
 
@@ -20,6 +20,11 @@ new_key_type! {
 type RequirementFn = Box<dyn Fn(&[&dyn Any]) -> Result<bool, anyhow::Error>>;
 
 /// A single named boolean check over some set of cells, attached to a cell.
+///
+/// Its predicate must be a pure, deterministic function of its input values and
+/// immutable captured constants, with no externally observable side effects.
+/// Equal inputs produce equivalent results or errors. There is no guarantee that
+/// the predicate executes, or when or how often it executes.
 pub struct Requirement {
     pub(crate) inputs: Vec<CellId>,
     pub(crate) input_types: Vec<TypeId>,
@@ -30,6 +35,7 @@ impl Requirement {
     /// Creates a requirement from explicit TypeIds and a type-erased predicate.
     ///
     /// - Precondition: `inputs.len() == input_types.len()`.
+    /// - Precondition: `f` satisfies [`Requirement`]'s purity contract.
     pub fn new<F>(inputs: Vec<CellId>, input_types: Vec<TypeId>, f: F) -> Self
     where
         F: Fn(&[&dyn Any]) -> Result<bool, anyhow::Error> + 'static,
@@ -46,6 +52,8 @@ impl Requirement {
     ///
     /// The TypeId for `A` is captured automatically. The requirement is validated against
     /// its cell registration when passed to [`crate::sheet::Sheet::add_requirement`].
+    ///
+    /// - Precondition: `f` satisfies [`Requirement`]'s purity contract.
     pub fn from_fn_1<A, F>(input: CellId, f: F) -> Self
     where
         A: Any + 'static,
@@ -68,6 +76,8 @@ impl Requirement {
     /// `inputs[0]` maps to `A` and `inputs[1]` maps to `B`. TypeIds are captured
     /// automatically. The requirement is validated when passed to
     /// [`crate::sheet::Sheet::add_requirement`].
+    ///
+    /// - Precondition: `f` satisfies [`Requirement`]'s purity contract.
     pub fn from_fn_2<A, B, F>(inputs: [CellId; 2], f: F) -> Self
     where
         A: Any + 'static,

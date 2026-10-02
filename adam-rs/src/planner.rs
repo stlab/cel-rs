@@ -14,13 +14,18 @@
 //! design rationale and literature grounding.
 //!
 //! Method selection is value-blind, including for self-referencing components: a
-//! self-referencing chain reaches the correct values through [`build_seeds`], which
-//! replays the release pass's elimination state to choose sibling seed methods,
+//! self-referencing chain reaches the correct values through [`evaluate_seeds`], which
+//! evaluates structurally selected sibling seed methods using current strengths,
 //! reconstructs each self-referencing input's value at execution time, and reports
 //! non-self seed dependency cycles as [`Error::SeedCycle`] rather than substituting a
 //! revisited source value (see
-//! `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`),
+//! `docs/superpowers/specs/2026-09-27-adam-rs-planner-generalization-design.md` §1),
 //! not through a value-aware assignment choice.
+//!
+//! [`crate::Sheet::propagate`] calls the planner only on prepared-plan misses.
+//! Eligible hits reuse the assignment and structural seed recipes while evaluating
+//! current values, strength gates, and local sibling ordering. The complete release
+//! order certifies changed priorities; it is not replayed for seed selection.
 //!
 //! Once [`release::resolve`] succeeds, its result's induced digraph is guaranteed
 //! acyclic, so Kahn's topological sort yields `execution_order` directly.
@@ -47,6 +52,7 @@ use crate::{
 mod digraph;
 mod matching;
 mod release;
+mod reuse;
 mod seed;
 mod trace;
 
@@ -54,11 +60,14 @@ use digraph::{Node, add_filter_edges, build_digraph, topological_order};
 use matching::pure_outputs;
 use release::ReleaseFailure;
 
-pub(crate) use seed::{SeedEvaluationCache, SeedSource, build_seeds, build_seeds_for_steps};
+pub(crate) use reuse::SourceCertificate;
+pub(crate) use seed::{
+    SeedEvaluationCache, SeedRecipes, SeedSignatures, SeedSource, evaluate_seeds,
+};
 
 /// The seed value each self-referencing input should read this round, keyed by cell. A
 /// cell absent from the map reads its own `source`. See [`seed`] and
-/// `docs/superpowers/specs/2026-09-07-adam-rs-value-aware-self-ref-planning-design.md`.
+/// `docs/superpowers/specs/2026-09-27-adam-rs-planner-generalization-design.md` §3.3.
 pub(crate) type Seeds = HashMap<CellId, Rc<dyn Any>>;
 
 /// One step of a [`Plan`]'s `execution_order`: either a selected method, or reapplying a
@@ -81,10 +90,8 @@ pub(crate) enum PlanStep {
 pub(crate) struct Plan {
     /// Selected steps (methods and filter reclamps) in execution order.
     pub(crate) execution_order: Vec<PlanStep>,
-    /// The exact deterministic cell sequence the release pass evaluated when
-    /// tentatively eliminating sources; [`seed::build_seeds`] replays sibling-local
-    /// elimination against this order when choosing seed methods, so sibling selection
-    /// follows actual elimination state rather than declaration order.
+    /// The complete deterministic cell sequence the release pass evaluated when
+    /// tentatively eliminating sources, retained for source-prefix certificates.
     pub(crate) elimination_order: Vec<CellId>,
     /// Cells that can never be a source under the relationships this plan considered.
     /// See [`forced_output_cells`].
@@ -100,7 +107,7 @@ pub(crate) struct Plan {
 /// Only relationships in `active` are planned; relationships outside `active` are
 /// invisible to method selection. Method selection is purely strength-based and
 /// value-blind: a self-referencing chain reaches the correct values not by choosing a
-/// value-aware assignment, but by [`build_seeds`] reconstructing each self-referencing
+/// value-aware assignment, but by [`evaluate_seeds`] reconstructing each self-referencing
 /// input's value at execution time.
 ///
 /// # Errors
@@ -109,9 +116,9 @@ pub(crate) struct Plan {
 /// - `Error::Cycle` — a valid method assignment exists, but every one of them is
 ///   cyclic: a genuine algebraic loop with no external input, regardless of strength.
 ///
-/// - Complexity: O(C · R² · M · K) where C = cells, R = active relationships, M =
-///   methods per relationship, K = cells per method — [`release::resolve`] attempts up
-///   to C full re-solves, each up to O(R² · M · K) in the worst case.
+/// - Complexity: Includes O(C log C) priority sorting and O(C) acyclic-assignment
+///   searches, each exponential in the active relationship count in the worst case
+///   (see [`release::resolve`]), plus forced-output and dependency-order preparation.
 pub(crate) fn plan(
     cells: &SlotMap<CellId, CellData>,
     relationships: &SlotMap<RelationshipId, RelationshipData>,

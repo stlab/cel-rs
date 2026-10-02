@@ -8,6 +8,24 @@
 //! selects one method per relationship based on cell write-recency (strength),
 //! then executes the selected methods in dependency order.
 //!
+//! # Callback purity
+//!
+//! Every [`Method`], [`Filter`], [`MatchExpr`], and [`Requirement`] callback must be
+//! purely functional: its result depends only on its explicit input values and
+//! immutable captured constants. Equal input values must produce equivalent output
+//! values or errors. This also applies to range-filter bound evaluators and
+//! conditional equality functions.
+//!
+//! Callbacks must not mutate inputs or captured state, perform I/O, or read mutable
+//! external state such as clocks, random generators, or independently changing shared
+//! data. Represent changing dependencies as input cells instead.
+//!
+//! There is no guarantee that a callback will execute, or when or how often it will
+//! execute. The runtime may omit evaluation, reuse a previously computed result, or
+//! reevaluate a callback while preserving the sheet's value and diagnostic semantics.
+//! Observe propagation through cell values and diagnostics, not callback side effects.
+//! Rust's `Fn` bound does not enforce purity; this is a caller obligation.
+//!
 //! # Example
 //!
 //! ```rust
@@ -122,7 +140,7 @@
 //! - The selected methods' induced dependency digraph is acyclic before execution
 //!   ([`Error::Cycle`] when not).
 //! - A self-referencing input never reads a same-round derived value. Instead it reads a
-//!   seed reconstructed from `source`: `planner::build_seeds` folds every other
+//!   seed reconstructed from `source`: `planner::evaluate_seeds` folds every other
 //!   relationship incident to the cell (excluding its own claimant) through that
 //!   relationship's cell-producing method, giving the cell's aspiration before its
 //!   claimant tightens it; a cell no other relationship contributes to just reads its
@@ -135,9 +153,11 @@
 //!
 //! Enforced only by convention (caller contract, not checked by the runtime):
 //!
+//! - All method, filter, conditional-expression, and requirement callbacks satisfy
+//!   the callback-purity contract above, with no invocation guarantee.
 //! - A self-referencing method must be idempotent: applying it twice to the same inputs
 //!   must produce the same result as applying it once.
-//! - A filter must be a pure, conforming function of its cell's value and its argument
+//! - A filter must be idempotent and conform its cell's value using its argument
 //!   cells' values.
 //! - Iteration order used to break ties among equal-strength cells is not stable API
 //!   and must not be relied on by callers.
@@ -147,7 +167,7 @@
 //! Capturing every cell's `source` value and reapplying the highest-strength sources
 //! reconstructs the sheet's *current* state, but not what a subsequent edit will do,
 //! since no method-selection state is captured, only values. This holds even for a
-//! self-referencing cell: `planner::build_seeds` reconstructs its contribution to a
+//! self-referencing cell: `planner::evaluate_seeds` reconstructs its contribution to a
 //! sibling relationship's method purely from current `source` values (recursively, for
 //! any other self-referencing cell that sibling method itself reads), so no state
 //! beyond `source` needs to be captured to reproduce the derived state.

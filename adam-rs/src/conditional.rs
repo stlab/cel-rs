@@ -28,6 +28,11 @@ type MatchExprFn = Box<dyn Fn(&[&dyn Any]) -> Result<Box<dyn Any>, anyhow::Error
 /// Constructed via [`MatchExpr::cell`] for the common single-cell case, or
 /// [`MatchExpr::new`]/[`MatchExpr::from_fn_1`]/[`MatchExpr::from_fn_2`] to compute the
 /// match value from multiple cells (analogous to [`crate::relationship::Method`]).
+///
+/// Its expression and equality callbacks must be pure, deterministic functions of
+/// their input values and immutable captured constants, with no externally observable
+/// side effects. Equal inputs produce equivalent outputs or errors. There is no
+/// guarantee that a callback executes, or when or how often it executes.
 pub struct MatchExpr(pub(crate) MatchSource);
 
 pub(crate) enum MatchSource {
@@ -63,6 +68,7 @@ impl MatchExpr {
     /// - Precondition: `f` returns a value whose runtime type matches `output_type`.
     /// - Precondition: `eq_fn` correctly compares two values of the type identified by
     ///   `output_type`.
+    /// - Precondition: `f` and `eq_fn` satisfy [`MatchExpr`]'s purity contract.
     #[must_use]
     pub fn new<F>(
         inputs: Vec<CellId>,
@@ -89,6 +95,8 @@ impl MatchExpr {
     /// `TypeId`s for `A` and `T` are captured automatically, along with `T`'s equality
     /// function. The expression is validated against its cell registration when passed to
     /// [`crate::sheet::Sheet::add_conditional`].
+    ///
+    /// - Precondition: `f` satisfies [`MatchExpr`]'s purity contract.
     #[must_use]
     pub fn from_fn_1<A, T, F>(input: CellId, f: F) -> Self
     where
@@ -115,6 +123,8 @@ impl MatchExpr {
     /// `inputs[0]` maps to `A` and `inputs[1]` maps to `B`. `TypeId`s for `A`, `B`, and `T`
     /// are captured automatically, along with `T`'s equality function. The expression is
     /// validated when passed to [`crate::sheet::Sheet::add_conditional`].
+    ///
+    /// - Precondition: `f` satisfies [`MatchExpr`]'s purity contract.
     #[must_use]
     pub fn from_fn_2<A, B, T, F>(inputs: [CellId; 2], f: F) -> Self
     where
