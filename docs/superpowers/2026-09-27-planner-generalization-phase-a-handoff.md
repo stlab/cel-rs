@@ -243,7 +243,7 @@ default features), and `cargo doc --workspace --no-deps --lib` with
 warnings. Both test commands reported the same three pre-existing ignored doctests:
 the DynamicArrayBuilder example and two ez-adam side-panel examples. They were not
 silently counted as passing. `git --no-pager diff --check` passed; Git reported an
-LF-to-CRLF conversion notices for `sheet.rs` and `planner.rs`, not compiler or
+LF-to-CRLF conversion notice for `sheet.rs` and `planner.rs`, not compiler or
 whitespace warnings.
 
 The Task 5 session report retains exact commands, full output logs, and per-criterion
