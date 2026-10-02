@@ -3220,6 +3220,103 @@ fn inequality_chain_dragging_the_low_end_keeps_the_middle_cells_edit() {
     }
 }
 
+/// Checks recursive seed spring-back and aspiration preservation after repeated warm propagations.
+#[test]
+fn inequality_chain_warm_rounds_preserve_current_aspirations() {
+    let (mut sheet, a, b, c) = inequality_chain();
+    for _ in 0..4 {
+        sheet.propagate().unwrap();
+    }
+    for (value, expected) in [(100_i32, [100, 100, 100]), (0, [0, 20, 30])] {
+        sheet.write(a, value).unwrap();
+        sheet.propagate().unwrap();
+        for (&cell, value) in [a, b, c].iter().zip(expected) {
+            assert_eq!(*sheet.read::<i32>(cell).unwrap(), value);
+        }
+        assert_eq!(*sheet.source::<i32>(b).unwrap(), 20);
+        assert_eq!(*sheet.source::<i32>(c).unwrap(), 30);
+        for _ in 0..3 {
+            sheet.propagate().unwrap();
+            assert_eq!(*sheet.read::<i32>(b).unwrap(), expected[1]);
+            assert_eq!(*sheet.read::<i32>(c).unwrap(), expected[2]);
+        }
+    }
+    sheet.write(b, 100_i32).unwrap();
+    sheet.propagate().unwrap();
+    for value in [10_i32, 9, 120, 50, 0] {
+        sheet.write(a, value).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(b).unwrap(), value.max(100));
+        assert_eq!(*sheet.read::<i32>(c).unwrap(), value.max(100));
+        assert_eq!(*sheet.source::<i32>(b).unwrap(), 100);
+        assert_eq!(*sheet.source::<i32>(c).unwrap(), 30);
+    }
+}
+
+/// Checks seed-cycle failure keeps the last completed display across warm rounds and recovery.
+#[test]
+fn conditional_seed_cycle_preserves_completed_queries_and_recovers() {
+    let (mut sheet, mode, selected, a, b, c, d) = conditional_seed_cycle_sheet();
+    sheet.write(mode, 0_i32).unwrap();
+    for _ in 0..4 {
+        sheet.propagate().unwrap();
+    }
+    let relationships = sheet.relationships().collect::<Vec<_>>();
+    let choices = relationships
+        .iter()
+        .map(|id| {
+            (
+                sheet.selected_method(*id),
+                sheet.is_relationship_forced(*id),
+            )
+        })
+        .collect::<Vec<_>>();
+    let cells = [selected, a, b, c, d];
+    let before = cells.map(|id| {
+        (
+            *sheet.read::<i32>(id).unwrap(),
+            *sheet.source::<i32>(id).unwrap(),
+            sheet.is_source(id),
+            sheet.is_forced(id),
+        )
+    });
+    sheet.write(mode, 1_i32).unwrap();
+    assert!(matches!(sheet.propagate(), Err(Error::SeedCycle { .. })));
+    assert_eq!(sheet.changed().count(), 0);
+    for (&cell, expected) in cells.iter().zip(before) {
+        assert_eq!(
+            (
+                *sheet.read::<i32>(cell).unwrap(),
+                *sheet.source::<i32>(cell).unwrap(),
+                sheet.is_source(cell),
+                sheet.is_forced(cell),
+            ),
+            expected
+        );
+    }
+    for (&relationship, expected) in relationships.iter().zip(&choices) {
+        assert_eq!(
+            (
+                sheet.selected_method(relationship),
+                sheet.is_relationship_forced(relationship)
+            ),
+            *expected
+        );
+    }
+    sheet.write(mode, 0_i32).unwrap();
+    sheet.propagate().unwrap();
+    assert_eq!(*sheet.read::<i32>(selected).unwrap(), 0);
+    for (&relationship, expected) in relationships.iter().zip(&choices) {
+        assert_eq!(
+            (
+                sheet.selected_method(relationship),
+                sheet.is_relationship_forced(relationship)
+            ),
+            *expected
+        );
+    }
+}
+
 #[test]
 fn seed_cycle_reports_exact_sites() {
     let (mut sheet, a, b, _c, _d, _s, rel1, rel2) = seed_cycle_sheet();
