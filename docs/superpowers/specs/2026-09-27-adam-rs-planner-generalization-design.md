@@ -1,7 +1,7 @@
 # adam-rs planner generalization design
 
 Date: 2026-09-27
-Status: Phases A–B implemented; Phase C design refined 2026-10-01, implementation pending
+Status: Phases A–C implemented; automatic prepared-plan reuse completed 2026-10-01
 Issues: #186 (seedfill generalization), #152 (automatic plan reuse). #153 was closed as
 not applicable (see §2); #18 was closed as a duplicate of #152.
 
@@ -62,7 +62,7 @@ where eliminating one cell at a time always narrows to exactly one method.
 
 ### 1.2 Seed method selection follows elimination state
 
-Phase B replaces first-declared sibling selection with elimination replay: start from
+Historically, Phase B replaced first-declared sibling selection with elimination replay: start from
 every method whose outputs contain `x`, then eliminate every other referenced cell in
 the planner's complete release order. Elimination removes any candidate with a pure
 output on that cell; it does not stop merely because one candidate remains. A pure
@@ -73,7 +73,7 @@ requires exactly one survivor: zero or multiple survivors produce `Error::Confli
 not a declaration-order fallback. A sibling with no `x`-producing method contributes
 no seed.
 
-**Phase C refinement:** complete replay is order-independent. A candidate survives
+**Implemented Phase C refinement:** complete replay is order-independent. A candidate survives
 exactly when its pure-output set is a subset of `{x}`. §3 uses this equivalent
 structural predicate to prepare sibling choices without replaying or sorting the
 global cell order on each propagation. Strength-sensitive gating and sibling fold
@@ -168,8 +168,9 @@ by validation.
 
 ## §3 Automatic plan reuse (#152)
 
-`propagate()` replans every call today; `propagate_without_replan()` no longer exists.
-Plan reuse is an internal optimization with no API change. The 2026-10-01 refinements
+`propagate()` automatically reuses eligible prepared phase plans and replans on a miss;
+`propagate_without_replan()` no longer exists. Plan reuse is an internal optimization
+with no API change. The implemented 2026-10-01 refinements
 minimize repeated structural work while preserving Phase B's staged propagation and
 the pure-callback contract in rule 6.
 
@@ -325,13 +326,19 @@ refinement. A safe full replan remains the fallback.
 
 ### 3.6 Cost and alternatives
 
-Eligible writes add expected O(1) cache bookkeeping. Eligible propagations skip
+Writes to sources released by an eligible phase add expected O(1) membership
+bookkeeping and retain that phase. Invalidating writes or structural mutations may
+destroy O(A) prepared artifacts when their final owners are released; replacing
+user values also has its own destruction cost. Eligible propagations skip
 assignment solving, producer/guard-cone preparation, structural seed selection, and
 global strength sorting. If certification is needed, it costs O(C), not an assignment
-search. Dynamic seed gates, local sibling-fold ordering, staged execution, and
+search. Comparing each phase's active set takes expected O(R) for R active
+relationships; building current active sets and evaluating guards remain necessary.
+Dynamic seed gates, local sibling-fold ordering, fresh staged execution, commit, and
 diagnostics still contribute their existing costs. Local fold ordering can require
-O(A log A) for A siblings; eliminating a global sort does not eliminate these local
-sorts. Preparation retains O(C + E) plan metadata plus structural recipe/signature
+O(S log S) comparisons for S siblings, plus structural signature comparison costs;
+eliminating a global sort does not eliminate these local sorts. Preparation retains
+O(C + E) plan metadata plus structural recipe/signature
 storage, where E counts the selected dependency edges.
 
 This targets the expensive structural work first: the current release pass can make
@@ -383,6 +390,17 @@ checks, not runtime benchmarks or substitutes for repository contract tests.
 
 Update the public propagation contract and the dated phase handoff alongside implementation.
 No UI change or caller-side optimization decision is needed.
+
+### 2026-10-01 Phase C completion
+
+Tasks 1–4 implement and test source certificates, structural seed recipes, independent
+prepared phase caches, invalidation, and differential full-replan equivalence. Task 5
+updates the contracts and completion record and runs the full repository checks.
+The existing `2026-09-27-planner-generalization-phase-a-handoff.md` retains historical
+A/B verification and records current Phase C coverage and validation separately.
+No cross-propagation values are cached, no incremental assignment repair is introduced,
+and callback purity supplies no invocation guarantee. Whole-branch independent review
+and any PR decision remain separate from this implementation completion.
 
 ## Out of scope
 

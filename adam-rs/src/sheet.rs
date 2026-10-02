@@ -31,8 +31,8 @@ use cached::{CachedPlan, PreparedPlan};
 ///
 /// Create cells with [`Sheet::add_cell`], define multi-way constraints with
 /// [`Sheet::add_relationship`], write input values with [`Sheet::write`],
-/// then call [`Sheet::propagate`] to execute the planning pass and update
-/// derived cells.
+/// then call [`Sheet::propagate`] to update derived cells. Propagation automatically
+/// reuses eligible prepared plans or plans again when necessary.
 ///
 /// # Example
 ///
@@ -1695,7 +1695,7 @@ impl Sheet {
         Ok(())
     }
 
-    /// Assigns derived-cell strengths after a planning pass.
+    /// Assigns derived-cell strengths after executing a selected plan.
     ///
     /// Walks `execution_order` and assigns a decrementing counter (starting at
     /// `0x7FFF_FFFF_FFFF_FFFF`) to each output cell of each selected method, in
@@ -1774,7 +1774,7 @@ impl Sheet {
         previously_derived
     }
 
-    /// Runs the planning pass and executes the selected methods.
+    /// Updates the sheet using eligible prepared plans or newly selected methods.
     ///
     /// Validates static guard independence before mutating state, then clears the
     /// changed-cell set from the previous `propagate()` call before staged planning.
@@ -1787,19 +1787,28 @@ impl Sheet {
     /// cell values and diagnostics. The phases below describe the current algorithm,
     /// not a callback invocation contract.
     ///
+    /// Retains at most one prepared unconditional plan and one prepared main plan,
+    /// each with its own released sources and active relationships. Successful writes
+    /// to released sources preserve that phase's eligibility; writes to claimed cells
+    /// (including self-referencing claimants) discard it. Filter reclamps do not claim
+    /// released sources. Actual structural mutations discard both entries, including
+    /// partial mutations before an error; rejected writes leave eligibility unchanged.
+    /// Prepared plans retain structural seed recipes, not values from earlier calls.
+    ///
     /// **Phase 0 — Staging:** propagation starts from each cell's source value, excluding
     /// every derived override from the previous round, but does not mutate live cells.
     ///
-    /// **Phase 1 — Pre-plan:** if any conditional match cells are derived (have an
-    /// in-edge in the unconditional relationship graph), the unconditional plan's selected
-    /// guard-prerequisite cone is executed so their values are current before branch evaluation.
+    /// **Phase 1 — Pre-plan:** when conditionals exist, an eligible prepared unconditional
+    /// plan is obtained or a new one is prepared. Its selected guard-prerequisite cone
+    /// executes so derived guard values are current before branch evaluation.
     /// Unrelated filters remain deferred until the final active plan, after the relationships
     /// that produce their arguments.
     ///
     /// **Phase 2 — Conditional evaluation:** each conditional's match cell value is
     /// read and compared against branch keys; the active relationship set is built.
     ///
-    /// **Phase 3 — General plan:** the Adam algorithm runs on the active set. Seed-cycle
+    /// **Phase 3 — General plan:** an eligible prepared main plan is obtained for the active
+    /// set, or the Adam algorithm selects and prepares a new one. Seed-cycle
     /// validation and method execution consume staged Phase 1 values. A callback already
     /// evaluated in Phase 1 is reused only when the final plan preserves its selected
     /// method, input producers, and output classification. A mismatched plan returns a
@@ -1832,11 +1841,21 @@ impl Sheet {
     /// and changed-state clearing but before commit. Live cell values therefore remain untouched
     /// and [`Sheet::changed`] stays empty for that failing call.
     ///
+    /// Requirement callback errors occur after commit: published values and changed-state
+    /// remain visible. Any propagation error discards both phases' reuse eligibility,
+    /// but retains the last successful display snapshot. Static validation errors occur
+    /// before changed-state clearing. Filter failures remain diagnostics rather than
+    /// propagation errors, and diagnostic results use current values.
+    ///
     /// - Complexity: on a cache miss, prerequisite-cone indexing, traversal, and producer
     ///   preparation take O(V + E) per selected plan, distinct from assignment matching.
-    ///   Cache hits omit this preparation and assignment matching; a pending strength
-    ///   certificate takes O(C) for C cells. Fresh staged execution, seed evaluation,
-    ///   active-set comparison, and diagnostics still run for current values.
+    ///   Cache hits omit this preparation, assignment matching, global strength sorting,
+    ///   and complete seed-elimination replay. Active-set comparison takes expected O(R)
+    ///   for R active relationships; a pending strength certificate takes O(C) for C cells.
+    ///   Current strength gates and local sibling sorts still run (O(S log S) comparisons
+    ///   for S siblings, with structural signature comparison costs). Fresh staged
+    ///   execution, seed evaluation, commit, and diagnostics retain their costs.
+    ///   Discarding final owners of prepared artifacts of total size A can take O(A).
     ///
     /// # Errors
     ///
@@ -2058,7 +2077,8 @@ impl Sheet {
 
     /// Returns `true` if `id` was not written by any selected method in the last successful propagation.
     ///
-    /// Returns `false` if no propagation has run yet (conservatively forces a full re-plan).
+    /// Returns `false` if no propagation has succeeded yet. This display query does not
+    /// determine prepared-plan eligibility.
     ///
     /// Cells absent from the completed plan, including newly added cells, return `true`.
     ///

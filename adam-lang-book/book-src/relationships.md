@@ -30,6 +30,24 @@ being stalest. The tutorial's [Cells and Relationships](tutorial.md#cells-and-re
 walks through the simplest case of this rule. A write never touches strength itself except to
 promote the written cell to "freshest of all"; reading a cell never changes it.
 
+## Automatic plan reuse
+
+Resolving the sheet does not always rerun method selection. The runtime retains one
+prepared unconditional plan for conditional guards and one prepared main plan for the
+current active relationships. A write to a released source can preserve a phase's plan;
+a write to a claimed cell, a changed active set, or a structural mutation can require
+planning again. A filtered source remains released, but a self-referencing method's
+output is claimed. The host calls the same `propagate` API either way.
+
+Reuse preserves assignments and structural seed choices, not old values. Resolution
+still uses current inputs, strength-sensitive seed gates and sibling ordering, and
+current diagnostics. Released-source membership bookkeeping takes expected constant
+time; comparing active sets takes time proportional to their size, and checking a
+pending source-priority certificate takes time proportional to the cell count.
+Local sibling sorting and fresh value evaluation retain their costs. Discarding a
+prepared plan can also take time proportional to its artifact size. This optimization
+does not add cross-resolution value memoization or incremental assignment repair.
+
 ## The rules a relationship's methods must satisfy
 
 Methods are purely functional: their results depend only on input values and immutable
