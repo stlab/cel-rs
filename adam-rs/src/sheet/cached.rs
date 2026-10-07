@@ -614,7 +614,6 @@ mod tests {
             sheet
                 .add_requirement(
                     cells[0],
-                    None,
                     Requirement::from_fn_1(cells[0], |value: &i32| Ok(*value >= 0)),
                 )
                 .unwrap();
@@ -732,7 +731,6 @@ mod tests {
                 sheet
                     .add_requirement(
                         ids[0],
-                        None,
                         Requirement::from_fn_1(ids[0], |x: &i32| Ok(*x >= 0)),
                     )
                     .unwrap();
@@ -740,14 +738,8 @@ mod tests {
             6 | 7 => {
                 let requirements = if mutation == 7 {
                     vec![
-                        (
-                            Some("check"),
-                            Requirement::from_fn_1(ids[2], |x: &i32| Ok(*x >= 0)),
-                        ),
-                        (
-                            Some("check"),
-                            Requirement::from_fn_1(ids[2], |x: &i32| Ok(*x >= 0)),
-                        ),
+                        Requirement::from_fn_1(ids[2], |x: &i32| Ok(*x >= 0)),
+                        Requirement::from_fn_1(CellId::default(), |x: &i32| Ok(*x >= 0)),
                     ]
                 } else {
                     vec![]
@@ -757,7 +749,7 @@ mod tests {
                     requirements,
                 );
                 if mutation == 7 {
-                    assert!(matches!(result, Err(Error::InvalidRequirement)));
+                    assert!(matches!(result, Err(Error::InvalidId)));
                     assert_eq!(sheet.cell_requirements(ids[2]).unwrap().len(), 1);
                 } else {
                     result.unwrap();
@@ -841,10 +833,9 @@ mod tests {
                     assert!(matches!(
                         sheet.add_requirement(
                             cells[2],
-                            Some("check"),
-                            Requirement::from_fn_1(cells[2], |_: &i32| Ok(true))
+                            Requirement::from_fn_1(CellId::default(), |_: &i32| Ok(true))
                         ),
-                        Err(Error::InvalidRequirement)
+                        Err(Error::InvalidId)
                     ));
                 }
             }
@@ -954,7 +945,6 @@ mod tests {
             sheet
                 .add_requirement(
                     output,
-                    None,
                     Requirement::from_fn_1(input, |value: &i32| {
                         if *value == 7 {
                             Err(anyhow::anyhow!("requirement probe"))
@@ -1033,11 +1023,10 @@ mod tests {
         let (mut automatic, a, b, relationship) = identity_sheet();
         let (mut forced, x, y, _) = identity_sheet();
         for (sheet, ids) in [(&mut automatic, [a, b]), (&mut forced, [x, y])] {
-            for name in ["first", "second"] {
+            for _ in 0..2 {
                 sheet
                     .add_requirement(
                         ids[0],
-                        Some(name),
                         Requirement::from_fn_1(ids[0], |value: &i32| {
                             if *value == 7 {
                                 Err(anyhow::anyhow!("requirement probe"))
@@ -1698,7 +1687,7 @@ mod tests {
             Err(Error::InvalidMethod { .. })
         ));
         assert!(matches!(
-            sheet.add_requirement(a, None, Requirement::from_fn_1(a, |_: &i32| Ok(false))),
+            sheet.add_requirement(a, Requirement::from_fn_1(a, |_: &i32| Ok(false))),
             Err(Error::InvalidRequirement)
         ));
         sheet.propagate().unwrap();
@@ -1716,17 +1705,11 @@ mod tests {
         let result = sheet.add_out(
             Method::from_fn_1_1(input, output, |x: &i32| Ok(*x)),
             vec![
-                (
-                    Some("valid"),
-                    Requirement::from_fn_1(output, |x: &i32| Ok(*x > 0)),
-                ),
-                (
-                    Some("valid"),
-                    Requirement::from_fn_1(output, |x: &i32| Ok(*x > 0)),
-                ),
+                Requirement::from_fn_1(output, |x: &i32| Ok(*x > 0)),
+                Requirement::from_fn_1(CellId::default(), |x: &i32| Ok(*x > 0)),
             ],
         );
-        assert!(matches!(result, Err(Error::InvalidRequirement)));
+        assert!(matches!(result, Err(Error::InvalidId)));
         assert_eq!(sheet.cell_kind(output), Some(CellKind::Out));
         assert_eq!(sheet.cell_requirements(output).unwrap().len(), 1);
         sheet.propagate().unwrap();
@@ -1786,7 +1769,6 @@ mod tests {
         sheet
             .add_requirement(
                 a,
-                None,
                 Requirement::from_fn_1(b, |x: &i32| {
                     anyhow::ensure!(*x >= 0, "negative input");
                     Ok(true)
@@ -1871,7 +1853,7 @@ mod tests {
 
         before = sheet.reuse_stats;
         sheet
-            .add_requirement(a, None, Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))
+            .add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))
             .unwrap();
         sheet.propagate().unwrap();
         assert_eq!(sheet.reuse_stats.pre_plans, before.pre_plans + 1);

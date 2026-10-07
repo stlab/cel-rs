@@ -63,18 +63,19 @@ struct OutputStatus {
     output_cells: HashSet<CellId>,
     /// Violated requirement names for each currently-invalid output, joined for display and
     /// keyed by the output's own cell — via `Sheet::violated_requirements`/
-    /// `Sheet::requirement_name`. A cell absent from this map has no currently-failing
-    /// requirement (either it isn't an output cell, or all of its requirements currently
-    /// hold).
+    /// `ParsedSheet::requirement_names`. A cell absent from this map has no currently-failing
+    /// explicitly labeled requirement; unnamed failures still contribute to `invalid_outputs`.
     invalid_output_requirement_names: HashMap<CellId, String>,
 }
 
-/// Computes `sheet`'s current out-cell status for the Inspector.
+/// Computes `parsed`'s current out-cell status and resolves caller-owned labels.
 ///
 /// - Complexity: O(sum of `Sheet::contributing_cells` cost over every out cell +
 ///   `Sheet::requirement_relevant_cells` + `Sheet::requirement_violation_cells` +
-///   `Sheet::filter_violation_cells` + the number of conditionals in the sheet).
-fn compute_output_status(sheet: &Sheet) -> OutputStatus {
+///   `Sheet::filter_violation_cells` + the number of conditionals in the sheet +
+///   violated requirements and their total label length), with expected O(1) label lookup.
+fn compute_output_status(parsed: &ParsedSheet) -> OutputStatus {
+    let sheet = &parsed.sheet;
     // `Sheet::out_cells()` now returns each out cell's own `CellId` directly — the
     // `OutputId` → `CellId` lookup this function used to do via `Sheet::output_cell` is
     // gone because there's no longer a separate handle to look up.
@@ -108,7 +109,7 @@ fn compute_output_status(sheet: &Sheet) -> OutputStatus {
         .filter_map(|&cell| {
             let names: Vec<&str> = sheet
                 .violated_requirements(cell)
-                .filter_map(|rid| sheet.requirement_name(rid))
+                .filter_map(|rid| parsed.requirement_names.get(&rid).map(String::as_str))
                 .collect();
             (!names.is_empty()).then(|| (cell, names.join(", ")))
         })
@@ -444,9 +445,9 @@ fn CellRow(
     let flags =
         use_memo(move || cell_flags(id, *forced.read(), *has_error.read(), &output_status.read()));
 
-    // `None` for a cell with no currently-failing `require`, including every non-output
+    // `None` for a cell with no currently-failing labeled `require`, including every non-output
     // cell — set from `OutputStatus::invalid_output_requirement_names`, itself keyed by
-    // `Sheet::violated_requirements`/`Sheet::requirement_name`.
+    // `Sheet::violated_requirements`/`ParsedSheet::requirement_names`.
     let violated_requirement_names = use_memo(move || {
         output_status
             .read()
@@ -713,6 +714,147 @@ fn CellRow(
 mod tests {
     use super::*;
 
+    /// Parses a valid test sheet with the standard type registry.
+    ///
+    /// - Complexity: The parser's source compilation cost.
+    fn parse(source: &str) -> ParsedSheet {
+        adam_lang::AdamParser::new(adam_lang::TypeRegistry::new(), cel_parser::OpLookup::new())
+            .parse_str(source)
+            .unwrap()
+    }
+
+    /// Wraps a runtime-only fixture without attaching display metadata.
+    fn parsed_with_sheet(sheet: Sheet) -> ParsedSheet {
+        let mut parsed = parse("sheet s {}");
+        parsed.sheet = sheet;
+        parsed
+    }
+
+    /// Builds a real parsed binding with a native failing method at the same registered IDs.
+    ///
+    /// The native method has no CEL `SpanContext`, so diagnostics must use the parser's
+    /// actual binding span rather than expression error context.
+    ///
+    /// - Precondition: `source` declares exactly two i32 cells and one identity binding.
+    /// - Complexity: The parser's source compilation cost.
+    fn live_write_fixture(source: &str, mismatch: bool) -> (ParsedSheet, Labels, CellId) {
+        use adam_rs::Method;
+        use std::any::TypeId;
+
+        let mut parsed = parse(source);
+        debug_assert_eq!(parsed.cell_names.len(), 2);
+        debug_assert_eq!(parsed.method_spans.len(), 1);
+        let mut sheet = Sheet::new();
+        let input = sheet.add_cell(0_i32);
+        let output = sheet.add_cell(0_i32);
+        assert_eq!(input, parsed.cell_names[0].0);
+        assert_eq!(output, parsed.cell_names[1].0);
+        let relationship = sheet
+            .add_relationship(vec![Method::new(
+                vec![input],
+                vec![output],
+                vec![TypeId::of::<i32>()],
+                vec![TypeId::of::<i32>()],
+                move |_| {
+                    if mismatch {
+                        Ok(vec![Box::new(true)])
+                    } else {
+                        Err(anyhow::anyhow!("live method failure"))
+                    }
+                },
+            )])
+            .unwrap();
+        assert!(parsed.method_spans.contains_key(&(relationship, 0)));
+        parsed.sheet = sheet;
+        let mut labels = Labels::new();
+        labels.add_cell::<i32>(input, parsed.cell_names.get_index(0).unwrap().0);
+        (parsed, labels, input)
+    }
+
+    /// Exercises live writes before and after replacing the parsed sheet in one signal.
+    ///
+    /// - Complexity: Two parses and two propagations.
+    fn live_write_app() -> Element {
+        let mismatch = std::env::var("ADAM_WEB_UI_LIVE_WRITE_CHILD").unwrap() == "type";
+        let original = "sheet s {\ncell trigger: i32;\ncell failed: i32;\nrelationship {\nfailed := trigger;\n}\n}";
+        let replacement = "sheet replacement {\n\ncell edited: i32;\ncell fresh: i32;\n\nrelationship {\nfresh := edited;\n}\n}";
+        let (initial_parsed, initial_labels, _) = live_write_fixture(original, mismatch);
+        let mut parsed = use_signal(move || initial_parsed);
+        let mut labels = use_signal(move || initial_labels);
+        let has_error = use_signal(|| false);
+        let source_text = use_memo(move || original.to_string());
+        let source_name = use_memo(|| "original.adm2".to_string());
+        let fresh_text = use_memo(move || replacement.to_string());
+        let fresh_name = use_memo(|| "replacement.adm2".to_string());
+        use_hook(move || {
+            let id = parsed.read().cell_names["trigger"].0;
+            write_and_propagate(
+                parsed,
+                labels,
+                id,
+                "7",
+                has_error,
+                ErrorContext {
+                    source_text,
+                    source_name,
+                    parsed,
+                },
+            );
+            assert!(*has_error.read());
+            assert_eq!(*parsed.read().read::<i32>(id).unwrap(), 7);
+            let (fresh, fresh_labels, id) = live_write_fixture(replacement, mismatch);
+            parsed.set(fresh);
+            labels.set(fresh_labels);
+            write_and_propagate(
+                parsed,
+                labels,
+                id,
+                "9",
+                has_error,
+                ErrorContext {
+                    source_text: fresh_text,
+                    source_name: fresh_name,
+                    parsed,
+                },
+            );
+            assert!(*has_error.read());
+            assert_eq!(*parsed.read().read::<i32>(id).unwrap(), 9);
+        });
+        rsx! { div {} }
+    }
+
+    #[test]
+    /// Verifies the real live-write error channel retains filenames and fresh binding spans.
+    fn live_write_errors_use_current_parsed_sheet_spans() {
+        if std::env::var_os("ADAM_WEB_UI_LIVE_WRITE_CHILD").is_some() {
+            let mut dom = VirtualDom::new(live_write_app);
+            dom.rebuild_in_place();
+            return;
+        }
+        for (kind, error) in [("method", "live method failure"), ("type", "type mismatch")] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "inspector::tests::live_write_errors_use_current_parsed_sheet_spans",
+                    "--nocapture",
+                ])
+                .env("ADAM_WEB_UI_LIVE_WRITE_CHILD", kind)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(output.status.success(), "{kind}: {stderr}");
+            for expected in [
+                error,
+                "original.adm2:5",
+                "failed := trigger;",
+                "replacement.adm2:7",
+                "fresh := edited;",
+            ] {
+                assert!(stderr.contains(expected), "missing {expected}: {stderr}");
+            }
+        }
+    }
+
     fn status(
         has_outputs: bool,
         relevant: &[CellId],
@@ -785,7 +927,7 @@ mod tests {
         sheet.write(b, -30.0_f64).unwrap();
         sheet.propagate().unwrap();
 
-        let status = compute_output_status(&sheet);
+        let status = compute_output_status(&parsed_with_sheet(sheet));
         assert!(status.filter_violated.contains(&a));
         assert!(status.invalid_contributors.contains(&b));
     }
@@ -806,7 +948,7 @@ mod tests {
         sheet.write(b, 30.0_f64).unwrap();
         sheet.propagate().unwrap();
 
-        let status = compute_output_status(&sheet);
+        let status = compute_output_status(&parsed_with_sheet(sheet));
         assert!(status.filter_violated.is_empty());
         assert!(status.invalid_contributors.is_empty());
     }
@@ -822,7 +964,7 @@ mod tests {
             .add_out(Method::from_fn_1_1(a, result, |x: &i32| Ok(*x)), vec![])
             .unwrap();
 
-        let status = compute_output_status(&sheet);
+        let status = compute_output_status(&parsed_with_sheet(sheet));
         assert!(status.output_cells.contains(&result));
         assert!(!status.output_cells.contains(&a));
     }
@@ -830,30 +972,18 @@ mod tests {
     #[test]
     fn compute_output_status_output_cells_empty_when_no_outputs() {
         let sheet = Sheet::new();
-        let status = compute_output_status(&sheet);
+        let status = compute_output_status(&parsed_with_sheet(sheet));
         assert!(status.output_cells.is_empty());
     }
 
     #[test]
     fn compute_output_status_invalid_output_requirement_names_names_the_failing_requirement() {
-        use adam_rs::{Method, Requirement};
-
-        let mut sheet = Sheet::new();
-        let width = sheet.add_cell(100_i32);
-        let height = sheet.add_cell(20_i32);
-        let area = sheet.add_cell(0_i32);
-        sheet
-            .add_out(
-                Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
-                vec![(
-                    Some("not_too_big"),
-                    Requirement::from_fn_1(area, |a: &i32| Ok(*a <= 300)),
-                )],
-            )
-            .unwrap();
-        sheet.propagate().unwrap();
-
-        let status = compute_output_status(&sheet);
+        let mut parsed = parse(
+            "sheet s { cell input: i32 = 2000; out area := input require { @not_too_big area <= 300i32; }; }",
+        );
+        parsed.propagate().unwrap();
+        let area = parsed.output_names["area"];
+        let status = compute_output_status(&parsed);
         assert_eq!(
             status.invalid_output_requirement_names.get(&area),
             Some(&"not_too_big".to_string())
@@ -862,58 +992,53 @@ mod tests {
 
     #[test]
     fn compute_output_status_invalid_output_requirement_names_empty_when_requirement_holds() {
-        use adam_rs::{Method, Requirement};
-
-        let mut sheet = Sheet::new();
-        let width = sheet.add_cell(10_i32);
-        let height = sheet.add_cell(20_i32);
-        let area = sheet.add_cell(0_i32);
-        sheet
-            .add_out(
-                Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h)),
-                vec![(
-                    Some("not_too_big"),
-                    Requirement::from_fn_1(area, |a: &i32| Ok(*a <= 300)),
-                )],
-            )
-            .unwrap();
-        sheet.propagate().unwrap();
-
-        let status = compute_output_status(&sheet);
+        let mut parsed = parse(
+            "sheet s { cell input: i32 = 200; out area := input require { @not_too_big area <= 300i32; }; }",
+        );
+        parsed.propagate().unwrap();
+        let status = compute_output_status(&parsed);
         assert!(status.invalid_output_requirement_names.is_empty());
     }
 
     #[test]
     fn compute_output_status_invalid_output_requirement_names_joins_multiple_violated_names() {
-        use adam_rs::{Method, Requirement};
-
-        let mut sheet = Sheet::new();
-        let a = sheet.add_cell(101_i32);
-        let result = sheet.add_cell(0_i32);
-        sheet
-            .add_out(
-                Method::from_fn_1_1(a, result, |x: &i32| Ok(*x)),
-                vec![
-                    (
-                        Some("too_big"),
-                        Requirement::from_fn_1(result, |r: &i32| Ok(*r <= 10)),
-                    ),
-                    (
-                        Some("not_even"),
-                        Requirement::from_fn_1(result, |r: &i32| Ok(r % 2 == 0)),
-                    ),
-                ],
-            )
-            .unwrap();
-        sheet.propagate().unwrap();
-
-        let status = compute_output_status(&sheet);
+        let mut parsed = parse(
+            "sheet s { cell input: i32 = 101; out result := input require {
+                @too_big result <= 10i32;
+                result < 0i32;
+                @passing result > 0i32;
+                @not_even result % 2i32 == 0i32;
+            }; }",
+        );
+        parsed.propagate().unwrap();
+        let result = parsed.output_names["result"];
+        let status = compute_output_status(&parsed);
         let names = status
             .invalid_output_requirement_names
             .get(&result)
             .expect("result should have violated requirements");
-        assert!(names.contains("too_big"));
-        assert!(names.contains("not_even"));
+        assert_eq!(names, "too_big, not_even");
+    }
+
+    #[test]
+    /// Marks unnamed failures invalid without manufacturing a display label.
+    fn compute_output_status_unnamed_failure_retains_generic_invalid_message() {
+        let mut parsed = parse(
+            "sheet s { cell input: i32 = 1; out result := input require { result < 0i32; result > 9i32; }; }",
+        );
+        parsed.propagate().unwrap();
+        let result = parsed.output_names["result"];
+        let status = compute_output_status(&parsed);
+        assert!(status.invalid_outputs.contains(&result));
+        assert!(
+            !status
+                .invalid_output_requirement_names
+                .contains_key(&result)
+        );
+        assert_eq!(
+            slider_invalid_message(result, "result", &parsed, &status),
+            Some("`result` is invalid".to_string())
+        );
     }
 
     #[test]
@@ -927,16 +1052,12 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(200_i32);
         sheet
-            .add_requirement(
-                a,
-                Some("too_big"),
-                Requirement::from_fn_1(a, |x: &i32| Ok(*x > 100)),
-            )
+            .add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 100)))
             .unwrap();
         sheet.write(a, 5_i32).unwrap();
         sheet.propagate().unwrap();
 
-        let status = compute_output_status(&sheet);
+        let status = compute_output_status(&parsed_with_sheet(sheet));
         assert!(status.invalid_contributors.contains(&a));
     }
 
@@ -957,7 +1078,7 @@ mod tests {
             .unwrap();
         sheet.propagate().unwrap();
 
-        let status = compute_output_status(&sheet);
+        let status = compute_output_status(&parsed_with_sheet(sheet));
         assert!(status.relevant.contains(&a));
     }
 

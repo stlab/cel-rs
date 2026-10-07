@@ -4,13 +4,15 @@
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 
-use adam_rs::{CellId, ErrorSite, MatchExpr, Method, RelationshipId, Requirement, Sheet};
+use adam_rs::{
+    CellId, ErrorSite, MatchExpr, Method, RelationshipId, Requirement, RequirementId, Sheet,
+};
 use cel_parser::lex_lexer::{HasSpan, LexLexer, Token};
 use cel_parser::{CELParser, OpLookup, ParseError, SourceSpan};
 use cel_runtime::DynSegment;
@@ -36,6 +38,18 @@ type NamedCells = Vec<(String, CellId, TypeShape)>;
 ///
 /// Derefs to [`Sheet`] so callers that only need sheet methods (e.g.
 /// `propagate`) can use the result exactly as if it were a `Sheet`.
+///
+/// # Examples
+///
+/// ```
+/// use adam_lang::{AdamParser, TypeRegistry};
+/// use cel_parser::OpLookup;
+/// let parsed = AdamParser::new(TypeRegistry::new(), OpLookup::new())
+///     .parse_str("sheet s { cell x: i32 = 1 require { @positive x > 0i32; }; }")?;
+/// let id = parsed.cell_requirements(parsed.cell_names["x"].0).unwrap()[0];
+/// assert_eq!(parsed.requirement_names[&id], "positive");
+/// # Ok::<(), cel_parser::ParseError>(())
+/// ```
 pub struct ParsedSheet {
     /// The constructed sheet.
     pub sheet: Sheet,
@@ -45,6 +59,10 @@ pub struct ParsedSheet {
     /// that need to look up `Sheet::cell_requirements_valid`/`Sheet::violated_requirements` by
     /// name.
     pub output_names: IndexMap<String, CellId>,
+    /// Explicit `@name` labels keyed by requirement ID; unnamed requirements have no entry.
+    /// Lookup takes expected O(1) time. Iterate the sheet's requirement IDs, not this map,
+    /// to preserve attachment or violation order.
+    pub requirement_names: HashMap<RequirementId, String>,
     /// `(RelationshipId, method index)` → the source span of that binding, populated for
     /// every successfully-added relationship. Lets a caller translate an `adam_rs::Error`'s
     /// `ErrorSite::Method` (raised well after parsing, e.g. from `Sheet::propagate`) back
@@ -73,6 +91,7 @@ impl std::fmt::Debug for ParsedSheet {
         f.debug_struct("ParsedSheet")
             .field("cell_names", &self.cell_names)
             .field("output_names", &self.output_names)
+            .field("requirement_names", &self.requirement_names)
             .field("method_spans", &self.method_spans)
             .field("relationship_spans", &self.relationship_spans)
             .field("cell_spans", &self.cell_spans)
@@ -151,6 +170,7 @@ impl std::ops::DerefMut for ParsedSheet {
 // ParseContext — mutable state for one parse_str call
 // ---------------------------------------------------------------------------
 
+/// Accumulates one sheet's declarations, display metadata, and source locations.
 struct ParseContext {
     cursor: crate::token_cursor::TokenCursor,
     sheet: Sheet,
@@ -160,6 +180,8 @@ struct ParseContext {
     /// Maps output name → `CellId`, in declaration order, for exposing to callers via
     /// `ParsedSheet`.
     output_names: IndexMap<String, CellId>,
+    /// Accumulates only explicit labels against successfully registered requirement IDs.
+    requirement_names: HashMap<RequirementId, String>,
     /// Accumulates spans for every successfully-added relationship's methods, for exposing to
     /// callers via `ParsedSheet::method_spans`.
     method_spans: HashMap<(RelationshipId, usize), SourceSpan>,
@@ -246,6 +268,7 @@ impl AdamParser {
             sheet: Sheet::new(),
             cell_names: IndexMap::new(),
             output_names: IndexMap::new(),
+            requirement_names: HashMap::new(),
             method_spans: HashMap::new(),
             relationship_spans: HashMap::new(),
             cell_spans: HashMap::new(),
@@ -263,6 +286,7 @@ impl AdamParser {
             sheet: ctx.sheet,
             cell_names: ctx.cell_names,
             output_names: ctx.output_names,
+            requirement_names: ctx.requirement_names,
             method_spans: ctx.method_spans,
             relationship_spans: ctx.relationship_spans,
             cell_spans: ctx.cell_spans,
@@ -377,13 +401,7 @@ impl AdamParser {
 
         let require_names_and_reqs: Vec<(Option<String>, Requirement)> =
             if ctx.is_keyword("require") {
-                ctx.expect_open_brace()?;
-                let mut reqs = Vec::new();
-                while !ctx.at_close_brace() {
-                    reqs.push(self.parse_requirement(ctx)?);
-                }
-                ctx.expect_close_brace()?;
-                reqs
+                self.parse_requirement_block(ctx)?
             } else {
                 Vec::new()
             };
@@ -395,9 +413,7 @@ impl AdamParser {
                 .map_err(|e| Self::sheet_error(ctx, name_span, e))?;
         }
         for (req_name, requirement) in require_names_and_reqs {
-            ctx.sheet
-                .add_requirement(cell_id, req_name.as_deref(), requirement)
-                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+            Self::register_requirement(ctx, cell_id, req_name, requirement, name_span)?;
         }
         Ok(())
     }
@@ -471,13 +487,7 @@ impl AdamParser {
 
         let require_names_and_reqs: Vec<(Option<String>, Requirement)> =
             if ctx.is_keyword("require") {
-                ctx.expect_open_brace()?;
-                let mut reqs = Vec::new();
-                while !ctx.at_close_brace() {
-                    reqs.push(self.parse_requirement(ctx)?);
-                }
-                ctx.expect_close_brace()?;
-                reqs
+                self.parse_requirement_block(ctx)?
             } else {
                 Vec::new()
             };
@@ -489,9 +499,7 @@ impl AdamParser {
                 .map_err(|e| Self::sheet_error(ctx, name_span, e))?;
         }
         for (req_name, requirement) in require_names_and_reqs {
-            ctx.sheet
-                .add_requirement(cell_id, req_name.as_deref(), requirement)
-                .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+            Self::register_requirement(ctx, cell_id, req_name, requirement, name_span)?;
         }
         Ok(())
     }
@@ -1552,30 +1560,21 @@ impl AdamParser {
             compiled,
         );
 
-        let mut requirement_names: Vec<Option<String>> = Vec::new();
-        let mut requirements: Vec<Requirement> = Vec::new();
-        if ctx.is_keyword("require") {
-            ctx.expect_open_brace()?;
-            while !ctx.at_close_brace() {
-                let (req_name, requirement) = self.parse_requirement(ctx)?;
-                requirement_names.push(req_name);
-                requirements.push(requirement);
-            }
-            ctx.expect_close_brace()?;
-        }
+        let requirements = if ctx.is_keyword("require") {
+            self.parse_requirement_block(ctx)?
+        } else {
+            Vec::new()
+        };
 
         ctx.expect_punct(";")?;
 
-        let named_requirements: Vec<(Option<&str>, Requirement)> = requirement_names
-            .iter()
-            .map(|n| n.as_deref())
-            .zip(requirements)
-            .collect();
-
         let out_cell = ctx
             .sheet
-            .add_out(writer, named_requirements)
+            .add_out(writer, Vec::new())
             .map_err(|e| ParseError::new(e.to_string(), name_span))?;
+        for (req_name, requirement) in requirements {
+            Self::register_requirement(ctx, out_cell, req_name, requirement, name_span)?;
+        }
         if let Some(filter) = filter {
             ctx.sheet
                 .add_filter(out_cell, filter)
@@ -1583,6 +1582,63 @@ impl AdamParser {
         }
         ctx.output_names.insert(name, out_cell);
 
+        Ok(())
+    }
+
+    /// `requirement_block = "{" { requirement } "}".`
+    ///
+    /// # Errors
+    /// Returns a parse error for invalid requirements or repeated explicit labels within
+    /// this declaration; unnamed requirements do not participate in duplicate detection.
+    ///
+    /// - Complexity: Expected O(n) bookkeeping for n requirements, plus compilation cost.
+    fn parse_requirement_block(
+        &mut self,
+        ctx: &mut ParseContext,
+    ) -> Result<Vec<(Option<String>, Requirement)>> {
+        ctx.expect_open_brace()?;
+        let mut requirements = Vec::new();
+        let mut names = HashSet::new();
+        while !ctx.at_close_brace() {
+            let span = ctx
+                .peek_token()
+                .ok_or_else(|| ParseError::new("unexpected end of input", Span::call_site()))?
+                .span();
+            let (name, requirement) = self.parse_requirement(ctx)?;
+            if let Some(label) = &name
+                && !names.insert(label.clone())
+            {
+                return Err(ParseError::new(
+                    format!("duplicate requirement `{label}`"),
+                    span,
+                ));
+            }
+            requirements.push((name, requirement));
+        }
+        ctx.expect_close_brace()?;
+        Ok(requirements)
+    }
+
+    /// Attaches a requirement and records its explicit label against the returned ID.
+    ///
+    /// # Errors
+    /// Returns a parse error at `span` when sheet registration fails.
+    ///
+    /// - Complexity: The cost of `Sheet::add_requirement`, plus expected O(1) map insertion.
+    fn register_requirement(
+        ctx: &mut ParseContext,
+        cell: CellId,
+        name: Option<String>,
+        requirement: Requirement,
+        span: Span,
+    ) -> Result<()> {
+        let id = ctx
+            .sheet
+            .add_requirement(cell, requirement)
+            .map_err(|e| ParseError::new(e.to_string(), span))?;
+        if let Some(name) = name {
+            ctx.requirement_names.insert(id, name);
+        }
         Ok(())
     }
 
@@ -3591,6 +3647,49 @@ mod tests {
     }
 
     #[test]
+    /// Resolves explicit labels by returned IDs while preserving unnamed checks and order.
+    fn requirement_names_are_metadata_for_explicit_labels_only() {
+        let mut parsed = parser()
+            .parse_str(
+                "sheet s {
+                    cell x: i32 = 1 require { @same x > 0i32; x > 0i32; x < 9i32; };
+                    source y: i32 = 2 require { @same y > 0i32; y > 0i32; };
+                    out z := x require { @last z < 0i32; z < 0i32; @first z > 9i32; };
+                }",
+            )
+            .unwrap();
+        let x = parsed.cell_names["x"].0;
+        let y = parsed.cell_names["y"].0;
+        let z = parsed.output_names["z"];
+        assert_eq!(parsed.requirement_names.len(), 4);
+        for cell in [x, y] {
+            let ids = parsed.cell_requirements(cell).unwrap();
+            assert_eq!(parsed.requirement_names[&ids[0]], "same");
+            assert!(!parsed.requirement_names.contains_key(&ids[1]));
+        }
+        parsed.propagate().unwrap();
+        let violated: Vec<_> = parsed.violated_requirements(z).collect();
+        assert_eq!(violated, parsed.cell_requirements(z).unwrap());
+        assert_eq!(parsed.requirement_names[&violated[0]], "last");
+        assert!(!parsed.requirement_names.contains_key(&violated[1]));
+        assert_eq!(parsed.requirement_names[&violated[2]], "first");
+    }
+
+    #[test]
+    /// Rejects repeated explicit labels locally for every declaration kind.
+    fn duplicate_requirement_labels_are_rejected_per_declaration() {
+        for declaration in [
+            "cell x: i32 = 1",
+            "source x: i32 = 1",
+            "cell y: i32 = 1; out x := y",
+        ] {
+            let source =
+                format!("sheet s {{ {declaration} require {{ @dup x > 0i32; @dup x < 9i32; }}; }}");
+            assert!(parser().parse_str(&source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
     fn parse_out_duplicate_requirement_names_is_error() {
         let result = parser().parse_str(
             r#"
@@ -3835,14 +3934,14 @@ mod tests {
     }
 
     #[test]
-    fn out_decl_structural_error_spans_the_out_name_not_the_sheet() {
+    /// Locates duplicate labels at the repeated requirement, not the sheet opening.
+    fn out_decl_duplicate_requirement_error_spans_the_duplicate_label() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
-        // Two requirements named `pos` in the same `require` block -- add_out's internal
-        // add_requirement call returns InvalidRequirement ("cell already has a same-named
-        // requirement") on its second call; the error must point at the out declaration's
-        // name (line 3, `out a: i32 := w require {`), not the sheet's opening line.
+        // The parser owns display-label validation, so it can identify the repeated label
+        // itself rather than blaming runtime registration or the sheet's opening line.
         let source = "sheet s {\n    cell w: i32 = 1;\n    out a: i32 := w require {\n        @pos a > 0;\n        @pos a > 0;\n    };\n}";
         let err = parser.parse_str(source).unwrap_err();
-        assert_eq!(err.span().start().line, 3);
+        assert_eq!(err.span().start().line, 5);
+        assert!(err.to_string().contains("duplicate requirement `pos`"));
     }
 }
