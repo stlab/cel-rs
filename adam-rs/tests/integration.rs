@@ -20,9 +20,9 @@ fn sheet_with_area_output() -> (Sheet, CellId, CellId, CellId, CellId) {
     let out = sheet
         .add_out(
             writer,
-            vec![(
-                Some("max_area"),
-                Requirement::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
+            vec![Requirement::from_fn_2(
+                [area, max_area],
+                |a: &i32, max: &i32| Ok(a <= max),
             )],
         )
         .unwrap();
@@ -1882,9 +1882,7 @@ fn add_out_succeeds_with_no_requirements() {
     let height = sheet.add_cell(0_i32);
     let area = sheet.add_cell(0_i32);
     let writer = Method::from_fn_2_1([width, height], area, |w: &i32, h: &i32| Ok(w * h));
-    let out = sheet
-        .add_out(writer, Vec::<(Option<&str>, Requirement)>::new())
-        .unwrap();
+    let out = sheet.add_out(writer, Vec::<Requirement>::new()).unwrap();
     assert_eq!(out, area);
 }
 
@@ -1901,9 +1899,9 @@ fn add_out_succeeds_with_one_requirement() {
     let out = sheet
         .add_out(
             writer,
-            vec![(
-                Some("max_area"),
-                Requirement::from_fn_2([area, max_area], |a: &i32, max: &i32| Ok(a <= max)),
+            vec![Requirement::from_fn_2(
+                [area, max_area],
+                |a: &i32, max: &i32| Ok(a <= max),
             )],
         )
         .unwrap();
@@ -1925,14 +1923,8 @@ fn add_out_succeeds_with_multiple_requirements() {
         .add_out(
             writer,
             vec![
-                (
-                    Some("max_width"),
-                    Requirement::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
-                ),
-                (
-                    Some("max_height"),
-                    Requirement::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
-                ),
+                Requirement::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
+                Requirement::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
             ],
         )
         .unwrap();
@@ -1946,7 +1938,7 @@ fn add_out_returns_invalid_output_for_writer_with_zero_outputs() {
     let writer = Method::new(vec![a], vec![], vec![TypeId::of::<i32>()], vec![], |_| {
         Ok(vec![])
     });
-    let result = sheet.add_out(writer, Vec::<(Option<&str>, Requirement)>::new());
+    let result = sheet.add_out(writer, Vec::<Requirement>::new());
     assert!(matches!(result, Err(Error::InvalidOutput)));
 }
 
@@ -1966,17 +1958,13 @@ fn add_out_returns_invalid_output_for_writer_with_two_outputs() {
             Ok(vec![Box::new(*x), Box::new(*x)])
         },
     );
-    let result = sheet.add_out(writer, Vec::<(Option<&str>, Requirement)>::new());
+    let result = sheet.add_out(writer, Vec::<Requirement>::new());
     assert!(matches!(result, Err(Error::InvalidOutput)));
 }
 
 #[test]
-fn add_out_returns_invalid_requirement_for_duplicate_requirement_names() {
-    // Under the old `add_output`, duplicate/empty requirement names were validated in a
-    // single pre-pass and reported as `Error::InvalidOutput`. `add_out` now delegates
-    // each requirement to `Sheet::add_requirement` one at a time, so this is
-    // `Error::InvalidRequirement` instead (see `add_out`'s doc comment on the
-    // resulting non-atomicity).
+/// Registers independent checks without display metadata in the runtime.
+fn add_out_accepts_multiple_requirements() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
@@ -1984,17 +1972,12 @@ fn add_out_returns_invalid_requirement_for_duplicate_requirement_names() {
     let result = sheet.add_out(
         writer,
         vec![
-            (
-                Some("check"),
-                Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)),
-            ),
-            (
-                Some("check"),
-                Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)),
-            ),
+            Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)),
+            Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)),
         ],
     );
-    assert!(matches!(result, Err(Error::InvalidRequirement)));
+    assert_eq!(result.unwrap(), b);
+    assert_eq!(sheet.cell_requirements(b).unwrap().len(), 2);
 }
 
 #[test]
@@ -2008,7 +1991,7 @@ fn add_out_returns_invalid_cell_kind_when_output_cell_already_has_a_relationship
         .unwrap();
     let c = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(c, b, |x: &i32| Ok(*x));
-    let result = sheet.add_out(writer, Vec::<(Option<&str>, Requirement)>::new());
+    let result = sheet.add_out(writer, Vec::<Requirement>::new());
     assert!(matches!(result, Err(Error::InvalidCellKind { .. })));
 }
 
@@ -2025,7 +2008,7 @@ fn add_out_succeeds_when_output_cell_was_previously_a_conditional_match_cell() {
         .unwrap();
     let a = sheet.add_cell(0_i32);
     let writer = Method::from_fn_1_1(a, mode, |x: &i32| Ok(*x));
-    let result = sheet.add_out(writer, Vec::<(Option<&str>, Requirement)>::new());
+    let result = sheet.add_out(writer, Vec::<Requirement>::new());
     assert!(result.is_ok());
     assert_eq!(sheet.cell_kind(mode), Some(CellKind::Out));
 }
@@ -2042,13 +2025,13 @@ fn add_out_succeeds_when_writer_input_is_already_an_out_cell() {
     sheet
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            Vec::<(Option<&str>, Requirement)>::new(),
+            Vec::<Requirement>::new(),
         )
         .unwrap();
     let c = sheet.add_cell(0_i32);
     let result = sheet.add_out(
         Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)),
-        Vec::<(Option<&str>, Requirement)>::new(),
+        Vec::<Requirement>::new(),
     );
     assert!(result.is_ok());
 }
@@ -2065,17 +2048,14 @@ fn add_out_succeeds_when_requirement_input_is_already_an_out_cell() {
     sheet
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            Vec::<(Option<&str>, Requirement)>::new(),
+            Vec::<Requirement>::new(),
         )
         .unwrap();
     let c = sheet.add_cell(0_i32);
     let d = sheet.add_cell(0_i32);
     let result = sheet.add_out(
         Method::from_fn_1_1(c, d, |x: &i32| Ok(*x)),
-        vec![(
-            Some("uses_b"),
-            Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0)),
-        )],
+        vec![Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0))],
     );
     assert!(result.is_ok());
 }
@@ -2087,10 +2067,7 @@ fn add_out_allows_a_requirement_to_reference_the_outputs_own_cell() {
     let b = sheet.add_cell(0_i32);
     let result = sheet.add_out(
         Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-        vec![(
-            Some("positive"),
-            Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0)),
-        )],
+        vec![Requirement::from_fn_1(b, |x: &i32| Ok(*x >= 0))],
     );
     assert!(result.is_ok());
 }
@@ -2103,7 +2080,7 @@ fn write_returns_invalid_cell_kind_for_an_output_cell() {
     sheet
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            Vec::<(Option<&str>, Requirement)>::new(),
+            Vec::<Requirement>::new(),
         )
         .unwrap();
     assert!(matches!(
@@ -2118,38 +2095,35 @@ fn cell_requirements_returns_requirement_ids_in_declaration_order() {
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     let out = sheet
-        .add_out(
-            Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            vec![
-                (
-                    Some("first"),
-                    Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)),
-                ),
-                (
-                    Some("second"),
-                    Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)),
-                ),
-            ],
-        )
+        .add_out(Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)), vec![])
         .unwrap();
-    let ids = sheet.cell_requirements(out).unwrap();
-    assert_eq!(sheet.requirement_name(ids[0]), Some("first"));
-    assert_eq!(sheet.requirement_name(ids[1]), Some("second"));
+    let first = sheet
+        .add_requirement(out, Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))
+        .unwrap();
+    let second = sheet
+        .add_requirement(out, Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)))
+        .unwrap();
+    assert_eq!(
+        sheet.cell_requirements(out),
+        Some([first, second].as_slice())
+    );
 }
 
 #[test]
-fn requirement_name_returns_none_for_a_live_unlabeled_requirement() {
+/// Preserves a check's cell and input identity without display labels.
+fn unlabeled_requirement_preserves_identity() {
     let mut sheet = Sheet::new();
     let a = sheet.add_cell(0_i32);
     let b = sheet.add_cell(0_i32);
     let out = sheet
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            vec![(None, Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)))],
+            vec![Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0))],
         )
         .unwrap();
     let id = sheet.cell_requirements(out).unwrap()[0];
-    assert_eq!(sheet.requirement_name(id), None);
+    assert_eq!(sheet.requirement_cell(id), Some(out));
+    assert_eq!(sheet.requirement_inputs(id), Some([a].as_slice()));
 }
 
 #[test]
@@ -2160,10 +2134,7 @@ fn requirement_cell_and_inputs_return_correct_values() {
     let out = sheet
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            vec![(
-                Some("check"),
-                Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0)),
-            )],
+            vec![Requirement::from_fn_1(a, |x: &i32| Ok(*x >= 0))],
         )
         .unwrap();
     let id = sheet.cell_requirements(out).unwrap()[0];
@@ -2172,10 +2143,9 @@ fn requirement_cell_and_inputs_return_correct_values() {
 }
 
 #[test]
-fn requirement_name_cell_inputs_return_none_for_invalid_id() {
+fn requirement_cell_inputs_return_none_for_invalid_id() {
     let sheet = Sheet::new();
     let id = RequirementId::default();
-    assert_eq!(sheet.requirement_name(id), None);
     assert_eq!(sheet.requirement_cell(id), None);
     assert_eq!(sheet.requirement_inputs(id), None);
 }
@@ -2213,7 +2183,7 @@ fn violated_requirements_lists_the_failing_requirement() {
     sheet.propagate().unwrap();
     let violated: Vec<_> = sheet.violated_requirements(out).collect();
     assert_eq!(violated.len(), 1);
-    assert_eq!(sheet.requirement_name(violated[0]), Some("max_area"));
+    assert_eq!(violated, sheet.cell_requirements(out).unwrap());
 }
 
 #[test]
@@ -2231,14 +2201,8 @@ fn violated_requirements_returns_only_the_failing_subset_of_multiple_requirement
         .add_out(
             writer,
             vec![
-                (
-                    Some("max_width"),
-                    Requirement::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
-                ),
-                (
-                    Some("max_height"),
-                    Requirement::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
-                ),
+                Requirement::from_fn_2([width, max_width], |w: &i32, max: &i32| Ok(w <= max)),
+                Requirement::from_fn_2([height, max_height], |h: &i32, max: &i32| Ok(h <= max)),
             ],
         )
         .unwrap();
@@ -2251,7 +2215,7 @@ fn violated_requirements_returns_only_the_failing_subset_of_multiple_requirement
     assert!(!sheet.cell_requirements_valid(out));
     let violated: Vec<_> = sheet.violated_requirements(out).collect();
     assert_eq!(violated.len(), 1);
-    assert_eq!(sheet.requirement_name(violated[0]), Some("max_height"));
+    assert_eq!(violated, [sheet.cell_requirements(out).unwrap()[1]]);
 }
 
 #[test]
@@ -2275,10 +2239,9 @@ fn requirement_function_error_aborts_propagate_with_method_failed() {
     sheet
         .add_out(
             Method::from_fn_1_1(a, b, |x: &i32| Ok(*x)),
-            vec![(
-                Some("always_errors"),
-                Requirement::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("check failed"))),
-            )],
+            vec![Requirement::from_fn_1(a, |_: &i32| {
+                Err(anyhow::anyhow!("check failed"))
+            })],
         )
         .unwrap();
     assert!(matches!(sheet.propagate(), Err(Error::MethodFailed { .. })));
@@ -2524,19 +2487,13 @@ fn requirement_relevant_cells_unions_across_multiple_out_cells() {
     sheet
         .add_out(
             Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)),
-            vec![(
-                Some("always_true"),
-                Requirement::from_fn_1(out_a, |_: &i32| Ok(true)),
-            )],
+            vec![Requirement::from_fn_1(out_a, |_: &i32| Ok(true))],
         )
         .unwrap();
     sheet
         .add_out(
             Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)),
-            vec![(
-                Some("always_true"),
-                Requirement::from_fn_1(out_b, |_: &i32| Ok(true)),
-            )],
+            vec![Requirement::from_fn_1(out_b, |_: &i32| Ok(true))],
         )
         .unwrap();
     sheet.propagate().unwrap();
@@ -2566,10 +2523,7 @@ fn requirement_relevant_cells_updates_when_a_different_relationship_becomes_acti
     sheet
         .add_out(
             Method::from_fn_1_1(b, c, |x: &i32| Ok(*x)),
-            vec![(
-                Some("always_true"),
-                Requirement::from_fn_1(c, |_: &i32| Ok(true)),
-            )],
+            vec![Requirement::from_fn_1(c, |_: &i32| Ok(true))],
         )
         .unwrap();
 
@@ -2623,19 +2577,17 @@ fn requirement_violation_cells_unions_across_multiple_violated_requirements() {
     sheet
         .add_out(
             Method::from_fn_1_1(a, out_a, |x: &i32| Ok(*x)),
-            vec![(
-                Some("max_a"),
-                Requirement::from_fn_2([a, max_a], |v: &i32, max: &i32| Ok(v <= max)),
-            )],
+            vec![Requirement::from_fn_2([a, max_a], |v: &i32, max: &i32| {
+                Ok(v <= max)
+            })],
         )
         .unwrap();
     sheet
         .add_out(
             Method::from_fn_1_1(b, out_b, |x: &i32| Ok(*x)),
-            vec![(
-                Some("max_b"),
-                Requirement::from_fn_2([b, max_b], |v: &i32, max: &i32| Ok(v <= max)),
-            )],
+            vec![Requirement::from_fn_2([b, max_b], |v: &i32, max: &i32| {
+                Ok(v <= max)
+            })],
         )
         .unwrap();
 

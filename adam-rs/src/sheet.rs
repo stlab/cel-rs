@@ -595,7 +595,7 @@ impl Sheet {
             .any(|rel| rel.methods.iter().any(|m| m.outputs.contains(&id)))
     }
 
-    /// Attaches a named requirement to `cell`. `requirement.inputs` may be any cells in
+    /// Attaches a requirement to `cell` and returns its stable ID. `requirement.inputs` may be any cells in
     /// the sheet, not only `cell` itself. For a `Cell`/`Source` kind `cell`, also
     /// evaluates `requirement` immediately against current effective values — its
     /// value is already authoritative. Skipped for an `Out`-kind `cell`: its value
@@ -609,30 +609,33 @@ impl Sheet {
     ///   live cell in this sheet.
     /// - `Error::TypeMismatch` — an input's declared type does not match its cell's
     ///   registered type.
-    /// - `Error::InvalidRequirement` — `name` is `Some` and `cell` already has a
-    ///   requirement with that same name, or (`Cell`/`Source` kind only) evaluating
+    /// - `Error::InvalidRequirement` — the input signature is invalid, or
+    ///   (`Cell`/`Source` kind only) evaluating
     ///   `requirement` against the referenced cells' current effective values
     ///   returns `Ok(false)`.
     /// - `Error::MethodFailed` — (`Cell`/`Source` kind only) evaluating `requirement`
     ///   against current values returns `Err`.
     ///
-    /// - Complexity: O(k) where k is `requirement`'s input count, plus O(A) when
-    ///   invalidation releases the final owners of prepared artifacts of total size A.
+    /// - Complexity: O(k) where k is `requirement`'s input count, plus predicate evaluation
+    ///   for a `Cell`/`Source`, plus O(A) when invalidation releases the final owners of
+    ///   prepared artifacts of total size A.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use adam_rs::{Requirement, Sheet};
+    /// let mut sheet = Sheet::new();
+    /// let cell = sheet.add_cell(1_i32);
+    /// let id = sheet.add_requirement(cell, Requirement::from_fn_1(cell, |x: &i32| Ok(*x > 0)))?;
+    /// assert_eq!(sheet.cell_requirements(cell), Some([id].as_slice()));
+    /// # Ok::<(), adam_rs::Error>(())
+    /// ```
     pub fn add_requirement(
         &mut self,
         cell: CellId,
-        name: Option<&str>,
         requirement: Requirement,
     ) -> Result<RequirementId, Error> {
-        let cell_data = self.cells.get(cell).ok_or(Error::InvalidId)?;
-        if let Some(name) = name
-            && cell_data
-                .requirements
-                .iter()
-                .any(|&rid| self.requirements[rid].name.as_deref() == Some(name))
-        {
-            return Err(Error::InvalidRequirement);
-        }
+        self.cells.get(cell).ok_or(Error::InvalidId)?;
         if requirement.inputs.len() != requirement.input_types.len() {
             return Err(Error::InvalidRequirement);
         }
@@ -668,7 +671,6 @@ impl Sheet {
 
         self.invalidate_prepared_plans();
         let rid = self.requirements.insert(RequirementData {
-            name: name.map(str::to_string),
             cell,
             inputs: requirement.inputs,
             function: requirement.function,
@@ -695,14 +697,32 @@ impl Sheet {
     ///   registered as its producer, and every requirement before the failing one is
     ///   already attached; none of this is rolled back on error.
     ///
-    /// - Complexity: O(k + m²×c) where k is the number of requirements, plus the
+    /// - Complexity: O(k + i + m²×c) where k is the number of requirements and i is
+    ///   their total input count, plus the
     ///   cost of `add_relationship` for `writer` alone (m = 1 method, c = cells in
     ///   that method), plus O(A) when invalidation releases the final owners of
     ///   prepared artifacts of total size A.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use adam_rs::{Method, Requirement, Sheet};
+    /// let mut sheet = Sheet::new();
+    /// let input = sheet.add_cell(1_i32);
+    /// let output = sheet.add_cell(0_i32);
+    /// let id = sheet.add_out(
+    ///     Method::from_fn_1_1(input, output, |x: &i32| Ok(*x)),
+    ///     vec![Requirement::from_fn_1(output, |x: &i32| Ok(*x > 0))],
+    /// )?;
+    /// assert_eq!(id, output);
+    /// sheet.propagate()?;
+    /// assert!(sheet.cell_requirements_valid(output));
+    /// # Ok::<(), adam_rs::Error>(())
+    /// ```
     pub fn add_out(
         &mut self,
         writer: Method,
-        requirements: Vec<(Option<&str>, Requirement)>,
+        requirements: Vec<Requirement>,
     ) -> Result<CellId, Error> {
         if writer.outputs.len() != 1 {
             return Err(Error::InvalidOutput);
@@ -717,8 +737,8 @@ impl Sheet {
         self.add_relationship(vec![writer])?;
         self.cells[out_cell].kind = CellKind::Out;
 
-        for (name, requirement) in requirements {
-            self.add_requirement(out_cell, name, requirement)?;
+        for requirement in requirements {
+            self.add_requirement(out_cell, requirement)?;
         }
 
         Ok(out_cell)
@@ -880,13 +900,6 @@ impl Sheet {
     /// Returns `None` if `id` is not a live cell in this sheet.
     pub fn cell_requirements(&self, id: CellId) -> Option<&[RequirementId]> {
         self.cells.get(id).map(|c| c.requirements.as_slice())
-    }
-
-    /// Returns the name of requirement `id`.
-    ///
-    /// Returns `None` if `id` is not a live requirement in this sheet.
-    pub fn requirement_name(&self, id: RequirementId) -> Option<&str> {
-        self.requirements.get(id)?.name.as_deref()
     }
 
     /// Returns the cell requirement `id` is attached to.
@@ -4234,31 +4247,22 @@ mod tests {
     fn add_requirement_succeeds_on_a_plain_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
-        let result = sheet.add_requirement(
-            a,
-            Some("positive"),
-            Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
-        );
+        let result = sheet.add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)));
         assert!(result.is_ok());
     }
 
     #[test]
-    fn add_requirement_returns_invalid_requirement_for_duplicate_name_on_same_cell() {
+    /// Attaches each check independently and returns IDs in registration order.
+    fn add_requirement_returns_distinct_ids_on_same_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
-        sheet
-            .add_requirement(
-                a,
-                Some("positive"),
-                Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
-            )
+        let first = sheet
+            .add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)))
             .unwrap();
-        let result = sheet.add_requirement(
-            a,
-            Some("positive"),
-            Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)),
-        );
-        assert!(matches!(result, Err(Error::InvalidRequirement)));
+        let result = sheet.add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)));
+        let second = result.unwrap();
+        assert_ne!(first, second);
+        assert_eq!(sheet.cell_requirements(a), Some([first, second].as_slice()));
     }
 
     #[test]
@@ -4266,10 +4270,9 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
         sheet
-            .add_requirement(a, None, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)))
+            .add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)))
             .unwrap();
-        let result =
-            sheet.add_requirement(a, None, Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)));
+        let result = sheet.add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x < 100)));
         assert!(result.is_ok());
     }
 
@@ -4277,11 +4280,7 @@ mod tests {
     fn add_requirement_hard_fails_when_current_value_already_violates_it_on_a_plain_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(-5_i32);
-        let result = sheet.add_requirement(
-            a,
-            Some("positive"),
-            Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
-        );
+        let result = sheet.add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)));
         assert!(matches!(result, Err(Error::InvalidRequirement)));
     }
 
@@ -4289,11 +4288,7 @@ mod tests {
     fn add_requirement_hard_fails_when_current_value_already_violates_it_on_a_source_cell() {
         let mut sheet = Sheet::new();
         let a = sheet.add_source(-5_i32);
-        let result = sheet.add_requirement(
-            a,
-            Some("positive"),
-            Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
-        );
+        let result = sheet.add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)));
         assert!(matches!(result, Err(Error::InvalidRequirement)));
     }
 
@@ -4303,7 +4298,6 @@ mod tests {
         let a = sheet.add_cell(5_i32);
         let result = sheet.add_requirement(
             a,
-            Some("always_errors"),
             Requirement::from_fn_1(a, |_: &i32| Err(anyhow::anyhow!("boom"))),
         );
         assert!(matches!(result, Err(Error::MethodFailed { .. })));
@@ -4314,11 +4308,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
         let rid = sheet
-            .add_requirement(
-                a,
-                Some("positive"),
-                Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
-            )
+            .add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)))
             .unwrap();
         assert_eq!(sheet.cells[a].requirements, vec![rid]);
     }
@@ -4428,10 +4418,7 @@ mod tests {
         let area_cell = sheet
             .add_out(
                 Method::from_fn_1_1(width, area, |w: &i32| Ok(*w)),
-                vec![(
-                    Some("too_small"),
-                    Requirement::from_fn_1(area, |a: &i32| Ok(*a > 100)),
-                )],
+                vec![Requirement::from_fn_1(area, |a: &i32| Ok(*a > 100))],
             )
             .unwrap();
         sheet.propagate().unwrap();
@@ -4468,11 +4455,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(5_i32);
         sheet
-            .add_requirement(
-                a,
-                Some("positive"),
-                Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)),
-            )
+            .add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 0)))
             .unwrap();
         sheet.propagate().unwrap();
         assert!(sheet.requirement_relevant_cells().contains(&a));
@@ -4488,11 +4471,7 @@ mod tests {
         let mut sheet = Sheet::new();
         let a = sheet.add_cell(200_i32);
         sheet
-            .add_requirement(
-                a,
-                Some("too_big"),
-                Requirement::from_fn_1(a, |x: &i32| Ok(*x > 100)),
-            )
+            .add_requirement(a, Requirement::from_fn_1(a, |x: &i32| Ok(*x > 100)))
             .unwrap();
         sheet.write(a, 5_i32).unwrap();
         sheet.propagate().unwrap();

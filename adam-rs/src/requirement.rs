@@ -1,4 +1,4 @@
-//! Named boolean checks attached to a cell.
+//! Boolean checks attached to a cell, identified by stable handles.
 //!
 //! Each [`Requirement`] is a pure predicate over some set of cells whose result after
 //! `Sheet::propagate` describes whether a cell's preconditions currently hold. A
@@ -19,7 +19,7 @@ new_key_type! {
 /// Type-erased predicate stored inside a [`Requirement`].
 type RequirementFn = Box<dyn Fn(&[&dyn Any]) -> Result<bool, anyhow::Error>>;
 
-/// A single named boolean check over some set of cells, attached to a cell.
+/// A single boolean check over some set of cells, attached to a cell.
 ///
 /// Its predicate must be a pure, deterministic function of its input values and
 /// immutable captured constants, with no externally observable side effects.
@@ -102,7 +102,6 @@ impl Requirement {
 
 /// Internal storage for a single requirement.
 pub(crate) struct RequirementData {
-    pub(crate) name: Option<String>,
     pub(crate) cell: CellId,
     pub(crate) inputs: Vec<CellId>,
     pub(crate) function: RequirementFn,
