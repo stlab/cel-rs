@@ -1,0 +1,132 @@
+repository:
+  repo_type: code
+ignore:
+- '**/target/'
+- '**/node_modules/'
+- '**/Cargo.lock'
+- '**/package-lock.json'
+- .claude/worktrees/
+- .vscode/
+- .idea/
+- begin/assets/swc.js
+- ez-adam/assets/swc.js
+dampen:
+- factor: 0.6
+  patterns:
+  - '**/tests/'
+  - '**/*.test.ts'
+  - '**/*.spec.ts'
+- factor: 0.5
+  patterns:
+  - '**/examples/'
+- factor: 0.7
+  patterns:
+  - docs/
+  - '**/*.md'
+- factor: 0.4
+  patterns:
+  - .github/
+  - .cargo/
+  - .claude/skills/
+  - .cursor/
+- factor: 0.3
+  patterns:
+  - '**/fixtures/'
+  - '**/mocks/'
+boost:
+- factor: 1.3
+  patterns:
+  - cel-runtime/src/
+  - cel-parser/src/
+  - adam-rs/src/
+  - adam-lang/src/
+- factor: 1.2
+  patterns:
+  - cel-std/src/
+  - adam-lsp/src/
+  - adam-web-ui/src/
+  - editors/vscode-adam-lang/src/
+tune:
+  rerank_scale: 0.0
+  rerank_weight_nl: 0.7
+  rerank_weight_ident: 0.5
+  rerank_weight_filtered: 0.4
+  rerank_candidates_nl: 20
+  rerank_candidates_ident: 15
+  rerank_confidence_threshold: 0.4
+  rerank_floor: 0.45
+  rerank_evidence_budget_nl: 500
+  rerank_evidence_budget_ident: 250
+  reranker_veto: true
+  reranker_veto_logit: -4.0
+  rrf_semantic_weight_nl: 1.2
+  rrf_bm25_weight_nl: 0.8
+  rrf_semantic_weight_salient: 1.8
+  rrf_bm25_weight_salient: 0.5
+  rrf_semantic_weight_ident: 0.7
+  rrf_bm25_weight_ident: 1.3
+  prf_top_k: 10
+  prf_confidence_threshold: 0.6
+  bm25_seed_expansion_min_agreement: 3
+  bm25_seed_expansion_min_strong_hits: 0
+  bm25_seed_expansion_strong_score: 0.5
+  semantic_lane_max_chunks_per_file: 8
+  bm25_legacy_mode: false
+  recency_weight_nl: 0.1
+  recency_weight_ident: 0.05
+  recency_midpoint_days: 30.0
+  coderank_weight_nl: 0.2
+  coderank_weight_ident: 0.1
+  coderank_midpoint: 0.3
+  symbol_popularity_weight_nl: 0.15
+  symbol_popularity_weight_ident: 0.15
+  symbol_popularity_midpoint: 0.3
+  learned_ranker_model_path: bundled:v27
+  learned_ranker_blend: 1.0
+  learned_ranker_blend_per_class:
+    filtered: 0.0
+    natural_language: 0.5
+  learned_ranker_calibrated_blend: true
+  learned_ranker_requires_rerank: false
+  learned_ranker_max_query_terms: 150
+  learned_ranker_entry_blend: 0.0
+  evidence_ranker_model_path: bundled:v3
+  evidence_ranker_mode: reorder
+  evidence_ranker_candidate_enabled: false
+  capsule_lane_weight: 1.0
+  capsule_identifier_dampen: 0.85
+  search_plan_router: true
+  search_plan_router_mode: deterministic_prf_only
+  keyword_definition_survives_cap: true
+  keyword_definition_boost: 0.0
+  keyword_definition_inject: true
+  keyword_cut_tau: 0.3
+  keyword_cut_min_keep: 3
+  keyword_cut_model_path: bundled:ks-cut-v4
+  keyword_cut_granularity: file
+  keyword_cut_graph_context: false
+  adapter_model_path: bundled:adapter-v3
+  adapter_pool_weight: 0.0
+  query_role_pool_weight: 0.0
+  directory_prf_mode: off
+  directory_prf_top_anchors: 8
+  directory_prf_max_directories: 3
+  directory_prf_max_supplemental_candidates: 12
+  directory_prf_min_supporting_files: 2
+  graph_prf_mode: off
+  graph_prf_top_anchors: 8
+  graph_prf_max_neighbors_per_anchor: 20
+  graph_prf_max_files: 12
+  graph_prf_max_supplemental_candidates: 12
+  file_hydration_mode: treatment
+  file_hydration_max_files: 12
+  file_hydration_adjacent_window: 20
+  file_hydration_max_adjacent_per_file: 2
+  file_hydration_max_entries: 24
+  file_hydration_sibling_files: 0
+  file_hydration_sibling_chunks_per_file: 2
+  file_hydration_render_slots: 12
+  file_hydration_lexical_per_file: 0
+  file_hydration_head_per_file: 0
+  file_hydration_head_lines: 120
+  response_selector_mode: shadow
