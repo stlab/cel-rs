@@ -97,6 +97,12 @@
 - Locked `npm ci`, all 12 Node tests, the authored deck build, and all 28
   Chromium tests passed. The shared inspector WASM was rebuilt for the
   number-field sizing change.
+- The shared field change was also rendered in begin's web build. All four
+  upgraded numeric fields filled their 236px inspector parents; their inputs
+  had equal client and scroll widths, and the screenshot showed no clipping.
+  The owned verification server was stopped.
+- With user approval, shared Task Manager favorites now use the main checkout's
+  `cel-rs` scope for the slides task and omit the user-local worktree task.
 - Talos identified a preview consistency gap: staging directly into published
   output replaced the merged manifest before source validation. Assets now stage
   privately through xtask's optional destination; invalid directives, unknown
