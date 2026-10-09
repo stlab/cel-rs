@@ -1,6 +1,6 @@
 # Adam Slides Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Build and publish a static Marp presentation with nine live Adam tutorial examples.
 
@@ -70,25 +70,25 @@ consumes the complete build and browser tests.
 - Adds: `prepare_live_slides_assets() -> Result<(), Box<dyn std::error::Error>>`, staging to `adam-slides\dist\theme`.
 - CLI: `cargo run -p xtask -- prepare-live-slides-assets`.
 
-- [ ] **Step 1: Write failing contract tests.**
+- [x] **Step 1: Write failing contract tests.**
   Create uniquely named temporary fixtures with canonical example directories,
   `begin\assets`, and a fake `adam-lang-book-live\pkg` tree. Assert that staging
   writes the manifest, copies the five existing assets, and preserves nested
   `snippets` and binary WebAssembly bytes. Assert that `NO_LIVE_MOUNT` entries
   remain excluded. Assert missing source, vendored asset, or pkg returns `Err`,
   including when destination files already exist. Clean only the owned fixture.
-- [ ] **Step 2: Run `cargo test -p xtask live_book_assets`.**
+- [x] **Step 2: Run `cargo test -p xtask live_book_assets`.**
   Expected: failure because the shared entry point does not exist.
-- [ ] **Step 3: Extract shared staging and add the slides wrapper.**
+- [x] **Step 3: Extract shared staging and add the slides wrapper.**
   Preserve the book's default destination and manifest behavior. Check required
   source assets and pkg existence before writing output, propagate I/O failures,
   and document the shared helper's errors and complexity.
-- [ ] **Step 4: Register the new command and update usage text.**
+- [x] **Step 4: Register the new command and update usage text.**
   Follow the existing stderr reporting and nonzero exit pattern. Do not introduce
   arbitrary destination configuration or alter other command dispatch.
-- [ ] **Step 5: Run `cargo test -p xtask` and `cargo clippy -p xtask --all-targets -- -D warnings`.**
+- [x] **Step 5: Run `cargo test -p xtask` and `cargo clippy -p xtask --all-targets -- -D warnings`.**
   Expected: all staging contract tests pass; no warnings.
-- [ ] **Step 6: Format and commit the staging changes.**
+- [x] **Step 6: Format and commit the staging changes.**
   Commit message: `Share live example asset staging with Adam slides`.
 
 ## Task 2: Generate the Nine Canonical Slides
@@ -102,7 +102,7 @@ consumes the complete build and browser tests.
 - Rendered frame: `example.html?example=tutorial%2Ffirst_sheet&graph=1`; non-graph slides use `graph=0`.
 - Every frame has `title`, `data-example`, and eager loading; source occupies a fenced Adam code block.
 
-- [ ] **Step 1: Create the package and failing generator tests.**
+- [x] **Step 1: Create the package and failing generator tests.**
   Pin `@marp-team/marp-cli` to `4.5.1` and `@playwright/test` to `1.64.0`
   as development dependencies; set `engines.node` to `>=22`.
   Use `npm install` only after writing the manifest, and commit its generated
@@ -117,24 +117,24 @@ consumes the complete build and browser tests.
   unknown, malformed, and traversal-like deck references fail explicitly.
   Assert canonical source survives rendering, including HTML-like text and
   Markdown backticks, without becoming executable markup or breaking its fence.
-- [ ] **Step 2: Run `npm test` from `adam-slides`.**
+- [x] **Step 2: Run `npm test` from `adam-slides`.**
   Expected: generator tests fail because their imported module is missing.
-- [ ] **Step 3: Implement the two generator interfaces in `deck.mjs`.**
+- [x] **Step 3: Implement the two generator interfaces in `deck.mjs`.**
   Strip HTML comments when collecting active tutorial examples; parse only
   the documented include and graph syntax. Validate keys against
   `^tutorial/[a-z][a-z0-9_]*$` and exact tutorial membership before reading files.
   Escape frame attributes and choose code fences longer than source backtick runs.
   Never interpolate Adam source into raw HTML.
-- [ ] **Step 4: Author the nine slides and presentation theme.**
+- [x] **Step 4: Author the nine slides and presentation theme.**
   Use the spec's exact titles and graph presence. Include one directive on each
   slide, a short prompt, widescreen sizing, and bounded source/live panes.
   Declare `/* @theme adam-slides */` in `slides.css` and select `theme: adam-slides`
   in the Markdown front matter.
   Keep full source available by scrolling; avoid external fonts or images.
-- [ ] **Step 5: Run `npm test`.**
+- [x] **Step 5: Run `npm test`.**
   Expected: all generator tests pass with nine canonical references and no
   commented-out examples.
-- [ ] **Step 6: Format and commit the generator and deck.**
+- [x] **Step 6: Format and commit the generator and deck.**
   Commit message: `Add canonical Adam tutorial Marp slides`.
 
 ## Task 3: Build and Verify Live Static Examples
@@ -150,7 +150,7 @@ consumes the complete build and browser tests.
 - `npm run build`: `node build.mjs && marp dist/slides.md --html --theme-set slides.css --output dist/index.html`.
 - `npm run test:browser`: `playwright test`.
 
-- [ ] **Step 1: Write failing runtime and build tests.**
+- [x] **Step 1: Write failing runtime and build tests.**
   Assert selector validation rejects missing, duplicate, traversal, and invalid
   graph parameters. Assert asset URLs retain `/project/docs/adam-slides/`.
   Simulate unknown manifest entries, manifest HTTP 404, module/script rejection,
@@ -158,9 +158,9 @@ consumes the complete build and browser tests.
   Assert graph dependencies finish before `mount` and no graph loader runs when
   graph is false. Assert staging subprocess failures reject the build even when
   stale output exists; never run Marp following a failed preparation.
-- [ ] **Step 2: Run `npm test`.**
+- [x] **Step 2: Run `npm test`.**
   Expected: new tests fail due to missing runtime/build interfaces.
-- [ ] **Step 3: Implement the host and runtime.**
+- [x] **Step 3: Implement the host and runtime.**
   Import `example.mjs` as a module; use URLs based on the host's document URL.
   Check HTTP success before JSON parsing and check own manifest membership.
   Load Spectrum and the existing module, initialize WebAssembly, and call
@@ -170,17 +170,17 @@ consumes the complete build and browser tests.
   Keep this error boundary narrowly around startup; display and log failures.
   Mount each eager iframe only once; do not add slide-driven reloads.
   Reuse graph.js's existing ResizeObserver behavior rather than replacing it.
-- [ ] **Step 4: Implement static build preparation.**
+- [x] **Step 4: Implement static build preparation.**
   Use native path joins for files, not URL path joins. Generate `dist/slides.md`,
   copy the host/runtime/theme files, and use Task 1 for `dist/theme`.
   Preserve subprocess stderr and nonzero exit status. Validate required outputs,
   including the manifest and WebAssembly module, before declaring build readiness.
   Add the exact build and browser scripts from this task's Interfaces.
-- [ ] **Step 5: Run `npm test` and build the real static output.**
+- [x] **Step 5: Run `npm test` and build the real static output.**
   From the repository root run `wasm-pack build --target web --release .\adam-lang-book-live`.
   From `adam-slides` run `npm run build`.
   Expected: tests pass; `dist/index.html` and all host/runtime assets exist.
-- [ ] **Step 6: Write browser acceptance tests and their static test server.**
+- [x] **Step 6: Write browser acceptance tests and their static test server.**
   Serve output beneath `/project/docs/adam-slides/`, with correct HTML, JS, JSON,
   and WebAssembly MIME types. Resolve requested files inside `dist`, reject
   traversal, and return real 404s. Make Playwright manage the server lifecycle.
@@ -203,12 +203,12 @@ consumes the complete build and browser tests.
   diagnostics, and unclipped graphs.
   Fail on unexpected browser errors or off-origin runtime requests.
   Intercept a runtime asset with HTTP 404 and assert the visible startup alert.
-- [ ] **Step 7: Run browser and existing tutorial tests.**
+- [x] **Step 7: Run browser and existing tutorial tests.**
   After manifest changes, install the browser with `npx playwright install chromium`
   (CI uses `--with-deps`). Run `npm run test:browser` and
   `cargo test -p adam-lang-book --test tutorial`.
   Expected: all interaction checks pass and the existing examples remain valid.
-- [ ] **Step 8: Format and commit the live deck build.**
+- [x] **Step 8: Format and commit the live deck build.**
   Commit message: `Build and verify live static Adam presentation`.
 
 ## Task 4: Publish Through the Existing Pages Build
@@ -219,31 +219,31 @@ consumes the complete build and browser tests.
 - Consumes: `npm ci`, `npm test`, `npm run build`, and `npm run test:browser` in `adam-slides`.
 - Produces: the existing Pages artifact with an `adam-slides/` static subtree.
 
-- [ ] **Step 1: Verify a clean dependency restore and build.**
+- [x] **Step 1: Verify a clean dependency restore and build.**
   Run `npm ci`, `npm test`, and `npm run build` in `adam-slides`.
   Expected: lockfile restore succeeds and the build does not depend on book-dist.
-- [ ] **Step 2: Add slides build and browser verification to the Docs build job.**
+- [x] **Step 2: Add slides build and browser verification to the Docs build job.**
   Set up Node 22 using the repository's current action/pinning conventions.
   Run npm commands with `working-directory: adam-slides` after the existing
   WebAssembly build. Install Chromium and run browser checks before upload.
   Copy `adam-slides/dist/.` into `target/doc/adam-slides/` with no extra nested
   `dist` directory. Preserve all existing doc builds, deployment gates, and permissions.
-- [ ] **Step 3: Document reproducible build, local preview, and deployment.**
+- [x] **Step 3: Document reproducible build, local preview, and deployment.**
   Include Node 22, wasm-pack, wasm32 target, and Rust prerequisites; exact Windows
   commands for wasm-pack and npm; browser installation; and optional HTTP preview.
   State that the generated directory can be hosted at any nested static path and
   that only HTML retains interactivity.
-- [ ] **Step 4: Verify the artifact-shaped directory.**
+- [x] **Step 4: Verify the artifact-shaped directory.**
   Serve a temporary staging directory with the slides nested under the intended
   Pages path and reuse the browser suite. Expected: all static URLs resolve and
   no book, rustdoc, or Internet service is required by the slides.
-- [ ] **Step 5: Run final focused checks and review.**
+- [x] **Step 5: Run final focused checks and review.**
   Run `npm test`, `npm run test:browser`, `cargo test -p xtask`,
   `cargo test -p adam-lang-book --test tutorial`, and
   `cargo clippy -p xtask --all-targets -- -D warnings`.
   Review the branch using the selected execution method's review workflow.
   Fix in-scope findings before claiming completion. Do not open a PR without
   separately running the repository's full required pre-PR suite.
-- [ ] **Step 6: Write the handoff, format, and commit publishing changes.**
+- [x] **Step 6: Write the handoff, format, and commit publishing changes.**
   Record delivered behavior, verification, and any explicit blockers or deferred
   issues. Commit message: `Publish live Adam slides with the documentation site`.

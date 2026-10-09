@@ -82,6 +82,27 @@ test("WebAssembly initialization rejection displays an alert", async ({ page }) 
   await expect(page.getByRole("alert")).toContainText("Wasm initialization failed");
 });
 
+for (const [name, file, graph, body] of [
+  ["Spectrum", "swc.js", false, 'throw new Error("Spectrum execution failed");'],
+  ["D3", "d3.v7.min.js", true, 'throw new Error("D3 execution failed");'],
+  ["graph driver", "graph.js", true, 'throw new Error("Graph execution failed");'],
+  ["Spectrum registration", "swc.js", false, ""],
+]) {
+  /** Catches successfully fetched dependencies that cannot actually execute or register. */
+  test(`${name} execution or registration failure displays an alert`, async ({ page }) => {
+    await page.route(`**/${file}`, (route) => route.fulfill({ contentType: "text/javascript", body }));
+    await page.goto(host("first_sheet", graph));
+    await expect(page.getByRole("alert")).toContainText(/failed|missing|registered/i, { timeout: 2000 });
+  });
+}
+
+/** Catches a missing bootstrap script preventing its own error boundary from running. */
+test("host bootstrap load failure displays an alert", async ({ page }) => {
+  await page.route("**/example.mjs", (route) => route.fulfill({ status: 404, body: "Missing bootstrap" }));
+  await page.goto(host());
+  await expect(page.getByRole("alert")).toContainText(/failed|fetch|load/i, { timeout: 2000 });
+});
+
 /** Catches graph dependencies loading after the sheet's first graph effect. */
 test("graph dependencies finish loading before mount", async ({ page }) => {
   await page.route("**/adam_lang_book_live.js", (route) => route.fulfill({

@@ -34,24 +34,6 @@ export function exampleAssetUrls(base) {
 }
 
 /**
- * Loads a classic or module dependency and rejects failed script loads.
- * Complexity: O(n) in loaded script bytes.
- * @param {URL} url
- * @param {boolean} module
- * @returns {Promise<void>}
- */
-function loadScript(url, module = false) {
-  return new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    if (module) script.type = "module";
-    script.src = url.href;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`Failed to load ${url.href}`));
-    document.head.append(script);
-  });
-}
-
-/**
  * Loads dependencies and mounts one sheet with its optional shared-state graph.
  * Rejects HTTP, dependency, initialization, or unknown-source failures.
  * Precondition: the host contains inspector and graph containers.
@@ -67,14 +49,25 @@ export async function loadExample(options, urls) {
       if (!response.ok) throw new Error(`Failed to fetch examples: HTTP ${response.status}`);
       return response.json();
     }),
-    loadScript(urls.spectrum, true),
+    import(urls.spectrum.href),
   ];
   if (options.graph) {
     document.getElementById("graph").hidden = false;
     document.body.classList.add("with-graph");
-    loaders.push(loadScript(urls.d3), loadScript(urls.graph));
+    loaders.push(import(urls.d3.href), import(urls.graph.href));
   }
   const [runtime, manifest] = await Promise.all(loaders);
+  for (const name of ["sp-theme", "sp-number-field", "sp-slider", "sp-checkbox"]) {
+    if (!customElements.get(name)) throw new Error(`Required Spectrum element is not registered: ${name}`);
+  }
+  if (options.graph && (
+    typeof window.d3?.select !== "function"
+    || typeof window.d3?.forceSimulation !== "function"
+    || typeof window.beginGraph?.init !== "function"
+    || typeof window.beginGraph?.update !== "function"
+  )) {
+    throw new Error("Missing D3 or graph driver capabilities");
+  }
   if (!Object.hasOwn(manifest, options.key) || typeof manifest[options.key] !== "string") {
     throw new Error(`Unknown example source: ${options.key}`);
   }
@@ -83,13 +76,6 @@ export async function loadExample(options, urls) {
 }
 
 if (typeof document !== "undefined") {
-  const status = document.getElementById("status");
-  try {
-    await loadExample(parseExampleOptions(new URL(document.URL)), exampleAssetUrls(new URL(document.URL)));
-    status.remove();
-  } catch (error) {
-    status.setAttribute("role", "alert");
-    status.textContent = `Unable to load this example: ${error.message}`;
-    console.error("adam-slides startup failed", error);
-  }
+  await loadExample(parseExampleOptions(new URL(document.URL)), exampleAssetUrls(new URL(document.URL)));
+  document.getElementById("status").remove();
 }

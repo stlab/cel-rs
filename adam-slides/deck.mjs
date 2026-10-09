@@ -2,15 +2,20 @@
 
 /**
  * Returns active tutorial examples in include order with their graph presence.
- * Throws for duplicate examples or graphs without an included example.
+ * Throws for unsupported include references, duplicate examples, or unbound graphs.
  * Complexity: O(n) in Markdown length.
  * @param {string} markdown
  * @returns {Example[]}
  */
 export function tutorialExamples(markdown) {
   const active = markdown.replace(/<!--[\s\S]*?-->/g, "");
-  const examples = [...active.matchAll(/\{\{#include examples\/(tutorial\/[a-z][a-z0-9_]*)\.adm2\}\}/g)]
-    .map((match) => ({ key: match[1], graph: false }));
+  const examples = [];
+  for (const match of active.matchAll(/\{\{#include\s+([^}]+)\}\}/g)) {
+    const reference = match[1].trim();
+    const key = /^examples\/(tutorial\/[a-z][a-z0-9_]*)\.adm2$/.exec(reference)?.[1];
+    if (!key) throw new Error(`Unsupported tutorial include reference: ${reference}`);
+    examples.push({ key, graph: false });
+  }
   const byKey = new Map(examples.map((example) => [example.key, example]));
   if (byKey.size !== examples.length) throw new Error("Duplicate tutorial example");
   for (const match of active.matchAll(/<graph\s+sheet="([^"]+)"\s*>/g)) {

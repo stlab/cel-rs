@@ -58,7 +58,8 @@ npm run test:browser
 
 Browser tests cover all nine mounts, canonical source, value edits, graph
 direction, conditional activation, forced values, diagnostics, input isolation,
-preserved state, resizing, and visible startup failures. They also capture slide
+preserved state, resizing, and visible startup failures, including a missing
+bootstrap and dependencies that load but cannot execute or register. They also capture slide
 screenshots under the ignored `test-results` directory.
 
 Click the slide title or another area outside the live frame before using Marp's

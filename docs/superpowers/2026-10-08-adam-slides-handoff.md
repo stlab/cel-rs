@@ -18,8 +18,8 @@
 
 ## Verification
 
-- Clean `npm ci`, `npm test` (8 tests), and `npm run build` succeeded.
-- Chromium acceptance checks passed (18 tests) against the generated output and
+- Clean `npm ci`, `npm test` (9 tests), and `npm run build` succeeded.
+- Chromium acceptance checks passed (23 tests) against the generated output and
   a separately copied artifact under a nested Pages-style URL.
 - Screenshots were inspected for every slide, including the smaller viewport.
   Browser checks cover actual keyboard edits, graph direction, conditional
@@ -28,7 +28,12 @@
 - `cargo test -p xtask` passed (5 tests).
 - `cargo test -p adam-lang-book --test tutorial` passed (6 tests).
 - `cargo clippy -p xtask --all-targets -- -D warnings` passed.
-- Independent whole-branch review is the remaining local completion gate.
+- Independent whole-branch review identified three important gaps: dependency
+  execution failures, unsupported tutorial references silently disappearing,
+  and a missing host bootstrap preventing its own error reporting. Regression
+  tests reproduced each gap before fixes; the complete suites passed afterward.
+  Startup now awaits module execution, checks required UI/graph capabilities,
+  and reports failures from an HTML-level boundary.
 
 ## Deliberately deferred
 

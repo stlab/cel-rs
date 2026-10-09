@@ -30,6 +30,19 @@ test("tutorial validation rejects graphs without examples and duplicate examples
   assert.throws(() => tutorialExamples(`${include}\n${include}`), /duplicate/i);
 });
 
+/** Catches active source references silently disappearing from slide coverage. */
+test("tutorial validation rejects unsupported includes mixed with valid examples", () => {
+  const first = "{{#include examples/tutorial/first_sheet.adm2}}";
+  for (const reference of [
+    "examples/tutorial/missing-sheet.adm2",
+    "examples/tutorial/first_sheet.adm2:1:4",
+    "examples/tutorial/../secret.adm2",
+    "examples/other/chapter.adm2",
+  ]) {
+    assert.throws(() => tutorialExamples(`${first}\n{{#include ${reference}}}`), /include|reference/i);
+  }
+});
+
 /** Catches key changes, missing directives, duplicate slides, and unsafe references. */
 test("deck validation rejects coverage drift and malformed directives", () => {
   const examples = keys.map((key) => ({ key, graph: false }));
