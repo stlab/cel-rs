@@ -15,6 +15,7 @@
         "playground"
     ],
     "taskManager.favorites": [
+        "cel-rs/Workspace/slides: serve (full)",
         "cel-rs/Workspace/Install adam-lsp + Extension (Local)",
         "cel-rs/Workspace/begin: serve (desktop)",
         "cel-rs/Workspace/begin: serve (web)",

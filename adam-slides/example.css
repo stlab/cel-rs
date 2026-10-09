@@ -1,0 +1,51 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, sans-serif;
+  background: white;
+  color: #192333;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+body.with-graph main {
+  height: 100vh;
+  min-height: 0;
+}
+
+#inspector {
+  flex-shrink: 0;
+  padding: 12px;
+}
+
+#inspector sp-theme {
+  display: block;
+}
+
+#graph:not([hidden]) {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+#graph svg {
+  display: block;
+}
+
+#status {
+  margin: 16px;
+  overflow-wrap: anywhere;
+}
+
+#status[role="alert"],
+.adam-live-error {
+  color: #a31919;
+  white-space: pre-wrap;
+}

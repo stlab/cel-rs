@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Adam example</title>
+  <link rel="stylesheet" href="theme/inspector.css">
+  <link rel="stylesheet" href="theme/graph.css">
+  <link rel="stylesheet" href="example.css">
+  <!-- Keep the error boundary here so it also catches a missing bootstrap module. -->
+  <script type="module">
+    try {
+      await import("./example.mjs");
+    } catch (error) {
+      const status = document.getElementById("status");
+      status.setAttribute("role", "alert");
+      status.textContent = `Unable to load this example: ${error.message}`;
+      console.error("adam-slides startup failed", error);
+    }
+  </script>
+</head>
+<body>
+  <p id="status" role="status" aria-live="polite">Loading live example...</p>
+  <main>
+    <div id="inspector"></div>
+    <div id="graph" class="adam-live-graph" hidden></div>
+  </main>
+</body>
+</html>

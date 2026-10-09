@@ -56,6 +56,26 @@ jobs:
     - name: Prepare live-book assets (manifest + Spectrum bundle + wasm/js output)
       run: cargo run -p xtask -- prepare-live-book-assets
 
+    - name: Set up Node for Adam slides
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: adam-slides/package-lock.json
+
+    - name: Build the live Adam slide deck
+      working-directory: adam-slides
+      run: |
+        npm ci
+        npm test
+        npm run build
+
+    - name: Verify the live Adam slides in Chromium
+      working-directory: adam-slides
+      run: |
+        npx playwright install --with-deps chromium
+        npm run test:browser
+
     # The adam-lang tutorial/reference book links into this same rustdoc output (e.g.
     # `../adam_rs/sheet/struct.Sheet.html`), so it's built and published from target/doc
     # alongside it, not as a separate site.
@@ -80,6 +100,11 @@ jobs:
       run: |
         rm -rf target/doc/cel-book
         cp -r cel-lang-book/book-dist target/doc/cel-book
+
+    - name: Copy the Adam slides into the docs site
+      run: |
+        mkdir -p target/doc/adam-slides
+        cp -r adam-slides/dist/. target/doc/adam-slides/
 
     - uses: actions/upload-pages-artifact@v5
       if: github.event_name == 'push'

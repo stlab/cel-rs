@@ -226,6 +226,113 @@
             ],
             "problemMatcher": []
         },
+        // ============ Adam Slides Tasks ============
+        {
+            "label": "slides: install dependencies",
+            "type": "shell",
+            "command": "npm",
+            "args": ["ci"],
+            "options": { "cwd": "${workspaceFolder}/adam-slides" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
+            "label": "slides: build",
+            "type": "shell",
+            "command": "npm",
+            "args": ["run", "build"],
+            "options": { "cwd": "${workspaceFolder}/adam-slides" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
+            "label": "slides: watch sources",
+            "type": "shell",
+            "command": "npm",
+            "args": ["run", "watch:sources"],
+            "options": { "cwd": "${workspaceFolder}/adam-slides" },
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "slides-sources",
+                "fileLocation": "absolute",
+                "pattern": {
+                    "regexp": "^(.*):(\\d+):(\\d+):\\s*(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "message": 4
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^(Restarting|Building live-example manifest)",
+                    "endsPattern": "^Adam slides: source generation complete$"
+                }
+            },
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
+            "label": "slides: watch marp",
+            "type": "shell",
+            "command": "npm",
+            "args": ["run", "watch:marp"],
+            "options": { "cwd": "${workspaceFolder}/adam-slides" },
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "slides-marp",
+                "fileLocation": "absolute",
+                "pattern": {
+                    "regexp": "^(.*):(\\d+):(\\d+):\\s*(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "message": 4
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "Converting .*markdown",
+                    "endsPattern": "\\[Watch mode\\] Start watching"
+                }
+            },
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
+            "label": "slides: preview",
+            "type": "shell",
+            "command": "npm",
+            "args": ["run", "preview"],
+            "options": { "cwd": "${workspaceFolder}/adam-slides" },
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "slides-preview",
+                "fileLocation": "absolute",
+                "pattern": {
+                    "regexp": "^(.*):(\\d+):(\\d+):\\s*(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "message": 4
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^$",
+                    "endsPattern": "^Adam slides: http://127\\.0\\.0\\.1:3419/"
+                }
+            },
+            "presentation": { "reveal": "always", "panel": "dedicated" }
+        },
+        {
+            "label": "slides: serve (full)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "book: build wasm",
+                "slides: install dependencies",
+                "slides: build",
+                "slides: watch sources",
+                "slides: watch marp",
+                "slides: preview"
+            ],
+            "problemMatcher": []
+        },
         // ============ adam-lang VS Code Extension Tasks ============
         {
             "label": "cargo: install adam-lsp",

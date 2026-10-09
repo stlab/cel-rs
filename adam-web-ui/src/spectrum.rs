@@ -66,7 +66,8 @@ pub fn SpTextfield(
 /// like [`SpTextfield`] — including the same custom-element caveat: Dioxus's event serializer
 /// never populates `event.target.value` for a custom element, so reading the live value off the
 /// DOM (not the synthetic event) is the caller's job. `value` is passed as its string
-/// representation; the element renders and edits it as a number internally. `min`/`max`, when
+/// representation; the element renders and edits it as a number internally. The field fills its
+/// container's inline size, leaving room for formatted values and validation icons. `min`/`max`, when
 /// present, are passed through to the underlying SWC element, which natively disables its
 /// increment/decrement stepper buttons once the value reaches the corresponding bound. Setting
 /// `readonly` to `true` renders the SWC read-only state — the value stays visible and
@@ -101,6 +102,7 @@ pub fn SpNumberfield(
 ) -> Element {
     rsx! {
         sp-number-field {
+            style: "inline-size: 100%;",
             "id": "{id}",
             "value": "{value}",
             "min": min.as_deref(),

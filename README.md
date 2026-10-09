@@ -3,6 +3,22 @@
 [![CI](https://github.com/stlab/cel-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/stlab/cel-rs/actions/workflows/ci.yml)
 [![Docs](https://github.com/stlab/cel-rs/actions/workflows/docs.yml/badge.svg)](https://github.com/stlab/cel-rs/actions/workflows/docs.yml)
 
+## Documentation
+
+| Component | Documentation |
+| --- | --- |
+| Languages | [CEL language guide](https://stlab.github.io/cel-rs/cel-book/) · [Adam language guide](https://stlab.github.io/cel-rs/book/) |
+| Live presentation | [Adam slides](https://stlab.github.io/cel-rs/adam-slides/) · [Authoring and preview](adam-slides/README.md) |
+| CEL libraries | [cel-rs](https://stlab.github.io/cel-rs/cel_rs/) · [Runtime](https://stlab.github.io/cel-rs/cel_runtime/) · [Parser](https://stlab.github.io/cel-rs/cel_parser/) · [Macros](https://stlab.github.io/cel-rs/cel_rs_macros/) · [Standard library](https://stlab.github.io/cel-rs/cel_std/) |
+| Adam libraries | [Property-model runtime](https://stlab.github.io/cel-rs/adam_rs/) · [Language](https://stlab.github.io/cel-rs/adam_lang/) · [Web UI](https://stlab.github.io/cel-rs/adam_web_ui/) |
+| Adam tools | [Formatter](https://stlab.github.io/cel-rs/adam_fmt/) · [Language server](https://stlab.github.io/cel-rs/adam_lsp/) · [VS Code extension](editors/vscode-adam-lang/README.md) |
+| Applications | [Begin architecture](docs/VISION.md) · [EZ Adam design](docs/superpowers/specs/2026-08-24-ez-adam-design.md) |
+
+The [Docs workflow](.github/workflows/docs.yml) builds and checks the guides,
+component APIs, and live slides on pull requests, then publishes the site on
+pushes to `main`. Newly added pages become available after their changes reach
+`main` and the Pages deployment finishes.
+
 A stack-based runtime for developing domain specific languages, paired with a
 recursive-descent parser for CEL (Common Expression Language) and a proc-macro crate
 for compile-time CEL validation. See [docs/VISION.md](docs/VISION.md) for the
@@ -77,9 +93,6 @@ a `u32` (fallibly, via `op1r`), add it to the `u32` argument, then format the re
 `cel-parser` and `cel-rs-macros` cover the other two ways to produce a segment: parsing
 CEL source at runtime, and validating/compiling CEL expressions at compile time. See
 [`src/lib.rs`](src/lib.rs) for one example of each.
-
-Full API documentation for every crate in the workspace is published from `main` at
-**<https://stlab.github.io/cel-rs/>**.
 
 ## Development
 

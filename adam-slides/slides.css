@@ -1,0 +1,62 @@
+/* @theme adam-slides */
+@import "default";
+
+section {
+  background: #f6f7fa;
+  color: #192333;
+  padding: 30px 36px 42px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 16px;
+  font-family: system-ui, sans-serif;
+}
+
+section h1 {
+  margin: 0;
+  font-size: 38px;
+  color: #173b69;
+}
+
+section > p {
+  margin: 0;
+  font-size: 22px;
+}
+
+section::after {
+  bottom: 10px;
+  right: 36px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.example-panes {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 22px;
+  min-height: 0;
+}
+
+.example-panes pre {
+  margin: 0;
+  padding: 18px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  font-size: 19px;
+  line-height: 1.35;
+  background: #fff;
+  border: 1px solid #ccd5df;
+  border-radius: 8px;
+}
+
+.example-panes iframe {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 1px solid #ccd5df;
+  border-radius: 8px;
+  background: #fff;
+}
