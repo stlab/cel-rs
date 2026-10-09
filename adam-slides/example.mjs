@@ -1,4 +1,15 @@
 /**
+ * Returns whether a key has two or more safe lowercase path components.
+ * Components start with a letter and contain only letters, digits, underscores, or hyphens.
+ * Complexity: O(n) in key length.
+ * @param {string} key
+ * @returns {boolean}
+ */
+export function isExampleKey(key) {
+  return /^[a-z][a-z0-9_-]*(?:\/[a-z][a-z0-9_-]*)+$/.test(key);
+}
+
+/**
  * Returns an unambiguous safe example selector and explicit graph setting.
  * Throws for missing, repeated, or malformed parameters.
  * Complexity: O(n) in URL query length.
@@ -8,7 +19,7 @@
 export function parseExampleOptions(url) {
   const keys = url.searchParams.getAll("example");
   const graphs = url.searchParams.getAll("graph");
-  if (keys.length !== 1 || !/^tutorial\/[a-z][a-z0-9_]*$/.test(keys[0])) {
+  if (keys.length !== 1 || !isExampleKey(keys[0])) {
     throw new Error("Invalid or missing example selector");
   }
   if (graphs.length !== 1 || !["0", "1"].includes(graphs[0])) {

@@ -10,9 +10,13 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "node tests/serve.mjs",
+    command: "node tests/build-fixture.mjs && node tests/serve.mjs",
+    env: {
+      SLIDES_INPUT_DIR: process.env.SLIDES_DIR ?? "dist",
+      SLIDES_DIR: "test-results/site",
+    },
     url: "http://127.0.0.1:3419/project/docs/adam-slides/",
     reuseExistingServer: false,
-    timeout: 10_000,
+    timeout: 30_000,
   },
 });

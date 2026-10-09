@@ -6,6 +6,8 @@
   "scripts": {
     "test": "node --test *.test.mjs",
     "build": "node build.mjs && marp dist/slides.md --html --theme-set slides.css --output dist/index.html",
+    "watch:sources": "node --watch --watch-path=slides.md --watch-path=examples --watch-path=../adam-lang-book/book-src/examples --watch-path=build.mjs --watch-path=deck.mjs --watch-path=example.mjs --watch-path=example.html --watch-path=example.css build.mjs",
+    "watch:marp": "marp dist/slides.md --no-stdin --html --theme-set slides.css --output dist/index.html --watch",
     "test:browser": "playwright test",
     "preview": "node tests/serve.mjs"
   },

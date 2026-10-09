@@ -1,12 +1,31 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { access, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { access, copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { renderDeck, tutorialExamples } from "./deck.mjs";
+import { renderDeck } from "./deck.mjs";
+import { isExampleKey } from "./example.mjs";
 
 /**
- * Stages runtime assets and host files, then generates canonical Marp Markdown.
+ * Reads deck-local `.adm2` files recursively into a `local/`-prefixed source map.
+ * Ignores other file extensions; rejects unsafe names and filesystem failures.
+ * Complexity: O(n) in directory entries and source bytes.
+ * @param {string} directory
+ * @returns {Promise<Record<string, string>>}
+ */
+export async function readLocalExamples(directory) {
+  const sources = {};
+  for (const entry of await readdir(directory, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".adm2")) continue;
+    const file = join(entry.parentPath, entry.name);
+    const key = `local/${relative(directory, file).slice(0, -5).split(sep).join("/")}`;
+    if (!isExampleKey(key)) throw new Error(`Invalid local example key: ${key}`);
+    sources[key] = await readFile(file, "utf8");
+  }
+  return sources;
+}
+
+/**
+ * Stages runtime assets and host files, then generates source-backed Marp Markdown.
  * Rejects staging, source validation, or filesystem failures.
  * Complexity: O(n) in source and staged asset bytes.
  * @param {string} root Repository root.
@@ -24,15 +43,26 @@ export async function prepareDeck(root) {
     "adam-live-examples.json", "adam_lang_book_live.js", "adam_lang_book_live_bg.wasm",
     "swc.js", "inspector.css", "graph.css", "graph.js", "d3.v7.min.js",
   ]) await access(join(output, "theme", asset));
-  const tutorial = await readFile(join(root, "adam-lang-book", "book-src", "tutorial.md"), "utf8");
+  const manifestPath = join(output, "theme", "adam-live-examples.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  if (Object.keys(manifest).some((key) => key.startsWith("local/"))) {
+    throw new Error("Book examples cannot use the reserved local/ namespace");
+  }
+  Object.assign(manifest, await readLocalExamples(join(slides, "examples")));
   const authored = await readFile(join(slides, "slides.md"), "utf8");
-  const markdown = renderDeck(authored, tutorialExamples(tutorial),
-    (key) => readFileSync(join(root, "adam-lang-book", "book-src", "examples", `${key}.adm2`), "utf8"));
+  const markdown = renderDeck(authored, (key) => {
+    if (!Object.hasOwn(manifest, key) || typeof manifest[key] !== "string") {
+      throw new Error(`Unknown or unsupported example source: ${key}`);
+    }
+    return manifest[key];
+  });
   await mkdir(output, { recursive: true });
   for (const name of ["example.html", "example.css", "example.mjs"]) {
     await copyFile(join(slides, name), join(output, name));
   }
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
   await writeFile(join(output, "slides.md"), markdown);
+  console.log("Adam slides: source generation complete");
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {

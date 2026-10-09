@@ -12,7 +12,7 @@ function host(name = "first_sheet", graph = false) {
   return `example.html?example=tutorial%2F${name}&graph=${graph ? "1" : "0"}`;
 }
 
-/** Catches missing live mounts, duplicate slides, source drift, and runtime network dependencies. */
+/** Catches missing live mounts, source drift, and runtime network dependencies. */
 test("nine canonical examples mount without external runtime requests", async ({ page }, testInfo) => {
   const unexpected = [];
   page.on("pageerror", (error) => unexpected.push(error.message));
@@ -22,9 +22,9 @@ test("nine canonical examples mount without external runtime requests", async ({
     }
   });
   await page.goto("./");
-  await expect(page.locator("iframe[data-example]")).toHaveCount(9);
-  for (const [index, name] of names.entries()) {
-    await page.evaluate((number) => { location.hash = String(number); }, index + 1);
+  await expect(page.locator("iframe[data-example]")).toHaveCount(10);
+  for (const name of names) {
+    await selectSlide(page, name);
     const iframe = page.locator(`iframe[data-example="tutorial/${name}"]`);
     const frame = iframe.contentFrame();
     await expect(frame.locator("sp-theme")).toBeAttached();
@@ -52,7 +52,7 @@ test("live panes fit their frames without unnecessary scrollbars", async ({ page
   for (const width of [1280, 960]) {
     await page.setViewportSize({ width, height: width * 9 / 16 });
     for (const [index, name] of names.entries()) {
-      const frame = await selectSlide(page, index + 1);
+      const frame = await selectSlide(page, name);
       await expect(frame.locator("#status")).toHaveCount(0);
       if (await frame.locator("#graph").isVisible()) {
         await expect(frame.locator("#graph svg")).toBeVisible();
@@ -74,13 +74,37 @@ test("live panes fit their frames without unnecessary scrollbars", async ({ page
   expect(overflow).toEqual([]);
 });
 
+/** Catches readonly numeric outputs truncating their formatted values in the shared inspector. */
+test("area number field displays its entire formatted value", async ({ page }, testInfo) => {
+  await page.goto("./");
+  const frame = await selectSlide(page, "area_with_requirement");
+  await writeSlider(frame, "width", 100);
+  await writeSlider(frame, "height", 100);
+  const field = frame.locator("sp-number-field[readonly]");
+  const input = field.getByRole("textbox");
+  await expect(input).toHaveValue("10,000");
+  const size = await input.evaluate(async (element) => {
+    await document.fonts.ready;
+    const style = getComputedStyle(element);
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    return {
+      text: context.measureText(element.value).width,
+      available: element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+    };
+  });
+  expect(size.available).toBeGreaterThanOrEqual(size.text);
+  await page.screenshot({ path: testInfo.outputPath("area-number-field.png") });
+});
+
 /** Catches slide numbers overlapping live panes instead of occupying the bottom margin. */
 test("slide numbers stay below the example panes", async ({ page }, testInfo) => {
   await page.goto("./");
   for (const width of [1280, 960]) {
     await page.setViewportSize({ width, height: width * 9 / 16 });
     for (const [index, name] of names.entries()) {
-      await selectSlide(page, index + 1);
+      await selectSlide(page, name);
       const section = page.locator(`iframe[data-example="tutorial/${name}"]`)
         .locator("xpath=ancestor::section");
       const layout = await section.evaluate((element) => {
@@ -183,10 +207,15 @@ test("inspector-only examples do not load graph scripts", async ({ page }) => {
   expect(graphRequests).toEqual([]);
 });
 
-/** Selects a presentation slide without reloading its mounted frames. */
-async function selectSlide(page, number) {
+/** Selects an example's actual slide without depending on authoring order or text slides. */
+async function selectSlide(page, name) {
+  const iframe = page.locator(`iframe[data-example="tutorial/${name}"]`);
+  const number = await iframe.evaluate((element) => {
+    const section = element.closest("section");
+    return [...document.querySelectorAll("section")].indexOf(section) + 1;
+  });
   await page.evaluate((value) => { location.hash = String(value); }, number);
-  const frame = page.locator(`iframe[data-example="tutorial/${names[number - 1]}"]`).contentFrame();
+  const frame = iframe.contentFrame();
   await expect(frame.getByRole("textbox").first()).toBeVisible();
   return frame;
 }
@@ -225,7 +254,7 @@ async function graphDirection(frame, name) {
 /** Catches broken write/propagate bridging and uneditable computed outputs. */
 test("live output follows an input edit", async ({ page }) => {
   await page.goto("./");
-  const frame = await selectSlide(page, 3);
+  const frame = await selectSlide(page, "basic_output");
   await writeSlider(frame, "width", 30);
   await expect(frame.getByText("600", { exact: true })).toBeVisible();
   await expect(frame.locator('#graph svg').getByText("600", { exact: true })).toBeVisible();
@@ -234,7 +263,7 @@ test("live output follows an input edit", async ({ page }) => {
 /** Catches missing bidirectional propagation or graph updates. */
 test("editing either side reverses a relationship and updates its graph", async ({ page }) => {
   await page.goto("./");
-  const frame = await selectSlide(page, 4);
+  const frame = await selectSlide(page, "basic_relationship");
   await writeSlider(frame, "a", 40);
   await expect(sliderInput(frame, "b")).toHaveValue("20");
   await expect(frame.locator("#graph svg").getByText("40", { exact: true })).toBeVisible();
@@ -248,7 +277,7 @@ test("editing either side reverses a relationship and updates its graph", async 
 /** Catches resetting derived source memory when navigating the chained example. */
 test("inequality restores prior values after releasing a constraint", async ({ page }) => {
   await page.goto("./");
-  const frame = await selectSlide(page, 5);
+  const frame = await selectSlide(page, "inequality");
   await writeSlider(frame, "a", 100);
   await expect(sliderInput(frame, "b")).toHaveValue("100");
   await expect(sliderInput(frame, "c")).toHaveValue("100");
@@ -260,7 +289,7 @@ test("inequality restores prior values after releasing a constraint", async ({ p
 /** Catches checkbox events failing to activate or deactivate relationships. */
 test("conditional toggle links and releases cells", async ({ page }) => {
   await page.goto("./");
-  const frame = await selectSlide(page, 6);
+  const frame = await selectSlide(page, "constrain");
   await expect(frame.locator("#graph svg line.link[marker-end]")).toHaveCount(1);
   await frame.getByRole("checkbox", { name: "constrain" }).check();
   await expect(frame.locator("#graph svg line.link[marker-end]")).toHaveCount(3);
@@ -276,7 +305,7 @@ test("conditional toggle links and releases cells", async ({ page }) => {
 /** Catches forced outputs staying editable or losing their preserved source value. */
 test("forced conditional value disables editing and restores its source", async ({ page }) => {
   await page.goto("./");
-  const frame = await selectSlide(page, 7);
+  const frame = await selectSlide(page, "conditional_forced");
   const input = sliderInput(frame, "a");
   await frame.getByRole("checkbox", { name: "constrain" }).check();
   await expect(input).toHaveValue("42");
@@ -289,14 +318,14 @@ test("forced conditional value disables editing and restores its source", async 
 /** Catches omitted filter or requirement diagnostics in the embedded host. */
 test("filtering and requirement diagnostics remain visible", async ({ page }) => {
   await page.goto("./");
-  const filter = await selectSlide(page, 2);
+  const filter = await selectSlide(page, "clamp_demo");
   await writeSlider(filter, "level", 150);
   await expect(sliderInput(filter, "level")).toHaveValue("100");
-  const diagnostic = await selectSlide(page, 8);
+  const diagnostic = await selectSlide(page, "requirements_filter_diagnostic");
   await expect(diagnostic.getByText(/filter violation.*width/)).toBeVisible();
   await writeSlider(diagnostic, "height", 50);
   await expect(diagnostic.getByText(/filter violation.*width/)).toHaveCount(0);
-  const requirements = await selectSlide(page, 9);
+  const requirements = await selectSlide(page, "area_with_requirement");
   await writeSlider(requirements, "width", 100);
   await writeSlider(requirements, "height", 100);
   await expect(requirements.getByText(/not_too_big/)).toBeVisible();
@@ -304,18 +333,19 @@ test("filtering and requirement diagnostics remain visible", async ({ page }) =>
 
 /** Catches input/graph events advancing Marp and slide switches recreating sheets. */
 test("frame interactions stay isolated and navigation preserves edits", async ({ page }) => {
-  await page.goto("./#1");
-  const first = await selectSlide(page, 1);
+  await page.goto("./");
+  const first = await selectSlide(page, "first_sheet");
+  const initialURL = page.url();
   const width = first.getByRole("textbox", { name: "width", exact: true });
   await width.fill("123");
   await width.press("ArrowRight");
   await width.press("Tab");
   await expect(width).toHaveValue("123");
-  await expect(page).toHaveURL(/#1$/);
+  await expect(page).toHaveURL(initialURL);
   await page.getByRole("heading", { name: "A first sheet" }).click();
   await page.keyboard.press("ArrowRight");
-  await expect(page).toHaveURL(/#2$/);
-  await selectSlide(page, 1);
+  await expect(page).not.toHaveURL(initialURL);
+  await selectSlide(page, "first_sheet");
   await expect(width).toHaveValue("123");
   const bounds = await first.locator("#graph svg").boundingBox();
   expect(bounds.width).toBeGreaterThan(0);
@@ -324,10 +354,35 @@ test("frame interactions stay isolated and navigation preserves edits", async ({
   await page.mouse.down();
   await page.mouse.move(bounds.x + bounds.width / 2 + 20, bounds.y + bounds.height / 2 + 20);
   await page.mouse.up();
-  await expect(page).toHaveURL(/#1$/);
+  await expect(page).toHaveURL(initialURL);
   await page.setViewportSize({ width: 960, height: 540 });
-  await selectSlide(page, 3);
-  await selectSlide(page, 1);
+  await selectSlide(page, "basic_output");
+  await selectSlide(page, "first_sheet");
   await expect(width).toHaveValue("123");
   await expect(first.locator("#graph svg")).toBeVisible();
+});
+
+/** Catches missing local sources and treating a text-only introduction as an example. */
+test("text and deck-local example slides render independently", async ({ page }) => {
+  await page.goto("./");
+  await expect(page.getByRole("heading", { name: "Text-only introduction" })).toBeVisible();
+  const introduction = page.getByRole("heading", { name: "Text-only introduction" })
+    .locator("xpath=ancestor::section");
+  await expect(introduction.locator("iframe")).toHaveCount(0);
+  await page.goto("example.html?example=local%2Facceptance&graph=0");
+  await expect(page.getByRole("textbox", { name: "width", exact: true })).toBeVisible();
+  await expect(page.locator("#status")).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+/** Catches failures in the actual authored deck independently of the acceptance fixture. */
+test("the authored deck mounts every selected example", async ({ page }) => {
+  await page.goto("authored.html");
+  const iframes = page.locator("iframe[data-example]");
+  for (let index = 0; index < await iframes.count(); index++) {
+    const frame = iframes.nth(index).contentFrame();
+    await expect(frame.locator("#status")).toHaveCount(0);
+    await expect(frame.locator("sp-theme")).toBeAttached();
+    await expect(frame.getByRole("alert")).toHaveCount(0);
+  }
 });

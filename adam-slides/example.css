@@ -15,7 +15,13 @@ main {
   min-height: 100vh;
 }
 
+body.with-graph main {
+  height: 100vh;
+  min-height: 0;
+}
+
 #inspector {
+  flex-shrink: 0;
   padding: 12px;
 }
 
@@ -24,9 +30,8 @@ main {
 }
 
 #graph:not([hidden]) {
-  flex: 1 0 240px;
-  min-height: 240px;
-  height: calc(100vh - 200px);
+  flex: 1;
+  min-height: 0;
   position: relative;
 }
 

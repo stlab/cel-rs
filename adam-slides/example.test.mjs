@@ -9,11 +9,16 @@ test("example selectors require one safe key and an explicit graph flag", () => 
     { key: "tutorial/first_sheet", graph: true });
   assert.deepEqual(parseExampleOptions(new URL(`${base}?example=tutorial%2Fclamp_demo&graph=0`)),
     { key: "tutorial/clamp_demo", graph: false });
+  for (const key of ["local/custom", "expressions/arithmetic", "local/nested/new-example"]) {
+    assert.deepEqual(parseExampleOptions(new URL(`${base}?example=${key}&graph=0`)),
+      { key, graph: false });
+  }
   for (const query of [
     "", "?example=tutorial/first_sheet", "?graph=0",
     "?example=../secret&graph=0", "?example=tutorial/first_sheet&graph=true",
     "?example=tutorial/first_sheet&graph=0&graph=1",
     "?example=tutorial/first_sheet&example=tutorial/clamp_demo&graph=0",
+    "?example=local/../secret&graph=0", "?example=local/custom.adm2&graph=0",
   ]) {
     assert.throws(() => parseExampleOptions(new URL(base + query)), /example|graph/i);
   }
