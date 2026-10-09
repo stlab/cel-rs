@@ -6,7 +6,9 @@ section {
   color: #192333;
   padding: 30px 36px 42px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto minmax(0, 1fr);
+  justify-content: stretch;
   gap: 16px;
   font-family: system-ui, sans-serif;
 }

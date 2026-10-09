@@ -4,7 +4,10 @@
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {
-    "test": "node --test *.test.mjs"
+    "test": "node --test *.test.mjs",
+    "build": "node build.mjs && marp dist/slides.md --html --theme-set slides.css --output dist/index.html",
+    "test:browser": "playwright test",
+    "preview": "node tests/serve.mjs"
   },
   "devDependencies": {
     "@marp-team/marp-cli": "4.5.1",

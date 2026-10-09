@@ -1,0 +1,42 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, sans-serif;
+  background: white;
+  color: #192333;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+#inspector {
+  padding: 12px;
+}
+
+#inspector sp-theme {
+  display: block;
+}
+
+#graph:not([hidden]) {
+  flex: 1 0 240px;
+  min-height: 240px;
+  height: calc(100vh - 200px);
+  position: relative;
+}
+
+#status {
+  margin: 16px;
+  overflow-wrap: anywhere;
+}
+
+#status[role="alert"],
+.adam-live-error {
+  color: #a31919;
+  white-space: pre-wrap;
+}
