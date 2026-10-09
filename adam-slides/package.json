@@ -1,0 +1,13 @@
+{
+  "name": "adam-slides",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test *.test.mjs"
+  },
+  "devDependencies": {
+    "@marp-team/marp-cli": "4.5.1",
+    "@playwright/test": "1.64.0"
+  }
+}
