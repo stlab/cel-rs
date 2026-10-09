@@ -1,0 +1,174 @@
+description = "cel-rs search quality: runtime, parser, property model, and language tooling"
+
+[[queries]]
+id = "ident-raw-stack"
+query = "RawStack"
+class = "identifier"
+
+[judgments.ident-raw-stack]
+"cel-runtime/src/raw_stack.rs" = 3
+"cel-runtime/src/dynamic_sequence.rs" = 1
+
+[[queries]]
+id = "ident-dyn-segment"
+query = "DynSegment"
+class = "identifier"
+
+[judgments.ident-dyn-segment]
+"cel-runtime/src/dyn_segment.rs" = 3
+"cel-parser/src/op_table.rs" = 1
+
+[[queries]]
+id = "ident-op-lookup"
+query = "OpLookup"
+class = "identifier"
+
+[judgments.ident-op-lookup]
+"cel-parser/src/op_table.rs" = 3
+"cel-parser/src/lib.rs" = 2
+"adam-web-ui/src/build.rs" = 1
+
+[[queries]]
+id = "ident-dynamic-sequence"
+query = "DynamicSequence"
+class = "identifier"
+
+[judgments.ident-dynamic-sequence]
+"cel-runtime/src/dynamic_sequence.rs" = 3
+
+[[queries]]
+id = "ident-type-expr"
+query = "TypeExpr"
+class = "identifier"
+
+[judgments.ident-type-expr]
+"cel-parser/src/type_expr.rs" = 3
+"cel-parser/src/ast.rs" = 1
+
+[[queries]]
+id = "ident-requirement"
+query = "Requirement"
+class = "identifier"
+
+[judgments.ident-requirement]
+"adam-rs/src/requirement.rs" = 3
+"adam-rs/src/sheet.rs" = 2
+
+[[queries]]
+id = "ident-match-expr"
+query = "MatchExpr"
+class = "identifier"
+
+[judgments.ident-match-expr]
+"adam-rs/src/conditional.rs" = 3
+"adam-rs/src/sheet.rs" = 2
+
+[[queries]]
+id = "ident-server-path"
+query = "resolveServerPath"
+class = "identifier"
+
+[judgments.ident-server-path]
+"editors/vscode-adam-lang/src/serverPath.ts" = 3
+
+[[queries]]
+id = "nl-aligned-stack"
+query = "storing heterogeneous values as naturally aligned raw bytes on a stack"
+class = "natural_language"
+
+[judgments.nl-aligned-stack]
+"cel-runtime/src/raw_stack.rs" = 3
+"cel-runtime/src/dynamic_sequence.rs" = 1
+
+[[queries]]
+id = "nl-runtime-types"
+query = "runtime type checking for expression stack operations and argument mismatches"
+class = "natural_language"
+
+[judgments.nl-runtime-types]
+"cel-runtime/src/dyn_segment.rs" = 3
+"cel-parser/src/op_table.rs" = 1
+
+[[queries]]
+id = "nl-owned-tuples"
+query = "convert concrete Rust tuples into owned type erased tuple values"
+class = "natural_language"
+
+[judgments.nl-owned-tuples]
+"cel-runtime/src/dynamic_sequence.rs" = 3
+
+[[queries]]
+id = "nl-operator-scopes"
+query = "resolve overloaded operators using custom scopes in last in first out order with built in fallback"
+class = "natural_language"
+
+[judgments.nl-operator-scopes]
+"cel-parser/src/op_table.rs" = 3
+"cel-parser/src/lib.rs" = 1
+
+[[queries]]
+id = "nl-cell-requirements"
+query = "attach pure boolean predicates to property model cells to check preconditions"
+class = "natural_language"
+
+[judgments.nl-cell-requirements]
+"adam-rs/src/requirement.rs" = 3
+"adam-rs/src/sheet.rs" = 2
+
+[[queries]]
+id = "nl-lsp-diagnostics"
+query = "convert recovered syntax and type errors into language server diagnostics"
+class = "natural_language"
+
+[judgments.nl-lsp-diagnostics]
+"adam-lsp/src/diagnostics.rs" = 3
+
+[[queries]]
+id = "nl-method-planning"
+query = "select one method per active constraint relationship in dependency order and report conflicts or cycles"
+class = "natural_language"
+
+[judgments.nl-method-planning]
+"adam-rs/src/planner.rs" = 3
+"adam-rs/src/sheet.rs" = 2
+
+[[queries]]
+id = "filt-type-expr"
+query = "TypeExpr"
+class = "filtered"
+extensions = ["rs"]
+paths = ["cel-parser/src"]
+
+[judgments.filt-type-expr]
+"cel-parser/src/type_expr.rs" = 3
+"cel-parser/src/ast.rs" = 1
+
+[[queries]]
+id = "filt-dyn-segment"
+query = "DynSegment"
+class = "filtered"
+extensions = ["rs"]
+paths = ["cel-runtime/src"]
+
+[judgments.filt-dyn-segment]
+"cel-runtime/src/dyn_segment.rs" = 3
+
+[[queries]]
+id = "filt-diagnostics"
+query = "diagnostics_for_source"
+class = "filtered"
+extensions = ["rs"]
+paths = ["adam-lsp/src"]
+
+[judgments.filt-diagnostics]
+"adam-lsp/src/diagnostics.rs" = 3
+
+[[queries]]
+id = "filt-server-path"
+query = "resolveServerPath"
+class = "filtered"
+extensions = ["ts"]
+paths = ["editors/vscode-adam-lang/src"]
+
+[judgments.filt-server-path]
+"editors/vscode-adam-lang/src/serverPath.ts" = 3
