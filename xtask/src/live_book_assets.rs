@@ -112,6 +112,8 @@ pub fn prepare_live_book_assets() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Stages the manifest and runtime assets for the standalone Adam slides.
 ///
+/// Uses `destination` when provided, otherwise `adam-slides/dist/theme`.
+///
 /// - Complexity: O(n) in the total example and runtime asset bytes.
 ///
 /// # Errors
@@ -120,10 +122,16 @@ pub fn prepare_live_book_assets() -> Result<(), Box<dyn std::error::Error>> {
 /// # Examples
 /// ```text
 /// cargo run -p xtask -- prepare-live-slides-assets
+/// cargo run -p xtask -- prepare-live-slides-assets staging/theme
 /// ```
-pub fn prepare_live_slides_assets() -> Result<(), Box<dyn std::error::Error>> {
+pub fn prepare_live_slides_assets(
+    destination: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let root = project_root();
-    prepare_live_assets(&root, &root.join("adam-slides/dist/theme"))
+    match destination {
+        Some(destination) => prepare_live_assets(&root, destination),
+        None => prepare_live_assets(&root, &root.join("adam-slides/dist/theme")),
+    }
 }
 
 /// Stages the live-example manifest and runtime assets into `destination`.

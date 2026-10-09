@@ -94,9 +94,15 @@
 
 ### Follow-up verification and boundaries
 
-- Locked `npm ci`, all 10 Node tests, the authored deck build, and all 28
+- Locked `npm ci`, all 12 Node tests, the authored deck build, and all 28
   Chromium tests passed. The shared inspector WASM was rebuilt for the
   number-field sizing change.
+- Talos identified a preview consistency gap: staging directly into published
+  output replaced the merged manifest before source validation. Assets now stage
+  privately through xtask's optional destination; invalid directives, unknown
+  references, and unsafe local filenames preserve the previous published
+  manifest/Markdown pair. Regression fixtures verify failed and successful
+  publication, and owned staging is removed after success or failure.
 - A real watched browser verified Markdown saves adding a slide and `.adm2`
   saves changing both displayed source and mounted values automatically.
   Temporary validation content was removed and owned watcher/server processes

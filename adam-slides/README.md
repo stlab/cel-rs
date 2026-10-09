@@ -31,6 +31,8 @@ The build stages shared runtime assets through
 directives from the staged book manifest and deck-local `.adm2` files, and converts
 the Markdown with Marp.
 Missing assets or example references fail the build.
+The generator stages assets privately and validates sources before updating
+`dist`, so an invalid edit leaves the last valid deck and manifest available.
 
 ## Author slides
 

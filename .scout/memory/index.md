@@ -4,7 +4,7 @@
 
 - [[knowledge/adam-lang-dual-parsing-pipeline.md|Adam-lang Dual Parsing Pipeline]] (concept, 0.80) `adam-lang` `adam-parser` `ast-parser` `type-registry` `adm2`
 - [[knowledge/adam-lsp-server-loop-and-diagnostic-publishing-flow.md|Adam-lsp Server Loop and Diagnostic Publishing Flow]] (observation, 0.75) `adam-lsp` `lsp` `diagnostics` `formatting` `server-loop`
-- [[knowledge/adam-slides-flexible-authoring-and-live-preview-publication-order.md|Adam slides flexible authoring and live preview publication order]] (pattern, 0.98) `adam-slides` `marp` `live-preview` `authoring` `manifest`
+- [[knowledge/adam-slides-flexible-authoring-and-live-preview-publication-order.md|Adam slides flexible authoring and live preview publication order]] (pattern, 0.99) `adam-slides` `marp` `live-preview` `authoring` `manifest`
 - [[knowledge/adam-slides-graph-baseline-overflow-and-pagination-margin-sizing.md|Adam slides graph baseline overflow and pagination margin sizing]] (discovery, 0.99) `adam-slides` `marp` `css` `svg` `layout` `scrollbars`
 - [[knowledge/architecture-overview.md|Architecture Overview]] (concept, 0.80) `architecture` `cel-rs` `adam-rs` `cel-runtime` `cel-parser` `overview`
 - [[knowledge/celparser-and-parsercontext-dual-emission.md|CELParser and ParserContext Dual Emission]] (concept, 0.80) `cel-parser` `parser-context` `ast-context` `dyn-segment-context` `cel-expression`

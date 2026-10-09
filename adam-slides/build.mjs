@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { access, copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { access, copyFile, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { renderDeck } from "./deck.mjs";
@@ -25,25 +26,24 @@ export async function readLocalExamples(directory) {
 }
 
 /**
- * Stages runtime assets and host files, then generates source-backed Marp Markdown.
- * Rejects staging, source validation, or filesystem failures.
- * Complexity: O(n) in source and staged asset bytes.
- * @param {string} root Repository root.
+ * Validates sources before publishing staged runtime assets and generated Markdown.
+ * Source validation failures leave the previous published manifest and Markdown unchanged.
+ * Rejects missing assets, source validation errors, and filesystem failures.
+ * Complexity: O(n) in source and asset bytes.
+ * @param {string} slides Slide authoring directory.
+ * @param {string} staged Runtime asset directory owned by the caller.
  * @returns {Promise<void>}
  */
-export async function prepareDeck(root) {
-  const result = spawnSync("cargo", ["run", "-p", "xtask", "--", "prepare-live-slides-assets"],
-    { cwd: root, encoding: "utf8" });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`Live asset staging failed:\n${result.stderr}`);
-  process.stdout.write(result.stdout);
-  const slides = join(root, "adam-slides");
+export async function publishDeck(slides, staged) {
   const output = join(slides, "dist");
   for (const asset of [
     "adam-live-examples.json", "adam_lang_book_live.js", "adam_lang_book_live_bg.wasm",
     "swc.js", "inspector.css", "graph.css", "graph.js", "d3.v7.min.js",
-  ]) await access(join(output, "theme", asset));
-  const manifestPath = join(output, "theme", "adam-live-examples.json");
+  ]) await access(join(staged, asset));
+  for (const name of ["example.html", "example.css", "example.mjs"]) {
+    await access(join(slides, name));
+  }
+  const manifestPath = join(staged, "adam-live-examples.json");
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   if (Object.keys(manifest).some((key) => key.startsWith("local/"))) {
     throw new Error("Book examples cannot use the reserved local/ namespace");
@@ -56,13 +56,35 @@ export async function prepareDeck(root) {
     }
     return manifest[key];
   });
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
   await mkdir(output, { recursive: true });
   for (const name of ["example.html", "example.css", "example.mjs"]) {
     await copyFile(join(slides, name), join(output, name));
   }
-  await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+  await cp(staged, join(output, "theme"), { recursive: true });
   await writeFile(join(output, "slides.md"), markdown);
   console.log("Adam slides: source generation complete");
+}
+
+/**
+ * Stages assets privately, validates and publishes the deck, and removes staging.
+ * Rejects staging, source validation, publication, or cleanup failures.
+ * Complexity: O(n) in source and staged asset bytes.
+ * @param {string} root Repository root.
+ * @returns {Promise<void>}
+ */
+export async function prepareDeck(root) {
+  const staging = await mkdtemp(join(tmpdir(), "adam-slides-build-"));
+  try {
+    const result = spawnSync("cargo", ["run", "-p", "xtask", "--", "prepare-live-slides-assets", staging],
+      { cwd: root, encoding: "utf8" });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(`Live asset staging failed:\n${result.stderr}`);
+    process.stdout.write(result.stdout);
+    await publishDeck(join(root, "adam-slides"), staging);
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
