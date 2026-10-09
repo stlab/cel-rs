@@ -1,4 +1,4 @@
-//! `prepare-live-book-assets`: assembles everything `adam-lang-book`'s live examples need
+//! `prepare-live-book-assets` and `prepare-live-slides-assets` assemble live-example assets
 //! before `mdbook build` runs — the per-example source manifest, the vendored Spectrum Web
 //! Components bundle, the D3/graph JS+CSS assets, and the compiled
 //! `adam-lang-book-live` wasm/js bundle — into
@@ -107,20 +107,73 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> io::Result<()> {
 /// doesn't exist.
 pub fn prepare_live_book_assets() -> Result<(), Box<dyn std::error::Error>> {
     let root = project_root();
+    prepare_live_assets(&root, &root.join("adam-lang-book/book-src/theme"))
+}
+
+/// Stages the manifest and runtime assets for the standalone Adam slides.
+///
+/// - Complexity: O(n) in the total example and runtime asset bytes.
+///
+/// # Errors
+/// Returns an error if a required input is missing or staging fails.
+///
+/// # Examples
+/// ```text
+/// cargo run -p xtask -- prepare-live-slides-assets
+/// ```
+pub fn prepare_live_slides_assets() -> Result<(), Box<dyn std::error::Error>> {
+    let root = project_root();
+    prepare_live_assets(&root, &root.join("adam-slides/dist/theme"))
+}
+
+/// Stages the live-example manifest and runtime assets into `destination`.
+///
+/// - Postcondition: required inputs are checked before output is written.
+/// - Complexity: O(n) in the total example and runtime asset bytes.
+///
+/// # Errors
+/// Returns an error for missing or unreadable inputs, serialization failure,
+/// or a destination that cannot be created or written.
+fn prepare_live_assets(root: &Path, destination: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let examples_dir = root
         .join("adam-lang-book")
         .join("book-src")
         .join("examples");
-    let theme_dir = root.join("adam-lang-book").join("book-src").join("theme");
-    fs::create_dir_all(&theme_dir)?;
+    let begin_assets = root.join("begin").join("assets");
+    let asset_names = [
+        "swc.js",
+        "inspector.css",
+        "graph.js",
+        "graph.css",
+        "d3.v7.min.js",
+    ];
+    for name in asset_names {
+        if !begin_assets.join(name).is_file() {
+            return Err(format!(
+                "Required live asset missing: {}",
+                begin_assets.join(name).display()
+            )
+            .into());
+        }
+    }
+    let pkg_dir = root.join("adam-lang-book-live").join("pkg");
+    for name in ["adam_lang_book_live.js", "adam_lang_book_live_bg.wasm"] {
+        if !pkg_dir.join(name).is_file() {
+            return Err(format!(
+                "{} not found -- run `wasm-pack build --target web --release` in adam-lang-book-live/ first",
+                pkg_dir.join(name).display()
+            ).into());
+        }
+    }
 
     println!(
         "Building live-example manifest from {} ...",
         examples_dir.display()
     );
     let manifest = build_manifest(&examples_dir)?;
-    let manifest_path = theme_dir.join("adam-live-examples.json");
+    let manifest_path = destination.join("adam-live-examples.json");
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
+    fs::create_dir_all(destination)?;
     fs::write(&manifest_path, manifest_json)?;
     println!(
         "  -> {} ({} examples)",
@@ -128,30 +181,15 @@ pub fn prepare_live_book_assets() -> Result<(), Box<dyn std::error::Error>> {
         manifest.len()
     );
 
-    let begin_assets = root.join("begin").join("assets");
-    for name in [
-        "swc.js",
-        "inspector.css",
-        "graph.js",
-        "graph.css",
-        "d3.v7.min.js",
-    ] {
+    for name in asset_names {
         let from = begin_assets.join(name);
-        let to = theme_dir.join(name);
+        let to = destination.join(name);
         fs::copy(&from, &to)?;
         println!("Copied {} -> {}", from.display(), to.display());
     }
 
-    let pkg_dir = root.join("adam-lang-book-live").join("pkg");
-    if !pkg_dir.is_dir() {
-        return Err(format!(
-            "{} not found -- run `wasm-pack build --target web --release` in adam-lang-book-live/ first",
-            pkg_dir.display()
-        )
-        .into());
-    }
-    copy_dir_contents(&pkg_dir, &theme_dir)?;
-    println!("Copied {} -> {}", pkg_dir.display(), theme_dir.display());
+    copy_dir_contents(&pkg_dir, destination)?;
+    println!("Copied {} -> {}", pkg_dir.display(), destination.display());
 
     Ok(())
 }
@@ -159,6 +197,109 @@ pub fn prepare_live_book_assets() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Creates an owned staging fixture with all required inputs.
+    ///
+    /// - Complexity: O(n) in fixture source and asset bytes.
+    fn staging_fixture() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "adam-slides-staging-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir(&root).unwrap();
+        let examples = root.join("adam-lang-book/book-src/examples");
+        write_example(&examples, "tutorial", "first_sheet", "sheet hello {}");
+        write_example(&examples, "expressions", "no_standard_library", "excluded");
+        let assets = root.join("begin/assets");
+        fs::create_dir_all(&assets).unwrap();
+        for name in [
+            "swc.js",
+            "inspector.css",
+            "graph.js",
+            "graph.css",
+            "d3.v7.min.js",
+        ] {
+            fs::write(assets.join(name), name).unwrap();
+        }
+        let pkg = root.join("adam-lang-book-live/pkg");
+        fs::create_dir_all(pkg.join("snippets/example")).unwrap();
+        fs::write(pkg.join("adam_lang_book_live.js"), "export {};").unwrap();
+        fs::write(
+            pkg.join("adam_lang_book_live_bg.wasm"),
+            [0, 97, 115, 109, 255],
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("snippets/example/inline.js"),
+            "export const x = 1;",
+        )
+        .unwrap();
+        root
+    }
+
+    /// Verifies the manifest and runtime assets reach an independent destination.
+    #[test]
+    fn prepare_live_assets_stages_manifest_and_runtime() {
+        let root = staging_fixture();
+        let destination = root.join("slides/theme");
+        prepare_live_assets(&root, &destination).unwrap();
+        let manifest: BTreeMap<String, String> = serde_json::from_str(
+            &fs::read_to_string(destination.join("adam-live-examples.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest["tutorial/first_sheet"], "sheet hello {}");
+        for name in [
+            "swc.js",
+            "inspector.css",
+            "graph.js",
+            "graph.css",
+            "d3.v7.min.js",
+        ] {
+            assert_eq!(fs::read_to_string(destination.join(name)).unwrap(), name);
+        }
+        assert_eq!(
+            fs::read(destination.join("adam_lang_book_live_bg.wasm")).unwrap(),
+            [0, 97, 115, 109, 255]
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("snippets/example/inline.js")).unwrap(),
+            "export const x = 1;"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Verifies missing required inputs fail before replacing existing output.
+    #[test]
+    fn prepare_live_assets_rejects_missing_inputs_even_with_stale_output() {
+        for missing in [
+            "adam-lang-book/book-src/examples",
+            "begin/assets/swc.js",
+            "adam-lang-book-live/pkg",
+        ] {
+            let root = staging_fixture();
+            fs::rename(root.join(missing), root.join("missing-input")).unwrap();
+            let destination = root.join("slides/theme");
+            fs::create_dir_all(&destination).unwrap();
+            fs::write(destination.join("adam-live-examples.json"), "stale").unwrap();
+            assert!(
+                prepare_live_assets(&root, &destination).is_err(),
+                "{missing}"
+            );
+            assert_eq!(
+                fs::read_to_string(destination.join("adam-live-examples.json")).unwrap(),
+                "stale"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     fn write_example(dir: &Path, chapter: &str, name: &str, source: &str) {
         let chapter_dir = dir.join(chapter);

@@ -121,8 +121,16 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("prepare-live-slides-assets") => {
+            if let Err(e) = live_book_assets::prepare_live_slides_assets() {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         _ => {
-            eprintln!("Usage: cargo xtask <fetch-assets|build-js|prepare-live-book-assets>");
+            eprintln!(
+                "Usage: cargo xtask <fetch-assets|build-js|prepare-live-book-assets|prepare-live-slides-assets>"
+            );
             std::process::exit(1);
         }
     }
