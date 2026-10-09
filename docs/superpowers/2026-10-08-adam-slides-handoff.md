@@ -28,6 +28,9 @@
 - `cargo test -p xtask` passed (5 tests).
 - `cargo test -p adam-lang-book --test tutorial` passed (6 tests).
 - `cargo clippy -p xtask --all-targets -- -D warnings` passed.
+- After the user requested a PR, the complete pre-PR suite passed: workspace
+  build and tests without compiler warnings, workspace doctests, all five
+  clippy invocations, formatting, and rustdoc with warnings denied.
 - Independent whole-branch review identified three important gaps: dependency
   execution failures, unsupported tutorial references silently disappearing,
   and a missing host bootstrap preventing its own error reporting. Regression
@@ -45,8 +48,8 @@
   `basic-ftp` 6.2.2. The build does not use Marp's optional archive/browser-export
   or authored-math paths, and Node dependencies are not shipped to the site.
   This bounds exposure but is not a clean dependency audit.
-- No push, PR, merge, or Pages deployment was requested. Run the repository's
-  complete pre-PR suite before opening a PR.
+- The user requested a PR after local completion. No merge or Pages deployment
+  was requested. Non-Chromium behavior and actual deployment remain unverified.
 
 ## Design records
 
