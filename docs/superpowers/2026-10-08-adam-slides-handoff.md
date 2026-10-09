@@ -15,11 +15,13 @@
   `target/doc/adam-slides` before the existing Pages upload. Deployment occurs
   only when that workflow publishes the changes; this worktree is not deployed.
 - Build and preview commands are in `adam-slides/README.md`.
+- Live panes fit their allotted size without the graph SVG's inline baseline
+  adding a scrollbar. Slide numbers sit below the panes in the bottom margin.
 
 ## Verification
 
 - Clean `npm ci`, `npm test` (9 tests), and `npm run build` succeeded.
-- Chromium acceptance checks passed (23 tests) against the generated output and
+- Chromium acceptance checks passed (25 tests) against the generated output and
   a separately copied artifact under a nested Pages-style URL.
 - Screenshots were inspected for every slide, including the smaller viewport.
   Browser checks cover actual keyboard edits, graph direction, conditional
@@ -37,6 +39,9 @@
   tests reproduced each gap before fixes; the complete suites passed afterward.
   Startup now awaits module execution, checks required UI/graph capabilities,
   and reports failures from an HTML-level boundary.
+- Layout regressions reproduced the unnecessary scrollbar and overlapping
+  pagination before the fixes. All nine slides fit without frame overflow and
+  keep pagination below the panes at 1280x720 and 960x540.
 
 ## Deliberately deferred
 

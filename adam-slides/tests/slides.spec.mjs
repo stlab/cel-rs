@@ -45,6 +45,59 @@ test("nine canonical examples mount without external runtime requests", async ({
   expect(unexpected).toEqual([]);
 });
 
+/** Catches viewport-based graph sizing adding scrollbars to otherwise fitting examples. */
+test("live panes fit their frames without unnecessary scrollbars", async ({ page }) => {
+  await page.goto("./");
+  const overflow = [];
+  for (const width of [1280, 960]) {
+    await page.setViewportSize({ width, height: width * 9 / 16 });
+    for (const [index, name] of names.entries()) {
+      const frame = await selectSlide(page, index + 1);
+      await expect(frame.locator("#status")).toHaveCount(0);
+      if (await frame.locator("#graph").isVisible()) {
+        await expect(frame.locator("#graph svg")).toBeVisible();
+      }
+      const size = await frame.locator("html").evaluate(async (element) => {
+        await document.fonts.ready;
+        return {
+          width: element.clientWidth,
+          height: element.clientHeight,
+          scrollWidth: element.scrollWidth,
+          scrollHeight: element.scrollHeight,
+        };
+      });
+      if (size.scrollWidth > size.width || size.scrollHeight > size.height) {
+        overflow.push({ name, viewport: width, ...size });
+      }
+    }
+  }
+  expect(overflow).toEqual([]);
+});
+
+/** Catches slide numbers overlapping live panes instead of occupying the bottom margin. */
+test("slide numbers stay below the example panes", async ({ page }, testInfo) => {
+  await page.goto("./");
+  for (const width of [1280, 960]) {
+    await page.setViewportSize({ width, height: width * 9 / 16 });
+    for (const [index, name] of names.entries()) {
+      await selectSlide(page, index + 1);
+      const section = page.locator(`iframe[data-example="tutorial/${name}"]`)
+        .locator("xpath=ancestor::section");
+      const layout = await section.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        const pane = element.querySelector("iframe").getBoundingClientRect();
+        const number = getComputedStyle(element, "::after");
+        const scale = bounds.height / element.clientHeight;
+        const bottom = bounds.bottom - parseFloat(number.bottom) * scale;
+        return { paneBottom: pane.bottom, numberTop: bottom - parseFloat(number.height) * scale, bottom, slideBottom: bounds.bottom };
+      });
+      expect(layout.numberTop).toBeGreaterThan(layout.paneBottom);
+      expect(layout.bottom).toBeLessThan(layout.slideBottom);
+      if (index === 2) await page.screenshot({ path: testInfo.outputPath(`out-cells-${width}.png`) });
+    }
+  }
+});
+
 /** Catches ambiguous URL options being silently accepted by the host. */
 test("invalid example selectors display an alert", async ({ page }) => {
   await page.goto("example.html?example=..%2Fsecret&graph=0");

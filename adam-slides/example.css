@@ -30,6 +30,10 @@ main {
   position: relative;
 }
 
+#graph svg {
+  display: block;
+}
+
 #status {
   margin: 16px;
   overflow-wrap: anywhere;
