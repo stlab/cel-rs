@@ -53,6 +53,26 @@ test("number fields preserve partial and blank drafts while normalizing locale t
     }
 });
 
+test("localized inline drafts normalize native digits and signed values", () => {
+    for (const locale of ["ar-EG", "fa-IR", "bn-BD", "de-DE", "en-US"]) {
+        const formatter = new Intl.NumberFormat(locale);
+        for (const value of [3.6, -12.25, 12345.5]) {
+            const draft = formatter.format(value);
+            assert.equal(context.readNumericInput(slider(value, locale, draft), true, true), `1|${value}`);
+            assert.equal(context.readNumericInput(field(draft, locale), false, true), `1|${value}`);
+        }
+    }
+    for (const [locale, partial] of [["ar-EG", "٣٫"], ["fa-IR", "۳٫"]]) {
+        assert.equal(context.readNumericInput(slider(3, locale, partial), true, true), "1|3.");
+    }
+});
+
+test("space-grouping locales accept ordinary and no-break-space variants", () => {
+    for (const group of [" ", "\u00a0", "\u202f"]) {
+        assert.equal(context.readNumericInput(slider(1234.5, "fr-FR", `1${group}234,5`), true, true), "1|1234.5");
+    }
+});
+
 /** Supplies event boundaries and an explicit next-task queue for exercising the installed bridge. */
 function mountedSlider(raw, value) {
     const scheduled = [];

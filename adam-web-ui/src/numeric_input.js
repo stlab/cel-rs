@@ -2,6 +2,7 @@
  * Returns a focus-prefixed numeric input payload from a Spectrum field or editable slider.
  * Consumes and deletes a slider's localized `adamNumericDraft`; otherwise reads its numeric handle.
  * Preserves canonical handle numbers across locales, and preserves blank and partial localized drafts.
+ * Converts locale digits and signs to ASCII, removes bidi marks, and accepts space-grouping variants.
  * Runtime: O(n) in the draft text length.
  */
 function readNumericInput(host, slider, focused) {
@@ -14,13 +15,25 @@ function readNumericInput(host, slider, focused) {
     let raw = slider
         ? draft
         : field.shadowRoot.querySelector("input").value;
-    let group = "", decimal = ".";
-    for (const part of field.numberFormatter.formatToParts(1234.5)) {
+    let group = "", decimal = ".", minus = "-";
+    for (const part of field.numberFormatter.formatToParts(-12345.6)) {
         if (part.type === "group") group = part.value;
         if (part.type === "decimal") decimal = part.value;
+        if (part.type === "minusSign") minus = part.value;
     }
-    if (group) raw = raw.split(group).join("");
+    for (let digit = 0; digit < 10; digit++) {
+        const native = field.numberFormatter.formatToParts(digit)
+            .find(part => part.type === "integer").value;
+        if (native !== String(digit)) raw = raw.split(native).join(String(digit));
+    }
+    raw = raw.replace(/[\u061c\u200e\u200f]/g, "");
+    if (group) {
+        raw = group.trim() === ""
+            ? raw.replace(/[ \u00a0\u202f]/g, "")
+            : raw.split(group).join("");
+    }
     if (decimal !== ".") raw = raw.split(decimal).join(".");
+    if (minus !== "-") raw = raw.split(minus).join("-");
     return (focused ? "1" : "0") + "|" + raw;
 }
 
