@@ -1,0 +1,27 @@
+sheet three_way {
+    source ratio = 3.0 / 5.0;
+    source resolution = 72.0;
+    cell lock = false;
+    cell width_pixels: f64;
+    cell height_pixels: f64;
+    cell width_inches = 3.0;
+    cell height_inches = 5.0;
+
+    relationship {
+        width_pixels := width_inches * resolution;
+        width_inches := width_pixels / resolution;
+    }
+    relationship {
+        height_pixels := height_inches * resolution;
+        height_inches := height_pixels / resolution;
+    }
+
+    conditional lock {
+        true => {
+            relationship {
+                width_pixels := height_pixels / ratio;
+                height_pixels := width_pixels * ratio;
+            }
+        }
+    }
+}

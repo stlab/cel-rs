@@ -246,6 +246,79 @@ fn slider_bounds(current: &str, range: (f64, f64)) -> (String, String) {
     (lo.min(current).to_string(), hi.max(current).to_string())
 }
 
+/// Returns Spectrum display options for a numeric cell, preserving integer defaults and
+/// displaying floating-point values with exactly two fractional digits.
+fn numeric_format_options(is_integer: bool) -> Option<&'static str> {
+    if is_integer {
+        None
+    } else {
+        Some(r#"{"minimumFractionDigits":2,"maximumFractionDigits":2}"#)
+    }
+}
+
+/// Returns slider increments of one for integer cells and one hundredth for floating-point cells.
+///
+/// The fractional increment matches the Inspector's two-decimal display precision.
+fn slider_step(is_integer: bool) -> Option<&'static str> {
+    Some(if is_integer { "1" } else { "0.01" })
+}
+
+/// Represents an empty number-field draft as `NaN`, avoiding JavaScript's empty-string-to-zero conversion.
+fn number_field_value(input: &str) -> &str {
+    if input.is_empty() { "NaN" } else { input }
+}
+
+/// Keeps the slider's numeric handle at the computed value while its inline draft is empty.
+fn slider_field_value<'a>(input: &'a str, computed: &'a str) -> &'a str {
+    if input.is_empty() { computed } else { input }
+}
+
+/// Preserves a blank numeric draft until its computed value changes, including across blur.
+///
+/// Nonempty drafts retain the existing focus-based synchronization policy.
+/// - Complexity: O(n) in the computed value text lengths.
+fn sync_input(is_numeric: bool, input: &str, focused: bool, previous: &str, current: &str) -> bool {
+    if is_numeric && input.is_empty() {
+        previous != current
+    } else {
+        !focused
+    }
+}
+
+/// Reads a normalized numeric draft from a Spectrum field or a slider's editable field.
+///
+/// Slider dragging reads the host value instead of the inline field's possibly stale text.
+/// - Complexity: O(n) in the field ID and edited text lengths.
+fn numeric_input_script(field_id: &str, slider: bool) -> String {
+    format!(
+        r#"
+        const host = document.getElementById({field_id:?});
+        const field = {field};
+        const focused = document.activeElement === host;
+        let raw = {raw};
+        delete host.adamNumericDraft;
+        let group = "", decimal = ".";
+        for (const part of field.numberFormatter.formatToParts(1234.5)) {{
+            if (part.type === "group") group = part.value;
+            if (part.type === "decimal") decimal = part.value;
+        }}
+        if (group) raw = raw.split(group).join("");
+        if (decimal !== ".") raw = raw.split(decimal).join(".");
+        dioxus.send((focused ? "1" : "0") + "|" + raw);
+        "#,
+        field = if slider {
+            r#"host.shadowRoot.querySelector("sp-number-field")"#
+        } else {
+            "host"
+        },
+        raw = if slider {
+            r#"host.adamNumericDraft ?? host.value.toString()"#
+        } else {
+            r#"field.shadowRoot.querySelector("input").value"#
+        },
+    )
+}
+
 /// Returns `true` if `typed`, read as a number, differs from `actual` (a cell's post-write
 /// display string) after applying [`format_rounded`]'s own rounding to both — i.e. a range
 /// filter silently clamped the written value to something other than what was typed. A range
@@ -276,6 +349,9 @@ struct ErrorContext {
 /// sheet's constraints, updating `has_error` and reporting any error — or, on success, any
 /// currently-violated filter — to `crate::diagnostics`.
 ///
+/// An empty numeric draft clears its parse error without writing or propagating; empty
+/// nonnumeric values still pass through the cell's parser.
+///
 /// - Postcondition: `has_error` is `true` on parse or propagation failure, or when a range
 ///   filter clamped `val` away from what was typed (see [`clamped_away`]); `false` otherwise.
 fn write_and_propagate(
@@ -286,11 +362,15 @@ fn write_and_propagate(
     mut has_error: Signal<bool>,
     errors: ErrorContext,
 ) {
-    let mut parsed_w = parsed.write();
     let labels_r = labels.read();
     let Some(meta) = labels_r.cells.get(&id) else {
         return;
     };
+    if meta.is_numeric && val.is_empty() {
+        has_error.set(false);
+        return;
+    }
+    let mut parsed_w = parsed.write();
     let write_result = (meta.write_str)(&mut parsed_w, val);
     drop(labels_r);
     let propagate_result = match write_result {
@@ -433,6 +513,7 @@ fn CellRow(
     let forced = use_memo(move || parsed.read().is_forced(id));
 
     let mut input = use_signal(|| value.peek().clone());
+    let mut previous_value = use_signal(|| value.peek().clone());
     let mut is_focused = use_signal(|| false);
     let mut has_error = use_signal(|| false);
 
@@ -467,9 +548,16 @@ fn CellRow(
     // is actively editing — that would interrupt mid-value typing (e.g. "1." → "1").
     use_effect(move || {
         let v = value.read().clone();
-        if !*is_focused.read() {
+        if sync_input(
+            *is_numeric.read(),
+            &input.peek(),
+            *is_focused.read(),
+            &previous_value.peek(),
+            &v,
+        ) {
             input.set(v);
         }
+        previous_value.set(value.peek().clone());
     });
 
     let field_id = format!("cell-{}-{id:?}", dom_id_namespace(&source_name.read()));
@@ -479,39 +567,34 @@ fn CellRow(
             style: "margin-bottom: 8px;",
             if let Some((lo, hi)) = *range.read() {
                 {
-                    let (min, max) = slider_bounds(&input.read(), (lo, hi));
-                    let step = is_integer.read().then(|| "1".to_string());
+                    let slider_value = slider_field_value(&input.read(), &value.read()).to_string();
+                    let (min, max) = slider_bounds(&slider_value, (lo, hi));
+                    let step = slider_step(*is_integer.read()).map(str::to_string);
                     rsx! {
                         SpSlider {
                             id: field_id,
                             label: label.read().clone(),
-                            value: input.read().clone(),
+                            value: slider_value,
                             min,
                             max,
                             step,
+                            format_options: numeric_format_options(*is_integer.read()),
                             editable: true,
                             disabled: flags.read().disabled,
                             oninput: move |_: FormEvent| {
                                 let ns = dom_id_namespace(&source_name.read());
                                 spawn(async move {
-                                    // No focus/blur staleness guard here (unlike the number and
-                                    // text fields below): dragging an `sp-slider` handle fires
-                                    // `input` without ever focusing the element — SWC's
-                                    // `SliderHandle` uses pointer capture, not focus, so neither
-                                    // `is_focused` nor `document.activeElement` reports the slider
-                                    // as focused mid-drag, and any such gate would silently drop
-                                    // every drag write. A guard is also unnecessary: the value read
-                                    // is always the slider's live position, never a partially typed
-                                    // buffer, so writing it on each event (even one whose round-trip
-                                    // resolves just after release) only ever commits the current
-                                    // value. `onfocus`/`onblur` are still wired below for the inline
-                                    // editable number field, whose real focus events do fire.
-                                    let mut eval = document::eval(&format!(
-                                        r#"dioxus.send(document.getElementById("cell-{ns}-{id:?}").value.toString())"#
+                                    // Dragging needs no focus; inline typing reads its raw draft
+                                    // instead of the slider's last committed numeric value.
+                                    let mut eval = document::eval(&numeric_input_script(
+                                        &format!("cell-{ns}-{id:?}"),
+                                        true,
                                     ));
-                                    let Ok(val) = eval.recv::<String>().await else { return; };
-                                    input.set(val.clone());
-                                    write_and_propagate(parsed, labels, id, &val, has_error, errors);
+                                    let Ok(payload) = eval.recv::<String>().await else { return; };
+                                    let Some((focused, val)) = payload.split_once('|') else { return; };
+                                    is_focused.set(focused == "1");
+                                    input.set(val.to_string());
+                                    write_and_propagate(parsed, labels, id, val, has_error, errors);
                                 });
                             },
                             onfocus: move |_| is_focused.set(true),
@@ -573,10 +656,11 @@ fn CellRow(
                 if *is_numeric.read() {
                     SpNumberfield {
                         id: field_id,
-                        value: input.read().clone(),
+                        value: number_field_value(&input.read()).to_string(),
                         min: None,
                         max: None,
                         step: is_integer.read().then(|| "1".to_string()),
+                        format_options: numeric_format_options(*is_integer.read()),
                         invalid: flags.read().invalid,
                         // An out cell's field is always `disabled` too (its cell is
                         // always `forced`, never a candidate write target), but
@@ -622,29 +706,16 @@ fn CellRow(
                                 // trusting the `is_focused` signal, sidesteps that gap while
                                 // still discarding a response that arrives after a genuine
                                 // blur-while-in-flight (`activeElement` has moved on by then).
-                                let mut eval = document::eval(&format!(
-                                    r#"
-                                    const el = document.getElementById("cell-{ns}-{id:?}");
-                                    const raw = el.shadowRoot.querySelector("input").value;
-                                    let group = "", decimal = ".";
-                                    try {{
-                                        for (const p of el.numberFormatter.formatToParts(1234.5)) {{
-                                            if (p.type === "group") group = p.value;
-                                            if (p.type === "decimal") decimal = p.value;
-                                        }}
-                                    }} catch (e) {{}}
-                                    let normalized = group ? raw.split(group).join("") : raw;
-                                    if (decimal && decimal !== ".") {{
-                                        normalized = normalized.split(decimal).join(".");
-                                    }}
-                                    dioxus.send((document.activeElement === el ? "1" : "0") + "|" + normalized);
-                                    "#
+                                let mut eval = document::eval(&numeric_input_script(
+                                    &format!("cell-{ns}-{id:?}"),
+                                    false,
                                 ));
                                 let Ok(payload) = eval.recv::<String>().await else { return; };
                                 let Some((still_focused, val)) = payload.split_once('|') else { return; };
                                 if still_focused != "1" {
                                     return;
                                 }
+                                is_focused.set(true);
                                 input.set(val.to_string());
                                 write_and_propagate(parsed, labels, id, val, has_error, errors);
                             });
@@ -713,6 +784,155 @@ fn CellRow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verifies blank numeric drafts stay blank through blur and unrelated recomputation.
+    #[test]
+    fn sync_input_preserves_blank_numeric_drafts() {
+        for focused in [false, true] {
+            assert!(!sync_input(true, "", focused, "51", "51"));
+            assert!(sync_input(true, "", focused, "51", "10"));
+        }
+    }
+
+    /// Verifies nonempty and nonnumeric drafts retain focus-based synchronization.
+    #[test]
+    fn sync_input_preserves_existing_editing_behavior() {
+        for numeric in [false, true] {
+            assert!(!sync_input(numeric, "1.", true, "1", "2"));
+            assert!(sync_input(numeric, "1.", false, "1", "2"));
+        }
+        assert!(sync_input(false, "", false, "old", "old"));
+        assert!(!sync_input(false, "", true, "old", "new"));
+    }
+
+    /// Verifies empty numeric drafts do not become JavaScript zero values.
+    #[test]
+    fn number_field_value_preserves_empty_and_nonempty_drafts() {
+        assert_eq!(number_field_value(""), "NaN");
+        for value in ["0", "5", "-1.5", "1."] {
+            assert_eq!(number_field_value(value), value);
+        }
+    }
+
+    /// Verifies clearing a slider draft preserves its handle and the bounds that contain it.
+    #[test]
+    fn slider_field_value_preserves_computed_value_for_empty_drafts() {
+        assert_eq!(slider_field_value("", "51"), "51");
+        assert_eq!(
+            slider_bounds(slider_field_value("", "51"), (0.0, 10.0)),
+            ("0".to_string(), "51".to_string())
+        );
+        assert_eq!(slider_field_value("5", "51"), "5");
+    }
+
+    thread_local! {
+        /// Records whether the live-write fixture completed its assertions outside Dioxus's error boundary.
+        static EMPTY_WRITES_CHECKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Exercises empty writes for numeric cells and a string cell through the live write path.
+    ///
+    /// - Complexity: One sheet parse and three writes.
+    fn empty_numeric_write_app() -> Element {
+        let source = r#"sheet s { cell float: f64 = 51.0; cell integer: i32 = 12; cell text: String = "old"; }"#;
+        let sheet = parse(source);
+        let metadata = crate::labels::labels_from_cell_names(&sheet, &sheet.cell_names);
+        let parsed = use_signal(move || sheet);
+        let labels = use_signal(move || metadata);
+        let mut has_error = use_signal(|| true);
+        let source_text = use_memo(move || source.to_string());
+        let source_name = use_memo(|| "empty-edit.adm2".to_string());
+        use_hook(move || {
+            for name in ["float", "integer", "text"] {
+                has_error.set(true);
+                let id = parsed.read().cell_names[name].0;
+                write_and_propagate(
+                    parsed,
+                    labels,
+                    id,
+                    "",
+                    has_error,
+                    ErrorContext {
+                        source_text,
+                        source_name,
+                        parsed,
+                    },
+                );
+                assert!(
+                    !*has_error.read(),
+                    "empty {name} edit must not report a parse error"
+                );
+            }
+            let sheet = parsed.read();
+            assert_eq!(
+                *sheet.read::<f64>(sheet.cell_names["float"].0).unwrap(),
+                51.0
+            );
+            assert_eq!(
+                *sheet.read::<i32>(sheet.cell_names["integer"].0).unwrap(),
+                12
+            );
+            assert_eq!(
+                sheet.read::<String>(sheet.cell_names["text"].0).unwrap(),
+                ""
+            );
+            EMPTY_WRITES_CHECKED.set(true);
+        });
+        rsx! { div {} }
+    }
+
+    /// Verifies blank numeric edits leave stored values unchanged while empty strings remain writable.
+    #[test]
+    fn empty_numeric_writes_preserve_sheet_values() {
+        EMPTY_WRITES_CHECKED.set(false);
+        VirtualDom::new(empty_numeric_write_app).rebuild_in_place();
+        assert!(
+            EMPTY_WRITES_CHECKED.get(),
+            "live-write fixture must complete every assertion"
+        );
+    }
+
+    /// Verifies that both floating-point types configure fractional slider increments.
+    #[test]
+    fn slider_step_configures_hundredths_for_floats() {
+        let parsed = parse("sheet s { cell a: f32 = 3.0_f32; cell b: f64 = 25.5; }");
+        let labels = crate::labels::labels_from_cell_names(&parsed, &parsed.cell_names);
+        assert_eq!(labels.cells.len(), 2);
+        for meta in labels.cells.values() {
+            assert_eq!(slider_step(meta.is_integer), Some("0.01"));
+        }
+    }
+
+    /// Verifies that integer cells retain whole-number slider increments.
+    #[test]
+    fn slider_step_preserves_whole_numbers_for_integers() {
+        let parsed = parse("sheet s { cell a: i32 = 51; cell b: u32 = 26_u32; }");
+        let labels = crate::labels::labels_from_cell_names(&parsed, &parsed.cell_names);
+        assert_eq!(labels.cells.len(), 2);
+        for meta in labels.cells.values() {
+            assert_eq!(slider_step(meta.is_integer), Some("1"));
+        }
+    }
+
+    /// Verifies that both floating-point types request exactly two fractional digits.
+    #[test]
+    fn numeric_format_options_sets_two_fractional_digits_for_floats() {
+        let parsed = parse("sheet s { cell a: f32 = 3.0_f32; cell b: f64 = 1.234; }");
+        let labels = crate::labels::labels_from_cell_names(&parsed, &parsed.cell_names);
+        assert_eq!(labels.cells.len(), 2);
+        for meta in labels.cells.values() {
+            let options: serde_json::Value =
+                serde_json::from_str(numeric_format_options(meta.is_integer).unwrap()).unwrap();
+            assert_eq!(options["minimumFractionDigits"], 2);
+            assert_eq!(options["maximumFractionDigits"], 2);
+        }
+    }
+
+    /// Verifies that integer widgets keep Spectrum's existing formatting.
+    #[test]
+    fn numeric_format_options_preserves_integer_defaults() {
+        assert_eq!(numeric_format_options(true), None);
+    }
 
     /// Parses a valid test sheet with the standard type registry.
     ///

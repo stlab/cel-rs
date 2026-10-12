@@ -21,5 +21,6 @@
         "cel-rs/Workspace/begin: serve (web)",
         "cel-rs/Workspace/book: serve (full)",
         "cel-rs/Workspace/cel-lang-book: serve"
-    ]
+    ],
+    "cmake.ignoreCMakeListsMissing": true
 }
