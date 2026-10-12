@@ -287,35 +287,18 @@ fn sync_input(is_numeric: bool, input: &str, focused: bool, previous: &str, curr
 
 /// Reads a normalized numeric draft from a Spectrum field or a slider's editable field.
 ///
-/// Slider dragging reads the host value instead of the inline field's possibly stale text.
+/// Consumes the localized `adamNumericDraft` installed by [`SpSlider`] once, preserving blanks
+/// and partial edits. Slider dragging reads the canonical host value without locale normalization.
+/// The script sends `1|value` while the host is focused and `0|value` otherwise.
 /// - Complexity: O(n) in the field ID and edited text lengths.
 fn numeric_input_script(field_id: &str, slider: bool) -> String {
     format!(
         r#"
+        {bridge}
         const host = document.getElementById({field_id:?});
-        const field = {field};
-        const focused = document.activeElement === host;
-        let raw = {raw};
-        delete host.adamNumericDraft;
-        let group = "", decimal = ".";
-        for (const part of field.numberFormatter.formatToParts(1234.5)) {{
-            if (part.type === "group") group = part.value;
-            if (part.type === "decimal") decimal = part.value;
-        }}
-        if (group) raw = raw.split(group).join("");
-        if (decimal !== ".") raw = raw.split(decimal).join(".");
-        dioxus.send((focused ? "1" : "0") + "|" + raw);
+        dioxus.send(readNumericInput(host, {slider}, document.activeElement === host));
         "#,
-        field = if slider {
-            r#"host.shadowRoot.querySelector("sp-number-field")"#
-        } else {
-            "host"
-        },
-        raw = if slider {
-            r#"host.adamNumericDraft ?? host.value.toString()"#
-        } else {
-            r#"field.shadowRoot.querySelector("input").value"#
-        },
+        bridge = include_str!("numeric_input.js"),
     )
 }
 
@@ -932,6 +915,26 @@ mod tests {
     #[test]
     fn numeric_format_options_preserves_integer_defaults() {
         assert_eq!(numeric_format_options(true), None);
+    }
+
+    /// Verifies the composed example preserves its starting aspect and both edit directions when locked.
+    #[test]
+    fn composed_example_lock_preserves_aspect_ratio() {
+        let mut parsed = parse(include_str!("../../adam-slides/examples/three_way.adm2"));
+        let lock = parsed.cell_names["lock"].0;
+        let width = parsed.cell_names["width_inches"].0;
+        let height = parsed.cell_names["height_inches"].0;
+        parsed.propagate().unwrap();
+        parsed.write(lock, true).unwrap();
+        parsed.propagate().unwrap();
+        assert!((*parsed.read::<f64>(width).unwrap() - 3.0).abs() < 1e-10);
+        assert!((*parsed.read::<f64>(height).unwrap() - 5.0).abs() < 1e-10);
+        parsed.write(width, 6.0_f64).unwrap();
+        parsed.propagate().unwrap();
+        assert!((*parsed.read::<f64>(height).unwrap() - 10.0).abs() < 1e-10);
+        parsed.write(height, 15.0_f64).unwrap();
+        parsed.propagate().unwrap();
+        assert!((*parsed.read::<f64>(width).unwrap() - 9.0).abs() < 1e-10);
     }
 
     /// Parses a valid test sheet with the standard type registry.

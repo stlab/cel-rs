@@ -150,6 +150,10 @@ pub fn SpNumberfield(
 /// [`SpTextfield`]/[`SpNumberfield`]. `format_options` supplies JSON-encoded `Intl.NumberFormat`
 /// options for both the value label and the inline number field without changing the stored value.
 /// Empty inline edits remain uncommitted rather than restoring the slider's last numeric value.
+/// A mounted slider captures unmanaged inline edits after Spectrum parses them, stores the raw
+/// localized text (including blanks) in `adamNumericDraft`, and redispatches a host `input` event.
+/// The Inspector's numeric input bridge consumes and deletes that draft once; handle drags instead
+/// read the canonical host value. Empty inline `change` events are suppressed to preserve blanks.
 #[component]
 pub fn SpSlider(
     id: String,
@@ -182,26 +186,10 @@ pub fn SpSlider(
             onmounted: move |_| {
                 let script = format!(
                     r#"
-                    const host = document.getElementById({id:?});
-                    host.addEventListener("input", event => {{
-                        const field = host.shadowRoot.querySelector("sp-number-field");
-                        if (!field || !event.composedPath().includes(field) || field.managedInput) return;
-                        // Microtasks can run between DOM listeners, before Spectrum parses the input.
-                        setTimeout(() => {{
-                            if (!host.isConnected) return;
-                            if (Number.isFinite(field.value)) host.value = field.value;
-                            host.adamNumericDraft = field.shadowRoot.querySelector("input").value;
-                            host.dispatchEvent(new Event("input", {{ bubbles: true, composed: true }}));
-                        }}, 0);
-                    }}, true);
-                    host.addEventListener("change", event => {{
-                        const field = host.shadowRoot.querySelector("sp-number-field");
-                        if (field && event.composedPath().includes(field)
-                            && field.shadowRoot.querySelector("input").value === "") {{
-                            event.stopImmediatePropagation();
-                        }}
-                    }}, true);
-                    "#
+                    {bridge}
+                    installNumericSliderBridge(document.getElementById({id:?}));
+                    "#,
+                    bridge = include_str!("numeric_input.js"),
                 );
                 document::eval(&script);
             },

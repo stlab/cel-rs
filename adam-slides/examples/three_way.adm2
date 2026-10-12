@@ -19,8 +19,8 @@ sheet three_way {
     conditional lock {
         true => {
             relationship {
-                width_pixels := height_pixels / ratio;
-                height_pixels := width_pixels * ratio;
+                width_pixels := height_pixels * ratio;
+                height_pixels := width_pixels / ratio;
             }
         }
     }
