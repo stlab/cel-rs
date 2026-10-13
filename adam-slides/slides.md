@@ -89,3 +89,9 @@ The derived `width` exceeds its filter. Edit `height` to explore the diagnostic.
 Set `width` and `height` to 100. The output reports its violated requirement.
 
 <!-- adam-example: tutorial/area_with_requirement -->
+
+---
+
+# Composed
+
+<!-- adam-example: local/three_way -->

@@ -83,8 +83,10 @@ pub fn SpTextfield(
 /// slotted [`SpHelpText`] there rather than inventing a non-standard visual override to
 /// compensate for the missing border. `step`, when present, sets the amount the stepper
 /// buttons/arrow keys/scroll wheel move the value by — pass `"1"` for an integer-typed cell so
-/// the stepper can never land it on a fractional value. `children` slots into the element's
-/// light DOM, e.g. an [`SpHelpText`] with `slot: "negative-help-text"` or `slot: "help-text"`.
+/// the stepper can never land it on a fractional value. `format_options` supplies JSON-encoded
+/// `Intl.NumberFormat` options for locale-aware display without changing the stored value.
+/// `children` slots into the element's light DOM, e.g. an [`SpHelpText`] with
+/// `slot: "negative-help-text"` or `slot: "help-text"`.
 #[component]
 pub fn SpNumberfield(
     id: String,
@@ -92,6 +94,7 @@ pub fn SpNumberfield(
     min: Option<String>,
     max: Option<String>,
     step: Option<String>,
+    format_options: Option<&'static str>,
     invalid: bool,
     disabled: bool,
     readonly: bool,
@@ -108,6 +111,7 @@ pub fn SpNumberfield(
             "min": min.as_deref(),
             "max": max.as_deref(),
             "step": step.as_deref(),
+            "format-options": format_options.unwrap_or("{}"),
             "invalid": if invalid { "true" },
             "disabled": if disabled { "true" },
             "readonly": if readonly { "true" },
@@ -129,7 +133,9 @@ pub fn SpNumberfield(
 /// every render from the cell's current filter bounds (see `adam-web-ui/src/labels.rs`'s
 /// `CellMeta::range`), so a range driven by other cells stays live. `step`, when present, sets
 /// the amount the drag handle/stepper/arrow keys move the value by — pass `"1"` for an
-/// integer-typed cell, mirroring [`SpNumberfield`]'s own `step`. Setting `editable` to `true`
+/// integer-typed cell, mirroring [`SpNumberfield`]'s own `step`, or `"0.01"` for a floating-point
+/// cell displayed to two decimal places. Omitting `step` leaves Spectrum's default of one,
+/// which also snaps the inline number field to whole numbers. Setting `editable` to `true`
 /// renders an internal `sp-number-field` alongside the track (SWC's own `Slider.render`),
 /// letting the user type an exact value instead of only dragging; both the drag handle and the
 /// editable field dispatch the same DOM `input` event on this element (SWC's
@@ -141,7 +147,13 @@ pub fn SpNumberfield(
 /// handle and (when `editable` is set) the inline number field — neither SWC handle re-dispatches
 /// a bubbling event, but DOM `focus`/`blur` are `composed`, so a listener on this host element
 /// still observes them across the intervening shadow boundaries, mirroring
-/// [`SpTextfield`]/[`SpNumberfield`].
+/// [`SpTextfield`]/[`SpNumberfield`]. `format_options` supplies JSON-encoded `Intl.NumberFormat`
+/// options for both the value label and the inline number field without changing the stored value.
+/// Empty inline edits remain uncommitted rather than restoring the slider's last numeric value.
+/// A mounted slider captures unmanaged inline edits after Spectrum parses them, stores the raw
+/// localized text (including blanks) in `adamNumericDraft`, and redispatches a host `input` event.
+/// The Inspector's numeric input bridge consumes and deletes that draft once; handle drags instead
+/// read the canonical host value. Empty inline `change` events are suppressed to preserve blanks.
 #[component]
 pub fn SpSlider(
     id: String,
@@ -150,6 +162,7 @@ pub fn SpSlider(
     min: String,
     max: String,
     step: Option<String>,
+    format_options: Option<&'static str>,
     editable: bool,
     disabled: bool,
     oninput: EventHandler<FormEvent>,
@@ -164,11 +177,22 @@ pub fn SpSlider(
             "min": "{min}",
             "max": "{max}",
             "step": step.as_deref(),
+            "format-options": format_options.unwrap_or("{}"),
             "editable": if editable { "true" },
             "disabled": if disabled { "true" },
             oninput: move |e| oninput.call(e),
             onfocus: move |e| onfocus.call(e),
             onblur: move |e| onblur.call(e),
+            onmounted: move |_| {
+                let script = format!(
+                    r#"
+                    {bridge}
+                    installNumericSliderBridge(document.getElementById({id:?}));
+                    "#,
+                    bridge = include_str!("numeric_input.js"),
+                );
+                document::eval(&script);
+            },
         }
     }
 }

@@ -265,11 +265,11 @@ test("editing either side reverses a relationship and updates its graph", async 
   await page.goto("./");
   const frame = await selectSlide(page, "basic_relationship");
   await writeSlider(frame, "a", 40);
-  await expect(sliderInput(frame, "b")).toHaveValue("20");
+  await expect(sliderInput(frame, "b")).toHaveValue("20.00");
   await expect(frame.locator("#graph svg").getByText("40", { exact: true })).toBeVisible();
   await expect.poll(() => graphDirection(frame, "a")).toBe("source");
   await writeSlider(frame, "b", 15);
-  await expect(sliderInput(frame, "a")).toHaveValue("30");
+  await expect(sliderInput(frame, "a")).toHaveValue("30.00");
   await expect(frame.locator("#graph svg").getByText("30", { exact: true })).toBeVisible();
   await expect.poll(() => graphDirection(frame, "a")).toBe("target");
 });
