@@ -1647,8 +1647,8 @@ fn range_full_scope(
 
 /// Operation lookup with scope stack support.
 ///
-/// Provides a stack of scopes for operation resolution, with built-in operations
-/// as the fallback. Scopes are searched in LIFO order (most recently pushed first).
+/// Resolves scopes in LIFO order, then persistent named registrations, tuple
+/// signatures, and built-in operations. Named registrations survive scope isolation.
 ///
 /// # Examples
 ///
@@ -1667,6 +1667,7 @@ fn range_full_scope(
 /// assert_eq!(segment.call0::<u32>().unwrap(), 30);
 /// ```
 pub struct OpLookup {
+    pub(crate) registered: crate::registered_ops::RegisteredOps,
     scopes: Vec<ScopeFn>,
     library_scope_count: usize,
     builtin_scope: BuiltinScope,
@@ -1686,6 +1687,7 @@ impl OpLookup {
     /// ```
     pub fn new() -> Self {
         let mut lookup = OpLookup {
+            registered: Default::default(),
             scopes: Vec::new(),
             library_scope_count: 0,
             builtin_scope: BuiltinScope,
@@ -1880,7 +1882,8 @@ impl OpLookup {
 
     /// Looks up and applies an operation, attaching the expression span to any error.
     ///
-    /// Searches scopes in LIFO order, then falls back to built-in operations.
+    /// Searches scopes in LIFO order, then persistent named registrations, tuple
+    /// signatures, and built-in operations.
     ///
     /// # Errors
     ///
@@ -1913,13 +1916,102 @@ impl OpLookup {
         start: proc_macro2::Span,
         end: proc_macro2::Span,
     ) -> std::result::Result<(), crate::ParseError> {
+        self.lookup_impl(name, segment, num_operands, start, end, false)
+    }
+
+    /// Applies a direct named operation without looking up a zero-arity value binding.
+    ///
+    /// Scopes retain LIFO precedence for nonzero operand counts; registered operations,
+    /// tuple signatures and built-ins provide the fallbacks. A declined signature
+    /// leaves the stack unchanged.
+    ///
+    /// # Errors
+    /// Returns a spanned error if no operation matches or an emitter fails.
+    ///
+    /// - Complexity: O(k + s * a * d) for k scopes, s signatures, a operands
+    ///   and descriptor depth d.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::OpLookup;
+    /// use cel_runtime::DynSegment;
+    /// use proc_macro2::Span;
+    /// let mut segment = DynSegment::new::<()>();
+    /// segment.just(1u32);
+    /// segment.just(2u32);
+    /// OpLookup::new().lookup_member("+", &mut segment, 2,
+    ///     Span::call_site(), Span::call_site()).unwrap();
+    /// assert_eq!(segment.call0::<u32>().unwrap(), 3);
+    /// ```
+    pub fn lookup_member(
+        &self,
+        name: &str,
+        segment: &mut DynSegment,
+        arity: usize,
+        start: proc_macro2::Span,
+        end: proc_macro2::Span,
+    ) -> crate::Result<()> {
+        self.lookup_impl(name, segment, arity, start, end, true)
+    }
+
+    /// Resolves direct scoped operations and shared signatures without value lookup.
+    ///
+    /// Zero-operand dispatch skips scopes, which cannot distinguish a value binding
+    /// from a direct operation at that arity.
+    ///
+    /// # Errors
+    /// Returns a scope or registered emitter error without trying a later overload.
+    ///
+    /// - Complexity: O(k + s * a * d) for k scopes, s signatures, a operands
+    ///   and descriptor depth d.
+    pub(crate) fn lookup_direct_operation(
+        &self,
+        name: &str,
+        segment: &mut DynSegment,
+        arity: usize,
+        span: SourceSpan,
+    ) -> Result<bool> {
+        if arity > 0 {
+            for scope in self.scopes.iter().rev() {
+                if scope(name, segment, arity, span)? {
+                    return Ok(true);
+                }
+            }
+        }
+        self.lookup_registered_operation(name, segment, arity, span)
+    }
+
+    /// Applies scoped lookup with either ordinary callable or operation-only dispatch.
+    ///
+    /// - Complexity: O(k + s * a * d) for k scopes, s signatures, a operands
+    ///   and descriptor depth d.
+    fn lookup_impl(
+        &self,
+        name: &str,
+        segment: &mut DynSegment,
+        num_operands: usize,
+        start: proc_macro2::Span,
+        end: proc_macro2::Span,
+        member: bool,
+    ) -> crate::Result<()> {
         let source_span = SourceSpan::from_proc_macro2_range(start, end);
-        for scope in self.scopes.iter().rev() {
+        for scope in self.scopes.iter().rev().filter(|_| !member) {
             match scope(name, segment, num_operands, source_span) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
                 Err(e) => return Err(crate::ParseError::new_range(e.to_string(), start, end)),
             }
+        }
+
+        let registered = if member {
+            self.lookup_direct_operation(name, segment, num_operands, source_span)
+        } else {
+            self.lookup_registered(name, segment, num_operands, source_span)
+        };
+        match registered {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => return Err(crate::ParseError::new_range(error.to_string(), start, end)),
         }
 
         match self.lookup_tuple_signature(name, segment, num_operands, source_span) {

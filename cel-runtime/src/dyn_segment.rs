@@ -830,6 +830,30 @@ impl DynSegment {
         self.stack_offset_after(self.stack_ids.len())
     }
 
+    /// Returns the stack byte offset preceding the top `n` operands.
+    ///
+    /// # Errors
+    /// Returns an error if fewer than `n` operand descriptors are available.
+    ///
+    /// - Complexity: O(k - n) for k available operand descriptors.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::DynSegment;
+    /// let mut segment = DynSegment::new::<()>();
+    /// segment.just(1u32);
+    /// assert_eq!(segment.stack_offset_before_top(1).unwrap(), 0);
+    /// assert!(segment.stack_offset_before_top(2).is_err());
+    /// ```
+    pub fn stack_offset_before_top(&self, n: usize) -> Result<usize> {
+        let count = self
+            .stack_ids
+            .len()
+            .checked_sub(n)
+            .ok_or_else(|| anyhow!("not enough operands on stack"))?;
+        Ok(self.stack_offset_after(count))
+    }
+
     /// Returns the arity of the tuple on top of the stack, or `None` if the
     /// top value isn't a tuple.
     #[must_use]

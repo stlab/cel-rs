@@ -218,6 +218,10 @@ mod error;
 mod fmt;
 pub mod lex_lexer;
 pub mod op_table;
+pub mod registered_ops;
+pub use registered_ops::{
+    OperationEmitter, OperationSignature, RecordEmitter, RecordField, RecordSchema,
+};
 pub mod parser_context;
 pub mod trivia;
 pub mod ty;
