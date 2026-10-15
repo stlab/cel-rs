@@ -46,7 +46,7 @@ callables! {
 ///
 /// # Errors
 /// Returns errors for a duplicate operand signature.
-fn unary<A: 'static, R: 'static>(
+pub(crate) fn unary<A: 'static, R: 'static>(
     lookup: &mut OpLookup,
     name: &'static str,
     op: fn(A) -> R,
@@ -65,7 +65,7 @@ fn unary<A: 'static, R: 'static>(
 ///
 /// # Errors
 /// Returns errors for a duplicate operand signature.
-fn binary<A: 'static, B: 'static, R: 'static>(
+pub(crate) fn binary<A: 'static, B: 'static, R: 'static>(
     lookup: &mut OpLookup,
     name: &'static str,
     op: fn(A, B) -> R,

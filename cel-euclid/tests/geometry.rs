@@ -552,13 +552,31 @@ fn every_signature_rejects_wrong_operands() {
         "contains_box",
         "intersects",
         "union",
+        "degrees",
+        "radians",
+        "m11",
+        "m12",
+        "m21",
+        "m22",
+        "m31",
+        "m32",
+        "identity_transform",
+        "translation",
+        "scale",
+        "rotation",
+        "then",
+        "determinant",
+        "inverse",
+        "transform_point",
+        "transform_vector",
+        "outer_transformed_rect",
     ];
     assert_eq!(
         names
             .iter()
             .map(|name| lookup.operation_signatures(name).count())
             .sum::<usize>(),
-        77
+        98
     );
     for name in names {
         for signature in lookup.operation_signatures(name) {
@@ -599,15 +617,8 @@ fn every_signature_rejects_wrong_operands() {
             }
         }
     }
-    // These are deliberately outside the fixed Task 1 operation set.
-    for name in [
-        "intersection",
-        "contains_box2d",
-        "degrees",
-        "radians",
-        "inverse",
-        "identity_transform",
-    ] {
+    // These remain deliberately outside the fixed operation table.
+    for name in ["intersection", "contains_box2d"] {
         assert_eq!(lookup.operation_signatures(name).count(), 0, "{name}");
     }
 }

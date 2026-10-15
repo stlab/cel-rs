@@ -16,16 +16,45 @@
 //! ```
 //!
 //! Geometry arithmetic, bounds and containment retain Euclid semantics, including
-//! non-finite arithmetic and half-open containment. `normalize` alone is checked:
-//! zero or non-finite lengths and non-finite results return evaluation errors.
-//! Angle conversion and transform operations (including the transform finite
-//! predicate) are reserved for the subsequent transform implementation.
+//! non-finite arithmetic and half-open containment. Three operations are checked:
+//! `normalize` rejects zero/non-finite lengths and non-finite results; `inverse`
+//! rejects non-finite coefficients, zero/non-finite determinants and non-finite
+//! inverses; `outer_transformed_rect` rejects invalid or unrepresentable bounds.
+//! Ordinary point/vector mapping, constructors and composition remain unchecked.
+//!
+//! `degrees` and `radians` construct angles from `f64` and extract the respective
+//! scalar from angles. Matrix accessors use Euclid's six coefficient names.
+//! `a.then(b)` applies `a` first, then `b`; vectors ignore translation.
+//!
+//! ```
+//! use cel_parser::{CELParser, OpLookup};
+//! let mut lookup = OpLookup::new();
+//! cel_euclid::install(&mut lookup);
+//! let mut parser = CELParser::new(lookup);
+//! let mut segment = parser.parse_str(
+//!     "translation(Vector2D { x: 10.0, y: 0.0 }).then(scale(2.0, 2.0))\
+//!      .transform_point(Point2D { x: 1.0, y: 0.0 }).x"
+//! ).unwrap();
+//! assert_eq!(segment.call0::<f64>().unwrap(), 22.0);
+//! ```
+//!
+//! Checked outer bounds enclose all four Euclid-mapped corners, not just a
+//! diagonal, for arbitrary affine rotation, shear and reflection. They are not
+//! an interior-containment test. Inputs must have finite matrix coefficients,
+//! finite source origins/extents/endpoints and nonnegative source extents.
+//! Positive source extents must advance their endpoints. Projected edges must
+//! not overflow or completely underflow, and positive projected spans must not
+//! collapse after mapping. Mapped corners and resulting bounds must be finite.
+//! Zero-size rectangles and singular transforms are allowed. If reconstructing
+//! a bound's maximum rounds inward, its extent advances one ULP to enclose that
+//! maximum; unrepresentable extents/endpoints return evaluation errors.
 //! The `adam` feature only adds optional type registration; it is disabled by default.
 
 #[cfg(feature = "adam")]
 mod adam;
 mod geometry;
 mod records;
+mod transforms;
 
 #[cfg(feature = "adam")]
 pub use adam::register_adam_types;
@@ -80,7 +109,7 @@ pub type Angle = euclid::Angle<f64>;
 /// ```
 pub type Transform2D = euclid::default::Transform2D<f64>;
 
-/// Installs seven record schemas and exact non-transform geometry signatures.
+/// Installs seven record schemas and the complete exact geometry signature table.
 ///
 /// - Precondition: this library has not already been installed on `lookup`.
 /// - Postcondition: unrelated signatures, including scalar `min`/`max`, remain available.
@@ -97,6 +126,8 @@ pub fn install(lookup: &mut cel_parser::OpLookup) {
     records::install(lookup).expect("cel-euclid record schemas must be installed exactly once");
     geometry::install(lookup)
         .expect("cel-euclid operation signatures must be installed exactly once");
+    transforms::install(lookup)
+        .expect("cel-euclid transform signatures must be installed exactly once");
 }
 
 /// Describes a concrete leaf without erasing its Rust identity.
