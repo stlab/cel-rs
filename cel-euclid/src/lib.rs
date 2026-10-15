@@ -18,9 +18,15 @@
 //! Geometry arithmetic, bounds and containment retain Euclid semantics, including
 //! non-finite arithmetic and half-open containment. Three operations are checked:
 //! `normalize` rejects zero/non-finite lengths and non-finite results; `inverse`
-//! rejects non-finite coefficients, zero/non-finite determinants and non-finite
-//! inverses; `outer_transformed_rect` rejects invalid or unrepresentable bounds.
+//! rejects non-finite coefficients, zero/non-finite determinants, non-finite
+//! inverses and zero inverse coefficients with nonzero exact cofactors;
+//! `outer_transformed_rect` rejects invalid or unrepresentable bounds.
 //! Ordinary point/vector mapping, constructors and composition remain unchecked.
+//! Checked inversion permits exact-zero cofactors and nonzero subnormal results.
+//! Translation cofactor checks compare exact products, so underflow or rounding
+//! before determinant scaling cannot disguise a lost nonzero coefficient.
+//! Other rounding and conditioning errors retain Euclid semantics: checked
+//! inversion does not guarantee exact-real arithmetic or numerical stability.
 //!
 //! `degrees` and `radians` construct angles from `f64` and extract the respective
 //! scalar from angles. Matrix accessors use Euclid's six coefficient names.

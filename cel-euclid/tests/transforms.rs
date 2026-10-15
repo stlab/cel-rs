@@ -155,6 +155,93 @@ fn singular_or_nonfinite_inverse_errors() {
     }
 }
 
+/// Checked inversion rejects complete loss of any nonzero inverse coefficient.
+#[test]
+fn inverse_rejects_complete_coefficient_underflow() {
+    let mut accepted = Vec::new();
+    for matrix in [
+        Transform2D::new(1e150, 1e-100, 0.0, 1e150, 0.0, 0.0),
+        Transform2D::new(1e150, 0.0, 1e-100, 1e150, 0.0, 0.0),
+        Transform2D::new(1.0, 1e150, -1e150, 1e-100, 0.0, 0.0),
+        Transform2D::new(1e-100, 1e150, -1e150, 1.0, 0.0, 0.0),
+        Transform2D::new(1e150, 0.0, 0.0, 1e150, 1e-250, 0.0),
+        Transform2D::new(1e150, 0.0, 0.0, 1e150, 0.0, 1e-250),
+        // Translation cofactors can lose their nonzero products before scaling.
+        Transform2D::new(1.0, 0.0, 0.0, 1e-200, 1e-200, 0.0),
+        Transform2D::new(1e-200, 0.0, 0.0, 1.0, 0.0, 1e-200),
+        // Distinct exact products can also round to the same cofactor terms.
+        Transform2D::new(2.0, 0.0, 1.0 + f64::EPSILON, 1.0, 1.0, 1.0 - f64::EPSILON),
+        Transform2D::new(1.0, 1.0 + f64::EPSILON, 0.0, 2.0, 1.0 - f64::EPSILON, 1.0),
+    ] {
+        assert!(matrix.determinant().is_finite() && matrix.determinant() != 0.0);
+        assert!(
+            matrix
+                .inverse()
+                .unwrap()
+                .to_array()
+                .into_iter()
+                .all(f64::is_finite)
+        );
+        for source in ["inverse(matrix)", "matrix.inverse()"] {
+            if parser(matrix, Rect::zero())
+                .parse_str(source)
+                .unwrap()
+                .call0::<Transform2D>()
+                .is_ok()
+            {
+                accepted.push((source, matrix));
+            }
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted unrepresentable inverses: {accepted:?}"
+    );
+    assert!(
+        parser(Transform2D::identity(), Rect::zero())
+            .parse_str(
+                "Transform2D { m11: 1e150, m12: 1e-100, m21: 0.0, m22: 1e150, m31: 0.0, m32: 0.0 }.inverse()"
+            )
+            .unwrap()
+            .call0::<Transform2D>()
+            .is_err()
+    );
+}
+
+/// Exact-zero cofactors and nonzero subnormal coefficients retain Euclid results.
+#[test]
+fn inverse_preserves_exact_zeros_and_representable_subnormals() {
+    let tiny = f64::from_bits(1);
+    for matrix in [
+        Transform2D::identity(),
+        Transform2D::rotation(Angle::degrees(90.0)),
+        Transform2D::new(1.0, 0.0, 2.0, 1.0, 6.0, 3.0),
+        Transform2D::new(1.0, 0.0, -2.0, 1.0, -6.0, 3.0),
+        Transform2D::new(1.0, 2.0, 0.0, 1.0, 3.0, 6.0),
+        Transform2D::new(1.0, tiny, 0.0, 1.0, 0.0, 0.0),
+        Transform2D::new(1.0, 0.0, tiny, 1.0, 0.0, 0.0),
+        Transform2D::new(1.0, 0.0, 0.0, 1.0, tiny, -tiny),
+        Transform2D::new(1.0, 0.0, tiny, 1.0, tiny, 1.0),
+        Transform2D::scale(1e308, 1.0),
+        Transform2D::scale(1.0, 1e308),
+        // The two nonzero translation products cancel exactly despite underflow.
+        Transform2D::new(2.0, 0.0, 1e-200, 1e-200, 1e-200, 1e-200),
+    ] {
+        let actual = parser(matrix, Rect::zero())
+            .parse_str("matrix.inverse()")
+            .unwrap()
+            .call0::<Transform2D>()
+            .unwrap();
+        assert_eq!(actual, matrix.inverse().unwrap(), "{matrix:?}");
+    }
+    assert_eq!(
+        evaluate::<Transform2D>(
+            "Transform2D { m11: 1.0, m12: 5e-324, m21: 0.0, m22: 1.0, m31: 0.0, m32: 0.0 }.inverse()"
+        ).m12,
+        -tiny
+    );
+}
+
 /// Reversing six named fields preserves the Euclid coefficient convention.
 #[test]
 fn matrix_literal_field_order_is_named() {

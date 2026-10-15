@@ -50,11 +50,47 @@ fn is_finite(matrix: Transform2D) -> bool {
     matrix.to_array().into_iter().all(f64::is_finite)
 }
 
-/// Returns Euclid's inverse only for finite, nonsingular, representable matrices.
+/// Encodes an exact product of finite binary64 values without rounding.
+///
+/// - Precondition: Both operands are finite.
+/// - Postcondition: Equal products have equal encodings, including signed zeros.
+///
+/// The tuple contains a negative-sign flag, an odd significand and an exponent
+/// offset by 2150; zero has the canonical encoding `(false, 0, 0)`. Two 53-bit
+/// significands fit exactly in `u128`, even when their floating product underflows.
+fn exact_product(a: f64, b: f64) -> (bool, u128, u32) {
+    debug_assert!(a.is_finite() && b.is_finite());
+    let parts = |value: f64| {
+        let bits = value.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as u32;
+        let significand =
+            u128::from(bits & ((1_u64 << 52) - 1)) | (u128::from(exponent != 0) << 52);
+        (significand, exponent.max(1))
+    };
+    let (a_significand, a_exponent) = parts(a);
+    let (b_significand, b_exponent) = parts(b);
+    let product = a_significand * b_significand;
+    if product == 0 {
+        return (false, 0, 0);
+    }
+    let shift = product.trailing_zeros();
+    (
+        a.is_sign_negative() != b.is_sign_negative(),
+        product >> shift,
+        a_exponent + b_exponent + shift,
+    )
+}
+
+/// Returns Euclid's inverse with finite coefficients and no lost nonzero cofactors.
+///
+/// A zero inverse coefficient is allowed only when its exact cofactor is zero.
+/// Nonzero subnormal results are allowed. Other rounding and conditioning errors
+/// remain Euclid's floating-point semantics; this is not exact-real inversion.
 ///
 /// # Errors
 /// Returns an error for non-finite coefficients, a zero/non-finite determinant,
-/// or non-finite inverse coefficients.
+/// non-finite inverse coefficients, or a zero inverse coefficient whose exact
+/// cofactor is nonzero (including loss inside translation cofactor arithmetic).
 fn inverse(matrix: Transform2D) -> Result<Transform2D> {
     ensure!(is_finite(matrix), "inverse requires finite coefficients");
     let determinant = matrix.determinant();
@@ -68,6 +104,21 @@ fn inverse(matrix: Transform2D) -> Result<Transform2D> {
     ensure!(
         is_finite(result),
         "inverse requires finite inverse coefficients"
+    );
+    ensure!(
+        [
+            (matrix.m22, result.m11),
+            (matrix.m12, result.m12),
+            (matrix.m21, result.m21),
+            (matrix.m11, result.m22),
+        ]
+        .into_iter()
+        .all(|(cofactor, coefficient)| coefficient != 0.0 || cofactor == 0.0)
+            && (result.m31 != 0.0
+                || exact_product(matrix.m21, matrix.m32) == exact_product(matrix.m22, matrix.m31))
+            && (result.m32 != 0.0
+                || exact_product(matrix.m31, matrix.m12) == exact_product(matrix.m11, matrix.m32)),
+        "inverse requires representable inverse coefficients"
     );
     Ok(result)
 }
