@@ -993,9 +993,11 @@ impl DynSegment {
     /// # Safety
     /// `arguments` must contain live pointers matching this body's parameter descriptors.
     /// # Errors
-    /// Propagates body operation errors.
+    /// Rejects preloaded arguments or a nonzero ambient stack origin before execution, and
+    /// propagates body operation errors.
     /// - Complexity: O(number of body operations).
     pub(crate) unsafe fn execute_raw(&mut self, arguments: &[*const u8]) -> Result<RawStack> {
+        self.validate_independent_body()?;
         let _guard = DynCallGuard(
             CALL_DYN_PTR.with(Cell::get),
             CALL_DYN_LEN.with(Cell::get),
@@ -1006,6 +1008,25 @@ impl DynSegment {
             self.segment.call0_stack(&mut output)?;
         }
         Ok(output)
+    }
+
+    /// Checks that this body's operands are laid out from an empty execution stack.
+    ///
+    /// Zero-origin fragments qualify: their descriptors expose no ambient operands, and
+    /// conditional joins check that every embedded fragment uses the matching origin.
+    ///
+    /// # Errors
+    /// Returns an error if the body requires preloaded arguments or a nonzero ambient origin.
+    pub(crate) fn validate_independent_body(&self) -> Result<()> {
+        ensure!(
+            self.argument_ids.is_empty(),
+            "independent body must not require preloaded arguments"
+        );
+        ensure!(
+            self.base_stack_index == 0,
+            "independent body must not require a nonzero ambient stack origin"
+        );
+        Ok(())
     }
 
     /// Creates a new empty segment with no operations.
@@ -2318,7 +2339,15 @@ impl DynSegment {
     /// * Either fragment doesn't return exactly one value
     /// * The fragments return different types
     /// * The top of the stack is not a boolean value
+    /// * Either fragment's compiled origin differs from the stack offset after popping the condition
+    ///
+    /// - Complexity: O(stack depth plus recursive result type nodes and fragment argument reads).
     pub fn join2(&mut self, mut fragment_0: DynSegment, fragment_1: DynSegment) -> Result<()> {
+        let origin = self.stack_offset_before_top(1)?;
+        ensure!(
+            fragment_0.base_stack_index == origin && fragment_1.base_stack_index == origin,
+            "fragment origins must match the stack offset after popping the condition"
+        );
         let [p0] = self.get_last_n_padded::<1>();
         self.pop_types::<(bool, ())>()?;
 

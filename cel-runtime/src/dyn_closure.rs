@@ -141,8 +141,9 @@ impl DynClosure {
     ///
     /// # Errors
     /// Returns an error if the body does not produce exactly one value, requires preloaded
-    /// arguments, reads an undeclared or differently shaped argument, or reads a tuple whose
-    /// leaves lack clone adapters.
+    /// arguments or a nonzero ambient stack origin, reads an undeclared or differently shaped
+    /// argument, or reads a tuple whose leaves lack clone adapters. A zero-origin fragment is
+    /// valid because its operations can access only its local operands and declared arguments.
     ///
     /// - Complexity: O(number of parameters plus recursive nodes in body argument reads/result).
     ///
@@ -159,10 +160,7 @@ impl DynClosure {
             body.stack_ids.len() == 1,
             "closure body must produce exactly one value"
         );
-        anyhow::ensure!(
-            body.argument_ids.is_empty(),
-            "closure body must not require preloaded arguments"
-        );
+        body.validate_independent_body()?;
         for (index, read_type) in &body.argument_reads {
             anyhow::ensure!(
                 parameters
@@ -437,6 +435,66 @@ mod tests {
         let mut body = DynSegment::new::<()>();
         body.push_arg::<i32>(1);
         assert!(DynClosure::typed(vec![ValueType::leaf::<i32>()], body).is_err());
+    }
+
+    /// A shifted fragment cannot become a body evaluated on an empty stack.
+    #[test]
+    fn typed_rejects_ambient_dependent_body_without_execution() {
+        let mut inner = DynSegment::new::<()>();
+        inner.just(42i32);
+        let closure = DynClosure::typed(vec![], inner).unwrap();
+        let mut parent = DynSegment::new::<()>();
+        parent.just(7u64);
+        parent.just(true);
+        let mut fragment = parent.new_fragment();
+        fragment.push_closure(closure);
+        fragment.invoke_closure(0).unwrap();
+
+        assert!(DynClosure::typed(vec![], fragment).is_err());
+    }
+
+    /// A zero-origin fragment contains only its local operands, even above ambient unit values.
+    #[test]
+    fn typed_accepts_zero_origin_body_with_nested_invocation() {
+        let mut inner = DynSegment::new::<()>();
+        inner.just(42i32);
+        let closure = DynClosure::typed(vec![], inner).unwrap();
+        let mut parent = DynSegment::new::<()>();
+        parent.just(());
+        parent.just(true);
+        let mut fragment = parent.new_fragment();
+        fragment.push_closure(closure);
+        fragment.invoke_closure(0).unwrap();
+
+        let closure = DynClosure::typed(vec![], fragment).unwrap();
+        assert_eq!(closure.call::<i32>(&[]).unwrap(), 42);
+        let mut caller = DynSegment::new::<()>();
+        caller.push_closure(closure);
+        caller.invoke_closure(0).unwrap();
+        assert_eq!(caller.call0::<i32>().unwrap(), 42);
+    }
+
+    /// A root body cannot hide a shifted fragment behind a conditional join.
+    #[test]
+    fn typed_body_join_rejects_mismatched_fragment_origins_without_execution() {
+        for shifted_first in [true, false] {
+            let mut parent = DynSegment::new::<()>();
+            parent.just(7u64);
+            parent.just(true);
+            let mut shifted = parent.new_fragment();
+            shifted.just(42i32);
+            let mut body = DynSegment::new::<()>();
+            body.just(true);
+            let mut alternate = body.new_fragment();
+            alternate.just(0i32);
+
+            let result = if shifted_first {
+                body.join2(shifted, alternate)
+            } else {
+                body.join2(alternate, shifted)
+            };
+            assert!(result.is_err());
+        }
     }
 
     /// A runtime closure value cannot masquerade as another known callable signature.
