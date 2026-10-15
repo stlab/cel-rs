@@ -31,7 +31,7 @@ pub fn diagnostics_for_source(source: &str) -> Vec<Diagnostic> {
         Ok(sheet) => sheet,
         Err(e) => return vec![to_diagnostic(e.into())],
     };
-    let type_errors = check_sheet(&sheet, &TypeRegistry::new());
+    let type_errors = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
     sheet
         .errors
         .into_iter()
@@ -72,6 +72,21 @@ fn to_range(span: SourceSpan) -> Range {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reports missing host schemas and still checks field expressions through the LSP path.
+    #[test]
+    fn unknown_record_and_child_errors_reach_lsp_diagnostics() {
+        let diagnostics =
+            diagnostics_for_source("sheet s {\n    out value := Missing { x: true + 1 }.x;\n}");
+        assert_eq!(diagnostics.len(), 2);
+        let missing = diagnostics
+            .iter()
+            .find(|d| d.message.contains("Missing"))
+            .unwrap();
+        assert_eq!(missing.range.start, Position::new(1, 17));
+        assert_eq!(missing.range.end, Position::new(1, 24));
+        assert!(diagnostics.iter().any(|d| d.message.contains("operand")));
+    }
 
     #[test]
     fn clean_sheet_has_no_diagnostics() {

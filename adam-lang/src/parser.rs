@@ -2614,6 +2614,72 @@ mod tests {
         assert_eq!(*sheet.read::<f64>(result).unwrap(), 20.0);
     }
 
+    /// Tracks only value expressions in a record-member binding.
+    #[test]
+    fn field_labels_and_member_names_are_not_cell_dependencies() {
+        use cel_parser::{OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
+        use cel_runtime::ArrayElementType;
+        use std::sync::Arc;
+        /// A record independent of any geometry library.
+        #[derive(Clone, Debug, PartialEq)]
+        struct TestPoint {
+            x: f64,
+            y: f64,
+        }
+        let point =
+            ResolvedLeafType::new("TestPoint", ArrayElementType::leaf::<TestPoint>().unwrap());
+        let scalar = ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap());
+        let mut lookup = OpLookup::new();
+        lookup
+            .register_record(RecordSchema {
+                ty: point.clone(),
+                fields: vec![
+                    RecordField {
+                        name: "x",
+                        ty: scalar.clone(),
+                    },
+                    RecordField {
+                        name: "y",
+                        ty: scalar.clone(),
+                    },
+                ],
+                emit: Arc::new(|s, order, _, _| {
+                    assert_eq!(order, [0, 1]);
+                    s.op2(|x: f64, y: f64| TestPoint { x, y })
+                }),
+            })
+            .unwrap();
+        lookup
+            .register_operation(OperationSignature {
+                name: "x",
+                operands: vec![point],
+                result: scalar,
+                emit: Arc::new(|s, _| s.op1(|p: TestPoint| p.x)),
+            })
+            .unwrap();
+        let mut sheet = AdamParser::new(TypeRegistry::new(), lookup)
+            .parse_str(
+                "sheet s { cell a: f64 = 2.0; cell b: f64 = 3.0; \
+             cell x: bool = false; cell y: bool = false; cell TestPoint: bool = true; \
+             cell result: f64 = 0.0; \
+             relationship { result := TestPoint { x: a, y: b }.x; } }",
+            )
+            .unwrap();
+        let a = sheet.cell_names["a"].0;
+        let b = sheet.cell_names["b"].0;
+        let result = sheet.cell_names["result"].0;
+        let (&(relationship, method), _) = sheet.method_spans.iter().next().unwrap();
+        assert_eq!(
+            sheet.method_inputs(relationship, method),
+            Some([a, b].as_slice())
+        );
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<f64>(result).unwrap(), 2.0);
+        sheet.write(a, 7.0f64).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<f64>(result).unwrap(), 7.0);
+    }
+
     #[test]
     fn parse_relationship_with_multiple_bindings_lets_the_planner_pick_a_direction() {
         // `c` is declared first (and so has the weakest cell strength — `adam_rs`'s

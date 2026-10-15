@@ -642,6 +642,19 @@ mod tests {
         assert!(parse_expr_text("width_pixels / height_pixels").is_ok());
     }
 
+    /// Preserves record labels, member spelling, precedence, and explicit arguments.
+    #[test]
+    fn ez_adam_formula_round_trips_member_and_record_syntax() {
+        let source = "TestPoint { x: a, y: b }.x + a.scale(b).x()";
+        let expr = parse_expr_text(source).unwrap();
+        let formatted = cel_parser::format_expr(&expr, source, 0);
+        assert_eq!(formatted, source);
+        assert_eq!(
+            cel_parser::format_expr(&parse_expr_text(&formatted).unwrap(), &formatted, 0),
+            source
+        );
+    }
+
     #[test]
     fn parse_expr_text_rejects_invalid_cel() {
         assert!(parse_expr_text("width_pixels / ").is_err());

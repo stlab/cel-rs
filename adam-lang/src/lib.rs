@@ -144,7 +144,7 @@
 //! let sheet = AdamAstParser::new()
 //!     .parse_str("sheet s { out values := [0, 1]: [f64]; }")
 //!     .unwrap();
-//! let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+//! let diagnostics = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
 //! assert_eq!(diagnostics.len(), 1);
 //! assert_eq!(
 //!     diagnostics[0].message(),

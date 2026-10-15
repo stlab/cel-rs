@@ -36,11 +36,14 @@ postfix_expression = primary_expression {
 } .
 argument_list = expression { "," expression } .
 primary_expression = literal
-                   | identifier
+                   | identifier [ record_fields ]
                    | tuple_or_group
                    | array_expression
                    | if_expression
                    | closure_expression .
+record_fields = "{"
+    [ field_initializer { "," field_initializer } [ "," ] ] "}" .
+field_initializer = identifier ":" expression .
 tuple_or_group = "(" [ expression [ "," [ expression { "," expression } ] ] ] ")" .
 array_expression = "[" [ expression { "," expression } ] "]"
                  [ ":" type_expr ] .
@@ -114,7 +117,7 @@ true as i32
 | 10 | `*`, `/`, `%` | left |
 | 11 | `as` | left |
 | 12 | unary <code>-</code>, <code>!</code> | prefix |
-| 13 | calls and `.N` | left |
+| 13 | calls, `.N`, `.name`, `.name(args)` | left |
 
 ## Operator rules table
 
@@ -198,6 +201,22 @@ when the evaluation environment installs it. See
 - `(expr.name)()` calls the operation's result normally; it fails if the result
   is not callable. Dot operations, ordinary calls, and tuple indexing share
   postfix precedence and may be chained.
+- `TypeName { field: expression, ... }` constructs a host-registered record.
+  Constructor names belong to the type namespace, separate from value names.
+  Field labels are not variable references. Every schema field is required exactly
+  once; unknown, duplicate, missing, and incorrectly typed fields are errors.
+  Field expressions evaluate once in written order, independent of schema order.
+  An empty schema permits `TypeName {}`; a non-empty field list permits a trailing comma.
+- Field types match exactly: an `f64` field accepts `1.0`, not the `i32` literal `1`.
+  The static checker uses installed record schemas and operation signatures; known
+  custom types retain their identities instead of unifying with unrelated types.
+  Unknown constructors are errors. Unresolved inputs and calls without metadata
+  remain best-effort, but all their child expressions are still checked.
+- Unparenthesized record constructors are forbidden throughout an `if` condition.
+  Parentheses, call arguments, tuple elements, and array elements start unrestricted
+  expression positions: write `if (Sample { value: 3.0 }.value) > 0.0 { ... }`.
+  The restriction propagates through operators, ranges, and closure bodies.
+- Members are reads/operations, not assignment targets. CEL has no member assignment.
 - CEL does not use bracket postfix indexing such as `expr[0]`.
 - CEL does not define map literals, object literals, or a ternary
   operator.

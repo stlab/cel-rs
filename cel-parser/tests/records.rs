@@ -93,6 +93,72 @@ fn lookup() -> OpLookup {
     lookup
 }
 
+/// Checks metadata without compiling or executing the expression.
+fn checked(source: &str) -> (Ty, Vec<cel_parser::ParseError>) {
+    let expr = Parser::<AstContext>::new(OpLookup::new())
+        .parse_str_ast(source)
+        .unwrap();
+    cel_parser::ty::check_expr_with_type_resolver(
+        &expr,
+        &|_| Ty::Any,
+        cel_parser::builtin_type_resolver().as_ref(),
+        &lookup(),
+    )
+}
+
+/// Rejects known constructor fields and accessor results with incompatible types.
+#[test]
+fn known_record_member_types_are_checked() {
+    assert_eq!(checked("TestPoint { x: 1.0, y: 2.0 }.x").0, Ty::F64);
+    for source in [
+        "TestPoint { x: 1, y: 2.0 }",
+        "TestPoint { x: 1.0 }",
+        "TestPoint { x: 1.0, x: 2.0, y: 3.0 }",
+        "TestPoint { x: 1.0, z: 2.0 }",
+        "TestPoint { x: 1.0, y: 2.0 }.x + true",
+        "TestPoint { x: 1.0, y: 2.0 }.x(2.0)",
+        "TestPoint { x: 'a', y: 2.0 }",
+        "TestPoint { x: (), y: 2.0 }",
+        "TestPoint { x: (1.0,), y: 2.0 }",
+        "'a'.x",
+        "(1.0,).x",
+    ] {
+        assert!(!checked(source).1.is_empty(), "{source}");
+    }
+    assert_eq!(
+        checked("TestPoint { x: [1]: [f64], y: 2.0 }.x + true")
+            .1
+            .len(),
+        1,
+        "an invalid field reports its own error without cascading outer mismatches"
+    );
+}
+
+/// Reports unknown constructors while retaining nested child diagnostics.
+#[test]
+fn unknown_record_type_is_diagnostic() {
+    let (_, diagnostics) = checked("Missing { x: true + 1 }");
+    assert_eq!(diagnostics.len(), 2);
+    assert!(diagnostics.iter().any(|d| d.message().contains("Missing")));
+}
+
+/// Preserves unrelated registered identities through annotated arrays and constructors.
+#[test]
+fn different_registered_types_do_not_unify() {
+    assert_eq!(
+        checked("[TestPoint { x: 1.0, y: 2.0 }, Empty {}]").1.len(),
+        1
+    );
+}
+
+/// Still checks arguments of unresolved members and custom calls.
+#[test]
+fn unresolved_member_checks_its_argument_expressions() {
+    assert_eq!(checked("unknown.custom(true + 1)").1.len(), 1);
+    assert_eq!(checked("custom(true + 1)").1.len(), 1);
+    assert!(checked("unknown.custom(1)").1.is_empty());
+}
+
 /// Verifies field names, not their written positions, select constructor arguments.
 #[test]
 fn record_field_order_is_named() {
@@ -109,6 +175,7 @@ fn record_field_order_is_named() {
             TestPoint { x: 1.0, y: 2.0 }
         );
     }
+
     assert_eq!(
         CELParser::new(lookup())
             .parse_str("(7u8, TestPoint { y: 2.0, x: 1.0 }.x).1 + 3.0")
@@ -116,6 +183,77 @@ fn record_field_order_is_named() {
             .call0::<f64>()
             .unwrap(),
         4.0
+    );
+}
+
+/// Gives a registered signature the same precedence over built-ins as runtime dispatch.
+#[test]
+fn registered_operator_results_precede_builtin_inference() {
+    let mut ops = lookup();
+    ops.register_operation(OperationSignature {
+        name: "+",
+        operands: vec![leaf::<i32>("i32"), leaf::<i32>("i32")],
+        result: leaf::<f64>("f64"),
+        emit: Arc::new(|s, _| s.op2(|a: i32, b: i32| f64::from(a) + f64::from(b))),
+    })
+    .unwrap();
+    for source in ["1 + 2", "1.0 + 2.0"] {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (ty, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+            &expr,
+            &|_| Ty::Any,
+            cel_parser::builtin_type_resolver().as_ref(),
+            &ops,
+        );
+        assert_eq!(ty, Ty::F64, "{source}");
+        assert!(diagnostics.is_empty());
+    }
+    assert_eq!(
+        CELParser::new(ops)
+            .parse_str("1 + 2")
+            .unwrap()
+            .call0::<f64>()
+            .unwrap(),
+        3.0
+    );
+}
+
+/// Leaves a member result unresolved when an array operand still has unknown elements.
+#[test]
+fn unresolved_array_operands_do_not_select_known_results() {
+    let mut ops = lookup();
+    ops.register_operation(OperationSignature {
+        name: "length",
+        operands: vec![ResolvedLeafType::new(
+            "[i32]",
+            ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap()),
+        )],
+        result: leaf::<usize>("usize"),
+        emit: Arc::new(|s, _| s.op1(|array: cel_runtime::DynamicArray| array.len())),
+    })
+    .unwrap();
+    for (source, expected) in [("[custom()].length", Ty::Any), ("[1].length", Ty::Usize)] {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (ty, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+            &expr,
+            &|_| Ty::Any,
+            cel_parser::builtin_type_resolver().as_ref(),
+            &ops,
+        );
+        assert_eq!(ty, expected, "{source}");
+        assert!(diagnostics.is_empty());
+    }
+    assert_eq!(
+        CELParser::new(ops)
+            .parse_str("[1, 2].length")
+            .unwrap()
+            .call0::<usize>()
+            .unwrap(),
+        2
     );
 }
 
@@ -552,7 +690,8 @@ fn record_ast_preserves_names_order_and_spans() {
         Ty::F64
     });
     assert_eq!(ty, Ty::Any);
-    assert!(diagnostics.is_empty());
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].message().contains("unknown record type"));
     assert_eq!(*referenced.lock().unwrap(), ["other", "input"]);
     let bad = Parser::<AstContext>::new(OpLookup::new())
         .parse_str_ast("Record { x: 1 + true }")
@@ -576,6 +715,22 @@ fn record_array_descriptor_identity_is_exact() {
         emit: Arc::new(|s, _, _, _| s.op1(|_: cel_runtime::DynamicArray| ())),
     })
     .unwrap();
+    for (source, errors) in [
+        ("ArrayRecord { values: []: [i32] }", 0),
+        ("ArrayRecord { values: []: [f64] }", 1),
+        ("ArrayRecord { values: []: [[i32]] }", 1),
+    ] {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (_, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+            &expr,
+            &|_| Ty::Any,
+            cel_parser::builtin_type_resolver().as_ref(),
+            &ops,
+        );
+        assert_eq!(diagnostics.len(), errors, "{source}: {diagnostics:?}");
+    }
     let mut parser = CELParser::new(ops);
     parser
         .parse_str("ArrayRecord { values: []: [i32] }")

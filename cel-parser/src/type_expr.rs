@@ -178,7 +178,7 @@ pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<R
 ///
 /// This pairs a human-readable type name with the runtime element descriptor needed to build or
 /// validate a `DynamicArray` whose elements have this leaf type.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedLeafType {
     type_id: TypeId,
     type_name: Cow<'static, str>,

@@ -10,8 +10,7 @@
 //! name a type [`crate::TypeRegistry`] doesn't recognize still resolve to [`cel_parser::Ty::Any`]
 //! and are never flagged, while CEL array annotations inside expression bodies resolve named
 //! leaves through the same registry-backed CEL resolver [`check_sheet`] builds per pass. An absent
-//! annotation or an operator
-//! [`cel_parser::op_table::builtin_operand_types`] doesn't recognize all resolve to
+//! annotation or a call without metadata resolves to
 //! [`cel_parser::Ty::Any`] and are never flagged — matching adam-lang/CEL's extensible type
 //! system. Not a complete type system; see the design doc's "Type checking (v1)" section.
 
@@ -21,15 +20,17 @@ use crate::TypeRegistry;
 use crate::ast::{BindingDecl, CellFilter, OutDecl, RequireBlock, Sheet, SheetItem, TypeExpr};
 use crate::type_registry::TypeShape;
 
-/// Checks `sheet` against `registry`'s registered types, returning every type diagnostic found.
+/// Checks `sheet` against registered types and operation/record metadata, returning diagnostics.
 /// Never fails — an absent Adam annotation, an unresolved identifier, an Adam `cell`/`source`/`out`
-/// annotation `registry` doesn't resolve, or a custom operator
-/// [`cel_parser::op_table::builtin_operand_types`] doesn't know about all fall back to
+/// annotation `registry` doesn't resolve, or a custom call without metadata falls back to
 /// [`cel_parser::Ty::Any`] and are silently skipped, not reported. CEL array annotations inside
 /// expressions use the same registry-backed CEL resolver, so unknown leaf names such as
-/// `[]: [Missing]` are still reported.
+/// `[]: [Missing]` are still reported. Known custom annotations retain their complete leaf
+/// descriptors. Constructors and members use `lookup`'s schemas/signatures, not value names;
+/// unknown constructors and incompatible known fields/operands produce diagnostics.
 ///
-/// - Complexity: O(n) in the number of nodes across every item in `sheet`.
+/// - Complexity: proportional to checking every expression with
+///   [`check_expr_with_type_resolver`], plus O(n) sheet traversal and registry snapshot costs.
 ///
 /// # Examples
 ///
@@ -39,7 +40,7 @@ use crate::type_registry::TypeShape;
 /// let sheet = AdamAstParser::new()
 ///     .parse_str("sheet s { cell x: i32 = 1.0; }")
 ///     .unwrap();
-/// let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+/// let diagnostics = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
 /// assert_eq!(diagnostics.len(), 1, "1.0 defaults to f64, mismatching the i32 annotation");
 /// ```
 ///
@@ -49,7 +50,7 @@ use crate::type_registry::TypeShape;
 /// let sheet = AdamAstParser::new()
 ///     .parse_str("sheet s { out values := [0, 1]: [f64]; }")
 ///     .unwrap();
-/// let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+/// let diagnostics = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
 /// assert_eq!(diagnostics.len(), 1);
 /// assert_eq!(
 ///     diagnostics[0].message(),
@@ -63,14 +64,19 @@ use crate::type_registry::TypeShape;
 /// let sheet = AdamAstParser::new()
 ///     .parse_str("sheet s { out values := []: [Missing]; }")
 ///     .unwrap();
-/// let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+/// let diagnostics = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
 /// assert_eq!(diagnostics.len(), 1);
 /// assert_eq!(diagnostics[0].message(), "unknown type `Missing`");
 /// ```
-pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
+pub fn check_sheet(
+    sheet: &Sheet,
+    registry: &TypeRegistry,
+    lookup: &cel_parser::OpLookup,
+) -> Vec<ParseError> {
     let mut diagnostics = Vec::new();
-    let (cell_types, shapes) = declared_cell_types(sheet, registry);
-    let resolve = |name: &str| -> Ty { cell_types.get(name).cloned().unwrap_or(Ty::Any) };
+    let declared = declared_cell_types(sheet, registry, lookup);
+    let shapes = &declared.shapes;
+    let resolve = |name: &str| -> Ty { declared.values.get(name).cloned().unwrap_or(Ty::Any) };
     let type_resolver = registry.cel_type_resolver();
     for item in &sheet.items {
         match item {
@@ -80,21 +86,23 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                     cell.initializer.as_ref(),
                     registry,
                     &type_resolver,
+                    lookup,
                     &mut diagnostics,
                 );
                 check_filter(
                     &cell.name,
                     cell.filter.as_ref(),
-                    &cell_types,
-                    &shapes,
+                    &declared,
                     &resolve,
                     &type_resolver,
+                    lookup,
                     &mut diagnostics,
                 );
                 check_requirements(
                     cell.require.as_ref(),
                     &resolve,
                     &type_resolver,
+                    lookup,
                     &mut diagnostics,
                 );
             }
@@ -104,21 +112,23 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                     source.initializer.as_ref(),
                     registry,
                     &type_resolver,
+                    lookup,
                     &mut diagnostics,
                 );
                 check_filter(
                     &source.name,
                     source.filter.as_ref(),
-                    &cell_types,
-                    &shapes,
+                    &declared,
                     &resolve,
                     &type_resolver,
+                    lookup,
                     &mut diagnostics,
                 );
                 check_requirements(
                     source.require.as_ref(),
                     &resolve,
                     &type_resolver,
+                    lookup,
                     &mut diagnostics,
                 );
             }
@@ -127,23 +137,34 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                     check_binding(
                         binding,
                         registry,
-                        &shapes,
+                        shapes,
                         &resolve,
                         &type_resolver,
+                        lookup,
                         &mut diagnostics,
                     );
                 }
             }
             SheetItem::Conditional(cond) => {
+                diagnostics.extend(
+                    check_expr_with_type_resolver(
+                        &cond.match_expr,
+                        &resolve,
+                        &type_resolver,
+                        lookup,
+                    )
+                    .1,
+                );
                 for branch in &cond.branches {
                     for rel in &branch.relationships {
                         for binding in &rel.bindings {
                             check_binding(
                                 binding,
                                 registry,
-                                &shapes,
+                                shapes,
                                 &resolve,
                                 &type_resolver,
+                                lookup,
                                 &mut diagnostics,
                             );
                         }
@@ -155,9 +176,10 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
                             check_binding(
                                 binding,
                                 registry,
-                                &shapes,
+                                shapes,
                                 &resolve,
                                 &type_resolver,
+                                lookup,
                                 &mut diagnostics,
                             );
                         }
@@ -167,10 +189,10 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
             SheetItem::Out(out_decl) => check_out(
                 out_decl,
                 registry,
-                &cell_types,
-                &shapes,
+                &declared,
                 &resolve,
                 &type_resolver,
+                lookup,
                 &mut diagnostics,
             ),
             SheetItem::Error { .. } => {} // already reported as a syntax error; nothing to type-check
@@ -181,9 +203,14 @@ pub fn check_sheet(sheet: &Sheet, registry: &TypeRegistry) -> Vec<ParseError> {
 
 /// Converts a recursive [`TypeShape`] to the closest [`Ty`] approximation available to the CEL
 /// expression checker.
-fn shape_to_ty(shape: &TypeShape) -> Ty {
+///
+/// - Complexity: O(l) in the registered leaf name length.
+fn shape_to_ty(shape: &TypeShape, registry: &TypeRegistry) -> Ty {
     match shape {
-        TypeShape::Named(type_id) => Ty::from_type_id(*type_id),
+        TypeShape::Named(type_id) => registry
+            .resolved_leaf_type(*type_id)
+            .map(|leaf| Ty::from_leaf(&leaf))
+            .unwrap_or(Ty::Any),
         TypeShape::Tuple(_) => Ty::Any,
     }
 }
@@ -191,7 +218,17 @@ fn shape_to_ty(shape: &TypeShape) -> Ty {
 /// Returns whether `lit` matches `declared` exactly, preserving adam-lang's no-coercion literal
 /// initializer rules.
 fn literal_matches_declared_ty(lit: &Literal, declared: &Ty) -> bool {
-    *declared == Ty::Any || Ty::from_literal(lit) == *declared
+    Ty::from_literal(lit).unifies_with(declared)
+}
+
+/// Keeps scalar approximations and exact annotation shapes for the same sheet declarations.
+///
+/// `values` includes all cells, sources, and outputs; `shapes` includes only resolved annotations.
+struct DeclaredTypes {
+    /// Inferred or annotated value types, using `Any` where unresolved.
+    values: std::collections::HashMap<String, Ty>,
+    /// Resolved recursive annotation shapes, including tuple structure.
+    shapes: std::collections::HashMap<String, TypeShape>,
 }
 
 /// Maps every declared cell name — from a `cell`, a `source`, or an `out` — to both its scalar
@@ -206,13 +243,13 @@ fn literal_matches_declared_ty(lit: &Literal, declared: &Ty) -> bool {
 /// inferred from its initializer body's checked type, using only `cell`-declared types as context (not
 /// other `out`s' inferred types — see this function's own note above), and is never present in
 /// the `TypeShape` map (only annotated cells/outs are).
+///
+/// - Complexity: O(n) sheet traversal plus annotation resolution and output-body checking.
 fn declared_cell_types(
     sheet: &Sheet,
     registry: &TypeRegistry,
-) -> (
-    std::collections::HashMap<String, Ty>,
-    std::collections::HashMap<String, TypeShape>,
-) {
+    lookup: &cel_parser::OpLookup,
+) -> DeclaredTypes {
     /// Resolves `type_expr` against `registry`, if present and recognized; `None` covers both an
     /// absent annotation and one naming a type `registry` doesn't recognize — the two cases
     /// `declared_cell_types`'s callers already treat identically (fall back to `Ty::Any`, or, for
@@ -230,7 +267,10 @@ fn declared_cell_types(
         match item {
             SheetItem::Cell(cell) => {
                 let shape = resolve_annotation_shape(cell.type_name.as_ref(), registry);
-                let ty = shape.as_ref().map(shape_to_ty).unwrap_or(Ty::Any);
+                let ty = shape
+                    .as_ref()
+                    .map(|shape| shape_to_ty(shape, registry))
+                    .unwrap_or(Ty::Any);
                 if let Some(shape) = shape {
                     shapes.insert(cell.name.clone(), shape);
                 }
@@ -238,7 +278,10 @@ fn declared_cell_types(
             }
             SheetItem::Source(source) => {
                 let shape = resolve_annotation_shape(source.type_name.as_ref(), registry);
-                let ty = shape.as_ref().map(shape_to_ty).unwrap_or(Ty::Any);
+                let ty = shape
+                    .as_ref()
+                    .map(|shape| shape_to_ty(shape, registry))
+                    .unwrap_or(Ty::Any);
                 if let Some(shape) = shape {
                     shapes.insert(source.name.clone(), shape);
                 }
@@ -253,10 +296,18 @@ fn declared_cell_types(
     for item in &sheet.items {
         if let SheetItem::Out(out_decl) = item {
             let shape = resolve_annotation_shape(out_decl.type_name.as_ref(), registry);
-            let ty = shape.as_ref().map(shape_to_ty).unwrap_or_else(|| {
-                check_expr_with_type_resolver(&out_decl.initializer, &resolve_cells, &type_resolver)
+            let ty = shape
+                .as_ref()
+                .map(|shape| shape_to_ty(shape, registry))
+                .unwrap_or_else(|| {
+                    check_expr_with_type_resolver(
+                        &out_decl.initializer,
+                        &resolve_cells,
+                        &type_resolver,
+                        lookup,
+                    )
                     .0
-            });
+                });
             if let Some(shape) = shape {
                 shapes.insert(out_decl.name.clone(), shape);
             }
@@ -264,7 +315,10 @@ fn declared_cell_types(
         }
     }
     map.extend(out_types);
-    (map, shapes)
+    DeclaredTypes {
+        values: map,
+        shapes,
+    }
 }
 
 /// Checks whether `expr` structurally matches `shape`, recursively: a `TypeShape::Named` leaf
@@ -286,11 +340,14 @@ fn expr_matches_shape(
     registry: &TypeRegistry,
     resolve: &impl Fn(&str) -> Ty,
     resolve_type: &impl cel_parser::TypeResolver,
+    lookup: &cel_parser::OpLookup,
     diagnostics: &mut Vec<ParseError>,
 ) {
     match (expr, shape) {
         (Expr::Tuple { elements, .. }, TypeShape::Tuple(expected)) => {
             if elements.len() != expected.len() {
+                diagnostics
+                    .extend(check_expr_with_type_resolver(expr, resolve, resolve_type, lookup).1);
                 diagnostics.push(ParseError::new_range(
                     format!(
                         "expected a {}-element tuple `{}`, got {}",
@@ -310,6 +367,7 @@ fn expr_matches_shape(
                     registry,
                     resolve,
                     resolve_type,
+                    lookup,
                     diagnostics,
                 );
             }
@@ -323,7 +381,8 @@ fn expr_matches_shape(
             },
             TypeShape::Tuple(_),
         ) => {
-            let (_, cond_diags) = check_expr_with_type_resolver(cond, resolve, resolve_type);
+            let (_, cond_diags) =
+                check_expr_with_type_resolver(cond, resolve, resolve_type, lookup);
             diagnostics.extend(cond_diags);
             expr_matches_shape(
                 then_branch,
@@ -331,6 +390,7 @@ fn expr_matches_shape(
                 registry,
                 resolve,
                 resolve_type,
+                lookup,
                 diagnostics,
             );
             if let Some(else_branch) = else_branch {
@@ -340,11 +400,17 @@ fn expr_matches_shape(
                     registry,
                     resolve,
                     resolve_type,
+                    lookup,
                     diagnostics,
                 );
             }
         }
         (_, TypeShape::Tuple(_)) => {
+            let nested = check_expr_with_type_resolver(expr, resolve, resolve_type, lookup).1;
+            if !nested.is_empty() {
+                diagnostics.extend(nested);
+                return;
+            }
             diagnostics.push(ParseError::new_range(
                 format!("expected tuple `{}`", registry.display_name(shape)),
                 expr.span().start,
@@ -352,6 +418,8 @@ fn expr_matches_shape(
             ));
         }
         (Expr::Tuple { .. }, TypeShape::Named(_)) => {
+            diagnostics
+                .extend(check_expr_with_type_resolver(expr, resolve, resolve_type, lookup).1);
             diagnostics.push(ParseError::new_range(
                 format!("expected `{}`, got a tuple", registry.display_name(shape)),
                 expr.span().start,
@@ -360,12 +428,16 @@ fn expr_matches_shape(
         }
         (_, TypeShape::Named(type_id)) => {
             let Some(entry) = registry.entry_by_type_id(*type_id) else {
+                diagnostics
+                    .extend(check_expr_with_type_resolver(expr, resolve, resolve_type, lookup).1);
                 return; // unrecognized custom type: never statically checked, matches Ty::Any
             };
-            let declared = Ty::from_type_id(entry.type_id);
-            let (actual, body_diags) = check_expr_with_type_resolver(expr, resolve, resolve_type);
+            let declared = shape_to_ty(&TypeShape::Named(entry.type_id), registry);
+            let (actual, body_diags) =
+                check_expr_with_type_resolver(expr, resolve, resolve_type, lookup);
+            let valid = body_diags.is_empty();
             diagnostics.extend(body_diags);
-            if !declared.unifies_with(&actual) {
+            if valid && !declared.unifies_with(&actual) {
                 diagnostics.push(ParseError::new_range(
                     format!(
                         "expression produces `{}`, but `{}` was expected",
@@ -381,32 +453,42 @@ fn expr_matches_shape(
 }
 
 /// Checks one `cell`'s or `source`'s initializer against its `: type_expr` annotation. A no-op if
-/// either half is absent, or if the annotation names a type `registry` doesn't recognize.
-/// Dispatches to [`expr_matches_shape`] for a tuple-shaped annotation (recursively,
-/// element-wise). A scalar annotation cross-checks only a bare literal initializer (adam-lang's
-/// exact-type, no-coercion literal rule); any other scalar initializer is only checked for its
-/// own internal diagnostics — including a CEL typed-array annotation mismatch inside its body —
-/// and never against the annotation itself, which the real parser reports from the folded value.
+/// the initializer is absent. Every initializer is recursively checked, including when its
+/// annotation is absent or unresolved. Known annotations check the initializer's inferred
+/// type exactly; tuple annotations check recursively element-wise. An invalid body produces
+/// its own diagnostics without an additional annotation mismatch.
 ///
 /// Takes `type_name`/`initializer` directly (rather than a whole `&CellDecl`) so both
 /// `SheetItem::Cell` and `SheetItem::Source` — which share this same shape but aren't the same
 /// Rust type — can share one check.
+///
+/// - Complexity: the cost of recursively checking the initializer and resolving its annotation.
 fn check_cell_initializer(
     type_name: Option<&TypeExpr>,
     initializer: Option<&Expr>,
     registry: &TypeRegistry,
     resolve_type: &impl cel_parser::TypeResolver,
+    lookup: &cel_parser::OpLookup,
     diagnostics: &mut Vec<ParseError>,
 ) {
-    let (Some(type_expr), Some(expr)) = (type_name, initializer) else {
+    let Some(expr) = initializer else {
         return;
     };
-    let Ok(shape) = registry.resolve(type_expr) else {
-        return; // unknown type name: already reported by the real parser's own error path
+    let resolve = |_: &str| Ty::Any;
+    let Some(shape) = type_name.and_then(|type_expr| registry.resolve(type_expr).ok()) else {
+        diagnostics.extend(check_expr_with_type_resolver(expr, &resolve, resolve_type, lookup).1);
+        return;
     };
     if let TypeShape::Tuple(_) = shape {
-        let resolve = |_: &str| Ty::Any; // initializers reference no cells
-        expr_matches_shape(expr, &shape, registry, &resolve, resolve_type, diagnostics);
+        expr_matches_shape(
+            expr,
+            &shape,
+            registry,
+            &resolve,
+            resolve_type,
+            lookup,
+            diagnostics,
+        );
         return;
     }
     if let Expr::Literal {
@@ -414,7 +496,7 @@ fn check_cell_initializer(
         span: lit_span,
     } = expr
     {
-        let declared = shape_to_ty(&shape);
+        let declared = shape_to_ty(&shape, registry);
         if !literal_matches_declared_ty(literal, &declared) {
             diagnostics.push(ParseError::new_range(
                 format!("literal cannot be used as type `{}`", declared.name()),
@@ -424,34 +506,32 @@ fn check_cell_initializer(
         }
         return;
     }
-    let resolve = |_: &str| Ty::Any;
-    // Scope-preserving: a non-literal scalar initializer gets its own body diagnostics (an
-    // operator mismatch, a CEL typed-array annotation mismatch) reported, but is deliberately
-    // *not* cross-checked against the annotation here — the real parser constant-folds it and
-    // reports its own `cell ...: type mismatch` for that, and a second, differently worded
-    // diagnostic from this checker would only duplicate it.
-    let (_, body_diags) = check_expr_with_type_resolver(expr, &resolve, resolve_type);
-    diagnostics.extend(body_diags);
+    expr_matches_shape(
+        expr,
+        &shape,
+        registry,
+        &resolve,
+        resolve_type,
+        lookup,
+        diagnostics,
+    );
 }
 
 /// The expected `TypeShape` for a filtered cell's own declared/inferred shape (`_`'s type inside
 /// its filter body) — `Some` only when a concrete shape is known: a tuple-typed annotation
-/// (from `shapes`), or a scalar type either annotated or already resolved to a concrete `Ty`
-/// (from `cell_types`, converted via `Ty::type_id`). `None` when nothing is known (an unannotated
+/// (from `declared.shapes`), or a scalar type either annotated or already resolved to a concrete `Ty`
+/// (from `declared.values`, converted via `Ty::type_id`). `None` when nothing is known (an unannotated
 /// cell, or a name neither map has an entry for), mirroring `Ty::Any`'s existing "never flagged"
 /// leniency elsewhere in this file.
 ///
 /// - Complexity: O(1) amortized lookup plus an O(k) clone of a possibly-nested `TypeShape`
-///   (k = the shape's own element count) when found in `shapes`.
-fn expected_shape(
-    name: &str,
-    cell_types: &std::collections::HashMap<String, Ty>,
-    shapes: &std::collections::HashMap<String, TypeShape>,
-) -> Option<TypeShape> {
-    if let Some(shape) = shapes.get(name) {
+///   (k = the shape's own element count) when found in `declared.shapes`.
+fn expected_shape(name: &str, declared: &DeclaredTypes) -> Option<TypeShape> {
+    if let Some(shape) = declared.shapes.get(name) {
         return Some(shape.clone());
     }
-    cell_types
+    declared
+        .values
         .get(name)
         .and_then(Ty::type_id)
         .map(TypeShape::Named)
@@ -501,7 +581,9 @@ fn expr_references_ident(expr: &Expr, name: &str) -> bool {
             expr_references_ident(lhs, name) || expr_references_ident(rhs, name)
         }
         Expr::Cast { expr, .. } => expr_references_ident(expr, name),
-        Expr::Closure { body, .. } => expr_references_ident(body, name),
+        Expr::Closure { params, body, .. } => {
+            !params.iter().any(|param| param.name == name) && expr_references_ident(body, name)
+        }
     }
 }
 
@@ -532,20 +614,22 @@ fn is_range_inclusive_body(expr: &Expr) -> bool {
 /// can all share this one check — `filter` is `Option<&CellFilter>` (not an owned/whole-decl
 /// reference) since `OutDecl`, `CellDecl`, and `SourceDecl` each declare their own `filter:
 /// Option<CellFilter>` field independently.
+///
+/// - Complexity: body type checking plus O(n) reference traversal over the filter expression.
 fn check_filter(
     name: &str,
     filter: Option<&CellFilter>,
-    cell_types: &std::collections::HashMap<String, Ty>,
-    shapes: &std::collections::HashMap<String, TypeShape>,
+    declared: &DeclaredTypes,
     resolve: &impl Fn(&str) -> Ty,
     resolve_type: &impl cel_parser::TypeResolver,
+    lookup: &cel_parser::OpLookup,
     diagnostics: &mut Vec<ParseError>,
 ) {
     let Some(filter) = filter else {
         return;
     };
 
-    let shape = expected_shape(name, cell_types, shapes);
+    let shape = expected_shape(name, declared);
     if matches!(shape, Some(TypeShape::Tuple(_))) {
         // Mirrors `adam_lang::parser::AdamParser::parse_cell_filter`'s runtime rejection of a
         // tuple-typed filtered cell — not yet supported by either layer, so both must agree
@@ -569,11 +653,11 @@ fn check_filter(
 
     match shape {
         Some(TypeShape::Tuple(_)) => unreachable!("handled above"),
-        Some(TypeShape::Named(type_id)) => {
+        Some(TypeShape::Named(_)) => {
             let (body_ty, body_diags) =
-                check_expr_with_type_resolver(&filter.body, &body_resolve, resolve_type);
+                check_expr_with_type_resolver(&filter.body, &body_resolve, resolve_type, lookup);
             diagnostics.extend(body_diags);
-            let declared = Ty::from_type_id(type_id);
+            let declared = own_ty.clone();
             if !declared.unifies_with(&body_ty) {
                 diagnostics.push(ParseError::new_range(
                     format!("cell `{name}`: filter must produce `{}`", declared.name()),
@@ -584,7 +668,7 @@ fn check_filter(
         }
         None => {
             let (_, body_diags) =
-                check_expr_with_type_resolver(&filter.body, &body_resolve, resolve_type);
+                check_expr_with_type_resolver(&filter.body, &body_resolve, resolve_type, lookup);
             diagnostics.extend(body_diags);
         }
     }
@@ -613,13 +697,14 @@ fn check_tuple_output_body(
     outputs: &[(String, ExprSpan)],
     resolve: &impl Fn(&str) -> Ty,
     resolve_type: &impl cel_parser::TypeResolver,
+    lookup: &cel_parser::OpLookup,
     diagnostics: &mut Vec<ParseError>,
 ) {
     match body {
         Expr::Tuple { elements, .. } if elements.len() == outputs.len() => {
             for (element, (name, _)) in elements.iter().zip(outputs) {
                 let (element_ty, element_diags) =
-                    check_expr_with_type_resolver(element, resolve, resolve_type);
+                    check_expr_with_type_resolver(element, resolve, resolve_type, lookup);
                 diagnostics.extend(element_diags);
                 let declared = resolve(name);
                 if !declared.unifies_with(&element_ty) {
@@ -641,15 +726,31 @@ fn check_tuple_output_body(
             else_branch,
             ..
         } => {
-            let (_, cond_diags) = check_expr_with_type_resolver(cond, resolve, resolve_type);
+            let (_, cond_diags) =
+                check_expr_with_type_resolver(cond, resolve, resolve_type, lookup);
             diagnostics.extend(cond_diags);
-            check_tuple_output_body(then_branch, outputs, resolve, resolve_type, diagnostics);
+            check_tuple_output_body(
+                then_branch,
+                outputs,
+                resolve,
+                resolve_type,
+                lookup,
+                diagnostics,
+            );
             if let Some(else_branch) = else_branch {
-                check_tuple_output_body(else_branch, outputs, resolve, resolve_type, diagnostics);
+                check_tuple_output_body(
+                    else_branch,
+                    outputs,
+                    resolve,
+                    resolve_type,
+                    lookup,
+                    diagnostics,
+                );
             }
         }
         other => {
-            let (_, body_diags) = check_expr_with_type_resolver(other, resolve, resolve_type);
+            let (_, body_diags) =
+                check_expr_with_type_resolver(other, resolve, resolve_type, lookup);
             diagnostics.extend(body_diags);
             let n = outputs.len();
             diagnostics.push(ParseError::new_range(
@@ -669,12 +770,15 @@ fn check_tuple_output_body(
 /// body is checked recursively via [`expr_matches_shape`] instead). Operator-level diagnostics
 /// from inside the body (via [`check_expr`]) are always included exactly once, regardless of
 /// which branch below runs.
+///
+/// - Complexity: body type checking plus recursive output-shape validation.
 fn check_binding(
     binding: &BindingDecl,
     registry: &TypeRegistry,
     shapes: &std::collections::HashMap<String, TypeShape>,
     resolve: &impl Fn(&str) -> Ty,
     resolve_type: &impl cel_parser::TypeResolver,
+    lookup: &cel_parser::OpLookup,
     diagnostics: &mut Vec<ParseError>,
 ) {
     if binding.destructure {
@@ -683,12 +787,14 @@ fn check_binding(
             &binding.outputs,
             resolve,
             resolve_type,
+            lookup,
             diagnostics,
         );
         return;
     }
     let Some((name, _)) = binding.outputs.first() else {
-        let (_, body_diags) = check_expr_with_type_resolver(&binding.body, resolve, resolve_type);
+        let (_, body_diags) =
+            check_expr_with_type_resolver(&binding.body, resolve, resolve_type, lookup);
         diagnostics.extend(body_diags);
         return;
     };
@@ -699,11 +805,13 @@ fn check_binding(
             registry,
             resolve,
             resolve_type,
+            lookup,
             diagnostics,
         );
         return;
     }
-    let (body_ty, body_diags) = check_expr_with_type_resolver(&binding.body, resolve, resolve_type);
+    let (body_ty, body_diags) =
+        check_expr_with_type_resolver(&binding.body, resolve, resolve_type, lookup);
     diagnostics.extend(body_diags);
     if let Expr::Tuple { elements, .. } = &binding.body {
         let n = elements.len();
@@ -736,27 +844,30 @@ fn check_binding(
 /// if a `require { ... }` block is present, each of its requirements' bodies against `Ty::Bool`.
 /// Operator-level diagnostics from inside any body (via `check_expr`) are always included,
 /// regardless of whether a mismatch diagnostic is also added.
+///
+/// - Complexity: body, filter, and requirement checking plus annotation-shape validation.
 fn check_out(
     out_decl: &OutDecl,
     registry: &TypeRegistry,
-    cell_types: &std::collections::HashMap<String, Ty>,
-    shapes: &std::collections::HashMap<String, TypeShape>,
+    declared: &DeclaredTypes,
     resolve: &impl Fn(&str) -> Ty,
     resolve_type: &impl cel_parser::TypeResolver,
+    lookup: &cel_parser::OpLookup,
     diagnostics: &mut Vec<ParseError>,
 ) {
-    if let Some(shape @ TypeShape::Tuple(_)) = shapes.get(&out_decl.name) {
+    if let Some(shape @ TypeShape::Tuple(_)) = declared.shapes.get(&out_decl.name) {
         expr_matches_shape(
             &out_decl.initializer,
             shape,
             registry,
             resolve,
             resolve_type,
+            lookup,
             diagnostics,
         );
     } else {
         let (body_ty, body_diags) =
-            check_expr_with_type_resolver(&out_decl.initializer, resolve, resolve_type);
+            check_expr_with_type_resolver(&out_decl.initializer, resolve, resolve_type, lookup);
         diagnostics.extend(body_diags);
         if out_decl.type_name.is_some() {
             let declared = resolve(&out_decl.name);
@@ -777,16 +888,17 @@ fn check_out(
     check_filter(
         &out_decl.name,
         out_decl.filter.as_ref(),
-        cell_types,
-        shapes,
+        declared,
         resolve,
         resolve_type,
+        lookup,
         diagnostics,
     );
     check_requirements(
         out_decl.require.as_ref(),
         resolve,
         resolve_type,
+        lookup,
         diagnostics,
     );
 }
@@ -796,10 +908,13 @@ fn check_out(
 /// `source`, or `out` with no `require { ... }` block). Shared by [`check_out`] and by the
 /// `SheetItem::Cell`/`SheetItem::Source` arms of [`check_sheet`]'s match, since `require` has the
 /// same shape and rules regardless of which cell kind it's attached to.
+///
+/// - Complexity: the sum of type-checking costs for every requirement body.
 fn check_requirements(
     require: Option<&RequireBlock>,
     resolve: &impl Fn(&str) -> Ty,
     resolve_type: &impl cel_parser::TypeResolver,
+    lookup: &cel_parser::OpLookup,
     diagnostics: &mut Vec<ParseError>,
 ) {
     let Some(require) = require else {
@@ -807,7 +922,7 @@ fn check_requirements(
     };
     for requirement in &require.requirements {
         let (req_ty, req_diags) =
-            check_expr_with_type_resolver(&requirement.body, resolve, resolve_type);
+            check_expr_with_type_resolver(&requirement.body, resolve, resolve_type, lookup);
         diagnostics.extend(req_diags);
         if !req_ty.unifies_with(&Ty::Bool) {
             diagnostics.push(ParseError::new_range(
@@ -843,7 +958,7 @@ mod tests {
     #[test]
     fn cell_initializer_matching_its_annotation_has_no_diagnostic() {
         let sheet = parse("sheet s { cell x: i32 = 1; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -851,7 +966,7 @@ mod tests {
     fn cell_initializer_mismatched_with_its_annotation_is_a_diagnostic() {
         // Unsuffixed float literal defaults to f64, not i32.
         let sheet = parse("sheet s { cell x: i32 = 1.0; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -859,7 +974,7 @@ mod tests {
     fn source_initializer_mismatched_with_its_annotation_is_a_diagnostic() {
         // Unsuffixed float literal defaults to f64, not i32.
         let sheet = parse("sheet s { source x: i32 = 1.0; }");
-        let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+        let diagnostics = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diagnostics.len(), 1);
     }
 
@@ -874,7 +989,7 @@ mod tests {
         let mut registry = TypeRegistry::new();
         registry.register_no_default::<Custom>("Custom");
 
-        let diagnostics = check_sheet(&sheet, &registry);
+        let diagnostics = check_sheet(&sheet, &registry, &cel_parser::OpLookup::new());
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
@@ -884,7 +999,7 @@ mod tests {
         let mut registry = TypeRegistry::new();
         registry.register_no_default::<Custom>("Custom");
 
-        let diagnostics = check_sheet(&sheet, &registry);
+        let diagnostics = check_sheet(&sheet, &registry, &cel_parser::OpLookup::new());
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert!(
             diagnostics[0]
@@ -898,7 +1013,7 @@ mod tests {
     #[test]
     fn unknown_custom_array_annotation_type_is_reported() {
         let sheet = parse("sheet s { out values := []: [Missing]; }");
-        let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+        let diagnostics = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diagnostics.len(), 1);
         assert!(
             diagnostics[0].message().contains("unknown type `Missing`"),
@@ -910,7 +1025,7 @@ mod tests {
     #[test]
     fn tuple_typed_array_annotations_report_the_existing_issue_213_diagnostic() {
         let sheet = parse("sheet s { out values := []: [(i32, f64)]; }");
-        let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+        let diagnostics = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert!(
             diagnostics[0]
@@ -929,19 +1044,19 @@ mod tests {
     #[test]
     fn cell_requirement_non_bool_body_is_a_diagnostic() {
         let sheet = parse("sheet s { cell x: i32 = 5 require { @positive x; }; }");
-        let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+        let diagnostics = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diagnostics.len(), 1);
     }
 
     #[test]
-    fn cell_initializer_non_literal_expression_is_not_cross_checked() {
-        // A non-literal scalar initializer is left to the real parser, which constant-folds it
-        // and reports its own `cell ...: type mismatch`. The checker must not add a second,
-        // differently-worded diagnostic here.
+    fn cell_initializer_non_literal_expression_is_checked() {
         let sheet = parse("sheet s { cell x: f64 = 1 + 2; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         let messages: Vec<&str> = diags.iter().map(cel_parser::ParseError::message).collect();
-        assert!(messages.is_empty(), "unexpected diagnostics: {messages:?}");
+        assert_eq!(
+            messages,
+            ["expression produces `i32`, but `f64` was expected"]
+        );
     }
 
     #[test]
@@ -949,7 +1064,7 @@ mod tests {
         // The initializer's own body diagnostics (here, a CEL typed-array annotation mismatch)
         // must still be reported even though the initializer isn't a bare literal.
         let sheet = parse("sheet s { cell x: f64 = [0, 1]: [f64]; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         let messages: Vec<&str> = diags.iter().map(cel_parser::ParseError::message).collect();
         assert_eq!(
             messages,
@@ -960,7 +1075,7 @@ mod tests {
     #[test]
     fn cell_with_only_an_annotation_has_nothing_to_cross_check() {
         let sheet = parse("sheet s { cell x: i32; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -972,7 +1087,7 @@ mod tests {
         // always infers as `i32`, so it mismatches a `u32` annotation; `cell x: u32 = 1;` is
         // rejected by the real parser, and the checker must flag it too.
         let sheet = parse("sheet s { cell x: u32 = 1; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -982,7 +1097,7 @@ mod tests {
         // Same exact-type rule as above, but across the int/float boundary: an unsuffixed integer
         // literal infers as `i32`, never as `f64`, so no int-to-float coercion is allowed either.
         let sheet = parse("sheet s { cell x: f64 = 1; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -991,14 +1106,14 @@ mod tests {
         // adam-lang's real parser has no rule accepting a char literal against any registered
         // type, so the checker must flag it too.
         let sheet = parse("sheet s { cell x: i32 = 'a'; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn cell_annotated_with_an_unregistered_type_name_is_never_flagged() {
         let sheet = parse("sheet s { cell x: WidgetHandle = 1; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1008,7 +1123,7 @@ mod tests {
             "sheet s { cell width: f64; cell height: f64; cell area: f64; \
              relationship { area := width * height; } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1018,7 +1133,7 @@ mod tests {
             "sheet s { cell width: f64; cell height: f64; cell area: i32; \
              relationship { area := width * height; } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1028,7 +1143,7 @@ mod tests {
             "sheet s { cell a: i32; cell b: i32; cell sum: i32; cell diff: i32; \
              relationship { (sum, diff) := (a + b, a - b); } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1038,7 +1153,7 @@ mod tests {
             "sheet s { cell a: i32; cell b: i32; cell sum: i32; cell diff: i32; \
              relationship { (sum, diff) := a + b; } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1050,7 +1165,7 @@ mod tests {
             "sheet s { cell a: i32; cell b: i32; cell out: i32; \
              relationship { out := (a, b); } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1060,7 +1175,7 @@ mod tests {
             "sheet s { cell a: i32; cell b: i32; cell sum: i32; cell diff: f64; \
              relationship { (sum, diff) := (a + b, a - b); } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1070,7 +1185,7 @@ mod tests {
             "sheet s { cell name: String; cell count: i32; cell out: i32; \
              relationship { out := name + count; } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1083,7 +1198,7 @@ mod tests {
                  _ => { relationship { out := b; } }, \
              } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1095,7 +1210,7 @@ mod tests {
             "sheet s { cell a = 1; cell out: i32; \
              relationship { out := a; } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1107,7 +1222,7 @@ mod tests {
             !sheet.errors.is_empty(),
             "fixture must actually recover an error item"
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1117,7 +1232,7 @@ mod tests {
             "sheet s { cell width: f64; cell height: f64; \
              out area: f64 := width * height; }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1127,7 +1242,7 @@ mod tests {
             "sheet s { cell width: f64; cell height: f64; \
              out area: i32 := width * height; }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1139,7 +1254,7 @@ mod tests {
             "sheet s { cell width: f64; cell height: f64; \
              out area := width * height; }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1151,7 +1266,7 @@ mod tests {
                  @max_width width <= max_width; \
              }; }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1163,7 +1278,7 @@ mod tests {
                  @bogus width; \
              }; }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1175,49 +1290,49 @@ mod tests {
                  width; \
              }; }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn cell_tuple_initializer_matching_its_annotation_has_no_diagnostic() {
         let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5); }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
     #[test]
     fn cell_tuple_initializer_arity_mismatch_is_a_diagnostic() {
         let sheet = parse("sheet s { cell a: (i32, f64, i32) = (1, 2.5); }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn cell_tuple_initializer_element_type_mismatch_is_a_diagnostic() {
         let sheet = parse("sheet s { cell a: (i32, i32) = (1, 2.5); }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn cell_nested_tuple_initializer_matching_its_annotation_has_no_diagnostic() {
         let sheet = parse("sheet s { cell a: (i32, (f64, String)) = (1, (2.5, \"x\")); }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
     #[test]
     fn filter_with_matching_types_has_no_diagnostic() {
         let sheet = parse("sheet s { cell a: i32 = 1 filter _; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
     #[test]
     fn filter_with_matching_types_on_a_source_has_no_diagnostic() {
         let sheet = parse("sheet s { source a: i32 = 1 filter _; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1226,7 +1341,7 @@ mod tests {
         let sheet = parse(
             "sheet s { cell hi: i32 = 100; cell a: i32 = 1 filter if _ > hi { hi } else { _ }; }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1234,30 +1349,55 @@ mod tests {
     fn filter_body_type_mismatch_is_a_diagnostic() {
         // Body is `bool`-typed (a comparison), but `a` is declared `i32`.
         let sheet = parse("sheet s { cell a: i32 = 1 filter _ > 0; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn filter_without_underscore_is_a_diagnostic() {
         let sheet = parse("sheet s { cell a: i32 = 1 filter 1; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
+    }
+
+    /// A closure parameter hides value references, not labels or type names.
+    #[test]
+    fn closure_parameter_shadows_only_value_references() {
+        for (source, references) in [
+            ("|_: i32| _", false),
+            ("|x: i32| _", true),
+            ("|_: i32| value._", false),
+            ("|_: i32| _ { x: value }", false),
+            ("|x: i32| Record { x: _ }.x", true),
+        ] {
+            let expr =
+                cel_parser::Parser::<cel_parser::AstContext>::new(cel_parser::OpLookup::new())
+                    .parse_str_ast(source)
+                    .unwrap();
+            assert_eq!(expr_references_ident(&expr, "_"), references, "{source}");
+        }
     }
 
     /// Verifies record values contribute dependencies, while constructor and field labels do not.
     #[test]
     fn record_filter_dependencies_only_visit_field_values() {
         let sheet = parse("sheet s { cell a: i32 = 1 filter Record { value: _ }; }");
-        assert!(check_sheet(&sheet, &TypeRegistry::new()).is_empty());
+        let diagnostics = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].message().contains("unknown record type"));
         for source in [
             "sheet s { cell a: i32 = 1 filter Record { _: 1 }; }",
             "sheet s { cell a: i32 = 1 filter _ { value: 1 }; }",
         ] {
             let sheet = parse(source);
-            let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
-            assert_eq!(diagnostics.len(), 1);
-            assert!(diagnostics[0].message().contains("must reference `_`"));
+            let diagnostics =
+                check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
+            assert_eq!(diagnostics.len(), 2);
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|d| d.message().contains("must reference `_`"))
+            );
         }
     }
 
@@ -1266,7 +1406,7 @@ mod tests {
         // Mirrors `filter_body_type_mismatch_is_a_diagnostic`, but for an `out`'s filter clause:
         // body is `bool`-typed (a comparison), but `area` is declared `i32`.
         let sheet = parse("sheet s { cell width: i32 = 1; out area: i32 := width filter _ > 0; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1274,7 +1414,7 @@ mod tests {
     fn filter_without_underscore_on_an_out_is_a_diagnostic() {
         // Mirrors `filter_without_underscore_is_a_diagnostic`, but for an `out`'s filter clause.
         let sheet = parse("sheet s { cell width: i32 = 1; out area: i32 := width filter 1; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1283,7 +1423,7 @@ mod tests {
         // Mirrors `filter_body_type_mismatch_is_a_diagnostic`, but for a `source`'s filter
         // clause: body is `bool`-typed (a comparison), but `a` is declared `i32`.
         let sheet = parse("sheet s { source a: i32 = 1 filter _ > 0; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1292,7 +1432,7 @@ mod tests {
         // Mirrors `filter_without_underscore_is_a_diagnostic`, but for a `source`'s filter
         // clause.
         let sheet = parse("sheet s { source a: i32 = 1 filter 1; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1301,7 +1441,7 @@ mod tests {
         // Mirrors the runtime parser's own rejection (`adam_lang::parser::AdamParser::
         // parse_cell_filter`) — a tuple-typed filtered cell isn't yet supported by either layer.
         let sheet = parse("sheet s { cell a: (i32, f64) = (1, 2.5) filter (_.0, _.1); }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1310,7 +1450,7 @@ mod tests {
         // `_` appears only inside an `if`'s then-branch, not as the whole body or a bare
         // operand — exercises `expr_references_ident`'s `Expr::If` arm specifically.
         let sheet = parse("sheet s { cell a: i32 = 1 filter if true { _ } else { 1 }; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1320,12 +1460,15 @@ mod tests {
         for body in ["_.accessor", "value.accessor(_)", "_.accessor()"] {
             let sheet = parse(&format!("sheet s {{ cell value: i32 = 1 filter {body}; }}"));
             assert!(
-                check_sheet(&sheet, &TypeRegistry::new()).is_empty(),
+                check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new()).is_empty(),
                 "{body}"
             );
         }
         let sheet = parse("sheet s { cell value: i32 = 1 filter value._; }");
-        assert_eq!(check_sheet(&sheet, &TypeRegistry::new()).len(), 1);
+        assert_eq!(
+            check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new()).len(),
+            1
+        );
     }
 
     #[test]
@@ -1334,7 +1477,7 @@ mod tests {
             "sheet s { cell a: i32; cell b: i32; cell pair: (i32, i32); \
              relationship { pair := (a, b); } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1344,7 +1487,7 @@ mod tests {
             "sheet s { cell a: i32; cell b: f64; cell pair: (i32, i32); \
              relationship { pair := (a, b); } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1356,7 +1499,7 @@ mod tests {
                  if cond { (a, b) } else { (b, a) }; \
              } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1368,7 +1511,7 @@ mod tests {
                  if cond { (a, b) }; \
              } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1381,7 +1524,7 @@ mod tests {
                  if mode == 0 { (a, b) } else if mode == 1 { (b, a) } else { (0, 0) }; \
              } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1400,7 +1543,7 @@ mod tests {
                  if cond { (a, c) } else { (a, c) }; \
              } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 2);
     }
 
@@ -1412,7 +1555,7 @@ mod tests {
                  if cond { (a + b, a - b) } else { (a - b, a + b) }; \
              } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1425,7 +1568,7 @@ mod tests {
                  if cond { (a, b) } else { (a, c) }; \
              } }",
         );
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
@@ -1433,7 +1576,7 @@ mod tests {
     fn binding_single_element_tuple_destructure_has_no_diagnostic() {
         let sheet =
             parse("sheet s { cell a: i32; cell out: i32; relationship { (out,) := (a,); } }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 
@@ -1441,21 +1584,21 @@ mod tests {
     fn binding_single_element_tuple_destructure_type_mismatch_is_a_diagnostic() {
         let sheet =
             parse("sheet s { cell a: f64; cell out: i32; relationship { (out,) := (a,); } }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn binding_single_element_tuple_destructure_arity_mismatch_is_a_diagnostic() {
         let sheet = parse("sheet s { cell a: i32; cell out: i32; relationship { (out,) := a; } }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn filter_range_inclusive_body_does_not_require_underscore() {
         let sheet = parse("sheet s { cell a: i32 filter 0..=100; }");
-        let diags = check_sheet(&sheet, &TypeRegistry::new());
+        let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
     }
 }

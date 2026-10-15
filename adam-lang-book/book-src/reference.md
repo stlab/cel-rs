@@ -51,6 +51,12 @@ initializer and the `cell_filter`/`require_block` clauses shown above exist toda
 - A sheet's own name has no runtime meaning; it is not otherwise referenceable.
 - `cell`, `source`, and `out` declarations share one namespace. Declaring the same name twice,
   in any combination of the three, is a "duplicate cell" error.
+- Record constructor/type names occupy a separate namespace from values.
+  `TypeName { field: expr, ... }` uses an installed schema; its name and field
+  labels are not dependencies. Members `expr.name` and `expr.name()` dispatch
+  a unary operation directly, ignoring same-named cells; `expr.name(a)` passes
+  the receiver first. `(expr.name)()` instead calls the operation's result.
+  Only value references contribute dependencies, including inside closures.
 - **No forward references.** An identifier is only recognized as a cell dependency if that
   cell was declared earlier in the same sheet's token order. Referencing an undeclared name is
   an "undeclared cell" error. See [names and declaration order](cells.md#names-and-declaration-order).
@@ -93,6 +99,24 @@ A host application can register additional Rust types under new Adam type names 
 (without one, such a type can only be used with an explicit initializer, never a bare `: T`
 declaration). This is a Rust-level embedding decision made before parsing a sheet, not
 something sheet source itself can do.
+
+Record syntax requires a separate `OpLookup::register_record` schema, and dot
+operations require host implementations (optionally with registered operation
+signatures). The host passes its lookup as the third argument to
+`check_sheet(&sheet, &registry, &lookup)` so static checking sees the same
+metadata as execution. Known custom annotations and results retain complete
+leaf descriptors and do not unify with unrelated types; truly unresolved values
+and custom calls without metadata remain best-effort, with all children checked.
+
+Record fields are required exactly once and match their types exactly: no
+implicit integer-to-float conversion. Unknown constructors and
+unknown/duplicate/missing/mistyped fields are errors. Field evaluation follows
+written order. Empty schemas accept `{}`; non-empty fields permit a trailing
+comma (call arguments do not). Records must be parenthesized in `if` conditions
+and `conditional` subjects unless inside a parenthesized, call, tuple, or array
+subexpression. Members are never assignment targets; binding targets remain
+whole cell names or tuple patterns. See the
+[executable host example](expressions.md#host-records-and-members).
 
 `RangeInclusive<T>` recognition for [range filters](filters.md#range-filters) is
 pre-registered for exactly the built-in numeric types above and is not extensible per custom

@@ -260,6 +260,18 @@ unsafe fn extract_box_impl<T: Clone + 'static>(ptr: *const u8) -> Box<dyn Any> {
 }
 
 impl TypeRegistry {
+    /// Returns a registered leaf's source-facing name and complete CEL element descriptor.
+    ///
+    /// - Complexity: O(l) to clone the registered name of length l.
+    pub(crate) fn resolved_leaf_type(&self, type_id: TypeId) -> Option<ResolvedLeafType> {
+        let name = self.by_type_id.get(&type_id)?;
+        let entry = self.by_name.get(name)?;
+        Some(ResolvedLeafType::new(
+            name.clone(),
+            (entry.element_type_fn)(),
+        ))
+    }
+
     /// Builds a CEL-facing resolver snapshot from this registry's registered leaf types.
     ///
     /// The returned resolver owns only the name-to-descriptor metadata CEL needs for typed array

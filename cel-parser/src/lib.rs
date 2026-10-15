@@ -121,6 +121,37 @@
 //! assert_eq!(format_expr(&expr, source, 0), source);
 //! ```
 //!
+//! ## Metadata-aware static checking
+//!
+//! [`ty::check_expr_with_type_resolver`] takes the host's [`OpLookup`] as its fourth argument.
+//! It checks record fields against schemas and receiver operations against signatures without
+//! invoking emitters. Known custom leaves retain [`Ty::Registered`] descriptors; unrelated
+//! known types never unify. Unknown constructors are diagnostic, while genuinely unresolved
+//! values and custom calls without metadata remain best-effort. Every child is still checked,
+//! and constructor/field/member labels never enter the value resolver. No integer-to-float
+//! coercion occurs. [`ty::check_expr`] remains the primitive convenience entry with an empty lookup.
+//!
+//! ```rust
+//! use std::sync::Arc;
+//! use cel_parser::{AstContext, OpLookup, OperationSignature, Parser, ResolvedLeafType, Ty};
+//! use cel_runtime::ArrayElementType;
+//!
+//! let scalar = ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap());
+//! let mut lookup = OpLookup::new();
+//! lookup.register_operation(OperationSignature {
+//!     name: "twice",
+//!     operands: vec![scalar.clone()],
+//!     result: scalar,
+//!     emit: Arc::new(|s, _| s.op1(|value: f64| value * 2.0)),
+//! }).unwrap();
+//! let expr = Parser::<AstContext>::new(OpLookup::new())
+//!     .parse_str_ast("3.0.twice() + true").unwrap();
+//! let (_, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+//!     &expr, &|_| Ty::Any, cel_parser::builtin_type_resolver().as_ref(), &lookup,
+//! );
+//! assert_eq!(diagnostics.len(), 1);
+//! ```
+//!
 //! ## Array Literals
 //!
 //! A `[...]` literal evaluates to one [`cel_runtime::DynamicArray`] owning every element.
