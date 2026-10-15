@@ -35,6 +35,7 @@ long-term direction behind each crate in this workspace.
 | [`cel-runtime`](cel-runtime) | Core stack-based runtime; all evaluation and stack machinery |
 | [`cel-parser`](cel-parser) | Recursive-descent CEL parser, lexer, and error types |
 | [`cel-rs-macros`](cel-rs-macros) | Proc-macro crate for compile-time CEL expression validation |
+| [`cel-euclid`](cel-euclid) | Opt-in `f64` Euclid records and affine geometry; optional Adam cell types |
 | [`adam-rs`](adam-rs) | Multi-way constraint system for property models |
 | [`adam-lang`](adam-lang) | DSL that expresses `adam-rs` constraint systems as source text |
 | [`adam-lsp`](adam-lsp) | Language server for `adam-lang` |
@@ -95,6 +96,27 @@ CEL source at runtime, and validating/compiling CEL expressions at compile time.
 [`src/lib.rs`](src/lib.rs) for one example of each.
 
 ## Development
+
+### Optional geometry
+
+Install `cel_euclid::install(&mut lookup)` alongside `cel_std::install` to use
+the [complete geometry signature table](cel-euclid/SIGNATURES.md).
+For Adam, enable `cel-euclid/adam` and register cell types with
+`cel_euclid::register_adam_types(&mut types)`. The web UI, LSP, and runnable
+book support configure equivalent environments; `adam-lang` itself remains
+geometry-independent.
+
+```bash
+cargo run -p cel-euclid --features adam --example adam_geometry
+cargo test -p cel-euclid --all-features
+```
+
+The actual [crop/straighten sheet](cel-euclid/examples/crop_straighten.adm2)
+fits arbitrary affine geometry with general operations and typed IIFEs,
+preserves source aspiration through Adam self-reference, and derives a
+fixed-overlay presentation. Its numerical policy lives in CEL, not a Rust
+fitting helper. The [pan/zoom sheet](cel-euclid/examples/pan_zoom.adm2)
+demonstrates graph policy; live graph migration is a separate stage.
 
 See [CLAUDE.md](CLAUDE.md) for the full command reference (build, test, lint,
 sanitizers) and repository conventions, including the requirement to work in a

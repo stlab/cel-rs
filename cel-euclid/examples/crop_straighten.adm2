@@ -1,0 +1,101 @@
+// Image coordinates -> crop coordinates. The caller rotates about the image
+// point under the requested crop center. No separate requested-crop cell:
+// Adam preserves the source aspiration of the self-referencing crop.
+sheet crop_straighten {
+    source image: Rect = Rect {
+        origin: Point2D { x: 0.0, y: 0.0 },
+        size: Size2D { width: 100.0, height: 100.0 }
+    } require {
+        @valid_image image.is_finite() && image.width > 0.0 && image.height > 0.0
+            && image.max_x > image.min_x && image.max_y > image.min_y
+            && (Point2D { x: image.max_x, y: image.max_y }).is_finite();
+    };
+    source transform: Transform2D = identity_transform();
+    cell crop: Rect = Rect {
+        origin: Point2D { x: 0.0, y: 0.0 },
+        size: Size2D { width: 100.0, height: 100.0 }
+    } require {
+        @positive_effective_crop crop.is_finite() && crop.width > 0.0 && crop.height > 0.0
+            && crop.max_x > crop.min_x && crop.max_y > crop.min_y
+            && (Point2D { x: crop.max_x, y: crop.max_y }).is_finite();
+    };
+    cell shrink: f64 = 1.0 require {
+        @representable_shrink shrink > 0.0 && shrink <= 1.0
+            && 1.0 / shrink <= 1.7976931348623157e308;
+    };
+    cell precise: bool = true require { @representable_uniform_fit precise; };
+
+    relationship {
+        (crop, shrink, precise) :=
+            (|r: Rect, i: Rect, inv: Transform2D|
+                (|r: Rect, i: Rect, inv: Transform2D, a: Point2D, b: Rect|
+                    (|r: Rect, s: f64, accurate: bool|
+                        if s == 1.0 { (r, 1.0, accurate) } else {
+                            // Eight epsilon inward guard, only when shrinking.
+                            // The documented acceptance tolerance is 64 epsilon.
+                            (|r: Rect, s: f64, accurate: bool|
+                                (|r: Rect, s: f64, accurate: bool, q: Rect|
+                                    (q, s, accurate
+                                        && abs(q.width / r.width - s)
+                                            <= 0.000000000000014210854715202004 * s
+                                        && abs(q.height / r.height - s)
+                                            <= 0.000000000000014210854715202004 * s)
+                                )(r, s, accurate, Rect {
+                                    origin: r.center() - Vector2D {
+                                        x: r.width * s * 0.5,
+                                        y: r.height * s * 0.5
+                                    },
+                                    size: r.size * s
+                                })
+                            )(r, s * (1.0 - 0.0000000000000017763568394002505), accurate)
+                        }
+                    )(r, min(1.0, min(
+                        min(a.x - i.min_x, i.max_x - a.x)
+                            / max(a.x - b.min_x, b.max_x - a.x),
+                        min(a.y - i.min_y, i.max_y - a.y)
+                            / max(a.y - b.min_y, b.max_y - a.y)
+                    )), (
+                        // Bound subtraction must retain the affine half-extents
+                        // within 32 epsilon; reject cancellation, not an undersized
+                        // but plausible result. This is a precision check only.
+                        abs(max(a.x - b.min_x, b.max_x - a.x)
+                            / (abs(inv.m11) * (r.width * 0.5)
+                                + abs(inv.m21) * (r.height * 0.5)) - 1.0)
+                            <= 0.000000000000007105427357601002
+                        && abs(max(a.y - b.min_y, b.max_y - a.y)
+                            / (abs(inv.m12) * (r.width * 0.5)
+                                + abs(inv.m22) * (r.height * 0.5)) - 1.0)
+                            <= 0.000000000000007105427357601002
+                    ))
+                )(r, i, inv, inv.transform_point(r.center()), inv.outer_transformed_rect(r))
+            )(crop, image, transform.inverse());
+    }
+
+    out anchor: Point2D := transform.inverse().transform_point(crop.center()) require {
+        @feasible_anchor anchor.is_finite()
+            && anchor.x > image.min_x && anchor.x < image.max_x
+            && anchor.y > image.min_y && anchor.y < image.max_y;
+    };
+    // Closed-edge coverage, not Euclid's half-open point containment.
+    // Use the image coordinate/extent scale for the absolute rounding budget.
+    out coverage: bool :=
+        (|b: Rect, i: Rect, e: f64|
+            b.min_x >= i.min_x - e && b.max_x <= i.max_x + e
+                && b.min_y >= i.min_y - e && b.max_y <= i.max_y + e
+        )(transform.inverse().outer_transformed_rect(crop), image,
+            0.000000000000014210854715202004 * max(
+                max(image.width, image.height),
+                max(max(abs(image.min_x), abs(image.max_x)),
+                    max(abs(image.min_y), abs(image.max_y)))
+            )
+        ) require { @closed_edges coverage; };
+
+    // Map the effective crop back onto the unchanged source overlay.
+    // This post-scale fixes crop.center(), hence fixes the same image anchor.
+    out presentation: Transform2D :=
+        transform
+            .then(translation(Vector2D { x: -crop.center().x, y: -crop.center().y }))
+            .then(scale(1.0 / shrink, 1.0 / shrink))
+            .then(translation(Vector2D { x: crop.center().x, y: crop.center().y }))
+        require { @finite_presentation presentation.is_finite(); };
+}

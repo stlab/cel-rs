@@ -55,6 +55,33 @@
 //! a bound's maximum rounds inward, its extent advances one ULP to enclose that
 //! maximum; unrepresentable extents/endpoints return evaluation errors.
 //! The `adam` feature only adds optional type registration; it is disabled by default.
+//!
+//! # Optional Adam installation
+//!
+//! Hosts explicitly install both cell types and operations. `adam-lang` itself
+//! has no geometry dependency. Its registration-aware checker consumes the same
+//! registry and lookup as compilation; unresolved call results remain best-effort.
+//! Bare CEL hosts that use registered closure annotations must also configure
+//! their [`cel_parser::TypeResolver`]; installing record operations alone does
+//! not replace the parser's annotation resolver.
+//!
+//! ```
+//! # #[cfg(feature = "adam")] {
+//! let mut types = adam_lang::TypeRegistry::new();
+//! cel_euclid::register_adam_types(&mut types);
+//! let mut lookup = cel_parser::OpLookup::new();
+//! cel_euclid::install(&mut lookup);
+//! let mut parser = adam_lang::AdamParser::new(types, lookup);
+//! assert!(parser.parse_str("sheet s { cell p: Point2D; }").is_ok());
+//! # }
+//! ```
+//!
+//! Run `cargo run -p cel-euclid --features adam --example adam_geometry` for
+//! source-preserving crop/straighten and pan/zoom sheets. Crop fitting, its
+//! eight-epsilon inward guard, and precision/coverage requirements live in CEL,
+//! not in library operations. The example's Rust boundary validates inputs only.
+
+#![doc = include_str!("../SIGNATURES.md")]
 
 #[cfg(feature = "adam")]
 mod adam;

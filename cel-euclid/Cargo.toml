@@ -19,5 +19,9 @@ adam = ["dep:adam-lang"]
 cel-std = { path = "../cel-std" }
 proc-macro2 = "1.0"
 
+[[example]]
+name = "adam_geometry"
+required-features = ["adam"]
+
 [lints]
 workspace = true

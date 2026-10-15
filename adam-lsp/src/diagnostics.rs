@@ -14,8 +14,11 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 ///   [`AdamAstParser::parse_str`] (syntax errors, including the single error produced when the
 ///   whole parse aborts instead of recovering one item) or returned by [`check_sheet`] (type
 ///   errors); returns an empty `Vec` for a syntactically and semantically clean sheet.
-/// - Complexity: O(n) in the length of `source` — parses and type-checks the whole sheet once,
-///   with no caching across calls.
+///
+/// The environment explicitly includes the standard library and optional Euclid geometry,
+/// matching the executing web/book hosts. Unresolved call-result shapes remain best-effort.
+///
+/// - Complexity: O(n + s²) in source length and installed library signatures, with no caching.
 ///
 /// # Examples
 ///
@@ -31,7 +34,12 @@ pub fn diagnostics_for_source(source: &str) -> Vec<Diagnostic> {
         Ok(sheet) => sheet,
         Err(e) => return vec![to_diagnostic(e.into())],
     };
-    let type_errors = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
+    let mut types = TypeRegistry::new();
+    cel_euclid::register_adam_types(&mut types);
+    let mut lookup = cel_parser::OpLookup::new();
+    cel_std::install(&mut lookup);
+    cel_euclid::install(&mut lookup);
+    let type_errors = check_sheet(&sheet, &types, &lookup);
     sheet
         .errors
         .into_iter()
@@ -72,6 +80,29 @@ fn to_range(span: SourceSpan) -> Range {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The LSP uses the same standard and Euclid metadata as executing hosts.
+    #[test]
+    fn lsp_geometry_fields_and_members_have_matching_diagnostics() {
+        let valid = "sheet s { out x := (|p: Point2D| p.x)(Point2D { y: 2.0, x: 1.0 }); out n := min(3.0, 4.0); }";
+        assert!(
+            diagnostics_for_source(valid).is_empty(),
+            "{:?}",
+            diagnostics_for_source(valid)
+        );
+        let invalid = "sheet s { out p := Point2D { x: true, y: 1.0 }; }";
+        let diagnostics = diagnostics_for_source(invalid);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let invalid = "sheet s { out p := Point2D { x: 1.0, y: 1.0 }.translate(1.0); }";
+        assert!(!diagnostics_for_source(invalid).is_empty());
+        for actual in [
+            include_str!("../../cel-euclid/examples/crop_straighten.adm2"),
+            include_str!("../../cel-euclid/examples/pan_zoom.adm2"),
+        ] {
+            let diagnostics = diagnostics_for_source(actual);
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        }
+    }
 
     /// Reports missing host schemas and still checks field expressions through the LSP path.
     #[test]

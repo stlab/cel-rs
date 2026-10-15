@@ -11,6 +11,7 @@
 - [Relationships and the Solver](relationships.md)
 - [Relationships Continued: Destructuring and Self-Referencing Methods](relationships-continued.md)
 - [Conditionals](conditionals.md)
+- [Optional Geometry and Self-Referencing Constraints](geometry.md)
 - [Lexical Conventions](lexical-conventions.md)
 - [Program Style](style.md)
 

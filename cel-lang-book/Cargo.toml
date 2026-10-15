@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 cel-parser = { path = "../cel-parser" }
 cel-runtime = { path = "../cel-runtime" }
+cel-euclid = { path = "../cel-euclid" }
 
 [dev-dependencies]
 cel-std = { path = "../cel-std" }

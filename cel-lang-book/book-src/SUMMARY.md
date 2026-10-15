@@ -8,4 +8,5 @@
 - [Collections](collections.md)
 - [Closures](closures.md)
 - [Standard library](standard-library.md)
+- [Optional Euclid geometry](geometry.md)
 - [Reference Manual](reference.md)

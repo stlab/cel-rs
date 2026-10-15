@@ -33,24 +33,24 @@ for release/performance. That second path does not yet exist.
 
 **Current state:** interpreted backend (`DynSegment`/`Segment`) is the only backend.
 `cel-rs-macros` currently does compile-time validation of CEL expressions only.
+Tuples, arrays, registered records/members, and typed noncapturing closures with
+checked invocation are implemented. The optional `cel-euclid` library exposes
+seven concrete `f64` / `UnknownUnit` geometry types and general affine operations,
+including checked inverse and four-corner outer bounds. Hosts explicitly opt in;
+the core languages do not depend on geometry. See
+[`cel-euclid/SIGNATURES.md`](../cel-euclid/SIGNATURES.md) for the supported boundary.
 
 **Directions being explored:**
 
 - The second parser backend: compiling CEL directly to Rust via a macro, rather than to
   runtime segments. `cel-rs-macros` — already a proc-macro crate that parses CEL at compile
   time — is the likely home for this, though that's not committed.
-- Language surface: tuples, arrays, and method calls.
-- First-class functions.
-- Closure syntax (open question, not yet designed).
+- Further first-class function capabilities beyond typed noncapturing closures.
 - Borrowing array-language concepts from J.
-- Geometry and affine-transform value types (point, size, rect, and a translate+uniform-scale
-  transform), likely reflecting Linebender's `kurbo` crate rather than defining bespoke ones —
-  `kurbo::TranslateScale` maps directly onto the `{x, y, k}` pan/zoom transform model `begin`'s
-  D3 graph view already uses (see
-  `docs/superpowers/specs/2026-07-10-begin-graph-pan-zoom-design.md`). Needs arithmetic ops for
-  these types plus method-call support (above) for operations like clamping scale to a range or
-  clamping a transform's translation to keep a content rect within a viewport. Another option would
-  be [Euclid](https://docs.rs/euclid/latest/euclid/).
+- Geometry beyond the implemented Euclid boundary (for example, paths/curves).
+  Euclid now supplies geometry values rather than the earlier exploratory
+  `kurbo::TranslateScale` proposal; graph-specific clamping remains sheet policy,
+  not a bespoke matrix operation.
 
 ## adam-rs
 
@@ -103,36 +103,16 @@ conditional groups; the only `cel-parser` client so far.
   }
   ```
 
-- View-constraint sheets: once geometry/matrix types and method-call syntax land (see
-  `cel-runtime`/`cel-parser` above), express view constraints — like `begin`'s graph pan/zoom
-  clamping, currently hand-written in `graph.js` — declaratively instead of imperatively:
-
-  ```text
-  sheet view_constraints(content_bounds: Rect, viewport: Size, max_zoom: f64) {
-      cell view: TranslateScale = TranslateScale::IDENTITY;
-
-      cell fit_scale = min(viewport.width / content_bounds.width(), viewport.height / content_bounds.height());
-      cell min_scale = fit_scale;
-      cell max_scale = max(fit_scale, max_zoom);
-
-      relationship {
-          view := view.clamp_scale(min_scale, max_scale)
-              .clamp_translation(content_bounds, viewport);
-      }
-  }
-
-  sheet graph_view {
-      cell bounds: Rect;
-      cell size: Size;
-
-      relationship view_constraints(bounds, size, 8.0);
-  }
-  ```
-
-  `min_scale`/`max_scale` express "zoom out no further than fit, zoom in no further than
-  `max_zoom`"; `clamp_translation` expresses "panning cannot move content past its own bounds."
-  `begin` would write `bounds`/`size` on resize or structural graph changes and read `view` back
-  to drive the zoom-layer transform, replacing the equivalent logic in `graph.js`.
+- View-constraint sheets now have executable
+  [pan/zoom](../cel-euclid/examples/pan_zoom.adm2) and
+  [crop/straighten](../cel-euclid/examples/crop_straighten.adm2) demonstrations.
+  They compose general Euclid/scalar operations; self-reference preserves user
+  aspirations, including crop spring-back. Crop fitting uses inverse source-image
+  bounds for general invertible affine transforms, explicit numerical requirements,
+  and reciprocal-shrink presentation without a Rust fitting function.
+  The next independent graph stage must connect a lifecycle-owned evaluation
+  bridge to measured bounds, viewport and gestures. `graph.js` still owns the
+  current live graph constraints; the demonstrations do not migrate it.
 
 ## begin
 

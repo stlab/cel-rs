@@ -11,6 +11,7 @@ adam-rs = { path = "../adam-rs" }
 cel-parser = { path = "../cel-parser" }
 cel-runtime = { path = "../cel-runtime" }
 cel-std = { path = "../cel-std" }
+cel-euclid = { path = "../cel-euclid", features = ["adam"] }
 
 [lints]
 workspace = true

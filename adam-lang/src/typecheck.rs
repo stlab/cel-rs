@@ -687,8 +687,10 @@ fn check_filter(
 /// type; an `Expr::If` recurses into `then_branch` (and `else_branch`, if present — itself possibly
 /// another `Expr::If`, covering `else if` chains) against the same `outputs`, since every branch
 /// that can be taken must produce a value of that shape (mirroring [`expr_matches_shape`]'s
-/// `Expr::If` handling); any other expression is a diagnostic. An `if` with no `else` is checked
+/// `Expr::If` handling); a known scalar or wrong-size literal tuple is a diagnostic.
+/// An `if` with no `else` is checked
 /// only against `then_branch`, matching `check_expr`'s existing leniency toward a missing else.
+/// Unresolved nonliteral bodies retain child diagnostics but defer tuple arity to runtime.
 ///
 /// - Complexity: O(n) in the number of declared outputs, times the number of (nested) `if`/`else
 ///   if` branches.
@@ -749,9 +751,12 @@ fn check_tuple_output_body(
             }
         }
         other => {
-            let (_, body_diags) =
+            let (body_ty, body_diags) =
                 check_expr_with_type_resolver(other, resolve, resolve_type, lookup);
             diagnostics.extend(body_diags);
+            if body_ty == Ty::Any && !matches!(other, Expr::Tuple { .. }) {
+                return;
+            }
             let n = outputs.len();
             diagnostics.push(ParseError::new_range(
                 format!("binding declares {n} outputs but its body is not a {n}-tuple"),
@@ -1145,6 +1150,23 @@ mod tests {
         );
         let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
         assert!(diags.is_empty());
+    }
+
+    /// Unknown call-result shapes defer arity, without suppressing body errors.
+    #[test]
+    fn binding_multi_output_iife_defers_unknown_shape_but_checks_children() {
+        for (body, expected) in [
+            ("(|x: i32| (x, x))(1)", 0),
+            ("(|x: i32| (x, true + x))(1)", 1),
+            ("1", 1),
+            ("(1, 2, 3)", 1),
+        ] {
+            let sheet = parse(&format!(
+                "sheet s {{ cell a: i32; cell b: i32; relationship {{ (a,b) := {body}; }} }}"
+            ));
+            let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
+            assert_eq!(diags.len(), expected, "{body}: {diags:?}");
+        }
     }
 
     #[test]

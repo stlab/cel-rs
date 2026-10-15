@@ -1,0 +1,40 @@
+// Demonstration only: the live graph still owns its existing model.
+// content includes the renderer's fit margin; empty content uses the viewport.
+sheet pan_zoom {
+    source content: Rect = Rect {
+        origin: Point2D { x: 0.0, y: 0.0 },
+        size: Size2D { width: 100.0, height: 100.0 }
+    };
+    source viewport: Size2D = Size2D { width: 200.0, height: 200.0 } require {
+        @nonzero_viewport viewport.is_finite() && viewport.width > 0.0 && viewport.height > 0.0;
+    };
+    out bounds: Rect := if content.width > 0.0 && content.height > 0.0 { content } else {
+        Rect { origin: Point2D { x: 0.0, y: 0.0 }, size: viewport }
+    };
+    out fit_scale: f64 := min(
+        viewport.width / max(bounds.width, 1.0),
+        viewport.height / max(bounds.height, 1.0)
+    );
+    out fit_pan: Vector2D := Vector2D {
+        x: viewport.width * 0.5 - fit_scale * bounds.center().x,
+        y: viewport.height * 0.5 - fit_scale * bounds.center().y
+    };
+    cell zoom: f64 = 2.0;
+    cell pan: Vector2D = Vector2D { x: 0.0, y: 0.0 };
+    relationship { zoom := clamp(zoom, fit_scale, max(fit_scale, 8.0)); }
+    relationship {
+        pan := Vector2D {
+            x: if bounds.width * zoom < viewport.width {
+                viewport.width * 0.5 - zoom * bounds.center().x
+            } else {
+                clamp(pan.x, viewport.width - zoom * bounds.max_x, -zoom * bounds.min_x)
+            },
+            y: if bounds.height * zoom < viewport.height {
+                viewport.height * 0.5 - zoom * bounds.center().y
+            } else {
+                clamp(pan.y, viewport.height - zoom * bounds.max_y, -zoom * bounds.min_y)
+            }
+        };
+    }
+    out view: Transform2D := scale(zoom, zoom).then(translation(pan));
+}
