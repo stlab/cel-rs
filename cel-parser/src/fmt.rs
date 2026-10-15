@@ -11,7 +11,9 @@
 //! unsupported today (issue #213).
 
 use crate::ast::{Expr, LogicalOp};
-use crate::trivia::{Comment, GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap};
+use crate::trivia::{
+    Comment, GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap, take_block_comment,
+};
 
 /// Binding-strength level, loosest first, mirroring `lib.rs`'s grammar chain from
 /// `range_expression` (via `expression = range_expression`) through `primary_expression`.
@@ -207,9 +209,8 @@ fn member_gap(
         rest = rest.trim_start();
         if let Some(after) = rest.strip_prefix("//") {
             rest = &after[after.find('\n').unwrap_or(after.len())..];
-        } else if let Some(after) = rest.strip_prefix("/*") {
-            let close = after.find("*/").unwrap_or(after.len());
-            rest = after.get(close + 2..).unwrap_or("");
+        } else if let Some((_, after)) = take_block_comment(rest) {
+            rest = after;
         } else if let Some(after) = rest.strip_prefix(')') {
             expected.push(")");
             rest = after;

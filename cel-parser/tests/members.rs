@@ -252,6 +252,55 @@ fn grouped_member_receivers_preserve_dot_comments() {
     }
 }
 
+/// Verifies nested dot comments retain their text and remain parseable and idempotent.
+#[test]
+fn member_receivers_preserve_nested_block_comments() {
+    for (source, expected) in [
+        (
+            "(a) /* outer /* inner */ outer */ .x",
+            "a /* outer /* inner */ outer */ .x",
+        ),
+        (
+            "a /* outer /* inner */ outer */ .x",
+            "a /* outer /* inner */ outer */ .x",
+        ),
+        (
+            "(a). /* outer /* inner */ outer */ x",
+            "a. /* outer /* inner */ outer */ x",
+        ),
+        (
+            "a. /* outer /* inner */ outer */ x",
+            "a. /* outer /* inner */ outer */ x",
+        ),
+        (
+            "((a) /* outer /* ) . */ outer */ ) /* before */ . /* after /* nested */ end */ x()",
+            "a /* outer /* ) . */ outer */ /* before */ . /* after /* nested */ end */ x()",
+        ),
+        (
+            "(a + b) /* α /* β /* γ */ β */ α */ .x",
+            "(a + b) /* α /* β /* γ */ β */ α */ .x",
+        ),
+        (
+            "a /* first /* nested */ end */ /* second */ . /* third /* nested */ end */ x",
+            "a /* first /* nested */ end */ /* second */ . /* third /* nested */ end */ x",
+        ),
+        (
+            "(a) /* outer // line\n /* inner */ outer */ .x",
+            "a /* outer // line\n/* inner */ outer */ .x",
+        ),
+    ] {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let formatted = format_expr(&expr, source, 0);
+        assert_eq!(formatted, expected, "{source}");
+        let reparsed = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(&formatted)
+            .unwrap();
+        assert_eq!(format_expr(&reparsed, &formatted, 0), formatted);
+    }
+}
+
 /// Verifies an unresolved member reports its label rather than the full expression.
 #[test]
 fn unknown_member_diagnostic_points_to_name() {

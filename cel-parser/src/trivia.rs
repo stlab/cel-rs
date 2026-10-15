@@ -15,7 +15,7 @@ pub enum Comment {
     /// joined with `\n`; cel-parser's `scan_gap` emits one `Line` per `//` line.
     Line(String),
     /// A `/* text */` block comment (single- or multi-line), inner text `\n`-joined with the
-    /// `/*`/`*/` delimiters and per-line indentation stripped.
+    /// outer `/*`/`*/` delimiters and per-line indentation stripped. Nested delimiters remain.
     Block(String),
 }
 
@@ -31,7 +31,8 @@ pub enum GapPiece {
 
 /// Scans the raw text of a grammatically-constrained gap — whitespace, `//`/`/* */` comments, and
 /// exactly the literal tokens in `expected`, in that order — returning every comment found plus
-/// every `expected` token, interleaved in source order.
+/// every `expected` token, interleaved in source order. Block comments nest; their inner
+/// delimiters and text remain intact apart from per-line whitespace normalization.
 ///
 /// - Postcondition: the result contains each element of `expected` exactly once, as a
 ///   `GapPiece::Punct`, in `expected`'s order, regardless of how much of `gap` actually matched
@@ -54,12 +55,9 @@ pub fn scan_gap(gap: &str, expected: &[&'static str]) -> Vec<GapPiece> {
                 after[..end].trim().to_string(),
             )));
             rest = &after[end..];
-        } else if let Some(after) = rest.strip_prefix("/*") {
-            let close = after.find("*/").unwrap_or(after.len());
-            pieces.push(GapPiece::Comment(Comment::Block(normalize_block(
-                &after[..close],
-            ))));
-            rest = after.get(close + 2..).unwrap_or("");
+        } else if let Some((inner, after)) = take_block_comment(rest) {
+            pieces.push(GapPiece::Comment(Comment::Block(normalize_block(inner))));
+            rest = after;
         } else if next < expected.len() && rest.starts_with(expected[next]) {
             pieces.push(GapPiece::Punct(expected[next]));
             rest = &rest[expected[next].len()..];
@@ -75,6 +73,36 @@ pub fn scan_gap(gap: &str, expected: &[&'static str]) -> Vec<GapPiece> {
         next += 1;
     }
     pieces
+}
+
+/// Splits a leading, nesting-aware block comment into its inner text and remaining source.
+///
+/// Returns `None` when `source` does not start with `/*`. An unterminated comment consumes
+/// the remaining source as inner text, preserving trivia recovery's best-effort behavior.
+///
+/// - Complexity: O(n) in the leading comment's byte length, with O(1) additional space.
+pub(crate) fn take_block_comment(source: &str) -> Option<(&str, &str)> {
+    let inner = source.strip_prefix("/*")?;
+    let bytes = inner.as_bytes();
+    let mut depth = 1usize;
+    let mut offset = 0usize;
+    while offset + 1 < bytes.len() {
+        match &bytes[offset..offset + 2] {
+            b"/*" => {
+                depth += 1;
+                offset += 2;
+            }
+            b"*/" => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&inner[..offset], &inner[offset + 2..]));
+                }
+                offset += 2;
+            }
+            _ => offset += 1,
+        }
+    }
+    Some((inner, ""))
 }
 
 /// Normalizes a block comment's inner text (between `/*` and `*/`): trims each line and joins the
@@ -182,6 +210,44 @@ mod tests {
         let pieces = scan_gap(" /* a */ /* b */ + ", &["+"]);
         assert_eq!(comments(pieces.clone()).len(), 2);
         assert!(matches!(pieces[2], GapPiece::Punct("+")));
+    }
+
+    /// Verifies nested delimiters stay in one comment without swallowing adjacent tokens.
+    #[test]
+    fn nested_block_comments_preserve_text_and_token_order() {
+        assert_eq!(
+            scan_gap(
+                " /* outer /* α /* deep */ β */ outer */ . /* after /* inner */ end */ ",
+                &["."],
+            ),
+            vec![
+                GapPiece::Comment(Comment::Block(
+                    "outer /* α /* deep */ β */ outer".to_string(),
+                )),
+                GapPiece::Punct("."),
+                GapPiece::Comment(Comment::Block("after /* inner */ end".to_string())),
+            ],
+        );
+    }
+
+    /// Verifies comment splitting handles empty, adjacent, Unicode, and incomplete input.
+    #[test]
+    fn block_comment_splitting_preserves_boundaries() {
+        for (source, expected) in [
+            ("", None),
+            ("/", None),
+            ("// line", None),
+            ("/**/.x", Some(("", ".x"))),
+            ("/*/**/*/.x", Some(("/**/", ".x"))),
+            ("/* α /* β */ γ */δ", Some((" α /* β */ γ ", "δ"))),
+            ("/* one *//* two */", Some((" one ", "/* two */"))),
+            ("/*", Some(("", ""))),
+            ("/* α", Some((" α", ""))),
+            ("/* outer /* inner */", Some((" outer /* inner */", ""))),
+            ("/*/*/", Some(("/*/", ""))),
+        ] {
+            assert_eq!(take_block_comment(source), expected, "{source}");
+        }
     }
 
     #[test]
