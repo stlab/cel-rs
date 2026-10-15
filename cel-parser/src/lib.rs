@@ -289,7 +289,7 @@ pub use ast::{AstContext, ClosureParam, Expr, ExprSpan, Literal, LogicalOp, Reco
 pub use error::{
     CELError, FormatRustcStyle, ParseError, SourceSpan, SpanContext, SpanLabel, format_multi_span,
 };
-pub use fmt::{format_expr, format_expr_restricted};
+pub use fmt::{format_expr, format_expr_header, format_expr_restricted};
 pub use op_table::{OpLookup, OperandTypes, builtin_operand_types};
 pub use parser_context::{DynSegmentContext, ParserContext};
 pub use proc_macro2::LineColumn;

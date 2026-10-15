@@ -196,33 +196,28 @@ fn member_gap(
     receiver_end: proc_macro2::Span,
     name_start: proc_macro2::Span,
 ) -> Vec<GapPiece> {
-    if source.is_empty() {
-        return scan_gap("", &["."]);
+    grouping_gap(source, receiver_end.end(), name_start.start(), &["."])
+}
+
+/// Renders a postfix base, retaining leading group comments inside one owning group.
+///
+/// - Precondition: `start` is the postfix node's original start in `source`, or source is empty.
+/// - Postcondition: the base's leading comments appear once, before its first rendered token.
+/// - Complexity: O(n) in the base's rendering cost plus source and gap lengths.
+fn format_postfix_base(
+    base: &Expr,
+    source: &str,
+    depth: usize,
+    start: proc_macro2::LineColumn,
+) -> String {
+    let leading = grouping_gap(source, start, base.span().start.start(), &[]);
+    if leading.is_empty() {
+        format_at(base, source, depth, Level::POSTFIX)
+    } else {
+        let (text, _) = render(base, source, depth);
+        let prefix = emit_gap(&leading, Spacing::None, depth);
+        format!("({}{text})", prefix.trim_start())
     }
-    let line_starts = line_start_byte_offsets(source);
-    let start = line_column_to_byte(source, &line_starts, receiver_end.end());
-    let end = line_column_to_byte(source, &line_starts, name_start.start());
-    let gap = source.get(start..end).unwrap_or("");
-    let mut rest = gap;
-    let mut expected = Vec::new();
-    loop {
-        rest = rest.trim_start();
-        if let Some(after) = rest.strip_prefix("//") {
-            rest = &after[after.find('\n').unwrap_or(after.len())..];
-        } else if let Some((_, after)) = take_block_comment(rest) {
-            rest = after;
-        } else if let Some(after) = rest.strip_prefix(')') {
-            expected.push(")");
-            rest = after;
-        } else {
-            break;
-        }
-    }
-    expected.push(".");
-    scan_gap(gap, &expected)
-        .into_iter()
-        .filter(|piece| !matches!(piece, GapPiece::Punct(")")))
-        .collect()
 }
 
 /// Renders a comma-separated element list with per-gap comment recovery: the gap before the first
@@ -651,21 +646,21 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             (text, Level::CAST)
         }
         Expr::Apply { callee, args, span } => {
-            let mut callee_s = format_at(callee, source, depth, Level::POSTFIX);
+            let mut callee_s = format_postfix_base(callee, source, depth, span.start.start());
             // Without parentheses a bare member followed by `()` becomes direct dispatch,
             // rather than an ordinary call of the member's result.
             if matches!(callee.as_ref(), Expr::Member { args: None, .. }) {
                 callee_s = format!("({callee_s})");
             }
-            // `callee.span().end` is a genuine leaf position (right after the callee, i.e. right
-            // before `(`); `span.end` is the call's own recorded end, which -- per `emit_list`'s
-            // doc comment -- is the whole `(...)` group's span, so its `.end()` (not `.start()`)
-            // is the position right after `)`.
+            let tail = grouping_gap(source, callee.span().end.end(), span.end.start(), &[]);
+            callee_s.push_str(&emit_gap(&tail, Spacing::None, depth));
+            // The call's end span covers the complete argument group, so neither boundary
+            // includes closing callee groups omitted from the AST.
             let list = emit_list(
                 source,
                 depth,
                 ("(", ")"),
-                (callee.span().end.end(), span.end.end()),
+                (span.end.start(), span.end.end()),
                 args,
                 false,
             );
@@ -678,7 +673,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             args,
             span,
         } => {
-            let receiver_s = format_at(receiver, source, depth, Level::POSTFIX);
+            let receiver_s = format_postfix_base(receiver, source, depth, span.start.start());
             let gap = member_gap(source, receiver.span().end, name_span.start);
             let mut text = format!("{receiver_s}{}{name}", emit_gap(&gap, Spacing::None, depth));
             if let Some(args) = args {
@@ -734,10 +729,10 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             }
             (list, Level::PRIMARY)
         }
-        Expr::TupleIndex { base, index, .. } => (
+        Expr::TupleIndex { base, index, span } => (
             format!(
                 "{}.{}",
-                format_at(base, source, depth, Level::POSTFIX),
+                format_postfix_base(base, source, depth, span.start.start()),
                 index
             ),
             Level::POSTFIX,
@@ -873,14 +868,17 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             } else {
                 format!(" {} ", gap.trim())
             };
-            (format!("{header}{sep}{body_s}"), Level::PRIMARY)
+            // A closure's body greedily consumes expressions, including following postfixes.
+            // Its primary-expression grammar position does not make it a tight-binding value.
+            (format!("{header}{sep}{body_s}"), Level::RANGE)
         }
     }
 }
 
-/// Returns the first rendered header token's position, excluding omitted receiver/operand groups.
+/// Returns the first rendered header token's position, excluding omitted operand groups.
 ///
-/// Prefix operators and explicit expression delimiters retain their own starting positions.
+/// Prefix/postfix operators and explicit expression delimiters retain their starting positions;
+/// postfix rendering owns any leading receiver-group trivia.
 ///
 /// - Complexity: O(h) in the visited leftmost AST path, with O(h) stack space.
 fn header_start(expr: &Expr) -> proc_macro2::LineColumn {
@@ -892,9 +890,6 @@ fn header_start(expr: &Expr) -> proc_macro2::LineColumn {
         }
         Expr::Logical { lhs, .. } => header_start(lhs),
         Expr::Cast { expr, .. } => header_start(expr),
-        Expr::Member { receiver, .. } => header_start(receiver),
-        Expr::TupleIndex { base, .. } => header_start(base),
-        Expr::Apply { callee, .. } => header_start(callee),
         _ => expr.span().start.start(),
     }
 }
@@ -1017,6 +1012,52 @@ pub fn format_expr_restricted(
     }
 }
 
+/// Formats a brace-reserving header and its surrounding comments within explicit boundaries.
+///
+/// `bounds` runs from just after the introducing keyword to just before the body brace.
+/// Grouping parentheses omitted from the AST do not interrupt comment recovery.
+///
+/// - Precondition: `source` is the parsed source and `bounds` encloses `expr`, or source is empty.
+/// - Postcondition: boundary comments appear exactly once in source order.
+/// - Complexity: O(n + s) in AST nodes and source text, excluding existing gap scan costs.
+///
+/// # Examples
+/// ```
+/// use cel_parser::{AstContext, OpLookup, Parser, format_expr_header};
+/// let source = "(Point { x: 1.0 }) /* keep */";
+/// let expr = Parser::<AstContext>::new(OpLookup::new()).parse_str_ast(source).unwrap();
+/// let text = format_expr_header(&expr, source, 0, (
+///     proc_macro2::LineColumn { line: 1, column: 0 },
+///     proc_macro2::LineColumn { line: 1, column: source.len() },
+/// ));
+/// assert_eq!(text, "(Point { x: 1.0 }) /* keep */");
+/// ```
+pub fn format_expr_header(
+    expr: &Expr,
+    source: &str,
+    depth: usize,
+    bounds: (proc_macro2::LineColumn, proc_macro2::LineColumn),
+) -> String {
+    let leading = grouping_gap(source, bounds.0, header_start(expr), &[]);
+    let trailing = grouping_gap(source, header_end(expr), bounds.1, &[]);
+    let mut text = emit_gap(&leading, Spacing::None, depth)
+        .trim_start()
+        .to_string();
+    text.push_str(&format_expr_restricted(
+        expr,
+        source,
+        depth,
+        crate::ExpressionRestriction::NoStructLiteral,
+    ));
+    let tail = emit_gap(&trailing, Spacing::None, depth);
+    if matches!(trailing.last(), Some(GapPiece::Comment(Comment::Line(_)))) {
+        text.push_str(&tail);
+    } else {
+        text.push_str(tail.trim_end());
+    }
+    text
+}
+
 /// Renders `expr`, wrapping it in parens if its own level is looser than `min_level` requires.
 ///
 /// `source` and `depth` are forwarded to [`render`] unchanged; see its doc comment.
@@ -1033,8 +1074,8 @@ fn format_at(expr: &Expr, source: &str, depth: usize, min_level: Level) -> Strin
 ///
 /// `source` is the text `expr` was parsed from (or `""` for a hand-built `Expr`); `depth` is the
 /// indent level for `//`-comment wrap continuations.
-/// Member-dot comments survive omitted receiver grouping; precedence still determines which
-/// parentheses appear in the output.
+/// Postfix bases retain leading group comments, and member-dot comments survive omitted groups.
+/// Closure bases stay grouped so following postfixes cannot move into their bodies.
 ///
 /// # Examples
 ///

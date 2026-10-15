@@ -377,6 +377,8 @@ fn write_branch(out: &mut String, source: &str, branch: &ast::ConditionalBranch,
 
 /// Writes one `conditional <expr> { ... }` declaration: its branches in declaration
 /// order (dispatching on the match-subject expression), followed by its optional `_ => { ... }` default arm.
+///
+/// Preserves header-boundary comments across omitted groups while reserving the body brace.
 fn write_conditional(out: &mut String, source: &str, cond: &ast::ConditionalDecl, depth: usize) {
     write_trivia(
         out,
@@ -387,19 +389,11 @@ fn write_conditional(out: &mut String, source: &str, cond: &ast::ConditionalDecl
     write_doc_comment(out, "///", cond.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("conditional ");
-    out.push_str(&cel_parser::format_expr_restricted(
+    out.push_str(&cel_parser::format_expr_header(
         &cond.match_expr,
         source,
         depth,
-        cel_parser::ExpressionRestriction::NoStructLiteral,
-    ));
-    // Comment between the match subject and the conditional's own `{`.
-    out.push_str(&emit_decl_gap(
-        source,
-        cond.match_expr.span(),
-        cond.open_brace_span,
-        &[],
-        depth,
+        (cond.span.start.end(), cond.open_brace_span.start.start()),
     ));
     out.push_str(" {\n");
     for branch in &cond.branches {
@@ -784,6 +778,41 @@ pub fn format_source(source: &str) -> Result<String, FormatSourceError> {
 
 #[cfg(test)]
 mod tests {
+    /// Verifies grouped restricted subjects retain boundary comments exactly once and in order.
+    #[test]
+    fn grouped_conditional_headers_preserve_comments() {
+        for header in [
+            "(Sample { value: 1.0 }) /* first */",
+            "/* first */ (Sample { value: 1.0 })",
+            "(/* first */ Sample { value: 1.0 } /* second */) /* third */",
+            "(/* first */ (/* second */ Sample { value: 1.0 }) /* third */) /* fourth */",
+            "(Sample { value: 1.0 }) /* first /* nested ) */ end */",
+            "(/* first /* nested ( */ end */ Sample { value: 1.0 }) /* second */",
+            "((Sample { value: 1.0 }) /* first */) /* second */",
+            "(// first\n Sample { value: 1.0 } // second\n) // third\n",
+            "// first\n (/* second */ Sample { value: 1.0 }) // third\n",
+            "(/* first */ p) /* second */",
+            "(/* first */ (Sample { value: 1.0 }).value) /* second */",
+        ] {
+            let source = format!("sheet s {{ conditional {header} {{ _ => {{}} }} }}");
+            let formatted = super::format_source(&source).unwrap();
+            let mut previous = 0;
+            for label in ["first", "second", "third", "fourth"] {
+                if source.contains(label) {
+                    assert_eq!(
+                        formatted.matches(label).count(),
+                        1,
+                        "{source} -> {formatted}"
+                    );
+                    let position = formatted.find(label).unwrap();
+                    assert!(position >= previous, "{formatted}");
+                    previous = position;
+                }
+            }
+            assert_eq!(super::format_source(&formatted).unwrap(), formatted);
+        }
+    }
+
     use super::*;
     use crate::AdamAstParser;
 

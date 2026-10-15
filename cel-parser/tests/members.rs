@@ -252,6 +252,139 @@ fn grouped_member_receivers_preserve_dot_comments() {
     }
 }
 
+/// Verifies postfix operations stay outside a closure body after formatting.
+#[test]
+fn closure_postfix_formatting_preserves_evaluation() {
+    let mut lookup = lookup();
+    lookup.push_scope(|name, s, arity, _| {
+        if name == "()" && arity == 1 {
+            s.op1r(|closure: cel_runtime::DynClosure| closure.call::<i32>(&[]))?;
+            return Ok(true);
+        }
+        if name != "arity" || arity != 1 {
+            return Ok(false);
+        }
+        s.op1(|closure: cel_runtime::DynClosure| closure.param_types().len())?;
+        Ok(true)
+    });
+    let mut parser = CELParser::new(lookup);
+    for (source, expected_arity) in [("(|| 1i32).arity", 0), ("(|x: i32| x).arity()", 1)] {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let formatted = format_expr(&expr, source, 0);
+        assert_eq!(formatted, source);
+        let before = parser.parse_str(source).unwrap().call0::<usize>().unwrap();
+        assert_eq!(before, expected_arity);
+        let after = parser
+            .parse_str(&formatted)
+            .unwrap()
+            .call0::<usize>()
+            .unwrap();
+        assert_eq!(before, after);
+        let reparsed = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(&formatted)
+            .unwrap();
+        assert_eq!(format_expr(&reparsed, &formatted, 0), formatted);
+    }
+    for source in ["(|| 1i32)()", "(|| (1i32, 2i32)).0"] {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let formatted = format_expr(&expr, source, 0);
+        assert_eq!(formatted, source);
+        match (&expr, source.ends_with(".0")) {
+            (Expr::TupleIndex { base, .. }, true) => {
+                assert!(matches!(base.as_ref(), Expr::Closure { .. }));
+            }
+            (Expr::Apply { callee, .. }, false) => {
+                assert!(matches!(callee.as_ref(), Expr::Closure { .. }));
+            }
+            _ => panic!("postfix must remain outside the closure"),
+        }
+        let reparsed = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(&formatted)
+            .unwrap();
+        assert_eq!(format_expr(&reparsed, &formatted, 0), formatted);
+    }
+    let source = "(|| 1i32)()";
+    let expr = Parser::<AstContext>::new(OpLookup::new())
+        .parse_str_ast(source)
+        .unwrap();
+    let formatted = format_expr(&expr, source, 0);
+    for text in [source, &formatted] {
+        assert_eq!(parser.parse_str(text).unwrap().call0::<i32>().unwrap(), 1);
+    }
+}
+
+/// Verifies omitted receiver groups retain each leading and trailing comment in source order.
+#[test]
+fn grouped_member_receivers_preserve_leading_comments() {
+    for source in [
+        "(/* first */ a).x",
+        "((/* first */ a)).x",
+        "(/* first */ (/* second */ a) /* third */) /* fourth */ .x",
+        "(/* first /* nested ) */ end */ a).x",
+        "(// first\n (/* second */ a) // third\n).x.y",
+        "(/* first */ a.x).y",
+        "(/* first */ a + b).x",
+    ] {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let formatted = format_expr(&expr, source, 0);
+        if source == "(/* first */ a).x" || source == "((/* first */ a)).x" {
+            assert_eq!(formatted, "(/* first */ a).x");
+        }
+        let mut previous = 0;
+        for label in ["first", "second", "third", "fourth"] {
+            if source.contains(label) {
+                assert_eq!(
+                    formatted.matches(label).count(),
+                    1,
+                    "{source} -> {formatted}"
+                );
+                let position = formatted.find(label).unwrap();
+                assert!(position >= previous, "{formatted}");
+                previous = position;
+            }
+        }
+        let reparsed = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(&formatted)
+            .unwrap();
+        assert_eq!(format_expr(&reparsed, &formatted, 0), formatted);
+    }
+}
+
+/// Verifies adjacent postfix forms retain grouped callee and index-base leading trivia.
+#[test]
+fn grouped_postfix_bases_preserve_comments() {
+    for source in [
+        "(/* first */ f) /* second */ (/* third */ 1i32)",
+        "((/* first */ f))()",
+        "(/* first */ (1i32, 2i32)).0",
+        "(/* first */ || 1i32) /* second */ ()",
+    ] {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let formatted = format_expr(&expr, source, 0);
+        for label in ["first", "second", "third"] {
+            if source.contains(label) {
+                assert_eq!(
+                    formatted.matches(label).count(),
+                    1,
+                    "{source} -> {formatted}"
+                );
+            }
+        }
+        let reparsed = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(&formatted)
+            .unwrap();
+        assert_eq!(format_expr(&reparsed, &formatted, 0), formatted);
+    }
+}
+
 /// Verifies nested dot comments retain their text and remain parseable and idempotent.
 #[test]
 fn member_receivers_preserve_nested_block_comments() {
