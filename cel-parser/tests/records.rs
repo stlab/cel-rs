@@ -332,6 +332,66 @@ fn parenthesized_record_in_header_is_allowed() {
     );
 }
 
+/// Verifies omitted header groups preserve comments, evaluation, and formatting idempotence.
+#[test]
+fn grouped_header_comments_round_trip() {
+    for (source, comments) in [
+        (
+            "if (/* keep */ TestPoint { x: 0.0, y: 1.0 }).x == 0.0 { 1 } else { 2 }",
+            &["/* keep */"][..],
+        ),
+        (
+            "if (/* ordinary */ true /* tail */) { 1 } else { 2 }",
+            &["/* ordinary */", "/* tail */"][..],
+        ),
+        (
+            "if true && (true /* operand tail */) { 1 } else { 2 }",
+            &["/* operand tail */"][..],
+        ),
+        (
+            "if (/* outer /* nested */ end */ (// inner\n true /* inner tail */) // outer tail\n) { 1 } else { 2 }",
+            &[
+                "/* outer /* nested */ end */",
+                "// inner",
+                "/* inner tail */",
+                "// outer tail",
+            ][..],
+        ),
+        (
+            "if (// record\n (/* nested record */ TestPoint { x: 0.0, y: 1.0 }).x == 0.0 /* record tail */) { 1 } else { 2 }",
+            &["// record", "/* nested record */", "/* record tail */"][..],
+        ),
+        (
+            "if (/* precedence */ 1 + 2) * 3 == 9 { 1 } else { 2 }",
+            &["/* precedence */"][..],
+        ),
+    ] {
+        let mut parser = Parser::<AstContext>::new(OpLookup::new());
+        let ast = parser.parse_str_ast(source).unwrap();
+        let text = format_expr(&ast, source, 0);
+        let mut previous = 0;
+        for comment in comments {
+            assert_eq!(text.matches(comment).count(), 1, "{source}\n{text}");
+            let position = text.find(comment).unwrap();
+            assert!(position >= previous, "{text}");
+            previous = position + comment.len();
+        }
+        let reparsed = parser.parse_str_ast(&text).unwrap();
+        assert_eq!(format_expr(&reparsed, &text, 0), text);
+        for expression in [source, text.as_str()] {
+            assert_eq!(
+                CELParser::new(lookup())
+                    .parse_str(expression)
+                    .unwrap()
+                    .call0::<i32>()
+                    .unwrap(),
+                1,
+                "{expression}"
+            );
+        }
+    }
+}
+
 /// Verifies branch bodies lift the enclosing header restriction.
 #[test]
 fn record_in_branch_body_is_allowed() {

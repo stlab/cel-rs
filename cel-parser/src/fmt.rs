@@ -426,7 +426,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
         } => {
             let mut out = name.clone();
             if let Some(first) = fields.first() {
-                let open = record_gap(
+                let open = grouping_gap(
                     source,
                     name_span.end.end(),
                     first.name_span.start.start(),
@@ -435,7 +435,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 out.push_str(&emit_gap(&open, Spacing::Around, depth));
                 for (index, field) in fields.iter().enumerate() {
                     out.push_str(&field.name);
-                    let colon = record_gap(
+                    let colon = grouping_gap(
                         source,
                         field.name_span.end.end(),
                         field.value.span().start.start(),
@@ -444,7 +444,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                     out.push_str(&emit_gap(&colon, Spacing::CommaAfter, depth));
                     out.push_str(&format_at(&field.value, source, depth, Level::RANGE));
                     if let Some(next) = fields.get(index + 1) {
-                        let comma = record_gap(
+                        let comma = grouping_gap(
                             source,
                             field.value.span().end.end(),
                             next.name_span.start.start(),
@@ -454,7 +454,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                     }
                 }
                 let last = fields.last().expect("non-empty fields");
-                let mut tail = record_gap(
+                let mut tail = grouping_gap(
                     source,
                     last.value.span().end.end(),
                     span.end.end(),
@@ -463,7 +463,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 tail.retain(|piece| !matches!(piece, GapPiece::Punct(",")));
                 out.push_str(emit_gap(&tail, Spacing::Around, depth).trim_end());
             } else {
-                let tail = record_gap(source, name_span.end.end(), span.end.end(), &["{", "}"]);
+                let tail = grouping_gap(source, name_span.end.end(), span.end.end(), &["{", "}"]);
                 out.push(' ');
                 out.push_str(&emit_gap(&tail, Spacing::None, depth));
             }
@@ -763,8 +763,13 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 crate::ExpressionRestriction::NoStructLiteral,
             );
             let then_s = format_at(then_branch, source, depth, Level::OR);
-            let if_gap = gap_between(source, span.start, cond.span().start, &["if"]);
-            let open_gap = gap_between(source, cond.span().end, then_branch.span().start, &["{"]);
+            let if_gap = grouping_gap(source, span.start.start(), header_start(cond), &["if"]);
+            let open_gap = grouping_gap(
+                source,
+                header_end(cond),
+                then_branch.span().start.start(),
+                &["{"],
+            );
             let mut text = String::new();
             // Only the very first gap is `trim_start`'d: it opens the whole node's text, so any
             // leading space `Spacing::Around` would otherwise add before `"if"` must be dropped.
@@ -873,11 +878,49 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
     }
 }
 
-/// Recovers a record field gap across grouping parentheses omitted from the AST.
+/// Returns the first rendered header token's position, excluding omitted receiver/operand groups.
+///
+/// Prefix operators and explicit expression delimiters retain their own starting positions.
+///
+/// - Complexity: O(h) in the visited leftmost AST path, with O(h) stack space.
+fn header_start(expr: &Expr) -> proc_macro2::LineColumn {
+    match expr {
+        Expr::Op { name, operands, .. }
+            if operands.len() == 2 || (name == "range_from" && operands.len() == 1) =>
+        {
+            header_start(&operands[0])
+        }
+        Expr::Logical { lhs, .. } => header_start(lhs),
+        Expr::Cast { expr, .. } => header_start(expr),
+        Expr::Member { receiver, .. } => header_start(receiver),
+        Expr::TupleIndex { base, .. } => header_start(base),
+        Expr::Apply { callee, .. } => header_start(callee),
+        _ => expr.span().start.start(),
+    }
+}
+
+/// Returns the last rendered header token's position, excluding omitted operand/body groups.
+///
+/// Postfix operators and explicit expression delimiters retain their own ending positions.
+///
+/// - Complexity: O(h) in the visited rightmost AST path, with O(h) stack space.
+fn header_end(expr: &Expr) -> proc_macro2::LineColumn {
+    match expr {
+        Expr::Op { name, operands, .. } if name != "range_from" && !operands.is_empty() => {
+            header_end(operands.last().expect("non-empty operands"))
+        }
+        Expr::Logical { rhs, .. } => header_end(rhs),
+        Expr::Closure { body, .. } => header_end(body),
+        _ => expr.span().end.end(),
+    }
+}
+
+/// Recovers a field or header gap across grouping parentheses omitted from the AST.
 ///
 /// - Precondition: positions refer to `source`, or `source` is empty.
+/// - Postcondition: comments and expected tokens retain source order without grouping tokens.
 /// - Complexity: O(n) in source length and gap size.
-fn record_gap(
+fn grouping_gap(
     source: &str,
     from: proc_macro2::LineColumn,
     to: proc_macro2::LineColumn,
