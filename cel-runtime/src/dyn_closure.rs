@@ -36,7 +36,36 @@ use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::ValueType;
 use crate::dyn_segment::DynSegment;
+
+/// An exact compile-time callable shape, including nested aggregate and callable results.
+#[derive(Clone, Debug)]
+pub(crate) struct ClosureSignature {
+    pub(crate) parameters: Vec<ValueType>,
+    pub(crate) result: ValueType,
+}
+
+/// Compares complete known signatures without relying on the erased closure marker.
+///
+/// - Complexity: O(number of recursive type nodes).
+pub(crate) fn same_signature(
+    left: Option<&ClosureSignature>,
+    right: Option<&ClosureSignature>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.parameters.len() == b.parameters.len()
+                && a.parameters
+                    .iter()
+                    .zip(&b.parameters)
+                    .all(|(a, b)| a.same_shape(b))
+                && a.result.same_shape(&b.result)
+        }
+        _ => false,
+    }
+}
 
 /// A monomorphized dispatcher for [`DynClosure::call_boxed`]: runs a closure's body via
 /// `DynSegment::call_dyn::<R>` for some concrete `R` the dispatcher itself already knows, boxing
@@ -47,6 +76,7 @@ struct ClosureData {
     param_types: Vec<TypeId>,
     return_type: TypeId,
     body: RefCell<DynSegment>,
+    signature: Option<std::sync::Arc<ClosureSignature>>,
 }
 
 /// `Debug` implementation that formats the closure's signature but deliberately omits `body` from the output
@@ -103,7 +133,96 @@ impl DynClosure {
             param_types,
             return_type,
             body: RefCell::new(body),
+            signature: None,
         }))
+    }
+
+    /// Wraps a checked CEL body while retaining its full callable shape.
+    ///
+    /// # Errors
+    /// Returns an error if the body does not produce exactly one value, requires preloaded
+    /// arguments, reads an undeclared or differently shaped argument, or reads a tuple whose
+    /// leaves lack clone adapters.
+    ///
+    /// - Complexity: O(number of parameters plus recursive nodes in body argument reads/result).
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{DynClosure, DynSegment, ValueType};
+    /// let mut body = DynSegment::new::<()>();
+    /// body.just(42i32);
+    /// let closure = DynClosure::typed(vec![], body).unwrap();
+    /// assert_eq!(closure.call::<i32>(&[]).unwrap(), 42);
+    /// ```
+    pub fn typed(parameters: Vec<ValueType>, body: DynSegment) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            body.stack_ids.len() == 1,
+            "closure body must produce exactly one value"
+        );
+        anyhow::ensure!(
+            body.argument_ids.is_empty(),
+            "closure body must not require preloaded arguments"
+        );
+        for (index, read_type) in &body.argument_reads {
+            anyhow::ensure!(
+                parameters
+                    .get(*index)
+                    .is_some_and(|expected| expected.same_shape(read_type)),
+                "closure body argument {index} differs from its declared signature"
+            );
+            if read_type.tuple_elements().is_some() {
+                read_type.validate_clone()?;
+            }
+        }
+        let result = body.peek_stack_infos(1)[0].value_type.clone();
+        let param_types = parameters
+            .iter()
+            .map(|p| {
+                if p.tuple_elements().is_some() {
+                    TypeId::of::<crate::DynamicSequence>()
+                } else {
+                    p.type_id()
+                }
+            })
+            .collect();
+        Ok(Self(Rc::new(ClosureData {
+            param_types,
+            return_type: result.type_id(),
+            signature: Some(std::sync::Arc::new(ClosureSignature { parameters, result })),
+            body: RefCell::new(body),
+        })))
+    }
+
+    /// Returns the metadata retained for a typed CEL closure.
+    pub(crate) fn signature(&self) -> Option<std::sync::Arc<ClosureSignature>> {
+        self.0.signature.clone()
+    }
+
+    /// Evaluates a previously checked borrowed raw argument frame into an independent stack.
+    ///
+    /// # Safety
+    /// Every pointer must reference a live value matching `expected.parameters`, in order,
+    /// until execution returns. No pointer may be retained by an operation.
+    ///
+    /// # Errors
+    /// Returns signature mismatch, reentrant body borrow, or body evaluation errors.
+    /// - Complexity: body-dependent.
+    pub(crate) unsafe fn call_raw(
+        &self,
+        expected: &ClosureSignature,
+        arguments: &[*const u8],
+    ) -> anyhow::Result<crate::raw_stack::RawStack> {
+        debug_assert_eq!(expected.parameters.len(), arguments.len());
+        anyhow::ensure!(
+            same_signature(self.0.signature.as_deref(), Some(expected)),
+            "closure signature mismatch"
+        );
+        let mut body = self
+            .0
+            .body
+            .try_borrow_mut()
+            .map_err(|_| anyhow::anyhow!("closure body is already executing"))?;
+        unsafe { body.execute_raw(arguments) }
     }
 
     /// Returns this closure's declared parameter types, in order.
@@ -302,5 +421,80 @@ mod tests {
             &[TypeId::of::<i32>(), TypeId::of::<i32>()]
         );
         assert_eq!(closure.return_type(), TypeId::of::<i32>());
+    }
+
+    /// A typed body cannot reinterpret an argument through a different Rust representation.
+    #[test]
+    fn typed_rejects_incompatible_body_argument_reads() {
+        let mut body = DynSegment::new::<()>();
+        body.push_arg::<String>(0);
+        assert!(DynClosure::typed(vec![ValueType::leaf::<i32>()], body).is_err());
+    }
+
+    /// An undeclared positional argument cannot enter a typed raw call frame.
+    #[test]
+    fn typed_rejects_undeclared_body_argument_reads() {
+        let mut body = DynSegment::new::<()>();
+        body.push_arg::<i32>(1);
+        assert!(DynClosure::typed(vec![ValueType::leaf::<i32>()], body).is_err());
+    }
+
+    /// A runtime closure value cannot masquerade as another known callable signature.
+    #[test]
+    fn invocation_checks_runtime_signature_before_body_execution() {
+        let mut expected_body = DynSegment::new::<()>();
+        expected_body.just(1i32);
+        let expected = DynClosure::typed(vec![], expected_body).unwrap();
+        let executed = Rc::new(std::cell::Cell::new(false));
+        let observed = executed.clone();
+        let mut actual_body = DynSegment::new::<()>();
+        actual_body.op0(move || {
+            observed.set(true);
+            true
+        });
+        let actual = DynClosure::typed(vec![], actual_body).unwrap();
+        // Both signatures have no parameters, so the borrowed argument frame is valid.
+        let error = unsafe { actual.call_raw(&expected.signature().unwrap(), &[]) }.unwrap_err();
+        assert!(error.to_string().contains("signature mismatch"));
+        assert!(!executed.get());
+    }
+
+    /// Argument reads inside alternate fragments participate in signature validation.
+    #[test]
+    fn typed_checks_conditional_argument_reads() {
+        let mut body = DynSegment::new::<()>();
+        body.just(true);
+        let mut then_branch = body.new_fragment();
+        then_branch.push_arg::<String>(0);
+        let mut else_branch = body.new_fragment();
+        else_branch.just(String::new());
+        body.join2(then_branch, else_branch).unwrap();
+        assert!(DynClosure::typed(vec![ValueType::leaf::<i32>()], body).is_err());
+    }
+
+    /// Rejected invocation leaves the evaluated operand descriptors and operations unchanged.
+    #[test]
+    fn wrong_argument_type_is_rejected_before_emitting() {
+        let mut body = DynSegment::new::<()>();
+        body.push_arg::<i32>(0);
+        let closure = DynClosure::typed(vec![ValueType::leaf::<i32>()], body).unwrap();
+        let mut caller = DynSegment::new::<()>();
+        caller.push_closure(closure);
+        caller.just(false);
+        assert!(caller.invoke_closure(1).is_err());
+        assert_eq!(caller.peek_stack_infos(2).len(), 2);
+        caller.op1(|_: bool| 8i32).unwrap();
+        caller.invoke_closure(1).unwrap();
+        assert_eq!(caller.call0::<i32>().unwrap(), 8);
+    }
+
+    /// Preloaded Rust argument layouts cannot enter the positional CEL invocation adapter.
+    #[test]
+    fn preloaded_arguments_fail_explicitly() {
+        let mut body = DynSegment::new::<()>();
+        body.just(1i32);
+        let mut caller = DynSegment::new::<(i32,)>();
+        caller.push_closure(DynClosure::typed(vec![], body).unwrap());
+        assert!(caller.invoke_closure(0).is_err());
     }
 }

@@ -206,8 +206,10 @@ fn call_dyn_impl<T: 'static + Clone>(
     Ok(Box::new(seg.call_dyn::<T>(inputs)?))
 }
 
-fn array_element_type_impl<T: 'static>() -> cel_runtime::ArrayElementType {
-    cel_runtime::ArrayElementType::leaf::<T>().expect("registered leaf type is not DynamicArray")
+/// Returns the registered leaf descriptor, including its closure argument clone adapter.
+fn array_element_type_impl<T: 'static + Clone>() -> cel_runtime::ArrayElementType {
+    cel_runtime::ArrayElementType::cloneable::<T>()
+        .expect("registered leaf type is not DynamicArray")
 }
 
 /// Evaluates `seg` (producing a `RangeInclusive<T>`) against `value` prepended to `args`, then

@@ -442,6 +442,10 @@ impl AstContext {
 }
 
 impl ParserContext for AstContext {
+    fn resolves_closure_types() -> bool {
+        false
+    }
+
     fn new_context() -> Self {
         AstContext { values: Vec::new() }
     }
@@ -705,7 +709,7 @@ impl ParserContext for AstContext {
 
     fn push_closure(
         &mut self,
-        param_types: Vec<std::any::TypeId>,
+        param_types: Vec<cel_runtime::ValueType>,
         params: Vec<ClosureParam>,
         body: Self,
         span: Span,

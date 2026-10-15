@@ -1149,7 +1149,7 @@ mod tests {
             );
             let scalar = builtin_scalar_type(&name)
                 .unwrap_or_else(|| panic!("`{name}` must resolve as a built-in scalar"));
-            assert_eq!(scalar.type_id, expected_id);
+            assert_eq!((scalar.element_type)().type_id(), expected_id);
             assert_eq!(scalar.type_name, name);
             let leaf = BuiltinTypeResolver
                 .resolve_named_type(&name, &[])
@@ -1162,8 +1162,8 @@ mod tests {
                 name,
                 "the runtime element descriptor must carry the source-level name"
             );
-            assert_eq!(leaf.element_type().size(), scalar.size);
-            assert_eq!(leaf.element_type().align(), scalar.align);
+            assert_eq!(leaf.element_type().size(), (scalar.element_type)().size());
+            assert_eq!(leaf.element_type().align(), (scalar.element_type)().align());
         }
     }
 

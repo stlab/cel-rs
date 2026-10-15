@@ -305,6 +305,17 @@ impl<'a> AnnotatedArray<'a> {
 /// "emitting" means: [`DynSegmentContext`] executes immediately into a stack machine; a future
 /// AST-building context would instead record a tree node.
 pub trait ParserContext: Sized {
+    /// Returns whether closure annotations must resolve while parsing rather than remain syntax.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, parser_context::ParserContext};
+    /// assert!(!AstContext::resolves_closure_types());
+    /// ```
+    fn resolves_closure_types() -> bool {
+        true
+    }
+
     /// Creates a fresh, empty context with no operations recorded yet.
     fn new_context() -> Self;
 
@@ -516,7 +527,7 @@ pub trait ParserContext: Sized {
 
     /// Packages a fully-parsed, independent nested context — the body of a closure literal — as
     /// a value pushed onto `self`, given the closure's declared parameter types in two parallel
-    /// forms: `param_types` (each parameter's runtime `TypeId`, in order) for an implementation
+    /// forms: `param_types` (each parameter's complete runtime shape, in order) for an implementation
     /// that executes, and `params` (each parameter's name, span, and unresolved type expression)
     /// for one that builds an AST instead. An implementation uses whichever it needs and ignores
     /// the other.
@@ -534,7 +545,7 @@ pub trait ParserContext: Sized {
     /// [`DynSegmentContext`] rejects a `body` that doesn't produce exactly one value.
     fn push_closure(
         &mut self,
-        param_types: Vec<std::any::TypeId>,
+        param_types: Vec<cel_runtime::ValueType>,
         params: Vec<ClosureParam>,
         body: Self,
         span: Span,
@@ -754,24 +765,15 @@ impl ParserContext for DynSegmentContext {
 
     fn push_closure(
         &mut self,
-        param_types: Vec<std::any::TypeId>,
+        param_types: Vec<cel_runtime::ValueType>,
         params: Vec<ClosureParam>,
         body: Self,
         span: Span,
     ) -> crate::Result<()> {
         let _ = params;
-        let return_type = body.output_type_id().ok_or_else(|| {
-            crate::ParseError::new_range(
-                "closure body must produce exactly one value".to_string(),
-                span,
-                span,
-            )
-        })?;
-        self.0.just(cel_runtime::DynClosure::new(
-            param_types,
-            return_type,
-            body.into_inner(),
-        ));
+        let closure = cel_runtime::DynClosure::typed(param_types, body.into_inner())
+            .map_err(|error| crate::ParseError::new_range(error.to_string(), span, span))?;
+        self.0.push_closure(closure);
         Ok(())
     }
 
@@ -785,7 +787,6 @@ mod tests {
     use super::*;
     use crate::op_table::OpLookup;
     use proc_macro2::Span;
-    use std::any::TypeId;
 
     #[test]
     fn new_context_is_empty_and_ready_for_literals() {
@@ -1195,7 +1196,7 @@ mod tests {
 
         outer
             .push_closure(
-                vec![TypeId::of::<i32>()],
+                vec![cel_runtime::ValueType::leaf::<i32>()],
                 Vec::new(),
                 body,
                 Span::call_site(),

@@ -64,17 +64,17 @@
 //! <https://doc.rust-lang.org/reference/patterns.html#literal-patterns>.
 //!
 //! `type_expression` is the single, reusable recursive type grammar shared by array type
-//! ascriptions (`[i32]: [...]`), closure parameters (`|x: RangeInclusive(f64)| ...`), and
+//! ascriptions (`[1, 2]: [i32]`), closure parameters (`|x: RangeInclusive(f64)| ...`), and
 //! adam-lang cell/source/out type annotations (`cell x: (i32, f64);`). A bare identifier
 //! resolves through the configured [`TypeResolver`] (array/closure contexts) or a host
 //! `TypeRegistry` (adam-lang cell contexts); `Name(args)` names a parameterized/generic type
 //! (e.g. `RangeInclusive(f64)`, the type produced by CEL's own `..=` range operator) resolved
 //! against the same [`TypeResolver`]; `[T]` composes nested array types (`[i32]`, `[[i32]]`);
 //! and parenthesized tuple syntax names a (possibly nested) tuple type. Every context that
-//! accepts `type_expression` documents its own narrower support boundary where one exists (for
-//! example, closure parameters do not yet support `[T]` — see
-//! <https://github.com/stlab/cel-rs/issues/228> — and adam-lang cell types do not yet support
-//! `[T]` or `Name(args)` — see <https://github.com/stlab/cel-rs/issues/227>).
+//! accepts `type_expression` documents its own narrower support boundary where one exists.
+//! Closure parameters support registered cloneable leaves and recursive tuples/arrays;
+//! array elements cannot be tuples. Adam-lang cell types do not yet support
+//! `[T]` or `Name(args)` — see <https://github.com/stlab/cel-rs/issues/227>.
 //!
 //! # Examples
 //!
@@ -304,6 +304,7 @@ use lex_lexer::{LexLexer, Literal as CelLiteral, Token, TokenStreamIter};
 
 use cel_runtime::DynSegment;
 use proc_macro2::{Delimiter, Span, TokenStream};
+#[cfg(test)]
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::iter::Peekable;
@@ -512,108 +513,42 @@ pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
     push_literal_token(&mut DynSegmentContext::new_context(), lit.clone())
 }
 
-/// One resolved closure parameter type: a built-in scalar or generic, or a (possibly nested)
-/// tuple of them — the result of resolving a parsed [`TypeExpr`] (see
-/// [`closure_param_type_from_type_expr`]).
-enum ClosureParamType {
-    /// A single built-in scalar or generic type (e.g. `i32`, `RangeInclusive(f64)`).
-    Named(crate::op_table::BuiltinScalarType),
-    /// A (possibly nested) tuple of closure parameter types.
-    Tuple(Vec<ClosureParamType>),
-}
-
-impl ClosureParamType {
-    /// Returns the `TypeId` this parameter type resolves to for [`cel_runtime::DynClosure`]'s
-    /// declared parameter list.
-    ///
-    /// Every tuple shape resolves to [`cel_runtime::DynamicSequence`]'s `TypeId` — the actual
-    /// runtime type of the boxed `dyn Any` argument a caller must hand to
-    /// [`cel_runtime::DynClosure::call`]/`call_boxed` for this parameter, matching what
-    /// [`is_closure_expression`](Self::is_closure_expression) pushes via
-    /// `DynSegment::push_arg_as_dynamic_sequence_tuple`. [`cel_runtime::DynTuple`] is a distinct,
-    /// stack-internal marker type used only for compile-time tuple-boundary tracking inside a
-    /// `DynSegment`'s own operand stack — it is never the type of a boxed argument crossing this
-    /// boundary, so using it here would make every tuple-typed closure parameter's declared type
-    /// unmatchable against its real argument. The tuple's real element shape lives in the
-    /// `AssociatedType` list built by [`elements_to_associated`], not in this `TypeId`.
-    fn type_id(&self) -> TypeId {
-        match self {
-            ClosureParamType::Named(s) => s.type_id,
-            ClosureParamType::Tuple(_) => TypeId::of::<cel_runtime::DynamicSequence>(),
-        }
-    }
-}
-
-/// Builds a fresh `AssociatedType` prototype list from resolved closure parameter element
-/// types, for [`cel_runtime::DynSegment::push_arg_as_dynamic_sequence_tuple`] — each leaf
-/// carries the scalar's own registered layout, and each nested tuple carries its own
-/// recursively-built elements (whose layout that method recomputes).
-///
-/// - Complexity: O(n) in the total (nested) element count.
-fn elements_to_associated(elements: &[ClosureParamType]) -> Vec<cel_runtime::AssociatedType> {
-    elements
-        .iter()
-        .map(|ty| cel_runtime::AssociatedType {
-            offset: 0,
-            value_type: match ty {
-                ClosureParamType::Named(s) => cel_runtime::ValueType::leaf_from_parts(
-                    s.type_id,
-                    std::borrow::Cow::Borrowed(s.type_name),
-                    s.size,
-                    s.align,
-                    s.dropper,
-                ),
-                ClosureParamType::Tuple(nested) => {
-                    cel_runtime::ValueType::tuple(elements_to_associated(nested))
-                }
-            },
-        })
-        .collect()
-}
-
-/// Builds a closure parameter's runtime-dispatch [`ClosureParamType`] from its already-parsed
-/// [`TypeExpr`]. Closures only ever support built-in scalar/generic/tuple types — never
-/// host-registered custom types — so this resolves directly against `op_table`'s built-in
-/// tables rather than through a [`TypeResolver`].
+/// Resolves a closure annotation through the configured registry without erasing its shape.
 ///
 /// # Errors
-///
-/// Returns an error if a named leaf (or its single type argument) names no recognized built-in
-/// type, or if `type_expr` contains an [`TypeExpr::Array`] (closure parameters cannot yet be
-/// array-typed; see <https://github.com/stlab/cel-rs/issues/228>).
-fn closure_param_type_from_type_expr(type_expr: &TypeExpr) -> Result<ClosureParamType> {
-    match type_expr {
-        TypeExpr::Named { name, args, span } => {
-            let scalar = match args.as_slice() {
-                [] => crate::op_table::builtin_scalar_type(name)
-                    .or_else(|| crate::op_table::builtin_generic_type_0(name)),
-                [
-                    TypeExpr::Named {
-                        name: arg_name,
-                        args: arg_args,
-                        ..
-                    },
-                ] if arg_args.is_empty() => crate::op_table::builtin_generic_type(name, arg_name),
-                _ => None,
-            };
-            scalar.map(ClosureParamType::Named).ok_or_else(|| {
-                ParseError::new_range(format!("unknown type `{name}`"), span.start, span.end)
-            })
+/// Returns annotation resolution errors, or unsupported tuple-valued array element errors.
+/// - Complexity: O(number of type nodes).
+fn closure_param_type_from_type_expr(
+    type_expr: &TypeExpr,
+    resolver: &dyn TypeResolver,
+) -> Result<cel_runtime::ValueType> {
+    /// Converts a resolved type tree into runtime descriptors.
+    ///
+    /// - Complexity: O(number of type nodes).
+    fn convert(ty: ResolvedType, span: ExprSpan) -> Result<cel_runtime::ValueType> {
+        match ty {
+            ResolvedType::Scalar(leaf) => Ok(cel_runtime::ValueType::registered(
+                leaf.element_type().clone(),
+            )),
+            ResolvedType::Tuple { elements } => Ok(cel_runtime::ValueType::tuple(
+                elements
+                    .into_iter()
+                    .map(|ty| {
+                        Ok(cel_runtime::AssociatedType {
+                            offset: 0,
+                            value_type: convert(ty, span)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            )),
+            ResolvedType::Array { element } => {
+                let array =
+                    ResolvedArrayType::from_resolved_type(ResolvedType::Array { element }, span)?;
+                Ok(cel_runtime::ValueType::array(array.into_element_type()))
+            }
         }
-        TypeExpr::Tuple { elements, .. } => Ok(ClosureParamType::Tuple(
-            elements
-                .iter()
-                .map(closure_param_type_from_type_expr)
-                .collect::<Result<Vec<_>>>()?,
-        )),
-        TypeExpr::Array { span, .. } => Err(ParseError::new_range(
-            "array-typed closure parameters are not yet supported; \
-             see https://github.com/stlab/cel-rs/issues/228"
-                .to_string(),
-            span.start,
-            span.end,
-        )),
     }
+    convert(type_expr.resolve(resolver)?, type_expr.span())
 }
 
 /// A recursive descent parser for expressions, generic over the [`ParserContext`] it emits
@@ -2297,12 +2232,10 @@ impl<C: ParserContext> Parser<C> {
     /// caller, e.g. adam-lang, pushed around this whole parse) for the duration of the body
     /// parse, so a closure never resolves a free variable from its lexical surroundings.
     ///
-    /// Each parameter's declared type is threaded through in two parallel forms: the existing
-    /// runtime-facing `ClosureParamType` (which `DynSegmentContext`'s `push_closure` needs a
-    /// concrete `TypeId` from, built from the parsed [`TypeExpr`] by
-    /// [`closure_param_type_from_type_expr`]) and the unresolved, span-carrying `TypeExpr`
-    /// itself (which `AstContext` needs instead) — both derived from the same
-    /// [`parse_type_expression`](Self::parse_type_expression) call, so nothing is parsed twice.
+    /// Runtime contexts resolve each annotation through the configured [`TypeResolver`] into
+    /// its exact [`cel_runtime::ValueType`]. Syntax-only contexts retain the unresolved,
+    /// span-carrying [`TypeExpr`] without consulting runtime tables. Both use the same
+    /// [`parse_type_expression`](Self::parse_type_expression) production.
     ///
     /// - Precondition: the opening `|` (`params_already_closed == false`) or the combined `||`
     ///   token naming an empty parameter list (`params_already_closed == true`) has already been
@@ -2312,15 +2245,15 @@ impl<C: ParserContext> Parser<C> {
     /// # Errors
     ///
     /// Returns an error if a parameter name, its `:`, its type, or the closing `|` is malformed
-    /// or missing; if a parameter's type names an unrecognized type or is array-typed (see
-    /// [`closure_param_type_from_type_expr`]); if the body expression is missing or malformed;
+    /// or missing; if a runtime parameter names an unrecognized type or unsupported array
+    /// element shape; if a used parameter lacks clone support; if the body is missing or malformed;
     /// or if this `ParserContext` implementation's `push_closure` rejects the closure (e.g.
     /// `DynSegmentContext` when the body doesn't produce exactly one value).
     ///
     /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
     fn is_closure_expression(&mut self, params_already_closed: bool) -> Result<bool> {
         let start_span = self.last_span;
-        let mut params: Vec<(String, Span, ClosureParamType, TypeExpr)> = Vec::new();
+        let mut params: Vec<(String, Span, Option<cel_runtime::ValueType>, TypeExpr)> = Vec::new();
         if !params_already_closed {
             loop {
                 let name = self.expect_identifier("expected closure parameter name")?;
@@ -2329,7 +2262,14 @@ impl<C: ParserContext> Parser<C> {
                     return Err(self.error_at("expected ':' after closure parameter name"));
                 }
                 let ty_ast = self.parse_type_expression()?;
-                let ty = closure_param_type_from_type_expr(&ty_ast)?;
+                let ty = if C::resolves_closure_types() {
+                    Some(closure_param_type_from_type_expr(
+                        &ty_ast,
+                        self.type_resolver.as_ref(),
+                    )?)
+                } else {
+                    None
+                };
                 params.push((name, name_span, ty, ty_ast));
                 if self.is_punctuation(",") {
                     continue;
@@ -2341,7 +2281,10 @@ impl<C: ParserContext> Parser<C> {
             }
         }
 
-        let param_types: Vec<TypeId> = params.iter().map(|(_, _, ty, _)| ty.type_id()).collect();
+        let param_types = params
+            .iter()
+            .filter_map(|(_, _, ty, _)| ty.clone())
+            .collect();
         let ast_params: Vec<ClosureParam> = params
             .iter()
             .map(|(name, name_span, _, ty_ast)| ClosureParam {
@@ -2354,7 +2297,7 @@ impl<C: ParserContext> Parser<C> {
             })
             .collect();
         let isolated = self.op_lookup.isolate_scopes();
-        let param_table: HashMap<String, (usize, ClosureParamType)> = params
+        let param_table: HashMap<String, (usize, Option<cel_runtime::ValueType>)> = params
             .into_iter()
             .enumerate()
             .map(|(idx, (name, _, ty, _))| (name, (idx, ty)))
@@ -2367,10 +2310,8 @@ impl<C: ParserContext> Parser<C> {
                 let Some((idx, ty)) = param_table.get(name) else {
                     return Ok(false);
                 };
-                match ty {
-                    ClosureParamType::Named(scalar) => (scalar.push_arg)(segment, *idx),
-                    ClosureParamType::Tuple(elements) => segment
-                        .push_arg_as_dynamic_sequence_tuple(*idx, elements_to_associated(elements)),
+                if let Some(ty) = ty {
+                    ty.push_argument(segment, *idx)?;
                 }
                 Ok(true)
             });
@@ -4055,17 +3996,11 @@ mod tests {
     }
 
     #[test]
-    fn closure_param_rejects_an_array_type_citing_issue_228() {
+    fn closure_param_accepts_an_array_type() {
         let mut parser = CELParser::new(OpLookup::new());
-        let err = match parser.parse_str("|xs: [i32]| xs") {
-            Ok(_) => panic!("expected array-typed closure parameter to be rejected"),
-            Err(err) => err,
-        };
-        assert!(
-            err.message().contains("issues/228"),
-            "got: {}",
-            err.message()
-        );
+        let mut segment = parser.parse_str("(|xs: [i32]| xs)([1, 2])").unwrap();
+        let array = segment.call0::<cel_runtime::DynamicArray>().unwrap();
+        assert_eq!(array.try_as_slice::<i32>().unwrap(), &[1, 2]);
     }
 
     #[test]

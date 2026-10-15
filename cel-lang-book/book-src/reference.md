@@ -47,16 +47,14 @@ field_initializer = identifier ":" expression .
 tuple_or_group = "(" [ expression [ "," [ expression { "," expression } ] ] ] ")" .
 array_expression = "[" [ expression { "," expression } ] "]"
                  [ ":" type_expr ] .
-type_expr = identifier
+type_expr = identifier [ "(" type_expr { "," type_expr } ")" ]
           | "[" type_expr "]"
-          | "(" [ type_expr [ "," [ type_expr { "," type_expr } ] ] ] ")" .
+          | "(" [ type_expr { "," type_expr } ] ")" .
 if_expression = "if" expression "{" expression "}"
               [ "else" ( "{" expression "}" | if_expression ) ] .
 closure_expression = "||" expression
                    | "|" closure_param { "," closure_param } "|" expression .
-closure_param = identifier ":" closure_type_expression .
-closure_type_expression = identifier
-                        | "(" [ closure_type_expression { "," closure_type_expression } ] ")" .
+closure_param = identifier ":" type_expr .
 ```
 
 ## Worked examples
@@ -84,7 +82,7 @@ true as i32
 
 | Kind | Names or forms | Notes |
 | --- | --- | --- |
-| Built-in scalar types | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `f32`, `f64`, `bool`, `String` | These are the only named cast targets and the only scalar names allowed in typed closure parameters. |
+| Built-in scalar types | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `f32`, `f64`, `bool`, `String` | These are the named cast targets. Closure annotations also accept registered cloneable leaves and built-in generic types through the configured type resolver. |
 | Other value forms | `char`, byte strings, C strings, unit, tuples, arrays, ranges, closures | Expressions can use these values, but they are not extra built-in scalar type names. |
 
 ## Literal table
@@ -177,10 +175,11 @@ when the evaluation environment installs it. See
 | Form | Meaning | Notes |
 | --- | --- | --- |
 | <code>&#124;&#124; expr</code> | zero-parameter closure | The body is one expression. |
-| <code>&#124;x: T&#124; expr</code> | one typed parameter | `T` is a built-in scalar type name or a tuple type. |
+| <code>&#124;x: T&#124; expr</code> | one typed parameter | `T` resolves through the configured type environment and may recursively contain tuples or arrays. |
 | <code>&#124;x: T, y: U&#124; expr</code> | multiple typed parameters | Parameters are comma-separated and ordered left to right. |
 | <code>&#124;pair: (i32, i32)&#124; expr</code> | one tuple-typed parameter | Tuple parameters are still one parameter and use `.N` inside the body. |
 | nested tuple type | <code>&#124;value: (i32, (f64, bool))&#124; expr</code> | Tuple types may nest recursively. |
+| <code>(&#124;x: f64&#124; x)(1.0)</code> | immediate invocation | CEL checks exact parameter/result shapes; arguments evaluate once, left to right. Unknown callable signatures fail explicitly. Host call operations retain precedence. |
 
 ## Exact rules
 

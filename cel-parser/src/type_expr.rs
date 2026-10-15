@@ -178,6 +178,8 @@ pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<R
 ///
 /// This pairs a human-readable type name with the runtime element descriptor needed to build or
 /// validate a `DynamicArray` whose elements have this leaf type.
+/// Hosts use [`ArrayElementType::cloneable`] when this leaf may also appear in a closure
+/// annotation; the same descriptor then supplies its checked argument-cloning adapter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedLeafType {
     type_id: TypeId,

@@ -1403,20 +1403,12 @@ pub fn cast_source_types(target_name: &str) -> impl Iterator<Item = TypeId> {
         .flat_map(|sigs| sigs.iter().map(CastSignature::source_type_id))
 }
 
-/// One built-in scalar type's identity plus everything needed to declare a `DynSegment`
-/// argument or tuple leaf of that type without the caller knowing it as a static Rust generic.
+/// One built-in name and its clone-capable runtime descriptor.
 ///
-/// Covers exactly the fixed set of scalar type names [`signatures_for_cast`] already recognizes
-/// as `as`-cast targets — closures are the first feature needing to *declare* a value of a named
-/// type (rather than convert an already-stack-resident one), so this is new, additive surface
-/// area; it deliberately reuses that same closed name set rather than inventing a second one.
+/// The default type resolver shares the scalar name set with [`signatures_for_cast`];
+/// configured resolvers may additionally supply host-registered descriptors.
 pub(crate) struct BuiltinScalarType {
-    pub(crate) type_id: TypeId,
     pub(crate) type_name: &'static str,
-    pub(crate) size: usize,
-    pub(crate) align: usize,
-    pub(crate) dropper: cel_runtime::RawDropper,
-    pub(crate) push_arg: fn(&mut DynSegment, usize),
     pub(crate) element_type: fn() -> cel_runtime::ArrayElementType,
 }
 
@@ -1438,14 +1430,9 @@ macro_rules! builtin_scalars {
         pub(crate) fn builtin_scalar_type(name: &str) -> Option<BuiltinScalarType> {
             Some(match name {
                 $($name => BuiltinScalarType {
-                    type_id: TypeId::of::<$ty>(),
                     type_name: $name,
-                    size: std::mem::size_of::<$ty>(),
-                    align: std::mem::align_of::<$ty>(),
-                    dropper: cel_runtime::raw_dropper_for::<$ty>(),
-                    push_arg: |seg, idx| seg.push_arg::<$ty>(idx),
                     element_type: || {
-                        cel_runtime::ArrayElementType::leaf::<$ty>()
+                        cel_runtime::ArrayElementType::cloneable::<$ty>()
                             .expect("a built-in scalar type is never DynamicArray")
                             .with_type_name($name)
                     },
@@ -1495,14 +1482,9 @@ macro_rules! builtin_generic_types {
             match generic_name {
                 $($generic => match arg_type_name {
                     $($arg_name => Some(BuiltinScalarType {
-                        type_id: TypeId::of::<$ty>(),
                         type_name: concat!($generic, "(", $arg_name, ")"),
-                        size: std::mem::size_of::<$ty>(),
-                        align: std::mem::align_of::<$ty>(),
-                        dropper: cel_runtime::raw_dropper_for::<$ty>(),
-                        push_arg: |seg, idx| seg.push_arg::<$ty>(idx),
                         element_type: || {
-                            cel_runtime::ArrayElementType::leaf::<$ty>()
+                            cel_runtime::ArrayElementType::cloneable::<$ty>()
                                 .expect("a built-in generic type is never DynamicArray")
                                 .with_type_name(concat!($generic, "(", $arg_name, ")"))
                         },
@@ -1570,14 +1552,9 @@ builtin_generic_types! {
 pub(crate) fn builtin_generic_type_0(name: &str) -> Option<BuiltinScalarType> {
     match name {
         "RangeFull" => Some(BuiltinScalarType {
-            type_id: TypeId::of::<std::ops::RangeFull>(),
             type_name: "RangeFull",
-            size: std::mem::size_of::<std::ops::RangeFull>(),
-            align: std::mem::align_of::<std::ops::RangeFull>(),
-            dropper: cel_runtime::raw_dropper_for::<std::ops::RangeFull>(),
-            push_arg: |seg, idx| seg.push_arg::<std::ops::RangeFull>(idx),
             element_type: || {
-                cel_runtime::ArrayElementType::leaf::<std::ops::RangeFull>()
+                cel_runtime::ArrayElementType::cloneable::<std::ops::RangeFull>()
                     .expect("RangeFull is never DynamicArray")
                     .with_type_name("RangeFull")
             },
@@ -2039,6 +2016,21 @@ impl OpLookup {
                     end,
                 ));
             }
+        }
+
+        if !member
+            && name == "()"
+            && num_operands > 0
+            && segment
+                .peek_stack_infos(num_operands)
+                .first()
+                .is_some_and(|info| {
+                    info.value_type.type_id() == TypeId::of::<cel_runtime::DynClosure>()
+                })
+        {
+            return segment
+                .invoke_closure(num_operands - 1)
+                .map_err(|error| crate::ParseError::new_range(error.to_string(), start, end));
         }
 
         if num_operands == 0 {
@@ -2970,16 +2962,18 @@ mod tests {
     #[test]
     fn builtin_scalar_type_i32_matches_std_any_type_id() {
         let scalar = builtin_scalar_type("i32").unwrap();
-        assert_eq!(scalar.type_id, TypeId::of::<i32>());
-        assert_eq!(scalar.size, std::mem::size_of::<i32>());
-        assert_eq!(scalar.align, std::mem::align_of::<i32>());
+        assert_eq!((scalar.element_type)().type_id(), TypeId::of::<i32>());
+        assert_eq!((scalar.element_type)().size(), std::mem::size_of::<i32>());
+        assert_eq!((scalar.element_type)().align(), std::mem::align_of::<i32>());
     }
 
     #[test]
     fn builtin_scalar_type_push_arg_declares_a_readable_argument() {
         let scalar = builtin_scalar_type("i32").unwrap();
         let mut segment = DynSegment::new::<()>();
-        (scalar.push_arg)(&mut segment, 0);
+        cel_runtime::ValueType::registered((scalar.element_type)())
+            .push_argument(&mut segment, 0)
+            .unwrap();
         let value = 42i32;
         let result: i32 = segment.call_dyn(&[&value]).unwrap();
         assert_eq!(result, 42);
@@ -3009,11 +3003,11 @@ mod tests {
     fn builtin_generic_type_range_inclusive_f64_matches_std_any_type_id() {
         let resolved = builtin_generic_type("RangeInclusive", "f64").unwrap();
         assert_eq!(
-            resolved.type_id,
+            (resolved.element_type)().type_id(),
             TypeId::of::<std::ops::RangeInclusive<f64>>()
         );
         assert_eq!(
-            resolved.size,
+            (resolved.element_type)().size(),
             std::mem::size_of::<std::ops::RangeInclusive<f64>>()
         );
     }
@@ -3030,7 +3024,10 @@ mod tests {
     fn builtin_generic_type_0_resolves_range_full() {
         let resolved = builtin_generic_type_0("RangeFull").unwrap();
         assert_eq!(resolved.type_name, "RangeFull");
-        assert_eq!(resolved.type_id, TypeId::of::<std::ops::RangeFull>());
+        assert_eq!(
+            (resolved.element_type)().type_id(),
+            TypeId::of::<std::ops::RangeFull>()
+        );
         assert!(builtin_generic_type_0("NotAGeneric").is_none());
     }
 
@@ -3038,7 +3035,9 @@ mod tests {
     fn builtin_generic_type_push_arg_declares_a_readable_argument() {
         let resolved = builtin_generic_type("RangeInclusive", "i32").unwrap();
         let mut segment = DynSegment::new::<()>();
-        (resolved.push_arg)(&mut segment, 0);
+        cel_runtime::ValueType::registered((resolved.element_type)())
+            .push_argument(&mut segment, 0)
+            .unwrap();
         let value = 1i32..=5i32;
         let result: std::ops::RangeInclusive<i32> = segment.call_dyn(&[&value]).unwrap();
         assert_eq!(result, 1..=5);

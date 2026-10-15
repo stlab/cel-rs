@@ -23,23 +23,31 @@ use std::mem::MaybeUninit;
 
 thread_local! {
     // Safety: valid only during the execution of `call_dyn` on this thread.
-    // Set before executing the segment; cleared by `DynCallGuard::drop` even on panic.
+    // Set before execution; DynCallGuard restores the enclosing context even on panic.
     static CALL_DYN_PTR: Cell<usize> = const { Cell::new(0) };
     static CALL_DYN_LEN: Cell<usize> = const { Cell::new(0) };
+    static CALL_RAW_PTR: Cell<*const *const u8> = const { Cell::new(std::ptr::null()) };
 }
 
-/// Clears the `call_dyn` thread-locals when dropped.
-struct DynCallGuard;
+/// Restores the enclosing argument context after a nested call.
+struct DynCallGuard(usize, usize, *const *const u8);
+
+impl DynCallGuard {
+    /// Installs an Any argument context until this guard is dropped.
+    fn install(inputs: &[&dyn Any]) -> Self {
+        Self(
+            CALL_DYN_PTR.with(|c| c.replace(inputs.as_ptr() as usize)),
+            CALL_DYN_LEN.with(|c| c.replace(inputs.len())),
+            CALL_RAW_PTR.with(|c| c.replace(std::ptr::null())),
+        )
+    }
+}
 
 impl Drop for DynCallGuard {
-    // Zeroes rather than restores the prior thread-local state.
-    // This is safe as long as call_dyn is not re-entered on the same thread
-    // (no nested call_dyn). If nested calls become necessary in the future,
-    // change to save/restore: capture (CALL_DYN_PTR, CALL_DYN_LEN) at guard
-    // construction and restore them here instead of zeroing.
     fn drop(&mut self) {
-        CALL_DYN_PTR.with(|c| c.set(0));
-        CALL_DYN_LEN.with(|c| c.set(0));
+        CALL_DYN_PTR.with(|c| c.set(self.0));
+        CALL_DYN_LEN.with(|c| c.set(self.1));
+        CALL_RAW_PTR.with(|c| c.set(self.2));
     }
 }
 
@@ -85,6 +93,9 @@ pub enum ValueKind {
 /// Physical metadata describes the bytes; `kind` describes what those bytes mean. The two are
 /// deliberately separate: an array and a tuple of arrays share neither shape nor layout rules,
 /// but every array has the same physical layout regardless of its element type.
+/// Known closures additionally carry their exact callable signature; tuple extraction, branch
+/// joining, and invocation results retain that metadata without treating every `DynClosure`
+/// marker as interchangeable.
 ///
 /// Every field is private and set only by a validating constructor ([`leaf`](Self::leaf),
 /// [`leaf_from_parts`](Self::leaf_from_parts), [`tuple`](Self::tuple), [`array`](Self::array)),
@@ -105,6 +116,9 @@ pub struct ValueType {
     raw_dropper: RawDropper,
     /// Semantic shape of the value.
     kind: ValueKind,
+    clone_value: Option<ElementCloner>,
+    push_arg: Option<fn(&mut DynSegment, usize, ValueType)>,
+    pub(crate) callable: Option<std::sync::Arc<crate::dyn_closure::ClosureSignature>>,
 }
 
 impl ValueType {
@@ -193,6 +207,9 @@ impl ValueType {
             align,
             raw_dropper,
             kind: ValueKind::Leaf,
+            clone_value: None,
+            push_arg: None,
+            callable: None,
         }
     }
 
@@ -224,6 +241,9 @@ impl ValueType {
             align,
             raw_dropper: drop_tuple,
             kind: ValueKind::Tuple(elements),
+            clone_value: None,
+            push_arg: None,
+            callable: None,
         }
     }
 
@@ -252,6 +272,125 @@ impl ValueType {
             align: align_of::<DynamicArray>(),
             raw_dropper: raw_dropper_for::<DynamicArray>(),
             kind: ValueKind::Array(element),
+            clone_value: None,
+            push_arg: None,
+            callable: None,
+        }
+    }
+
+    /// Converts a registered leaf or recursive array descriptor into its complete value type.
+    ///
+    /// - Complexity: O(array nesting depth).
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{ArrayElementType, ValueType};
+    /// let value = ValueType::registered(ArrayElementType::cloneable::<String>().unwrap());
+    /// assert_eq!(value.type_id(), std::any::TypeId::of::<String>());
+    /// ```
+    pub fn registered(element: ArrayElementType) -> Self {
+        if let Some(nested) = element.nested() {
+            return Self::array(nested.clone());
+        }
+        let mut value = Self::leaf_from_parts(
+            element.type_id(),
+            element.display_name(),
+            element.size(),
+            element.align(),
+            element.drop,
+        );
+        value.clone_value = element.clone_value;
+        value.push_arg = element.push_arg;
+        value
+    }
+
+    /// Emits a clone of the positional argument with this exact recursive shape.
+    ///
+    /// - Precondition: execution supplies argument `index` with this exact recursive shape.
+    ///
+    /// # Errors
+    /// Returns an error when any registered leaf lacks clone support.
+    ///
+    /// - Complexity: O(number of recursive type nodes).
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{ArrayElementType, DynSegment, ValueType};
+    /// let mut segment = DynSegment::new::<()>();
+    /// ValueType::registered(ArrayElementType::cloneable::<String>().unwrap())
+    ///     .push_argument(&mut segment, 0).unwrap();
+    /// assert_eq!(segment.call_dyn::<String>(&[&String::from("x")]).unwrap(), "x");
+    /// ```
+    pub fn push_argument(&self, segment: &mut DynSegment, index: usize) -> Result<()> {
+        self.validate_clone()?;
+        if let Some(elements) = self.tuple_elements() {
+            segment.push_arg_as_dynamic_sequence_tuple(index, elements.to_vec());
+        } else if self.array_element().is_some() {
+            segment.push_array_argument(index, self.clone());
+        } else {
+            (self
+                .push_arg
+                .ok_or_else(|| anyhow!("registered type lacks argument adapter"))?)(
+                segment,
+                index,
+                self.clone(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Checks clone support throughout a parameter descriptor.
+    ///
+    /// # Errors
+    /// Returns an error if a recursive leaf has no clone adapter.
+    /// - Complexity: O(number of recursive type nodes).
+    pub(crate) fn validate_clone(&self) -> Result<()> {
+        if let Some(elements) = self.tuple_elements() {
+            for element in elements {
+                element.value_type.validate_clone()?;
+            }
+        } else if let Some(element) = self.array_element() {
+            ensure!(
+                element.supports_clone(),
+                "type `{}` lacks registered clone support",
+                self.type_name
+            );
+        } else {
+            ensure!(
+                self.clone_value.is_some(),
+                "type `{}` lacks registered clone support",
+                self.type_name
+            );
+        }
+        Ok(())
+    }
+
+    /// Clones an exactly matching live value into uninitialized, aligned destination storage.
+    ///
+    /// # Safety
+    /// Both pointers must cover this layout without overlap; source must be live.
+    /// `validate_clone` must have succeeded before entering.
+    /// - Complexity: O(recursive element count), plus leaf clone costs.
+    pub(crate) unsafe fn clone_into(&self, source: *const u8, destination: *mut u8) {
+        if let Some(elements) = self.tuple_elements() {
+            for element in elements {
+                unsafe {
+                    element
+                        .value_type
+                        .clone_into(source.add(element.offset), destination.add(element.offset));
+                }
+            }
+        } else if let Some(element) = self.array_element() {
+            unsafe {
+                let array = &*source.cast::<DynamicArray>();
+                destination
+                    .cast::<DynamicArray>()
+                    .write(array.clone_as(element));
+            }
+        } else {
+            unsafe {
+                (self.clone_value.expect("validated clone adapter"))(source, destination);
+            }
         }
     }
 
@@ -409,6 +548,8 @@ impl ValueType {
     /// Returns whether `self` and `other` denote the same semantic type: the same `TypeId` for
     /// leaves, the same ordered element shapes (recursively) for tuples, and the same recursive
     /// element descriptor for arrays.
+    /// Known callable signatures must also match recursively; known and unknown signatures
+    /// are not interchangeable.
     ///
     /// Physical layout is never compared: two distinct types with identical size and alignment
     /// have different shapes, and two equal shapes always have identical layout.
@@ -427,6 +568,10 @@ impl ValueType {
     /// ```
     #[must_use]
     pub fn same_shape(&self, other: &ValueType) -> bool {
+        if !crate::dyn_closure::same_signature(self.callable.as_deref(), other.callable.as_deref())
+        {
+            return false;
+        }
         if self.type_id != other.type_id {
             return false;
         }
@@ -714,9 +859,155 @@ pub struct DynSegment {
     /// is always recomputed from this plus `stack_ids`, never cached, so it
     /// can never drift out of sync after ops consume stack entries.
     base_stack_index: usize,
+    /// Positional reads emitted by this body, including reads inside conditional fragments.
+    pub(crate) argument_reads: Vec<(usize, ValueType)>,
 }
 
 impl DynSegment {
+    /// Pushes a closure value with its known callable signature, if present.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{DynClosure, DynSegment};
+    /// let mut body = DynSegment::new::<()>();
+    /// body.just(9i32);
+    /// let mut caller = DynSegment::new::<()>();
+    /// caller.push_closure(DynClosure::typed(vec![], body).unwrap());
+    /// caller.invoke_closure(0).unwrap();
+    /// assert_eq!(caller.call0::<i32>().unwrap(), 9);
+    /// ```
+    pub fn push_closure(&mut self, closure: crate::DynClosure) {
+        let signature = closure.signature();
+        self.just(closure);
+        self.stack_ids
+            .last_mut()
+            .expect("just pushed closure")
+            .value_type
+            .callable = signature;
+    }
+
+    /// Emits invocation of the closure below `arity` evaluated arguments, in source order.
+    ///
+    /// # Errors
+    /// Returns an error before emitting if this segment requires preloaded arguments, the
+    /// callable shape is unknown, or argument arity or recursive types differ. Body errors
+    /// and runtime signature mismatches propagate.
+    ///
+    /// - Complexity: O(stack depth plus recursive type nodes); execution is body-dependent.
+    ///
+    /// # Examples
+    /// See [`push_closure`](Self::push_closure).
+    pub fn invoke_closure(&mut self, arity: usize) -> Result<()> {
+        ensure!(
+            self.argument_ids.is_empty(),
+            "closure invocation requires a push_arg-based segment"
+        );
+        ensure!(
+            self.stack_ids.len() > arity,
+            "closure invocation lacks callee"
+        );
+        let first = self.stack_ids.len() - arity - 1;
+        let signature = self.stack_ids[first]
+            .value_type
+            .callable
+            .clone()
+            .ok_or_else(|| anyhow!("unsupported closure call: callable signature is unknown"))?;
+        ensure!(
+            signature.parameters.len() == arity,
+            "closure argument arity mismatch: expected {}, found {arity}",
+            signature.parameters.len()
+        );
+        for (expected, actual) in signature
+            .parameters
+            .iter()
+            .zip(&self.stack_ids[first + 1..])
+        {
+            ensure!(
+                expected.same_shape(&actual.value_type),
+                "closure argument type mismatch: expected {}, found {}",
+                expected.type_name,
+                actual.value_type.type_name
+            );
+        }
+        let mut offset = self.base_stack_index;
+        let mut offsets = Vec::with_capacity(self.stack_ids.len());
+        for info in &self.stack_ids {
+            offset = align_index(info.value_type.align, offset);
+            offsets.push(offset);
+            offset += info.value_type.size;
+        }
+        let callee_offset = offsets[first];
+        let argument_offsets = offsets[first + 1..].to_vec();
+        let unwind = self.capture_unwind();
+        let consumed = unwind[first..].to_vec();
+        let result_type = signature.result.clone();
+        let value_type = result_type.clone();
+        let ambient = self.stack_offset_before_top(arity + 1)?;
+        self.segment.update_base_alignment(result_type.align);
+        self.segment.raw0_(move |stack| {
+            let result = {
+                // Safety: offsets refer to checked, live stack values. The outer stack is
+                // unchanged during body evaluation, which uses an independent allocation.
+                let closure = unsafe {
+                    stack.read_at(callee_offset, |p| (&*p.cast::<crate::DynClosure>()).clone())
+                };
+                unsafe {
+                    stack.read_at(0, |base| {
+                        let arguments: Vec<*const u8> = argument_offsets
+                            .iter()
+                            .map(|offset| base.add(*offset))
+                            .collect();
+                        closure.call_raw(&signature, &arguments)
+                    })
+                }
+            };
+            let mut output = Self::unwind_on_err(&unwind, stack, result)?;
+            for (padding, ty) in consumed.iter().rev() {
+                // Safety: consume each original argument and the callee exactly once.
+                unsafe {
+                    stack.drop_sized(ty.size, *padding, |p| {
+                        (ty.raw_dropper)(p, ty.dropper_children())
+                    });
+                }
+            }
+            // Safety: output owns exactly one result of this layout. Move its bytes to the
+            // caller, then remove the now-dead source bytes without running their dropper.
+            unsafe {
+                output.read_at(output.len() - result_type.size, |p| {
+                    stack.push_raw(result_type.align, result_type.size, p.cast());
+                });
+                output.truncate_to(0, false);
+            }
+            Ok(())
+        });
+        self.stack_ids.truncate(first);
+        self.stack_ids.push(StackInfo {
+            padding: align_index(value_type.align, ambient) != ambient,
+            value_type,
+        });
+        Ok(())
+    }
+
+    /// Evaluates a checked raw frame and restores the enclosing argument context on return.
+    ///
+    /// # Safety
+    /// `arguments` must contain live pointers matching this body's parameter descriptors.
+    /// # Errors
+    /// Propagates body operation errors.
+    /// - Complexity: O(number of body operations).
+    pub(crate) unsafe fn execute_raw(&mut self, arguments: &[*const u8]) -> Result<RawStack> {
+        let _guard = DynCallGuard(
+            CALL_DYN_PTR.with(Cell::get),
+            CALL_DYN_LEN.with(Cell::get),
+            CALL_RAW_PTR.with(|c| c.replace(arguments.as_ptr())),
+        );
+        let mut output = RawStack::with_base_alignment(self.segment.base_alignment());
+        unsafe {
+            self.segment.call0_stack(&mut output)?;
+        }
+        Ok(output)
+    }
+
     /// Creates a new empty segment with no operations.
     #[must_use]
     pub fn new<Args: IntoCStackList>() -> Self
@@ -733,6 +1024,7 @@ impl DynSegment {
                 .collect(),
             stack_ids,
             base_stack_index: size_of::<ReverseList<Args::Output>>(),
+            argument_reads: Vec::new(),
         }
     }
 
@@ -758,6 +1050,7 @@ impl DynSegment {
             argument_names: Vec::new(),
             stack_ids: Vec::new(),
             base_stack_index: self.stack_offset_after(self.stack_ids.len().saturating_sub(1)),
+            argument_reads: Vec::new(),
         }
     }
 
@@ -1366,7 +1659,26 @@ impl DynSegment {
     ///
     /// - Complexity: O(1).
     pub fn push_arg<T: 'static + Clone>(&mut self, index: usize) {
+        self.push_typed_arg::<T>(index, ValueType::leaf::<T>());
+    }
+
+    /// Emits a monomorphized argument clone with the supplied semantic descriptor.
+    ///
+    /// - Precondition: `value_type` describes `T`; runtime arguments match that descriptor.
+    pub(crate) fn push_typed_arg<T: 'static + Clone>(
+        &mut self,
+        index: usize,
+        value_type: ValueType,
+    ) {
+        debug_assert_eq!(value_type.type_id(), TypeId::of::<T>());
+        self.argument_reads.push((index, value_type.clone()));
         self.segment.push_op0(move || {
+            let raw = CALL_RAW_PTR.with(Cell::get);
+            if !raw.is_null() {
+                // Safety: checked invocation installs live, exactly typed positional values
+                // for the duration of the body. Cloning does not consume their ownership.
+                return unsafe { (&*(*raw.add(index)).cast::<T>()).clone() };
+            }
             CALL_DYN_PTR.with(|ptr_cell| {
                 CALL_DYN_LEN.with(|len_cell| {
                     let raw_ptr = ptr_cell.get() as *const &dyn Any;
@@ -1374,7 +1686,7 @@ impl DynSegment {
                     assert!(!raw_ptr.is_null(), "push_arg op invoked outside call_dyn");
                     debug_assert!(index < len, "push_arg index {index} out of range {len}");
                     // Safety: raw_ptr is non-null (checked above) and valid for the duration
-                    // of the enclosing call_dyn call; DynCallGuard clears it on return.
+                    // of the enclosing call_dyn call; DynCallGuard restores it on return.
                     let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len) };
                     slice[index]
                         .downcast_ref::<T>()
@@ -1383,7 +1695,59 @@ impl DynSegment {
                 })
             })
         });
-        self.push_type::<T>();
+        let ambient = self.current_stack_offset();
+        self.stack_ids.push(StackInfo {
+            padding: align_index(value_type.align, ambient) != ambient,
+            value_type,
+        });
+    }
+
+    /// Emits a deep clone of a recursive array argument with statically registered leaf hooks.
+    ///
+    /// - Precondition: clone support was validated for `value_type`.
+    /// - Complexity: O(stack depth plus recursive array type depth) to capture descriptors;
+    ///   execution is O(total recursive element count), plus leaf clone costs.
+    fn push_array_argument(&mut self, index: usize, value_type: ValueType) {
+        self.argument_reads.push((index, value_type.clone()));
+        let element = value_type
+            .array_element()
+            .expect("array descriptor")
+            .clone();
+        let unwind = self.capture_unwind();
+        self.segment.raw0(move |stack| {
+            let result = (|| {
+                let raw = CALL_RAW_PTR.with(Cell::get);
+                if !raw.is_null() {
+                    // Safety: the checked invocation frame provides an exact array value.
+                    return Ok(unsafe {
+                        (&*(*raw.add(index)).cast::<DynamicArray>()).clone_as(&element)
+                    });
+                }
+                CALL_DYN_PTR.with(|ptr| {
+                    CALL_DYN_LEN.with(|len| {
+                        // Safety: the enclosing call_dyn owns the live Any slice.
+                        let inputs = unsafe {
+                            std::slice::from_raw_parts(ptr.get() as *const &dyn Any, len.get())
+                        };
+                        let array = inputs
+                            .get(index)
+                            .and_then(|input| input.downcast_ref::<DynamicArray>())
+                            .ok_or_else(|| anyhow!("array closure argument type mismatch"))?;
+                        ensure!(
+                            array.element_type().same_shape_and_layout(&element),
+                            "array closure argument element type mismatch"
+                        );
+                        Ok(unsafe { array.clone_as(&element) })
+                    })
+                })
+            })();
+            Self::unwind_on_err(&unwind, stack, result)
+        });
+        let ambient = self.current_stack_offset();
+        self.stack_ids.push(StackInfo {
+            padding: align_index(value_type.align, ambient) != ambient,
+            value_type,
+        });
     }
 
     /// Emits an op that clones `inputs[index]` (downcast to `&DynamicSequence`) onto the stack
@@ -1419,6 +1783,7 @@ impl DynSegment {
         // under-reserving the stack space the write below actually needs for the nested region —
         // a buffer overrun, not just a wrong offset.
         let value_type = ValueType::tuple(associated);
+        self.argument_reads.push((index, value_type.clone()));
         let total_size = value_type.size;
         let tuple_align = value_type.align;
         // raw0_ (unlike raw0/push_op0) does not fold its own return-type alignment into the
@@ -1435,7 +1800,19 @@ impl DynSegment {
             .tuple_elements()
             .expect("ValueType::tuple produces a tuple")
             .to_vec();
+        let raw_shape = value_type.clone();
         self.segment.raw0_(move |stack| {
+            let raw = CALL_RAW_PTR.with(Cell::get);
+            if !raw.is_null() {
+                // Safety: invocation checked the recursive shape before installing the
+                // borrowed frame. The fresh destination has exactly that layout.
+                unsafe {
+                    stack.reserve_and_write(tuple_align, total_size, |dst| {
+                        raw_shape.clone_into(*raw.add(index), dst);
+                    });
+                }
+                return Ok(());
+            }
             CALL_DYN_PTR.with(|ptr_cell| {
                 CALL_DYN_LEN.with(|len_cell| -> anyhow::Result<()> {
                     let raw_ptr = ptr_cell.get() as *const &dyn Any;
@@ -1449,7 +1826,7 @@ impl DynSegment {
                         "push_arg_as_dynamic_sequence_tuple index {index} out of range {len}"
                     );
                     // Safety: raw_ptr is non-null (checked above) and valid for the duration of
-                    // the enclosing call_dyn call; DynCallGuard clears it on return.
+                    // the enclosing call_dyn call; DynCallGuard restores it on return.
                     let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len) };
                     let seq = slice[index]
                         .downcast_ref::<DynamicSequence>()
@@ -1557,9 +1934,7 @@ impl DynSegment {
             std::any::type_name::<R>(),
             self.stack_ids[0].value_type.type_name,
         );
-        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
-        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
-        let _guard = DynCallGuard;
+        let _guard = DynCallGuard::install(inputs);
         // Safety: type check above verified R matches stack top; bypasses pop_types
         // so stack_ids is not consumed, enabling repeated calls.
         unsafe { self.segment.call0() }
@@ -1634,9 +2009,7 @@ impl DynSegment {
         let tuple_padding = info.padding;
         let associated = elements.to_vec();
 
-        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
-        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
-        let _guard = DynCallGuard;
+        let _guard = DynCallGuard::install(inputs);
 
         let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
         // Safety: the checks above verified the segment builds exactly one tuple
@@ -1715,9 +2088,7 @@ impl DynSegment {
         let tuple_padding = info.padding;
         let associated = elements.to_vec();
 
-        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
-        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
-        let _guard = DynCallGuard;
+        let _guard = DynCallGuard::install(inputs);
 
         let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
         // Safety: the checks above verified the segment builds exactly one tuple value whose
@@ -1807,9 +2178,7 @@ impl DynSegment {
         let tuple_padding = info.padding;
         let associated = elements.to_vec();
 
-        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
-        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
-        let _guard = DynCallGuard;
+        let _guard = DynCallGuard::install(inputs);
 
         let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
         // Safety: the checks above verified the segment builds exactly one tuple value;
@@ -1981,7 +2350,10 @@ impl DynSegment {
             "fragment result types must match"
         );
 
+        let unwind = self.capture_unwind();
         self.stack_ids.push(fragment_0.stack_ids.pop().unwrap());
+        self.argument_reads.extend(fragment_0.argument_reads);
+        self.argument_reads.extend(fragment_1.argument_reads);
         self.segment.update_base_alignment(max(
             fragment_0.segment.base_alignment(),
             fragment_1.segment.base_alignment(),
@@ -1995,16 +2367,12 @@ impl DynSegment {
         */
         self.segment.raw0_(move |stack| {
             let conditional = unsafe { stack.pop(p0) };
-            if conditional {
-                unsafe {
-                    raw_segment_0.call0_stack(stack)?;
-                }
+            let result = if conditional {
+                unsafe { raw_segment_0.call0_stack(stack) }
             } else {
-                unsafe {
-                    raw_segment_1.call0_stack(stack)?;
-                }
-            }
-            Ok(())
+                unsafe { raw_segment_1.call0_stack(stack) }
+            };
+            Self::unwind_on_err(&unwind, stack, result)
         });
         Ok(())
     }
@@ -2396,9 +2764,7 @@ impl DynSegment {
         let tuple_padding = info.padding;
         let associated = elements.to_vec();
 
-        CALL_DYN_PTR.with(|c| c.set(inputs.as_ptr() as usize));
-        CALL_DYN_LEN.with(|c| c.set(inputs.len()));
-        let _guard = DynCallGuard;
+        let _guard = DynCallGuard::install(inputs);
 
         let mut stack = RawStack::with_base_alignment(self.segment.base_alignment());
         // Safety: the checks above verified the segment builds exactly one tuple value with
