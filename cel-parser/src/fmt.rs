@@ -183,6 +183,47 @@ fn gap_between(
     scan_gap(gap, expected)
 }
 
+/// Recovers member-dot comments across closing receiver groups omitted from the AST.
+///
+/// - Precondition: non-empty `source` is the receiver's original parsed text, and both spans
+///   resolve within it.
+/// - Postcondition: grouping delimiters are omitted; comments and the dot retain source order.
+/// - Complexity: O(n) in the source length plus the gap length.
+fn member_gap(
+    source: &str,
+    receiver_end: proc_macro2::Span,
+    name_start: proc_macro2::Span,
+) -> Vec<GapPiece> {
+    if source.is_empty() {
+        return scan_gap("", &["."]);
+    }
+    let line_starts = line_start_byte_offsets(source);
+    let start = line_column_to_byte(source, &line_starts, receiver_end.end());
+    let end = line_column_to_byte(source, &line_starts, name_start.start());
+    let gap = source.get(start..end).unwrap_or("");
+    let mut rest = gap;
+    let mut expected = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix("//") {
+            rest = &after[after.find('\n').unwrap_or(after.len())..];
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            let close = after.find("*/").unwrap_or(after.len());
+            rest = after.get(close + 2..).unwrap_or("");
+        } else if let Some(after) = rest.strip_prefix(')') {
+            expected.push(")");
+            rest = after;
+        } else {
+            break;
+        }
+    }
+    expected.push(".");
+    scan_gap(gap, &expected)
+        .into_iter()
+        .filter(|piece| !matches!(piece, GapPiece::Punct(")")))
+        .collect()
+}
+
 /// Renders a comma-separated element list with per-gap comment recovery: the gap before the first
 /// element (after `bounds.0`, the opening delimiter's position, e.g. a `(` or `[`), each
 /// inter-element `,` gap, and the gap after the last element (before `bounds.1`, the position
@@ -586,7 +627,7 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             span,
         } => {
             let receiver_s = format_at(receiver, source, depth, Level::POSTFIX);
-            let gap = gap_between(source, receiver.span().end, name_span.start, &["."]);
+            let gap = member_gap(source, receiver.span().end, name_span.start);
             let mut text = format!("{receiver_s}{}{name}", emit_gap(&gap, Spacing::None, depth));
             if let Some(args) = args {
                 text.push_str(&emit_list(
@@ -791,6 +832,8 @@ fn format_at(expr: &Expr, source: &str, depth: usize, min_level: Level) -> Strin
 ///
 /// `source` is the text `expr` was parsed from (or `""` for a hand-built `Expr`); `depth` is the
 /// indent level for `//`-comment wrap continuations.
+/// Member-dot comments survive omitted receiver grouping; precedence still determines which
+/// parentheses appear in the output.
 ///
 /// # Examples
 ///

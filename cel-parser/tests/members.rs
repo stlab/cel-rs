@@ -209,6 +209,49 @@ fn member_formatting_preserves_comments() {
     }
 }
 
+/// Verifies grouped receivers retain dot comments without changing postfix precedence.
+#[test]
+fn grouped_member_receivers_preserve_dot_comments() {
+    for (source, expected) in [
+        ("((a)).x", "a.x"),
+        ("(a.center()).x()", "a.center().x()"),
+        (
+            "(a) /* before */ . /* after */ x",
+            "a /* before */ . /* after */ x",
+        ),
+        (
+            "(a.center()) /* before */ . /* after */ x()",
+            "a.center() /* before */ . /* after */ x()",
+        ),
+        (
+            "((a.x)) /* before */ . /* after */ y.z",
+            "a.x /* before */ . /* after */ y.z",
+        ),
+        (
+            "(a + b) /* before */ . /* after */ x",
+            "(a + b) /* before */ . /* after */ x",
+        ),
+        (
+            "((a) /* inner ) */ ) /* before */ . /* after */ x",
+            "a /* inner ) */ /* before */ . /* after */ x",
+        ),
+        (
+            "(a) // before\n . // after\n x",
+            "a // before\n    . // after\n    x",
+        ),
+    ] {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let formatted = format_expr(&expr, source, 0);
+        assert_eq!(formatted, expected, "{source}");
+        let reparsed = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(&formatted)
+            .unwrap();
+        assert_eq!(format_expr(&reparsed, &formatted, 0), formatted);
+    }
+}
+
 /// Verifies an unresolved member reports its label rather than the full expression.
 #[test]
 fn unknown_member_diagnostic_points_to_name() {
