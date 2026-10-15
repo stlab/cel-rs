@@ -189,6 +189,28 @@ pub enum Expr {
         /// The span of the whole call, including its argument list.
         span: ExprSpan,
     },
+    /// A direct receiver operation (`receiver.name` or `receiver.name(args...)`).
+    ///
+    /// The label is not an identifier reference. Type and overload resolution are deferred.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, Expr, OpLookup, Parser};
+    /// let expr = Parser::<AstContext>::new(OpLookup::new()).parse_str_ast("a.x()").unwrap();
+    /// assert!(matches!(expr, Expr::Member { args: Some(args), .. } if args.is_empty()));
+    /// ```
+    Member {
+        /// The receiver, evaluated before explicit arguments.
+        receiver: Box<Expr>,
+        /// The operation's name.
+        name: String,
+        /// The member name token's span.
+        name_span: ExprSpan,
+        /// Explicit arguments in source order; `None` preserves property spelling.
+        args: Option<Vec<Expr>>,
+        /// The span from the receiver through the name or closing parenthesis.
+        span: ExprSpan,
+    },
     /// A tuple literal (`(a, b, ...)`; a 1-tuple is `(a,)`).
     Tuple {
         /// The element sub-expressions, in source order.
@@ -276,6 +298,7 @@ impl Expr {
             | Expr::Ident { span, .. }
             | Expr::Op { span, .. }
             | Expr::Apply { span, .. }
+            | Expr::Member { span, .. }
             | Expr::Tuple { span, .. }
             | Expr::Array { span, .. }
             | Expr::TupleIndex { span, .. }
@@ -423,6 +446,31 @@ impl ParserContext for AstContext {
                 span,
             });
         }
+        Ok(())
+    }
+
+    /// Records member spelling and source-order operands without resolving their types.
+    ///
+    /// - Complexity: O(n) in the number of explicit arguments.
+    fn apply_member(
+        &mut self,
+        _lookup: &OpLookup,
+        name: &str,
+        name_span: ExprSpan,
+        explicit_args: Option<usize>,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        debug_assert!(self.values.len() > explicit_args.unwrap_or(0));
+        let args = explicit_args.map(|count| self.pop_n(count));
+        let receiver = self.pop();
+        self.values.push(Expr::Member {
+            receiver: Box::new(receiver),
+            name: name.to_string(),
+            name_span,
+            args,
+            span: ExprSpan { start, end },
+        });
         Ok(())
     }
 

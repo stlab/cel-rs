@@ -334,6 +334,38 @@ pub trait ParserContext: Sized {
         end: Span,
     ) -> crate::Result<()>;
 
+    /// Applies a direct named operation to the receiver and explicit arguments in source order.
+    ///
+    /// `None` preserves `.name`; `Some(0)` preserves `.name()`. Both consume one receiver.
+    /// `name_span` identifies the member label for diagnostics; `start`/`end` cover the expression.
+    ///
+    /// - Precondition: the receiver and `explicit_args.unwrap_or(0)` arguments are emitted.
+    /// - Complexity: O(n) for n operands, plus operation lookup in runtime contexts.
+    ///
+    /// # Errors
+    /// Returns an error if a runtime context cannot resolve the operation.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, ExprSpan, OpLookup};
+    /// use cel_parser::parser_context::ParserContext;
+    /// use proc_macro2::Span;
+    /// let mut context = AstContext::new_context();
+    /// let span = Span::call_site();
+    /// context.push_literal(1i32, span);
+    /// context.apply_member(&OpLookup::new(), "custom", ExprSpan { start: span, end: span },
+    ///     None, span, span).unwrap();
+    /// ```
+    fn apply_member(
+        &mut self,
+        lookup: &OpLookup,
+        name: &str,
+        name_span: ExprSpan,
+        explicit_args: Option<usize>,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()>;
+
     /// Applies a short-circuiting logical operator (`"||"` or `"&&"`), consuming a leading
     /// condition value already present on `self` and folding in `rhs`, the already-parsed
     /// right-hand-side fragment.
@@ -569,6 +601,21 @@ impl ParserContext for DynSegmentContext {
         op_lookup.lookup(name, &mut self.0, arity, start, end)
     }
 
+    /// Emits receiver-first direct dispatch with diagnostics anchored to the member name.
+    fn apply_member(
+        &mut self,
+        lookup: &OpLookup,
+        name: &str,
+        name_span: ExprSpan,
+        explicit_args: Option<usize>,
+        _start: Span,
+        _end: Span,
+    ) -> crate::Result<()> {
+        let arity = explicit_args.unwrap_or(0) + 1;
+        debug_assert_eq!(self.0.peek_stack_infos(arity).len(), arity);
+        lookup.lookup_member(name, &mut self.0, arity, name_span.start, name_span.end)
+    }
+
     fn apply_logical(
         &mut self,
         name: &str,
@@ -771,6 +818,19 @@ mod tests {
             _op_lookup: &OpLookup,
             _name: &str,
             _arity: usize,
+            _start: Span,
+            _end: Span,
+        ) -> crate::Result<()> {
+            unimplemented!("RecordingContext only records array construction")
+        }
+
+        /// Rejects member operations outside this array-only test context.
+        fn apply_member(
+            &mut self,
+            _lookup: &OpLookup,
+            _name: &str,
+            _name_span: ExprSpan,
+            _explicit_args: Option<usize>,
             _start: Span,
             _end: Span,
         ) -> crate::Result<()> {

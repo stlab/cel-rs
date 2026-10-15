@@ -330,6 +330,7 @@ impl Ty {
 /// Only [`Expr::Op`] (via [`builtin_operand_types`]), [`Expr::Logical`] (CEL's fixed `&&`/`||`
 /// semantics: both operands must unify with `bool`), and [`Expr::Array`] (whose elements must
 /// share one type, see this module's `check_array`) are checked directly. [`Expr::Apply`],
+/// [`Expr::Member`] (receiver and arguments only, never its label),
 /// [`Expr::Tuple`], [`Expr::TupleIndex`], [`Expr::If`], and [`Expr::Closure`] are recursed into —
 /// so an `Op` nested inside one is still checked ([`Expr::Closure`] recurses into its own `body`
 /// with a resolver that shadows the outer one with the closure's own parameter names first) — but
@@ -408,6 +409,15 @@ pub fn check_expr_with_type_resolver(
             let mut diagnostics =
                 check_expr_with_type_resolver(callee, resolve_ident, resolve_type).1;
             for arg in args {
+                diagnostics
+                    .extend(check_expr_with_type_resolver(arg, resolve_ident, resolve_type).1);
+            }
+            (Ty::Any, diagnostics)
+        }
+        Expr::Member { receiver, args, .. } => {
+            let mut diagnostics =
+                check_expr_with_type_resolver(receiver, resolve_ident, resolve_type).1;
+            for arg in args.iter().flatten() {
                 diagnostics
                     .extend(check_expr_with_type_resolver(arg, resolve_ident, resolve_type).1);
             }

@@ -558,7 +558,12 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             (text, Level::CAST)
         }
         Expr::Apply { callee, args, span } => {
-            let callee_s = format_at(callee, source, depth, Level::POSTFIX);
+            let mut callee_s = format_at(callee, source, depth, Level::POSTFIX);
+            // Without parentheses a bare member followed by `()` becomes direct dispatch,
+            // rather than an ordinary call of the member's result.
+            if matches!(callee.as_ref(), Expr::Member { args: None, .. }) {
+                callee_s = format!("({callee_s})");
+            }
             // `callee.span().end` is a genuine leaf position (right after the callee, i.e. right
             // before `(`); `span.end` is the call's own recorded end, which -- per `emit_list`'s
             // doc comment -- is the whole `(...)` group's span, so its `.end()` (not `.start()`)
@@ -572,6 +577,28 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
                 false,
             );
             (format!("{callee_s}{list}"), Level::POSTFIX)
+        }
+        Expr::Member {
+            receiver,
+            name,
+            name_span,
+            args,
+            span,
+        } => {
+            let receiver_s = format_at(receiver, source, depth, Level::POSTFIX);
+            let gap = gap_between(source, receiver.span().end, name_span.start, &["."]);
+            let mut text = format!("{receiver_s}{}{name}", emit_gap(&gap, Spacing::None, depth));
+            if let Some(args) = args {
+                text.push_str(&emit_list(
+                    source,
+                    depth,
+                    ("(", ")"),
+                    (name_span.end.end(), span.end.end()),
+                    args,
+                    false,
+                ));
+            }
+            (text, Level::POSTFIX)
         }
         Expr::Tuple { elements, span } => {
             // `span.start` and `span.end` are both the same whole-group span here (see

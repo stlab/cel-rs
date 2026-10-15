@@ -472,6 +472,13 @@ fn expr_references_ident(expr: &Expr, name: &str) -> bool {
             expr_references_ident(callee, name)
                 || args.iter().any(|e| expr_references_ident(e, name))
         }
+        Expr::Member { receiver, args, .. } => {
+            expr_references_ident(receiver, name)
+                || args
+                    .iter()
+                    .flatten()
+                    .any(|e| expr_references_ident(e, name))
+        }
         Expr::Tuple { elements, .. } => elements.iter().any(|e| expr_references_ident(e, name)),
         Expr::Array { elements, .. } => elements.iter().any(|e| expr_references_ident(e, name)),
         Expr::TupleIndex { base, .. } => expr_references_ident(base, name),
@@ -1286,6 +1293,20 @@ mod tests {
         let sheet = parse("sheet s { cell a: i32 = 1 filter if true { _ } else { 1 }; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert!(diags.is_empty());
+    }
+
+    /// Verifies filter identifier walks visit receivers and arguments, but not member labels.
+    #[test]
+    fn member_filter_references_are_operands_not_labels() {
+        for body in ["_.accessor", "value.accessor(_)", "_.accessor()"] {
+            let sheet = parse(&format!("sheet s {{ cell value: i32 = 1 filter {body}; }}"));
+            assert!(
+                check_sheet(&sheet, &TypeRegistry::new()).is_empty(),
+                "{body}"
+            );
+        }
+        let sheet = parse("sheet s { cell value: i32 = 1 filter value._; }");
+        assert_eq!(check_sheet(&sheet, &TypeRegistry::new()).len(), 1);
     }
 
     #[test]

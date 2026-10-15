@@ -33,7 +33,7 @@
 //! multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression }.
 //! cast_expression = unary_expression { "as" identifier }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
-//! postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." unsuffixed_integer }.
+//! postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ parameter_list ] ")" ]) }.
 //! primary_expression = literal | identifier | tuple_or_group | array_expression
 //!                    | if_expression | closure_expression.
 //! tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".
@@ -92,6 +92,26 @@
 //! let mut parser = CELParser::new(OpLookup::new());
 //! let result = parser.parse_tokens(input.into_iter());
 //! assert!(result.is_ok());
+//! ```
+//!
+//! ## Receiver Operations
+//!
+//! `receiver.name` and `receiver.name()` both invoke a unary named operation directly.
+//! `receiver.name(arg1, arg2)` passes the receiver first, then the explicit arguments;
+//! execution evaluates each operand once in source order. Value bindings named `name` do
+//! not hide dot operations. Grouping changes call behavior: `(receiver.name)()` calls the
+//! operation's result through the ordinary callable lookup instead.
+//!
+//! Host libraries supply these operations through [`OpLookup`]; the parser imposes no
+//! domain-specific receiver types. AST parsing preserves the spelling and the member's name
+//! span without resolving the operation:
+//!
+//! ```rust
+//! use cel_parser::{AstContext, Expr, OpLookup, Parser, format_expr};
+//! let source = "a.center().x";
+//! let expr = Parser::<AstContext>::new(OpLookup::new()).parse_str_ast(source).unwrap();
+//! assert!(matches!(&expr, Expr::Member { args: None, .. }));
+//! assert_eq!(format_expr(&expr, source, 0), source);
 //! ```
 //!
 //! ## Array Literals
@@ -1553,7 +1573,7 @@ impl<C: ParserContext> Parser<C> {
         }
     }
 
-    /// `postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." unsuffixed_integer }.`
+    /// `postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ parameter_list ] ")" ]) }.`
     ///
     /// The repetition allows chained indices (`t.0.1`): each `"." unsuffixed_integer`
     /// is applied in turn to whatever value the previous step left on top of the
@@ -1561,40 +1581,15 @@ impl<C: ParserContext> Parser<C> {
     /// float literal `0.1` (Rust's own lexer maximally munches the digits after
     /// the second `.`), so that case is detected and split back into its two
     /// integer indices — see the `Token::Literal(CelLiteral::Float(..))` arm below.
+    /// Named members consume their optional argument list as one operation, not a call
+    /// of a previously evaluated scalar result.
     fn is_postfix_expression(&mut self) -> Result<bool> {
         let start_span = self.peek_span();
         if !self.is_primary_expression()? {
             return Ok(false);
         }
         loop {
-            if matches!(
-                self.peek_token(),
-                Some(Token::OpenDelim {
-                    delimiter: Delimiter::Parenthesis,
-                    ..
-                })
-            ) {
-                self.advance(); // consume "("
-                let arg_count = if matches!(
-                    self.peek_token(),
-                    Some(Token::CloseDelim {
-                        delimiter: Delimiter::Parenthesis,
-                        ..
-                    })
-                ) {
-                    0
-                } else {
-                    self.parameter_list()?
-                };
-                match self.peek_token() {
-                    Some(Token::CloseDelim {
-                        delimiter: Delimiter::Parenthesis,
-                        ..
-                    }) => {
-                        self.advance(); // consume ")"
-                    }
-                    _ => return Err(self.error_at("expected closing parenthesis")),
-                }
+            if let Some(arg_count) = self.postfix_arguments()? {
                 // Stack order is [callee, arg1, arg2, ...]; lookup peeks top (arg_count + 1) entries.
                 self.context.apply_op(
                     &self.op_lookup,
@@ -1605,6 +1600,23 @@ impl<C: ParserContext> Parser<C> {
                 )?;
             } else if self.is_punctuation(".") {
                 match self.peek_token() {
+                    Some(Token::Identifier(_)) => {
+                        let name_start = self.peek_span().expect("member has a name token");
+                        let name = self.expect_identifier("expected member name")?;
+                        let name_span = ExprSpan {
+                            start: name_start,
+                            end: name_start,
+                        };
+                        let explicit_args = self.postfix_arguments()?;
+                        self.context.apply_member(
+                            &self.op_lookup,
+                            &name,
+                            name_span,
+                            explicit_args,
+                            start_span.expect("production has token at start"),
+                            self.last_span,
+                        )?;
+                    }
                     Some(Token::Literal(CelLiteral::Int(integer))) => {
                         let integer = integer.clone();
                         if !integer.suffix().is_empty() {
@@ -1649,13 +1661,35 @@ impl<C: ParserContext> Parser<C> {
                         self.apply_tuple_index(first_index, idx_start)?;
                         self.apply_tuple_index(second_index, idx_start)?;
                     }
-                    _ => return Err(self.error_at("expected integer after '.'")),
+                    _ => return Err(self.error_at("expected integer or member name after '.'")),
                 }
             } else {
                 break;
             }
         }
         Ok(true)
+    }
+
+    /// `postfix_arguments = [ "(" [ parameter_list ] ")" ].`
+    ///
+    /// Returns `None` without consuming input when no argument list follows.
+    ///
+    /// # Errors
+    /// Returns an error for malformed arguments or a missing closing parenthesis.
+    ///
+    /// - Complexity: O(n) in the parsed argument expressions.
+    fn postfix_arguments(&mut self) -> Result<Option<usize>> {
+        if !self.is_open_paren() {
+            return Ok(None);
+        }
+        if self.is_close_paren() {
+            return Ok(Some(0));
+        }
+        let count = self.parameter_list()?;
+        if !self.is_close_paren() {
+            return Err(self.error_at("expected closing parenthesis"));
+        }
+        Ok(Some(count))
     }
 
     /// Applies a single `.N` tuple-index operation to the value currently on

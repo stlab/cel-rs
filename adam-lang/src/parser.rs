@@ -2550,6 +2550,38 @@ mod tests {
         assert_eq!(*sheet.read::<i32>(c_id).unwrap(), 6);
     }
 
+    /// Verifies member labels never become dependencies or resolve same-named cells.
+    #[test]
+    fn member_labels_are_not_cell_dependencies() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, arity, _| {
+            if matches!(name, "x" | "width") && arity == 1 {
+                segment.op1(|value: f64| value * 2.0)?;
+                return Ok(true);
+            }
+            Ok(false)
+        });
+        let mut sheet = AdamParser::new(TypeRegistry::new(), lookup)
+            .parse_str(
+                "sheet s { cell input: f64 = 3.0; cell x: bool = true; \
+                 cell width: bool = false; cell result: f64 = 0.0; \
+                 relationship { result := input.x().width; } }",
+            )
+            .unwrap();
+        let input = sheet.cell_names["input"].0;
+        let result = sheet.cell_names["result"].0;
+        let (&(relationship, method), _) = sheet.method_spans.iter().next().unwrap();
+        assert_eq!(
+            sheet.method_inputs(relationship, method),
+            Some([input].as_slice())
+        );
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<f64>(result).unwrap(), 12.0);
+        sheet.write(input, 5.0f64).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<f64>(result).unwrap(), 20.0);
+    }
+
     #[test]
     fn parse_relationship_with_multiple_bindings_lets_the_planner_pick_a_direction() {
         // `c` is declared first (and so has the weakest cell strength — `adam_rs`'s

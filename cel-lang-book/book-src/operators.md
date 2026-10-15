@@ -29,7 +29,9 @@ additive_expression = multiplicative_expression { ("+" | "-") multiplicative_exp
 multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression } .
 cast_expression = unary_expression { "as" identifier } .
 unary_expression = (("-" | "!") unary_expression) | postfix_expression .
-postfix_expression = primary_expression { "(" [ argument_list ] ")" | "." unsuffixed_integer } .
+postfix_expression = primary_expression {
+    "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ argument_list ] ")" ])
+} .
 argument_list = expression { "," expression } .
 ```
 

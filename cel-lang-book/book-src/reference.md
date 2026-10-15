@@ -31,7 +31,9 @@ additive_expression = multiplicative_expression { ("+" | "-") multiplicative_exp
 multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression } .
 cast_expression = unary_expression { "as" identifier } .
 unary_expression = (("-" | "!") unary_expression) | postfix_expression .
-postfix_expression = primary_expression { "(" [ argument_list ] ")" | "." unsuffixed_integer } .
+postfix_expression = primary_expression {
+    "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ argument_list ] ")" ])
+} .
 argument_list = expression { "," expression } .
 primary_expression = literal
                    | identifier
@@ -189,7 +191,13 @@ when the evaluation environment installs it. See
   array elements.
 - Comparison expressions consume one comparison operator.
 - Range forms do not chain.
-- CEL does not use member-name access such as `expr.name`.
+- `expr.name` and `expr.name()` invoke the same host-provided unary operation.
+  `expr.name(a, b)` passes the receiver first, followed by explicit arguments.
+  Each operand evaluates once in source order. A value binding named `name`
+  does not hide a dot operation, and the member label is not a variable reference.
+- `(expr.name)()` calls the operation's result normally; it fails if the result
+  is not callable. Dot operations, ordinary calls, and tuple indexing share
+  postfix precedence and may be chained.
 - CEL does not use bracket postfix indexing such as `expr[0]`.
 - CEL does not define map literals, object literals, or a ternary
   operator.
