@@ -257,6 +257,90 @@ fn unresolved_array_operands_do_not_select_known_results() {
     );
 }
 
+/// Composes built-in and registered overloads without diagnosing viable unresolved operands.
+#[test]
+fn mixed_operator_overloads_preserve_unresolved_operands() {
+    let mut ops = lookup();
+    ops.register_operation(OperationSignature {
+        name: "+",
+        operands: vec![
+            leaf::<TestPoint>("TestPoint"),
+            leaf::<TestPoint>("TestPoint"),
+        ],
+        result: leaf::<TestPoint>("TestPoint"),
+        emit: Arc::new(|s, _| {
+            s.op2(|a: TestPoint, b: TestPoint| TestPoint {
+                x: a.x + b.x,
+                y: a.y + b.y,
+            })
+        }),
+    })
+    .unwrap();
+    for (source, expected) in [
+        ("unknown + 1", Ty::Any),
+        ("1 + unknown", Ty::Any),
+        ("unknown + unknown", Ty::Any),
+        ("unknown + TestPoint { x: 1.0, y: 2.0 }", Ty::Any),
+        ("TestPoint { x: 1.0, y: 2.0 } + unknown", Ty::Any),
+        ("1 + 2", Ty::I32),
+        (
+            "TestPoint { x: 1.0, y: 2.0 } + TestPoint { x: 3.0, y: 4.0 }",
+            Ty::Registered(leaf::<TestPoint>("TestPoint")),
+        ),
+    ] {
+        let expr = Parser::<AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (ty, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+            &expr,
+            &|_| Ty::Any,
+            cel_parser::builtin_type_resolver().as_ref(),
+            &ops,
+        );
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+        assert_eq!(ty, expected, "{source}");
+    }
+}
+
+/// Rejects known incompatible operands even when another operand remains unresolved.
+#[test]
+fn mixed_operator_overloads_reject_known_incompatible_operands() {
+    let mut registered = lookup();
+    registered
+        .register_operation(OperationSignature {
+            name: "+",
+            operands: vec![
+                leaf::<TestPoint>("TestPoint"),
+                leaf::<TestPoint>("TestPoint"),
+            ],
+            result: leaf::<TestPoint>("TestPoint"),
+            emit: Arc::new(|s, _| s.op2(|a: TestPoint, _: TestPoint| a)),
+        })
+        .unwrap();
+    for ops in [lookup(), registered] {
+        for source in [
+            "unknown + true",
+            "true + unknown",
+            "1 + true",
+            "TestPoint { x: 1.0, y: 2.0 } + 1",
+            "1 + TestPoint { x: 1.0, y: 2.0 }",
+            "TestPoint { x: 1.0, y: 2.0 } + Empty {}",
+        ] {
+            let expr = Parser::<AstContext>::new(OpLookup::new())
+                .parse_str_ast(source)
+                .unwrap();
+            let (ty, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+                &expr,
+                &|_| Ty::Any,
+                cel_parser::builtin_type_resolver().as_ref(),
+                &ops,
+            );
+            assert_eq!(ty, Ty::Any, "{source}");
+            assert_eq!(diagnostics.len(), 1, "{source}: {diagnostics:?}");
+        }
+    }
+}
+
 /// Verifies malformed field sets and unknown constructors have useful diagnostics.
 #[test]
 fn record_missing_duplicate_unknown_fields_are_errors() {

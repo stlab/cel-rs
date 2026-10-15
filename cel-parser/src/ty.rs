@@ -820,11 +820,14 @@ fn resolved_type_to_element_ty(resolved: &ResolvedType, span: ExprSpan) -> crate
 }
 
 /// Checks an [`Expr::Op`] node by matching known operands against registered signatures
-/// before [`builtin_operand_types`]. Built-in-only checking skips unresolved operands.
+/// before [`builtin_operand_types`]. Both sources accept unresolved operands only when
+/// a signature accepts all known operands; such applications retain an unresolved result.
+/// Known matches preserve their exact result and registered signatures take precedence.
+/// Invalid operand expressions retain their diagnostics without a cascading operator mismatch.
 /// An operator neither metadata source recognizes can't be checked and infers as `Ty::Any`.
 ///
-/// - Complexity: O(s) where s is the number of overloads [`builtin_operand_types`] registers for
-///   `name`, plus the cost of checking each operand (see [`check_expr`]'s own complexity note).
+/// - Complexity: O(s · a · d) for s registered and built-in signatures, a operands and
+///   descriptor depth d, plus the cost of checking each operand (see [`check_expr`]).
 fn check_op(
     name: &str,
     operands: &[Expr],
@@ -843,22 +846,30 @@ fn check_op(
             ty
         })
         .collect();
+    if !diagnostics.is_empty() {
+        return (Ty::Any, diagnostics);
+    }
     if let Some(ty) = matching_registered_type(name, &operand_tys, lookup) {
         return (ty, diagnostics);
     }
     let signatures = builtin_operand_types(name);
     let matched = signatures.iter().find(|sig| {
         sig.arity as usize == operand_tys.len()
-            && Some(sig.lhs) == operand_tys[0].type_id()
-            && (operand_tys.len() < 2 || Some(sig.rhs) == operand_tys[1].type_id())
+            && operand_tys[0].type_id().is_none_or(|id| sig.lhs == id)
+            && (operand_tys.len() < 2 || operand_tys[1].type_id().is_none_or(|id| sig.rhs == id))
     });
     if matched.is_some() {
-        return (result_ty_for_op(name, &operand_tys[0]), diagnostics);
+        let ty = if operand_tys.iter().any(Ty::contains_any) {
+            Ty::Any
+        } else {
+            result_ty_for_op(name, &operand_tys[0])
+        };
+        return (ty, diagnostics);
     }
     if let Some(ty) = registered_operation_ty(name, &operand_tys, span, lookup, &mut diagnostics) {
         return (ty, diagnostics);
     }
-    if !signatures.is_empty() && !operand_tys.contains(&Ty::Any) {
+    if !signatures.is_empty() {
         let described = operand_tys
             .iter()
             .map(Ty::name)
