@@ -418,6 +418,57 @@ fn render_type_expr(type_expr: &crate::TypeExpr) -> String {
 /// indent level for `//`-comment wrap continuations. Neither is used to change emission yet.
 fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
     match expr {
+        Expr::Struct {
+            name,
+            name_span,
+            fields,
+            span,
+        } => {
+            let mut out = name.clone();
+            if let Some(first) = fields.first() {
+                let open = record_gap(
+                    source,
+                    name_span.end.end(),
+                    first.name_span.start.start(),
+                    &["{"],
+                );
+                out.push_str(&emit_gap(&open, Spacing::Around, depth));
+                for (index, field) in fields.iter().enumerate() {
+                    out.push_str(&field.name);
+                    let colon = record_gap(
+                        source,
+                        field.name_span.end.end(),
+                        field.value.span().start.start(),
+                        &[":"],
+                    );
+                    out.push_str(&emit_gap(&colon, Spacing::CommaAfter, depth));
+                    out.push_str(&format_at(&field.value, source, depth, Level::RANGE));
+                    if let Some(next) = fields.get(index + 1) {
+                        let comma = record_gap(
+                            source,
+                            field.value.span().end.end(),
+                            next.name_span.start.start(),
+                            &[","],
+                        );
+                        out.push_str(&emit_gap(&comma, Spacing::CommaAfter, depth));
+                    }
+                }
+                let last = fields.last().expect("non-empty fields");
+                let mut tail = record_gap(
+                    source,
+                    last.value.span().end.end(),
+                    span.end.end(),
+                    &[",", "}"],
+                );
+                tail.retain(|piece| !matches!(piece, GapPiece::Punct(",")));
+                out.push_str(emit_gap(&tail, Spacing::Around, depth).trim_end());
+            } else {
+                let tail = record_gap(source, name_span.end.end(), span.end.end(), &["{", "}"]);
+                out.push(' ');
+                out.push_str(&emit_gap(&tail, Spacing::None, depth));
+            }
+            (out, Level::PRIMARY)
+        }
         Expr::Literal { span, .. } => (render_literal(*span), Level::PRIMARY),
         // `AstContext::apply_op` records every arity-0 operator as a plain `Expr::Ident` (see
         // its own test `apply_op_with_arity_zero_records_an_ident_node`) — `"range_full"` (`..`)
@@ -705,7 +756,12 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             // that a gap holding more than one fixed token (`"}"`, `"else"`, and — for a braced
             // else — `"{"`) still gets a single space between each token and the next, matching
             // the pre-`scan_gap` literal `" } else { "` spacing exactly in the comment-free case.
-            let cond_s = format_at(cond, source, depth, Level::OR);
+            let cond_s = format_expr_restricted(
+                cond,
+                source,
+                depth,
+                crate::ExpressionRestriction::NoStructLiteral,
+            );
             let then_s = format_at(then_branch, source, depth, Level::OR);
             let if_gap = gap_between(source, span.start, cond.span().start, &["if"]);
             let open_gap = gap_between(source, cond.span().end, then_branch.span().start, &["{"]);
@@ -814,6 +870,107 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             };
             (format!("{header}{sep}{body_s}"), Level::PRIMARY)
         }
+    }
+}
+
+/// Recovers a record field gap across grouping parentheses omitted from the AST.
+///
+/// - Precondition: positions refer to `source`, or `source` is empty.
+/// - Complexity: O(n) in source length and gap size.
+fn record_gap(
+    source: &str,
+    from: proc_macro2::LineColumn,
+    to: proc_macro2::LineColumn,
+    expected: &[&'static str],
+) -> Vec<GapPiece> {
+    let starts = line_start_byte_offsets(source);
+    let gap = if source.is_empty() {
+        ""
+    } else {
+        let from = line_column_to_byte(source, &starts, from);
+        let to = line_column_to_byte(source, &starts, to);
+        source.get(from..to).unwrap_or("")
+    };
+    let mut rest = gap;
+    let mut tokens = Vec::new();
+    let mut next = 0;
+    loop {
+        rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix("//") {
+            rest = &after[after.find('\n').unwrap_or(after.len())..];
+        } else if let Some((_, after)) = take_block_comment(rest) {
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix('(') {
+            tokens.push("(");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix(')') {
+            tokens.push(")");
+            rest = after;
+        } else if next < expected.len() && rest.starts_with(expected[next]) {
+            tokens.push(expected[next]);
+            rest = &rest[expected[next].len()..];
+            next += 1;
+        } else {
+            break;
+        }
+    }
+    tokens.extend_from_slice(&expected[next..]);
+    scan_gap(gap, &tokens)
+        .into_iter()
+        .filter(|piece| !matches!(piece, GapPiece::Punct("(" | ")")))
+        .collect()
+}
+
+/// Detects record syntax reached without an explicit expression boundary in a header.
+///
+/// - Complexity: O(n) in the number of visited AST nodes.
+fn header_contains_record(expr: &Expr) -> bool {
+    match expr {
+        Expr::Struct { .. } => true,
+        Expr::Op { operands, .. } => operands.iter().any(header_contains_record),
+        Expr::Logical { lhs, rhs, .. } => {
+            header_contains_record(lhs) || header_contains_record(rhs)
+        }
+        Expr::Cast { expr, .. } | Expr::Closure { body: expr, .. } => header_contains_record(expr),
+        Expr::Member { receiver, .. } => header_contains_record(receiver),
+        Expr::TupleIndex { base, .. } => header_contains_record(base),
+        Expr::Apply { callee, .. } => header_contains_record(callee),
+        Expr::Literal { .. }
+        | Expr::Ident { .. }
+        | Expr::Tuple { .. }
+        | Expr::Array { .. }
+        | Expr::If { .. } => false,
+    }
+}
+
+/// Formats an embedded expression while preserving a header's brace reservation.
+///
+/// Groups the complete header when an otherwise unparenthesized record would be ambiguous.
+/// Ordinary delimiters and nested branch bodies retain their normal formatting.
+///
+/// - Precondition: `source` is the parsed source, or empty for a hand-built AST.
+/// - Complexity: O(n + s) in AST nodes and source text, excluding existing gap scan costs.
+///
+/// # Examples
+/// ```
+/// use cel_parser::{AstContext, ExpressionRestriction, OpLookup, Parser, format_expr_restricted};
+/// let source = "(Point { x: 1.0 }).x";
+/// let ast = Parser::<AstContext>::new(OpLookup::new()).parse_str_ast(source).unwrap();
+/// let text = format_expr_restricted(&ast, source, 0, ExpressionRestriction::NoStructLiteral);
+/// assert_eq!(text, "(Point { x: 1.0 }.x)");
+/// ```
+pub fn format_expr_restricted(
+    expr: &Expr,
+    source: &str,
+    depth: usize,
+    restriction: crate::ExpressionRestriction,
+) -> String {
+    let text = format_expr(expr, source, depth);
+    if restriction == crate::ExpressionRestriction::NoStructLiteral && header_contains_record(expr)
+    {
+        format!("({text})")
+    } else {
+        text
     }
 }
 

@@ -1012,6 +1012,21 @@ impl AdamParser {
     /// - Complexity: O(k) in the number of distinct cell identifiers referenced, for this
     ///   method's own bookkeeping (on top of `cel-parser`'s own parse cost).
     fn parse_deduced_expr(&mut self, ctx: &mut ParseContext) -> Result<(DynSegment, NamedCells)> {
+        self.parse_deduced_expr_restricted(ctx, cel_parser::ExpressionRestriction::None)
+    }
+
+    /// Compiles a dependency-deducing expression with the enclosing header's brace reservation.
+    ///
+    /// - Postcondition: temporary dependency scope is removed on success and error.
+    /// - Complexity: O(k + n) for k declared cells and n expression tokens.
+    ///
+    /// # Errors
+    /// Returns expression syntax, unknown cell, or operation/type errors.
+    fn parse_deduced_expr_restricted(
+        &mut self,
+        ctx: &mut ParseContext,
+        restriction: cel_parser::ExpressionRestriction,
+    ) -> Result<(DynSegment, NamedCells)> {
         // Precompute how to push each currently-declared cell, keyed by name. Built before
         // the scope closure captures anything, since `push_scope` requires `'static` (the
         // closure can't borrow `self.types`).
@@ -1063,7 +1078,7 @@ impl AdamParser {
                 Ok(true)
             });
 
-        let result = self.parse_cel_expression(ctx);
+        let result = self.parse_cel_expression_restricted(ctx, restriction);
         self.cel.op_lookup_mut().pop_scope();
         let segment = result?;
 
@@ -1193,7 +1208,10 @@ impl AdamParser {
         ctx: &mut ParseContext,
         match_span: proc_macro2::Span,
     ) -> Result<(TypeShape, MatchExpr)> {
-        let (segment, inputs) = self.parse_deduced_expr(ctx)?;
+        let (segment, inputs) = self.parse_deduced_expr_restricted(
+            ctx,
+            cel_parser::ExpressionRestriction::NoStructLiteral,
+        )?;
         self.build_match_expr(segment, inputs, match_span)
     }
 
@@ -1824,9 +1842,23 @@ impl AdamParser {
 
     /// Delegates one `expression` to CELParser, sharing the token stream.
     fn parse_cel_expression(&mut self, ctx: &mut ParseContext) -> Result<DynSegment> {
+        self.parse_cel_expression_restricted(ctx, cel_parser::ExpressionRestriction::None)
+    }
+
+    /// Delegates a header expression while leaving its body brace in the shared token stream.
+    ///
+    /// - Complexity: O(n) in expression tokens.
+    ///
+    /// # Errors
+    /// Returns the embedded CEL expression's syntax or type error.
+    fn parse_cel_expression_restricted(
+        &mut self,
+        ctx: &mut ParseContext,
+        restriction: cel_parser::ExpressionRestriction,
+    ) -> Result<DynSegment> {
         let tokens = ctx.cursor.take_tokens().expect("tokens present");
         self.cel.set_lex_tokens(tokens);
-        let result = self.cel.parse_expression();
+        let result = self.cel.parse_expression_restricted(restriction);
         ctx.cursor
             .set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
         result
@@ -3458,6 +3490,49 @@ mod tests {
         sheet.write(mode_id, 1_i32).unwrap();
         sheet.propagate().unwrap();
         assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
+    }
+
+    /// Verifies runtime conditional headers accept grouped records and deduce field dependencies.
+    #[test]
+    fn adam_registered_match_header_reserves_braces() {
+        let mut parser = parser();
+        parser
+            .op_lookup_mut()
+            .register_record(cel_parser::RecordSchema {
+                ty: cel_parser::ResolvedLeafType::new(
+                    "Gate",
+                    cel_runtime::ArrayElementType::leaf::<bool>().unwrap(),
+                ),
+                fields: vec![cel_parser::RecordField {
+                    name: "value",
+                    ty: cel_parser::ResolvedLeafType::new(
+                        "bool",
+                        cel_runtime::ArrayElementType::leaf::<bool>().unwrap(),
+                    ),
+                }],
+                emit: Arc::new(|segment, _, _, _| segment.op1(|value: bool| value)),
+            })
+            .unwrap();
+        let mut sheet = parser
+            .parse_str(
+                "sheet s {
+                cell flag: bool = true;
+                cell input: i32 = 7;
+                cell output: i32 = 0;
+                conditional (Gate { value: flag }) {
+                    true => { relationship { output := if flag { input } else { 0 }; } }
+                    _ => { relationship { output := 0; } }
+                }
+            }",
+            )
+            .unwrap();
+        let output = sheet.cell_names["output"].0;
+        let flag = sheet.cell_names["flag"].0;
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(output).unwrap(), 7);
+        sheet.write(flag, false).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(output).unwrap(), 0);
     }
 
     #[test]

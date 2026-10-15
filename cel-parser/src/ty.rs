@@ -331,6 +331,7 @@ impl Ty {
 /// semantics: both operands must unify with `bool`), and [`Expr::Array`] (whose elements must
 /// share one type, see this module's `check_array`) are checked directly. [`Expr::Apply`],
 /// [`Expr::Member`] (receiver and arguments only, never its label),
+/// [`Expr::Struct`] (field expressions only, never constructor or field labels),
 /// [`Expr::Tuple`], [`Expr::TupleIndex`], [`Expr::If`], and [`Expr::Closure`] are recursed into —
 /// so an `Op` nested inside one is still checked ([`Expr::Closure`] recurses into its own `body`
 /// with a resolver that shadows the outer one with the closure's own parameter names first) — but
@@ -397,6 +398,15 @@ pub fn check_expr_with_type_resolver(
     match expr {
         Expr::Literal { value, .. } => (Ty::from_literal(value), Vec::new()),
         Expr::Ident { name, .. } => (resolve_ident(name), Vec::new()),
+        Expr::Struct { fields, .. } => {
+            let mut diagnostics = Vec::new();
+            for field in fields {
+                diagnostics.extend(
+                    check_expr_with_type_resolver(&field.value, resolve_ident, resolve_type).1,
+                );
+            }
+            (Ty::Any, diagnostics)
+        }
         Expr::Op {
             name,
             operands,

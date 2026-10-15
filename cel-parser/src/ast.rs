@@ -157,6 +157,25 @@ pub enum LogicalOp {
 /// executes it) so a formatter can round-trip `a || b` as `a || b`.
 #[derive(Clone, Debug)]
 pub enum Expr {
+    /// A named record constructor, unresolved until semantic checking.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, Expr, OpLookup, Parser};
+    /// let expr = Parser::<AstContext>::new(OpLookup::new())
+    ///     .parse_str_ast("Point { x: 1.0 }").unwrap();
+    /// assert!(matches!(expr, Expr::Struct { fields, .. } if fields.len() == 1));
+    /// ```
+    Struct {
+        /// The constructor's type name, not a value reference.
+        name: String,
+        /// The constructor name token's span.
+        name_span: ExprSpan,
+        /// Field labels and expressions in their written evaluation order.
+        fields: Vec<RecordInit>,
+        /// The whole constructor, including the closing brace.
+        span: ExprSpan,
+    },
     /// A literal value (`10i32`, `"x"`, `true`, `()`, ...).
     Literal {
         /// The literal's value.
@@ -295,6 +314,7 @@ impl Expr {
     pub fn span(&self) -> ExprSpan {
         match self {
             Expr::Literal { span, .. }
+            | Expr::Struct { span, .. }
             | Expr::Ident { span, .. }
             | Expr::Op { span, .. }
             | Expr::Apply { span, .. }
@@ -308,6 +328,27 @@ impl Expr {
             | Expr::Closure { span, .. } => *span,
         }
     }
+}
+
+/// One required record field initializer, retaining its written name, span, and value.
+///
+/// # Examples
+/// ```
+/// use cel_parser::{AstContext, Expr, OpLookup, Parser};
+/// let expr = Parser::<AstContext>::new(OpLookup::new())
+///     .parse_str_ast("Point { x: value }").unwrap();
+/// if let Expr::Struct { fields, .. } = expr {
+///     assert_eq!(fields[0].name, "x");
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct RecordInit {
+    /// The field label, not an identifier reference.
+    pub name: String,
+    /// The field label token's span.
+    pub name_span: ExprSpan,
+    /// The source-order value expression.
+    pub value: Expr,
 }
 
 /// One `closure_param = identifier ":" type_expression` — a closure literal's declared
@@ -469,6 +510,38 @@ impl ParserContext for AstContext {
             name: name.to_string(),
             name_span,
             args,
+            span: ExprSpan { start, end },
+        });
+        Ok(())
+    }
+
+    /// Records source-order field names and values without resolving a constructor.
+    ///
+    /// - Complexity: O(f) in the number of fields.
+    fn make_record(
+        &mut self,
+        _lookup: &OpLookup,
+        name: &str,
+        name_span: ExprSpan,
+        fields: Vec<(String, ExprSpan)>,
+        _ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        let values = self.pop_n(fields.len());
+        let fields = fields
+            .into_iter()
+            .zip(values)
+            .map(|((name, name_span), value)| RecordInit {
+                name,
+                name_span,
+                value,
+            })
+            .collect();
+        self.values.push(Expr::Struct {
+            name: name.to_string(),
+            name_span,
+            fields,
             span: ExprSpan { start, end },
         });
         Ok(())

@@ -366,6 +366,29 @@ pub trait ParserContext: Sized {
         end: Span,
     ) -> crate::Result<()>;
 
+    /// Constructs a record from named fields emitted exactly once in source order.
+    ///
+    /// - Precondition: one value per field follows `ambient_start` in this context.
+    /// - Complexity: O(f² + f * d + r) for f fields, descriptor depth d and r schemas.
+    ///
+    /// # Errors
+    /// Runtime contexts reject unknown schemas, invalid field sets, mismatched types,
+    /// or constructor emitter failures; syntax-only contexts preserve unresolved names.
+    ///
+    /// # Examples
+    /// See [`OpLookup::construct_record`].
+    #[allow(clippy::too_many_arguments)]
+    fn make_record(
+        &mut self,
+        lookup: &OpLookup,
+        name: &str,
+        name_span: ExprSpan,
+        fields: Vec<(String, ExprSpan)>,
+        ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()>;
+
     /// Applies a short-circuiting logical operator (`"||"` or `"&&"`), consuming a leading
     /// condition value already present on `self` and folding in `rhs`, the already-parsed
     /// right-hand-side fragment.
@@ -616,6 +639,20 @@ impl ParserContext for DynSegmentContext {
         lookup.lookup_member(name, &mut self.0, arity, name_span.start, name_span.end)
     }
 
+    /// Validates and emits the registered constructor without rearranging field values.
+    fn make_record(
+        &mut self,
+        lookup: &OpLookup,
+        name: &str,
+        _name_span: ExprSpan,
+        fields: Vec<(String, ExprSpan)>,
+        ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        lookup.construct_record(name, &fields, ambient_start, &mut self.0, start, end)
+    }
+
     fn apply_logical(
         &mut self,
         name: &str,
@@ -818,6 +855,20 @@ mod tests {
             _op_lookup: &OpLookup,
             _name: &str,
             _arity: usize,
+            _start: Span,
+            _end: Span,
+        ) -> crate::Result<()> {
+            unimplemented!("RecordingContext only records array construction")
+        }
+
+        /// Rejects records outside this array-only test context.
+        fn make_record(
+            &mut self,
+            _lookup: &OpLookup,
+            _name: &str,
+            _name_span: ExprSpan,
+            _fields: Vec<(String, ExprSpan)>,
+            _ambient_start: usize,
             _start: Span,
             _end: Span,
         ) -> crate::Result<()> {

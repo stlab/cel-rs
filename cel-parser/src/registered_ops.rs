@@ -24,7 +24,7 @@ use std::{any::TypeId, sync::Arc};
 use anyhow::{Result, ensure};
 use cel_runtime::{DynSegment, ValueKind, ValueType};
 
-use crate::{OpLookup, ResolvedLeafType, SourceSpan};
+use crate::{ExprSpan, OpLookup, ParseError, ResolvedLeafType, SourceSpan};
 
 /// Emits an operation after the complete operand signature has matched.
 ///
@@ -107,6 +107,108 @@ fn matches_type(expected: &ResolvedLeafType, actual: &ValueType) -> bool {
 }
 
 impl OpLookup {
+    /// Validates required named fields and emits one record from their original stack order.
+    ///
+    /// Field descriptors must match exactly, including recursive array identities. Validation
+    /// never changes the segment; only a fully validated constructor invokes its emitter.
+    ///
+    /// - Precondition: the stack ends with one value per field, starting at `ambient_start`.
+    /// - Complexity: O(r + f² + f * d) for r schemas, f fields and descriptor depth d.
+    ///
+    /// # Errors
+    /// Returns an error for unknown records, unknown/duplicate/missing fields, mismatched
+    /// field types, or a constructor emitter's setup failure.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{CELParser, OpLookup, RecordSchema, ResolvedLeafType};
+    /// use cel_runtime::ArrayElementType;
+    /// use std::sync::Arc;
+    /// let mut lookup = OpLookup::new();
+    /// lookup.register_record(RecordSchema {
+    ///     ty: ResolvedLeafType::new("Empty", ArrayElementType::leaf::<()>().unwrap()),
+    ///     fields: vec![],
+    ///     emit: Arc::new(|s, _, _, _| { s.just(()); Ok(()) }),
+    /// }).unwrap();
+    /// CELParser::new(lookup).parse_str("Empty {}").unwrap().call0::<()>().unwrap();
+    /// ```
+    pub fn construct_record(
+        &self,
+        name: &str,
+        fields: &[(String, ExprSpan)],
+        ambient_start: usize,
+        segment: &mut DynSegment,
+        start: proc_macro2::Span,
+        end: proc_macro2::Span,
+    ) -> crate::Result<()> {
+        let error = |message| ParseError::new_range(message, start, end);
+        let schema = self
+            .record_schema(name)
+            .ok_or_else(|| error(format!("unknown record `{name}`")))?;
+        let mut mapping = Vec::with_capacity(fields.len());
+        for (index, (field, span)) in fields.iter().enumerate() {
+            let schema_index = schema
+                .fields
+                .iter()
+                .position(|candidate| candidate.name == field)
+                .ok_or_else(|| {
+                    ParseError::new_range(
+                        format!("unknown field `{field}` in record `{name}`"),
+                        span.start,
+                        span.end,
+                    )
+                })?;
+            if fields[..index]
+                .iter()
+                .any(|(previous, _)| previous == field)
+            {
+                return Err(ParseError::new_range(
+                    format!("duplicate field `{field}` in record `{name}`"),
+                    span.start,
+                    span.end,
+                ));
+            }
+            mapping.push(schema_index);
+        }
+        if let Some(missing) = schema
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(index, _)| !mapping.contains(index))
+        {
+            return Err(error(format!(
+                "missing field `{}` in record `{name}`",
+                missing.1.name
+            )));
+        }
+        let operands = segment.peek_stack_infos(fields.len());
+        debug_assert_eq!(operands.len(), fields.len());
+        debug_assert_eq!(
+            segment.stack_offset_before_top(fields.len()).ok(),
+            Some(ambient_start)
+        );
+        for ((actual, &schema_index), (field, span)) in operands.iter().zip(&mapping).zip(fields) {
+            let expected = &schema.fields[schema_index].ty;
+            if !matches_type(expected, &actual.value_type) {
+                return Err(ParseError::new_range(
+                    format!(
+                        "field `{field}`: type mismatch: expected `{}`",
+                        expected.type_name()
+                    ),
+                    span.start,
+                    span.end,
+                ));
+            }
+        }
+        (schema.emit)(
+            segment,
+            &mapping,
+            ambient_start,
+            SourceSpan::from_proc_macro2_range(start, end),
+        )
+        .map_err(|err| error(err.to_string()))
+    }
+
     /// Registers one persistent named operation without replacing existing overloads.
     ///
     /// # Errors

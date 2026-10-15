@@ -467,6 +467,9 @@ fn expr_references_ident(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Literal { .. } => false,
         Expr::Ident { name: ident, .. } => ident == name,
+        Expr::Struct { fields, .. } => fields
+            .iter()
+            .any(|field| expr_references_ident(&field.value, name)),
         Expr::Op { operands, .. } => operands.iter().any(|e| expr_references_ident(e, name)),
         Expr::Apply { callee, args, .. } => {
             expr_references_ident(callee, name)
@@ -1240,6 +1243,22 @@ mod tests {
         let sheet = parse("sheet s { cell a: i32 = 1 filter 1; }");
         let diags = check_sheet(&sheet, &TypeRegistry::new());
         assert_eq!(diags.len(), 1);
+    }
+
+    /// Verifies record values contribute dependencies, while constructor and field labels do not.
+    #[test]
+    fn record_filter_dependencies_only_visit_field_values() {
+        let sheet = parse("sheet s { cell a: i32 = 1 filter Record { value: _ }; }");
+        assert!(check_sheet(&sheet, &TypeRegistry::new()).is_empty());
+        for source in [
+            "sheet s { cell a: i32 = 1 filter Record { _: 1 }; }",
+            "sheet s { cell a: i32 = 1 filter _ { value: 1 }; }",
+        ] {
+            let sheet = parse(source);
+            let diagnostics = check_sheet(&sheet, &TypeRegistry::new());
+            assert_eq!(diagnostics.len(), 1);
+            assert!(diagnostics[0].message().contains("must reference `_`"));
+        }
     }
 
     #[test]

@@ -387,7 +387,12 @@ fn write_conditional(out: &mut String, source: &str, cond: &ast::ConditionalDecl
     write_doc_comment(out, "///", cond.doc_comment.as_deref(), depth);
     out.push_str(&indent(depth));
     out.push_str("conditional ");
-    out.push_str(&cel_parser::format_expr(&cond.match_expr, source, depth));
+    out.push_str(&cel_parser::format_expr_restricted(
+        &cond.match_expr,
+        source,
+        depth,
+        cel_parser::ExpressionRestriction::NoStructLiteral,
+    ));
     // Comment between the match subject and the conditional's own `{`.
     out.push_str(&emit_decl_gap(
         source,

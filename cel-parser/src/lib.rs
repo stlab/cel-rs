@@ -34,8 +34,9 @@
 //! cast_expression = unary_expression { "as" identifier }.
 //! unary_expression = (("-" | "!") unary_expression) | postfix_expression.
 //! postfix_expression = primary_expression { "(" [ parameter_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ parameter_list ] ")" ]) }.
-//! primary_expression = literal | identifier | tuple_or_group | array_expression
+//! primary_expression = literal | identifier [ record_fields ] | tuple_or_group | array_expression
 //!                    | if_expression | closure_expression.
+//! record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } [ "," ] ] "}".
 //! tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".
 //! array_expression = "[" [ expression { "," expression } ] "]" [ ":" type_expression ].
 //! if_expression = "if" expression "{" expression "}" [ "else" ( "{" expression "}" | if_expression ) ].
@@ -49,6 +50,12 @@
 //!
 //! literal_pattern = ["-"] literal.
 //! ```
+//!
+//! Registered records use a constructor namespace independent of value bindings and evaluate
+//! fields once in written order. All schema fields are required exactly once with exact types.
+//! An `if` condition (or an embedded host header) reserves its body brace: write
+//! `if (Point { x: 0.0 }).x == 0.0 { 1 } else { 2 }` to explicitly allow a record there.
+//! Delimited argument lists, arrays, field values, and branch bodies parse ordinarily.
 //!
 //! `literal_pattern` is a separate entry point, not reachable from `expression` — it exists for
 //! grammars that embed CEL literals in pattern position (e.g. adam-lang's `conditional_branch`)
@@ -247,11 +254,11 @@ pub mod trivia;
 pub mod ty;
 pub mod type_expr;
 
-pub use ast::{AstContext, ClosureParam, Expr, ExprSpan, Literal, LogicalOp};
+pub use ast::{AstContext, ClosureParam, Expr, ExprSpan, Literal, LogicalOp, RecordInit};
 pub use error::{
     CELError, FormatRustcStyle, ParseError, SourceSpan, SpanContext, SpanLabel, format_multi_span,
 };
-pub use fmt::format_expr;
+pub use fmt::{format_expr, format_expr_restricted};
 pub use op_table::{OpLookup, OperandTypes, builtin_operand_types};
 pub use parser_context::{DynSegmentContext, ParserContext};
 pub use proc_macro2::LineColumn;
@@ -634,6 +641,27 @@ pub struct Parser<C: ParserContext> {
     /// `OpenDelim`, decremented for a `CloseDelim`. See
     /// [`unbalanced_delimiter_count`](Self::unbalanced_delimiter_count).
     unbalanced_delimiters: i32,
+    restriction: ExpressionRestriction,
+}
+
+/// Selects whether a header reserves an identifier's following brace for its body.
+///
+/// Explicit delimiters establish ordinary expression boundaries; unary, binary, and closure
+/// expressions inherit the surrounding restriction.
+///
+/// # Examples
+/// ```
+/// use cel_parser::{CELParser, ExpressionRestriction, OpLookup};
+/// let mut parser = CELParser::new(OpLookup::new());
+/// parser.set_tokens("true {}".parse::<proc_macro2::TokenStream>().unwrap().into_iter());
+/// parser.parse_expression_restricted(ExpressionRestriction::NoStructLiteral).unwrap();
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpressionRestriction {
+    /// Allows ordinary record literals.
+    None,
+    /// Leaves an unparenthesized identifier's following brace to the enclosing grammar.
+    NoStructLiteral,
 }
 
 /// A recursive descent parser that executes directly into a [`DynSegment`].
@@ -699,6 +727,7 @@ impl<C: ParserContext> Parser<C> {
             type_resolver,
             last_span: Span::call_site(),
             unbalanced_delimiters: 0,
+            restriction: ExpressionRestriction::None,
         }
     }
 
@@ -799,10 +828,51 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// - Complexity: O(n) in the number of tokens in the expression.
     pub fn parse_expression_ctx(&mut self) -> Result<C> {
-        if !self.is_expression()? {
+        self.parse_expression_ctx_restricted(ExpressionRestriction::None)
+    }
+
+    /// Parses one expression under `restriction`, restoring the previous mode on every result.
+    ///
+    /// Does not require end-of-stream, so the enclosing grammar retains its body brace.
+    ///
+    /// - Complexity: O(n) in the expression's token count.
+    ///
+    /// # Errors
+    /// Returns an error for a malformed expression or a context's semantic rejection.
+    ///
+    /// # Examples
+    /// See [`ExpressionRestriction`].
+    pub fn parse_expression_ctx_restricted(
+        &mut self,
+        restriction: ExpressionRestriction,
+    ) -> Result<C> {
+        if !self.with_restriction(restriction, |p| p.is_expression())? {
             return Err(self.error_at("expression expected"));
         }
         Ok(std::mem::replace(&mut self.context, C::new_context()))
+    }
+
+    /// Runs a grammar production in a temporary mode, restoring it on success and error.
+    ///
+    /// - Complexity: the invoked production's complexity.
+    fn with_restriction<T>(
+        &mut self,
+        restriction: ExpressionRestriction,
+        parse: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let previous = std::mem::replace(&mut self.restriction, restriction);
+        let result = parse(self);
+        self.restriction = previous;
+        result
+    }
+
+    /// `ordinary_expression = expression.` Explicit delimiters lift header restrictions.
+    ///
+    /// # Errors
+    /// Returns the nested expression's syntax or context error.
+    /// - Complexity: O(n) in the expression's token count.
+    fn is_ordinary_expression(&mut self) -> Result<bool> {
+        self.with_restriction(ExpressionRestriction::None, |p| p.is_expression())
     }
 
     /// Parses one `literal_pattern` from the current token stream and returns the built context.
@@ -1725,12 +1795,12 @@ impl<C: ParserContext> Parser<C> {
     /// Returns an error if the first token can't start an `expression`, or if a comma
     /// isn't followed by one.
     fn parameter_list(&mut self) -> Result<usize> {
-        if !self.is_expression()? {
+        if !self.is_ordinary_expression()? {
             return Err(self.error_at("expected expression"));
         }
         let mut count = 1;
         while self.is_punctuation(",") {
-            if !self.is_expression()? {
+            if !self.is_ordinary_expression()? {
                 return Err(self.error_at("expected expression after comma"));
             }
             count += 1;
@@ -1738,7 +1808,7 @@ impl<C: ParserContext> Parser<C> {
         Ok(count)
     }
 
-    /// `primary_expression = literal | identifier | tuple_or_group | array_expression |
+    /// `primary_expression = literal | identifier [ record_fields ] | tuple_or_group | array_expression |
     /// if_expression | closure_expression.`
     ///
     /// Dispatches to [`is_if_expression`](Self::is_if_expression) when the `if` keyword is seen,
@@ -1783,6 +1853,18 @@ impl<C: ParserContext> Parser<C> {
                     return self.is_if_expression(ident_span);
                 }
 
+                if self.restriction == ExpressionRestriction::None
+                    && matches!(
+                        self.peek_token(),
+                        Some(Token::OpenDelim {
+                            delimiter: Delimiter::Brace,
+                            ..
+                        })
+                    )
+                {
+                    return self.is_record_fields(&ident_name, ident_span);
+                }
+
                 self.context
                     .apply_op(&self.op_lookup, &ident_name, 0, ident_span, ident_span)?;
 
@@ -1798,6 +1880,77 @@ impl<C: ParserContext> Parser<C> {
             }) => self.is_array_expression(),
             _ => Ok(false),
         }
+    }
+
+    /// `record_fields = "{" [ identifier ":" expression { "," identifier ":" expression } [ "," ] ] "}".`
+    ///
+    /// - Precondition: the constructor identifier is consumed and the next token is `{`.
+    /// - Postcondition: fields are emitted once in source order before the constructor.
+    /// - Complexity: O(n + f² + f * d + r) for n tokens, f fields, descriptor depth d and r schemas.
+    ///
+    /// # Errors
+    /// Returns malformed field syntax errors or the context's record validation error.
+    fn is_record_fields(&mut self, name: &str, name_token: Span) -> Result<bool> {
+        self.advance();
+        let ambient_start = self.context.current_stack_offset();
+        let mut fields = Vec::new();
+        loop {
+            if matches!(
+                self.peek_token(),
+                Some(Token::CloseDelim {
+                    delimiter: Delimiter::Brace,
+                    ..
+                })
+            ) {
+                self.advance();
+                break;
+            }
+            let Some(Token::Identifier(field)) = self.peek_token() else {
+                return Err(self.error_at("expected record field name"));
+            };
+            let field_name = field.to_string();
+            let field_span = field.span();
+            self.advance();
+            if !self.is_punctuation(":") {
+                return Err(self.error_at("expected `:` after record field name"));
+            }
+            if !self.is_ordinary_expression()? {
+                return Err(self.error_at("expected record field expression"));
+            }
+            fields.push((
+                field_name,
+                ExprSpan {
+                    start: field_span,
+                    end: field_span,
+                },
+            ));
+            if matches!(
+                self.peek_token(),
+                Some(Token::CloseDelim {
+                    delimiter: Delimiter::Brace,
+                    ..
+                })
+            ) {
+                self.advance();
+                break;
+            }
+            if !self.is_punctuation(",") {
+                return Err(self.error_at("expected `,` or `}` after record field"));
+            }
+        }
+        self.context.make_record(
+            &self.op_lookup,
+            name,
+            ExprSpan {
+                start: name_token,
+                end: name_token,
+            },
+            fields,
+            ambient_start,
+            name_token,
+            self.last_span,
+        )?;
+        Ok(true)
     }
 
     /// `tuple_or_group = "(" [ expression ["," [ expression { "," expression } ]] ] ")".`
@@ -1829,7 +1982,7 @@ impl<C: ParserContext> Parser<C> {
             return Ok(true);
         }
         let ambient_start = self.context.current_stack_offset();
-        if !self.is_expression()? {
+        if !self.is_ordinary_expression()? {
             return Err(self.error_at("expected expression"));
         }
         if matches!(
@@ -1861,7 +2014,7 @@ impl<C: ParserContext> Parser<C> {
             return Ok(true);
         }
         loop {
-            if !self.is_expression()? {
+            if !self.is_ordinary_expression()? {
                 return Err(self.error_at("expected expression after ','"));
             }
             count += 1;
@@ -1910,7 +2063,7 @@ impl<C: ParserContext> Parser<C> {
         let ambient_start = self.context.current_stack_offset();
         let mut count = 0usize;
         if !self.is_close_bracket() {
-            if !self.is_expression()? {
+            if !self.is_ordinary_expression()? {
                 return Err(self.error_at("expected expression"));
             }
             count = 1;
@@ -1923,7 +2076,7 @@ impl<C: ParserContext> Parser<C> {
                 }
                 // A comma always requires another element: `]` here (a trailing comma) can't
                 // start an `expression`, so this is where `[0i32,]` is rejected.
-                if !self.is_expression()? {
+                if !self.is_ordinary_expression()? {
                     return Err(self.error_at("expected expression after ','"));
                 }
                 count += 1;
@@ -2214,7 +2367,9 @@ impl<C: ParserContext> Parser<C> {
     ///
     /// - Postcondition: Returns `Ok(true)` on success; `Ok(false)` is never returned.
     fn is_if_expression(&mut self, if_span: Span) -> Result<bool> {
-        if !self.is_expression()? {
+        if !self.with_restriction(ExpressionRestriction::NoStructLiteral, |p| {
+            p.is_expression()
+        })? {
             return Err(self.error_at("expected condition after `if`"));
         }
         match self.peek_token() {
@@ -2228,7 +2383,7 @@ impl<C: ParserContext> Parser<C> {
         }
         let mut then_fragment = self.context.new_fragment();
         std::mem::swap(&mut self.context, &mut then_fragment);
-        if !self.is_expression()? {
+        if !self.is_ordinary_expression()? {
             return Err(self.error_at("expected expression in then-branch"));
         }
         std::mem::swap(&mut self.context, &mut then_fragment);
@@ -2263,7 +2418,7 @@ impl<C: ParserContext> Parser<C> {
                 }
                 let mut fragment = self.context.new_fragment();
                 std::mem::swap(&mut self.context, &mut fragment);
-                if !self.is_expression()? {
+                if !self.is_ordinary_expression()? {
                     return Err(self.error_at("expected expression in else-branch"));
                 }
                 std::mem::swap(&mut self.context, &mut fragment);
@@ -2304,6 +2459,23 @@ impl Parser<DynSegmentContext> {
     /// - Complexity: O(n) in the number of tokens in the expression.
     pub fn parse_expression(&mut self) -> Result<DynSegment> {
         self.parse_expression_ctx()
+            .map(DynSegmentContext::into_inner)
+    }
+
+    /// Parses one embedded expression with a header brace restriction.
+    ///
+    /// - Complexity: O(n) in the expression's token count.
+    ///
+    /// # Errors
+    /// Returns syntax, type, or operation-resolution errors.
+    ///
+    /// # Examples
+    /// See [`ExpressionRestriction`].
+    pub fn parse_expression_restricted(
+        &mut self,
+        restriction: ExpressionRestriction,
+    ) -> Result<DynSegment> {
+        self.parse_expression_ctx_restricted(restriction)
             .map(DynSegmentContext::into_inner)
     }
 
