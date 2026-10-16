@@ -17,17 +17,41 @@ pub struct BuildOutcome {
     pub error: Option<String>,
 }
 
-/// Builds a [`cel_parser::OpLookup`] with the CEL standard library installed, so every
+/// Builds a [`cel_parser::OpLookup`] with the CEL standard and Euclid libraries installed, so every
 /// adam-lang source [`build_sheet`] parses has the same function set (`min`, `max`, `clamp`,
 /// etc.) available.
 ///
 /// Every source parsed through this function therefore has `cel-std` installed — a source
 /// that deliberately relies on the standard library being *absent* cannot use this function
 /// or [`build_sheet`]; construct an `AdamParser` directly with an empty `OpLookup` instead.
+///
+/// - Complexity: O(s²) in the number of installed signatures.
+///
+/// # Examples
+/// ```
+/// let lookup = adam_web_ui::build::op_lookup();
+/// assert!(lookup.record_schema("Rect").is_some());
+/// ```
 pub fn op_lookup() -> cel_parser::OpLookup {
     let mut lookup = cel_parser::OpLookup::new();
     cel_std::install(&mut lookup);
+    cel_euclid::install(&mut lookup);
     lookup
+}
+
+/// Builds the matching scalar and Euclid cell-type environment.
+///
+/// - Complexity: O(t) in the number of registered types.
+///
+/// # Examples
+/// ```
+/// let types = adam_web_ui::build::type_registry();
+/// assert!(types.get("Rect").is_some());
+/// ```
+pub fn type_registry() -> TypeRegistry {
+    let mut types = TypeRegistry::new();
+    cel_euclid::register_adam_types(&mut types);
+    types
 }
 
 /// Parses `source` as adam-lang, builds a `Sheet` and `Labels`, and propagates
@@ -39,7 +63,7 @@ pub fn op_lookup() -> cel_parser::OpLookup {
 ///
 /// - Complexity: O(n) in the length of `source` plus the cost of one `propagate()`.
 pub fn build_sheet(source: &str, file_name: &str, renderer: &Renderer) -> BuildOutcome {
-    let mut parser = AdamParser::new(TypeRegistry::new(), op_lookup());
+    let mut parser = AdamParser::new(type_registry(), op_lookup());
     let mut parsed = match parser.parse_str(source) {
         Ok(p) => p,
         Err(e) => {
@@ -72,6 +96,26 @@ pub fn build_sheet(source: &str, file_name: &str, renderer: &Renderer) -> BuildO
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The opted-in host builds registered fields, members, and typed closures.
+    #[test]
+    fn geometry_sheet_builds_in_opted_in_host() {
+        let outcome = build_sheet(
+            "sheet s { out x := (|p: Point2D| p.x)(Point2D { y: 2.0, x: 1.0 }); out n := min(3.0, 4.0); }",
+            "geometry.adm2",
+            &Renderer::plain(),
+        );
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        let (parsed, _) = outcome.sheet_labels.unwrap();
+        assert_eq!(*parsed.read::<f64>(parsed.cell_names["x"].0).unwrap(), 1.0);
+        for actual in [
+            include_str!("../../cel-euclid/examples/crop_straighten.adm2"),
+            include_str!("../../cel-euclid/examples/pan_zoom.adm2"),
+        ] {
+            let outcome = build_sheet(actual, "geometry.adm2", &Renderer::plain());
+            assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        }
+    }
 
     const VALID_SOURCE: &str = r#"
         sheet s {

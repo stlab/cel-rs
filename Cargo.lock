@@ -30,6 +30,7 @@ version = "0.1.0"
 dependencies = [
  "adam-lang",
  "adam-rs",
+ "cel-euclid",
  "cel-parser",
  "cel-runtime",
  "cel-std",
@@ -65,7 +66,9 @@ version = "0.1.0"
 dependencies = [
  "adam-lang",
  "anyhow",
+ "cel-euclid",
  "cel-parser",
+ "cel-std",
  "lsp-server",
  "lsp-types",
  "serde_json",
@@ -87,6 +90,7 @@ dependencies = [
  "adam-rs",
  "annotate-snippets",
  "anyhow",
+ "cel-euclid",
  "cel-parser",
  "cel-runtime",
  "cel-std",
@@ -520,9 +524,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cel-euclid"
+version = "0.1.0"
+dependencies = [
+ "adam-lang",
+ "anyhow",
+ "cel-parser",
+ "cel-runtime",
+ "cel-std",
+ "euclid",
+ "proc-macro2",
+]
+
+[[package]]
 name = "cel-lang-book"
 version = "0.1.0"
 dependencies = [
+ "cel-euclid",
  "cel-parser",
  "cel-runtime",
  "cel-std",

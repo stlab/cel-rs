@@ -206,8 +206,10 @@ fn call_dyn_impl<T: 'static + Clone>(
     Ok(Box::new(seg.call_dyn::<T>(inputs)?))
 }
 
-fn array_element_type_impl<T: 'static>() -> cel_runtime::ArrayElementType {
-    cel_runtime::ArrayElementType::leaf::<T>().expect("registered leaf type is not DynamicArray")
+/// Returns the registered leaf descriptor, including its closure argument clone adapter.
+fn array_element_type_impl<T: 'static + Clone>() -> cel_runtime::ArrayElementType {
+    cel_runtime::ArrayElementType::cloneable::<T>()
+        .expect("registered leaf type is not DynamicArray")
 }
 
 /// Evaluates `seg` (producing a `RangeInclusive<T>`) against `value` prepended to `args`, then
@@ -260,6 +262,18 @@ unsafe fn extract_box_impl<T: Clone + 'static>(ptr: *const u8) -> Box<dyn Any> {
 }
 
 impl TypeRegistry {
+    /// Returns a registered leaf's source-facing name and complete CEL element descriptor.
+    ///
+    /// - Complexity: O(l) to clone the registered name of length l.
+    pub(crate) fn resolved_leaf_type(&self, type_id: TypeId) -> Option<ResolvedLeafType> {
+        let name = self.by_type_id.get(&type_id)?;
+        let entry = self.by_name.get(name)?;
+        Some(ResolvedLeafType::new(
+            name.clone(),
+            (entry.element_type_fn)(),
+        ))
+    }
+
     /// Builds a CEL-facing resolver snapshot from this registry's registered leaf types.
     ///
     /// The returned resolver owns only the name-to-descriptor metadata CEL needs for typed array

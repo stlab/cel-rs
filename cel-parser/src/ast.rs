@@ -157,6 +157,25 @@ pub enum LogicalOp {
 /// executes it) so a formatter can round-trip `a || b` as `a || b`.
 #[derive(Clone, Debug)]
 pub enum Expr {
+    /// A named record constructor, unresolved until semantic checking.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, Expr, OpLookup, Parser};
+    /// let expr = Parser::<AstContext>::new(OpLookup::new())
+    ///     .parse_str_ast("Point { x: 1.0 }").unwrap();
+    /// assert!(matches!(expr, Expr::Struct { fields, .. } if fields.len() == 1));
+    /// ```
+    Struct {
+        /// The constructor's type name, not a value reference.
+        name: String,
+        /// The constructor name token's span.
+        name_span: ExprSpan,
+        /// Field labels and expressions in their written evaluation order.
+        fields: Vec<RecordInit>,
+        /// The whole constructor, including the closing brace.
+        span: ExprSpan,
+    },
     /// A literal value (`10i32`, `"x"`, `true`, `()`, ...).
     Literal {
         /// The literal's value.
@@ -187,6 +206,28 @@ pub enum Expr {
         /// The argument sub-expressions, in source order.
         args: Vec<Expr>,
         /// The span of the whole call, including its argument list.
+        span: ExprSpan,
+    },
+    /// A direct receiver operation (`receiver.name` or `receiver.name(args...)`).
+    ///
+    /// The label is not an identifier reference. Type and overload resolution are deferred.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, Expr, OpLookup, Parser};
+    /// let expr = Parser::<AstContext>::new(OpLookup::new()).parse_str_ast("a.x()").unwrap();
+    /// assert!(matches!(expr, Expr::Member { args: Some(args), .. } if args.is_empty()));
+    /// ```
+    Member {
+        /// The receiver, evaluated before explicit arguments.
+        receiver: Box<Expr>,
+        /// The operation's name.
+        name: String,
+        /// The member name token's span.
+        name_span: ExprSpan,
+        /// Explicit arguments in source order; `None` preserves property spelling.
+        args: Option<Vec<Expr>>,
+        /// The span from the receiver through the name or closing parenthesis.
         span: ExprSpan,
     },
     /// A tuple literal (`(a, b, ...)`; a 1-tuple is `(a,)`).
@@ -273,9 +314,11 @@ impl Expr {
     pub fn span(&self) -> ExprSpan {
         match self {
             Expr::Literal { span, .. }
+            | Expr::Struct { span, .. }
             | Expr::Ident { span, .. }
             | Expr::Op { span, .. }
             | Expr::Apply { span, .. }
+            | Expr::Member { span, .. }
             | Expr::Tuple { span, .. }
             | Expr::Array { span, .. }
             | Expr::TupleIndex { span, .. }
@@ -285,6 +328,27 @@ impl Expr {
             | Expr::Closure { span, .. } => *span,
         }
     }
+}
+
+/// One required record field initializer, retaining its written name, span, and value.
+///
+/// # Examples
+/// ```
+/// use cel_parser::{AstContext, Expr, OpLookup, Parser};
+/// let expr = Parser::<AstContext>::new(OpLookup::new())
+///     .parse_str_ast("Point { x: value }").unwrap();
+/// if let Expr::Struct { fields, .. } = expr {
+///     assert_eq!(fields[0].name, "x");
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct RecordInit {
+    /// The field label, not an identifier reference.
+    pub name: String,
+    /// The field label token's span.
+    pub name_span: ExprSpan,
+    /// The source-order value expression.
+    pub value: Expr,
 }
 
 /// One `closure_param = identifier ":" type_expression` — a closure literal's declared
@@ -378,6 +442,10 @@ impl AstContext {
 }
 
 impl ParserContext for AstContext {
+    fn resolves_closure_types() -> bool {
+        false
+    }
+
     fn new_context() -> Self {
         AstContext { values: Vec::new() }
     }
@@ -423,6 +491,63 @@ impl ParserContext for AstContext {
                 span,
             });
         }
+        Ok(())
+    }
+
+    /// Records member spelling and source-order operands without resolving their types.
+    ///
+    /// - Complexity: O(n) in the number of explicit arguments.
+    fn apply_member(
+        &mut self,
+        _lookup: &OpLookup,
+        name: &str,
+        name_span: ExprSpan,
+        explicit_args: Option<usize>,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        debug_assert!(self.values.len() > explicit_args.unwrap_or(0));
+        let args = explicit_args.map(|count| self.pop_n(count));
+        let receiver = self.pop();
+        self.values.push(Expr::Member {
+            receiver: Box::new(receiver),
+            name: name.to_string(),
+            name_span,
+            args,
+            span: ExprSpan { start, end },
+        });
+        Ok(())
+    }
+
+    /// Records source-order field names and values without resolving a constructor.
+    ///
+    /// - Complexity: O(f) in the number of fields.
+    fn make_record(
+        &mut self,
+        _lookup: &OpLookup,
+        name: &str,
+        name_span: ExprSpan,
+        fields: Vec<(String, ExprSpan)>,
+        _ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        let values = self.pop_n(fields.len());
+        let fields = fields
+            .into_iter()
+            .zip(values)
+            .map(|((name, name_span), value)| RecordInit {
+                name,
+                name_span,
+                value,
+            })
+            .collect();
+        self.values.push(Expr::Struct {
+            name: name.to_string(),
+            name_span,
+            fields,
+            span: ExprSpan { start, end },
+        });
         Ok(())
     }
 
@@ -584,7 +709,7 @@ impl ParserContext for AstContext {
 
     fn push_closure(
         &mut self,
-        param_types: Vec<std::any::TypeId>,
+        param_types: Vec<cel_runtime::ValueType>,
         params: Vec<ClosureParam>,
         body: Self,
         span: Span,

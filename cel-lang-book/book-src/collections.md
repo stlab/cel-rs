@@ -50,8 +50,9 @@ if ready { [1, 2] } else { [3, 4] }
 - Tuples and arrays are distinct value forms: tuples are positional and
   use `.N`, while arrays use bracket literals and homogeneous element
   typing.
-- Tuple indexing uses an unsuffixed integer such as `.0` or `.1`; member
-  access such as `value.name` is not part of CEL.
+- Tuple indexing uses an unsuffixed integer such as `.0` or `.1`. Named
+  postfixes such as `value.name` invoke host-provided operations; they do not
+  select tuple fields.
 - Tuple values are not valid array elements.
 
 ## Edge cases

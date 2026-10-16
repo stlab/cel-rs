@@ -130,6 +130,29 @@ CEL also builds compound values from ordinary expressions:
 |x: i32| x + 1
 ```
 
+## Host-registered records
+
+A host can register a named record schema and operations without changing CEL.
+Write `Sample { value: 3.0, }` to construct a record when the host supplies that
+schema. Field labels select schema fields rather than variables; values evaluate
+in written order. Supply every field exactly once. Empty schemas accept `{}`,
+and non-empty field lists accept a trailing comma. CEL reports unknown
+constructors, unknown/duplicate/missing fields, and mismatched field types.
+
+Records use exact scalar types: `1` is `i32`, never implicitly `f64`; use `1.0`
+or an explicit supported cast for an `f64` field. Constructor names occupy a
+separate namespace from values, so a value named `Sample` does not hide the
+constructor. The host must separately register any operation such as `.value`;
+a record schema does not automatically create accessors.
+
+This executable embedding example registers a real Rust value and accessor.
+Both bare and parenthesized member spellings return `3.0`; calling that numeric
+result with `(record.value)()` fails.
+
+```rust
+{{#include ../tests/examples.rs:registered-record}}
+```
+
 ## Range values
 
 A range expression produces a range value from zero, one, or two numeric

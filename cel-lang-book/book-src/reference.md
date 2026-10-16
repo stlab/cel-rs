@@ -31,27 +31,30 @@ additive_expression = multiplicative_expression { ("+" | "-") multiplicative_exp
 multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression } .
 cast_expression = unary_expression { "as" identifier } .
 unary_expression = (("-" | "!") unary_expression) | postfix_expression .
-postfix_expression = primary_expression { "(" [ argument_list ] ")" | "." unsuffixed_integer } .
+postfix_expression = primary_expression {
+    "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ argument_list ] ")" ])
+} .
 argument_list = expression { "," expression } .
 primary_expression = literal
-                   | identifier
+                   | identifier [ record_fields ]
                    | tuple_or_group
                    | array_expression
                    | if_expression
                    | closure_expression .
+record_fields = "{"
+    [ field_initializer { "," field_initializer } [ "," ] ] "}" .
+field_initializer = identifier ":" expression .
 tuple_or_group = "(" [ expression [ "," [ expression { "," expression } ] ] ] ")" .
 array_expression = "[" [ expression { "," expression } ] "]"
                  [ ":" type_expr ] .
-type_expr = identifier
+type_expr = identifier [ "(" type_expr { "," type_expr } ")" ]
           | "[" type_expr "]"
-          | "(" [ type_expr [ "," [ type_expr { "," type_expr } ] ] ] ")" .
+          | "(" [ type_expr { "," type_expr } ] ")" .
 if_expression = "if" expression "{" expression "}"
               [ "else" ( "{" expression "}" | if_expression ) ] .
 closure_expression = "||" expression
                    | "|" closure_param { "," closure_param } "|" expression .
-closure_param = identifier ":" closure_type_expression .
-closure_type_expression = identifier
-                        | "(" [ closure_type_expression { "," closure_type_expression } ] ")" .
+closure_param = identifier ":" type_expr .
 ```
 
 ## Worked examples
@@ -79,7 +82,7 @@ true as i32
 
 | Kind | Names or forms | Notes |
 | --- | --- | --- |
-| Built-in scalar types | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `f32`, `f64`, `bool`, `String` | These are the only named cast targets and the only scalar names allowed in typed closure parameters. |
+| Built-in scalar types | `i8`, `i16`, `i32`, `i64`, `i128`, `isize`, `u8`, `u16`, `u32`, `u64`, `u128`, `usize`, `f32`, `f64`, `bool`, `String` | These are the named cast targets. Closure annotations also accept registered cloneable leaves and built-in generic types through the configured type resolver. |
 | Other value forms | `char`, byte strings, C strings, unit, tuples, arrays, ranges, closures | Expressions can use these values, but they are not extra built-in scalar type names. |
 
 ## Literal table
@@ -112,7 +115,7 @@ true as i32
 | 10 | `*`, `/`, `%` | left |
 | 11 | `as` | left |
 | 12 | unary <code>-</code>, <code>!</code> | prefix |
-| 13 | calls and `.N` | left |
+| 13 | calls, `.N`, `.name`, `.name(args)` | left |
 
 ## Operator rules table
 
@@ -172,10 +175,11 @@ when the evaluation environment installs it. See
 | Form | Meaning | Notes |
 | --- | --- | --- |
 | <code>&#124;&#124; expr</code> | zero-parameter closure | The body is one expression. |
-| <code>&#124;x: T&#124; expr</code> | one typed parameter | `T` is a built-in scalar type name or a tuple type. |
+| <code>&#124;x: T&#124; expr</code> | one typed parameter | `T` resolves through the configured type environment and may recursively contain tuples or arrays. |
 | <code>&#124;x: T, y: U&#124; expr</code> | multiple typed parameters | Parameters are comma-separated and ordered left to right. |
 | <code>&#124;pair: (i32, i32)&#124; expr</code> | one tuple-typed parameter | Tuple parameters are still one parameter and use `.N` inside the body. |
 | nested tuple type | <code>&#124;value: (i32, (f64, bool))&#124; expr</code> | Tuple types may nest recursively. |
+| <code>(&#124;x: f64&#124; x)(1.0)</code> | immediate invocation | CEL checks exact parameter/result shapes; arguments evaluate once, left to right. Unknown callable signatures fail explicitly. Host call operations retain precedence. |
 
 ## Exact rules
 
@@ -189,7 +193,29 @@ when the evaluation environment installs it. See
   array elements.
 - Comparison expressions consume one comparison operator.
 - Range forms do not chain.
-- CEL does not use member-name access such as `expr.name`.
+- `expr.name` and `expr.name()` invoke the same host-provided unary operation.
+  `expr.name(a, b)` passes the receiver first, followed by explicit arguments.
+  Each operand evaluates once in source order. A value binding named `name`
+  does not hide a dot operation, and the member label is not a variable reference.
+- `(expr.name)()` calls the operation's result normally; it fails if the result
+  is not callable. Dot operations, ordinary calls, and tuple indexing share
+  postfix precedence and may be chained.
+- `TypeName { field: expression, ... }` constructs a host-registered record.
+  Constructor names belong to the type namespace, separate from value names.
+  Field labels are not variable references. Every schema field is required exactly
+  once; unknown, duplicate, missing, and incorrectly typed fields are errors.
+  Field expressions evaluate once in written order, independent of schema order.
+  An empty schema permits `TypeName {}`; a non-empty field list permits a trailing comma.
+- Field types match exactly: an `f64` field accepts `1.0`, not the `i32` literal `1`.
+  The static checker uses installed record schemas and operation signatures; known
+  custom types retain their identities instead of unifying with unrelated types.
+  Unknown constructors are errors. Unresolved inputs and calls without metadata
+  remain best-effort, but all their child expressions are still checked.
+- Unparenthesized record constructors are forbidden throughout an `if` condition.
+  Parentheses, call arguments, tuple elements, and array elements start unrestricted
+  expression positions: write `if (Sample { value: 3.0 }.value) > 0.0 { ... }`.
+  The restriction propagates through operators, ranges, and closure bodies.
+- Members are reads/operations, not assignment targets. CEL has no member assignment.
 - CEL does not use bracket postfix indexing such as `expr[0]`.
 - CEL does not define map literals, object literals, or a ternary
   operator.

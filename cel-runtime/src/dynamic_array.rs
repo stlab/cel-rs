@@ -80,8 +80,10 @@ pub struct ArrayElementType {
     type_name: Cow<'static, str>,
     size: usize,
     align: usize,
-    drop: RawDropper,
+    pub(crate) drop: RawDropper,
     nested: Option<Box<ArrayElementType>>,
+    pub(crate) push_arg: Option<fn(&mut crate::DynSegment, usize, crate::ValueType)>,
+    pub(crate) clone_value: Option<crate::ElementCloner>,
 }
 
 impl ArrayElementType {
@@ -111,7 +113,27 @@ impl ArrayElementType {
             align: align_of::<T>(),
             drop: raw_dropper_for::<T>(),
             nested: None,
+            push_arg: None,
+            clone_value: None,
         })
+    }
+
+    /// Returns a leaf descriptor that also supports cloning closure arguments.
+    ///
+    /// # Errors
+    /// Returns the same marker-type error as [`leaf`](Self::leaf).
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::ArrayElementType;
+    /// let leaf = ArrayElementType::cloneable::<String>().unwrap();
+    /// assert_eq!(leaf.type_name(), "alloc::string::String");
+    /// ```
+    pub fn cloneable<T: 'static + Clone>() -> Result<Self, ArrayBuildErrorKind> {
+        let mut descriptor = Self::leaf::<T>()?;
+        descriptor.push_arg = Some(crate::DynSegment::push_typed_arg::<T>);
+        descriptor.clone_value = Some(crate::element_cloner_for::<T>());
+        Ok(descriptor)
     }
 
     /// Returns the descriptor for a leaf element described by already-erased metadata, for a
@@ -153,6 +175,8 @@ impl ArrayElementType {
             align,
             drop,
             nested: None,
+            push_arg: None,
+            clone_value: None,
         }
     }
 
@@ -176,6 +200,8 @@ impl ArrayElementType {
             align: align_of::<DynamicArray>(),
             drop: raw_dropper_for::<DynamicArray>(),
             nested: Some(Box::new(element)),
+            push_arg: None,
+            clone_value: None,
         }
     }
 
@@ -273,6 +299,15 @@ impl ArrayElementType {
     /// ```
     pub fn nested(&self) -> Option<&ArrayElementType> {
         self.nested.as_deref()
+    }
+
+    /// Reports whether every recursive leaf has a registered clone hook.
+    ///
+    /// - Complexity: O(array nesting depth).
+    pub(crate) fn supports_clone(&self) -> bool {
+        self.nested
+            .as_deref()
+            .map_or(self.clone_value.is_some(), Self::supports_clone)
     }
 
     /// Returns the recursive name used in type mismatch diagnostics.
@@ -783,6 +818,32 @@ pub struct DynamicArray {
 }
 
 impl DynamicArray {
+    /// Deep-clones this array using an exactly matching descriptor with validated clone hooks.
+    ///
+    /// # Safety
+    /// `element` must have this array's recursive shape and layout, and every leaf must carry
+    /// a clone hook. The caller validates those requirements before executing a closure body.
+    ///
+    /// - Complexity: O(total recursive element count), plus leaf clone costs.
+    pub(crate) unsafe fn clone_as(&self, element: &ArrayElementType) -> Self {
+        debug_assert!(self.element.same_shape_and_layout(element));
+        let value_type = crate::ValueType::registered(element.clone());
+        let mut builder = DynamicArrayBuilder::with_capacity(element.clone(), self.len)
+            .expect("a live array's length has a representable matching layout");
+        for index in 0..self.len {
+            // Safety: both allocations contain this exact layout. Incrementing the initialized
+            // prefix only after cloning keeps completed values owned by the builder.
+            unsafe {
+                value_type.clone_into(
+                    self.ptr.as_ptr().add(index * element.size),
+                    builder.ptr.as_ptr().add(index * element.size),
+                );
+            }
+            builder.len += 1;
+        }
+        builder.finish()
+    }
+
     /// Takes ownership of a concrete vector without moving or reallocating its elements.
     ///
     /// # Errors

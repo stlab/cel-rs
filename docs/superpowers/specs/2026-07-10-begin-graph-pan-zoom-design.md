@@ -1,5 +1,9 @@
 # begin graph view: fixed initial sizing + pan/zoom
 
+> Historical design. [Graph view ownership and verification](../../graph-view.md)
+> documents the current shared Adam approval policy, live resize, and controls.
+> The direct D3 policy/rendering described below no longer governs live graphs.
+
 ## Problem
 
 `GraphView` ([begin/src/graph_view.rs](../../../begin/src/graph_view.rs)) mounts a D3

@@ -1,0 +1,13 @@
+{
+  "messages": [
+    {"kind":"start","generation":1},
+    {"kind":"update","request":{"generation":1,"revision":1,"sequence":1,"bounds":[0.0,0.0,200.0,100.0],"viewport":[400.0,300.0],"action":{"kind":"propose","view":{"x":0.0,"y":50.0,"k":2.0}}}},
+    {"kind":"update","request":{"generation":1,"revision":1,"sequence":2,"bounds":[0.0,0.0,200.0,100.0],"viewport":[400.0,300.0],"action":{"kind":"refresh"}}},
+    {"kind":"update","request":{"generation":1,"revision":1,"sequence":3,"bounds":[0.0,0.0,200.0,100.0],"viewport":[400.0,300.0],"action":{"kind":"fit"}}},
+    {"kind":"dispose","generation":1}
+  ],
+  "replies": [
+    {"kind":"accepted","generation":1,"revision":1,"sequence":1,"output":{"view":{"x":0.0,"y":50.0,"k":2.0},"fit":{"x":0.0,"y":50.0,"k":2.0},"min_zoom":2.0,"max_zoom":8.0}},
+    {"kind":"failed","generation":1,"revision":1,"sequence":2,"message":"invalid viewport"}
+  ]
+}

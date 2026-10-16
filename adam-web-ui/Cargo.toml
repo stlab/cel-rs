@@ -14,6 +14,7 @@ adam-lang = { path = "../adam-lang" }
 cel-parser = { path = "../cel-parser" }
 cel-runtime = { path = "../cel-runtime" }
 cel-std = { path = "../cel-std" }
+cel-euclid = { path = "../cel-euclid", features = ["adam"] }
 annotate-snippets = "0.12"
 anyhow = "1"
 indexmap = "2"

@@ -19,6 +19,9 @@ every construct in this book except a function call — any attempt to call an u
 function fails to parse with an error naming the missing function. This book's own examples
 always install `cel-std` (see `support::parser` in `adam-lang-book`'s own source).
 
+Host-registered records and members additionally require their own schemas and
+operations; neither the bare language nor `cel-std` supplies application types.
+
 ## Cell initializers see no cells
 
 A `cell`'s `= expression` initializer is evaluated with no cell scope at all. Referencing any
@@ -41,6 +44,44 @@ declared earlier in the same sheet.
 
 A [`filter`](filters.md) clause uses the same deduction, plus one reserved identifier: `_`
 always denotes the candidate value being conformed, never a cell; see the [filters chapter](filters.md).
+
+Constructor names, record field labels, and member names are not value references.
+The only dependencies of `TestPoint { x: a, y: b }.x` are `a` and `b`, even if
+cells named `TestPoint`, `x`, and `y` exist. A closure parameter shadows only value
+references in its body, not those labels or constructor names.
+
+## Host records and members
+
+Write `Sample { value: 3.0, }` when the host registers a `Sample` schema.
+Supply every field exactly once; unknown constructors and unknown, duplicate,
+missing, or incorrectly typed fields are errors. Field expressions evaluate in
+written order. Empty schemas accept `{}`, and non-empty field lists accept a
+trailing comma. An `f64` field requires `3.0`, not `3`: integers do not
+implicitly convert to floats.
+
+`reading.value` and `reading.value()` both invoke the host's unary `value`
+operation. `reading.operation(a)` passes `reading` first, then `a`. A same-named
+cell cannot hide a dot operation. `(reading.value)()` instead calls the
+operation's result and fails when that value is not callable.
+
+Bare record constructors are forbidden in `if` conditions and Adam
+`conditional` subjects so `{` can begin the following body without backtracking.
+Parenthesize the constructor-containing expression, for example
+`conditional (Sample { value: 3.0 }.value) { ... }`. Parentheses, call arguments,
+tuple elements, and array elements permit record expressions within such
+headers. Unparenthesized operators, ranges, and closure bodies inherit the
+header restriction.
+
+Member assignment is not part of the language: update the whole cell from the
+host or construct a new record as a relationship's output.
+
+This executable host example registers the type, constructor, and accessor, then
+checks the sheet with the same metadata used to run it. The `Sample` and `value`
+cells do not shadow either constructor or member resolution:
+
+```rust
+{{#include ../tests/expressions.rs:registered-record}}
+```
 
 ## "Expression produced no value"
 

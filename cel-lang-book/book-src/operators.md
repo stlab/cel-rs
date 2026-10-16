@@ -7,7 +7,7 @@ full grammar, see the [Reference Manual](reference.md).
 ## Concept
 
 Unary, binary, cast, and postfix operators all participate in one
-expression grammar. Postfix calls and tuple indices bind most tightly.
+expression grammar. Postfix calls, tuple indices, and named members bind most tightly.
 Range forms bind most loosely. Logical operators short-circuit, and
 comparison and range forms do not chain.
 
@@ -29,7 +29,9 @@ additive_expression = multiplicative_expression { ("+" | "-") multiplicative_exp
 multiplicative_expression = cast_expression { ("*" | "/" | "%") cast_expression } .
 cast_expression = unary_expression { "as" identifier } .
 unary_expression = (("-" | "!") unary_expression) | postfix_expression .
-postfix_expression = primary_expression { "(" [ argument_list ] ")" | "." unsuffixed_integer } .
+postfix_expression = primary_expression {
+    "(" [ argument_list ] ")" | "." (unsuffixed_integer | identifier [ "(" [ argument_list ] ")" ])
+} .
 argument_list = expression { "," expression } .
 ```
 
@@ -60,13 +62,24 @@ Precedence runs from lowest to highest in this order:
 10. multiplicative `*`, `/`, and `%`
 11. casts with `as`
 12. unary `-` and `!`
-13. postfix calls and tuple indexing
+13. postfix calls, tuple indexing, and named members
 
 Within one precedence level, binary operators associate to the left.
 Comparison expressions consume one comparison operator, and range forms do
 not chain.
 
 - A call is a postfix `()` form with zero or more comma-separated arguments.
+- `receiver.name` and `receiver.name()` both invoke a unary named operation,
+  ignoring same-named value bindings. `receiver.name(a, b)` supplies the receiver
+  first, then explicit arguments; each evaluates once in source order.
+  The member label is not a variable reference, even inside a closure.
+- Grouping changes call semantics: `(receiver.name)()` calls the accessor's
+  result as a value. It is not another spelling of `receiver.name()`.
+  Named members, calls, and `.N` share postfix precedence and chain left to right.
+  Neither named members nor tuple indices support assignment.
+- Hosts supply member signatures, not a fixed set of receiver types. The checker
+  rejects known incompatible operands and preserves registered result types.
+  Calls without metadata remain best-effort and still check every argument.
 - Postfix calls and tuple indices bind more tightly than unary and binary
   operators.
 - `+` accepts homogeneous numeric operands and `String + String`.

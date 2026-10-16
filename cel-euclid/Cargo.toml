@@ -1,0 +1,27 @@
+[package]
+name = "cel-euclid"
+version = "0.1.0"
+edition = "2024"
+description = "Opt-in f64 two-dimensional Euclid geometry for CEL"
+
+[dependencies]
+cel-parser = { path = "../cel-parser" }
+cel-runtime = { path = "../cel-runtime" }
+euclid = "0.22.14"
+anyhow = "1.0"
+adam-lang = { path = "../adam-lang", optional = true }
+
+[features]
+default = []
+adam = ["dep:adam-lang"]
+
+[dev-dependencies]
+cel-std = { path = "../cel-std" }
+proc-macro2 = "1.0"
+
+[[example]]
+name = "adam_geometry"
+required-features = ["adam"]
+
+[lints]
+workspace = true

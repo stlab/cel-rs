@@ -305,6 +305,17 @@ impl<'a> AnnotatedArray<'a> {
 /// "emitting" means: [`DynSegmentContext`] executes immediately into a stack machine; a future
 /// AST-building context would instead record a tree node.
 pub trait ParserContext: Sized {
+    /// Returns whether closure annotations must resolve while parsing rather than remain syntax.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, parser_context::ParserContext};
+    /// assert!(!AstContext::resolves_closure_types());
+    /// ```
+    fn resolves_closure_types() -> bool {
+        true
+    }
+
     /// Creates a fresh, empty context with no operations recorded yet.
     fn new_context() -> Self;
 
@@ -330,6 +341,61 @@ pub trait ParserContext: Sized {
         op_lookup: &OpLookup,
         name: &str,
         arity: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()>;
+
+    /// Applies a direct named operation to the receiver and explicit arguments in source order.
+    ///
+    /// `None` preserves `.name`; `Some(0)` preserves `.name()`. Both consume one receiver.
+    /// `name_span` identifies the member label for diagnostics; `start`/`end` cover the expression.
+    ///
+    /// - Precondition: the receiver and `explicit_args.unwrap_or(0)` arguments are emitted.
+    /// - Complexity: O(n) for n operands, plus operation lookup in runtime contexts.
+    ///
+    /// # Errors
+    /// Returns an error if a runtime context cannot resolve the operation.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::{AstContext, ExprSpan, OpLookup};
+    /// use cel_parser::parser_context::ParserContext;
+    /// use proc_macro2::Span;
+    /// let mut context = AstContext::new_context();
+    /// let span = Span::call_site();
+    /// context.push_literal(1i32, span);
+    /// context.apply_member(&OpLookup::new(), "custom", ExprSpan { start: span, end: span },
+    ///     None, span, span).unwrap();
+    /// ```
+    fn apply_member(
+        &mut self,
+        lookup: &OpLookup,
+        name: &str,
+        name_span: ExprSpan,
+        explicit_args: Option<usize>,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()>;
+
+    /// Constructs a record from named fields emitted exactly once in source order.
+    ///
+    /// - Precondition: one value per field follows `ambient_start` in this context.
+    /// - Complexity: O(f² + f * d + r) for f fields, descriptor depth d and r schemas.
+    ///
+    /// # Errors
+    /// Runtime contexts reject unknown schemas, invalid field sets, mismatched types,
+    /// or constructor emitter failures; syntax-only contexts preserve unresolved names.
+    ///
+    /// # Examples
+    /// See [`OpLookup::construct_record`].
+    #[allow(clippy::too_many_arguments)]
+    fn make_record(
+        &mut self,
+        lookup: &OpLookup,
+        name: &str,
+        name_span: ExprSpan,
+        fields: Vec<(String, ExprSpan)>,
+        ambient_start: usize,
         start: Span,
         end: Span,
     ) -> crate::Result<()>;
@@ -461,7 +527,7 @@ pub trait ParserContext: Sized {
 
     /// Packages a fully-parsed, independent nested context — the body of a closure literal — as
     /// a value pushed onto `self`, given the closure's declared parameter types in two parallel
-    /// forms: `param_types` (each parameter's runtime `TypeId`, in order) for an implementation
+    /// forms: `param_types` (each parameter's complete runtime shape, in order) for an implementation
     /// that executes, and `params` (each parameter's name, span, and unresolved type expression)
     /// for one that builds an AST instead. An implementation uses whichever it needs and ignores
     /// the other.
@@ -479,7 +545,7 @@ pub trait ParserContext: Sized {
     /// [`DynSegmentContext`] rejects a `body` that doesn't produce exactly one value.
     fn push_closure(
         &mut self,
-        param_types: Vec<std::any::TypeId>,
+        param_types: Vec<cel_runtime::ValueType>,
         params: Vec<ClosureParam>,
         body: Self,
         span: Span,
@@ -567,6 +633,35 @@ impl ParserContext for DynSegmentContext {
         end: Span,
     ) -> crate::Result<()> {
         op_lookup.lookup(name, &mut self.0, arity, start, end)
+    }
+
+    /// Emits receiver-first direct dispatch with diagnostics anchored to the member name.
+    fn apply_member(
+        &mut self,
+        lookup: &OpLookup,
+        name: &str,
+        name_span: ExprSpan,
+        explicit_args: Option<usize>,
+        _start: Span,
+        _end: Span,
+    ) -> crate::Result<()> {
+        let arity = explicit_args.unwrap_or(0) + 1;
+        debug_assert_eq!(self.0.peek_stack_infos(arity).len(), arity);
+        lookup.lookup_member(name, &mut self.0, arity, name_span.start, name_span.end)
+    }
+
+    /// Validates and emits the registered constructor without rearranging field values.
+    fn make_record(
+        &mut self,
+        lookup: &OpLookup,
+        name: &str,
+        _name_span: ExprSpan,
+        fields: Vec<(String, ExprSpan)>,
+        ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        lookup.construct_record(name, &fields, ambient_start, &mut self.0, start, end)
     }
 
     fn apply_logical(
@@ -670,24 +765,15 @@ impl ParserContext for DynSegmentContext {
 
     fn push_closure(
         &mut self,
-        param_types: Vec<std::any::TypeId>,
+        param_types: Vec<cel_runtime::ValueType>,
         params: Vec<ClosureParam>,
         body: Self,
         span: Span,
     ) -> crate::Result<()> {
         let _ = params;
-        let return_type = body.output_type_id().ok_or_else(|| {
-            crate::ParseError::new_range(
-                "closure body must produce exactly one value".to_string(),
-                span,
-                span,
-            )
-        })?;
-        self.0.just(cel_runtime::DynClosure::new(
-            param_types,
-            return_type,
-            body.into_inner(),
-        ));
+        let closure = cel_runtime::DynClosure::typed(param_types, body.into_inner())
+            .map_err(|error| crate::ParseError::new_range(error.to_string(), span, span))?;
+        self.0.push_closure(closure);
         Ok(())
     }
 
@@ -701,7 +787,6 @@ mod tests {
     use super::*;
     use crate::op_table::OpLookup;
     use proc_macro2::Span;
-    use std::any::TypeId;
 
     #[test]
     fn new_context_is_empty_and_ready_for_literals() {
@@ -771,6 +856,33 @@ mod tests {
             _op_lookup: &OpLookup,
             _name: &str,
             _arity: usize,
+            _start: Span,
+            _end: Span,
+        ) -> crate::Result<()> {
+            unimplemented!("RecordingContext only records array construction")
+        }
+
+        /// Rejects records outside this array-only test context.
+        fn make_record(
+            &mut self,
+            _lookup: &OpLookup,
+            _name: &str,
+            _name_span: ExprSpan,
+            _fields: Vec<(String, ExprSpan)>,
+            _ambient_start: usize,
+            _start: Span,
+            _end: Span,
+        ) -> crate::Result<()> {
+            unimplemented!("RecordingContext only records array construction")
+        }
+
+        /// Rejects member operations outside this array-only test context.
+        fn apply_member(
+            &mut self,
+            _lookup: &OpLookup,
+            _name: &str,
+            _name_span: ExprSpan,
+            _explicit_args: Option<usize>,
             _start: Span,
             _end: Span,
         ) -> crate::Result<()> {
@@ -1084,7 +1196,7 @@ mod tests {
 
         outer
             .push_closure(
-                vec![TypeId::of::<i32>()],
+                vec![cel_runtime::ValueType::leaf::<i32>()],
                 Vec::new(),
                 body,
                 Span::call_site(),

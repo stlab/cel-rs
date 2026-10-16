@@ -6,13 +6,24 @@
 use adam_lang::{AdamParser, TypeRegistry};
 use cel_parser::OpLookup;
 
-/// Builds an [`AdamParser`] with the CEL standard library (`cel-std`) installed, exactly as
+/// Builds an [`AdamParser`] with `cel-std` and `cel-euclid` installed, exactly as
 /// `begin` wires one up. Every runnable example in this book starts from this function, so
 /// `min`, `max`, `clamp`, `round`, and the rest of `cel-std`'s functions are always available —
 /// this book does not document those functions itself; see `cel-std`'s own crate documentation.
+///
+/// - Complexity: O(s²) in the number of installed signatures.
+///
+/// # Examples
+/// ```
+/// let mut parser = adam_lang_book::support::parser();
+/// assert!(parser.parse_str("sheet s { cell p: Point2D; }").is_ok());
+/// ```
 #[must_use]
 pub fn parser() -> AdamParser {
     let mut lookup = OpLookup::new();
     cel_std::install(&mut lookup);
-    AdamParser::new(TypeRegistry::new(), lookup)
+    cel_euclid::install(&mut lookup);
+    let mut types = TypeRegistry::new();
+    cel_euclid::register_adam_types(&mut types);
+    AdamParser::new(types, lookup)
 }

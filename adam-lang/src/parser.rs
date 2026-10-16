@@ -1012,6 +1012,21 @@ impl AdamParser {
     /// - Complexity: O(k) in the number of distinct cell identifiers referenced, for this
     ///   method's own bookkeeping (on top of `cel-parser`'s own parse cost).
     fn parse_deduced_expr(&mut self, ctx: &mut ParseContext) -> Result<(DynSegment, NamedCells)> {
+        self.parse_deduced_expr_restricted(ctx, cel_parser::ExpressionRestriction::None)
+    }
+
+    /// Compiles a dependency-deducing expression with the enclosing header's brace reservation.
+    ///
+    /// - Postcondition: temporary dependency scope is removed on success and error.
+    /// - Complexity: O(k + n) for k declared cells and n expression tokens.
+    ///
+    /// # Errors
+    /// Returns expression syntax, unknown cell, or operation/type errors.
+    fn parse_deduced_expr_restricted(
+        &mut self,
+        ctx: &mut ParseContext,
+        restriction: cel_parser::ExpressionRestriction,
+    ) -> Result<(DynSegment, NamedCells)> {
         // Precompute how to push each currently-declared cell, keyed by name. Built before
         // the scope closure captures anything, since `push_scope` requires `'static` (the
         // closure can't borrow `self.types`).
@@ -1063,7 +1078,7 @@ impl AdamParser {
                 Ok(true)
             });
 
-        let result = self.parse_cel_expression(ctx);
+        let result = self.parse_cel_expression_restricted(ctx, restriction);
         self.cel.op_lookup_mut().pop_scope();
         let segment = result?;
 
@@ -1193,7 +1208,10 @@ impl AdamParser {
         ctx: &mut ParseContext,
         match_span: proc_macro2::Span,
     ) -> Result<(TypeShape, MatchExpr)> {
-        let (segment, inputs) = self.parse_deduced_expr(ctx)?;
+        let (segment, inputs) = self.parse_deduced_expr_restricted(
+            ctx,
+            cel_parser::ExpressionRestriction::NoStructLiteral,
+        )?;
         self.build_match_expr(segment, inputs, match_span)
     }
 
@@ -1824,9 +1842,23 @@ impl AdamParser {
 
     /// Delegates one `expression` to CELParser, sharing the token stream.
     fn parse_cel_expression(&mut self, ctx: &mut ParseContext) -> Result<DynSegment> {
+        self.parse_cel_expression_restricted(ctx, cel_parser::ExpressionRestriction::None)
+    }
+
+    /// Delegates a header expression while leaving its body brace in the shared token stream.
+    ///
+    /// - Complexity: O(n) in expression tokens.
+    ///
+    /// # Errors
+    /// Returns the embedded CEL expression's syntax or type error.
+    fn parse_cel_expression_restricted(
+        &mut self,
+        ctx: &mut ParseContext,
+        restriction: cel_parser::ExpressionRestriction,
+    ) -> Result<DynSegment> {
         let tokens = ctx.cursor.take_tokens().expect("tokens present");
         self.cel.set_lex_tokens(tokens);
-        let result = self.cel.parse_expression();
+        let result = self.cel.parse_expression_restricted(restriction);
         ctx.cursor
             .set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
         result
@@ -2548,6 +2580,104 @@ mod tests {
         sheet.propagate().unwrap();
         let (c_id, _) = sheet.cell_names["c"].clone();
         assert_eq!(*sheet.read::<i32>(c_id).unwrap(), 6);
+    }
+
+    /// Verifies member labels never become dependencies or resolve same-named cells.
+    #[test]
+    fn member_labels_are_not_cell_dependencies() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, arity, _| {
+            if matches!(name, "x" | "width") && arity == 1 {
+                segment.op1(|value: f64| value * 2.0)?;
+                return Ok(true);
+            }
+            Ok(false)
+        });
+        let mut sheet = AdamParser::new(TypeRegistry::new(), lookup)
+            .parse_str(
+                "sheet s { cell input: f64 = 3.0; cell x: bool = true; \
+                 cell width: bool = false; cell result: f64 = 0.0; \
+                 relationship { result := input.x().width; } }",
+            )
+            .unwrap();
+        let input = sheet.cell_names["input"].0;
+        let result = sheet.cell_names["result"].0;
+        let (&(relationship, method), _) = sheet.method_spans.iter().next().unwrap();
+        assert_eq!(
+            sheet.method_inputs(relationship, method),
+            Some([input].as_slice())
+        );
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<f64>(result).unwrap(), 12.0);
+        sheet.write(input, 5.0f64).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<f64>(result).unwrap(), 20.0);
+    }
+
+    /// Tracks only value expressions in a record-member binding.
+    #[test]
+    fn field_labels_and_member_names_are_not_cell_dependencies() {
+        use cel_parser::{OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
+        use cel_runtime::ArrayElementType;
+        use std::sync::Arc;
+        /// A record independent of any geometry library.
+        #[derive(Clone, Debug, PartialEq)]
+        struct TestPoint {
+            x: f64,
+            y: f64,
+        }
+        let point =
+            ResolvedLeafType::new("TestPoint", ArrayElementType::leaf::<TestPoint>().unwrap());
+        let scalar = ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap());
+        let mut lookup = OpLookup::new();
+        lookup
+            .register_record(RecordSchema {
+                ty: point.clone(),
+                fields: vec![
+                    RecordField {
+                        name: "x",
+                        ty: scalar.clone(),
+                    },
+                    RecordField {
+                        name: "y",
+                        ty: scalar.clone(),
+                    },
+                ],
+                emit: Arc::new(|s, order, _, _| {
+                    assert_eq!(order, [0, 1]);
+                    s.op2(|x: f64, y: f64| TestPoint { x, y })
+                }),
+            })
+            .unwrap();
+        lookup
+            .register_operation(OperationSignature {
+                name: "x",
+                operands: vec![point],
+                result: scalar,
+                emit: Arc::new(|s, _| s.op1(|p: TestPoint| p.x)),
+            })
+            .unwrap();
+        let mut sheet = AdamParser::new(TypeRegistry::new(), lookup)
+            .parse_str(
+                "sheet s { cell a: f64 = 2.0; cell b: f64 = 3.0; \
+             cell x: bool = false; cell y: bool = false; cell TestPoint: bool = true; \
+             cell result: f64 = 0.0; \
+             relationship { result := TestPoint { x: a, y: b }.x; } }",
+            )
+            .unwrap();
+        let a = sheet.cell_names["a"].0;
+        let b = sheet.cell_names["b"].0;
+        let result = sheet.cell_names["result"].0;
+        let (&(relationship, method), _) = sheet.method_spans.iter().next().unwrap();
+        assert_eq!(
+            sheet.method_inputs(relationship, method),
+            Some([a, b].as_slice())
+        );
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<f64>(result).unwrap(), 2.0);
+        sheet.write(a, 7.0f64).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<f64>(result).unwrap(), 7.0);
     }
 
     #[test]
@@ -3426,6 +3556,49 @@ mod tests {
         sheet.write(mode_id, 1_i32).unwrap();
         sheet.propagate().unwrap();
         assert_eq!(*sheet.read::<i32>(y_id).unwrap(), 1);
+    }
+
+    /// Verifies runtime conditional headers accept grouped records and deduce field dependencies.
+    #[test]
+    fn adam_registered_match_header_reserves_braces() {
+        let mut parser = parser();
+        parser
+            .op_lookup_mut()
+            .register_record(cel_parser::RecordSchema {
+                ty: cel_parser::ResolvedLeafType::new(
+                    "Gate",
+                    cel_runtime::ArrayElementType::leaf::<bool>().unwrap(),
+                ),
+                fields: vec![cel_parser::RecordField {
+                    name: "value",
+                    ty: cel_parser::ResolvedLeafType::new(
+                        "bool",
+                        cel_runtime::ArrayElementType::leaf::<bool>().unwrap(),
+                    ),
+                }],
+                emit: Arc::new(|segment, _, _, _| segment.op1(|value: bool| value)),
+            })
+            .unwrap();
+        let mut sheet = parser
+            .parse_str(
+                "sheet s {
+                cell flag: bool = true;
+                cell input: i32 = 7;
+                cell output: i32 = 0;
+                conditional (Gate { value: flag }) {
+                    true => { relationship { output := if flag { input } else { 0 }; } }
+                    _ => { relationship { output := 0; } }
+                }
+            }",
+            )
+            .unwrap();
+        let output = sheet.cell_names["output"].0;
+        let flag = sheet.cell_names["flag"].0;
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(output).unwrap(), 7);
+        sheet.write(flag, false).unwrap();
+        sheet.propagate().unwrap();
+        assert_eq!(*sheet.read::<i32>(output).unwrap(), 0);
     }
 
     #[test]

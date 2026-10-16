@@ -21,6 +21,68 @@ fn arithmetic_respects_precedence() {
     assert_eq!(segment.call0::<u32>().unwrap(), 110);
 }
 
+// ANCHOR: registered-record
+/// Evaluates a host record and its direct accessor with exact field types.
+#[test]
+fn registered_record_and_member_example() {
+    use cel_parser::{OperationSignature, RecordField, RecordSchema, ResolvedLeafType};
+    use cel_runtime::ArrayElementType;
+    use std::sync::Arc;
+
+    /// A host-defined value, not a built-in CEL type.
+    #[derive(Clone, Debug, PartialEq)]
+    struct Sample {
+        value: f64,
+    }
+    let sample = ResolvedLeafType::new("Sample", ArrayElementType::leaf::<Sample>().unwrap());
+    let scalar = ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap());
+    let mut lookup = OpLookup::new();
+    lookup
+        .register_record(RecordSchema {
+            ty: sample.clone(),
+            fields: vec![RecordField {
+                name: "value",
+                ty: scalar.clone(),
+            }],
+            emit: Arc::new(|s, _, _, _| s.op1(|value: f64| Sample { value })),
+        })
+        .unwrap();
+    lookup
+        .register_operation(OperationSignature {
+            name: "value",
+            operands: vec![sample],
+            result: scalar,
+            emit: Arc::new(|s, _| s.op1(|sample: Sample| sample.value)),
+        })
+        .unwrap();
+    let mut parser = CELParser::new(lookup);
+    for source in [
+        "Sample { value: 3.0, }.value",
+        "Sample { value: 3.0 }.value()",
+    ] {
+        assert_eq!(
+            parser.parse_str(source).unwrap().call0::<f64>().unwrap(),
+            3.0
+        );
+    }
+    assert_eq!(
+        parser
+            .parse_str("if (Sample { value: 3.0 }.value) > 0.0 { 1 } else { 0 }")
+            .unwrap()
+            .call0::<i32>()
+            .unwrap(),
+        1
+    );
+    assert!(parser.parse_str("Sample { value: 1 }").is_err());
+    assert!(parser.parse_str("(Sample { value: 3.0 }.value)()").is_err());
+    assert!(
+        parser
+            .parse_str("Sample { value: 3.0 }.value = 4.0")
+            .is_err()
+    );
+}
+// ANCHOR_END: registered-record
+
 #[test]
 fn round_is_not_available_with_the_standard_library() {
     assert!(

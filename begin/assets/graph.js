@@ -41,7 +41,6 @@
   var PULSE_ON_MS = 200;
   var PULSE_OFF_MS = 400;
   var INACTIVE_STROKE = "#ccc";
-  var MAX_ZOOM = 8;
 
   // One GraphInstance per mounted container id -- begin's single view, or one of a
   // book page's several simultaneously-live examples. Each owns its D3
@@ -50,6 +49,212 @@
   var instances = new Map();
 
   // ---- Pure helpers (no instance state) ----
+
+  /**
+   * Validates an unsigned protocol counter without coercion or truncation.
+   * @param {number} value Counter to validate.
+   * @returns {number} The unchanged u32 value.
+   * @throws {Error} When the value is not an integer in the u32 range.
+   */
+  function u32(value) {
+    if (!Number.isInteger(value) || value < 0 || value > 4294967295)
+      throw new Error("graph counter is outside u32 range");
+    return value;
+  }
+
+  /**
+   * Increments a protocol counter, explicitly rejecting exhaustion.
+   * @param {number} value Previous u32 value.
+   * @returns {number} The checked successor.
+   * @throws {Error} On exhaustion or an invalid input.
+   */
+  function nextCounter(value) {
+    return u32(u32(value) + 1);
+  }
+
+  /**
+   * Owns one in-flight request and one latest complete pending snapshot.
+   * Rendering occurs only for matching successful current-geometry replies;
+   * pending gestures never invalidate approved progress at the same geometry.
+   * @param {number} generation Explicitly started u32 lifecycle.
+   * @param {function(object):void} send Ordered transport submission.
+   * @param {function(object, object, object):void} apply Renderer, request and originating action.
+   * @param {function(string):void} fail Visible/error-channel reporter.
+   */
+  function ProposalQueue(generation, send, apply, fail) {
+    this.generation = u32(generation);
+    this.send = send;
+    this.apply = apply;
+    this.fail = fail;
+    this.sequence = 0;
+    this.revision = 0;
+    this.applied = 0;
+    this.inflight = null;
+    this.pending = null;
+    // Local provenance survives refresh coalescing without changing the wire request.
+    this.origins = new WeakMap();
+    this.disposed = false;
+    send({ kind: "start", generation: generation });
+  }
+
+  /** Returns the bounded number of retained request snapshots (zero to two). */
+  Object.defineProperty(ProposalQueue.prototype, "size", {
+    get: function () { return Number(!!this.inflight) + Number(!!this.pending); },
+  });
+
+  /**
+   * Retains the latest geometry and action, preserving queued Fit on refresh.
+   * A newer explicit proposal intentionally replaces a queued Fit.
+   * Preserves originating action identity locally, outside the wire snapshot.
+   * @param {object} snapshot Complete geometry and action, without sequence.
+   * @postcondition At most two snapshots are retained, independent of burst size.
+   */
+  ProposalQueue.prototype.submit = function (snapshot) {
+    if (this.disposed) return;
+    try {
+      u32(snapshot.revision);
+      if (snapshot.revision < this.revision) return;
+      this.revision = snapshot.revision;
+      var action = snapshot.action;
+      var origin = action;
+      if (action.kind === "refresh") {
+        if (this.pending) {
+          action = this.pending.action;
+          origin = this.origins.get(this.pending);
+        } else if (this.inflight && this.inflight.action.kind === "fit") {
+          action = this.inflight.action;
+          origin = this.origins.get(this.inflight);
+        }
+      }
+      this.pending = {
+        generation: this.generation, revision: snapshot.revision,
+        bounds: snapshot.bounds.slice(), viewport: snapshot.viewport.slice(),
+        action: action.kind === "propose"
+          ? { kind: "propose", view: { x: action.view.x, y: action.view.y, k: action.view.k } }
+          : { kind: action.kind },
+      };
+      this.origins.set(this.pending, origin);
+      this.pump();
+    } catch (error) { this.stop(error.message); }
+  };
+
+  /** Submits pending work only when the single in-flight slot is vacant. */
+  ProposalQueue.prototype.pump = function () {
+    if (this.disposed || this.inflight || !this.pending) return;
+    this.sequence = nextCounter(this.sequence);
+    this.inflight = this.pending;
+    this.pending = null;
+    this.inflight.sequence = this.sequence;
+    this.send({ kind: "update", request: this.inflight });
+  };
+
+  /**
+   * Releases matching work even when its geometry is too old to render.
+   * @param {object} reply Typed model reply.
+   * @postcondition Unrelated generation/sequence replies cannot clear a live slot.
+   */
+  ProposalQueue.prototype.receive = function (reply) {
+    if (this.disposed) return;
+    try {
+      if (!reply) throw new Error("invalid graph reply");
+      u32(reply.generation);
+      if (reply.generation !== this.generation) return;
+      u32(reply.sequence); u32(reply.revision);
+      if (!this.inflight || reply.sequence !== this.inflight.sequence) return;
+      if (reply.revision !== this.inflight.revision)
+        throw new Error("graph reply revision does not match its request");
+      var request = this.inflight;
+      this.inflight = null;
+      if (reply.kind !== "accepted" && reply.kind !== "failed")
+        throw new Error("unknown graph reply");
+      if (reply.revision < this.revision) { this.pump(); return; }
+      if (reply.kind === "failed") throw new Error(reply.message);
+      if (!validOutput(reply.output)) throw new Error("invalid approved graph output");
+      if (reply.revision === this.revision && reply.sequence > this.applied) {
+        this.applied = reply.sequence;
+        this.apply(reply.output, request, this.origins.get(request));
+      }
+      this.pump();
+    } catch (error) { this.stop(error.message); }
+  };
+
+  /** Retires the queue and exposes an error without any fallback rendering. */
+  ProposalQueue.prototype.stop = function (message) {
+    this.retire();
+    this.fail(message);
+  };
+
+  /** Ends this generation once and discards all retained work. */
+  ProposalQueue.prototype.dispose = function () {
+    var error = this.retire();
+    if (error) this.fail(error);
+  };
+
+  /** Retires work and returns any transport diagnostic without throwing. */
+  ProposalQueue.prototype.retire = function () {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.pending = this.inflight = null;
+    try { this.send({ kind: "dispose", generation: this.generation }); }
+    catch (error) { return error.message; }
+  };
+
+  /**
+   * Validates finite approved transforms and consistent model-owned zoom hints.
+   * @param {object} output Candidate model output.
+   * @returns {boolean} Whether every required number satisfies the wire contract.
+   */
+  function validOutput(output) {
+    /** Returns whether a transform has finite pan and positive finite zoom. */
+    function validView(view) {
+      return view && Number.isFinite(view.x) && Number.isFinite(view.y)
+        && Number.isFinite(view.k) && view.k > 0;
+    }
+    return !!(output && validView(output.view) && validView(output.fit)
+      && Number.isFinite(output.min_zoom) && output.min_zoom > 0
+      && Number.isFinite(output.max_zoom) && output.max_zoom >= output.min_zoom
+      && output.view.k >= output.min_zoom && output.view.k <= output.max_zoom);
+  }
+
+  /**
+   * Creates a container-scoped ordered transport with monotonic generations.
+   * @param {function(object):void} send Rust evaluation-channel sender.
+   * @param {function(string):void} fail Visible diagnostic reporter.
+   * @returns {object} Lifecycle allocator, subscriptions, delivery and disposal.
+   */
+  function createChannel(send, fail) {
+    var generation = 0, subscribers = new Set(), closed = false;
+    return {
+      send: send,
+      fail: fail,
+      /** Allocates the next checked lifecycle without reusing a retired number. */
+      nextGeneration: function () {
+        if (closed) throw new Error("graph channel is closed");
+        generation = nextCounter(generation);
+        return generation;
+      },
+      /** Registers a reply receiver and returns its idempotent disposer. */
+      subscribe: function (receive) {
+        if (closed) throw new Error("graph channel is closed");
+        subscribers.add(receive);
+        return function () { subscribers.delete(receive); };
+      },
+      /**
+       * Delivers only to currently subscribed instances of this channel.
+       * @complexity O(s) callbacks for s live subscriptions.
+       */
+      deliver: function (reply) {
+        if (!closed) subscribers.forEach(function (receive) { receive(reply); });
+      },
+      /**
+       * Closes delivery and releases every subscription.
+       * @complexity O(s) released subscriptions.
+       */
+      close: function () { closed = true; subscribers.clear(); },
+      /** Returns the number of live instance subscriptions. */
+      get subscriberCount() { return subscribers.size; },
+    };
+  }
 
   function setsEqual(a, b) {
     if (a.size !== b.size) return false;
@@ -205,31 +410,6 @@
   }
 
   /**
-   * Computes a centered fit scale and translation for graph bounds.
-   * The scale is the smaller of the viewport width/content width and viewport
-   * height/content height; zero-sized content is treated as one unit.
-   * @param {{minX: number, minY: number, maxX: number, maxY: number}} bbox Bounds.
-   * @param {number} width Viewport width.
-   * @param {number} height Viewport height.
-   * @returns {{fitScale: number, x: number, y: number}} Fit parameters.
-   * @postcondition The transformed bounding-box center is the viewport center,
-   * and the fitted content does not exceed either viewport axis.
-   * @complexity O(1) time and space.
-   */
-  function fitTransformFor(bbox, width, height) {
-    var cx = (bbox.minX + bbox.maxX) / 2;
-    var cy = (bbox.minY + bbox.maxY) / 2;
-    var contentW = Math.max(bbox.maxX - bbox.minX, 1);
-    var contentH = Math.max(bbox.maxY - bbox.minY, 1);
-    var fitScale = Math.min(width / contentW, height / contentH);
-    return {
-      fitScale: fitScale,
-      x: width / 2 - fitScale * cx,
-      y: height / 2 - fitScale * cy,
-    };
-  }
-
-  /**
    * Reconciles graph data while retaining existing node objects and positions.
    * @param {{nodes: Array<object>, links: Array<object>}} previous Previous graph.
    * @param {{nodes: Array<object>, links: Array<object>}} next Incoming graph.
@@ -319,7 +499,12 @@
 
   // ---- GraphInstance: one independent D3 force layout mounted into one container ----
 
-  function GraphInstance(containerId) {
+  /**
+   * Owns one graph's D3 resources and lifecycle-scoped approval queue.
+   * @param {string} containerId Mounted container id.
+   * @param {object} channel Container-owned bidirectional evaluation channel.
+   */
+  function GraphInstance(containerId, channel) {
     this.containerId = containerId;
     this.svg = null;
     this.simulation = null;
@@ -338,6 +523,7 @@
     this.zoom = null;
     this.zoomLayer = null;
     this.hasInitialFit = false;
+    this.initialFitRequested = false;
     this.latestData = null;
     // Seeded from a JS global that begin (not graph.js/GraphView -- see their
     // doc comments) sets alongside its "Show inactive" toggle, mirroring the
@@ -352,6 +538,20 @@
         ? root.__beginShowInactive
         : true;
     this.hiddenNodeIds = new Set();
+    this.channel = channel;
+    this.synchronizing = false;
+    this.gestureActive = false;
+    this.approved = null;
+    // Target identity outlives its animation, but never retains retired requests.
+    this.resetTargets = new WeakSet();
+    this.resetPending = null;
+    this.resetAnimating = false;
+    this.geometry = null;
+    this.revision = 0;
+    var self = this;
+    this.queue = new ProposalQueue(channel.nextGeneration(), channel.send,
+      function (output, request, origin) { self.applyApproved(output, request, origin); }, channel.fail);
+    this.unsubscribe = channel.subscribe(function (reply) { self.queue.receive(reply); });
   }
 
   /**
@@ -367,50 +567,89 @@
   };
 
   /**
-   * Returns the D3 transform that fits bounds in this instance's viewport.
-   * @param {{minX: number, minY: number, maxX: number, maxY: number}} bbox Bounds.
-   * @returns {{fitScale: number, transform: object}} Fit scale and D3 transform.
-   * @postcondition The transform centers the bounds and uses the smaller
-   * viewport-axis scale.
-   * @complexity O(1) time and space.
+   * Measures geometry and submits it without deriving any view policy.
+   * @param {object} action Explicit source action.
+   * @complexity O(n) time and O(1) auxiliary space in visible graph nodes.
    */
-  GraphInstance.prototype.fitTransformFor = function (bbox) {
-    var fit = fitTransformFor(bbox, this.width, this.height);
-    return {
-      fitScale: fit.fitScale,
-      transform: d3.zoomIdentity
-        .translate(this.width / 2, this.height / 2)
-        .scale(fit.fitScale)
-        .translate(-(bbox.minX + bbox.maxX) / 2, -(bbox.minY + bbox.maxY) / 2),
-    };
+  GraphInstance.prototype.submitAction = function (action) {
+    if (this.queue.disposed) return;
+    try {
+      var box = this.computeBBox();
+      var geometry = [box.minX, box.minY, box.maxX, box.maxY, this.width, this.height];
+      if (!this.geometry || geometry.some(function (v, i) { return v !== this.geometry[i]; }, this)) {
+        this.revision = nextCounter(this.revision);
+        this.geometry = geometry;
+      }
+      this.queue.submit({ revision: this.revision, bounds: geometry.slice(0, 4),
+        viewport: geometry.slice(4), action: action });
+    } catch (error) { this.queue.stop(error.message); }
   };
 
-  GraphInstance.prototype.updateZoomConstraints = function (forceFit) {
-    var bbox = this.computeBBox();
-    var fit = this.fitTransformFor(bbox);
-    var maxScale = Math.max(fit.fitScale, MAX_ZOOM);
-    var extent = [
-      [0, 0],
-      [this.width, this.height],
-    ];
-    var translateExtent = [
-      [bbox.minX, bbox.minY],
-      [bbox.maxX, bbox.maxY],
-    ];
-    this.zoom
-      .scaleExtent([fit.fitScale, maxScale])
-      .translateExtent(translateExtent)
-      .extent(extent);
-    if (!this.hasInitialFit || forceFit) {
-      this.svg.call(this.zoom.transform, fit.transform);
-      this.hasInitialFit = true;
-    } else {
-      var current = d3.zoomTransform(this.svg.node());
-      var clampedK = Math.max(fit.fitScale, Math.min(maxScale, current.k));
-      var rescaled = current.scale(clampedK / current.k);
-      var clamped = this.zoom.constrain()(rescaled, extent, translateExtent);
-      this.svg.call(this.zoom.transform, clamped);
+  /** Submits absolute gesture proposals, except during approved baseline synchronization. */
+  GraphInstance.prototype.proposeView = function (event) {
+    if (!this.synchronizing) {
+      if (event.sourceEvent) this.resetPending = null;
+      this.submitAction({ kind: "propose", view: event.transform });
     }
+  };
+
+  /** Defers programmatic baseline synchronization throughout a D3 gesture/transition. */
+  GraphInstance.prototype.beginGesture = function () {
+    if (!this.synchronizing) this.gestureActive = true;
+  };
+
+  /** Synchronizes the last approved baseline after the gesture/transition has ended. */
+  GraphInstance.prototype.endGesture = function () {
+    if (this.synchronizing) return;
+    this.gestureActive = false;
+    this.syncApproved();
+  };
+
+  /**
+   * Renders a model-approved frame and feeds only model limits back to D3.
+   * A reset-target Fit starts interpolation without snapping the visible view.
+   * Repeated or cancelled targets never display, even after interpolation ends.
+   * @param {object} output Validated complete model output.
+   * @param {object} request Snapshot that produced this approval.
+   * @param {object} origin Original action, preserved across coalesced refreshes.
+   * @postcondition No proposal is emitted by applying this frame.
+   */
+  GraphInstance.prototype.applyApproved = function (output, request, origin) {
+    this.zoom.scaleExtent([output.min_zoom, output.max_zoom]);
+    if (this.resetTargets.has(origin)) {
+      if (this.resetPending === origin) {
+        this.resetPending = null;
+        this.animateFit(output.fit);
+      }
+      return;
+    }
+    if (this.resetAnimating && request.action.kind !== "propose") return;
+    this.approved = output;
+    this.hasInitialFit = true;
+    this.zoomLayer.attr("transform", d3.zoomIdentity.translate(output.view.x, output.view.y).scale(output.view.k));
+    this.zoomLayer.attr("visibility", null);
+    this.syncApproved();
+  };
+
+  /** Synchronizes D3's approved baseline under a no-feedback guard, never mid-transition. */
+  GraphInstance.prototype.syncApproved = function () {
+    if (!this.approved || this.gestureActive || !this.svg || this.queue.disposed) return;
+    this.synchronizing = true;
+    try {
+      var view = this.approved.view;
+      this.svg.call(this.zoom.transform, d3.zoomIdentity.translate(view.x, view.y).scale(view.k));
+    } finally { this.synchronizing = false; }
+  };
+
+  /**
+   * Requests initial/explicit fit or a geometry-only refresh from Adam.
+   * @param {boolean} [forceFit] Whether to replace the source aspiration.
+   * @complexity O(n) time and O(1) auxiliary space in graph nodes.
+   */
+  GraphInstance.prototype.updateZoomConstraints = function (forceFit) {
+    var fit = forceFit || !this.initialFitRequested;
+    this.initialFitRequested = true;
+    this.submitAction({ kind: fit ? "fit" : "refresh" });
   };
 
   GraphInstance.prototype.settleSimulation = function (forceFit) {
@@ -444,23 +683,32 @@
     // initial fit would stick -- the graph appears zoomed/cut off on first load.
     // Waiting for a real size guarantees the one-time initial fit is computed
     // against the actual viewport.
-    this.resizeObserver = new ResizeObserver(function () {
-      var w = container.clientWidth;
-      var h = container.clientHeight;
-      if (!self.svg) {
-        if (!w || !h) {
-          return;
-        }
-        self.width = w;
-        self.height = h;
-        self.buildGraph(container, self.latestData);
-      } else {
-        self.width = w || self.width;
-        self.height = h || self.height;
-        self.resizeCanvas();
-      }
-    });
+    this.resizeObserver = new ResizeObserver(function () { self.observeSize(container); });
     this.resizeObserver.observe(container);
+  };
+
+  /**
+   * Builds only at a real nonzero size and ignores callbacks after disposal.
+   * Later measurements preserve the live layout and submit geometry refreshes.
+   * @param {HTMLElement} container This instance's observed container.
+   * @complexity O(n + m + p) for initial graph construction/layout, otherwise O(n)
+   * for geometry measurement, in nodes `n`, links `m`, and settling work `p`.
+   */
+  GraphInstance.prototype.observeSize = function (container) {
+    if (this.queue.disposed) return;
+    try {
+      var w = container.clientWidth, h = container.clientHeight;
+      if (!this.svg) {
+        if (!w || !h) return;
+        this.width = w;
+        this.height = h;
+        this.buildGraph(container, this.latestData);
+      } else {
+        this.width = w || this.width;
+        this.height = h || this.height;
+        this.resizeCanvas();
+      }
+    } catch (error) { this.queue.stop(error.message); }
   };
 
   // Resizes the existing SVG to the current width/height without touching
@@ -526,7 +774,7 @@
       .attr("fill", "context-stroke");
 
     // Layer z-order: bg → control links → constraint links → cells → rels → conditionals → labels → values
-    this.zoomLayer = this.svg.append("g").attr("class", "zoom-layer");
+    this.zoomLayer = this.svg.append("g").attr("class", "zoom-layer").attr("visibility", "hidden");
     this.zoomLayer.append("g").attr("class", "bg-layer");
     this.controlLinkLayer = this.zoomLayer
       .append("g")
@@ -538,9 +786,12 @@
     this.labelLayer = this.zoomLayer.append("g").attr("class", "label-layer");
     this.valueLayer = this.zoomLayer.append("g").attr("class", "value-layer");
 
-    this.zoom = d3.zoom().on("zoom", function (event) {
-      self.zoomLayer.attr("transform", event.transform);
-    });
+    this.zoom = d3.zoom()
+      // D3 owns gesture mechanics, never geometry policy.
+      .constrain(function (transform) { return transform; })
+      .on("start", function () { self.beginGesture(); })
+      .on("zoom", function (event) { self.proposeView(event); })
+      .on("end", function () { self.endGesture(); });
     this.svg.call(this.zoom);
 
     this.simulation = d3
@@ -614,11 +865,8 @@
     this.latestData = data;
     if (!this.svg) return;
 
-    // True only for the very first call after this instance was built (its node
-    // list is still empty) -- this instance-local fact replaces the old
-    // cross-source "sourceChanged" string comparison, since a fresh instance
-    // never carries over another sheet's nodes to begin with.
-    var isFirstPopulation = this.nodes.length === 0 && data.nodes.length > 0;
+    // Empty graphs can later gain nodes without becoming a fresh lifecycle.
+    var isFirstPopulation = !this.initialFitRequested;
 
     var reconciled = reconcileNodes(
       { nodes: this.nodes, links: this.links },
@@ -867,9 +1115,11 @@
       this.settleSimulation(true);
     } else if (structureChanged) {
       this.ticked();
+      this.updateZoomConstraints();
       this.simulation.alpha(1).restart();
     } else {
       this.ticked();
+      this.updateZoomConstraints();
     }
   };
 
@@ -951,26 +1201,54 @@
       });
   };
 
+  /** Proposes an animated zoom increase; only model-approved frames render. */
   GraphInstance.prototype.zoomIn = function () {
     if (!this.svg || !this.zoom) return;
+    this.resetPending = null;
     this.svg.transition().duration(200).call(this.zoom.scaleBy, 1.3);
   };
 
+  /** Proposes an animated zoom decrease using model-provided gesture hints. */
   GraphInstance.prototype.zoomOut = function () {
     if (!this.svg || !this.zoom) return;
+    this.resetPending = null;
     this.svg
       .transition()
       .duration(200)
       .call(this.zoom.scaleBy, 1 / 1.3);
   };
 
+  /**
+   * Requests a fresh Fit target before animating; an initial Fit displays immediately.
+   * A user gesture or another zoom button cancels a waiting reset target.
+   */
   GraphInstance.prototype.resetZoom = function () {
     if (!this.svg || !this.zoom) return;
-    var fit = this.fitTransformFor(this.computeBBox());
+    this.svg.interrupt();
+    var action = { kind: "fit" };
+    this.resetPending = this.approved ? action : null;
+    if (this.resetPending) this.resetTargets.add(action);
+    this.submitAction(action);
+  };
+
+  /**
+   * Interpolates toward a freshly approved Fit through approved proposals.
+   * A completed transition restores Fit aspiration; interruption leaves the
+   * user's newer proposal intact.
+   * @param {{x: number, y: number, k: number}} fit Model-approved target.
+   */
+  GraphInstance.prototype.animateFit = function (fit) {
+    var self = this;
+    this.resetAnimating = true;
     this.svg
       .transition()
       .duration(300)
-      .call(this.zoom.transform, fit.transform);
+      .call(this.zoom.transform, d3.zoomIdentity.translate(fit.x, fit.y).scale(fit.k))
+      .on("end.fit", function () {
+        self.resetAnimating = false;
+        self.submitAction({ kind: "fit" });
+      })
+      .on("interrupt.fit cancel.fit", function () { self.resetAnimating = false; });
   };
 
   GraphInstance.prototype.setShowInactive = function (value) {
@@ -978,7 +1256,14 @@
     if (this.svg) this.update(this.latestData);
   };
 
+  /**
+   * Retires the generation/subscription before stopping observers and D3 resources.
+   * Late replies, transition events, and observer callbacks cannot render again.
+   * @complexity O(n + m) in removed SVG nodes and links.
+   */
   GraphInstance.prototype.destroy = function () {
+    this.queue.dispose();
+    this.unsubscribe();
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
       this.resizeObserver = null;
@@ -988,6 +1273,7 @@
       this.simulation = null;
     }
     if (this.svg) {
+      this.svg.interrupt();
       this.svg.remove();
       this.svg = null;
     }
@@ -998,7 +1284,9 @@
   function init(id, data) {
     var existing = instances.get(id);
     if (existing) existing.destroy();
-    var inst = new GraphInstance(id);
+    var channel = root.__beginGraphChannels && root.__beginGraphChannels[id];
+    if (!channel) throw new Error("GraphView approval channel is not installed for " + id);
+    var inst = new GraphInstance(id, channel);
     instances.set(id, inst);
     inst.start(data);
   }
@@ -1042,6 +1330,7 @@
       zoomOut: zoomOut,
       resetZoom: resetZoom,
       setShowInactive: setShowInactive,
+      createChannel: createChannel,
     };
   }
 
@@ -1051,8 +1340,11 @@
       circleEdgePoint: circleEdgePoint,
       linkEndpoints: linkEndpoints,
       computeBBox: computeBBox,
-      fitTransformFor: fitTransformFor,
       reconcileNodes: reconcileNodes,
+      ProposalQueue: ProposalQueue,
+      nextCounter: nextCounter,
+      createChannel: createChannel,
+      GraphInstance: GraphInstance,
     };
   }
 })();

@@ -11,7 +11,9 @@
 //! unsupported today (issue #213).
 
 use crate::ast::{Expr, LogicalOp};
-use crate::trivia::{Comment, GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap};
+use crate::trivia::{
+    Comment, GapPiece, line_column_to_byte, line_start_byte_offsets, scan_gap, take_block_comment,
+};
 
 /// Binding-strength level, loosest first, mirroring `lib.rs`'s grammar chain from
 /// `range_expression` (via `expression = range_expression`) through `primary_expression`.
@@ -181,6 +183,41 @@ fn gap_between(
     let end = line_column_to_byte(source, &line_starts, next_start.start());
     let gap = source.get(start..end).unwrap_or("");
     scan_gap(gap, expected)
+}
+
+/// Recovers member-dot comments across closing receiver groups omitted from the AST.
+///
+/// - Precondition: non-empty `source` is the receiver's original parsed text, and both spans
+///   resolve within it.
+/// - Postcondition: grouping delimiters are omitted; comments and the dot retain source order.
+/// - Complexity: O(n) in the source length plus the gap length.
+fn member_gap(
+    source: &str,
+    receiver_end: proc_macro2::Span,
+    name_start: proc_macro2::Span,
+) -> Vec<GapPiece> {
+    grouping_gap(source, receiver_end.end(), name_start.start(), &["."])
+}
+
+/// Renders a postfix base, retaining leading group comments inside one owning group.
+///
+/// - Precondition: `start` is the postfix node's original start in `source`, or source is empty.
+/// - Postcondition: the base's leading comments appear once, before its first rendered token.
+/// - Complexity: O(n) in the base's rendering cost plus source and gap lengths.
+fn format_postfix_base(
+    base: &Expr,
+    source: &str,
+    depth: usize,
+    start: proc_macro2::LineColumn,
+) -> String {
+    let leading = grouping_gap(source, start, base.span().start.start(), &[]);
+    if leading.is_empty() {
+        format_at(base, source, depth, Level::POSTFIX)
+    } else {
+        let (text, _) = render(base, source, depth);
+        let prefix = emit_gap(&leading, Spacing::None, depth);
+        format!("({}{text})", prefix.trim_start())
+    }
 }
 
 /// Renders a comma-separated element list with per-gap comment recovery: the gap before the first
@@ -376,6 +413,57 @@ fn render_type_expr(type_expr: &crate::TypeExpr) -> String {
 /// indent level for `//`-comment wrap continuations. Neither is used to change emission yet.
 fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
     match expr {
+        Expr::Struct {
+            name,
+            name_span,
+            fields,
+            span,
+        } => {
+            let mut out = name.clone();
+            if let Some(first) = fields.first() {
+                let open = grouping_gap(
+                    source,
+                    name_span.end.end(),
+                    first.name_span.start.start(),
+                    &["{"],
+                );
+                out.push_str(&emit_gap(&open, Spacing::Around, depth));
+                for (index, field) in fields.iter().enumerate() {
+                    out.push_str(&field.name);
+                    let colon = grouping_gap(
+                        source,
+                        field.name_span.end.end(),
+                        field.value.span().start.start(),
+                        &[":"],
+                    );
+                    out.push_str(&emit_gap(&colon, Spacing::CommaAfter, depth));
+                    out.push_str(&format_at(&field.value, source, depth, Level::RANGE));
+                    if let Some(next) = fields.get(index + 1) {
+                        let comma = grouping_gap(
+                            source,
+                            field.value.span().end.end(),
+                            next.name_span.start.start(),
+                            &[","],
+                        );
+                        out.push_str(&emit_gap(&comma, Spacing::CommaAfter, depth));
+                    }
+                }
+                let last = fields.last().expect("non-empty fields");
+                let mut tail = grouping_gap(
+                    source,
+                    last.value.span().end.end(),
+                    span.end.end(),
+                    &[",", "}"],
+                );
+                tail.retain(|piece| !matches!(piece, GapPiece::Punct(",")));
+                out.push_str(emit_gap(&tail, Spacing::Around, depth).trim_end());
+            } else {
+                let tail = grouping_gap(source, name_span.end.end(), span.end.end(), &["{", "}"]);
+                out.push(' ');
+                out.push_str(&emit_gap(&tail, Spacing::None, depth));
+            }
+            (out, Level::PRIMARY)
+        }
         Expr::Literal { span, .. } => (render_literal(*span), Level::PRIMARY),
         // `AstContext::apply_op` records every arity-0 operator as a plain `Expr::Ident` (see
         // its own test `apply_op_with_arity_zero_records_an_ident_node`) — `"range_full"` (`..`)
@@ -558,20 +646,47 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             (text, Level::CAST)
         }
         Expr::Apply { callee, args, span } => {
-            let callee_s = format_at(callee, source, depth, Level::POSTFIX);
-            // `callee.span().end` is a genuine leaf position (right after the callee, i.e. right
-            // before `(`); `span.end` is the call's own recorded end, which -- per `emit_list`'s
-            // doc comment -- is the whole `(...)` group's span, so its `.end()` (not `.start()`)
-            // is the position right after `)`.
+            let mut callee_s = format_postfix_base(callee, source, depth, span.start.start());
+            // Without parentheses a bare member followed by `()` becomes direct dispatch,
+            // rather than an ordinary call of the member's result.
+            if matches!(callee.as_ref(), Expr::Member { args: None, .. }) {
+                callee_s = format!("({callee_s})");
+            }
+            let tail = grouping_gap(source, callee.span().end.end(), span.end.start(), &[]);
+            callee_s.push_str(&emit_gap(&tail, Spacing::None, depth));
+            // The call's end span covers the complete argument group, so neither boundary
+            // includes closing callee groups omitted from the AST.
             let list = emit_list(
                 source,
                 depth,
                 ("(", ")"),
-                (callee.span().end.end(), span.end.end()),
+                (span.end.start(), span.end.end()),
                 args,
                 false,
             );
             (format!("{callee_s}{list}"), Level::POSTFIX)
+        }
+        Expr::Member {
+            receiver,
+            name,
+            name_span,
+            args,
+            span,
+        } => {
+            let receiver_s = format_postfix_base(receiver, source, depth, span.start.start());
+            let gap = member_gap(source, receiver.span().end, name_span.start);
+            let mut text = format!("{receiver_s}{}{name}", emit_gap(&gap, Spacing::None, depth));
+            if let Some(args) = args {
+                text.push_str(&emit_list(
+                    source,
+                    depth,
+                    ("(", ")"),
+                    (name_span.end.end(), span.end.end()),
+                    args,
+                    false,
+                ));
+            }
+            (text, Level::POSTFIX)
         }
         Expr::Tuple { elements, span } => {
             // `span.start` and `span.end` are both the same whole-group span here (see
@@ -614,10 +729,10 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             }
             (list, Level::PRIMARY)
         }
-        Expr::TupleIndex { base, index, .. } => (
+        Expr::TupleIndex { base, index, span } => (
             format!(
                 "{}.{}",
-                format_at(base, source, depth, Level::POSTFIX),
+                format_postfix_base(base, source, depth, span.start.start()),
                 index
             ),
             Level::POSTFIX,
@@ -636,10 +751,20 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             // that a gap holding more than one fixed token (`"}"`, `"else"`, and — for a braced
             // else — `"{"`) still gets a single space between each token and the next, matching
             // the pre-`scan_gap` literal `" } else { "` spacing exactly in the comment-free case.
-            let cond_s = format_at(cond, source, depth, Level::OR);
+            let cond_s = format_expr_restricted(
+                cond,
+                source,
+                depth,
+                crate::ExpressionRestriction::NoStructLiteral,
+            );
             let then_s = format_at(then_branch, source, depth, Level::OR);
-            let if_gap = gap_between(source, span.start, cond.span().start, &["if"]);
-            let open_gap = gap_between(source, cond.span().end, then_branch.span().start, &["{"]);
+            let if_gap = grouping_gap(source, span.start.start(), header_start(cond), &["if"]);
+            let open_gap = grouping_gap(
+                source,
+                header_end(cond),
+                then_branch.span().start.start(),
+                &["{"],
+            );
             let mut text = String::new();
             // Only the very first gap is `trim_start`'d: it opens the whole node's text, so any
             // leading space `Spacing::Around` would otherwise add before `"if"` must be dropped.
@@ -743,9 +868,194 @@ fn render(expr: &Expr, source: &str, depth: usize) -> (String, Level) {
             } else {
                 format!(" {} ", gap.trim())
             };
-            (format!("{header}{sep}{body_s}"), Level::PRIMARY)
+            // A closure's body greedily consumes expressions, including following postfixes.
+            // Its primary-expression grammar position does not make it a tight-binding value.
+            (format!("{header}{sep}{body_s}"), Level::RANGE)
         }
     }
+}
+
+/// Returns the first rendered header token's position, excluding omitted operand groups.
+///
+/// Prefix/postfix operators and explicit expression delimiters retain their starting positions;
+/// postfix rendering owns any leading receiver-group trivia.
+///
+/// - Complexity: O(h) in the visited leftmost AST path, with O(h) stack space.
+fn header_start(expr: &Expr) -> proc_macro2::LineColumn {
+    match expr {
+        Expr::Op { name, operands, .. }
+            if operands.len() == 2 || (name == "range_from" && operands.len() == 1) =>
+        {
+            header_start(&operands[0])
+        }
+        Expr::Logical { lhs, .. } => header_start(lhs),
+        Expr::Cast { expr, .. } => header_start(expr),
+        _ => expr.span().start.start(),
+    }
+}
+
+/// Returns the last rendered header token's position, excluding omitted operand/body groups.
+///
+/// Postfix operators and explicit expression delimiters retain their own ending positions.
+///
+/// - Complexity: O(h) in the visited rightmost AST path, with O(h) stack space.
+fn header_end(expr: &Expr) -> proc_macro2::LineColumn {
+    match expr {
+        Expr::Op { name, operands, .. } if name != "range_from" && !operands.is_empty() => {
+            header_end(operands.last().expect("non-empty operands"))
+        }
+        Expr::Logical { rhs, .. } => header_end(rhs),
+        Expr::Closure { body, .. } => header_end(body),
+        _ => expr.span().end.end(),
+    }
+}
+
+/// Recovers a field or header gap across grouping parentheses omitted from the AST.
+///
+/// - Precondition: positions refer to `source`, or `source` is empty.
+/// - Postcondition: comments and expected tokens retain source order without grouping tokens.
+/// - Complexity: O(n) in source length and gap size.
+fn grouping_gap(
+    source: &str,
+    from: proc_macro2::LineColumn,
+    to: proc_macro2::LineColumn,
+    expected: &[&'static str],
+) -> Vec<GapPiece> {
+    let starts = line_start_byte_offsets(source);
+    let gap = if source.is_empty() {
+        ""
+    } else {
+        let from = line_column_to_byte(source, &starts, from);
+        let to = line_column_to_byte(source, &starts, to);
+        source.get(from..to).unwrap_or("")
+    };
+    let mut rest = gap;
+    let mut tokens = Vec::new();
+    let mut next = 0;
+    loop {
+        rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix("//") {
+            rest = &after[after.find('\n').unwrap_or(after.len())..];
+        } else if let Some((_, after)) = take_block_comment(rest) {
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix('(') {
+            tokens.push("(");
+            rest = after;
+        } else if let Some(after) = rest.strip_prefix(')') {
+            tokens.push(")");
+            rest = after;
+        } else if next < expected.len() && rest.starts_with(expected[next]) {
+            tokens.push(expected[next]);
+            rest = &rest[expected[next].len()..];
+            next += 1;
+        } else {
+            break;
+        }
+    }
+    tokens.extend_from_slice(&expected[next..]);
+    scan_gap(gap, &tokens)
+        .into_iter()
+        .filter(|piece| !matches!(piece, GapPiece::Punct("(" | ")")))
+        .collect()
+}
+
+/// Detects record syntax reached without an explicit expression boundary in a header.
+///
+/// - Complexity: O(n) in the number of visited AST nodes.
+fn header_contains_record(expr: &Expr) -> bool {
+    match expr {
+        Expr::Struct { .. } => true,
+        Expr::Op { operands, .. } => operands.iter().any(header_contains_record),
+        Expr::Logical { lhs, rhs, .. } => {
+            header_contains_record(lhs) || header_contains_record(rhs)
+        }
+        Expr::Cast { expr, .. } | Expr::Closure { body: expr, .. } => header_contains_record(expr),
+        Expr::Member { receiver, .. } => header_contains_record(receiver),
+        Expr::TupleIndex { base, .. } => header_contains_record(base),
+        Expr::Apply { callee, .. } => header_contains_record(callee),
+        Expr::Literal { .. }
+        | Expr::Ident { .. }
+        | Expr::Tuple { .. }
+        | Expr::Array { .. }
+        | Expr::If { .. } => false,
+    }
+}
+
+/// Formats an embedded expression while preserving a header's brace reservation.
+///
+/// Groups the complete header when an otherwise unparenthesized record would be ambiguous.
+/// Ordinary delimiters and nested branch bodies retain their normal formatting.
+///
+/// - Precondition: `source` is the parsed source, or empty for a hand-built AST.
+/// - Complexity: O(n + s) in AST nodes and source text, excluding existing gap scan costs.
+///
+/// # Examples
+/// ```
+/// use cel_parser::{AstContext, ExpressionRestriction, OpLookup, Parser, format_expr_restricted};
+/// let source = "(Point { x: 1.0 }).x";
+/// let ast = Parser::<AstContext>::new(OpLookup::new()).parse_str_ast(source).unwrap();
+/// let text = format_expr_restricted(&ast, source, 0, ExpressionRestriction::NoStructLiteral);
+/// assert_eq!(text, "(Point { x: 1.0 }.x)");
+/// ```
+pub fn format_expr_restricted(
+    expr: &Expr,
+    source: &str,
+    depth: usize,
+    restriction: crate::ExpressionRestriction,
+) -> String {
+    let text = format_expr(expr, source, depth);
+    if restriction == crate::ExpressionRestriction::NoStructLiteral && header_contains_record(expr)
+    {
+        format!("({text})")
+    } else {
+        text
+    }
+}
+
+/// Formats a brace-reserving header and its surrounding comments within explicit boundaries.
+///
+/// `bounds` runs from just after the introducing keyword to just before the body brace.
+/// Grouping parentheses omitted from the AST do not interrupt comment recovery.
+///
+/// - Precondition: `source` is the parsed source and `bounds` encloses `expr`, or source is empty.
+/// - Postcondition: boundary comments appear exactly once in source order.
+/// - Complexity: O(n + s) in AST nodes and source text, excluding existing gap scan costs.
+///
+/// # Examples
+/// ```
+/// use cel_parser::{AstContext, OpLookup, Parser, format_expr_header};
+/// let source = "(Point { x: 1.0 }) /* keep */";
+/// let expr = Parser::<AstContext>::new(OpLookup::new()).parse_str_ast(source).unwrap();
+/// let text = format_expr_header(&expr, source, 0, (
+///     proc_macro2::LineColumn { line: 1, column: 0 },
+///     proc_macro2::LineColumn { line: 1, column: source.len() },
+/// ));
+/// assert_eq!(text, "(Point { x: 1.0 }) /* keep */");
+/// ```
+pub fn format_expr_header(
+    expr: &Expr,
+    source: &str,
+    depth: usize,
+    bounds: (proc_macro2::LineColumn, proc_macro2::LineColumn),
+) -> String {
+    let leading = grouping_gap(source, bounds.0, header_start(expr), &[]);
+    let trailing = grouping_gap(source, header_end(expr), bounds.1, &[]);
+    let mut text = emit_gap(&leading, Spacing::None, depth)
+        .trim_start()
+        .to_string();
+    text.push_str(&format_expr_restricted(
+        expr,
+        source,
+        depth,
+        crate::ExpressionRestriction::NoStructLiteral,
+    ));
+    let tail = emit_gap(&trailing, Spacing::None, depth);
+    if matches!(trailing.last(), Some(GapPiece::Comment(Comment::Line(_)))) {
+        text.push_str(&tail);
+    } else {
+        text.push_str(tail.trim_end());
+    }
+    text
 }
 
 /// Renders `expr`, wrapping it in parens if its own level is looser than `min_level` requires.
@@ -764,6 +1074,8 @@ fn format_at(expr: &Expr, source: &str, depth: usize, min_level: Level) -> Strin
 ///
 /// `source` is the text `expr` was parsed from (or `""` for a hand-built `Expr`); `depth` is the
 /// indent level for `//`-comment wrap continuations.
+/// Postfix bases retain leading group comments, and member-dot comments survive omitted groups.
+/// Closure bases stay grouped so following postfixes cannot move into their bodies.
 ///
 /// # Examples
 ///

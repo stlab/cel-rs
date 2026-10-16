@@ -365,7 +365,10 @@ impl AdamAstParser {
         use cel_parser::lex_lexer::Token;
         let decl_start = cursor.peek_span();
         cursor.is_keyword("conditional");
-        let match_expr = self.parse_cel_expression(cursor)?;
+        let match_expr = self.parse_cel_expression_restricted(
+            cursor,
+            cel_parser::ExpressionRestriction::NoStructLiteral,
+        )?;
         let outer_open = cursor.expect_open_brace()?;
         let mut branches = Vec::new();
         let mut default = None;
@@ -544,9 +547,27 @@ impl AdamAstParser {
     /// stream (the same take/set-tokens handoff `crate::AdamParser` uses for the `DynSegment`
     /// path).
     fn parse_cel_expression(&mut self, cursor: &mut TokenCursor) -> Result<cel_parser::Expr> {
+        self.parse_cel_expression_restricted(cursor, cel_parser::ExpressionRestriction::None)
+    }
+
+    /// Parses an embedded expression with a temporary header brace reservation.
+    ///
+    /// - Postcondition: tokens and unmatched delimiter depth return to the cursor on every result.
+    /// - Complexity: O(n) in expression tokens.
+    ///
+    /// # Errors
+    /// Returns the embedded expression's syntax error.
+    fn parse_cel_expression_restricted(
+        &mut self,
+        cursor: &mut TokenCursor,
+        restriction: cel_parser::ExpressionRestriction,
+    ) -> Result<cel_parser::Expr> {
         let tokens = cursor.take_tokens().expect("tokens present");
         self.cel.set_lex_tokens(tokens);
-        let result = self.cel.parse_expression_ast();
+        let result = self
+            .cel
+            .parse_expression_ctx_restricted(restriction)
+            .map(cel_parser::AstContext::into_expr);
         cursor.set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
         cursor.absorb_unbalanced_delimiters(self.cel.unbalanced_delimiter_count());
         result
@@ -908,6 +929,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Verifies embedded CEL conditions and conditional subjects reserve their body braces.
+    #[test]
+    fn adam_condition_and_match_headers_reserve_braces() {
+        for source in [
+            "sheet s { conditional flag { _ => { relationship { x := if flag { 1 } else { 2 }; } } } }",
+            "sheet s { conditional (TestPoint { x: 0.0, y: 1.0 }).x { _ => { relationship { x := TestPoint { x: 2.0, y: 3.0 }; } } } }",
+        ] {
+            let sheet = AdamAstParser::new().parse_str(source).unwrap();
+            assert!(sheet.errors.is_empty(), "{:?}", sheet.errors);
+            assert!(matches!(sheet.items[0], ast::SheetItem::Conditional(_)));
+            let formatted = crate::fmt::format_sheet(&sheet, source);
+            let reparsed = AdamAstParser::new().parse_str(&formatted).unwrap();
+            assert!(
+                reparsed.errors.is_empty(),
+                "{formatted}\n{:?}",
+                reparsed.errors
+            );
+            assert_eq!(crate::fmt::format_sheet(&reparsed, &formatted), formatted);
+        }
     }
 
     #[test]
