@@ -1,0 +1,38 @@
+// Executable graph-view policy. Refreshes preserve the ordinary cells' sources.
+sheet view_constraints {
+    source bounds: Rect = Rect {
+        origin: Point2D { x: 0.0, y: 0.0 },
+        size: Size2D { width: 200.0, height: 100.0 }
+    };
+    source viewport: Size2D = Size2D { width: 400.0, height: 300.0 };
+    source max_zoom: f64 = 8.0;
+    cell pan: Vector2D = Vector2D { x: 0.0, y: 0.0 };
+    cell zoom: f64 = 1.0;
+
+    out fit_zoom: f64 := min(
+        viewport.width / max(bounds.width, 1.0),
+        viewport.height / max(bounds.height, 1.0)
+    );
+    out fit_pan: Vector2D := Vector2D {
+        x: viewport.width * 0.5 - fit_zoom * bounds.center().x,
+        y: viewport.height * 0.5 - fit_zoom * bounds.center().y
+    };
+    out min_zoom: f64 := fit_zoom;
+    out effective_max_zoom: f64 := max(fit_zoom, max_zoom);
+    relationship { zoom := clamp(zoom, min_zoom, effective_max_zoom); }
+    relationship {
+        pan := Vector2D {
+            x: if bounds.width * zoom < viewport.width {
+                viewport.width * 0.5 - zoom * bounds.center().x
+            } else {
+                clamp(pan.x, viewport.width - zoom * bounds.max_x, -zoom * bounds.min_x)
+            },
+            y: if bounds.height * zoom < viewport.height {
+                viewport.height * 0.5 - zoom * bounds.center().y
+            } else {
+                clamp(pan.y, viewport.height - zoom * bounds.max_y, -zoom * bounds.min_y)
+            }
+        };
+    }
+    out view: Transform2D := scale(zoom, zoom).then(translation(pan));
+}
