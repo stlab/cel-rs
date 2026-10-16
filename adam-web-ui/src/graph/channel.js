@@ -7,9 +7,10 @@
  * @param {string} id Container id.
  * @param {object} data Initial graph snapshot.
  * @param {{send: function(*):void, recv: function():Promise<object>}} transport Dioxus evaluation transport.
+ * @param {boolean} [external=false] Whether diagnostics belong in a host-owned container.
  * @returns {Promise<void>} Resolves after all owned JS resources are disposed.
  */
-async function runGraphChannel(root, id, data, transport) {
+async function runGraphChannel(root, id, data, transport, external = false) {
   root.__beginGraphOwners = root.__beginGraphOwners || Object.create(null);
   root.__beginGraphChannels = root.__beginGraphChannels || Object.create(null);
   root.__beginGraphErrors = root.__beginGraphErrors || Object.create(null);
@@ -22,6 +23,10 @@ async function runGraphChannel(root, id, data, transport) {
   root.__beginGraphOwners[id] = owner;
   root.__beginGraphData[id] = data;
   delete root.__beginGraphErrors[id];
+  const container = root.document && root.document.getElementById(id);
+  if (external && container) {
+    container.querySelectorAll("[data-graph-diagnostic]").forEach(node => node.remove());
+  }
 
   /** Retires this owner without ever destroying a replacement's instance. */
   function close() {
@@ -54,7 +59,18 @@ async function runGraphChannel(root, id, data, transport) {
     }
     root.__beginGraphErrors[id] = message;
     try { if (notify) transport.send(message); }
-    finally { close(); }
+    finally {
+      close();
+      if (external && container) {
+        const diagnostic = root.document.createElement("p");
+        diagnostic.setAttribute("role", "alert");
+        diagnostic.setAttribute("data-graph-diagnostic", "");
+        diagnostic.className = "graph-failure";
+        diagnostic.textContent = message.startsWith("Graph view failed:")
+          ? message : "Graph view failed: " + message;
+        container.appendChild(diagnostic);
+      }
+    }
   }
 
   /** Receives Rust replies until explicit closure or a terminal transport error. */

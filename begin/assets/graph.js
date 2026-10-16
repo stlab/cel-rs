@@ -78,7 +78,7 @@
    * pending gestures never invalidate approved progress at the same geometry.
    * @param {number} generation Explicitly started u32 lifecycle.
    * @param {function(object):void} send Ordered transport submission.
-   * @param {function(object):void} apply Approved-output renderer.
+   * @param {function(object, object):void} apply Approved-output renderer and request.
    * @param {function(string):void} fail Visible/error-channel reporter.
    */
   function ProposalQueue(generation, send, apply, fail) {
@@ -154,6 +154,7 @@
       if (!this.inflight || reply.sequence !== this.inflight.sequence) return;
       if (reply.revision !== this.inflight.revision)
         throw new Error("graph reply revision does not match its request");
+      var request = this.inflight;
       this.inflight = null;
       if (reply.kind !== "accepted" && reply.kind !== "failed")
         throw new Error("unknown graph reply");
@@ -162,7 +163,7 @@
       if (!validOutput(reply.output)) throw new Error("invalid approved graph output");
       if (reply.revision === this.revision && reply.sequence > this.applied) {
         this.applied = reply.sequence;
-        this.apply(reply.output);
+        this.apply(reply.output, request);
       }
       this.pump();
     } catch (error) { this.stop(error.message); }
@@ -400,31 +401,6 @@
   }
 
   /**
-   * Computes a centered fit scale and translation for graph bounds.
-   * The scale is the smaller of the viewport width/content width and viewport
-   * height/content height; zero-sized content is treated as one unit.
-   * @param {{minX: number, minY: number, maxX: number, maxY: number}} bbox Bounds.
-   * @param {number} width Viewport width.
-   * @param {number} height Viewport height.
-   * @returns {{fitScale: number, x: number, y: number}} Fit parameters.
-   * @postcondition The transformed bounding-box center is the viewport center,
-   * and the fitted content does not exceed either viewport axis.
-   * @complexity O(1) time and space.
-   */
-  function fitTransformFor(bbox, width, height) {
-    var cx = (bbox.minX + bbox.maxX) / 2;
-    var cy = (bbox.minY + bbox.maxY) / 2;
-    var contentW = Math.max(bbox.maxX - bbox.minX, 1);
-    var contentH = Math.max(bbox.maxY - bbox.minY, 1);
-    var fitScale = Math.min(width / contentW, height / contentH);
-    return {
-      fitScale: fitScale,
-      x: width / 2 - fitScale * cx,
-      y: height / 2 - fitScale * cy,
-    };
-  }
-
-  /**
    * Reconciles graph data while retaining existing node objects and positions.
    * @param {{nodes: Array<object>, links: Array<object>}} previous Previous graph.
    * @param {{nodes: Array<object>, links: Array<object>}} next Incoming graph.
@@ -557,11 +533,14 @@
     this.synchronizing = false;
     this.gestureActive = false;
     this.approved = null;
+    // null, "waiting", or "cancelled" until the outstanding target is consumed.
+    this.resetPending = null;
+    this.resetAnimating = false;
     this.geometry = null;
     this.revision = 0;
     var self = this;
     this.queue = new ProposalQueue(channel.nextGeneration(), channel.send,
-      function (output) { self.applyApproved(output); }, channel.fail);
+      function (output, request) { self.applyApproved(output, request); }, channel.fail);
     this.unsubscribe = channel.subscribe(function (reply) { self.queue.receive(reply); });
   }
 
@@ -598,8 +577,10 @@
 
   /** Submits absolute gesture proposals, except during approved baseline synchronization. */
   GraphInstance.prototype.proposeView = function (event) {
-    if (!this.synchronizing)
+    if (!this.synchronizing) {
+      if (event.sourceEvent && this.resetPending) this.resetPending = "cancelled";
       this.submitAction({ kind: "propose", view: event.transform });
+    }
   };
 
   /** Defers programmatic baseline synchronization throughout a D3 gesture/transition. */
@@ -616,13 +597,24 @@
 
   /**
    * Renders a model-approved frame and feeds only model limits back to D3.
+   * A reset-target Fit starts interpolation without snapping the visible view.
    * @param {object} output Validated complete model output.
+   * @param {object} request Snapshot that produced this approval.
    * @postcondition No proposal is emitted by applying this frame.
    */
-  GraphInstance.prototype.applyApproved = function (output) {
+  GraphInstance.prototype.applyApproved = function (output, request) {
+    this.zoom.scaleExtent([output.min_zoom, output.max_zoom]);
+    // A coalesced refresh can still carry Fit while the target is in flight.
+    // It is another target acknowledgement, not an interpolated display frame.
+    if (this.resetAnimating && request.action.kind !== "propose") return;
+    if (this.resetPending && request.action.kind === "fit") {
+      var animate = this.resetPending === "waiting";
+      this.resetPending = null;
+      if (animate) this.animateFit(output.fit);
+      return;
+    }
     this.approved = output;
     this.hasInitialFit = true;
-    this.zoom.scaleExtent([output.min_zoom, output.max_zoom]);
     this.zoomLayer.attr("transform", d3.zoomIdentity.translate(output.view.x, output.view.y).scale(output.view.k));
     this.zoomLayer.attr("visibility", null);
     this.syncApproved();
@@ -862,11 +854,8 @@
     this.latestData = data;
     if (!this.svg) return;
 
-    // True only for the very first call after this instance was built (its node
-    // list is still empty) -- this instance-local fact replaces the old
-    // cross-source "sourceChanged" string comparison, since a fresh instance
-    // never carries over another sheet's nodes to begin with.
-    var isFirstPopulation = this.nodes.length === 0 && data.nodes.length > 0;
+    // Empty graphs can later gain nodes without becoming a fresh lifecycle.
+    var isFirstPopulation = !this.initialFitRequested;
 
     var reconciled = reconcileNodes(
       { nodes: this.nodes, links: this.links },
@@ -1115,9 +1104,11 @@
       this.settleSimulation(true);
     } else if (structureChanged) {
       this.ticked();
+      this.updateZoomConstraints();
       this.simulation.alpha(1).restart();
     } else {
       this.ticked();
+      this.updateZoomConstraints();
     }
   };
 
@@ -1202,12 +1193,14 @@
   /** Proposes an animated zoom increase; only model-approved frames render. */
   GraphInstance.prototype.zoomIn = function () {
     if (!this.svg || !this.zoom) return;
+    if (this.resetPending) this.resetPending = "cancelled";
     this.svg.transition().duration(200).call(this.zoom.scaleBy, 1.3);
   };
 
   /** Proposes an animated zoom decrease using model-provided gesture hints. */
   GraphInstance.prototype.zoomOut = function () {
     if (!this.svg || !this.zoom) return;
+    if (this.resetPending) this.resetPending = "cancelled";
     this.svg
       .transition()
       .duration(200)
@@ -1215,22 +1208,34 @@
   };
 
   /**
-   * Animates toward the last model-derived fit and requests a terminal fresh Fit.
-   * A user-interrupted transition does not submit that terminal reset.
+   * Requests a fresh Fit target before animating; an initial Fit displays immediately.
+   * A user gesture or another zoom button cancels a waiting reset target.
    */
   GraphInstance.prototype.resetZoom = function () {
     if (!this.svg || !this.zoom) return;
-    if (!this.approved) {
-      this.submitAction({ kind: "fit" });
-      return;
-    }
+    this.svg.interrupt();
+    this.resetPending = this.approved ? "waiting" : null;
+    this.submitAction({ kind: "fit" });
+  };
+
+  /**
+   * Interpolates toward a freshly approved Fit through approved proposals.
+   * A completed transition restores Fit aspiration; interruption leaves the
+   * user's newer proposal intact.
+   * @param {{x: number, y: number, k: number}} fit Model-approved target.
+   */
+  GraphInstance.prototype.animateFit = function (fit) {
     var self = this;
-    var fit = this.approved.fit;
+    this.resetAnimating = true;
     this.svg
       .transition()
       .duration(300)
       .call(this.zoom.transform, d3.zoomIdentity.translate(fit.x, fit.y).scale(fit.k))
-      .on("end.fit", function () { self.submitAction({ kind: "fit" }); });
+      .on("end.fit", function () {
+        self.resetAnimating = false;
+        self.submitAction({ kind: "fit" });
+      })
+      .on("interrupt.fit cancel.fit", function () { self.resetAnimating = false; });
   };
 
   GraphInstance.prototype.setShowInactive = function (value) {
@@ -1322,7 +1327,6 @@
       circleEdgePoint: circleEdgePoint,
       linkEndpoints: linkEndpoints,
       computeBBox: computeBBox,
-      fitTransformFor: fitTransformFor,
       reconcileNodes: reconcileNodes,
       ProposalQueue: ProposalQueue,
       nextCounter: nextCounter,

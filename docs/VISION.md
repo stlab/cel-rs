@@ -110,9 +110,12 @@ conditional groups; the only `cel-parser` client so far.
   aspirations, including crop spring-back. Crop fitting uses inverse source-image
   bounds for general invertible affine transforms, explicit numerical requirements,
   and reciprocal-shrink presentation without a Rust fitting function.
-  The next independent graph stage must connect a lifecycle-owned evaluation
-  bridge to measured bounds, viewport and gestures. `graph.js` still owns the
-  current live graph constraints; the demonstrations do not migrate it.
+  Live graphs now use the same library-first approach: a cached Adam sheet owns
+  fit, zoom limits, centering, and pan clamping. Shared `GraphView` evaluation
+  channels connect measured bounds, viewport changes, gestures, and animated
+  controls to approved transforms on desktop, web, and live book pages.
+  JavaScript retains layout and measurement, not a second constraint policy.
+  See [Graph view ownership and verification](graph-view.md).
 
 ## begin
 

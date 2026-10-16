@@ -1,7 +1,8 @@
 // Mounts a live SheetInspector into every `.adam-live` div that the live-examples preprocessor
 // inserted. Each `.adam-live-graph` div sharing that mount's `data-example` is not mounted on
 // its own; it's a plain container whose id is handed to the inspector's `mount` call, and the
-// inspector's own sheet drives it via `window.beginGraph` (see `begin/assets/graph.js`). Each
+// inspector's own sheet drives it through a shared GraphView channel owner; no
+// Begin-specific hook or JavaScript constraint fallback is needed. Each
 // div's `data-example` (e.g. "cells/tuple_typed_cell") names one of the `adam-live-examples.json`
 // manifest's entries; the manifest and the compiled adam-lang-book-live wasm/js bundle are both
 // generated into `book-src/theme/` by the book build (see the CI workflow changes), and
@@ -74,8 +75,8 @@ function loadScript(url, { module = false } = {}) {
   await init();
 
   // Assign each graph container its own id and index it by the example it shows, so each
-  // inspector mount can be handed the ids of the graphs its sheet must drive. The graph divs
-  // are now plain containers graph.js attaches to; the inspector mount owns the sheet.
+  // inspector mount can install one GraphView channel owner per graph. The graph divs
+  // stay in their chapter positions, outside the inspector's Dioxus root.
   const graphIdsByExample = new Map();
   graphMounts.forEach((div, index) => {
     const name = div.dataset.example;

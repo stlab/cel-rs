@@ -24,6 +24,50 @@ function mountedChannel() {
 }
 
 describe("mounted shared graph channel", () => {
+  it.each([false, true])("container_failure_rendering_respects_external_ownership_%s", async external => {
+    const c = mountedChannel();
+    const children = [];
+    const container = {
+      appendChild: node => children.push(node),
+      querySelectorAll: () => children.slice(),
+    };
+    c.root.document = {
+      getElementById: id => id === "book-a" ? container : null,
+      createElement: () => ({
+        setAttribute(name, value) { this[name] = value; },
+        remove() { children.splice(children.indexOf(this), 1); },
+      }),
+    };
+    const old = runGraphChannel(c.root, "book-a", {}, c.transport, external);
+    c.root.__beginGraphChannels["book-a"].fail("intentional book failure");
+    await old;
+    assert.equal(children.length, Number(external));
+    if (external) {
+      assert.equal(children[0].role, "alert");
+      assert.equal(children[0].textContent, "Graph view failed: intentional book failure");
+    }
+    const next = runGraphChannel(c.root, "book-a", {}, c.transport, external);
+    assert.equal(children.length, 0);
+    c.root.__beginGraphOwners["book-a"].close();
+    await next;
+  });
+  it("two_simultaneous_book_owners_keep_channels_and_failures_independent", async () => {
+    const c = mountedChannel(), other = mountedChannel();
+    const a = runGraphChannel(c.root, "book-a", { a: true }, c.transport);
+    const b = runGraphChannel(c.root, "book-b", { b: true }, other.transport);
+    const channel = c.root.__beginGraphChannels["book-b"];
+    const received = [];
+    channel.subscribe(value => received.push(value));
+    c.root.__beginGraphChannels["book-a"].fail("only a failed");
+    await a;
+    assert.equal(c.root.__beginGraphChannels["book-b"], channel);
+    other.reply({ kind: "accepted" });
+    await Promise.resolve(); await Promise.resolve();
+    assert.deepEqual(received, [{ kind: "accepted" }]);
+    assert.equal(c.root.__beginGraphErrors["book-b"], undefined);
+    c.root.__beginGraphOwners["book-b"].close();
+    await b;
+  });
   it("preserves_the_real_dioxus_sender_receiver_binding", async () => {
     const c = mountedChannel();
     c.transport.sent = [];

@@ -8,7 +8,6 @@ const {
   circleEdgePoint,
   linkEndpoints,
   computeBBox,
-  fitTransformFor,
   reconcileNodes,
   ProposalQueue,
   GraphInstance,
@@ -151,10 +150,176 @@ function approvedGraph() {
     baselines.push(view);
     graph.proposeView({ transform: view });
   } };
-  return { graph, channel, messages, frames, baselines };
+  const reply = (view, fit = { x: 0, y: 50, k: 2 }) => {
+    const request = graph.queue.inflight;
+    channel.deliver({ kind: "accepted", generation: request.generation,
+      sequence: request.sequence, revision: request.revision,
+      output: { view, fit, min_zoom: 2, max_zoom: 8 } });
+  };
+  return { graph, channel, messages, frames, baselines, reply };
 }
 
 describe("GraphInstance approval adapter", () => {
+  it("initial_fit_waits_for_real_viewport_and_approval", () => {
+    const c = approvedGraph();
+    c.graph.svg = null;
+    c.graph.buildGraph = () => {
+      c.graph.svg = {};
+      c.graph.updateZoomConstraints(true);
+    };
+    c.graph.observeSize({ clientWidth: 0, clientHeight: 300 });
+    assert.equal(c.messages.length, 1);
+    c.graph.observeSize({ clientWidth: 400, clientHeight: 300 });
+    assert.deepEqual(c.graph.queue.inflight.viewport, [400, 300]);
+    assert.equal(c.graph.queue.inflight.action.kind, "fit");
+    assert.deepEqual(c.frames, []);
+  });
+  it("resize_and_visibility_refresh_constraints", () => {
+    const c = approvedGraph();
+    c.graph.updateZoomConstraints(true);
+    c.reply({ x: 0, y: 50, k: 2 });
+    c.graph.width = 500;
+    c.graph.hiddenNodeIds.add("inactive");
+    c.graph.updateZoomConstraints();
+    assert.equal(c.graph.queue.inflight.action.kind, "refresh");
+    assert.deepEqual(c.graph.queue.inflight.viewport, [500, 300]);
+    assert.equal(c.frames.length, 1);
+  });
+  it("structural_change_preserves_current_view_when_valid", () => {
+    const c = approvedGraph();
+    c.graph.updateZoomConstraints(true);
+    c.reply({ x: -200, y: -100, k: 4 });
+    c.graph.nodes = [{ id: "new", kind: "Cell", x: 100, y: 100 }];
+    c.graph.updateZoomConstraints();
+    assert.equal(c.graph.queue.inflight.action.kind, "refresh");
+    c.reply({ x: -200, y: -100, k: 4 });
+    assert.equal(c.frames.at(-1).k, 4);
+    assert.equal(c.frames.at(-1).x, -200);
+  });
+  it("repopulation_and_label_updates_refresh_without_resetting_aspiration", () => {
+    const c = updateGraph();
+    c.graph.update({ nodes: [{ id: "a", kind: "Cell", label: "A", x: 100, y: 100 }],
+      links: [], changed: [] });
+    assert.equal(c.graph.queue.inflight?.action.kind, "refresh");
+    c.reply({ x: -200, y: -100, k: 4 });
+    c.graph.update({ nodes: [{ id: "a", kind: "Cell", label: "A much longer label" }],
+      links: [], changed: [] });
+    assert.equal(c.graph.queue.inflight?.action.kind, "refresh");
+    assert.equal(c.frames.at(-1).k, 4);
+  });
+  it("visibility_toggle_refreshes_measured_bounds_without_fit", () => {
+    const c = updateGraph();
+    const data = { nodes: [
+      { id: "active", kind: "Cell", x: 100, y: 100 },
+      { id: "inactive", kind: "Relationship", x: 500, y: 100 },
+    ], links: [{ source: "active", target: "inactive", kind: "Control", branch_active: false }],
+    changed: [] };
+    c.graph.update(data);
+    c.reply({ x: -200, y: -100, k: 4 });
+    c.graph.setShowInactive(false);
+    assert.ok(c.graph.hiddenNodeIds.has("inactive"));
+    assert.equal(c.graph.queue.inflight?.action.kind, "refresh");
+    assert.ok(c.graph.queue.inflight.bounds[2] < 500);
+  });
+  it("reset_animation_is_not_interrupted_by_approvals", () => {
+    const c = animatedGraph();
+    c.graph.resetZoom();
+    assert.equal(c.graph.queue.inflight.action.kind, "fit");
+    assert.equal(c.frames.length, 1);
+    // A fresh target differs from the previously acknowledged fit.
+    c.reply({ x: 20, y: 60, k: 2 }, { x: 20, y: 60, k: 2 });
+    assert.equal(c.frames.length, 1, "target approval must not snap the display");
+    assert.equal(c.timing.duration, 300);
+    for (const t of [0.25, 0.5, 0.75, 1]) {
+      c.advance(t);
+      const before = c.frames.length;
+      c.reply(c.graph.queue.inflight.action.view, { x: 20, y: 60, k: 2 });
+      assert.equal(c.frames.length, before + 1);
+      if (t < 1) assert.equal(c.graph.gestureActive, true);
+    }
+    assert.equal(c.graph.queue.inflight.action.kind, "fit");
+    c.reply({ x: 20, y: 60, k: 2 }, { x: 20, y: 60, k: 2 });
+    assert.equal(c.frames.at(-1).k, 2);
+    assert.equal(c.frames.at(-1).x, 20);
+  });
+  it("zoom_buttons_and_wheel_use_the_same_model", () => {
+    const c = animatedGraph();
+    for (const [method, scale] of [["zoomIn", 5.2], ["zoomOut", 4]]) {
+      c.graph[method]();
+      assert.equal(c.timing.duration, 200);
+      c.advance(1);
+      const proposal = c.graph.queue.inflight.action;
+      assert.equal(proposal.kind, "propose");
+      assert.ok(Math.abs(proposal.view.k - scale) < 1e-9);
+      const before = c.frames.length;
+      c.reply(proposal.view);
+      assert.equal(c.frames.length, before + 1);
+    }
+    c.graph.proposeView({ sourceEvent: { type: "wheel" },
+      transform: { x: -200, y: -100, k: 5 } });
+    assert.equal(c.frames.at(-1).k, 4);
+    c.reply({ x: -200, y: -100, k: 5 });
+    assert.equal(c.frames.at(-1).k, 5);
+  });
+  it("explicit_reset_replaces_an_older_button_animation", () => {
+    const c = animatedGraph();
+    c.graph.zoomIn();
+    c.advance(0.25);
+    const intermediate = c.graph.queue.inflight.action.view;
+    c.graph.resetZoom();
+    c.advance(0.5);
+    c.reply(intermediate);
+    assert.equal(c.graph.queue.inflight.action.kind, "fit",
+      "old animation must not overwrite the explicit reset");
+  });
+  it("geometry_refresh_does_not_snap_an_approved_reset_animation", () => {
+    const c = animatedGraph();
+    c.graph.resetZoom();
+    c.graph.updateZoomConstraints();
+    c.reply({ x: 0, y: 50, k: 2 });
+    c.advance(0.25);
+    assert.equal(c.graph.queue.inflight.action.kind, "fit");
+    c.reply({ x: 0, y: 50, k: 2 });
+    assert.equal(c.frames.length, 1, "repeated Fit target is not an animation frame");
+    c.reply(c.graph.queue.inflight.action.view);
+    assert.equal(c.frames.length, 2);
+    assert.ok(c.frames.at(-1).k > 2 && c.frames.at(-1).k < 4);
+  });
+  it.each(["wheel", "zoomIn", "zoomOut"])("new_%s_cancels_an_inflight_reset_target_without_a_fit_snap", method => {
+    const c = animatedGraph();
+    c.graph.resetZoom();
+    if (method === "wheel") {
+      c.graph.proposeView({ sourceEvent: { type: "wheel" },
+        transform: { x: -210, y: -110, k: 5 } });
+    } else {
+      c.graph[method]();
+      c.advance(1);
+    }
+    c.reply({ x: 0, y: 50, k: 2 });
+    assert.equal(c.frames.length, 1, "cancelled target must never display");
+    const proposal = c.graph.queue.inflight.action.view;
+    c.reply(proposal);
+    const expected = method === "wheel" ? 5 : method === "zoomIn" ? 5.2 : 4 / 1.3;
+    assert.ok(Math.abs(c.frames.at(-1).k - expected) < 1e-9);
+    assert.equal(c.graph.queue.size, 0);
+  });
+  it("late_source_reply_cannot_move_replacement_graph", () => {
+    const c = approvedGraph();
+    c.graph.updateZoomConstraints(true);
+    const retired = c.graph.queue.inflight;
+    c.graph.destroy();
+    const replacement = new GraphInstance("test", c.channel);
+    replacement.width = 400; replacement.height = 300;
+    replacement.updateZoomConstraints(true);
+    c.channel.deliver({ kind: "accepted", generation: retired.generation,
+      sequence: retired.sequence, revision: retired.revision,
+      output: { view: { x: 0, y: 50, k: 2 }, fit: { x: 0, y: 50, k: 2 },
+        min_zoom: 2, max_zoom: 8 } });
+    assert.equal(replacement.approved, null);
+    assert.equal(replacement.queue.size, 1);
+    assert.equal(c.frames.length, 0);
+    replacement.destroy();
+  });
   it("waits_for_nonzero_size_and_ignores_late_observer_after_disposal", () => {
     const messages = [];
     const channel = createChannel(m => messages.push(m), error => assert.fail(error));
@@ -208,6 +373,77 @@ describe("GraphInstance approval adapter", () => {
     assert.equal(c.graph.queue.pending.action.kind, "propose");
   });
 });
+
+/**
+ * Drives production animation callbacks with deterministic transition timing.
+ * Only the unavailable SVG transition scheduler is substituted; proposals and
+ * delayed approvals pass through the real GraphInstance and bounded queue.
+ * @returns {object} Approval harness with an explicit normalized clock.
+ */
+function animatedGraph() {
+  const c = approvedGraph();
+  c.graph.updateZoomConstraints(true);
+  c.reply({ x: -200, y: -100, k: 4 });
+  let target, start, onEnd, onInterrupt, interrupted = false;
+  c.timing = {};
+  c.graph.zoom.transform = "transform";
+  c.graph.zoom.scaleBy = "scaleBy";
+  c.graph.svg.interrupt = () => {
+    interrupted = true;
+    c.graph.endGesture();
+    if (onInterrupt) onInterrupt();
+  };
+  c.graph.svg.transition = () => ({
+    duration(ms) { c.timing.duration = ms; return this; },
+    call(method, value) {
+      interrupted = false;
+      start = c.graph.approved.view;
+      target = method === "scaleBy"
+        ? { ...start, k: start.k * value } : value;
+      onEnd = onInterrupt = null;
+      c.graph.beginGesture();
+      return this;
+    },
+    on(event, callback) {
+      if (event === "end.fit") onEnd = callback; else onInterrupt = callback;
+      return this;
+    },
+  });
+  c.advance = t => {
+    if (interrupted) return;
+    c.graph.proposeView({ transform: {
+      x: start.x + (target.x - start.x) * t,
+      y: start.y + (target.y - start.y) * t,
+      k: start.k + (target.k - start.k) * t,
+    } });
+    if (t === 1) { c.graph.endGesture(); if (onEnd) onEnd(); }
+  };
+  return c;
+}
+
+/**
+ * Supplies inert SVG joins and a stopped layout for real update-path tests.
+ * DOM drawing and force integration are external boundaries; reconciliation,
+ * filtering, bounds measurement and bridge actions remain production code.
+ * @returns {object} An initially approved empty graph ready for data updates.
+ */
+function updateGraph() {
+  const c = animatedGraph();
+  const selection = {};
+  for (const name of ["selectAll", "data", "join", "attr", "style", "on", "call",
+    "filter", "text", "each", "transition", "duration", "append", "remove", "classed"]) {
+    selection[name] = () => selection;
+  }
+  for (const layer of ["cellLayer", "relLayer", "condLayer", "labelLayer",
+    "valueLayer", "linkLayer", "controlLinkLayer"]) c.graph[layer] = selection;
+  const simulation = {};
+  for (const name of ["stop", "alpha", "tick", "nodes", "restart"]) simulation[name] = () => simulation;
+  simulation.alphaMin = () => 0.001;
+  simulation.alphaDecay = () => 0.1;
+  simulation.force = () => ({ links() {}, x() {}, y() {} });
+  c.graph.simulation = simulation;
+  return c;
+}
 
 /**
  * Asserts that two finite Cartesian points are equal within one nanounit.
@@ -322,15 +558,6 @@ describe("computeBBox", () => {
       maxX: 400,
       maxY: 300,
     });
-  });
-});
-
-describe("fitTransformFor", () => {
-  it("centers the box and limits scale by the smaller viewport axis", () => {
-    assert.deepEqual(
-      fitTransformFor({ minX: 0, minY: 0, maxX: 200, maxY: 100 }, 400, 300),
-      { fitScale: 2, x: 0, y: 50 },
-    );
   });
 });
 

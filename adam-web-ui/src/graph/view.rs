@@ -69,11 +69,11 @@ impl ChannelSession {
 /// Embeds the tested shared channel runtime and safely encoded initial arguments.
 ///
 /// - Complexity: O(n) time and space in serialized graph data.
-fn graph_channel_script(container_id: &str, data: &GraphData) -> String {
+fn graph_channel_script(container_id: &str, data: &GraphData, external_container: bool) -> String {
     let id = serde_json::to_string(container_id).expect("strings serialize");
     let data = serde_json::to_string(data).expect("graph data serializes");
     format!(
-        "{}\nawait runGraphChannel(window, {id}, {data}, dioxus);",
+        "{}\nawait runGraphChannel(window, {id}, {data}, dioxus, {external_container});",
         include_str!("channel.js")
     )
 }
@@ -167,14 +167,32 @@ pub fn graph_drive_script(container_id: &str, data: &GraphData, call: GraphDrive
 /// reported through the platform diagnostics channel and a visible alert;
 /// no JavaScript view policy substitutes for a failed model.
 ///
+/// With `external_container`, the host supplies an existing container outside
+/// this Dioxus root (as mdBook does). This component renders only its lifecycle
+/// anchor and fallback diagnostic, never a second element with the same id.
+/// The shared channel also displays failures inside that external container.
+///
 /// The zoom controls and the "Show inactive" toggle live in `App`'s top bar
 /// (not here) — they only ever call `window.beginGraph.*`/set a signal `App`
 /// owns, so they don't need to be inside this component to work.
+///
+/// # Examples
+///
+/// ```
+/// use adam_web_ui::{GraphData, GraphView};
+/// use dioxus::prelude::*;
+///
+/// fn graph(id: ReadSignal<String>, data: ReadSignal<GraphData>,
+///          source: ReadSignal<String>) -> Element {
+///     rsx! { GraphView { graph_id: id, data, source_id: source } }
+/// }
+/// ```
 #[component]
 pub fn GraphView(
     graph_id: ReadSignal<String>,
     data: ReadSignal<GraphData>,
     source_id: ReadSignal<String>,
+    #[props(default = false)] external_container: bool,
 ) -> Element {
     let container_id = graph_id.read().clone();
     let mut mounted = use_signal(|| false);
@@ -198,7 +216,7 @@ pub fn GraphView(
             previous.stop();
         }
         failure.set(None);
-        let eval = document::eval(&graph_channel_script(&id, &data.peek()));
+        let eval = document::eval(&graph_channel_script(&id, &data.peek(), external_container));
         let task = spawn(receive_views(eval, failure));
         *session.borrow_mut() = Some(ChannelSession {
             identity: Rc::new(()),
@@ -237,8 +255,8 @@ pub fn GraphView(
 
     rsx! {
         div {
-            id: "{container_id}",
-            class: "graph-view",
+            id: (!external_container).then_some(container_id),
+            class: if external_container { "graph-channel-owner" } else { "graph-view" },
             onmounted: move |_| mounted.set(true),
             if let Some(message) = failure() {
                 p { class: "graph-failure", role: "alert", "{message}" }
@@ -250,6 +268,28 @@ pub fn GraphView(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// External book containers retain their DOM identity while sharing the channel owner.
+    #[test]
+    fn external_graph_host_does_not_steal_existing_container() {
+        /// Renders a lifecycle owner for a container outside this Dioxus root.
+        fn external_host() -> Element {
+            let id = use_signal(|| "book-graph".to_string());
+            let data = use_signal(empty_graph_data);
+            let source = use_signal(|| "book-source".to_string());
+            rsx! { GraphView { graph_id: id, data, source_id: source, external_container: true } }
+        }
+        let mut dom = VirtualDom::new(external_host);
+        let mutations = dom.rebuild_to_vec();
+        assert!(!mutations.edits.iter().any(|edit| matches!(
+            edit,
+            dioxus::core::Mutation::SetAttribute {
+                name: "id",
+                value: dioxus::core::AttributeValue::Text(_),
+                ..
+            }
+        )));
+    }
 
     /// A replaced channel's one-shot evaluation failure cannot affect its successor.
     #[test]
@@ -290,7 +330,7 @@ mod tests {
     /// The mounted channel script starts its receiver before graph initialization.
     #[test]
     fn channel_script_embeds_shared_runtime_and_escapes_ids() {
-        let script = graph_channel_script("a\"b", &empty_graph_data());
+        let script = graph_channel_script("a\"b", &empty_graph_data(), false);
         assert!(script.contains("async function runGraphChannel"));
         assert!(script.contains(r#"await runGraphChannel(window, "a\"b""#));
     }
