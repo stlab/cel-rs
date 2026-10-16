@@ -60,8 +60,9 @@ DOM identity.
 The 2026-10-15 graph task also exercises real Begin web and desktop WebView2
 evaluation transports, plus multiple simultaneous release-built book owners.
 Its fresh DOM/transform audits, screenshots opened for inspection, exact commands,
-and any environment observations live in the local graph task workspace:
-`.superpowers/sdd/2026-10-15-cel-euclid-graph/task-3-report.md`.
+and any environment observations are archived in the originating Copilot
+session's `files/euclid-graph-evidence/task-3-report.md`.
 The [dated handoff](superpowers/2026-10-15-cel-euclid-handoff.md) separates this
 rendered verification from the completed full workspace gate and final fix
-wave. Controller approval of the final scoped fixes remains separate.
+wave. Independent whole-branch review and the final scoped fix review are
+complete, with no unresolved finding.

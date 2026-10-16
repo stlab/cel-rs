@@ -86,15 +86,17 @@ exercised the actual Spectrum controls and D3 wheel/drag events.
 Fresh final screenshots were opened and visually inspected:
 `task-3-web-final.png`, `task-3-native-final.png`,
 `task-3-book-two-owners.png`, and the corresponding final failure screenshots.
-They live with exact commands, RED/GREEN logs, DOM/transform evidence, and
-`task-3-report.md` under the git-ignored
-`.superpowers\sdd\2026-10-15-cel-euclid-graph\` task workspace.
+They are archived with exact commands, RED/GREEN logs, DOM/transform evidence,
+and `task-3-report.md` in the originating Copilot session's
+`files\euclid-graph-evidence` directory. Their original collection location was
+the git-ignored `.superpowers\sdd\2026-10-15-cel-euclid-graph\` task workspace.
 Book screenshots temporarily place two existing live containers side by side;
 they do not represent a production layout change.
 
 Scoped Rust/JavaScript tests, both Begin Clippy modes, affected host/Wasm lint,
-strict affected-library documentation, and formatting passed. Task 3 received
-direct self-review only; no nested agent or independent reviewer ran.
+strict affected-library documentation, and formatting passed. Independent
+Task 3 review and scoped follow-up review approved the implementation through
+`279fe345`, in addition to the implementer's direct self-review.
 
 The independent review follow-up fixes repeated reset-target acknowledgements
 after refresh plus animation interruption. Local action provenance now identifies
@@ -127,9 +129,8 @@ findings. This final wave addresses both actionable Minor findings together:
 
 No Rust policy helper, crop constraint, production bridge change, new dependency,
 Spectrum bundle regeneration, or unrelated rendered check accompanies this wave.
-Direct self-review found no additional in-scope issue; no nested agent or
-reviewer ran. Controller approval of these final scoped fixes is pending as of
-this commit, not asserted here.
+Direct self-review found no additional in-scope issue. Independent scoped
+review approved both final fixes at `81249db1`, with no new finding.
 
 ### Fresh complete final gate
 
@@ -159,14 +160,13 @@ run passed all 18 `adam_examples` tests. The RED run exited 101 with both
 regressions failing for the reproduced clamp error, not a setup failure.
 Exact outputs, command/exit/warning counts, direct self-review, and commit
 identity are retained in `final-fix-*.log`, `final-fix-gate-results.json`, and
-`final-fix-report.md` under the ignored
-`.superpowers\sdd\2026-10-15-cel-euclid-graph\` workspace.
+`final-fix-report.md` in the session's `files\euclid-graph-evidence` archive.
 
 ## Remaining
 
-The complete implementation and fresh final gate are complete. Only controller
-scoped review approval of this final fix wave remains; no implementation work,
-known in-scope finding, or desktop/web/book platform blocker is parked.
+Implementation, independent review, and the complete final gate are complete.
+No implementation work, known in-scope finding, or desktop/web/book platform
+blocker is parked. The branch and worktree remain local and preserved.
 The five ignored doctests remain ignored by their existing declarations.
 Earlier native/web/book rendered evidence above remains applicable; this wave
 does not change the live UI or bridge and does not repeat that rendering.
@@ -222,6 +222,8 @@ In particular, preserve the bounded one-in-flight/latest-pending queue,
 generation/revision/sequence handling, obsolete-revision queue release,
 reset preservation, and animation-safe D3 synchronization.
 
-Task briefs, evidence, and review ledgers live in git-ignored
-`.superpowers\sdd\` stage directories. Resume the first task without a completion
-entry rather than repeating committed work. No push or pull request is requested.
+The completed graph task's briefs, evidence, and review ledger are archived in
+the originating Copilot session's `files\euclid-graph-evidence` directory.
+Earlier stage artifacts remain in their git-ignored `.superpowers\sdd\`
+directories. All implementation tasks are complete; do not repeat them.
+No push or pull request is requested.

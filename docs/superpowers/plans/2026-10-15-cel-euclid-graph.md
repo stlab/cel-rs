@@ -290,5 +290,6 @@ No PR or merge is part of executing this task unless the user requests it.
 Completion evidence: the dated handoff records Tasks 1–3, native/web/book
 rendered checks, and the fresh complete gate after the final fix wave. The
 whole-branch review covered 90 files; both actionable Minor findings are fixed.
-Controller approval of the final scoped fixes remains pending as of their
-commit. Checkbox completion records executed work, not that final approval.
+Independent scoped review approved the final fixes at `81249db1`, with no new
+finding. Implementation, rendered verification, the complete gate, and review
+are complete. The branch remains local; no PR or merge is requested.
