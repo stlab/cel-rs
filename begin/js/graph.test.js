@@ -285,6 +285,97 @@ describe("GraphInstance approval adapter", () => {
     assert.equal(c.frames.length, 2);
     assert.ok(c.frames.at(-1).k > 2 && c.frames.at(-1).k < 4);
   });
+  it.each(["wheel", "zoomIn", "zoomOut"])("refreshed_reset_target_cannot_snap_after_%s_interrupts_animation", method => {
+    const c = animatedGraph();
+    c.graph.resetZoom();
+    c.graph.updateZoomConstraints();
+    c.graph.updateZoomConstraints();
+    c.reply({ x: 20, y: 60, k: 2 }, { x: 20, y: 60, k: 2 });
+    c.graph.svg.interrupt();
+    if (method === "wheel") {
+      c.graph.proposeView({ sourceEvent: { type: "wheel" },
+        transform: { x: -210, y: -110, k: 5 } });
+    } else {
+      c.graph[method]();
+      c.advance(1);
+    }
+    const before = c.frames.map(frame => frame.k);
+    assert.equal(c.graph.queue.inflight.action.kind, "fit");
+    c.reply({ x: 20, y: 60, k: 2 }, { x: 20, y: 60, k: 2 });
+    assert.deepEqual(c.frames.map(frame => frame.k), before,
+      "repeated target must not snap a cancelled interpolation");
+    assert.equal(c.graph.queue.inflight.action.kind, "propose");
+    const proposal = c.graph.queue.inflight.action.view;
+    c.reply(proposal);
+    assert.equal(c.frames.length, before.length + 1);
+    const expected = method === "wheel" ? 5 : method === "zoomIn" ? 5.2 : 4 / 1.3;
+    assert.ok(Math.abs(c.frames.at(-1).k - expected) < 1e-9);
+    assert.equal(c.graph.queue.size, 0);
+  });
+  it("terminal_fit_renders_after_an_outstanding_repeated_target_without_restarting_reset", () => {
+    const c = animatedGraph();
+    c.graph.resetZoom();
+    c.graph.updateZoomConstraints();
+    c.reply({ x: 20, y: 60, k: 2 }, { x: 20, y: 60, k: 2 });
+    c.advance(1);
+    c.reply({ x: 20, y: 60, k: 2 }, { x: 20, y: 60, k: 2 });
+    assert.deepEqual(c.frames.map(frame => frame.k), [4],
+      "a delayed target remains a target after the animation ends");
+    assert.equal(c.graph.queue.inflight.action.kind, "fit",
+      "terminal Fit restores the source aspiration instead of leaving Propose");
+    c.reply({ x: 30, y: 70, k: 2 }, { x: 30, y: 70, k: 2 });
+    assert.equal(c.frames.at(-1).x, 30);
+    assert.equal(c.graph.queue.size, 0);
+  });
+  it("a_new_reset_waits_for_its_own_fresh_target_not_an_older_repeated_target", () => {
+    const c = animatedGraph();
+    c.graph.resetZoom();
+    c.graph.updateZoomConstraints();
+    c.reply({ x: 0, y: 50, k: 2 });
+    c.graph.resetZoom();
+    c.reply({ x: 0, y: 50, k: 2 });
+    c.reply({ x: 20, y: 60, k: 3 }, { x: 20, y: 60, k: 3 });
+    c.advance(1);
+    assert.equal(c.graph.queue.inflight.action.view.x, 20);
+    assert.equal(c.graph.queue.inflight.action.view.k, 3);
+    c.reply(c.graph.queue.inflight.action.view, { x: 20, y: 60, k: 3 });
+    assert.equal(c.graph.queue.inflight.action.kind, "fit");
+    c.reply({ x: 20, y: 60, k: 3 }, { x: 20, y: 60, k: 3 });
+    assert.equal(c.frames.at(-1).x, 20);
+    assert.equal(c.frames.at(-1).k, 3);
+    assert.equal(c.graph.queue.size, 0);
+  });
+  it("geometry_revision_replacement_keeps_the_reset_target_intent", () => {
+    const c = animatedGraph();
+    c.graph.resetZoom();
+    c.graph.width = 500;
+    c.graph.updateZoomConstraints();
+    c.graph.updateZoomConstraints();
+    c.reply({ x: 0, y: 50, k: 2 });
+    c.reply({ x: 20, y: 60, k: 3 }, { x: 20, y: 60, k: 3 });
+    assert.deepEqual(c.frames.map(frame => frame.k), [4]);
+    c.advance(0.5);
+    assert.equal(c.graph.queue.inflight.action.kind, "propose");
+    assert.equal(c.graph.queue.inflight.action.view.k, 3.5);
+    c.reply(c.graph.queue.inflight.action.view);
+    assert.equal(c.frames.at(-1).k, 3.5);
+  });
+  it("a_failed_repeated_target_still_reports_the_current_model_error", () => {
+    const c = animatedGraph();
+    c.graph.resetZoom();
+    c.graph.updateZoomConstraints();
+    c.reply({ x: 0, y: 50, k: 2 });
+    c.graph.svg.interrupt();
+    c.graph.proposeView({ sourceEvent: { type: "wheel" },
+      transform: { x: -210, y: -110, k: 5 } });
+    const request = c.graph.queue.inflight;
+    assert.throws(() => c.channel.deliver({ kind: "failed",
+      generation: request.generation, sequence: request.sequence,
+      revision: request.revision, message: "current target failed" }), /current target failed/);
+    assert.deepEqual(c.frames.map(frame => frame.k), [4]);
+    assert.equal(c.graph.queue.disposed, true);
+    assert.equal(c.graph.queue.size, 0);
+  });
   it.each(["wheel", "zoomIn", "zoomOut"])("new_%s_cancels_an_inflight_reset_target_without_a_fit_snap", method => {
     const c = animatedGraph();
     c.graph.resetZoom();

@@ -78,7 +78,7 @@
    * pending gestures never invalidate approved progress at the same geometry.
    * @param {number} generation Explicitly started u32 lifecycle.
    * @param {function(object):void} send Ordered transport submission.
-   * @param {function(object, object):void} apply Approved-output renderer and request.
+   * @param {function(object, object, object):void} apply Renderer, request and originating action.
    * @param {function(string):void} fail Visible/error-channel reporter.
    */
   function ProposalQueue(generation, send, apply, fail) {
@@ -91,6 +91,8 @@
     this.applied = 0;
     this.inflight = null;
     this.pending = null;
+    // Local provenance survives refresh coalescing without changing the wire request.
+    this.origins = new WeakMap();
     this.disposed = false;
     send({ kind: "start", generation: generation });
   }
@@ -103,6 +105,7 @@
   /**
    * Retains the latest geometry and action, preserving queued Fit on refresh.
    * A newer explicit proposal intentionally replaces a queued Fit.
+   * Preserves originating action identity locally, outside the wire snapshot.
    * @param {object} snapshot Complete geometry and action, without sequence.
    * @postcondition At most two snapshots are retained, independent of burst size.
    */
@@ -113,10 +116,15 @@
       if (snapshot.revision < this.revision) return;
       this.revision = snapshot.revision;
       var action = snapshot.action;
+      var origin = action;
       if (action.kind === "refresh") {
-        if (this.pending) action = this.pending.action;
-        else if (this.inflight && this.inflight.action.kind === "fit")
+        if (this.pending) {
+          action = this.pending.action;
+          origin = this.origins.get(this.pending);
+        } else if (this.inflight && this.inflight.action.kind === "fit") {
           action = this.inflight.action;
+          origin = this.origins.get(this.inflight);
+        }
       }
       this.pending = {
         generation: this.generation, revision: snapshot.revision,
@@ -125,6 +133,7 @@
           ? { kind: "propose", view: { x: action.view.x, y: action.view.y, k: action.view.k } }
           : { kind: action.kind },
       };
+      this.origins.set(this.pending, origin);
       this.pump();
     } catch (error) { this.stop(error.message); }
   };
@@ -163,7 +172,7 @@
       if (!validOutput(reply.output)) throw new Error("invalid approved graph output");
       if (reply.revision === this.revision && reply.sequence > this.applied) {
         this.applied = reply.sequence;
-        this.apply(reply.output, request);
+        this.apply(reply.output, request, this.origins.get(request));
       }
       this.pump();
     } catch (error) { this.stop(error.message); }
@@ -533,14 +542,15 @@
     this.synchronizing = false;
     this.gestureActive = false;
     this.approved = null;
-    // null, "waiting", or "cancelled" until the outstanding target is consumed.
+    // Target identity outlives its animation, but never retains retired requests.
+    this.resetTargets = new WeakSet();
     this.resetPending = null;
     this.resetAnimating = false;
     this.geometry = null;
     this.revision = 0;
     var self = this;
     this.queue = new ProposalQueue(channel.nextGeneration(), channel.send,
-      function (output, request) { self.applyApproved(output, request); }, channel.fail);
+      function (output, request, origin) { self.applyApproved(output, request, origin); }, channel.fail);
     this.unsubscribe = channel.subscribe(function (reply) { self.queue.receive(reply); });
   }
 
@@ -578,7 +588,7 @@
   /** Submits absolute gesture proposals, except during approved baseline synchronization. */
   GraphInstance.prototype.proposeView = function (event) {
     if (!this.synchronizing) {
-      if (event.sourceEvent && this.resetPending) this.resetPending = "cancelled";
+      if (event.sourceEvent) this.resetPending = null;
       this.submitAction({ kind: "propose", view: event.transform });
     }
   };
@@ -598,21 +608,22 @@
   /**
    * Renders a model-approved frame and feeds only model limits back to D3.
    * A reset-target Fit starts interpolation without snapping the visible view.
+   * Repeated or cancelled targets never display, even after interpolation ends.
    * @param {object} output Validated complete model output.
    * @param {object} request Snapshot that produced this approval.
+   * @param {object} origin Original action, preserved across coalesced refreshes.
    * @postcondition No proposal is emitted by applying this frame.
    */
-  GraphInstance.prototype.applyApproved = function (output, request) {
+  GraphInstance.prototype.applyApproved = function (output, request, origin) {
     this.zoom.scaleExtent([output.min_zoom, output.max_zoom]);
-    // A coalesced refresh can still carry Fit while the target is in flight.
-    // It is another target acknowledgement, not an interpolated display frame.
-    if (this.resetAnimating && request.action.kind !== "propose") return;
-    if (this.resetPending && request.action.kind === "fit") {
-      var animate = this.resetPending === "waiting";
-      this.resetPending = null;
-      if (animate) this.animateFit(output.fit);
+    if (this.resetTargets.has(origin)) {
+      if (this.resetPending === origin) {
+        this.resetPending = null;
+        this.animateFit(output.fit);
+      }
       return;
     }
+    if (this.resetAnimating && request.action.kind !== "propose") return;
     this.approved = output;
     this.hasInitialFit = true;
     this.zoomLayer.attr("transform", d3.zoomIdentity.translate(output.view.x, output.view.y).scale(output.view.k));
@@ -1193,14 +1204,14 @@
   /** Proposes an animated zoom increase; only model-approved frames render. */
   GraphInstance.prototype.zoomIn = function () {
     if (!this.svg || !this.zoom) return;
-    if (this.resetPending) this.resetPending = "cancelled";
+    this.resetPending = null;
     this.svg.transition().duration(200).call(this.zoom.scaleBy, 1.3);
   };
 
   /** Proposes an animated zoom decrease using model-provided gesture hints. */
   GraphInstance.prototype.zoomOut = function () {
     if (!this.svg || !this.zoom) return;
-    if (this.resetPending) this.resetPending = "cancelled";
+    this.resetPending = null;
     this.svg
       .transition()
       .duration(200)
@@ -1214,8 +1225,10 @@
   GraphInstance.prototype.resetZoom = function () {
     if (!this.svg || !this.zoom) return;
     this.svg.interrupt();
-    this.resetPending = this.approved ? "waiting" : null;
-    this.submitAction({ kind: "fit" });
+    var action = { kind: "fit" };
+    this.resetPending = this.approved ? action : null;
+    if (this.resetPending) this.resetTargets.add(action);
+    this.submitAction(action);
   };
 
   /**

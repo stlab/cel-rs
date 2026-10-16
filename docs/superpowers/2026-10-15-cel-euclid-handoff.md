@@ -96,12 +96,23 @@ Scoped Rust/JavaScript tests, both Begin Clippy modes, affected host/Wasm lint,
 strict affected-library documentation, and formatting passed. Task 3 received
 direct self-review only; no nested agent or independent reviewer ran.
 
+The independent review follow-up fixes repeated reset-target acknowledgements
+after refresh plus animation interruption. Local action provenance now identifies
+targets independently of transition activity, without changing wire messages or
+Adam policy. Five observed RED regressions became GREEN; the full Begin JS suite
+passes 65 tests. A fresh rendered web race using actual Adam replies records zero
+cancelled-target frames, newer wheel progress, and a subsequent 21-frame reset
+ending in terminal Fit. Scoped Rust tests and both Begin Clippy modes pass;
+the task report contains exact commands and retained evidence.
+
 ## Remaining
 
-The controller still owns the final full master-workspace gate and independent
-whole-branch review. Task 3 deliberately does not duplicate that stage or claim
-PR readiness. There is no known parked in-scope finding and no desktop/web/book
-platform blocker. No push, PR, or merge is requested.
+The controller reports the full master-workspace gate passed at `ff1deacd`,
+including all five Clippy commands, strict docs, and warning-free build/test.
+The controller will revalidate this scoped review fix and finish independent
+whole-branch review; this follow-up does not claim PR readiness. There is no
+known parked in-scope finding and no desktop/web/book platform blocker.
+No push, PR, or merge is requested.
 
 The approved design and three stage plans remain authoritative. No
 crop-specific constraint function or Rust fitting helper is permitted: the
