@@ -21,13 +21,15 @@ sheet view_constraints {
     out effective_max_zoom: f64 := max(fit_zoom, max_zoom);
     relationship { zoom := clamp(zoom, min_zoom, effective_max_zoom); }
     relationship {
+        // Compare the actual pan endpoints: equivalent extent arithmetic can
+        // round differently at fit and otherwise produce inverted clamp bounds.
         pan := Vector2D {
-            x: if bounds.width * zoom < viewport.width {
+            x: if viewport.width - zoom * bounds.max_x >= -zoom * bounds.min_x {
                 viewport.width * 0.5 - zoom * bounds.center().x
             } else {
                 clamp(pan.x, viewport.width - zoom * bounds.max_x, -zoom * bounds.min_x)
             },
-            y: if bounds.height * zoom < viewport.height {
+            y: if viewport.height - zoom * bounds.max_y >= -zoom * bounds.min_y {
                 viewport.height * 0.5 - zoom * bounds.center().y
             } else {
                 clamp(pan.y, viewport.height - zoom * bounds.max_y, -zoom * bounds.min_y)

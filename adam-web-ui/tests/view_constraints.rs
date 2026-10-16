@@ -40,6 +40,47 @@ fn fit_centers_content() {
     }
 }
 
+/// Translated fit bounds remain valid when rounded clamp endpoints cross by one ulp.
+#[test]
+fn translated_fit_roundoff_does_not_invert_pan_limits() {
+    for (bounds, viewport, x, y) in [
+        (
+            rect(437.7687406100192, 0.0, 317.7044969997028, 100.0),
+            Size2D::new(696.0, 712.0),
+            -959.0265367407072,
+            246.464251124426,
+        ),
+        (
+            rect(0.0, 437.7687406100192, 100.0, 317.7044969997028),
+            Size2D::new(712.0, 696.0),
+            246.464251124426,
+            -959.0265367407072,
+        ),
+    ] {
+        let mut model = ViewConstraints::new().unwrap();
+        for action in [
+            ViewAction::Fit,
+            ViewAction::Propose {
+                view: ViewTransform {
+                    x: 999.0,
+                    y: 999.0,
+                    k: 2.19071497751148,
+                },
+            },
+            ViewAction::Refresh,
+        ] {
+            let out = model
+                .update(ViewInput {
+                    bounds,
+                    viewport,
+                    action,
+                })
+                .unwrap();
+            assert_view(out.view, x, y, 2.19071497751148);
+        }
+    }
+}
+
 /// Proposals clamp long axes and center short axes at the approved zoom.
 #[test]
 fn pan_centers_short_axis_and_clamps_long_axis() {
