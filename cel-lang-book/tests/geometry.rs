@@ -21,3 +21,41 @@ fn optional_geometry() {
     assert_eq!(segment.call0::<f64>().unwrap(), 42.0);
 }
 // ANCHOR_END: geometry
+
+/// Evaluates each annotated reference example against its stated result or error.
+///
+/// - Complexity: Proportional to parsing and evaluating the chapter's examples.
+#[test]
+fn reference_examples_match_documented_results() {
+    let mut lookup = cel_parser::OpLookup::new();
+    cel_std::install(&mut lookup);
+    cel_euclid::install(&mut lookup);
+    let mut parser = cel_parser::CELParser::new(lookup);
+    let mut checked = 0;
+    for block in include_str!("../book-src/geometry.md")
+        .split("```text")
+        .skip(1)
+    {
+        let (example, _) = block.split_once("```").expect("closed example fence");
+        if let Some((source, expected)) = example.split_once("// =>") {
+            let expression = format!("({source}) == ({expected})");
+            let mut segment = parser
+                .parse_str(&expression)
+                .unwrap_or_else(|error| panic!("{source}: {error}"));
+            assert!(
+                segment
+                    .call0::<bool>()
+                    .unwrap_or_else(|error| panic!("{source}: {error}")),
+                "{source}: expected {expected}"
+            );
+            checked += 1;
+        } else if let Some((source, _)) = example.split_once("// Evaluation error:") {
+            let mut segment = parser
+                .parse_str(&format!("({source}).is_finite"))
+                .unwrap_or_else(|error| panic!("{source}: {error}"));
+            assert!(segment.call0::<bool>().is_err(), "{source}: expected error");
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "the chapter must contain executable examples");
+}

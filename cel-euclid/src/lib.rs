@@ -145,6 +145,11 @@ pub type Transform2D = euclid::default::Transform2D<f64>;
 /// Installs seven record schemas and the complete exact geometry signature table.
 ///
 /// - Precondition: this library has not already been installed on `lookup`.
+/// - Precondition: `lookup` has no record schemas named `Point2D`, `Vector2D`,
+///   `Size2D`, `Rect`, `Box2D`, `Angle`, or `Transform2D`.
+/// - Precondition: `lookup` has no operation with the same name and operand
+///   identities as a signature in the [supported table](#supported-geometry-signatures).
+///   Other overloads of those names may already be installed.
 /// - Postcondition: unrelated signatures, including scalar `min`/`max`, remain available.
 /// - Complexity: O(s²) time and O(s) space in the total installed signatures.
 ///
@@ -155,12 +160,25 @@ pub type Transform2D = euclid::default::Transform2D<f64>;
 /// assert!(lookup.record_schema("Rect").is_some());
 /// ```
 pub fn install(lookup: &mut cel_parser::OpLookup) {
-    debug_assert!(lookup.record_schema("Point2D").is_none());
-    records::install(lookup).expect("cel-euclid record schemas must be installed exactly once");
+    debug_assert!(
+        [
+            "Point2D",
+            "Vector2D",
+            "Size2D",
+            "Rect",
+            "Box2D",
+            "Angle",
+            "Transform2D"
+        ]
+        .iter()
+        .all(|name| lookup.record_schema(name).is_none())
+    );
+    records::install(lookup)
+        .expect("cel-euclid record names must not conflict with existing schemas");
     geometry::install(lookup)
-        .expect("cel-euclid operation signatures must be installed exactly once");
+        .expect("cel-euclid operation signatures must not conflict with existing signatures");
     transforms::install(lookup)
-        .expect("cel-euclid transform signatures must be installed exactly once");
+        .expect("cel-euclid transform signatures must not conflict with existing signatures");
 }
 
 /// Describes a concrete leaf without erasing its Rust identity.

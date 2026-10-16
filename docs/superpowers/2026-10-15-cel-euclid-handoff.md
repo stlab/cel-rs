@@ -86,9 +86,13 @@ exercised the actual Spectrum controls and D3 wheel/drag events.
 Fresh final screenshots were opened and visually inspected:
 `task-3-web-final.png`, `task-3-native-final.png`,
 `task-3-book-two-owners.png`, and the corresponding final failure screenshots.
-They are archived with exact commands, RED/GREEN logs, DOM/transform evidence,
-and `task-3-report.md` in the originating Copilot session's
-`files\euclid-graph-evidence` directory. Their original collection location was
+These raw artifacts, exact commands, RED/GREEN logs, and `task-3-report.md`
+remain private to the originating Copilot session's
+`files\euclid-graph-evidence` directory; they are not available in a checkout.
+The case summaries, observations, and tolerances above are the published
+evidence summary. [PR #253](https://github.com/stlab/cel-rs/pull/253) records
+validation and review, and [graph-view verification](../graph-view.md#verification)
+provides reproduction instructions. The original collection location was
 the git-ignored `.superpowers\sdd\2026-10-15-cel-euclid-graph\` task workspace.
 Book screenshots temporarily place two existing live containers side by side;
 they do not represent a production layout change.
@@ -159,8 +163,9 @@ tests pass) and both new actual-example regressions. The separate focused GREEN
 run passed all 18 `adam_examples` tests. The RED run exited 101 with both
 regressions failing for the reproduced clamp error, not a setup failure.
 Exact outputs, command/exit/warning counts, direct self-review, and commit
-identity are retained in `final-fix-*.log`, `final-fix-gate-results.json`, and
-`final-fix-report.md` in the session's `files\euclid-graph-evidence` archive.
+identity are retained in private `final-fix-*.log`, `final-fix-gate-results.json`,
+and `final-fix-report.md` session artifacts, not repository files. The table
+above and PR #253 provide the public command/result summary.
 
 ## Remaining
 
@@ -170,7 +175,8 @@ blocker is parked. The branch and worktree remain local and preserved.
 The five ignored doctests remain ignored by their existing declarations.
 Earlier native/web/book rendered evidence above remains applicable; this wave
 does not change the live UI or bridge and does not repeat that rendering.
-No push, PR, or merge is requested or performed.
+The initial implementation stopped before publication. PR #253 now tracks
+publication and review; no merge has been performed.
 
 The approved design and three stage plans remain authoritative. No
 crop-specific constraint function or Rust fitting helper is permitted: the
@@ -222,8 +228,10 @@ In particular, preserve the bounded one-in-flight/latest-pending queue,
 generation/revision/sequence handling, obsolete-revision queue release,
 reset preservation, and animation-safe D3 synchronization.
 
-The completed graph task's briefs, evidence, and review ledger are archived in
-the originating Copilot session's `files\euclid-graph-evidence` directory.
+The completed graph task's private briefs, raw evidence, and review ledger are
+archived in the originating Copilot session's `files\euclid-graph-evidence`
+directory, not in this checkout. Use this committed handoff and PR #253 rather
+than depending on access to those session artifacts.
 Earlier stage artifacts remain in their git-ignored `.superpowers\sdd\`
 directories. All implementation tasks are complete; do not repeat them.
-No push or pull request is requested.
+PR #253 contains the subsequent review and publication record.

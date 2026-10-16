@@ -57,12 +57,20 @@ replacement, real data-update/filter paths, and deterministic approved animation
 frames. Rust tests cover the model, wire protocol, lifecycle, and external host
 DOM identity.
 
-The 2026-10-15 graph task also exercises real Begin web and desktop WebView2
+The 2026-10-15 graph task also exercised real Begin web and desktop WebView2
 evaluation transports, plus multiple simultaneous release-built book owners.
-Its fresh DOM/transform audits, screenshots opened for inspection, exact commands,
-and any environment observations are archived in the originating Copilot
-session's `files/euclid-graph-evidence/task-3-report.md`.
-The [dated handoff](superpowers/2026-10-15-cel-euclid-handoff.md) separates this
-rendered verification from the completed full workspace gate and final fix
-wave. Independent whole-branch review and the final scoped fix review are
-complete, with no unresolved finding.
+The [dated handoff](superpowers/2026-10-15-cel-euclid-handoff.md) publishes the
+rendered cases, observed frame counts, numerical tolerances, and complete
+workspace gate. [PR #253](https://github.com/stlab/cel-rs/pull/253) records
+validation and review. Raw screenshots, DOM audits, and logs remain private
+historical session artifacts; they are not distributed with this checkout.
+
+To reproduce rendered verification, run
+`dx serve --platform web --no-default-features --features web --open false`
+from `begin`. Follow `.claude/skills/verifying-begin-ui/SKILL.md` for an isolated
+Edge profile, screenshots, DOM/live-transform inspection, and process cleanup.
+Check initial approval, sustained wheel/drag, animated buttons/reset, resize,
+source replacement, inactive-node filtering, and visible intentional failures.
+Use `dx serve --platform desktop` for native transport checks; a browser-only
+run does not verify WebView2. The handoff describes the simultaneous live-book
+and delayed-reply cases separately from deterministic Rust/JavaScript tests.
