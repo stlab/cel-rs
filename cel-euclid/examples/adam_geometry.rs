@@ -127,6 +127,37 @@ mod tests {
         assert!(error.contains("positive"), "{error}");
     }
 
+    /// Finite but inaccurate presentation returns the sheet's named precision error.
+    #[test]
+    fn propagation_rejects_insufficient_presentation_precision() {
+        let mut parsed = parser()
+            .parse_str(include_str!("crop_straighten.adm2"))
+            .unwrap();
+        let image = parsed.cell_names["image"].0;
+        let crop = parsed.cell_names["crop"].0;
+        let transform = parsed.cell_names["transform"].0;
+        parsed
+            .write(
+                image,
+                Rect::new(
+                    Point2D::new(0.03333283332557231, 0.03333283332557231),
+                    Size2D::new(1e-6, 1e-6),
+                ),
+            )
+            .unwrap();
+        let requested = Rect::new(Point2D::new(-499999.9, -499999.9), Size2D::new(1e6, 1e6));
+        parsed.write(crop, requested).unwrap();
+        parsed
+            .write(transform, Transform2D::scale(3.0, 3.0))
+            .unwrap();
+        let error = propagate(&mut parsed).unwrap_err().to_string();
+        assert!(
+            error.contains("sufficient_fit_and_presentation_precision"),
+            "{error}"
+        );
+        assert_eq!(*parsed.sheet.source::<Rect>(crop).unwrap(), requested);
+    }
+
     /// Runtime arithmetic errors are returned rather than mistaken for valid output.
     #[test]
     fn propagation_returns_evaluation_errors() {

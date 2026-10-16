@@ -173,6 +173,114 @@ fn presentation_keeps_overlay_and_image_anchor_fixed() {
     );
 }
 
+/// Finite reciprocal-scale cancellation fails a visible precision requirement.
+#[test]
+fn presentation_rejects_insufficient_precision_at_extreme_size_ratio() {
+    let mut s = sheet();
+    let image = rect(0.03333283332557231, 0.03333283332557231, 1e-6, 1e-6);
+    let requested = rect(-499999.9, -499999.9, 1e6, 1e6);
+    let t = Transform2D::scale(3.0, 3.0);
+    s.sheet.write(s.cell_names["image"].0, image).unwrap();
+    s.sheet.write(s.cell_names["crop"].0, requested).unwrap();
+    s.sheet.write(s.cell_names["transform"].0, t).unwrap();
+    s.propagate().unwrap();
+    let p = *s
+        .read::<Transform2D>(s.cell_names["presentation"].0)
+        .unwrap();
+    let anchor = t.inverse().unwrap().transform_point(requested.center());
+    let error = p.transform_point(anchor) - requested.center();
+    assert!(
+        [p.m11, p.m12, p.m21, p.m22, p.m31, p.m32]
+            .into_iter()
+            .all(f64::is_finite)
+    );
+    assert!(error.x.abs() > 64.0 * f64::EPSILON * requested.width());
+    assert!(
+        !s.cell_requirements_valid(s.cell_names["precise"].0),
+        "accepted finite presentation with anchor error {error:?}"
+    );
+    let requirement = s
+        .violated_requirements(s.cell_names["precise"].0)
+        .next()
+        .unwrap();
+    assert_eq!(
+        s.requirement_names[&requirement],
+        "sufficient_fit_and_presentation_precision"
+    );
+    assert_eq!(
+        *s.sheet.source::<Rect>(s.cell_names["crop"].0).unwrap(),
+        requested
+    );
+}
+
+/// A fixed anchor alone cannot certify all four overlay corners.
+#[test]
+fn presentation_rejects_overlay_cancellation_even_with_fixed_anchor() {
+    let mut s = sheet();
+    let image = rect(-1.0000005, -1.0000005, 1e-6, 1e-6);
+    let requested = rect(-5e5, -5e5, 1e6, 1e6);
+    let t = Transform2D::new(3.0, 0.0, 0.0, 3.0, 3.0, 3.0);
+    s.sheet.write(s.cell_names["image"].0, image).unwrap();
+    s.sheet.write(s.cell_names["crop"].0, requested).unwrap();
+    s.sheet.write(s.cell_names["transform"].0, t).unwrap();
+    s.propagate().unwrap();
+    let fitted = *s.read::<Rect>(s.cell_names["crop"].0).unwrap();
+    let p = *s
+        .read::<Transform2D>(s.cell_names["presentation"].0)
+        .unwrap();
+    let inv = t.inverse().unwrap();
+    assert_eq!(
+        p.transform_point(inv.transform_point(requested.center())),
+        requested.center()
+    );
+    let displayed = p.transform_point(inv.transform_point(fitted.origin));
+    assert!((displayed.x - requested.min_x()).abs() > 64.0 * f64::EPSILON * requested.width());
+    assert!(!s.cell_requirements_valid(s.cell_names["precise"].0));
+    assert_eq!(
+        *s.sheet.source::<Rect>(s.cell_names["crop"].0).unwrap(),
+        requested
+    );
+}
+
+/// Representable extreme shrink fixes the center and all four overlay corners.
+#[test]
+fn presentation_maps_extreme_size_ratio_when_representable() {
+    let mut s = sheet();
+    let requested = rect(-524288.0, -262144.0, 1048576.0, 524288.0);
+    let image = rect(-1e-6, -5e-7, 2e-6, 1e-6);
+    let t = Transform2D::new(-3.0, 0.25, 0.5, 2.0, 0.0, 0.0);
+    let fitted = fit(&mut s, image, requested, t);
+    let p = *s
+        .read::<Transform2D>(s.cell_names["presentation"].0)
+        .unwrap();
+    let inv = t.inverse().unwrap();
+    let extent = requested.width().max(requested.height());
+    for (effective, overlay) in [
+        (fitted.center(), requested.center()),
+        (fitted.origin, requested.origin),
+        (
+            Point2D::new(fitted.max_x(), fitted.min_y()),
+            Point2D::new(requested.max_x(), requested.min_y()),
+        ),
+        (
+            Point2D::new(fitted.min_x(), fitted.max_y()),
+            Point2D::new(requested.min_x(), requested.max_y()),
+        ),
+        (
+            Point2D::new(fitted.max_x(), fitted.max_y()),
+            Point2D::new(requested.max_x(), requested.max_y()),
+        ),
+    ] {
+        let displayed = p.transform_point(inv.transform_point(effective));
+        close(displayed.x, overlay.x, extent);
+        close(displayed.y, overlay.y, extent);
+    }
+    assert_eq!(
+        *s.sheet.source::<Rect>(s.cell_names["crop"].0).unwrap(),
+        requested
+    );
+}
+
 /// General standard and Euclid operations alone execute the actual fixture.
 #[test]
 fn crop_fitting_uses_only_general_registered_operations() {

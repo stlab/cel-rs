@@ -66,13 +66,27 @@ shrink, it multiplies the computed factor by `1 - 8*f64::EPSILON` to round
 conservatively inward. The `precise` flag rejects inverse-bound cancellation
 that differs from affine support half-extents by more than `32*EPSILON`; it also
 rejects subnormal rounding that changes either uniform size ratio by more than
-`64*EPSILON` relative to the shrink factor. This flag is validation metadata,
-not another requested rectangle. The expression contains these policies openly.
+`64*EPSILON` relative to the shrink factor. The relationship computes the fitted
+crop and its presentation together, while the source request is still available.
+It checks the fitted center, the presented source-image anchor, and **all four**
+effective corners mapped through the inverse and presentation against the
+requested center and overlay corners. Each component must agree within
+`64*EPSILON * max(requested.width, requested.height)`. A large absolute overlay
+offset does not relax this extent-relative budget. Finite presentation
+coefficients alone do not guarantee these postconditions: reciprocal-scale
+cancellation can move the anchor or distort the overlay.
+
+The named `sufficient_fit_and_presentation_precision` requirement reports
+insufficient precision, even when fitting, coverage, and coefficient finiteness
+pass. The `precise` flag is validation metadata, not another requested rectangle.
+The expression contains these policies openly, without a crop-specific operation.
 
 Acceptance uses a `64*f64::EPSILON` scale-relative tolerance for closed-edge
 coverage, center preservation, maximality, and repeated application. For image
-coordinates the scale is the maximum image extent or absolute image endpoint;
-for dimensionless shrink ratios the scale is one. Ordinary Euclid point
+coverage the scale is the maximum image extent or absolute image endpoint;
+crop-center and presentation comparisons use the requested overlay extent as
+specified above. For dimensionless maximality comparisons the scale is one.
+Ordinary Euclid point
 containment is half-open; crop coverage allows corners on maximum edges.
 The conservative result is maximal within this tolerance, not an exact-real
 arithmetic guarantee. Identity preserves a fitting crop exactly; applying the
@@ -94,7 +108,20 @@ overlay, never the previously fitted value. `shrink` describes the current
 source-to-effective size ratio. `presentation` applies the image transform and
 then its reciprocal shrink around the same crop center. Thus the effective
 crop fills the original overlay and the same image anchor stays under its
-center (within the rounding tolerance). In `a.then(b)`, `a` runs first.
+center, provided the explicit precision requirement passes. In `a.then(b)`,
+`a` runs first. A fixed anchor alone does not certify the overlay corners.
+
+The executable chapter test also covers unequal source/overlay magnitudes.
+With `scale(3.0, 3.0)`, an image centered at zero of size `1e-6 × 1e-6` and a
+requested crop centered at zero of size `1e6 × 1e6` pass, preserving the center
+and overlay mapping despite a shrink near `3e-12`. In contrast, an image with
+both origin coordinates `0.03333283332557231` and size `1e-6 × 1e-6`, and a
+requested crop with both origin coordinates `-499999.9` and size `1e6 × 1e6`,
+fail the precision requirement under the same transform. All presentation
+coefficients remain finite, but the anchor maps to `0.10000228881835938`
+instead of the requested `0.09999999997671694`, exceeding the approximately
+`1.42e-8` overlay budget. Rejection preserves the source aspiration; it does not
+translate the crop or silently narrow support to rotations or uniform scales.
 
 For a `[0,100] × [0,100]` image, a centered square at 45 degrees has side
 `100 / sqrt(2)` within `1e-12`. For `[0,100] × [0,80]` with a requested
