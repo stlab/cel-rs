@@ -42,11 +42,16 @@ async function runGraphChannel(root, id, data, transport) {
   }
 
   /**
-   * Exposes failure without policy fallback and optionally notifies Rust.
+   * Exposes only the active owner's failure and optionally notifies Rust.
+   * Retired failures only close their own resources, without policy fallback.
    * @param {string} message Human-readable diagnostic.
    * @param {boolean} [notify=true] Whether Rust has not already reported it.
    */
   function fail(message, notify = true) {
+    if (stopped || root.__beginGraphOwners[id] !== owner) {
+      close();
+      return;
+    }
     root.__beginGraphErrors[id] = message;
     try { if (notify) transport.send(message); }
     finally { close(); }

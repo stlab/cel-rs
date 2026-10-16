@@ -9,17 +9,18 @@ const { createChannel } = require("../assets/graph.js");
  */
 function mountedChannel() {
   const sent = [], calls = [];
-  let receive;
+  let receive, rejectReceive;
   const transport = {
     send: value => sent.push(value),
-    recv: () => new Promise(resolve => { receive = resolve; }),
+    recv: () => new Promise((resolve, reject) => { receive = resolve; rejectReceive = reject; }),
   };
   const root = { d3: {}, __beginGraphData: {}, beginGraph: {
     createChannel,
     init: (id, data) => calls.push(["init", id, data]),
     destroy: id => calls.push(["destroy", id]),
   } };
-  return { root, calls, sent, transport, reply: value => receive(value) };
+  return { root, calls, sent, transport, reply: value => receive(value),
+    reject: error => rejectReceive(error) };
 }
 
 describe("mounted shared graph channel", () => {
@@ -53,6 +54,45 @@ describe("mounted shared graph channel", () => {
     assert.equal(c.root.__beginGraphChannels.a, channel);
     newer.reply({ kind: "close" }); await task;
     assert.equal(c.root.__beginGraphChannels.a, undefined);
+  });
+  it.each(["closed", "replaced"])("retired_receive_failure_is_ignored_when_%s", async retirement => {
+    const c = mountedChannel(), newer = mountedChannel();
+    const oldTask = runGraphChannel(c.root, "a", {}, c.transport);
+    const oldChannel = c.root.__beginGraphChannels.a;
+    c.reject(new Error("retired transport failed"));
+    let task;
+    if (retirement === "replaced") {
+      task = runGraphChannel(c.root, "a", { newer: true }, newer.transport);
+    } else {
+      c.root.__beginGraphOwners.a.close();
+    }
+    const channel = c.root.__beginGraphChannels.a;
+    try {
+      await oldTask;
+      assert.equal(c.root.__beginGraphErrors.a, undefined);
+      assert.deepEqual(c.sent, []);
+      assert.deepEqual(newer.sent, []);
+      assert.equal(c.root.__beginGraphChannels.a, channel);
+      assert.equal(oldChannel.subscriberCount, 0);
+      assert.deepEqual(c.calls.filter(call => call[0] === "destroy"), [["destroy", "a"]]);
+    } finally {
+      c.root.__beginGraphOwners.a?.close();
+      await task;
+    }
+  });
+  it("current_receive_failure_is_visible_notified_and_closes_resources", async () => {
+    const c = mountedChannel();
+    const task = runGraphChannel(c.root, "a", {}, c.transport);
+    const channel = c.root.__beginGraphChannels.a;
+    c.reject(new Error("current transport failed"));
+    await task;
+    assert.equal(c.root.__beginGraphErrors.a, "current transport failed");
+    assert.deepEqual(c.sent, ["current transport failed"]);
+    assert.equal(c.root.__beginGraphChannels.a, undefined);
+    assert.equal(c.root.__beginGraphOwners.a, undefined);
+    assert.equal(c.root.__beginGraphData.a, undefined);
+    assert.equal(channel.subscriberCount, 0);
+    assert.deepEqual(c.calls.at(-1), ["destroy", "a"]);
   });
   it("close_before_driver_load_aborts_polling_and_never_initializes", async () => {
     const c = mountedChannel(); const driver = c.root.beginGraph;
