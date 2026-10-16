@@ -1,4 +1,4 @@
-// Demonstration only: the live graph still owns its existing model.
+// Standalone demonstration; the live graph owns a separate Adam sheet.
 // content includes the renderer's fit margin; empty content uses the viewport.
 sheet pan_zoom {
     source content: Rect = Rect {
@@ -23,13 +23,14 @@ sheet pan_zoom {
     cell pan: Vector2D = Vector2D { x: 0.0, y: 0.0 };
     relationship { zoom := clamp(zoom, fit_scale, max(fit_scale, 8.0)); }
     relationship {
+        // Compare actual endpoints: extent arithmetic can round differently at fit.
         pan := Vector2D {
-            x: if bounds.width * zoom < viewport.width {
+            x: if viewport.width - zoom * bounds.max_x >= -zoom * bounds.min_x {
                 viewport.width * 0.5 - zoom * bounds.center().x
             } else {
                 clamp(pan.x, viewport.width - zoom * bounds.max_x, -zoom * bounds.min_x)
             },
-            y: if bounds.height * zoom < viewport.height {
+            y: if viewport.height - zoom * bounds.max_y >= -zoom * bounds.min_y {
                 viewport.height * 0.5 - zoom * bounds.center().y
             } else {
                 clamp(pan.y, viewport.height - zoom * bounds.max_y, -zoom * bounds.min_y)

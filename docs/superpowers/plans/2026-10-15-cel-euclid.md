@@ -119,13 +119,18 @@ and local `raw_stack.rs:231-254`, `dyn_segment.rs:840-918,2050-2110`,
 
 ## Rollout gates
 
-- [ ] Execute language plan, review it, and commit its independently working result.
-- [ ] Execute library plan against that result, review it, and commit.
-- [ ] Execute graph plan, including rendered verification and interaction checks.
-- [ ] Update `docs\superpowers\2026-10-15-cel-euclid-handoff.md` before a
+- [x] Execute language plan, review it, and commit its independently working result.
+- [x] Execute library plan against that result, review it, and commit.
+- [x] Execute graph plan, including rendered verification and interaction checks.
+- [x] Update `docs\superpowers\2026-10-15-cel-euclid-handoff.md` before a
   multi-session/phase handoff or PR, recording actual outcomes and deferrals.
-- [ ] Run the complete final gate below, fix in-scope findings, and record
+- [x] Run the complete final gate below, fix in-scope findings, and record
   unrelated substantial findings as GitHub issues rather than dropping them.
+
+The whole-branch review covered 90 files and found no Critical/Important issues.
+The final fix wave addresses both actionable Minor findings; controller approval
+of that scoped wave is pending as of its commit. See the dated handoff for
+completed implementation, verification evidence, and limitations.
 
 Run in PowerShell from the worktree:
 

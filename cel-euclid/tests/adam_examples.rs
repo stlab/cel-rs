@@ -528,3 +528,82 @@ fn pan_zoom_sheet_demonstrates_graph_policy() {
     s.propagate().unwrap();
     assert_eq!(*s.read::<f64>(s.cell_names["fit_scale"].0).unwrap(), 1.0);
 }
+
+/// Translated horizontal bounds remain valid through proposals, Fit, and refresh.
+#[test]
+fn pan_zoom_translated_horizontal_fit_rounding() {
+    translated_pan_zoom_contract(false);
+}
+
+/// Translated vertical bounds remain valid through proposals, Fit, and refresh.
+#[test]
+fn pan_zoom_translated_vertical_fit_rounding() {
+    translated_pan_zoom_contract(true);
+}
+
+/// Executes the actual example with transposed geometry and retained source aspirations.
+fn translated_pan_zoom_contract(transpose: bool) {
+    let text = include_str!("../examples/pan_zoom.adm2");
+    let mut s = parser().parse_str(text).unwrap();
+    let (content, viewport, proposed_pan) = if transpose {
+        (
+            rect(0.0, 437.7687406100192, 100.0, 317.7044969997028),
+            Size2D::new(712.0, 696.0),
+            Vector2D::new(156.0, -4.0 * 437.7687406100192),
+        )
+    } else {
+        (
+            rect(437.7687406100192, 0.0, 317.7044969997028, 100.0),
+            Size2D::new(696.0, 712.0),
+            Vector2D::new(-4.0 * 437.7687406100192, 156.0),
+        )
+    };
+    let content_id = s.cell_names["content"].0;
+    let viewport_id = s.cell_names["viewport"].0;
+    let zoom = s.cell_names["zoom"].0;
+    let pan = s.cell_names["pan"].0;
+    s.write(content_id, content).unwrap();
+    s.write(viewport_id, viewport).unwrap();
+    // Default zoom 2 conforms to fit without inverted clamp bounds.
+    s.propagate().unwrap();
+    let fit_scale = *s.read::<f64>(s.cell_names["fit_scale"].0).unwrap();
+    let fit_pan = *s.read::<Vector2D>(s.cell_names["fit_pan"].0).unwrap();
+    close(fit_scale, 2.19071497751148, 3.0);
+    assert_eq!(*s.read::<f64>(zoom).unwrap(), fit_scale);
+    assert_eq!(*s.read::<Vector2D>(pan).unwrap(), fit_pan);
+
+    // Explicit proposals clamp the effective view, not the source aspiration.
+    let aspiration = Vector2D::new(10000.0, 10000.0);
+    s.write(zoom, 4.0).unwrap();
+    s.write(pan, aspiration).unwrap();
+    s.propagate().unwrap();
+    assert_eq!(*s.read::<f64>(zoom).unwrap(), 4.0);
+    assert_eq!(*s.read::<Vector2D>(pan).unwrap(), proposed_pan);
+    s.write(viewport_id, viewport * 2.0).unwrap();
+    s.propagate().unwrap();
+    assert_eq!(*s.read::<f64>(zoom).unwrap(), fit_scale * 2.0);
+    assert_eq!(*s.sheet.source::<f64>(zoom).unwrap(), 4.0);
+    assert_eq!(*s.sheet.source::<Vector2D>(pan).unwrap(), aspiration);
+    s.write(viewport_id, viewport).unwrap();
+    s.propagate().unwrap();
+    assert_eq!(*s.read::<f64>(zoom).unwrap(), 4.0);
+    assert_eq!(*s.read::<Vector2D>(pan).unwrap(), proposed_pan);
+
+    // Fit/reset replaces those aspirations using the sheet's own outputs.
+    s.write(zoom, fit_scale).unwrap();
+    s.write(pan, fit_pan).unwrap();
+    s.propagate().unwrap();
+    assert_eq!(*s.read::<f64>(zoom).unwrap(), fit_scale);
+    assert_eq!(*s.read::<Vector2D>(pan).unwrap(), fit_pan);
+    assert_eq!(*s.sheet.source::<f64>(zoom).unwrap(), fit_scale);
+    assert_eq!(*s.sheet.source::<Vector2D>(pan).unwrap(), fit_pan);
+    let view = *s.read::<Transform2D>(s.cell_names["view"].0).unwrap();
+    let center = view.transform_point(content.center());
+    close(center.x, viewport.width * 0.5, viewport.width);
+    close(center.y, viewport.height * 0.5, viewport.height);
+    assert!(
+        s.cell_names
+            .values()
+            .all(|(id, _)| s.cell_requirements_valid(*id))
+    );
+}

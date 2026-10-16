@@ -116,7 +116,7 @@ errors, not success-shaped replies.
 **Interfaces:** Produces `ViewTransform`, `ViewAction`, `ViewInput`,
 `ViewOutput`, `ViewConstraints` above.
 
-- [ ] **Step 1: Add contract tests** `fit_centers_content`,
+- [x] **Step 1: Add contract tests** `fit_centers_content`,
   `pan_centers_short_axis_and_clamps_long_axis`,
   `fit_can_exceed_nominal_zoom_limit`, `zero_extent_uses_one_unit`,
   `refresh_preserves_source_aspiration`, and
@@ -125,9 +125,9 @@ errors, not success-shaped replies.
   `{ x: 0, y: 50, k: 2 }`. At `k=3`, pan limits are `x in [-200,0]`,
   `y=0`. Bounds `(10,10)` in viewport `(400,300)` yield minimum/maximum
   zoom `30`, not an invalid `[30,8]` range.
-- [ ] **Step 2: Run** `cargo test -p adam-web-ui --test view_constraints`.
+- [x] **Step 2: Run** `cargo test -p adam-web-ui --test view_constraints`.
   Expected: missing model/module.
-- [ ] **Step 3: Write `view_constraints.adm2`.** Use source `bounds: Rect`,
+- [x] **Step 3: Write `view_constraints.adm2`.** Use source `bounds: Rect`,
   `viewport: Size2D`, `max_zoom: f64 = 8.0`; ordinary cells
   `pan: Vector2D`, `zoom: f64`; derived outputs
   `fit_zoom`, `fit_pan`, `min_zoom`, `effective_max_zoom`, and
@@ -139,21 +139,21 @@ errors, not success-shaped replies.
   Derive `view = scale(zoom, zoom).then(translation(pan))`.
   Declare relationships in a dependency-safe order without relying on order
   as solver behavior.
-- [ ] **Step 4: Implement `ViewConstraints`.** Use the library stage's
+- [x] **Step 4: Implement `ViewConstraints`.** Use the library stage's
   `build::type_registry()` and `build::op_lookup()`; parse the embedded sheet
   once and cache IDs. Validate finite ordered bounds with nonnegative
   representable extents, positive finite viewport, and positive finite
   proposed zoom. Validate finite model outputs and surface formatted
   sheet errors. `Fit` copies derived fit outputs; `Refresh` never writes
   an effective pan/zoom back as a new source.
-- [ ] **Step 5: Pin spring-back**: propose an excessive pan at a valid zoom,
+- [x] **Step 5: Pin spring-back**: propose an excessive pan at a valid zoom,
   shrink bounds to clamp it, expand bounds, and assert the original proposal
   returns when feasible. Assert `Fit` intentionally replaces that aspiration
   and subsequent refreshes do not restore the pre-reset source.
-- [ ] **Step 6: Run** `cargo test -p adam-web-ui --test view_constraints`;
+- [x] **Step 6: Run** `cargo test -p adam-web-ui --test view_constraints`;
   `cargo clippy -p adam-web-ui --all-targets -- -D warnings`.
   Expected: all pass with the actual sheet, not a Rust duplicate of its math.
-- [ ] **Step 7: Format and commit**:
+- [x] **Step 7: Format and commit**:
   `feat(graph): model view constraints in Adam`.
 
 ### Task 2: Lifecycle-safe proposal and approval bridge
@@ -169,13 +169,13 @@ modify `adam-web-ui\src\graph\{mod,view}.rs`,
 approved-view application and subscription disposal. Preserve existing
 `window.beginGraph` driver method names.
 
-- [ ] **Step 1: Add Rust protocol tests**
+- [x] **Step 1: Add Rust protocol tests**
   `stale_generation_is_ignored`, `disposed_generation_cannot_restart`,
   `stale_sequence_does_not_mutate_model`, `current_failure_is_a_failed_reply`,
   `message_numbers_are_validated`, and `two_containers_are_independent`.
   Serialize/deserialize real request/reply fixtures and assert field names,
   actions and ordering exactly match the JS fixtures.
-- [ ] **Step 2: Add Vitest cases**
+- [x] **Step 2: Add Vitest cases**
   `proposed_view_is_not_rendered_before_approval`,
   `bursts_keep_one_in_flight_and_one_pending_snapshot`,
   `old_revision_reply_does_not_apply`, `approval_does_not_resubmit`,
@@ -185,10 +185,10 @@ approved-view application and subscription disposal. Preserve existing
   Drive 100 proposals against a delayed fake channel: assert queue size
   remains two, a valid completed reply renders before the burst finishes,
   and the eventual view corresponds to the latest proposal.
-- [ ] **Step 3: Run** `cargo test -p adam-web-ui graph::bridge`;
+- [x] **Step 3: Run** `cargo test -p adam-web-ui graph::bridge`;
   from `begin`, `npm test -- graph.test.js`.
   Expected: missing bridge/adapter failures.
-- [ ] **Step 4: Implement pure protocol state and JS coalescing.**
+- [x] **Step 4: Implement pure protocol state and JS coalescing.**
   Process one request at a time. Retain one latest pending snapshot; merge
   newer bounds into pending actions. A bounds refresh cannot erase a queued
   reset. A genuinely newer user gesture may intentionally cancel an ongoing
@@ -200,7 +200,7 @@ approved-view application and subscription disposal. Preserve existing
   A newer merely pending gesture does not
   invalidate the current completed reply: render approved progress while
   input continues.
-- [ ] **Step 5: Own the channel in `GraphView`.** Install the evaluation
+- [x] **Step 5: Own the channel in `GraphView`.** Install the evaluation
   listener before JS initialization. JS uses `dioxus.send` and the matching
   `dioxus.recv` callback to exchange typed messages. Start/dispose a model
   with each graph instance, and cancel subscriptions/tasks on unmount,
@@ -208,7 +208,7 @@ approved-view application and subscription disposal. Preserve existing
   `BridgeState`/tested pure helpers rather than untested framework callbacks.
   Report errors via `crate::diagnostics::report_error` and a visible graph
   error state; do not restore JS policy silently.
-- [ ] **Step 6: Separate proposal and rendering paths in D3.**
+- [x] **Step 6: Separate proposal and rendering paths in D3.**
   Gestures submit absolute proposed transforms; only accepted views set
   `.zoom-layer` transforms. Apply acknowledged views under a guard so
   programmatic synchronization cannot emit another request. During a D3
@@ -217,10 +217,10 @@ approved-view application and subscription disposal. Preserve existing
   interrupts that transition. Outside transitions, synchronize accepted
   baselines under the guard. Feed model-provided zoom limits back as gesture
   hints, not independently calculated policy.
-- [ ] **Step 7: Run** the Rust protocol/model tests and the complete
+- [x] **Step 7: Run** the Rust protocol/model tests and the complete
   `begin` Vitest suite. Expected: no stale applications, recursive message
   loops, cross-instance updates, lost terminal request, or unbounded queues.
-- [ ] **Step 8: Format and commit**:
+- [x] **Step 8: Format and commit**:
   `feat(graph): bridge view proposals to Adam approvals`.
 
 ### Task 3: Migrate every live control and verify desktop/web rendering
@@ -238,7 +238,7 @@ Update `docs\VISION.md`, relevant graph documentation, and
 and multi-instance container IDs. Every rendering path consumes the bridge
 approval, including initial fit and animated controls.
 
-- [ ] **Step 1: Add migration tests**
+- [x] **Step 1: Add migration tests**
   `initial_fit_waits_for_real_viewport_and_approval`,
   `resize_and_visibility_refresh_constraints`,
   `structural_change_preserves_current_view_when_valid`,
@@ -248,9 +248,9 @@ approval, including initial fit and animated controls.
   Use fake transition timing and delayed model replies; assert multiple
   approved intermediate frames and the final fit rather than merely a
   queued transition call.
-- [ ] **Step 2: Run** from `begin`, `npm test -- graph.test.js`.
+- [x] **Step 2: Run** from `begin`, `npm test -- graph.test.js`.
   Expected: old direct-fit/constraint paths fail the new approval assertions.
-- [ ] **Step 3: Route all view changes through the model.** Keep `computeBBox`
+- [x] **Step 3: Route all view changes through the model.** Keep `computeBBox`
   and layout measurement in JS. Replace `fitTransformFor` and
   `updateZoomConstraints` arithmetic with requests. Remove the old
   `scaleExtent`/`translateExtent` policy calculation and default D3
@@ -260,17 +260,17 @@ approval, including initial fit and animated controls.
   Zoom +/- retain `1.3` and `1/1.3`, `200 ms`; reset retains `300 ms`.
   Bounds changes preserve the current aspiration unless a user explicitly
   resets or makes a new gesture.
-- [ ] **Step 4: Keep shared hosts consistent.** Verify direct book graphs
+- [x] **Step 4: Keep shared hosts consistent.** Verify direct book graphs
   also install the channel; no Begin-only global solver hook. Preserve
   node dragging and inactive-node filtering. Show a useful failure in the
   graph container if its model cannot start or propagate; keep diagnostics
   visible on both browser and native paths.
-- [ ] **Step 5: Run** `cargo test -p adam-web-ui -p adam-lang-book-live`;
+- [x] **Step 5: Run** `cargo test -p adam-web-ui -p adam-lang-book-live`;
   from `begin`, `npm test`;
   `cargo clippy -p begin --no-default-features --all-targets -- -D warnings`;
   `cargo clippy -p begin --all-targets -- -D warnings`.
   Expected: all pass, with no remaining production JS copy of the policy.
-- [ ] **Step 6: Invoke `verifying-begin-ui` and perform rendered checks.**
+- [x] **Step 6: Invoke `verifying-begin-ui` and perform rendered checks.**
   Inspect screenshots, DOM and live zoom transforms for initial fit,
   sustained wheel/drag, zoom bounds, all buttons and animations, viewport
   resize, graph changes, inactive-node hiding, source replacement and two
@@ -280,9 +280,15 @@ approval, including initial fit and animated controls.
   errors and that a deliberate error is surfaced rather than hidden.
   Exercise the desktop evaluation transport too; web rendering alone does
   not prove desktop messages work.
-- [ ] **Step 7: Run the master plan's full gate**, document actual rendered
+- [x] **Step 7: Run the master plan's full gate**, document actual rendered
   evidence and any platform blockers in the dated handoff, review the whole
   branch, fix in-scope findings, and commit:
   `feat(graph): enforce live pan and zoom through Adam`.
 
 No PR or merge is part of executing this task unless the user requests it.
+
+Completion evidence: the dated handoff records Tasks 1–3, native/web/book
+rendered checks, and the fresh complete gate after the final fix wave. The
+whole-branch review covered 90 files; both actionable Minor findings are fixed.
+Controller approval of the final scoped fixes remains pending as of their
+commit. Checkbox completion records executed work, not that final approval.

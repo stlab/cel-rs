@@ -142,7 +142,11 @@ content; otherwise it clamps to the actual scaled content edges.
 Self-referencing writes retain pan/zoom aspirations. For initial fit or reset,
 the caller writes `fit_scale` to `zoom` and `fit_pan` to `pan`.
 
-This sheet demonstrates policy only. The live graph still uses its existing
-JavaScript model; no Dioxus bridge or graph migration ships in this stage.
-The future bridge must wait for real positive viewport observations and retain
-the last valid viewport during transient zero-size observations.
+This standalone sheet demonstrates the policy. The live graph uses its own
+Adam sheet in `adam-web-ui`, with a Dioxus proposal/approval bridge shared by
+Begin's desktop and web builds and the book's graph inspectors. JavaScript owns
+measurement, layout, and gestures, but renders only matching Adam approvals.
+The bridge waits for real positive viewport observations and retains the last
+valid viewport during transient zero-size observations. See
+[graph view ownership and verification](https://github.com/stlab/cel-rs/blob/main/docs/graph-view.md)
+for the live model, lifecycle, and interaction contracts.

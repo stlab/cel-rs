@@ -63,5 +63,5 @@ Its fresh DOM/transform audits, screenshots opened for inspection, exact command
 and any environment observations live in the local graph task workspace:
 `.superpowers/sdd/2026-10-15-cel-euclid-graph/task-3-report.md`.
 The [dated handoff](superpowers/2026-10-15-cel-euclid-handoff.md) separates this
-scoped verification from the controller's pending full workspace gate and
-independent final whole-branch review.
+rendered verification from the completed full workspace gate and final fix
+wave. Controller approval of the final scoped fixes remains separate.

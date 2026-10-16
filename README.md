@@ -116,7 +116,9 @@ fits arbitrary affine geometry with general operations and typed IIFEs,
 preserves source aspiration through Adam self-reference, and derives a
 fixed-overlay presentation. Its numerical policy lives in CEL, not a Rust
 fitting helper. The [pan/zoom sheet](cel-euclid/examples/pan_zoom.adm2)
-demonstrates graph policy; live graph migration is a separate stage.
+demonstrates graph policy. The live graph uses an Adam-owned model and a shared
+Dioxus proposal/approval bridge in Begin and the book; see
+[graph view ownership and verification](docs/graph-view.md).
 
 See [CLAUDE.md](CLAUDE.md) for the full command reference (build, test, lint,
 sanitizers) and repository conventions, including the requirement to work in a

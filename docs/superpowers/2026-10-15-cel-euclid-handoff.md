@@ -13,8 +13,8 @@ The language stage is implemented and independently reviewed on
 - Formatter fixes preserve closure receiver semantics and grouped comments.
 
 Targeted suites, downstream checks, strict documentation, formatting, and
-all-target lint checks passed for the affected language crates. The final
-whole-workspace gate remains due after the library and graph stages.
+all-target lint checks passed for the affected language crates. The completed
+final whole-workspace gate below also covers the library and graph stages.
 
 The library stage is implemented and independently reviewed through `f5b48309`.
 `cel-euclid` exposes the seven concrete geometry aliases, named records, the
@@ -105,14 +105,72 @@ cancelled-target frames, newer wheel progress, and a subsequent 21-frame reset
 ending in terminal Fit. Scoped Rust tests and both Begin Clippy modes pass;
 the task report contains exact commands and retained evidence.
 
+### Final whole-branch fix wave
+
+The controller's whole-branch review covered 90 files with no Critical/Important
+findings. This final wave addresses both actionable Minor findings together:
+
+- The shipped `cel-euclid/examples/pan_zoom.adm2` now compares actual pan
+  endpoints on both axes, matching the production sheet. Equivalent extent
+  arithmetic can round in the opposite direction at fit and invert clamp
+  bounds for valid translated geometry. Two actual-example integration tests
+  failed with `invalid clamp bounds` before the fix and pass afterward.
+  Both axis orientations cover default proposal conformance, explicit
+  proposals, viewport refresh and spring-back, source retention, explicit
+  Fit/reset, and the final view transform. All 18 example tests pass.
+- The geometry chapter, README, and example comment distinguish the standalone
+  demonstration from the completed real Adam-backed graph. The chapter links
+  to the ownership documentation using a repository URL valid in the built
+  book. The ownership documentation no longer calls the full gate pending.
+- Master rollout and graph task checkboxes now reflect the executed work.
+  The historical offline pause below remains historical, not a current blocker.
+
+No Rust policy helper, crop constraint, production bridge change, new dependency,
+Spectrum bundle regeneration, or unrelated rendered check accompanies this wave.
+Direct self-review found no additional in-scope issue; no nested agent or
+reviewer ran. Controller approval of these final scoped fixes is pending as of
+this commit, not asserted here.
+
+### Fresh complete final gate
+
+The exact amended executable source passed the full gate once after the fixes.
+Every command below exited 0; every Cargo command emitted zero compiler
+warnings. Plain workspace build and test were warning-free.
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all` | Passed. |
+| `cargo fmt --all -- --check` | Passed. |
+| `cargo build --workspace` | Passed; zero warnings. |
+| `cargo test --workspace` | 2,453 passed, 0 failed, 5 ignored; includes 218 doctests. |
+| `cargo test --doc --workspace` | 218 passed, 0 failed, 5 ignored. |
+| `cargo clippy --workspace --exclude begin --all-targets -- -D warnings` | Passed. |
+| `cargo clippy -p begin --no-default-features --all-targets -- -D warnings` | Passed. |
+| `cargo clippy -p begin --all-targets -- -D warnings` | Passed. |
+| `cargo clippy -p ez-adam --no-default-features --all-targets -- -D warnings` | Passed. |
+| `cargo clippy -p ez-adam --all-targets -- -D warnings` | Passed. |
+| `$env:RUSTDOCFLAGS='-D warnings'; cargo doc --lib --no-deps --workspace` | Passed. |
+| `npm test` from `begin` | 65 passed across 2 files. |
+| `mdbook build adam-lang-book` | Passed with installed preprocessors. |
+
+The workspace run includes the book's executable chapter tests (all 3 geometry
+tests pass) and both new actual-example regressions. The separate focused GREEN
+run passed all 18 `adam_examples` tests. The RED run exited 101 with both
+regressions failing for the reproduced clamp error, not a setup failure.
+Exact outputs, command/exit/warning counts, direct self-review, and commit
+identity are retained in `final-fix-*.log`, `final-fix-gate-results.json`, and
+`final-fix-report.md` under the ignored
+`.superpowers\sdd\2026-10-15-cel-euclid-graph\` workspace.
+
 ## Remaining
 
-The controller reports the full master-workspace gate passed at `ff1deacd`,
-including all five Clippy commands, strict docs, and warning-free build/test.
-The controller will revalidate this scoped review fix and finish independent
-whole-branch review; this follow-up does not claim PR readiness. There is no
-known parked in-scope finding and no desktop/web/book platform blocker.
-No push, PR, or merge is requested.
+The complete implementation and fresh final gate are complete. Only controller
+scoped review approval of this final fix wave remains; no implementation work,
+known in-scope finding, or desktop/web/book platform blocker is parked.
+The five ignored doctests remain ignored by their existing declarations.
+Earlier native/web/book rendered evidence above remains applicable; this wave
+does not change the live UI or bridge and does not repeat that rendering.
+No push, PR, or merge is requested or performed.
 
 The approved design and three stage plans remain authoritative. No
 crop-specific constraint function or Rust fitting helper is permitted: the
