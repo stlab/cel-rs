@@ -2139,6 +2139,96 @@
         "push_scope",
         1.0
       ]
+    ],
+    "adam": [
+      [
+        "async",
+        1.0
+      ],
+      [
+        "graph",
+        1.0
+      ],
+      [
+        "euclid",
+        1.0
+      ],
+      [
+        "floating-point",
+        1.0
+      ]
+    ],
+    "euclid": [
+      [
+        "floating-point",
+        1.0
+      ],
+      [
+        "adam",
+        1.0
+      ],
+      [
+        "graph",
+        1.0
+      ],
+      [
+        "async",
+        1.0
+      ]
+    ],
+    "async": [
+      [
+        "floating-point",
+        1.0
+      ],
+      [
+        "adam",
+        1.0
+      ],
+      [
+        "graph",
+        1.0
+      ],
+      [
+        "euclid",
+        1.0
+      ]
+    ],
+    "graph": [
+      [
+        "adam",
+        1.0
+      ],
+      [
+        "euclid",
+        1.0
+      ],
+      [
+        "floating-point",
+        1.0
+      ],
+      [
+        "async",
+        1.0
+      ]
+    ],
+    "floating-point": [
+      [
+        "async",
+        1.0
+      ],
+      [
+        "adam",
+        1.0
+      ],
+      [
+        "graph",
+        1.0
+      ],
+      [
+        "euclid",
+        1.0
+      ]
     ]
   },
   "provenance": {
@@ -3607,8 +3697,68 @@
     ],
     "celparser|astcontext": [
       "knowledge\\celparser-and-parsercontext-dual-emission.md"
+    ],
+    "adam|graph": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "adam|floating-point": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "graph|euclid": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "euclid|adam": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "graph|floating-point": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "floating-point|graph": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "graph|adam": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "async|euclid": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "floating-point|async": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "euclid|async": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "floating-point|euclid": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "async|graph": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "async|adam": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "adam|euclid": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "floating-point|adam": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "euclid|graph": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "adam|async": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "euclid|floating-point": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "graph|async": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
+    ],
+    "async|floating-point": [
+      "knowledge\\euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md"
     ]
   },
-  "entries_processed": 16,
-  "built_at": "2026-10-09T05:37:53.740301700+00:00"
+  "entries_processed": 17,
+  "built_at": "2026-10-16T04:44:28.616653900+00:00"
 }

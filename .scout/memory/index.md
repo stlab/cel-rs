@@ -11,6 +11,7 @@
 - [[knowledge/clippy-and-feature-flag-validation-matrix.md|Clippy and Feature Flag Validation Matrix]] (procedure, 0.85) `build` `clippy` `feature-flags` `validation` `cargo`
 - [[knowledge/contract-style-documentation-and-precondition-invariants.md|Contract-Style Documentation and Precondition Invariants]] (pattern, 0.85) `conventions` `documentation` `contract` `preconditions` `debug-assert`
 - [[knowledge/dynamicsequence-and-dynamicarray-value-persistence.md|DynamicSequence and DynamicArray Value Persistence]] (concept, 0.75) `cel-runtime` `dynamic-sequence` `dynamic-array` `tuples` `arrays` `value-persistence`
+- [[knowledge/euclid-graph-reset-provenance-and-floating-point-pan-endpoint-invariants.md|Euclid graph reset provenance and floating-point pan endpoint invariants]] (discovery, 0.98) `euclid` `graph` `adam` `floating-point` `async`
 - [[knowledge/ez-adam-document-model-and-node-placements-separation.md|Ez-adam Document Model and Node Placements Separation]] (observation, 0.80) `ez-adam` `document-model` `cell-node` `cell` `canvas` `visual-model`
 - [[knowledge/filter-purity-and-idempotence-contract.md|Filter Purity and Idempotence Contract]] (observation, 0.80) `adam-rs` `filter` `method` `idempotence` `purity` `constraints`
 - [[knowledge/four-layer-stack-runtime-architecture.md|Four-Layer Stack Runtime Architecture]] (concept, 0.80) `cel-runtime` `raw-stack` `raw-segment` `dyn-segment` `segment` `type-safety`
