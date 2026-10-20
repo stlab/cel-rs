@@ -33,7 +33,7 @@
 //! ```
 
 use std::any::{Any, TypeId};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::ValueType;
@@ -171,11 +171,31 @@ pub(crate) fn same_signature(
 /// the result so the caller (which only knows `R` dynamically, as a `TypeId`) doesn't need to.
 pub type CallDynFn = fn(&mut DynSegment, &[&dyn Any]) -> anyhow::Result<Box<dyn Any>>;
 
+/// Shares one body and counts live trusted-binding leases across all carrier aliases.
 struct ClosureData {
     param_types: Vec<TypeId>,
     return_type: TypeId,
     body: RefCell<DynSegment>,
     signature: Option<std::sync::Arc<ClosureSignature>>,
+    trusted_bindings: Cell<usize>,
+}
+
+/// Prevents arbitrary mutable body dispatch until this independent lease is dropped.
+///
+/// Holds the shared carrier alive; moving the lease preserves the freeze, and
+/// dropping it releases exactly one binding even during unwinding. Carrier clones
+/// share the counter but neither acquire nor release leases themselves.
+pub(crate) struct TrustedBindingLease {
+    closure: DynClosure,
+}
+
+impl Drop for TrustedBindingLease {
+    /// Decrements the lease count without borrowing the body, before releasing the carrier.
+    fn drop(&mut self) {
+        let bindings = &self.closure.0.trusted_bindings;
+        debug_assert!(bindings.get() > 0);
+        bindings.set(bindings.get() - 1);
+    }
 }
 
 /// `Debug` implementation that formats the closure's signature but deliberately omits `body` from the output
@@ -233,6 +253,7 @@ impl DynClosure {
             return_type,
             body: RefCell::new(body),
             signature: None,
+            trusted_bindings: Cell::new(0),
         }))
     }
 
@@ -271,7 +292,35 @@ impl DynClosure {
             return_type: result.type_id(),
             signature: Some(std::sync::Arc::new(ClosureSignature { parameters, result })),
             body: RefCell::new(body),
+            trusted_bindings: Cell::new(0),
         })))
+    }
+
+    /// Freezes arbitrary mutable body access across all aliases until the returned lease drops.
+    ///
+    /// This does not validate the signature; preparation must do so before binding.
+    /// Existing nonmutating execution paths remain available while leased.
+    ///
+    /// # Errors
+    /// Rejects a mutably borrowed body (including an active mutable dispatcher)
+    /// or an unrepresentable additional lease count without changing the counter.
+    pub(crate) fn freeze_trusted_binding(&self) -> anyhow::Result<TrustedBindingLease> {
+        let _body = self
+            .0
+            .body
+            .try_borrow()
+            .map_err(|_| anyhow::anyhow!("closure body is already executing"))?;
+        let count = self
+            .0
+            .trusted_bindings
+            .get()
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("too many trusted bindings"))?;
+        let lease = TrustedBindingLease {
+            closure: self.clone(),
+        };
+        self.0.trusted_bindings.set(count);
+        Ok(lease)
     }
 
     /// Validates independent execution and declared argument reads, returning the actual result.
@@ -410,8 +459,8 @@ impl DynClosure {
     /// and result against this closure's full signature and its legacy physical
     /// frame. Every pointer must remain a live matching borrowed value
     /// until execution returns; operations must not retain argument pointers.
-    /// The binding must remain valid: a legacy `CallDynFn` dispatcher must not
-    /// modify the compiled body between preparation and execution.
+    /// A trusted-binding lease must protect the validated body from modification
+    /// throughout preparation and execution.
     ///
     /// # Errors
     ///
@@ -528,6 +577,12 @@ impl DynClosure {
     ///   `DynSegment::call_dyn::<R>` for the same concrete `R` that `TypeId` names).
     /// - Complexity: whatever the body's own evaluation complexity is.
     ///
+    /// # Errors
+    ///
+    /// Returns an error without invoking `call_dyn_fn` while any trusted binding
+    /// leases this shared body, including through another clone. Mutable dispatch
+    /// resumes after the last lease drops. Otherwise propagates dispatcher errors.
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -560,6 +615,10 @@ impl DynClosure {
         call_dyn_fn: CallDynFn,
     ) -> anyhow::Result<Box<dyn Any>> {
         debug_assert_eq!(args.len(), self.0.param_types.len());
+        anyhow::ensure!(
+            self.0.trusted_bindings.get() == 0,
+            "closure body is frozen by a trusted binding"
+        );
         call_dyn_fn(&mut self.0.body.borrow_mut(), args)
     }
 }

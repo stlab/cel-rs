@@ -390,16 +390,22 @@ pub(crate) struct TrustedInvocation {
     closure: DynClosure,
     signature: ValueType,
     result: ResultPlan,
+    _lease: crate::dyn_closure::TrustedBindingLease,
 }
 
 impl TrustedInvocation {
-    /// Validates the actual body, semantic identity, and matching legacy physical frame once.
+    /// Freezes and validates the actual body, semantic identity, and legacy physical frame once.
+    ///
+    /// The body stays frozen across all carrier aliases for this binding's lifetime.
+    /// Failed construction releases its lease, including during unwinding.
     ///
     /// # Errors
-    /// Rejects missing/mismatched signatures, incompatible structural frames, an
-    /// executing body, or current body reads, origin, or result violating its signature.
+    /// Rejects non-callable descriptors, missing/mismatched signatures, incompatible
+    /// structural frames, an executing body, an unrepresentable lease count, or
+    /// current body reads, origin, or result violating its signature.
     /// - Complexity: O(n) comparisons for n parameters and recursive body read/result nodes.
     pub(crate) fn new(closure: DynClosure, signature: ValueType) -> anyhow::Result<Self> {
+        let lease = closure.freeze_trusted_binding()?;
         let ValueKind::Callable { parameters, result } = signature.kind() else {
             anyhow::bail!("complete callable descriptor required");
         };
@@ -423,6 +429,7 @@ impl TrustedInvocation {
             closure,
             signature,
             result,
+            _lease: lease,
         })
     }
 
@@ -458,8 +465,8 @@ impl TrustedInvocation {
     /// # Safety
     /// Arguments must be live borrowed pointers matching this plan's full
     /// parameter descriptors, in source order, for the duration of execution.
-    /// The bound compiled body must remain unchanged after preparation, including
-    /// through any legacy `CallDynFn` dispatcher given mutable body access.
+    /// This binding's lease keeps the validated compiled body unchanged across
+    /// safe carrier aliases; no repeated signature validation is required.
     ///
     /// # Errors
     /// Propagates reentrant borrow and body execution errors without producing a result.
@@ -778,6 +785,182 @@ mod tests {
         ValueType::callable(vec![ValueType::leaf::<u8>()], ValueType::leaf::<String>())
     }
 
+    /// Builds an unchanged typed carrier for trusted-binding lifetime tests.
+    fn freeze_closure() -> DynClosure {
+        let mut body = DynSegment::new::<()>();
+        body.push_arg::<u8>(0);
+        body.op1(|n: u8| n.to_string()).unwrap();
+        DynClosure::typed(vec![crate::ValueType::leaf::<u8>()], body).unwrap()
+    }
+
+    /// Executes a checked String call without replacing the supplied body.
+    fn string_dispatch(
+        body: &mut DynSegment,
+        arguments: &[&dyn std::any::Any],
+    ) -> anyhow::Result<Box<dyn std::any::Any>> {
+        Ok(Box::new(body.call_dyn::<String>(arguments)?))
+    }
+
+    /// Rejects mutable alias dispatch before its callback runs and keeps trusted calls usable.
+    #[test]
+    fn trusted_freeze_rejects_alias_mutation_without_dispatch() {
+        /// Must never receive mutable access while a trusted binding exists.
+        fn mutate(
+            body: &mut DynSegment,
+            arguments: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            let mut replacement = DynSegment::new::<()>();
+            replacement.just([0_usize; 3]);
+            execute_then_replace(body, arguments, replacement)?;
+            panic!("mutable dispatcher executed while leased");
+        }
+        let closure = freeze_closure();
+        let alias = closure.clone();
+        let plan = TrustedInvocation::new(closure.clone(), mutation_signature()).unwrap();
+        let error = alias.call_boxed(&[&7_u8], mutate).unwrap_err();
+        assert!(error.to_string().contains("trusted binding"));
+        for n in [7_u8, 8, 9] {
+            assert_eq!(closure.call::<String>(&[&n]).unwrap(), n.to_string());
+            let result = unsafe { plan.invoke(&[(&raw const n).cast()]) }
+                .unwrap()
+                .try_into_typed::<Leaf<String>>()
+                .unwrap();
+            assert_eq!(result, n.to_string());
+        }
+        drop(plan);
+        assert_eq!(
+            *alias
+                .call_boxed(&[&10_u8], string_dispatch)
+                .unwrap()
+                .downcast::<String>()
+                .unwrap(),
+            "10"
+        );
+    }
+
+    /// Keeps every alias frozen until the last independent trusted binding is released.
+    #[test]
+    fn trusted_freeze_multiple_bindings_and_cloned_aliases() {
+        let closure = freeze_closure();
+        let first = TrustedInvocation::new(closure.clone(), mutation_signature()).unwrap();
+        let alias = closure.clone();
+        let second = TrustedInvocation::new(alias.clone(), mutation_signature()).unwrap();
+        assert!(TrustedInvocation::new(alias.clone(), ValueType::leaf::<u8>()).is_err());
+        drop(first);
+        let late_alias = alias.clone();
+        assert!(late_alias.call_boxed(&[&1_u8], string_dispatch).is_err());
+        drop(second);
+        assert!(late_alias.call_boxed(&[&1_u8], string_dispatch).is_ok());
+        let third = TrustedInvocation::new(late_alias, mutation_signature()).unwrap();
+        assert!(closure.call_boxed(&[&2_u8], string_dispatch).is_err());
+        drop(third);
+        assert!(closure.call_boxed(&[&2_u8], string_dispatch).is_ok());
+    }
+
+    /// Releases failed preparations and unwound bindings without leaving aliases frozen.
+    #[test]
+    fn trusted_freeze_error_and_unwind_release() {
+        let closure = freeze_closure();
+        let wrong = ValueType::callable(vec![ValueType::leaf::<u8>()], ValueType::leaf::<u64>());
+        for _ in 0..2 {
+            assert!(TrustedInvocation::new(closure.clone(), wrong.clone()).is_err());
+            assert!(closure.call_boxed(&[&1_u8], string_dispatch).is_ok());
+        }
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _plan = TrustedInvocation::new(closure.clone(), mutation_signature()).unwrap();
+                assert!(closure.call_boxed(&[&1_u8], string_dispatch).is_err());
+                panic!("unwind a live binding");
+            }))
+            .is_err()
+        );
+        assert!(closure.call_boxed(&[&2_u8], string_dispatch).is_ok());
+        let plan = TrustedInvocation::new(closure.clone(), mutation_signature()).unwrap();
+        assert!(closure.call_boxed(&[&3_u8], string_dispatch).is_err());
+        drop(plan);
+        assert!(closure.call_boxed(&[&3_u8], string_dispatch).is_ok());
+    }
+
+    /// Keeps the freeze after execution errors and panics, then releases it normally.
+    #[test]
+    fn trusted_freeze_execution_failures_do_not_poison() {
+        let mut body = DynSegment::new::<()>();
+        body.push_arg::<u8>(0);
+        body.op1r(|n: u8| -> anyhow::Result<String> {
+            match n {
+                0 => anyhow::bail!("body error"),
+                1 => panic!("body panic"),
+                _ => Ok(n.to_string()),
+            }
+        })
+        .unwrap();
+        let closure = DynClosure::typed(vec![crate::ValueType::leaf::<u8>()], body).unwrap();
+        let plan = TrustedInvocation::new(closure.clone(), mutation_signature()).unwrap();
+        let error_arg = 0_u8;
+        assert!(unsafe { plan.invoke(&[(&raw const error_arg).cast()]) }.is_err());
+        let panic_arg = 1_u8;
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| unsafe {
+                plan.invoke(&[(&raw const panic_arg).cast()])
+            }))
+            .is_err()
+        );
+        assert!(closure.call_boxed(&[&2_u8], string_dispatch).is_err());
+        let success_arg = 3_u8;
+        assert_eq!(
+            unsafe { plan.invoke(&[(&raw const success_arg).cast()]) }
+                .unwrap()
+                .try_into_typed::<Leaf<String>>()
+                .unwrap(),
+            "3"
+        );
+        drop(plan);
+        assert!(closure.call_boxed(&[&4_u8], string_dispatch).is_ok());
+    }
+
+    /// Rejects preparation inside a mutable dispatcher before it can retain a binding.
+    #[test]
+    fn trusted_freeze_rejects_preparation_during_mutable_dispatch() {
+        /// Attempts to bind the body currently exposed to this dispatcher, then executes it.
+        fn dispatch(
+            body: &mut DynSegment,
+            arguments: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            let alias = arguments[0].downcast_ref::<DynClosure>().unwrap();
+            let signature = ValueType::callable(
+                vec![ValueType::leaf::<DynClosure>()],
+                ValueType::leaf::<String>(),
+            );
+            assert!(TrustedInvocation::new(alias.clone(), signature).is_err());
+            string_dispatch(body, arguments)
+        }
+        let mut body = DynSegment::new::<()>();
+        body.just(String::from("unchanged"));
+        let closure =
+            DynClosure::typed(vec![crate::ValueType::leaf::<DynClosure>()], body).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                *closure
+                    .call_boxed(&[&closure], dispatch)
+                    .unwrap()
+                    .downcast::<String>()
+                    .unwrap(),
+                "unchanged"
+            );
+        }
+        let plan = TrustedInvocation::new(
+            closure.clone(),
+            ValueType::callable(
+                vec![ValueType::leaf::<DynClosure>()],
+                ValueType::leaf::<String>(),
+            ),
+        )
+        .unwrap();
+        assert!(closure.call_boxed(&[&closure], string_dispatch).is_err());
+        drop(plan);
+        assert!(closure.call_boxed(&[&closure], string_dispatch).is_ok());
+    }
+
     /// Rejects a same-layout incompatible result installed before preparation without executing it.
     #[test]
     fn trusted_preparation_rejects_preexisting_same_layout_result_mutation() {
@@ -791,7 +974,19 @@ mod tests {
             replacement.just([0_usize; 3]);
             execute_then_replace(body, arguments, replacement)
         }
-        assert!(TrustedInvocation::new(mutated_closure(dispatch), mutation_signature()).is_err());
+        let closure = mutated_closure(dispatch);
+        assert!(TrustedInvocation::new(closure.clone(), mutation_signature()).is_err());
+        /// Repairs the stale body after the failed preparation releases its lease.
+        fn repair(
+            body: &mut DynSegment,
+            _: &[&dyn std::any::Any],
+        ) -> anyhow::Result<Box<dyn std::any::Any>> {
+            *body = DynSegment::new::<()>();
+            body.just(String::from("repaired"));
+            Ok(Box::new(String::from("repair complete")))
+        }
+        assert!(closure.call_boxed(&[&7_u8], repair).is_ok());
+        assert!(TrustedInvocation::new(closure, mutation_signature()).is_ok());
     }
 
     /// Rejects replaced bodies with no result or more than one result before execution.
