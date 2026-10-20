@@ -72,9 +72,13 @@
 //! against the same [`TypeResolver`]; `[T]` composes nested array types (`[i32]`, `[[i32]]`);
 //! and parenthesized tuple syntax names a (possibly nested) tuple type. Every context that
 //! accepts `type_expression` documents its own narrower support boundary where one exists.
-//! Closure parameters support registered cloneable leaves and recursive tuples/arrays;
-//! array elements cannot be tuples. Adam-lang cell types do not yet support
-//! `[T]` or `Name(args)` — see <https://github.com/stlab/cel-rs/issues/227>.
+//! CEL types recursively compose registered cloneable leaves, tuples, arrays, and callables:
+//! arrays can contain tuples or callables, and tuples and callable signatures can contain
+//! further compound types. `Fn((A, B), R)` names a callable with two parameters and result
+//! `R`; use `Fn((A,), R)` for one parameter and `Fn((), R)` for none.
+//! Adam-lang's current persistent cell storage has a narrower boundary: it does not yet
+//! support `[T]` or `Name(args)` cell types. Migrating that storage to recursive compound
+//! types is separate follow-up work — see <https://github.com/stlab/cel-rs/issues/227>.
 //!
 //! # Examples
 //!

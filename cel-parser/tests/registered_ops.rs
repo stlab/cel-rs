@@ -162,6 +162,124 @@ fn nullary_function_values_do_not_infer_their_result_until_called() {
     );
 }
 
+/// Registers an integer function for lexical-shadowing contracts.
+fn shadowing_lookup() -> OpLookup {
+    /// Marks the registered global function independently of local value types.
+    #[derive(Clone)]
+    struct F;
+    let mut ops = OpLookup::new();
+    ops.register_function("f", F).unwrap();
+    ops.register_operation(OperationSignature {
+        name: "f",
+        operands: vec![shape("i32")],
+        result: shape("i32"),
+        emit: Arc::new(|segment, _| segment.op1(|value: i32| value)),
+    })
+    .unwrap();
+    ops
+}
+
+/// Known noncallable locals shadow same-named registered functions in ordinary calls.
+#[test]
+fn noncallable_locals_shadow_registered_functions() {
+    let ops = shadowing_lookup();
+    let mut failures = Vec::new();
+    for source in [
+        "(|f: (i32,)| f(1i32))((2i32,))",
+        "(|f: [i32]| f(1i32))([2i32])",
+        "(|f: i32| f(1i32))(2i32)",
+        "(|f: bool| f(1i32))(true)",
+        "(|f: String| f(1i32))(\"local\")",
+        "(|f: ()| f(1i32))(())",
+    ] {
+        assert!(
+            CELParser::new(shadowing_lookup())
+                .parse_str(source)
+                .is_err(),
+            "executable parsing must reject {source}"
+        );
+        let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (ty, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+            &expr,
+            &|_| cel_parser::Ty::Any,
+            cel_parser::builtin_type_resolver().as_ref(),
+            &ops,
+        );
+        if diagnostics.len() != 1 {
+            failures.push(format!("{source}: inferred {ty:?}, {diagnostics:?}"));
+            continue;
+        }
+        let error = &diagnostics[0];
+        assert!(
+            error.message().contains("not callable"),
+            "{source}: {error}"
+        );
+        let start = source.find("f(1i32)").unwrap();
+        assert_eq!(error.span().start().column, start, "{source}");
+        assert_eq!(
+            error.end_span().unwrap().end().column,
+            start + "f(1i32)".len(),
+            "{source}"
+        );
+        assert_eq!(ty, cel_parser::Ty::Any, "{source}");
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Shadowing does not hide direct members or override a callable local's signature.
+#[test]
+fn registered_global_member_and_callable_local_resolution() {
+    let ops = shadowing_lookup();
+    for (source, expected_ty, expected_value) in [
+        ("f(1i32)", cel_parser::Ty::I32, 1),
+        ("1i32.f()", cel_parser::Ty::I32, 1),
+        ("(|f: (i32,)| 1i32.f())((2i32,))", cel_parser::Ty::I32, 1),
+        ("(|f: [i32]| 1i32.f)([2i32])", cel_parser::Ty::I32, 1),
+    ] {
+        let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (ty, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+            &expr,
+            &|_| cel_parser::Ty::Any,
+            cel_parser::builtin_type_resolver().as_ref(),
+            &ops,
+        );
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+        assert_eq!(ty, expected_ty, "{source}");
+        assert_eq!(
+            CELParser::new(shadowing_lookup())
+                .parse_str(source)
+                .unwrap()
+                .call0::<i32>()
+                .unwrap(),
+            expected_value,
+            "{source}"
+        );
+    }
+    let source = "(|f: Fn((i32,), bool)| f(1i32))(|x: i32| x == 1i32)";
+    let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+        .parse_str_ast(source)
+        .unwrap();
+    let (ty, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+        &expr,
+        &|_| cel_parser::Ty::Any,
+        cel_parser::builtin_type_resolver().as_ref(),
+        &ops,
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(ty, cel_parser::Ty::Bool);
+    assert!(
+        CELParser::new(ops)
+            .parse_str(source)
+            .unwrap()
+            .call0::<bool>()
+            .unwrap()
+    );
+}
+
 /// Identifies the first installer's callable.
 #[derive(Clone)]
 struct Min;

@@ -615,7 +615,8 @@ pub fn check_expr_with_type_resolver(
                     span.end,
                 ));
             } else {
-                if let Expr::Ident { name, .. } = callee.as_ref()
+                if matches!(callee_ty, Ty::Any | Ty::Registered(_))
+                    && let Expr::Ident { name, .. } = callee.as_ref()
                     && let Some(ty) =
                         registered_operation_ty(name, &types, *span, lookup, &mut diagnostics)
                 {
