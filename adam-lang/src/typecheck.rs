@@ -201,17 +201,21 @@ pub fn check_sheet(
     diagnostics
 }
 
-/// Converts a recursive [`TypeShape`] to the closest [`Ty`] approximation available to the CEL
-/// expression checker.
+/// Converts a recursive [`TypeShape`] to the CEL expression checker's complete static type.
 ///
-/// - Complexity: O(l) in the registered leaf name length.
+/// - Complexity: O(n + l) for n recursive nodes and l total registered leaf-name bytes.
 fn shape_to_ty(shape: &TypeShape, registry: &TypeRegistry) -> Ty {
     match shape {
         TypeShape::Named(type_id) => registry
             .resolved_leaf_type(*type_id)
             .map(|leaf| Ty::from_leaf(&leaf))
             .unwrap_or(Ty::Any),
-        TypeShape::Tuple(_) => Ty::Any,
+        TypeShape::Tuple(elements) => Ty::Tuple(
+            elements
+                .iter()
+                .map(|element| shape_to_ty(element, registry))
+                .collect(),
+        ),
     }
 }
 
@@ -231,15 +235,14 @@ struct DeclaredTypes {
     shapes: std::collections::HashMap<String, TypeShape>,
 }
 
-/// Maps every declared cell name — from a `cell`, a `source`, or an `out` — to both its scalar
-/// `Ty` (unaware of tuple structure, for use as the identifier resolver method/condition bodies
+/// Maps every declared cell name — from a `cell`, a `source`, or an `out` — to both its recursive
+/// `Ty` (for use as the identifier resolver method/condition bodies
 /// are checked against) and its full recursive `TypeShape` (for `expr_matches_shape`'s tuple-aware
 /// checks). A `source` is resolved exactly like a `cell` (same shape) so its name is referenceable
 /// by other cells'/sources'/outs' expressions exactly like a `cell`'s.
 /// A `cell`/`source`/`out` with no annotation, or one naming a type `registry` doesn't resolve, is
-/// absent from the `TypeShape` map and maps to `Ty::Any` in the `Ty` map; a tuple-typed annotation
-/// also maps to `Ty::Any` in the `Ty` map (`Ty` has no tuple variant), but *is* present in the
-/// `TypeShape` map. An `out` with an annotation resolves the same way as a `cell`; one without is
+/// absent from the `TypeShape` map and maps to `Ty::Any` in the `Ty` map. An `out` with an
+/// annotation resolves the same way as a `cell`; one without is
 /// inferred from its initializer body's checked type, using only `cell`-declared types as context (not
 /// other `out`s' inferred types — see this function's own note above), and is never present in
 /// the `TypeShape` map (only annotated cells/outs are).
@@ -406,9 +409,13 @@ fn expr_matches_shape(
             }
         }
         (_, TypeShape::Tuple(_)) => {
-            let nested = check_expr_with_type_resolver(expr, resolve, resolve_type, lookup).1;
+            let (actual, nested) =
+                check_expr_with_type_resolver(expr, resolve, resolve_type, lookup);
             if !nested.is_empty() {
                 diagnostics.extend(nested);
+                return;
+            }
+            if actual != Ty::Any && shape_to_ty(shape, registry).unifies_with(&actual) {
                 return;
             }
             diagnostics.push(ParseError::new_range(
@@ -753,7 +760,30 @@ fn check_tuple_output_body(
         other => {
             let (body_ty, body_diags) =
                 check_expr_with_type_resolver(other, resolve, resolve_type, lookup);
+            let valid = body_diags.is_empty();
             diagnostics.extend(body_diags);
+            if !valid {
+                return;
+            }
+            if let Ty::Tuple(elements) = &body_ty
+                && elements.len() == outputs.len()
+            {
+                for (element_ty, (name, _)) in elements.iter().zip(outputs) {
+                    let declared = resolve(name);
+                    if !declared.unifies_with(element_ty) {
+                        diagnostics.push(ParseError::new_range(
+                            format!(
+                                "binding output `{name}` produces `{}`, but is declared `{}`",
+                                element_ty.name(),
+                                declared.name()
+                            ),
+                            other.span().start,
+                            other.span().end,
+                        ));
+                    }
+                }
+                return;
+            }
             if body_ty == Ty::Any && !matches!(other, Expr::Tuple { .. }) {
                 return;
             }
@@ -1140,12 +1170,14 @@ mod tests {
         assert!(diags.is_empty());
     }
 
-    /// Unknown call-result shapes defer arity, without suppressing body errors.
+    /// Complete call-result shapes check arity and leaves without suppressing body errors.
     #[test]
     fn binding_multi_output_iife_defers_unknown_shape_but_checks_children() {
         for (body, expected) in [
             ("(|x: i32| (x, x))(1)", 0),
             ("(|x: i32| (x, true + x))(1)", 1),
+            ("(|x: i32| (x, true))(1)", 1),
+            ("(|x: i32| (x,))(1)", 1),
             ("1", 1),
             ("(1, 2, 3)", 1),
         ] {
@@ -1154,6 +1186,18 @@ mod tests {
             ));
             let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
             assert_eq!(diags.len(), expected, "{body}: {diags:?}");
+        }
+    }
+
+    /// Inferred tuple call results satisfy matching annotations and reject mismatched leaves.
+    #[test]
+    fn tuple_call_results_match_declared_shapes() {
+        for (annotation, expected) in [("(i32, i32)", 0), ("(i32, bool)", 1)] {
+            let sheet = parse(&format!(
+                "sheet s {{ cell pair: {annotation} = (|x: i32| (x,x))(1); }}"
+            ));
+            let diags = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
+            assert_eq!(diags.len(), expected, "{annotation}: {diags:?}");
         }
     }
 

@@ -8,6 +8,160 @@ use cel_parser::{
 use cel_runtime::{ArrayElementType, DynSegment};
 use proc_macro2::Span;
 
+/// Resolves a complete source shape independently of operation installation.
+fn shape(source: &str) -> cel_parser::ResolvedType {
+    CELParser::new(OpLookup::new())
+        .parse_type_expr_str(source)
+        .unwrap()
+        .resolve(cel_parser::builtin_type_resolver().as_ref())
+        .unwrap()
+}
+
+/// Overloads and duplicate detection compare every recursive parameter, not erased carriers.
+#[test]
+fn complete_shapes_distinguish_overloads_and_reject_alias_duplicates() {
+    use cel_runtime::{ArrayOf, Cons, FnOf, IntoCStackList, IntoRustTuple, Leaf, Nil};
+    type IntTuple = Cons<Leaf<i32>, Nil>;
+    type BoolTuple = Cons<Leaf<bool>, Nil>;
+    type IntFn = FnOf<IntTuple, Leaf<i32>>;
+    type BoolFn = FnOf<BoolTuple, Leaf<bool>>;
+    #[derive(Clone)]
+    struct Identity;
+    let mut ops = OpLookup::new();
+    ops.register_function("identity", Identity).unwrap();
+    for (source, emitter) in [
+        (
+            "[(i32,)]",
+            Arc::new(|s: &mut DynSegment, _| {
+                s.op1_repr::<ArrayOf<IntTuple>, ArrayOf<IntTuple>, _>(|value| value)
+            }) as cel_parser::OperationEmitter,
+        ),
+        (
+            "[(bool,)]",
+            Arc::new(|s: &mut DynSegment, _| {
+                s.op1_repr::<ArrayOf<BoolTuple>, ArrayOf<BoolTuple>, _>(|value| value)
+            }) as cel_parser::OperationEmitter,
+        ),
+        (
+            "Fn((i32,), i32)",
+            Arc::new(|s: &mut DynSegment, _| s.op1_repr::<IntFn, IntFn, _>(|value| value))
+                as cel_parser::OperationEmitter,
+        ),
+        (
+            "Fn((bool,), bool)",
+            Arc::new(|s: &mut DynSegment, _| s.op1_repr::<BoolFn, BoolFn, _>(|value| value))
+                as cel_parser::OperationEmitter,
+        ),
+    ] {
+        ops.register_operation(OperationSignature {
+            name: "identity",
+            operands: vec![shape(source)],
+            result: shape(source),
+            emit: emitter,
+        })
+        .unwrap();
+    }
+    assert_eq!(ops.operation_signatures("identity").count(), 4);
+    let alias = cel_parser::ResolvedType::Array {
+        element: Box::new(cel_parser::ResolvedType::Tuple {
+            elements: vec![ResolvedLeafType::leaf::<i32>("Alias").unwrap().into()],
+        }),
+    };
+    assert!(
+        ops.register_operation(OperationSignature {
+            name: "identity",
+            operands: vec![alias],
+            result: shape("String"),
+            emit: Arc::new(|_, _| panic!("alias duplicate emitter must never run")),
+        })
+        .is_err()
+    );
+    for source in [
+        "[(i32,)]",
+        "[(bool,)]",
+        "Fn((i32,), i32)",
+        "Fn((bool,), bool)",
+    ] {
+        assert!(
+            ops.register_operation(OperationSignature {
+                name: "identity",
+                operands: vec![shape(source)],
+                result: shape("String"),
+                emit: Arc::new(|_, _| panic!("duplicate emitter must never run")),
+            })
+            .is_err()
+        );
+    }
+    let mut parser = CELParser::new(ops);
+    for source in [
+        "identity([(1i32,)])",
+        "[(1i32,)].identity",
+        "[(1i32,)].identity()",
+    ] {
+        let body = parser.parse_str(source).unwrap();
+        let result = body
+            .prepare::<Nil, ArrayOf<IntTuple>>()
+            .unwrap()
+            .call(&().into_c_stack_list())
+            .unwrap();
+        assert_eq!(result.as_slice()[0].clone().into_rust_tuple(), (1,));
+    }
+    for source in [
+        "identity(|x: i32| x)(42i32)",
+        "(|x: i32| x).identity()(42i32)",
+    ] {
+        assert_eq!(
+            parser.parse_str(source).unwrap().call0::<i32>().unwrap(),
+            42
+        );
+    }
+    assert!(parser.parse_str("identity([(1.0f64,)])").is_err());
+    assert!(parser.parse_str("identity(|x: i32| true)").is_err());
+}
+
+/// A bare named function marker is not mistaken for its nullary operation result.
+#[test]
+fn nullary_function_values_do_not_infer_their_result_until_called() {
+    #[derive(Clone)]
+    struct Constant;
+    let mut ops = OpLookup::new();
+    ops.register_function("constant", Constant).unwrap();
+    ops.register_operation(OperationSignature {
+        name: "constant",
+        operands: vec![],
+        result: shape("i32"),
+        emit: Arc::new(|segment, _| {
+            segment.just(42i32);
+            Ok(())
+        }),
+    })
+    .unwrap();
+    for (source, expected) in [
+        ("constant", cel_parser::Ty::Any),
+        ("constant()", cel_parser::Ty::I32),
+    ] {
+        let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (ty, diagnostics) = cel_parser::ty::check_expr_with_type_resolver(
+            &expr,
+            &|_| cel_parser::Ty::Any,
+            cel_parser::builtin_type_resolver().as_ref(),
+            &ops,
+        );
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+        assert_eq!(ty, expected, "{source}");
+    }
+    assert_eq!(
+        CELParser::new(ops)
+            .parse_str("constant()")
+            .unwrap()
+            .call0::<i32>()
+            .unwrap(),
+        42
+    );
+}
+
 /// Identifies the first installer's callable.
 #[derive(Clone)]
 struct Min;
@@ -32,8 +186,8 @@ fn numeric(lookup: &mut OpLookup) {
     lookup
         .register_operation(OperationSignature {
             name: "min",
-            operands: vec![leaf::<f64>(), leaf::<f64>()],
-            result: leaf::<f64>(),
+            operands: vec![leaf::<f64>().into(), leaf::<f64>().into()],
+            result: leaf::<f64>().into(),
             emit: Arc::new(|s, _| s.op2(f64::min)),
         })
         .unwrap();
@@ -45,8 +199,8 @@ fn custom(lookup: &mut OpLookup) {
     lookup
         .register_operation(OperationSignature {
             name: "min",
-            operands: vec![leaf::<TestBox>()],
-            result: leaf::<f64>(),
+            operands: vec![leaf::<TestBox>().into()],
+            result: leaf::<f64>().into(),
             emit: Arc::new(|s, _| s.op1(|b: TestBox| b.0)),
         })
         .unwrap();
@@ -126,8 +280,8 @@ fn duplicate_operand_signature_is_rejected() {
         lookup
             .register_operation(OperationSignature {
                 name: "min",
-                operands: vec![leaf::<f64>(), leaf::<f64>()],
-                result: leaf::<u32>(),
+                operands: vec![leaf::<f64>().into(), leaf::<f64>().into()],
+                result: leaf::<u32>().into(),
                 emit: Arc::new(|s, _| s.op2(|_: f64, _: f64| 0u32)),
             })
             .is_err()
@@ -174,7 +328,7 @@ fn zero_arg_function_invokes_operation_not_marker() {
         .register_operation(OperationSignature {
             name: "answer",
             operands: vec![],
-            result: leaf::<u32>(),
+            result: leaf::<u32>().into(),
             emit: Arc::new(|s, _| {
                 s.just(42u32);
                 Ok(())
@@ -224,11 +378,11 @@ fn record_metadata_rejects_duplicates_and_survives_isolation() {
             .register_record(schema(vec![
                 RecordField {
                     name: "corner",
-                    ty: leaf::<f64>()
+                    ty: leaf::<f64>().into()
                 },
                 RecordField {
                     name: "corner",
-                    ty: leaf::<u32>()
+                    ty: leaf::<u32>().into()
                 },
             ]))
             .is_err()
@@ -236,7 +390,7 @@ fn record_metadata_rejects_duplicates_and_survives_isolation() {
     lookup
         .register_record(schema(vec![RecordField {
             name: "corner",
-            ty: leaf::<f64>(),
+            ty: leaf::<f64>().into(),
         }]))
         .unwrap();
     assert!(lookup.register_record(schema(vec![])).is_err());
@@ -245,7 +399,7 @@ fn record_metadata_rejects_duplicates_and_survives_isolation() {
         .record_schema(std::any::type_name::<TestBox>())
         .unwrap();
     assert_eq!(record.ty, leaf::<TestBox>());
-    assert_eq!(record.fields[0].ty, leaf::<f64>());
+    assert_eq!(record.fields[0].ty, leaf::<f64>().into());
     lookup.restore_scopes(saved);
 }
 
@@ -267,12 +421,11 @@ fn checked_stack_offset_rejects_underflow_and_preserves_ambient() {
 fn full_operand_descriptors_control_dispatch() {
     use cel_runtime::{ArrayOf, Leaf};
     let mut lookup = OpLookup::new();
-    let floats = ArrayElementType::array_of(leaf::<f64>().element_type().clone());
     lookup
         .register_operation(OperationSignature {
             name: "length",
-            operands: vec![ResolvedLeafType::new("Floats", floats)],
-            result: leaf::<usize>(),
+            operands: vec![shape("[f64]")],
+            result: leaf::<usize>().into(),
             emit: Arc::new(|s, _| {
                 s.op1_repr::<ArrayOf<Leaf<f64>>, Leaf<usize>, _>(|values| values.len())
             }),
@@ -334,18 +487,31 @@ fn metadata_keeps_distinct_host_type_identities() {
         lookup
             .register_operation(OperationSignature {
                 name: "corner",
-                operands: vec![ResolvedLeafType::new("Box", ty.element_type().clone())],
-                result: ty,
+                operands: vec![ResolvedLeafType::new("Box", ty.element_type().clone()).into()],
+                result: ty.into(),
                 emit: Arc::new(|_, _| Ok(())),
             })
             .unwrap();
     }
     let signatures: Vec<_> = lookup.operation_signatures("corner").collect();
     assert_ne!(
-        signatures[0].operands[0].type_id(),
-        signatures[1].operands[0].type_id()
+        signatures[0].operands[0]
+            .complete_value_type()
+            .unwrap()
+            .type_id(),
+        signatures[1].operands[0]
+            .complete_value_type()
+            .unwrap()
+            .type_id()
     );
-    assert_eq!(signatures[1].result.type_id(), leaf::<OtherBox>().type_id());
+    assert_eq!(
+        signatures[1]
+            .result
+            .complete_value_type()
+            .unwrap()
+            .type_id(),
+        leaf::<OtherBox>().type_id()
+    );
 }
 
 /// Gives transient direct operations precedence without querying a value marker.
@@ -395,7 +561,7 @@ fn ordinary_call_preserves_ambient_and_drops_marker() {
         .register_operation(OperationSignature {
             name: "text",
             operands: vec![],
-            result: leaf::<String>(),
+            result: leaf::<String>().into(),
             emit: Arc::new(|s, _| {
                 s.just(String::from("result"));
                 Ok(())
@@ -421,8 +587,8 @@ fn registered_calls_in_closures_preserve_marker_type_checks() {
     lookup
         .register_operation(OperationSignature {
             name: "other",
-            operands: vec![leaf::<f64>(), leaf::<f64>()],
-            result: leaf::<f64>(),
+            operands: vec![leaf::<f64>().into(), leaf::<f64>().into()],
+            result: leaf::<f64>().into(),
             emit: Arc::new(|s, _| s.op2(f64::max)),
         })
         .unwrap();

@@ -45,11 +45,12 @@ struct FractFn;
 struct RoundTiesEvenFn;
 
 /// Returns a numeric leaf's complete concrete descriptor.
-fn numeric_type<T: 'static>() -> ResolvedLeafType {
+fn numeric_type<T: 'static>() -> cel_parser::ResolvedType {
     ResolvedLeafType::new(
         std::any::type_name::<T>(),
         ArrayElementType::leaf::<T>().expect("numeric types are non-array leaves"),
     )
+    .into()
 }
 
 /// Registers existing numeric contracts as composable direct operation signatures.
@@ -163,11 +164,12 @@ mod tests {
             lookup.register_function("min", HostMin)?;
             lookup.register_operation(OperationSignature {
                 name: "min",
-                operands: vec![ResolvedLeafType::new(
-                    "Corner",
-                    ArrayElementType::leaf::<Corner>().unwrap(),
-                )],
-                result: ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap()),
+                operands: vec![
+                    ResolvedLeafType::new("Corner", ArrayElementType::leaf::<Corner>().unwrap())
+                        .into(),
+                ],
+                result: ResolvedLeafType::new("f64", ArrayElementType::leaf::<f64>().unwrap())
+                    .into(),
                 emit: Arc::new(|segment, _| segment.op1(|corner: Corner| corner.0)),
             })?;
             if !reverse {

@@ -7,8 +7,8 @@
 //!
 //! Typed arrays round-trip with their postfix `: Type` ascriptions, including recursive array
 //! types such as `[]: [[i32]]` and reusable tuple syntax such as `[]: [(i32, f64)]`. The
-//! formatter preserves that syntax even though tuple-valued array elements remain semantically
-//! unsupported today (issue #213).
+//! formatter preserves complete tuple, array, and `Fn((A,), R)` callable annotations,
+//! including the comma that distinguishes a singleton tuple from grouping.
 
 use crate::ast::{Expr, LogicalOp};
 use crate::trivia::{

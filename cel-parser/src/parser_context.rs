@@ -461,8 +461,7 @@ pub trait ParserContext: Sized {
     /// # Errors
     ///
     /// Implementations that validate operand types during parsing (e.g. [`DynSegmentContext`])
-    /// return `Err` if the elements' complete recursive runtime shapes differ, if any element is
-    /// a CEL tuple (see <https://github.com/stlab/cel-rs/issues/213>), or if the array's storage
+    /// return `Err` if the elements' complete recursive runtime shapes differ, or if the array's storage
     /// layout cannot be represented. Implementations that defer type validation to a later phase
     /// (e.g. [`crate::ast::AstContext`]) never return `Err` here.
     fn make_array(

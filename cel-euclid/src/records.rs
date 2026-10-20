@@ -52,7 +52,7 @@ fn scalar_pair<T: 'static>(
             .into_iter()
             .map(|name| RecordField {
                 name,
-                ty: leaf::<f64>("f64"),
+                ty: leaf::<f64>("f64").into(),
             })
             .collect(),
         emit: Arc::new(move |s, mapping, ambient, _| {
@@ -84,11 +84,11 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
         fields: vec![
             RecordField {
                 name: "origin",
-                ty: leaf::<Point2D>("Point2D"),
+                ty: leaf::<Point2D>("Point2D").into(),
             },
             RecordField {
                 name: "size",
-                ty: leaf::<Size2D>("Size2D"),
+                ty: leaf::<Size2D>("Size2D").into(),
             },
         ],
         emit: Arc::new(|s, mapping, ambient, _| {
@@ -112,11 +112,11 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
         fields: vec![
             RecordField {
                 name: "min",
-                ty: leaf::<Point2D>("Point2D"),
+                ty: leaf::<Point2D>("Point2D").into(),
             },
             RecordField {
                 name: "max",
-                ty: leaf::<Point2D>("Point2D"),
+                ty: leaf::<Point2D>("Point2D").into(),
             },
         ],
         emit: Arc::new(|s, mapping, ambient, _| {
@@ -137,7 +137,7 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
         ty: leaf::<Angle>("Angle"),
         fields: vec![RecordField {
             name: "radians",
-            ty: leaf::<f64>("f64"),
+            ty: leaf::<f64>("f64").into(),
         }],
         emit: Arc::new(|s, _, ambient, _| {
             s.make_tuple(1, ambient)?;
@@ -153,7 +153,7 @@ pub(crate) fn install(lookup: &mut OpLookup) -> Result<()> {
             .into_iter()
             .map(|name| RecordField {
                 name,
-                ty: leaf::<f64>("f64"),
+                ty: leaf::<f64>("f64").into(),
             })
             .collect(),
         emit: Arc::new(|s, mapping, ambient, _| {

@@ -40,7 +40,7 @@ fn registered_record_and_member_example() {
             ty: sample.clone(),
             fields: vec![RecordField {
                 name: "value",
-                ty: scalar.clone(),
+                ty: scalar.clone().into(),
             }],
             emit: Arc::new(|s, _, _, _| s.op1(|value: f64| Sample { value })),
         })
@@ -48,8 +48,8 @@ fn registered_record_and_member_example() {
     lookup
         .register_operation(OperationSignature {
             name: "value",
-            operands: vec![sample],
-            result: scalar,
+            operands: vec![sample.into()],
+            result: scalar.into(),
             emit: Arc::new(|s, _| s.op1(|sample: Sample| sample.value)),
         })
         .unwrap();

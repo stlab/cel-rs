@@ -6,9 +6,8 @@
 //!
 //! Array nodes preserve optional recursive type ascriptions exactly as written — for example
 //! `[0, 1]: [i32]`, `[]: [[i32]]`, or `[]: [Custom]` — using unresolved [`TypeExpr`] leaves so a
-//! later checker can resolve names through built-in CEL types or a host registry. Tuple-shaped
-//! type expressions remain representable in the tree for grammar reuse, but tuple-valued array
-//! elements are still rejected during semantic checking (issue #213).
+//! later checker can resolve names through built-in CEL types or a host registry. Recursive
+//! tuple, array, and callable types compose without per-shape host registrations.
 
 use std::any::Any;
 use std::ffi::CString;
@@ -242,8 +241,7 @@ pub enum Expr {
     /// a typed empty array is recorded here with `elements.is_empty()`. `type_annotation` stores
     /// the complete recursive array type exactly as written, including nested arrays and custom
     /// leaf names such as `Custom`. Whether the elements share one type, whether
-    /// `type_annotation` names a complete array type, and whether tuple-valued array elements
-    /// remain unsupported are all deferred to the later type-checking phase (see the module doc
+    /// `type_annotation` names a complete array type are deferred to the later type-checking phase (see the module doc
     /// comment), same as `TupleIndex`'s deferred bounds check.
     Array {
         /// The element sub-expressions, in source order.
@@ -1429,10 +1427,7 @@ mod tests {
 
     #[test]
     fn array_literal_with_a_tuple_element_still_builds_a_tree() {
-        // Deferred validation, mirroring `tuple_index_on_a_call_result_still_builds_a_tree`:
-        // `DynSegmentContext` rejects a tuple element at parse time (issue #213), but
-        // `AstContext` resolves no types at all, so it records the node and leaves the
-        // rejection to the later type-checking phase.
+        // Syntax-only parsing records tuple elements without resolving their shapes.
         let mut parser = Parser::<AstContext>::new(OpLookup::new());
         let expr = parser.parse_str_ast("[(1i32, 2i32)]").unwrap();
         assert!(matches!(expr, Expr::Array { ref elements, .. } if elements.len() == 1));

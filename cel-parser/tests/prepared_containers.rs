@@ -217,7 +217,7 @@ fn parsed_registered_results_retain_optional_capabilities() {
                 .unwrap(),
             fields: vec![RecordField {
                 name: "value",
-                ty: ResolvedLeafType::leaf::<i32>("i32").unwrap(),
+                ty: ResolvedLeafType::leaf::<i32>("i32").unwrap().into(),
             }],
             emit: Arc::new(|segment, _, _, _| segment.op1(Payload)),
         })

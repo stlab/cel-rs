@@ -1,9 +1,8 @@
-//! A minimal static type model for the built-in primitives `adam_lang::TypeRegistry::new()`
-//! registers by default, plus recursive [`Ty::Array`] types, [`Ty::Registered`] leaf
-//! descriptors, and [`Ty::Any`] for unresolved expressions.
-//! Used by [`check_expr`] to type-check [`crate::Expr`] trees built by [`crate::AstContext`]. Not
-//! a complete type system — see the design doc's "Type checking (v1)" section for what's
-//! deliberately out of scope.
+//! Checks source expressions using complete recursive array, tuple, and callable shapes.
+//!
+//! Use [`check_expr`] with a free-identifier resolver for builtin-only expressions, or
+//! [`check_expr_with_type_resolver`] with a host registry and operation metadata.
+//! [`Ty::Any`] retains incomplete editor expressions; it never authorizes executable storage.
 
 use std::any::TypeId;
 use std::borrow::Cow;
@@ -12,7 +11,7 @@ use crate::op_table::{builtin_operand_types, cast_source_types};
 use crate::type_expr::{BuiltinTypeResolver, ResolvedType, TypeExpr, TypeResolver};
 use crate::{Expr, ExprSpan, Literal, OpLookup, ParseError, ResolvedLeafType};
 
-/// A static primitive, recursive homogeneous array, known registered leaf, or unresolved value.
+/// A complete recursive source type, or an unresolved editor value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ty {
     /// `i8`.
@@ -51,11 +50,15 @@ pub enum Ty {
     /// itself be an array (`[[i32]]`) or [`Ty::Any`] (an array whose element type isn't
     /// statically known — e.g. `[f(), g()]`, whose elements are unresolved call results).
     Array(Box<Ty>),
+    /// A source-ordered tuple, including unit and singleton tuples.
+    Tuple(Vec<Ty>),
+    /// A callable with complete parameter and result types.
+    Callable(Vec<Ty>, Box<Ty>),
     /// A known host leaf, retaining its concrete identity and complete runtime descriptor.
     Registered(ResolvedLeafType),
     /// Anything not statically known: an unannotated cell, an
-    /// unresolved identifier, or a node kind [`check_expr`] doesn't check directly (e.g. a tuple
-    /// or call result). Unifies silently with every other `Ty`, in both directions.
+    /// unresolved identifier, or a call without available metadata.
+    /// Unifies silently with every other `Ty`, in both directions.
     Any,
 }
 
@@ -112,7 +115,7 @@ impl Ty {
             Literal::Char(_) => Self::known_leaf::<char>("char"),
             Literal::ByteStr(_) => Self::known_leaf::<Vec<u8>>("byte string"),
             Literal::CStr(_) => Self::known_leaf::<std::ffi::CString>("C string"),
-            Literal::Unit => Self::known_leaf::<()>("()"),
+            Literal::Unit => Ty::Tuple(vec![]),
         }
     }
 
@@ -129,11 +132,15 @@ impl Ty {
 
     /// Returns whether this type contains an unresolved leaf.
     ///
-    /// - Complexity: O(d) in array nesting depth.
+    /// - Complexity: O(n) in recursive type nodes.
     fn contains_any(&self) -> bool {
         match self {
             Ty::Any => true,
             Ty::Array(element) => element.contains_any(),
+            Ty::Tuple(elements) => elements.iter().any(Self::contains_any),
+            Ty::Callable(parameters, result) => {
+                parameters.iter().any(Self::contains_any) || result.contains_any()
+            }
             _ => false,
         }
     }
@@ -199,8 +206,8 @@ impl Ty {
         }
     }
 
-    /// Returns this type's `TypeId`, or `None` for [`Ty::Any`] (which has no single concrete
-    /// Rust type). Every [`Ty::Array`], whatever its element type, reports
+    /// Returns this type's `TypeId`, or `None` for [`Ty::Any`] and nonempty tuples (whose
+    /// storage needs a complete shape). Every [`Ty::Array`], whatever its element type, reports
     /// `cel_runtime::DynamicArray`'s `TypeId` — the one runtime type every array value has.
     ///
     /// # Examples
@@ -236,15 +243,17 @@ impl Ty {
             Ty::String => TypeId::of::<String>(),
             Ty::Array(_) => TypeId::of::<cel_runtime::DynamicArray>(),
             Ty::Registered(leaf) => leaf.type_id(),
+            Ty::Tuple(elements) if elements.is_empty() => TypeId::of::<()>(),
+            Ty::Tuple(_) => return None,
+            Ty::Callable(..) => TypeId::of::<cel_runtime::DynClosure>(),
             Ty::Any => return None,
         })
     }
 
-    /// A human-readable name for diagnostics (e.g. `"i32"`, `"<any>"`, `"[[i32]]"`). Borrowed for
-    /// every non-array type; an array's name is built recursively, so it owns its rendering.
+    /// Returns a human-readable name for diagnostics, borrowing primitive and leaf names.
     ///
-    /// - Complexity: O(d) time and space in this type's array nesting depth `d` (O(1) for every
-    ///   non-array type, which borrows its name).
+    /// - Complexity: O(n * l) time and O(l) space for n recursive nodes and l output bytes;
+    ///   primitive and registered leaf names take O(1).
     ///
     /// # Examples
     ///
@@ -274,6 +283,29 @@ impl Ty {
             Ty::Bool => "bool",
             Ty::String => "String",
             Ty::Array(element) => return Cow::Owned(format!("[{}]", element.name())),
+            Ty::Tuple(elements) => {
+                return Cow::Owned(format!(
+                    "({}{})",
+                    elements
+                        .iter()
+                        .map(|ty| ty.name())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if elements.len() == 1 { "," } else { "" }
+                ));
+            }
+            Ty::Callable(parameters, result) => {
+                return Cow::Owned(format!(
+                    "Fn(({}{}), {})",
+                    parameters
+                        .iter()
+                        .map(|ty| ty.name())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if parameters.len() == 1 { "," } else { "" },
+                    result.name()
+                ));
+            }
             Ty::Registered(leaf) => leaf.type_name(),
             Ty::Any => "<any>",
         })
@@ -313,15 +345,12 @@ impl Ty {
         }
     }
 
-    /// Returns `true` if `self` and `other` are compatible: either is [`Ty::Any`], they're two
-    /// arrays whose element types are themselves compatible, or they're equal. `Ty::Any` unifying
-    /// silently with everything (in both directions, and at every array nesting level) is the
+    /// Returns `true` if `self` and `other` have compatible recursive shapes.
+    /// `Ty::Any` unifying silently with everything (in both directions and at every nesting level) is the
     /// load-bearing property that lets unresolved inputs produce zero false-positive diagnostics.
     /// Registered leaves unify only when their complete descriptors agree, regardless of aliases.
     ///
-    /// - Complexity: O(d) in the array nesting depth of the unified type, which is at least the
-    ///   depth of the deeper of the two operands — a [`Ty::Any`] operand still clones the other
-    ///   side's full nested structure.
+    /// - Complexity: O(n + l) time and space for n recursive nodes and l registered name bytes.
     ///
     /// # Examples
     ///
@@ -338,14 +367,12 @@ impl Ty {
     }
 
     /// The most specific type both `self` and `other` describe, or `None` if they're
-    /// incompatible: [`Ty::Any`] yields the other side (it constrains nothing), two arrays yield
-    /// an array of their unified element types, and two equal types yield themselves.
+    /// incompatible: [`Ty::Any`] yields the other side (it constrains nothing); arrays,
+    /// tuples, and callables unify recursively with equal arity; equal leaves yield themselves.
     ///
     /// - Postcondition: `self.unify(other).is_some() == self.unifies_with(other)`, and the result
     ///   (when `Some`) unifies with both `self` and `other`.
-    /// - Complexity: O(d) in the array nesting depth of the result, which is at least the depth
-    ///   of the deeper of the two operands — a [`Ty::Any`] operand still clones the other side's
-    ///   full nested structure.
+    /// - Complexity: O(n + l) time and space for n recursive nodes and l registered name bytes.
     ///
     /// # Examples
     ///
@@ -364,6 +391,21 @@ impl Ty {
             (Ty::Any, other) => Some(other.clone()),
             (this, Ty::Any) => Some(this.clone()),
             (Ty::Array(lhs), Ty::Array(rhs)) => Some(Ty::Array(Box::new(lhs.unify(rhs)?))),
+            (Ty::Tuple(lhs), Ty::Tuple(rhs)) if lhs.len() == rhs.len() => Some(Ty::Tuple(
+                lhs.iter()
+                    .zip(rhs)
+                    .map(|(a, b)| a.unify(b))
+                    .collect::<Option<_>>()?,
+            )),
+            (Ty::Callable(lhs, lr), Ty::Callable(rhs, rr)) if lhs.len() == rhs.len() => {
+                Some(Ty::Callable(
+                    lhs.iter()
+                        .zip(rhs)
+                        .map(|(a, b)| a.unify(b))
+                        .collect::<Option<_>>()?,
+                    Box::new(lr.unify(rr)?),
+                ))
+            }
             (Ty::Registered(lhs), Ty::Registered(rhs))
                 if lhs.element_type() == rhs.element_type() =>
             {
@@ -396,17 +438,10 @@ fn descriptor_ty(descriptor: &cel_runtime::ArrayElementType) -> Ty {
 /// annotation), returning the expression's inferred type plus every type diagnostic found.
 ///
 /// Uses an empty [`OpLookup`]; metadata-aware hosts use [`check_expr_with_type_resolver`].
-/// Only [`Expr::Op`] (via [`builtin_operand_types`]), [`Expr::Logical`] (CEL's fixed `&&`/`||`
-/// semantics: both operands must unify with `bool`), and [`Expr::Array`] (whose elements must
-/// share one type, see this module's `check_array`) are checked directly. [`Expr::Apply`],
-/// [`Expr::Member`] (receiver and arguments only, never its label),
-/// [`Expr::Struct`] (unknown constructor diagnostic plus field-expression checking),
-/// [`Expr::Tuple`], [`Expr::TupleIndex`], [`Expr::If`], and [`Expr::Closure`] are recursed into —
-/// so an `Op` nested inside one is still checked ([`Expr::Closure`] recurses into its own `body`
-/// with a resolver that shadows the outer one with the closure's own parameter names first) — but
-/// the node itself always infers as [`Ty::Any`]: checking call return types, tuple shapes, and
-/// if/else branch agreement is deferred to a later phase (see the design doc's "Type checking
-/// (v1)" section), and CEL has no first-class function type for a closure literal to infer as.
+/// Checks every child, including closure bodies under parameter-local bindings.
+/// Arrays require homogeneous complete shapes, tuples retain source order, and `if` joins
+/// compatible branch types. Callable applications check parameter and result types.
+/// Calls without metadata and free identifiers without declarations remain unresolved.
 ///
 /// - Complexity: O(n) in the number of nodes in `expr`.
 ///
@@ -471,7 +506,15 @@ pub fn check_expr_with_type_resolver(
 ) -> (Ty, Vec<ParseError>) {
     match expr {
         Expr::Literal { value, .. } => (Ty::from_literal(value), Vec::new()),
-        Expr::Ident { name, .. } => (resolve_ident(name), Vec::new()),
+        Expr::Ident { name, .. } => {
+            let ty = resolve_ident(name);
+            let ty = if ty == Ty::Any && !lookup.is_registered_function(name) {
+                matching_registered_type(name, &[], lookup).unwrap_or(ty)
+            } else {
+                ty
+            };
+            (ty, Vec::new())
+        }
         Expr::Struct {
             name,
             name_span,
@@ -494,19 +537,15 @@ pub fn check_expr_with_type_resolver(
                 let error = if !seen.insert(field.name.as_str()) {
                     Some(format!("duplicate field `{}`", field.name))
                 } else if let Some(expected) = schema.fields.iter().find(|f| f.name == field.name) {
-                    let expected = Ty::from_leaf(&expected.ty);
-                    if valid && matches!(field.value, Expr::Tuple { .. }) {
-                        Some(format!("field `{}` cannot be tuple-valued", field.name))
-                    } else {
-                        (valid && !expected.unifies_with(&actual)).then(|| {
-                            format!(
-                                "field `{}` expects `{}`, found `{}`",
-                                field.name,
-                                expected.name(),
-                                actual.name(),
-                            )
-                        })
-                    }
+                    let expected = resolved_type_to_element_ty(&expected.ty);
+                    (valid && !expected.unifies_with(&actual)).then(|| {
+                        format!(
+                            "field `{}` expects `{}`, found `{}`",
+                            field.name,
+                            expected.name(),
+                            actual.name(),
+                        )
+                    })
                 } else {
                     Some(format!("unknown field `{}` for `{name}`", field.name))
                 };
@@ -551,13 +590,44 @@ pub fn check_expr_with_type_resolver(
         Expr::Logical { lhs, rhs, span, .. } => {
             check_logical(lhs, rhs, *span, resolve_ident, resolve_type, lookup)
         }
-        Expr::Apply { callee, args, .. } => {
-            let mut diagnostics =
-                check_expr_with_type_resolver(callee, resolve_ident, resolve_type, lookup).1;
+        Expr::Apply { callee, args, span } => {
+            let (callee_ty, mut diagnostics) =
+                check_expr_with_type_resolver(callee, resolve_ident, resolve_type, lookup);
+            let mut types = Vec::with_capacity(args.len());
             for arg in args {
-                diagnostics.extend(
-                    check_expr_with_type_resolver(arg, resolve_ident, resolve_type, lookup).1,
-                );
+                let (ty, errors) =
+                    check_expr_with_type_resolver(arg, resolve_ident, resolve_type, lookup);
+                types.push(ty);
+                diagnostics.extend(errors);
+            }
+            if let Ty::Callable(parameters, result) = callee_ty {
+                if parameters.len() == types.len()
+                    && parameters
+                        .iter()
+                        .zip(&types)
+                        .all(|(a, b)| a.unifies_with(b))
+                {
+                    return (*result, diagnostics);
+                }
+                diagnostics.push(ParseError::new_range(
+                    "callable argument type mismatch",
+                    span.start,
+                    span.end,
+                ));
+            } else {
+                if let Expr::Ident { name, .. } = callee.as_ref()
+                    && let Some(ty) =
+                        registered_operation_ty(name, &types, *span, lookup, &mut diagnostics)
+                {
+                    return (ty, diagnostics);
+                }
+                if !matches!(callee_ty, Ty::Any | Ty::Registered(_)) {
+                    diagnostics.push(ParseError::new_range(
+                        "value is not callable",
+                        span.start,
+                        span.end,
+                    ));
+                }
             }
             (Ty::Any, diagnostics)
         }
@@ -570,37 +640,31 @@ pub fn check_expr_with_type_resolver(
         } => {
             let mut diagnostics = Vec::new();
             let operands = std::iter::once(receiver.as_ref()).chain(args.iter().flatten());
-            let mut tuple_operand = false;
             let types: Vec<_> = operands
                 .map(|expr| {
                     let (ty, child_diags) =
                         check_expr_with_type_resolver(expr, resolve_ident, resolve_type, lookup);
                     let valid = child_diags.is_empty();
-                    tuple_operand |= valid && matches!(expr, Expr::Tuple { .. });
                     diagnostics.extend(child_diags);
                     if valid { ty } else { Ty::Any }
                 })
                 .collect();
-            if tuple_operand && lookup.operation_signatures(name).next().is_some() {
-                diagnostics.push(ParseError::new_range(
-                    format!("`{name}` does not accept tuple-valued operands"),
-                    span.start,
-                    span.end,
-                ));
-                return (Ty::Any, diagnostics);
-            }
             let ty = registered_operation_ty(name, &types, *span, lookup, &mut diagnostics)
                 .unwrap_or(Ty::Any);
             (ty, diagnostics)
         }
         Expr::Tuple { elements, .. } => {
             let mut diagnostics = Vec::new();
-            for element in elements {
-                diagnostics.extend(
-                    check_expr_with_type_resolver(element, resolve_ident, resolve_type, lookup).1,
-                );
-            }
-            (Ty::Any, diagnostics)
+            let types = elements
+                .iter()
+                .map(|element| {
+                    let (ty, errors) =
+                        check_expr_with_type_resolver(element, resolve_ident, resolve_type, lookup);
+                    diagnostics.extend(errors);
+                    ty
+                })
+                .collect();
+            (Ty::Tuple(types), diagnostics)
         }
         // An array literal's own type is `Array` of its elements' unified type; see `check_array`.
         Expr::Array {
@@ -616,10 +680,27 @@ pub fn check_expr_with_type_resolver(
             resolve_type,
             lookup,
         ),
-        Expr::TupleIndex { base, .. } => (
-            Ty::Any,
-            check_expr_with_type_resolver(base, resolve_ident, resolve_type, lookup).1,
-        ),
+        Expr::TupleIndex { base, index, span } => {
+            let (ty, mut diagnostics) =
+                check_expr_with_type_resolver(base, resolve_ident, resolve_type, lookup);
+            if let Ty::Tuple(elements) = ty {
+                if let Some(element) = elements.get(*index) {
+                    return (element.clone(), diagnostics);
+                }
+                diagnostics.push(ParseError::new_range(
+                    "tuple index out of bounds",
+                    span.start,
+                    span.end,
+                ));
+            } else if ty != Ty::Any {
+                diagnostics.push(ParseError::new_range(
+                    "tuple index requires a tuple",
+                    span.start,
+                    span.end,
+                ));
+            }
+            (Ty::Any, diagnostics)
+        }
         Expr::Cast {
             expr,
             type_name,
@@ -629,36 +710,60 @@ pub fn check_expr_with_type_resolver(
             cond,
             then_branch,
             else_branch,
-            ..
+            span,
         } => {
-            let mut diagnostics =
-                check_expr_with_type_resolver(cond, resolve_ident, resolve_type, lookup).1;
-            diagnostics.extend(
-                check_expr_with_type_resolver(then_branch, resolve_ident, resolve_type, lookup).1,
-            );
-            if let Some(else_branch) = else_branch {
-                diagnostics.extend(
-                    check_expr_with_type_resolver(else_branch, resolve_ident, resolve_type, lookup)
-                        .1,
-                );
+            let (condition, mut diagnostics) =
+                check_expr_with_type_resolver(cond, resolve_ident, resolve_type, lookup);
+            if !condition.unifies_with(&Ty::Bool) {
+                diagnostics.push(ParseError::new_range(
+                    "if condition must be bool",
+                    cond.span().start,
+                    cond.span().end,
+                ));
             }
-            (Ty::Any, diagnostics)
+            let (then_ty, errors) =
+                check_expr_with_type_resolver(then_branch, resolve_ident, resolve_type, lookup);
+            diagnostics.extend(errors);
+            let (else_ty, errors) = else_branch
+                .as_ref()
+                .map(|branch| {
+                    check_expr_with_type_resolver(branch, resolve_ident, resolve_type, lookup)
+                })
+                .unwrap_or((Ty::Tuple(vec![]), vec![]));
+            diagnostics.extend(errors);
+            let ty = then_ty.unify(&else_ty).unwrap_or_else(|| {
+                diagnostics.push(ParseError::new_range(
+                    "if branch type mismatch",
+                    span.start,
+                    span.end,
+                ));
+                Ty::Any
+            });
+            (ty, diagnostics)
         }
         Expr::Closure { params, body, .. } => {
+            let mut annotation_errors = Vec::new();
+            let parameters: Vec<_> = params
+                .iter()
+                .map(|p| match p.type_expr.resolve(resolve_type) {
+                    Ok(resolved) => resolved_type_to_element_ty(&resolved),
+                    Err(error) => {
+                        annotation_errors.push(error);
+                        Ty::Any
+                    }
+                })
+                .collect();
             let resolve_with_params = |name: &str| -> Ty {
-                if let Some(p) = params.iter().find(|p| p.name == name) {
-                    p.type_expr
-                        .resolve(resolve_type)
-                        .ok()
-                        .map(|resolved| resolved_type_to_element_ty(&resolved))
-                        .unwrap_or(Ty::Any)
+                if let Some(index) = params.iter().position(|p| p.name == name) {
+                    parameters[index].clone()
                 } else {
                     resolve_ident(name)
                 }
             };
-            let (_, diagnostics) =
+            let (result, mut diagnostics) =
                 check_expr_with_type_resolver(body, &resolve_with_params, resolve_type, lookup);
-            (Ty::Any, diagnostics)
+            diagnostics.extend(annotation_errors);
+            (Ty::Callable(parameters, Box::new(result)), diagnostics)
         }
     }
 }
@@ -796,9 +901,9 @@ fn resolved_type_to_array_ty(resolved: &ResolvedType, span: ExprSpan) -> crate::
     }
 }
 
-/// Preserves resolved scalar and array identities, deferring tuple precision.
+/// Preserves every complete resolved shape in the static model.
 ///
-/// - Complexity: O(d + l) in descriptor depth d and leaf display-name length l.
+/// - Complexity: O(n + l) in recursive descriptor nodes n and total leaf-name length l.
 ///
 fn resolved_type_to_element_ty(resolved: &ResolvedType) -> Ty {
     match resolved {
@@ -806,7 +911,13 @@ fn resolved_type_to_element_ty(resolved: &ResolvedType) -> Ty {
         ResolvedType::Array { element } => {
             Ty::Array(Box::new(resolved_type_to_element_ty(element)))
         }
-        ResolvedType::Tuple { .. } => Ty::Any,
+        ResolvedType::Tuple { elements } => {
+            Ty::Tuple(elements.iter().map(resolved_type_to_element_ty).collect())
+        }
+        ResolvedType::Callable { parameters, result } => Ty::Callable(
+            parameters.iter().map(resolved_type_to_element_ty).collect(),
+            Box::new(resolved_type_to_element_ty(result)),
+        ),
     }
 }
 
@@ -846,8 +957,10 @@ fn check_op(
     let signatures = builtin_operand_types(name);
     let matched = signatures.iter().find(|sig| {
         sig.arity as usize == operand_tys.len()
-            && operand_tys[0].type_id().is_none_or(|id| sig.lhs == id)
-            && (operand_tys.len() < 2 || operand_tys[1].type_id().is_none_or(|id| sig.rhs == id))
+            && (operand_tys[0] == Ty::Any || operand_tys[0].type_id() == Some(sig.lhs))
+            && (operand_tys.len() < 2
+                || operand_tys[1] == Ty::Any
+                || operand_tys[1].type_id() == Some(sig.rhs))
     });
     if matched.is_some() {
         let ty = if operand_tys.iter().any(Ty::contains_any) {
@@ -913,12 +1026,14 @@ fn matching_registered_type(name: &str, operands: &[Ty], lookup: &OpLookup) -> O
                 .operands
                 .iter()
                 .zip(operands)
-                .all(|(expected, actual)| Ty::from_leaf(expected).unifies_with(actual))
+                .all(|(expected, actual)| {
+                    resolved_type_to_element_ty(expected).unifies_with(actual)
+                })
     })?;
     Some(if operands.iter().any(Ty::contains_any) {
         Ty::Any
     } else {
-        Ty::from_leaf(&signature.result)
+        resolved_type_to_element_ty(&signature.result)
     })
 }
 
@@ -960,8 +1075,10 @@ fn check_cast(
         ));
         return (Ty::Any, diagnostics);
     };
-    if let Some(source_type_id) = expr_ty.type_id()
-        && !cast_source_types(type_name).any(|id| id == source_type_id)
+    if expr_ty != Ty::Any
+        && !expr_ty.type_id().is_some_and(|source_type_id| {
+            cast_source_types(type_name).any(|id| id == source_type_id)
+        })
     {
         diagnostics.push(ParseError::new_range(
             format!("no cast from `{}` to `{type_name}`", expr_ty.name()),
@@ -1384,7 +1501,7 @@ mod tests {
             span: point(proc_macro2::Span::call_site()),
         };
         let (ty, diags) = check_expr(&expr, &any_resolver);
-        assert_eq!(ty, Ty::Any, "Tuple itself is not type-checked in v1");
+        assert_eq!(ty, Ty::Tuple(vec![Ty::Any, Ty::I32]));
         assert_eq!(diags.len(), 1);
     }
 
@@ -1397,7 +1514,7 @@ mod tests {
             span: point(proc_macro2::Span::call_site()),
         };
         let (ty, diags) = check_expr(&expr, &any_resolver);
-        assert_eq!(ty, Ty::Any, "If itself is not type-checked in v1");
+        assert_eq!(ty, Ty::I32);
         assert_eq!(diags.len(), 1);
     }
 
@@ -1491,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn closure_literal_itself_infers_as_any() {
+    fn closure_literal_preserves_its_signature() {
         let expr = closure(
             vec![closure_param("x", "i32")],
             Expr::Ident {
@@ -1500,7 +1617,7 @@ mod tests {
             },
         );
         let (ty, diags) = check_expr(&expr, &any_resolver);
-        assert_eq!(ty, Ty::Any);
+        assert_eq!(ty, Ty::Callable(vec![Ty::I32], Box::new(Ty::I32)));
         assert!(diags.is_empty());
     }
 
@@ -1518,7 +1635,7 @@ mod tests {
         );
         let expr = closure(vec![closure_param("x", "i32")], body);
         let (ty, diags) = check_expr(&expr, &any_resolver);
-        assert_eq!(ty, Ty::Any, "the closure's own type is always Any");
+        assert_eq!(ty, Ty::Callable(vec![Ty::I32], Box::new(Ty::Any)));
         assert_eq!(diags.len(), 1, "the body's i32 + String mismatch surfaces");
     }
 
@@ -1967,7 +2084,7 @@ mod tests {
             .parse_str_ast("[]: [(i32, f64)]")
             .expect("source parses");
         let (ty, diags) = check_expr(&expr, &any_resolver);
-        assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
+        assert_eq!(ty, Ty::Array(Box::new(Ty::Tuple(vec![Ty::I32, Ty::F64]))));
         assert!(diags.is_empty());
     }
 

@@ -2610,11 +2610,11 @@ mod tests {
                 fields: vec![
                     RecordField {
                         name: "x",
-                        ty: scalar.clone(),
+                        ty: scalar.clone().into(),
                     },
                     RecordField {
                         name: "y",
-                        ty: scalar.clone(),
+                        ty: scalar.clone().into(),
                     },
                 ],
                 emit: Arc::new(|s, order, _, _| {
@@ -2626,8 +2626,8 @@ mod tests {
         lookup
             .register_operation(OperationSignature {
                 name: "x",
-                operands: vec![point],
-                result: scalar,
+                operands: vec![point.into()],
+                result: scalar.into(),
                 emit: Arc::new(|s, _| s.op1(|p: TestPoint| p.x)),
             })
             .unwrap();
@@ -3548,7 +3548,8 @@ mod tests {
                     ty: cel_parser::ResolvedLeafType::new(
                         "bool",
                         cel_runtime::ArrayElementType::leaf::<bool>().unwrap(),
-                    ),
+                    )
+                    .into(),
                 }],
                 emit: Arc::new(|segment, _, _, _| segment.op1(|value: bool| value)),
             })

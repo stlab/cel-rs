@@ -22,6 +22,9 @@ use crate::{ExprSpan, ParseError, Result, op_table};
 /// parameterized (generic) type applying zero or more type arguments (`RangeInclusive(f64)`,
 /// `RangeFull()`); an identifier immediately followed by `(` has no other meaning in type
 /// position, so this is unambiguous with adjacent tuple-grouping syntax.
+/// `Fn((A, B), R)` reserves structural callable syntax: the first argument must be a tuple
+/// of parameter types and the second is the result. `Fn((), R)` has no parameters;
+/// `Fn((A,), R)` has one. This syntax is resolved before host generic-leaf lookup.
 #[derive(Clone, Debug)]
 pub enum TypeExpr {
     /// A single type name, optionally applying type arguments, resolved later through a
@@ -65,7 +68,8 @@ impl TypeExpr {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if some named leaf is not recognized by `resolver`.
+    /// Returns `Err` if some named leaf is not recognized by `resolver`, or `Fn` lacks
+    /// exactly two arguments with a tuple of parameter types first.
     ///
     /// - Complexity: O(n) in the number of nodes in this type tree.
     pub fn resolve(&self, resolver: &dyn TypeResolver) -> Result<ResolvedType> {
@@ -75,6 +79,26 @@ impl TypeExpr {
                     .iter()
                     .map(|arg| arg.resolve(resolver))
                     .collect::<Result<Vec<_>>>()?;
+                if name == "Fn" {
+                    let mut resolved_args = resolved_args.into_iter();
+                    return match (
+                        resolved_args.next(),
+                        resolved_args.next(),
+                        resolved_args.next(),
+                    ) {
+                        (Some(ResolvedType::Tuple { elements }), Some(result), None) => {
+                            Ok(ResolvedType::Callable {
+                                parameters: elements,
+                                result: Box::new(result),
+                            })
+                        }
+                        _ => Err(ParseError::new_range(
+                            "Fn requires a parameter tuple and a result type",
+                            span.start,
+                            span.end,
+                        )),
+                    };
+                }
                 resolver
                     .resolve_named_type(name, &resolved_args)
                     .map_or_else(
@@ -346,9 +370,39 @@ pub enum ResolvedType {
         /// The resolved tuple element types, in source order.
         elements: Vec<ResolvedType>,
     },
+    /// A callable's source-ordered parameters and single result.
+    Callable {
+        /// The complete parameter types.
+        parameters: Vec<ResolvedType>,
+        /// The complete result type.
+        result: Box<ResolvedType>,
+    },
+}
+
+impl From<ResolvedLeafType> for ResolvedType {
+    /// Promotes a registered leaf without changing its identity.
+    fn from(leaf: ResolvedLeafType) -> Self {
+        Self::Scalar(leaf)
+    }
 }
 
 impl ResolvedType {
+    /// Consumes a complete source type and returns its canonical runtime descriptor.
+    ///
+    /// # Errors
+    /// Returns an error for unavailable leaf factories or unrepresentable tuple layouts.
+    ///
+    /// - Complexity: O(n) in recursive type nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_parser::ResolvedType;
+    /// assert!(ResolvedType::Tuple { elements: vec![] }.into_value_type().is_ok());
+    /// ```
+    pub fn into_value_type(self) -> anyhow::Result<cel_runtime::ValueType> {
+        self.complete_value_type()
+    }
+
     /// Builds canonical recursive metadata for interpreter storage.
     ///
     /// Empty tuples describe source unit, not an opaque host `()`.
@@ -383,6 +437,13 @@ impl ResolvedType {
                     })
                     .collect::<anyhow::Result<Vec<_>>>()?,
             ),
+            Self::Callable { parameters, result } => Ok(ValueType::callable(
+                parameters
+                    .iter()
+                    .map(Self::complete_value_type)
+                    .collect::<anyhow::Result<_>>()?,
+                result.complete_value_type()?,
+            )),
         }
     }
 
@@ -396,8 +457,22 @@ impl ResolvedType {
             ResolvedType::Array { element } => format!("[{}]", element.display_name()),
             ResolvedType::Tuple { elements } => {
                 let parts: Vec<String> = elements.iter().map(Self::display_name).collect();
-                format!("({})", parts.join(", "))
+                format!(
+                    "({}{})",
+                    parts.join(", "),
+                    if parts.len() == 1 { "," } else { "" }
+                )
             }
+            Self::Callable { parameters, result } => format!(
+                "Fn(({}{}), {})",
+                parameters
+                    .iter()
+                    .map(Self::display_name)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if parameters.len() == 1 { "," } else { "" },
+                result.display_name()
+            ),
         }
     }
 }
@@ -451,7 +526,7 @@ impl ResolvedArrayType {
     pub fn from_resolved_type(resolved: ResolvedType, span: ExprSpan) -> Result<Self> {
         match resolved {
             ResolvedType::Array { element } => Ok(Self {
-                element_type: element.complete_value_type().map_err(|error| {
+                element_type: element.into_value_type().map_err(|error| {
                     ParseError::new_range(error.to_string(), span.start, span.end)
                 })?,
             }),

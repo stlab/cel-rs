@@ -34,7 +34,7 @@ fn environment() -> (TypeRegistry, OpLookup) {
             ty: leaf::<TestPoint>("TestPoint"),
             fields: vec![RecordField {
                 name: "x",
-                ty: leaf::<f64>("f64"),
+                ty: leaf::<f64>("f64").into(),
             }],
             emit: Arc::new(|s, _, _, _| s.op1(|x: f64| TestPoint { x })),
         })
@@ -42,8 +42,8 @@ fn environment() -> (TypeRegistry, OpLookup) {
     lookup
         .register_operation(OperationSignature {
             name: "x",
-            operands: vec![leaf::<TestPoint>("TestPoint")],
-            result: leaf::<f64>("f64"),
+            operands: vec![leaf::<TestPoint>("TestPoint").into()],
+            result: leaf::<f64>("f64").into(),
             emit: Arc::new(|s, _| s.op1(|p: TestPoint| p.x)),
         })
         .unwrap();

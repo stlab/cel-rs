@@ -13,7 +13,7 @@
 //! lookup.register_function("identity", Identity).unwrap();
 //! let ty = ResolvedLeafType::new("u32", ArrayElementType::leaf::<u32>().unwrap());
 //! lookup.register_operation(OperationSignature {
-//!     name: "identity", operands: vec![ty.clone()], result: ty,
+//!     name: "identity", operands: vec![ty.clone().into()], result: ty.into(),
 //!     emit: Arc::new(|segment, _| segment.op1(|value: u32| value)),
 //! }).unwrap();
 //! assert_eq!(lookup.operation_signatures("identity").count(), 1);
@@ -24,7 +24,7 @@ use std::{any::TypeId, sync::Arc};
 use anyhow::{Result, ensure};
 use cel_runtime::{DynSegment, ValueType};
 
-use crate::{ExprSpan, OpLookup, ParseError, ResolvedLeafType, SourceSpan};
+use crate::{ExprSpan, OpLookup, ParseError, ResolvedLeafType, ResolvedType, SourceSpan};
 
 /// Emits an operation after the complete operand signature has matched.
 ///
@@ -46,9 +46,9 @@ pub struct OperationSignature {
     /// The shared operation name.
     pub name: &'static str,
     /// Operands in source order, including the receiver for member lookup.
-    pub operands: Vec<ResolvedLeafType>,
+    pub operands: Vec<ResolvedType>,
     /// The single result's complete type.
-    pub result: ResolvedLeafType,
+    pub result: ResolvedType,
     /// The implementation used by both direct lookup and ordinary calls.
     pub emit: OperationEmitter,
 }
@@ -58,7 +58,7 @@ pub struct RecordField {
     /// The source field name.
     pub name: &'static str,
     /// The field's complete concrete type.
-    pub ty: ResolvedLeafType,
+    pub ty: ResolvedType,
 }
 
 /// Describes a named record's required fields and construction implementation.
@@ -89,21 +89,34 @@ pub(crate) struct RegisteredOps {
 
 /// Compares concrete recursive identities without treating diagnostic names as identity.
 ///
-/// - Complexity: O(d) in descriptor nesting depth.
-fn same_type(left: &ResolvedLeafType, right: &ResolvedLeafType) -> bool {
-    left.element_type() == right.element_type()
+/// - Complexity: O(n) in recursive descriptor nodes.
+fn same_type(left: &ResolvedType, right: &ResolvedType) -> bool {
+    match (left.complete_value_type(), right.complete_value_type()) {
+        (Ok(left), Ok(right)) => left.same_shape(&right),
+        _ => false,
+    }
 }
 
 /// Matches the complete runtime descriptor, never just an erased array marker.
 ///
-/// - Complexity: O(d) in descriptor nesting depth.
-fn matches_type(expected: &ResolvedLeafType, actual: &ValueType) -> bool {
+/// - Complexity: O(n) in recursive descriptor nodes.
+fn matches_type(expected: &ResolvedType, actual: &ValueType) -> bool {
     expected
         .complete_value_type()
         .is_ok_and(|expected| expected.same_shape(actual))
 }
 
 impl OpLookup {
+    /// Returns whether a bare name emits a registered function marker rather than a nullary result.
+    ///
+    /// - Complexity: O(f) for f registered functions.
+    pub(crate) fn is_registered_function(&self, name: &str) -> bool {
+        self.registered
+            .functions
+            .iter()
+            .any(|function| function.name == name)
+    }
+
     /// Validates required named fields and emits one record from their original stack order.
     ///
     /// Field descriptors must match exactly, including recursive array identities. Validation
@@ -190,7 +203,7 @@ impl OpLookup {
                 return Err(ParseError::new_range(
                     format!(
                         "field `{field}`: type mismatch: expected `{}`",
-                        expected.type_name()
+                        expected.display_name()
                     ),
                     span.start,
                     span.end,
@@ -218,13 +231,18 @@ impl OpLookup {
     /// Registers one persistent named operation without replacing existing overloads.
     ///
     /// # Errors
-    /// Returns an error for duplicate operand identities, including return-type-only overloads.
+    /// Returns an error for unavailable complete factories or unrepresentable layouts, and
+    /// duplicate operand identities, including return-type-only overloads.
     ///
     /// - Complexity: O(s * a * d) for s signatures, a operands and descriptor depth d.
     ///
     /// # Examples
     /// See the [registration tutorial](crate::registered_ops).
     pub fn register_operation(&mut self, signature: OperationSignature) -> Result<()> {
+        for operand in &signature.operands {
+            operand.complete_value_type()?;
+        }
+        signature.result.complete_value_type()?;
         ensure!(
             !self.operation_signatures(signature.name).any(|existing| {
                 existing.operands.len() == signature.operands.len()
@@ -289,7 +307,8 @@ impl OpLookup {
     /// Registers a persistent record schema keyed by its source type name.
     ///
     /// # Errors
-    /// Returns an error for a duplicate schema name or duplicate field names.
+    /// Returns an error for unavailable complete factories or unrepresentable layouts, a
+    /// duplicate schema name, or duplicate field names.
     ///
     /// - Complexity: O(r + f²) for r schemas and f fields.
     ///
@@ -307,6 +326,10 @@ impl OpLookup {
     /// assert!(lookup.record_schema("Unit").is_some());
     /// ```
     pub fn register_record(&mut self, schema: RecordSchema) -> Result<()> {
+        schema.ty.complete_value_type()?;
+        for field in &schema.fields {
+            field.ty.complete_value_type()?;
+        }
         ensure!(
             self.record_schema(schema.ty.type_name()).is_none(),
             "duplicate record schema `{}`",

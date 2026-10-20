@@ -31,8 +31,8 @@ fn lookup() -> OpLookup {
         lookup
             .register_operation(OperationSignature {
                 name,
-                operands: vec![leaf::<f64>()],
-                result: leaf::<f64>(),
+                operands: vec![leaf::<f64>().into()],
+                result: leaf::<f64>().into(),
                 emit: Arc::new(|s, _| s.op1(|value: f64| value)),
             })
             .unwrap();
@@ -40,24 +40,28 @@ fn lookup() -> OpLookup {
     lookup
         .register_operation(OperationSignature {
             name: "x",
-            operands: vec![leaf::<TestPoint>()],
-            result: leaf::<f64>(),
+            operands: vec![leaf::<TestPoint>().into()],
+            result: leaf::<f64>().into(),
             emit: Arc::new(|s, _| s.op1(|p: TestPoint| p.0)),
         })
         .unwrap();
     lookup
         .register_operation(OperationSignature {
             name: "shift",
-            operands: vec![leaf::<TestPoint>(), leaf::<TestVector>()],
-            result: leaf::<TestPoint>(),
+            operands: vec![leaf::<TestPoint>().into(), leaf::<TestVector>().into()],
+            result: leaf::<TestPoint>().into(),
             emit: Arc::new(|s, _| s.op2(|p: TestPoint, v: TestVector| TestPoint(p.0 + v.0))),
         })
         .unwrap();
     lookup
         .register_operation(OperationSignature {
             name: "combine",
-            operands: vec![leaf::<TestPoint>(), leaf::<f64>(), leaf::<f64>()],
-            result: leaf::<f64>(),
+            operands: vec![
+                leaf::<TestPoint>().into(),
+                leaf::<f64>().into(),
+                leaf::<f64>().into(),
+            ],
+            result: leaf::<f64>().into(),
             emit: Arc::new(|s, _| s.op3(|p: TestPoint, a: f64, b: f64| p.0 + 10.0 * a + b)),
         })
         .unwrap();

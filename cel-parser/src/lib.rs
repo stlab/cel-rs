@@ -140,8 +140,8 @@
 //! let mut lookup = OpLookup::new();
 //! lookup.register_operation(OperationSignature {
 //!     name: "twice",
-//!     operands: vec![scalar.clone()],
-//!     result: scalar,
+//!     operands: vec![scalar.clone().into()],
+//!     result: scalar.into(),
 //!     emit: Arc::new(|s, _| s.op1(|value: f64| value * 2.0)),
 //! }).unwrap();
 //! let expr = Parser::<AstContext>::new(OpLookup::new())
@@ -158,7 +158,7 @@
 //! Checked host calls can export supported leaf/nested-array shapes as
 //! [`cel_runtime::DynamicArray`]; prepared calls use exact recursive witnesses instead.
 //! Unannotated non-empty arrays keep their existing inference, while postfix annotations let
-//! callers state the complete scalar, nested-array, custom-registry, or empty-array type
+//! callers state complete recursive array, tuple, callable, and custom-leaf shapes
 //! explicitly. Elements must share one complete recursive runtime type — a heterogeneous literal
 //! such as `[1i32, 2.0f64]`, an unannotated empty literal `[]`, or a trailing comma is a parse
 //! error — and the evaluated array converts to the corresponding `Vec<T>` without moving or
@@ -177,6 +177,21 @@
 //! let mut segment = CELParser::new(OpLookup::new()).parse_str("[]: [i32]").unwrap();
 //! let array: DynamicArray = segment.call0().unwrap();
 //! assert!(array.try_into_vec::<i32>().unwrap().is_empty());
+//! ```
+//!
+//! Tuple arrays and callable arrays use canonical witnesses rather than external erased wrappers.
+//! Singleton tuple types retain their trailing comma. `Fn((A, B), R)` has two parameters,
+//! `Fn((A,), R)` has one, and `Fn((), R)` has none:
+//!
+//! ```
+//! use cel_parser::{CELParser, OpLookup};
+//! use cel_runtime::{ArrayOf, Cons, FnOf, IntoCStackList, Leaf, Nil};
+//! type F = FnOf<Cons<Leaf<i32>, Nil>, ArrayOf<Leaf<i32>>>;
+//! let body = CELParser::new(OpLookup::new())
+//!     .parse_str("[]: [Fn((i32,), [i32])]").unwrap();
+//! let values = body.prepare::<Nil, ArrayOf<F>>().unwrap()
+//!     .call(&().into_c_stack_list()).unwrap();
+//! assert!(values.is_empty());
 //! ```
 //!
 //! Hosts may also resolve custom registry-backed leaf names by constructing the parser with
@@ -526,7 +541,7 @@ fn closure_param_type_from_type_expr(
 ) -> Result<cel_runtime::ValueType> {
     type_expr
         .resolve(resolver)?
-        .complete_value_type()
+        .into_value_type()
         .map_err(|error| {
             let span = type_expr.span();
             ParseError::new_range(error.to_string(), span.start, span.end)
@@ -2400,7 +2415,7 @@ impl<C: ParserContext> Parser<C> {
         };
         self.context
             .join2(then_fragment, else_fragment, if_span, self.last_span)
-            .map_err(|e| ParseError::new(e.to_string(), self.last_span))?;
+            .map_err(|e| ParseError::new_range(e.to_string(), if_span, self.last_span))?;
         Ok(true)
     }
 }

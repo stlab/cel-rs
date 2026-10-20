@@ -568,7 +568,16 @@ impl ValueType {
     /// capabilities. Equality is unavailable; formatting describes the carrier.
     /// This constructor installs ownership directly from the statically known
     /// carrier, not from an opaque leaf witness.
-    pub(crate) fn callable(parameters: Vec<ValueType>, result: ValueType) -> Self {
+    ///
+    /// - Complexity: O(1), transferring ownership of the signature.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{ValueType, FnOf, Nil, Leaf, ValueRepr};
+    /// assert!(ValueType::callable(vec![], ValueType::leaf::<i32>())
+    ///     .same_shape(&FnOf::<Nil, Leaf<i32>>::value_type()));
+    /// ```
+    pub fn callable(parameters: Vec<ValueType>, result: ValueType) -> Self {
         Self(Arc::new(Plan {
             kind: ValueKind::Callable {
                 parameters,

@@ -3,6 +3,32 @@
 use cel_parser::{CELParser, OpLookup, ResolvedLeafType, resolve_builtin_named_type};
 use cel_runtime::ArrayElementType;
 
+/// Callable annotations retain complete signatures through higher-order and tuple intermediates.
+#[test]
+fn full_callable_annotations_execute_without_host_shape_registration() {
+    use cel_runtime::{ArrayOf, IntoCStackList, Leaf, Nil};
+    for source in [
+        "(|f: Fn((i32,), [i32])| f(42i32))(|x: i32| [x])",
+        "(|f: Fn((), [i32])| f())(|| [42i32])",
+        "(|f: Fn(((i32, [i32]),), [i32])| f((42i32, [42i32])))(|x: (i32, [i32])| x.1)",
+        "(if true { |x: i32| [x] } else { |x: i32| [x] })(42i32)",
+    ] {
+        let body = parser().parse_str(source).unwrap();
+        let value = body
+            .prepare::<Nil, ArrayOf<Leaf<i32>>>()
+            .unwrap()
+            .call(&().into_c_stack_list())
+            .unwrap();
+        assert_eq!(value.as_slice(), &[42]);
+        let expr = cel_parser::Parser::<cel_parser::AstContext>::new(OpLookup::new())
+            .parse_str_ast(source)
+            .unwrap();
+        let (ty, diagnostics) = cel_parser::ty::check_expr(&expr, &|_| cel_parser::Ty::Any);
+        assert!(diagnostics.is_empty(), "{source}: {diagnostics:?}");
+        assert_eq!(ty, cel_parser::Ty::Array(Box::new(cel_parser::Ty::I32)));
+    }
+}
+
 /// A registered, owning leaf with stricter alignment than ordinary scalars.
 #[derive(Clone, Debug, PartialEq)]
 #[repr(align(64))]
@@ -361,12 +387,13 @@ fn ast_preserves_unresolved_annotations_and_static_body_walks() {
         matches!(&elements[1], TypeExpr::Array { element, .. } if matches!(element.as_ref(), TypeExpr::Array { .. }))
     );
     let (_, diagnostics) = cel_parser::ty::check_expr(&expression, &|_| cel_parser::Ty::Any);
-    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics.len(), 2);
     assert!(
         diagnostics[0].message().contains("array"),
         "{}",
         diagnostics[0]
     );
+    assert!(diagnostics[1].message().contains("Unregistered"));
 }
 
 /// Invocation imposes no built-in finite limit on parameter count.
