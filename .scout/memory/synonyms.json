@@ -2155,7 +2155,7 @@
       "knowledge\\adam-slides-flexible-authoring-and-live-preview-publication-order.md"
     ],
     "dynamicsequence|value persistence": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "oplookup|operator table": [
       "knowledge\\oplookup-scoping-and-resolution-hierarchy.md"
@@ -2230,7 +2230,7 @@
       "knowledge\\clippy-and-feature-flag-validation-matrix.md"
     ],
     "dynamicsequence|cel-runtime values": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "ez-adam model|multi-placement cells": [
       "knowledge\\ez-adam-document-model-and-node-placements-separation.md"
@@ -2269,7 +2269,7 @@
       "knowledge\\ez-adam-document-model-and-node-placements-separation.md"
     ],
     "dynamicarray|value persistence": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "oplookup|push_scope": [
       "knowledge\\oplookup-scoping-and-resolution-hierarchy.md"
@@ -2293,7 +2293,7 @@
       "knowledge\\ez-adam-document-model-and-node-placements-separation.md"
     ],
     "dynamic array|value persistence": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "cel parser ast|parser emission": [
       "knowledge\\celparser-and-parsercontext-dual-emission.md"
@@ -2302,7 +2302,7 @@
       "knowledge\\adam-lang-dual-parsing-pipeline.md"
     ],
     "dynamic array|type-erased tuple": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "astcontext|dual emission": [
       "knowledge\\celparser-and-parsercontext-dual-emission.md"
@@ -2404,7 +2404,7 @@
       "knowledge\\ez-adam-document-model-and-node-placements-separation.md"
     ],
     "value persistence|type-erased tuple": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "method selection|sheet planner": [
       "knowledge\\sheet-constraint-planning-and-method-selection-flow.md"
@@ -2449,7 +2449,7 @@
       "knowledge\\clippy-and-feature-flag-validation-matrix.md"
     ],
     "cel-runtime values|type-erased tuple": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "adm2 parsing|adamparser": [
       "knowledge\\adam-lang-dual-parsing-pipeline.md"
@@ -2515,7 +2515,7 @@
       "knowledge\\sheet-constraint-planning-and-method-selection-flow.md"
     ],
     "value persistence|dynamicsequence": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "cel-rs workspace|cel_rs": [
       "knowledge\\architecture-overview.md"
@@ -2617,7 +2617,7 @@
       "knowledge\\adam-slides-flexible-authoring-and-live-preview-publication-order.md"
     ],
     "dynamicarray|dynamic array": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "adam workspace|adam architecture": [
       "knowledge\\architecture-overview.md"
@@ -2668,7 +2668,7 @@
       "knowledge\\adam-lang-dual-parsing-pipeline.md"
     ],
     "dynamic array|cel-runtime values": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "begin no-default-features|clippy matrix": [
       "knowledge\\clippy-and-feature-flag-validation-matrix.md"
@@ -2680,7 +2680,7 @@
       "knowledge\\contract-style-documentation-and-precondition-invariants.md"
     ],
     "dynamic array|dynamicarray": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "adam lsp flow|lsp dispatch": [
       "knowledge\\adam-lsp-server-loop-and-diagnostic-publishing-flow.md"
@@ -2692,7 +2692,7 @@
       "knowledge\\adam-slides-flexible-authoring-and-live-preview-publication-order.md"
     ],
     "type-erased tuple|cel-runtime values": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "dynsegment|cel-runtime layers": [
       "knowledge\\four-layer-stack-runtime-architecture.md"
@@ -2746,7 +2746,7 @@
       "knowledge\\oplookup-scoping-and-resolution-hierarchy.md"
     ],
     "type-erased tuple|dynamic array": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "type-level stack|cel-runtime layers": [
       "knowledge\\four-layer-stack-runtime-architecture.md"
@@ -2779,7 +2779,7 @@
       "knowledge\\git-worktree-and-no-direct-commit-policy.md"
     ],
     "value persistence|cel-runtime values": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "clippy matrix|cargo clippy flags": [
       "knowledge\\clippy-and-feature-flag-validation-matrix.md"
@@ -2806,7 +2806,7 @@
       "knowledge\\sheet-constraint-planning-and-method-selection-flow.md"
     ],
     "value persistence|dynamicarray": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "authoring|adam-slides": [
       "knowledge\\adam-slides-flexible-authoring-and-live-preview-publication-order.md"
@@ -2821,7 +2821,7 @@
       "knowledge\\adam-slides-flexible-authoring-and-live-preview-publication-order.md"
     ],
     "dynamicarray|cel-runtime values": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "visual graph placements|ez-adam model": [
       "knowledge\\ez-adam-document-model-and-node-placements-separation.md"
@@ -2896,7 +2896,7 @@
       "knowledge\\contract-style-documentation-and-precondition-invariants.md"
     ],
     "type-erased tuple|value persistence": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "document|ez-adam model": [
       "knowledge\\ez-adam-document-model-and-node-placements-separation.md"
@@ -2911,7 +2911,7 @@
       "knowledge\\ez-adam-document-model-and-node-placements-separation.md"
     ],
     "cel-runtime values|value persistence": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "cel parser ast|dynsegmentcontext": [
       "knowledge\\celparser-and-parsercontext-dual-emission.md"
@@ -2956,7 +2956,7 @@
       "knowledge\\contract-style-documentation-and-precondition-invariants.md"
     ],
     "dynamicsequence|dynamicarray": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "cel parser ast|celparser": [
       "knowledge\\celparser-and-parsercontext-dual-emission.md"
@@ -2995,7 +2995,7 @@
       "knowledge\\vendored-spectrum-bundle-maintenance-via-xtask.md"
     ],
     "dynamicarray|type-erased tuple": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "adam planning|multi-way constraints": [
       "knowledge\\sheet-constraint-planning-and-method-selection-flow.md"
@@ -3040,7 +3040,7 @@
       "knowledge\\ez-adam-document-model-and-node-placements-separation.md"
     ],
     "dynamic array|dynamicsequence": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "cellnode|ez-adam ops": [
       "knowledge\\ez-adam-document-model-and-node-placements-separation.md"
@@ -3135,7 +3135,7 @@
       "knowledge\\adam-slides-graph-baseline-overflow-and-pagination-margin-sizing.md"
     ],
     "cel-runtime values|dynamicsequence": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "adamastparser|typeregistry": [
       "knowledge\\adam-lang-dual-parsing-pipeline.md"
@@ -3162,7 +3162,7 @@
       "knowledge\\four-layer-stack-runtime-architecture.md"
     ],
     "dynamicsequence|type-erased tuple": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "ez-adam ops|visual graph placements": [
       "knowledge\\ez-adam-document-model-and-node-placements-separation.md"
@@ -3213,7 +3213,7 @@
       "knowledge\\sheet-constraint-planning-and-method-selection-flow.md"
     ],
     "dynamicarray|dynamicsequence": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "type-level stack|rawsegment": [
       "knowledge\\four-layer-stack-runtime-architecture.md"
@@ -3240,7 +3240,7 @@
       "knowledge\\oplookup-scoping-and-resolution-hierarchy.md"
     ],
     "type-erased tuple|dynamicarray": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "filter callbacks|method purity": [
       "knowledge\\filter-purity-and-idempotence-contract.md"
@@ -3255,7 +3255,7 @@
       "knowledge\\adam-slides-flexible-authoring-and-live-preview-publication-order.md"
     ],
     "value persistence|dynamic array": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "segment|c_stack_list": [
       "knowledge\\four-layer-stack-runtime-architecture.md"
@@ -3303,7 +3303,7 @@
       "knowledge\\sheet-constraint-planning-and-method-selection-flow.md"
     ],
     "cel-runtime values|dynamic array": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "layout|css": [
       "knowledge\\adam-slides-graph-baseline-overflow-and-pagination-margin-sizing.md"
@@ -3354,7 +3354,7 @@
       "knowledge\\celparser-and-parsercontext-dual-emission.md"
     ],
     "cel-runtime values|dynamicarray": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "type-level stack|rawstack": [
       "knowledge\\four-layer-stack-runtime-architecture.md"
@@ -3483,7 +3483,7 @@
       "knowledge\\celparser-and-parsercontext-dual-emission.md"
     ],
     "type-erased tuple|dynamicsequence": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "sheet planner|release resolve": [
       "knowledge\\sheet-constraint-planning-and-method-selection-flow.md"
@@ -3552,7 +3552,7 @@
       "knowledge\\filter-purity-and-idempotence-contract.md"
     ],
     "dynamicsequence|dynamic array": [
-      "knowledge\\dynamicsequence-and-dynamicarray-value-persistence.md"
+      "knowledge\\canonical-container-value-persistence.md"
     ],
     "operator table|built-in ops": [
       "knowledge\\oplookup-scoping-and-resolution-hierarchy.md"
