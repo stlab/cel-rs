@@ -22,7 +22,7 @@
 use std::{any::TypeId, sync::Arc};
 
 use anyhow::{Result, ensure};
-use cel_runtime::{DynSegment, ValueKind, ValueType};
+use cel_runtime::{DynSegment, ValueType};
 
 use crate::{ExprSpan, OpLookup, ParseError, ResolvedLeafType, SourceSpan};
 
@@ -98,12 +98,9 @@ fn same_type(left: &ResolvedLeafType, right: &ResolvedLeafType) -> bool {
 ///
 /// - Complexity: O(d) in descriptor nesting depth.
 fn matches_type(expected: &ResolvedLeafType, actual: &ValueType) -> bool {
-    expected.type_id() == actual.type_id()
-        && match actual.kind() {
-            ValueKind::Leaf => expected.element_type().nested().is_none(),
-            ValueKind::Array(element) => expected.element_type().nested() == Some(element),
-            ValueKind::Tuple(_) => false,
-        }
+    expected
+        .complete_value_type()
+        .is_ok_and(|expected| expected.same_shape(actual))
 }
 
 impl OpLookup {
@@ -206,7 +203,16 @@ impl OpLookup {
             ambient_start,
             SourceSpan::from_proc_macro2_range(start, end),
         )
-        .map_err(|err| error(err.to_string()))
+        .map_err(|err| error(err.to_string()))?;
+        segment
+            .annotate_top(
+                schema
+                    .ty
+                    .complete_value_type()
+                    .map_err(|err| error(err.to_string()))?
+                    .clone(),
+            )
+            .map_err(|err| error(err.to_string()))
     }
 
     /// Registers one persistent named operation without replacing existing overloads.
@@ -373,6 +379,7 @@ impl OpLookup {
                     .all(|(expected, actual)| matches_type(expected, &actual.value_type))
             {
                 (signature.emit)(segment, span)?;
+                segment.annotate_top(signature.result.complete_value_type()?.clone())?;
                 return Ok(true);
             }
         }
@@ -413,8 +420,8 @@ impl OpLookup {
             {
                 let ambient_start = segment.stack_offset_before_top(arity)?;
                 if self.lookup_direct_operation(function.name, segment, arity - 1, span)? {
-                    segment.make_tuple(2, ambient_start);
-                    segment.tuple_index(1);
+                    segment.make_tuple(2, ambient_start)?;
+                    segment.tuple_index(1)?;
                     return Ok(true);
                 }
                 return Ok(false);

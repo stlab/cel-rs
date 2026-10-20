@@ -265,7 +265,7 @@ fn checked_stack_offset_rejects_underflow_and_preserves_ambient() {
 /// Distinguishes nested array descriptors that share the erased runtime array marker.
 #[test]
 fn full_operand_descriptors_control_dispatch() {
-    use cel_runtime::DynamicArray;
+    use cel_runtime::{ArrayOf, Leaf};
     let mut lookup = OpLookup::new();
     let floats = ArrayElementType::array_of(leaf::<f64>().element_type().clone());
     lookup
@@ -273,7 +273,9 @@ fn full_operand_descriptors_control_dispatch() {
             name: "length",
             operands: vec![ResolvedLeafType::new("Floats", floats)],
             result: leaf::<usize>(),
-            emit: Arc::new(|s, _| s.op1(|values: DynamicArray| values.len())),
+            emit: Arc::new(|s, _| {
+                s.op1_repr::<ArrayOf<Leaf<f64>>, Leaf<usize>, _>(|values| values.len())
+            }),
         })
         .unwrap();
     let mut wrong = DynSegment::new::<()>();

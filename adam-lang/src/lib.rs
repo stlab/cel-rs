@@ -74,7 +74,7 @@
 //! ```rust
 //! use adam_lang::{AdamParser, TypeRegistry};
 //! use cel_parser::OpLookup;
-//! use cel_runtime::DynamicArray;
+//! use cel_runtime::{ArrayOf, Leaf, ValueRepr};
 //!
 //! #[derive(Clone, Debug, PartialEq)]
 //! struct Custom(i32);
@@ -97,7 +97,17 @@
 //!         Ok(true)
 //!     }
 //!     ("()", 2) => {
-//!         segment.op2(|_callee: CountFn, values: DynamicArray| values.len() as i32)?;
+//!         let array = &segment.peek_stack_infos(1)[0].value_type;
+//!         if array.same_shape(&ArrayOf::<Leaf<i32>>::value_type()) {
+//!             segment.op2_repr::<Leaf<CountFn>, ArrayOf<Leaf<i32>>, Leaf<i32>, _>(
+//!                 |_callee, values| values.len() as i32)?;
+//!         } else if array.same_shape(&ArrayOf::<Leaf<Custom>>::value_type()) {
+//!             segment.op2_repr::<Leaf<CountFn>, ArrayOf<Leaf<Custom>>, Leaf<i32>, _>(
+//!                 |_callee, values| values.len() as i32)?;
+//!         } else {
+//!             segment.op2_repr::<Leaf<CountFn>, ArrayOf<ArrayOf<Leaf<Custom>>>, Leaf<i32>, _>(
+//!                 |_callee, values| values.len() as i32)?;
+//!         }
 //!         Ok(true)
 //!     }
 //!     _ => Ok(false),

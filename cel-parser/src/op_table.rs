@@ -1435,6 +1435,14 @@ macro_rules! builtin_scalars {
         #[cfg(test)]
         pub(crate) const BUILTIN_SCALAR_NAMES: &[&str] = &[$($name),*];
 
+        /// Returns complete scalar metadata from concrete registration factories.
+        pub(crate) fn builtin_value_type(id: TypeId) -> Option<cel_runtime::ValueType> {
+            $(if id == TypeId::of::<$ty>() {
+                return Some(complete_builtin_leaf::<$ty>());
+            })*
+            None
+        }
+
         /// Resolves a built-in scalar type's bare identifier (a closure parameter annotation, a
         /// CEL array annotation leaf) to its full descriptor, or `None` if `name` names no
         /// recognized scalar type.
@@ -2819,7 +2827,7 @@ mod tests {
             tuple_operand_index: 0,
             operand_type_ids: vec![],
             op_fn: |seg, _span| {
-                seg.tuple_index(1);
+                seg.tuple_index(1)?;
                 seg.op1(|_ignored: i32| true)
             },
         });
@@ -2828,7 +2836,7 @@ mod tests {
         let ambient_start = segment.current_stack_offset();
         segment.op0(|| "hi".to_string());
         segment.op0(|| 7i32);
-        segment.make_tuple(2, ambient_start);
+        segment.make_tuple(2, ambient_start)?;
 
         lookup.lookup(
             "greet",
@@ -2850,7 +2858,7 @@ mod tests {
             tuple_operand_index: 0,
             operand_type_ids: vec![],
             op_fn: |seg, _span| {
-                seg.tuple_index(1);
+                seg.tuple_index(1)?;
                 seg.op1(|_ignored: i32| true)
             },
         });
@@ -2859,7 +2867,7 @@ mod tests {
         let ambient_start = segment.current_stack_offset();
         segment.op0(|| 1i32);
         segment.op0(|| 2i32);
-        segment.make_tuple(2, ambient_start);
+        segment.make_tuple(2, ambient_start).unwrap();
 
         let result = lookup.lookup(
             "greet",
@@ -2987,7 +2995,7 @@ mod tests {
     fn builtin_scalar_type_push_arg_declares_a_readable_argument() {
         let scalar = builtin_scalar_type("i32").unwrap();
         let mut segment = DynSegment::new::<()>();
-        cel_runtime::ValueType::registered((scalar.element_type)())
+        (scalar.value_type)()
             .push_argument(&mut segment, 0)
             .unwrap();
         let value = 42i32;
@@ -3051,7 +3059,7 @@ mod tests {
     fn builtin_generic_type_push_arg_declares_a_readable_argument() {
         let resolved = builtin_generic_type("RangeInclusive", "i32").unwrap();
         let mut segment = DynSegment::new::<()>();
-        cel_runtime::ValueType::registered((resolved.element_type)())
+        (resolved.value_type)()
             .push_argument(&mut segment, 0)
             .unwrap();
         let value = 1i32..=5i32;

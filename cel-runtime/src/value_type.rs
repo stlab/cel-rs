@@ -280,6 +280,201 @@ struct Plan {
 pub struct ValueType(Arc<Plan>);
 
 impl ValueType {
+    /// Sets an opaque leaf's diagnostic name without changing identity or capabilities.
+    ///
+    /// Structural descriptors retain their recursively defined names.
+    ///
+    /// # Examples
+    /// ```
+    /// let ty = cel_runtime::ValueType::leaf::<i32>().with_type_name("Integer");
+    /// assert_eq!(ty.type_name(), "Integer");
+    /// ```
+    pub fn with_type_name(mut self, name: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        if let Some(host) = Arc::make_mut(&mut self.0).host_leaf.as_mut() {
+            host.name = name.into();
+        }
+        self
+    }
+
+    /// Rejects legacy external wrapper leaves before binding interpreter instructions.
+    ///
+    /// # Errors
+    /// Rejects `DynamicArray`, `DynamicSequence`, or tuple-marker opaque leaves
+    /// at any recursive node; those carriers require checked external conversion.
+    /// - Complexity: O(n) traversal for n descriptor nodes.
+    pub(crate) fn validate_canonical(&self) -> anyhow::Result<()> {
+        match self.kind() {
+            ValueKind::Leaf(id) => anyhow::ensure!(
+                *id != TypeId::of::<crate::DynamicArray>()
+                    && *id != TypeId::of::<crate::DynamicSequence>()
+                    && *id != TypeId::of::<crate::DynTuple>(),
+                "external wrappers require an explicit checked canonical boundary"
+            ),
+            ValueKind::Array(element) => element.validate_canonical()?,
+            ValueKind::Tuple(fields) => {
+                for field in fields {
+                    field.value_type.validate_canonical()?;
+                }
+            }
+            ValueKind::Callable { parameters, result } => {
+                for parameter in parameters {
+                    parameter.validate_canonical()?;
+                }
+                result.validate_canonical()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Installs checked external tuple hooks while leaving canonical ownership unchanged.
+    ///
+    /// # Safety
+    /// Each hook must operate on the concrete leaf represented by this descriptor.
+    /// - Precondition: This descriptor describes an opaque leaf.
+    pub(crate) unsafe fn with_external_hooks(
+        mut self,
+        clone: crate::ElementCloner,
+        eq: crate::ElementEq,
+        debug: crate::ElementDebug,
+    ) -> Self {
+        debug_assert!(matches!(self.kind(), ValueKind::Leaf(_)));
+        let host = Arc::make_mut(&mut self.0)
+            .host_leaf
+            .as_mut()
+            .expect("concrete leaf factory");
+        host.clone = Some(clone);
+        host.eq = Some(eq);
+        host.debug = Some(debug);
+        self
+    }
+
+    /// Returns complete metadata retained by an external concrete element factory.
+    ///
+    /// # Errors
+    /// Rejects erased external descriptors without a concrete canonical factory.
+    ///
+    /// # Examples
+    /// ```
+    /// let external = cel_runtime::ArrayElementType::cloneable::<i32>().unwrap();
+    /// assert!(cel_runtime::ValueType::registered(external).unwrap().can_clone_for_argument());
+    /// ```
+    pub fn registered(element: crate::ArrayElementType) -> anyhow::Result<Self> {
+        element.value_type()
+    }
+
+    /// Returns whether the complete frozen plan supports borrowed argument cloning.
+    ///
+    /// # Examples
+    /// ```
+    /// assert!(cel_runtime::ValueType::cloneable_leaf::<i32>().can_clone_for_argument());
+    /// ```
+    pub fn can_clone_for_argument(&self) -> bool {
+        self.can_clone()
+    }
+    /// Returns a diagnostic carrier identity; structural casts require witnesses.
+    ///
+    /// # Examples
+    /// ```
+    /// assert_eq!(cel_runtime::ValueType::leaf::<i32>().type_id(), std::any::TypeId::of::<i32>());
+    /// ```
+    pub fn type_id(&self) -> TypeId {
+        match self.kind() {
+            ValueKind::Leaf(id) => *id,
+            ValueKind::Tuple(_) => TypeId::of::<crate::DynTuple>(),
+            ValueKind::Array(_) => TypeId::of::<RawArray>(),
+            ValueKind::Callable { .. } => TypeId::of::<crate::DynClosure>(),
+        }
+    }
+
+    /// Returns a human-readable diagnostic representation name.
+    ///
+    /// # Examples
+    /// ```
+    /// assert_eq!(cel_runtime::ValueType::leaf::<i32>().type_name(), "i32");
+    /// ```
+    pub fn type_name(&self) -> &str {
+        match self.kind() {
+            ValueKind::Leaf(_) => self.host_leaf().map_or("opaque", |host| host.name()),
+            ValueKind::Tuple(_) => "canonical tuple",
+            ValueKind::Array(_) => "canonical array",
+            ValueKind::Callable { .. } => "callable",
+        }
+    }
+
+    /// Returns the canonical representation size.
+    ///
+    /// # Examples
+    /// ```
+    /// assert_eq!(cel_runtime::ValueType::leaf::<i32>().size(), 4);
+    /// ```
+    pub fn size(&self) -> usize {
+        self.layout().size()
+    }
+
+    /// Returns the canonical representation alignment.
+    ///
+    /// # Examples
+    /// ```
+    /// assert_eq!(cel_runtime::ValueType::leaf::<u8>().align(), 1);
+    /// ```
+    pub fn align(&self) -> usize {
+        self.layout().align()
+    }
+
+    /// Borrows source-ordered canonical tuple fields, including empty source unit.
+    ///
+    /// # Examples
+    /// ```
+    /// assert!(cel_runtime::ValueType::leaf::<i32>().tuple_elements().is_none());
+    /// ```
+    pub fn tuple_elements(&self) -> Option<&[AssociatedType]> {
+        match self.kind() {
+            ValueKind::Tuple(fields) => Some(fields),
+            _ => None,
+        }
+    }
+
+    /// Borrows the complete canonical array element descriptor.
+    ///
+    /// # Examples
+    /// ```
+    /// assert!(cel_runtime::ValueType::array(cel_runtime::ValueType::leaf::<i32>()).array_element().is_some());
+    /// ```
+    pub fn array_element(&self) -> Option<&ValueType> {
+        match self.kind() {
+            ValueKind::Array(element) => Some(element),
+            _ => None,
+        }
+    }
+
+    /// Registers a borrowed canonical argument read using this complete clone plan.
+    ///
+    /// # Errors
+    /// Rejects unavailable cloning or an unrepresentable destination frame.
+    /// - Complexity: O(n) registration for n existing stack slots.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut body = cel_runtime::DynSegment::new::<()>();
+    /// cel_runtime::ValueType::cloneable_leaf::<i32>().push_argument(&mut body, 0).unwrap();
+    /// ```
+    pub fn push_argument(
+        &self,
+        segment: &mut crate::DynSegment,
+        index: usize,
+    ) -> anyhow::Result<()> {
+        segment.push_argument(index, self.clone())
+    }
+
+    /// Checks the borrowed whole-value clone capability.
+    ///
+    /// # Errors
+    /// Rejects a descriptor whose frozen plan cannot clone its representation.
+    pub(crate) fn validate_clone(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.can_clone(), "argument clone capability unavailable");
+        Ok(())
+    }
+
     /// Describes an opaque host leaf without requiring optional capabilities.
     ///
     /// # Examples

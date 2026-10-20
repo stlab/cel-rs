@@ -14,16 +14,28 @@ fn parser() -> CELParser {
     lookup.push_library_scope(|name, segment, arity, _| {
         if matches!(name, "first" | "last") && arity == 0 {
             segment.just(Parcel(name.to_string()));
+            segment.annotate_top(
+                cel_runtime::ValueType::cloneable_leaf::<Parcel>()
+                    .with_equality::<cel_runtime::Leaf<Parcel>>()?
+                    .with_debug::<cel_runtime::Leaf<Parcel>>()?,
+            )?;
             return Ok(true);
         }
         Ok(false)
     });
     CELParser::with_type_resolver(lookup, |name: &str, args: &[cel_parser::ResolvedType]| {
         if name == "Parcel" && args.is_empty() {
-            Some(ResolvedLeafType::new(
-                "Parcel",
-                ArrayElementType::cloneable::<Parcel>().unwrap(),
-            ))
+            Some(
+                ResolvedLeafType::new("Parcel", ArrayElementType::cloneable::<Parcel>().unwrap())
+                    .with_complete_value_type(
+                        cel_runtime::ValueType::cloneable_leaf::<Parcel>()
+                            .with_equality::<cel_runtime::Leaf<Parcel>>()
+                            .unwrap()
+                            .with_debug::<cel_runtime::Leaf<Parcel>>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
+            )
         } else {
             resolve_builtin_named_type(name, args)
         }
@@ -56,27 +68,7 @@ fn registered_recursive_tuple_and_nested_invocation() {
              ((first, (7, last)))",
         )
         .unwrap();
-    let result = segment
-        .call_dyn_as_dynamic_sequence(&[], &|id| {
-            if id == std::any::TypeId::of::<Parcel>() {
-                Some((
-                    cel_runtime::element_dropper_for::<Parcel>(),
-                    cel_runtime::element_cloner_for::<Parcel>(),
-                    cel_runtime::element_eq_for::<Parcel>(),
-                    cel_runtime::element_debug_for::<Parcel>(),
-                ))
-            } else if id == std::any::TypeId::of::<i32>() {
-                Some((
-                    cel_runtime::element_dropper_for::<i32>(),
-                    cel_runtime::element_cloner_for::<i32>(),
-                    cel_runtime::element_eq_for::<i32>(),
-                    cel_runtime::element_debug_for::<i32>(),
-                ))
-            } else {
-                None
-            }
-        })
-        .unwrap();
+    let result = segment.call_dyn_as_dynamic_sequence(&[]).unwrap();
     let (first, nested): (Parcel, cel_runtime::DynamicSequence) = result.try_into_tuple().unwrap();
     assert_eq!(first, Parcel("first".into()));
     assert_eq!(
@@ -288,7 +280,9 @@ fn host_call_scope_precedes_general_invocation() {
     let mut lookup = OpLookup::new();
     lookup.push_scope(|name, segment, arity, _| {
         if name == "()" && arity == 2 {
-            segment.op2(|_: cel_runtime::DynClosure, _: i32| 99i32)?;
+            segment.drop_value()?;
+            segment.drop_value()?;
+            segment.just(99i32);
             return Ok(true);
         }
         Ok(false)
@@ -308,8 +302,11 @@ fn host_tuple_call_precedes_general_invocation() {
         tuple_operand_index: 1,
         operand_type_ids: vec![TypeId::of::<cel_runtime::DynClosure>()],
         op_fn: |segment, _| {
-            segment.tuple_index(0);
-            segment.op2(|_: cel_runtime::DynClosure, _: i32| 77i32)
+            segment.tuple_index(0)?;
+            segment.drop_value()?;
+            segment.drop_value()?;
+            segment.just(77i32);
+            Ok(())
         },
     });
     let mut segment = CELParser::new(lookup)
@@ -336,7 +333,10 @@ fn unknown_callable_signature_fails_explicitly() {
         Ok(false)
     });
     let error = CELParser::new(lookup).parse_str("opaque()").err().unwrap();
-    assert!(error.message().contains("signature is unknown"), "{error}");
+    assert!(
+        error.message().contains("callable signature required"),
+        "{error}"
+    );
 }
 
 /// Syntax-only parsing preserves custom recursive annotations without any registry lookup.
@@ -430,5 +430,5 @@ fn parameter_without_clone_adapter_is_explicitly_unsupported() {
         )],
     );
     let error = parser.parse_str("|x: Ticket| x").err().unwrap();
-    assert!(error.message().contains("clone support"), "{error}");
+    assert!(error.message().contains("clone capability"), "{error}");
 }

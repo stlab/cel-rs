@@ -660,9 +660,8 @@ impl AdamParser {
             let shape = self
                 .shape_of_associated(&associated)
                 .map_err(|msg| ParseError::new(msg, Span::call_site()))?;
-            let leaf = |type_id: TypeId| self.types.element_descriptor(type_id);
             let seq = segment
-                .call_dyn_as_dynamic_sequence(&[], &leaf)
+                .call_dyn_as_dynamic_sequence(&[])
                 .map_err(|e| ParseError::new(e.to_string(), Span::call_site()))?;
             Ok((shape, Box::new(seq) as Box<dyn Any>))
         } else {
@@ -1072,7 +1071,7 @@ impl AdamParser {
                 match push {
                     InputPush::Scalar(fn_ptr) => fn_ptr(segment, idx),
                     InputPush::Tuple(associated) => {
-                        segment.push_arg_as_dynamic_sequence_tuple(idx, associated.clone())
+                        segment.push_arg_as_dynamic_sequence_tuple(idx, associated.clone())?
                     }
                 }
                 Ok(true)
@@ -1153,7 +1152,7 @@ impl AdamParser {
                     match &value_push {
                         InputPush::Scalar(fn_ptr) => fn_ptr(segment, 0),
                         InputPush::Tuple(associated) => {
-                            segment.push_arg_as_dynamic_sequence_tuple(0, associated.clone())
+                            segment.push_arg_as_dynamic_sequence_tuple(0, associated.clone())?
                         }
                     }
                     return Ok(true);
@@ -1174,7 +1173,7 @@ impl AdamParser {
                 match push {
                     InputPush::Scalar(fn_ptr) => fn_ptr(segment, idx),
                     InputPush::Tuple(associated) => {
-                        segment.push_arg_as_dynamic_sequence_tuple(idx, associated.clone())
+                        segment.push_arg_as_dynamic_sequence_tuple(idx, associated.clone())?
                     }
                 }
                 Ok(true)
@@ -1248,20 +1247,11 @@ impl AdamParser {
             let shape = self
                 .shape_of_associated(&associated)
                 .map_err(|msg| ParseError::new(msg, match_span))?;
-            let table = self.types.element_descriptors_for(&shape);
             let segment = RefCell::new(segment);
 
             let function =
                 move |args: &[&dyn Any]| -> std::result::Result<Box<dyn Any>, anyhow::Error> {
-                    let leaf = |type_id: TypeId| {
-                        table
-                            .iter()
-                            .find(|(tid, ..)| *tid == type_id)
-                            .map(|(_, d, c, e, dbg)| (*d, *c, *e, *dbg))
-                    };
-                    let seq = segment
-                        .borrow_mut()
-                        .call_dyn_as_dynamic_sequence(args, &leaf)?;
+                    let seq = segment.borrow_mut().call_dyn_as_dynamic_sequence(args)?;
                     Ok(Box::new(seq) as Box<dyn Any>)
                 };
 
@@ -1567,9 +1557,7 @@ impl AdamParser {
                     .call_dyn_fn;
                 CompiledOutputs::Single(call_fn)
             }
-            TypeShape::Tuple(_) => {
-                CompiledOutputs::SingleTuple(self.types.element_descriptors_for(&out_shape))
-            }
+            TypeShape::Tuple(_) => CompiledOutputs::SingleTuple,
         };
         let writer = build_method(
             inputs,
@@ -1723,7 +1711,7 @@ impl AdamParser {
     ///
     /// A non-destructuring single output (`destructure` false; always `outputs.len() == 1`)
     /// takes the segment's single result directly (scalar via `call_dyn`, tuple-typed via
-    /// `call_dyn_as_dynamic_sequence`, or the trivial empty-tuple case). A destructuring binding
+    /// `call_dyn_as_dynamic_sequence`, including source unit). A destructuring binding
     /// (`destructure` true, one or more outputs — see `ast::BindingDecl::destructure`) requires
     /// the result to be a tuple of matching arity and element shapes, split element-wise via
     /// `call_dyn_tuple_mixed`.
@@ -1762,17 +1750,13 @@ impl AdamParser {
                     Ok(CompiledOutputs::Single(call_fn))
                 }
                 TypeShape::Tuple(elements) if elements.is_empty() => {
-                    // () is CEL's concrete unit type, a distinct leaf TypeId -- not DynTuple.
-                    let actual_type_id = segment.peek_output_type_id().ok_or_else(|| {
-                        ctx.err_at(format!("output `{out_name}`: expression produced no value"))
-                    })?;
-                    if actual_type_id != TypeId::of::<()>() {
+                    if segment.peek_tuple_arity() != Some(0) {
                         return Err(ctx.err_at(format!(
                             "output `{out_name}`: type mismatch: expected `()`, got a non-`()` \
                              value"
                         )));
                     }
-                    Ok(CompiledOutputs::EmptyTuple)
+                    Ok(CompiledOutputs::SingleTuple)
                 }
                 TypeShape::Tuple(_) => {
                     let stack_info = segment.peek_stack_infos(1).first();
@@ -1792,9 +1776,7 @@ impl AdamParser {
                             self.types.display_name(out_shape)
                         )));
                     }
-                    Ok(CompiledOutputs::SingleTuple(
-                        self.types.element_descriptors_for(out_shape),
-                    ))
+                    Ok(CompiledOutputs::SingleTuple)
                 }
             }
         } else {
@@ -1861,7 +1843,17 @@ impl AdamParser {
         let result = self.cel.parse_expression_restricted(restriction);
         ctx.cursor
             .set_tokens(self.cel.take_lex_tokens().expect("tokens set"));
-        result
+        let mut segment = result?;
+        if let Some(info) = segment.peek_stack_infos(1).first() {
+            let enriched = self
+                .types
+                .enrich_value_type(&info.value_type)
+                .map_err(|error| ParseError::new(error.to_string(), Span::call_site()))?;
+            segment
+                .annotate_top(enriched)
+                .map_err(|error| ParseError::new(error.to_string(), Span::call_site()))?;
+        }
+        Ok(segment)
     }
 
     /// Delegates one `literal_pattern` (a bare literal, optionally negated by a leading `-`) to
@@ -1928,20 +1920,7 @@ enum CompiledOutputs {
     Single(CallDynFn),
     /// One output, tuple-typed: the segment's whole tuple result, moved into one
     /// `DynamicSequence` via `call_dyn_as_dynamic_sequence`.
-    SingleTuple(
-        Vec<(
-            TypeId,
-            cel_runtime::ElementDropper,
-            cel_runtime::ElementCloner,
-            cel_runtime::ElementEq,
-            cel_runtime::ElementDebug,
-        )>,
-    ),
-    /// The declared output is the empty tuple `()`: no CEL expression can produce a live
-    /// `DynTuple`-tagged 0-arity value (CEL's own `()` literal is the concrete Rust unit type,
-    /// a distinct leaf `TypeId`, not `DynTuple`) — so this is its own case, matched directly
-    /// against a `()`-typed body result and stored as a trivially-empty `DynamicSequence`.
-    EmptyTuple,
+    SingleTuple,
     /// A destructuring binding (one or more outputs): the segment's tuple result, split
     /// element-wise via `call_dyn_tuple_mixed`.
     Tuple(Vec<cel_runtime::DynExtractor>),
@@ -1975,20 +1954,8 @@ fn build_method(
             let seg = &mut *segment.borrow_mut();
             match &compiled {
                 CompiledOutputs::Single(call_fn) => Ok(vec![call_fn(seg, inputs_any)?]),
-                CompiledOutputs::EmptyTuple => {
-                    Ok(vec![
-                        Box::new(cel_runtime::DynamicSequence::from_dyn_elements(Vec::new()))
-                            as Box<dyn Any>,
-                    ])
-                }
-                CompiledOutputs::SingleTuple(table) => {
-                    let leaf = |type_id: TypeId| {
-                        table
-                            .iter()
-                            .find(|(tid, ..)| *tid == type_id)
-                            .map(|(_, d, c, e, dbg)| (*d, *c, *e, *dbg))
-                    };
-                    let seq = seg.call_dyn_as_dynamic_sequence(inputs_any, &leaf)?;
+                CompiledOutputs::SingleTuple => {
+                    let seq = seg.call_dyn_as_dynamic_sequence(inputs_any)?;
                     Ok(vec![Box::new(seq) as Box<dyn Any>])
                 }
                 CompiledOutputs::Tuple(extractors) => {
@@ -2066,7 +2033,7 @@ mod tests {
     use super::*;
     use crate::TypeRegistry;
     use cel_parser::OpLookup;
-    use cel_runtime::DynamicArray;
+    use cel_runtime::{ArrayOf, Leaf};
 
     fn parser() -> AdamParser {
         AdamParser::new(TypeRegistry::new(), OpLookup::new())
@@ -2094,7 +2061,20 @@ mod tests {
                 Ok(true)
             }
             "()" if arity == 2 => {
-                segment.op2(|_callee: CountFn, array: DynamicArray| array.len() as i32)?;
+                if segment.peek_stack_infos(1)[0]
+                    .value_type
+                    .array_element()
+                    .is_some_and(|element| element.array_element().is_some())
+                {
+                    segment
+                        .op2_repr::<Leaf<CountFn>, ArrayOf<ArrayOf<Leaf<Custom>>>, Leaf<i32>, _>(
+                            |_callee, array| array.len() as i32,
+                        )?;
+                } else {
+                    segment.op2_repr::<Leaf<CountFn>, ArrayOf<Leaf<Custom>>, Leaf<i32>, _>(
+                        |_callee, array| array.len() as i32,
+                    )?;
+                }
                 Ok(true)
             }
             _ => Ok(false),
@@ -2188,21 +2168,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_cell_initializer_rejects_tuple_typed_array_annotations() {
+    fn parse_cell_initializer_rejects_persistent_array_cells_explicitly() {
         let mut parser = AdamParser::new(TypeRegistry::new(), OpLookup::new());
         let err = parser
             .parse_str("sheet s { cell values = []: [(i32, f64)]; }")
-            .expect_err("tuple-valued array annotations must remain unsupported");
+            .expect_err("persistent aggregate cells belong to Task 7");
 
         assert!(
-            err.message()
-                .contains("tuple-valued array elements are not supported"),
+            err.message().contains("cannot infer a type"),
             "got: {}",
-            err.message()
-        );
-        assert!(
-            err.message().contains("issues/213"),
-            "the diagnostic must reference the tuple-array issue, got: {}",
             err.message()
         );
     }
@@ -3947,7 +3921,7 @@ mod tests {
             r#"
             sheet s {
                 cell dummy: i32 = 0;
-                out x := ();
+                out x := []: [i32];
             }
         "#,
         );
@@ -3955,6 +3929,24 @@ mod tests {
             result.is_err(),
             "an out with no annotation whose writer body produces an unregistered type must be an error"
         );
+    }
+
+    /// Empty tuple writers execute their initializer and propagate runtime errors.
+    #[test]
+    fn empty_tuple_output_executes_its_writer() {
+        let mut lookup = OpLookup::new();
+        lookup.push_scope(|name, segment, arity, _| {
+            if name == "bad" && arity == 0 {
+                segment.op0r(|| -> anyhow::Result<i32> { anyhow::bail!("unit writer failed") });
+                return Ok(true);
+            }
+            Ok(false)
+        });
+        let mut sheet = AdamParser::new(TypeRegistry::new(), lookup)
+            .parse_str("sheet s { cell input: i32 = 0; cell nothing: (); relationship { nothing := (input, bad, ()).2; } }")
+            .unwrap();
+        let error = sheet.propagate().unwrap_err();
+        assert!(error.to_string().contains("unit writer failed"), "{error}");
     }
 
     #[test]

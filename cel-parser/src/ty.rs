@@ -650,9 +650,7 @@ pub fn check_expr_with_type_resolver(
                     p.type_expr
                         .resolve(resolve_type)
                         .ok()
-                        .and_then(|resolved| {
-                            resolved_type_to_element_ty(&resolved, p.type_expr.span()).ok()
-                        })
+                        .map(|resolved| resolved_type_to_element_ty(&resolved))
                         .unwrap_or(Ty::Any)
                 } else {
                     resolve_ident(name)
@@ -755,7 +753,7 @@ fn check_array(
 /// # Errors
 ///
 /// Returns one diagnostic when the annotation names an unknown type, does not name a complete
-/// array type, or names tuple-valued array elements.
+/// array type.
 ///
 /// - Complexity: O(n) in the annotation tree plus resolver and descriptor-copying costs.
 fn check_array_annotation(
@@ -781,12 +779,12 @@ fn check_array_annotation(
 /// - Complexity: O(d) in descriptor nesting depth.
 ///
 /// # Errors
-/// Returns an error for non-array annotations or tuple-valued array elements.
+/// Returns an error for non-array annotations.
 fn resolved_type_to_array_ty(resolved: &ResolvedType, span: ExprSpan) -> crate::Result<Ty> {
     match resolved {
-        ResolvedType::Array { element } => Ok(Ty::Array(Box::new(resolved_type_to_element_ty(
-            element, span,
-        )?))),
+        ResolvedType::Array { element } => {
+            Ok(Ty::Array(Box::new(resolved_type_to_element_ty(element))))
+        }
         other => Err(ParseError::new_range(
             format!(
                 "array annotations must name a complete array type, found `{}`",
@@ -798,24 +796,17 @@ fn resolved_type_to_array_ty(resolved: &ResolvedType, span: ExprSpan) -> crate::
     }
 }
 
-/// Preserves resolved scalar and array identities, rejecting tuple-valued array elements.
+/// Preserves resolved scalar and array identities, deferring tuple precision.
 ///
 /// - Complexity: O(d + l) in descriptor depth d and leaf display-name length l.
 ///
-/// # Errors
-/// Returns the existing unsupported-tuple-elements diagnostic for a tuple type.
-fn resolved_type_to_element_ty(resolved: &ResolvedType, span: ExprSpan) -> crate::Result<Ty> {
+fn resolved_type_to_element_ty(resolved: &ResolvedType) -> Ty {
     match resolved {
-        ResolvedType::Scalar(leaf) => Ok(Ty::from_leaf(leaf)),
+        ResolvedType::Scalar(leaf) => Ty::from_leaf(leaf),
         ResolvedType::Array { element } => {
-            Ok(Ty::Array(Box::new(resolved_type_to_element_ty(element, span)?)))
+            Ty::Array(Box::new(resolved_type_to_element_ty(element)))
         }
-        ResolvedType::Tuple { .. } => Err(ParseError::new_range(
-            "tuple-valued array elements are not supported; see https://github.com/stlab/cel-rs/issues/213"
-                .to_string(),
-            span.start,
-            span.end,
-        )),
+        ResolvedType::Tuple { .. } => Ty::Any,
     }
 }
 
@@ -1970,19 +1961,14 @@ mod tests {
     }
 
     #[test]
-    fn typed_array_annotation_rejects_tuple_array_element_types() {
+    fn typed_array_annotation_preserves_tuple_array_element_types() {
         let mut parser = crate::Parser::<crate::AstContext>::new(crate::OpLookup::new());
         let expr = parser
             .parse_str_ast("[]: [(i32, f64)]")
             .expect("source parses");
         let (ty, diags) = check_expr(&expr, &any_resolver);
         assert_eq!(ty, Ty::Array(Box::new(Ty::Any)));
-        assert_eq!(diags.len(), 1);
-        assert!(
-            diags[0].message().contains("tuple"),
-            "got: {}",
-            diags[0].message()
-        );
+        assert!(diags.is_empty());
     }
 
     #[test]

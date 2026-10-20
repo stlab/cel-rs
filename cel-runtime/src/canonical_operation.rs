@@ -80,6 +80,10 @@ impl OperationPlan {
         operands: &[ValueType],
         result: ValueType,
     ) -> anyhow::Result<Self> {
+        result.validate_canonical()?;
+        for value_type in ambient.iter().chain(operands) {
+            value_type.validate_canonical()?;
+        }
         let mut end = origin;
         let mut slots = |values: &[ValueType]| -> anyhow::Result<Vec<Slot>> {
             values

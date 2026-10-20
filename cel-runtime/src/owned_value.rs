@@ -74,6 +74,177 @@ pub struct OwnedValue {
 }
 
 impl OwnedValue {
+    /// Moves one bound array element and destroys every unselected element.
+    ///
+    /// # Safety
+    /// This owner must have the canonical array descriptor bound by the caller.
+    /// # Errors
+    /// Returns an error for an out-of-bounds index, destroying the consumed array.
+    /// - Complexity: O(n) sibling destruction for n array elements plus one raw move.
+    pub(crate) unsafe fn take_array_element(mut self, index: usize) -> anyhow::Result<Self> {
+        let ValueKind::Array(element) = self.value_type.kind() else {
+            unreachable!("validated canonical array projection")
+        };
+        let raw = unsafe { &*self.as_ptr().cast::<RawArray>() };
+        anyhow::ensure!(
+            index < raw.len,
+            "array index {index} is out of bounds for length {}",
+            raw.len
+        );
+        let allocation = Allocation::new(element.layout());
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                raw.ptr.as_ptr().cast::<u8>().add(index * element.size()),
+                allocation.pointer.as_ptr(),
+                element.size(),
+            );
+        }
+        let result = unsafe { Self::from_allocation(allocation, element.clone()) };
+        let _payload = Allocation {
+            pointer: raw.ptr.cast(),
+            layout: array_layout(element, raw.capacity),
+        };
+        /// Destroys the still-owned array elements during normal and unwinding cleanup.
+        struct Siblings<'a> {
+            base: *mut u8,
+            element: &'a ValueType,
+            remaining: usize,
+            skip: usize,
+        }
+        impl Siblings<'_> {
+            /// Destroys unselected elements in reverse index order.
+            fn destroy(&mut self) {
+                while self.remaining != 0 {
+                    self.remaining -= 1;
+                    if self.remaining != self.skip {
+                        unsafe {
+                            drop_raw(
+                                self.element,
+                                self.base.add(self.remaining * self.element.size()),
+                            )
+                        };
+                    }
+                }
+            }
+        }
+        impl Drop for Siblings<'_> {
+            /// Continues remaining element destruction after a sibling panics.
+            fn drop(&mut self) {
+                self.destroy();
+            }
+        }
+        let mut siblings = Siblings {
+            base: raw.ptr.as_ptr().cast(),
+            element,
+            remaining: raw.len,
+            skip: index,
+        };
+        self.live = false;
+        siblings.destroy();
+        Ok(result)
+    }
+
+    /// Splits a canonical tuple into independent source-ordered field owners.
+    ///
+    /// Nested arrays retain their payload allocations; no leaf is cloned.
+    /// # Errors
+    /// Rejects a nontuple owner without transferring any field ownership.
+    /// - Complexity: O(n + s) field allocations and raw moves for n fields and s bytes.
+    ///
+    /// # Examples
+    /// ```
+    /// use cel_runtime::{OwnedValue, Cons, Leaf, Nil, IntoCStackList};
+    /// let tuple = OwnedValue::new::<Cons<Leaf<i32>, Nil>>((7,).into_c_stack_list());
+    /// let fields = tuple.into_fields().unwrap();
+    /// assert_eq!(fields.len(), 1);
+    /// ```
+    pub fn into_fields(mut self) -> anyhow::Result<Vec<Self>> {
+        let crate::value_type::ValueKind::Tuple(fields) = self.value_type.kind() else {
+            anyhow::bail!("canonical tuple owner required");
+        };
+        let destinations: Vec<_> = fields
+            .iter()
+            .map(|field| {
+                (
+                    Allocation::new(field.value_type.layout()),
+                    field.offset,
+                    field.value_type.clone(),
+                )
+            })
+            .collect();
+        let mut result = Vec::with_capacity(destinations.len());
+        let source = self.as_ptr();
+        // Every allocation precedes the first transfer; no callback, allocation,
+        // or fallible operation follows disarming this enclosing owner.
+        self.live = false;
+        for (allocation, offset, value_type) in destinations {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    source.add(offset),
+                    allocation.pointer.as_ptr(),
+                    value_type.size(),
+                );
+                result.push(Self::from_allocation(allocation, value_type));
+            }
+        }
+        Ok(result)
+    }
+
+    /// Moves a previously validated tuple field and destroys the remaining fields.
+    ///
+    /// # Safety
+    /// This owner must be a canonical tuple and `index` must be in range.
+    /// The caller must bind the returned field's full descriptor before execution.
+    /// - Complexity: O(n) destruction calls for n fields plus one field move.
+    pub(crate) unsafe fn take_field(mut self, index: usize) -> Self {
+        let crate::value_type::ValueKind::Tuple(fields) = self.value_type.kind() else {
+            unreachable!("validated tuple projection")
+        };
+        let selected = &fields[index];
+        let allocation = Allocation::new(selected.value_type.layout());
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.as_ptr().add(selected.offset),
+                allocation.pointer.as_ptr(),
+                selected.value_type.size(),
+            );
+        }
+        let result = unsafe { Self::from_allocation(allocation, selected.value_type.clone()) };
+        self.live = false;
+        /// Continues sibling destruction if one sibling destructor unwinds.
+        struct Siblings<'a> {
+            pointer: *mut u8,
+            fields: &'a [crate::value_type::AssociatedType],
+            remaining: usize,
+            skip: usize,
+        }
+        impl Siblings<'_> {
+            /// Destroys unselected fields in reverse source order.
+            fn destroy(&mut self) {
+                while self.remaining != 0 {
+                    self.remaining -= 1;
+                    if self.remaining != self.skip {
+                        let field = &self.fields[self.remaining];
+                        unsafe { drop_raw(&field.value_type, self.pointer.add(field.offset)) };
+                    }
+                }
+            }
+        }
+        impl Drop for Siblings<'_> {
+            /// Continues cleanup after the first destructor panic.
+            fn drop(&mut self) {
+                self.destroy();
+            }
+        }
+        let mut siblings = Siblings {
+            pointer: self.allocation.pointer.as_ptr(),
+            fields,
+            remaining: fields.len(),
+            skip: index,
+        };
+        siblings.destroy();
+        result
+    }
     /// Adopts an allocation containing one fully initialized canonical value.
     ///
     /// # Safety

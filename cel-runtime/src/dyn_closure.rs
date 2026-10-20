@@ -95,25 +95,7 @@ fn complete_leaf(
     Ok(complete)
 }
 
-/// Converts a recursive legacy array element shape, not its different header.
-///
-/// # Errors
-/// Returns an error if a required concrete leaf factory or signature is unavailable.
-/// - Complexity: O(n) time and output space for n nested array nodes.
-fn complete_array_element(
-    element: &crate::ArrayElementType,
-    leaf: &mut impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
-) -> anyhow::Result<crate::value_type::ValueType> {
-    if let Some(nested) = element.nested() {
-        Ok(crate::value_type::ValueType::array(complete_array_element(
-            nested, leaf,
-        )?))
-    } else {
-        complete_leaf(element.type_id(), element.size(), element.align(), leaf)
-    }
-}
-
-/// Converts recursive legacy semantic metadata into canonical metadata only.
+/// Enriches canonical signature leaves through explicitly supplied factories.
 ///
 /// # Errors
 /// Returns an error for unavailable signatures/factories or invalid tuple layout.
@@ -123,11 +105,8 @@ fn complete_legacy_value_type(
     leaf: &mut impl FnMut(TypeId) -> Option<crate::value_type::ValueType>,
 ) -> anyhow::Result<crate::value_type::ValueType> {
     use crate::value_type::{AssociatedType, ValueType as Complete};
-    if let Some(signature) = &value.callable {
-        return signature.complete(leaf);
-    }
-    if let Some(fields) = value.tuple_elements() {
-        return Complete::tuple(
+    match value.kind() {
+        crate::ValueKind::Tuple(fields) => Complete::tuple(
             fields
                 .iter()
                 .map(|field| {
@@ -137,17 +116,25 @@ fn complete_legacy_value_type(
                     })
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?,
-        );
+        ),
+        crate::ValueKind::Array(element) => {
+            Ok(Complete::array(complete_legacy_value_type(element, leaf)?))
+        }
+        crate::ValueKind::Callable { parameters, result } => Ok(Complete::callable(
+            parameters
+                .iter()
+                .map(|parameter| complete_legacy_value_type(parameter, leaf))
+                .collect::<anyhow::Result<_>>()?,
+            complete_legacy_value_type(result, leaf)?,
+        )),
+        crate::ValueKind::Leaf(id) => complete_leaf(*id, value.size(), value.align(), leaf),
     }
-    if let Some(element) = value.array_element() {
-        return Ok(Complete::array(complete_array_element(element, leaf)?));
-    }
-    complete_leaf(value.type_id(), value.size(), value.align(), leaf)
 }
 
 /// Compares complete known signatures without relying on the erased closure marker.
 ///
 /// - Complexity: O(number of recursive type nodes).
+#[cfg(test)]
 pub(crate) fn same_signature(
     left: Option<&ClosureSignature>,
     right: Option<&ClosureSignature>,
@@ -219,9 +206,42 @@ impl std::fmt::Debug for ClosureData {
 /// (matching `adam_rs::Filter`/`Method`'s `Fn`, not `FnMut`, storage), while `DynSegment`'s own
 /// call methods need `&mut self`.
 #[derive(Clone, Debug)]
-pub struct DynClosure(Rc<ClosureData>);
+pub struct DynClosure(Rc<ClosureData>, Option<Rc<TrustedBindingLease>>);
+
+impl std::fmt::Debug for TrustedBindingLease {
+    /// Formats the lease without recursively traversing its retained carrier.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TrustedBindingLease")
+    }
+}
 
 impl DynClosure {
+    /// Returns the complete canonical callable descriptor after validating its current body.
+    ///
+    /// # Errors
+    /// Rejects untyped closures, executing bodies, or bodies changed incompatibly
+    /// through an unfrozen legacy mutable dispatcher.
+    /// - Complexity: O(n) complete comparisons for n signature/body descriptor nodes.
+    ///
+    /// # Examples
+    /// ```
+    /// let mut body = cel_runtime::DynSegment::new::<()>(); body.just(7i32);
+    /// let closure = cel_runtime::DynClosure::typed(vec![], body).unwrap();
+    /// assert!(matches!(closure.value_type().unwrap().kind(), cel_runtime::ValueKind::Callable { .. }));
+    /// ```
+    pub fn value_type(&self) -> anyhow::Result<ValueType> {
+        self.validate_body_signature()?;
+        let signature = self
+            .0
+            .signature
+            .as_ref()
+            .expect("validated typed signature");
+        Ok(ValueType::callable(
+            signature.parameters.clone(),
+            signature.result.clone(),
+        ))
+    }
+
     /// Wraps `body` as a closure value declaring `param_types` (in order) and `return_type`.
     ///
     /// - Precondition: `body` was compiled expecting exactly `param_types.len()` positional
@@ -248,13 +268,16 @@ impl DynClosure {
     /// ```
     #[must_use]
     pub fn new(param_types: Vec<TypeId>, return_type: TypeId, body: DynSegment) -> Self {
-        DynClosure(Rc::new(ClosureData {
-            param_types,
-            return_type,
-            body: RefCell::new(body),
-            signature: None,
-            trusted_bindings: Cell::new(0),
-        }))
+        DynClosure(
+            Rc::new(ClosureData {
+                param_types,
+                return_type,
+                body: RefCell::new(body),
+                signature: None,
+                trusted_bindings: Cell::new(0),
+            }),
+            None,
+        )
     }
 
     /// Wraps a checked CEL body while retaining its full callable shape.
@@ -277,23 +300,28 @@ impl DynClosure {
     /// ```
     pub fn typed(parameters: Vec<ValueType>, body: DynSegment) -> anyhow::Result<Self> {
         let result = Self::validate_body(&parameters, &body)?;
-        let param_types = parameters
-            .iter()
-            .map(|p| {
-                if p.tuple_elements().is_some() {
-                    TypeId::of::<crate::DynamicSequence>()
-                } else {
-                    p.type_id()
-                }
-            })
-            .collect();
-        Ok(Self(Rc::new(ClosureData {
-            param_types,
-            return_type: result.type_id(),
-            signature: Some(std::sync::Arc::new(ClosureSignature { parameters, result })),
-            body: RefCell::new(body),
-            trusted_bindings: Cell::new(0),
-        })))
+        let param_types = parameters.iter().map(ValueType::type_id).collect();
+        Ok(Self(
+            Rc::new(ClosureData {
+                param_types,
+                return_type: result.type_id(),
+                signature: Some(std::sync::Arc::new(ClosureSignature { parameters, result })),
+                body: RefCell::new(body),
+                trusted_bindings: Cell::new(0),
+            }),
+            None,
+        ))
+    }
+
+    /// Returns a carrier whose clones retain a trusted freeze for their own lifetime.
+    ///
+    /// # Errors
+    /// Rejects an executing body or an unrepresentable additional lease.
+    pub(crate) fn bind_canonical(mut self) -> anyhow::Result<Self> {
+        if self.1.is_none() {
+            self.1 = Some(Rc::new(self.freeze_trusted_binding()?));
+        }
+        Ok(self)
     }
 
     /// Freezes arbitrary mutable body access across all aliases until the returned lease drops.
@@ -342,9 +370,7 @@ impl DynClosure {
                     .is_some_and(|expected| expected.same_shape(read_type)),
                 "closure body argument {index} differs from its declared signature"
             );
-            if read_type.tuple_elements().is_some() {
-                read_type.validate_clone()?;
-            }
+            read_type.validate_clone()?;
         }
         Ok(body.peek_stack_infos(1)[0].value_type.clone())
     }
@@ -381,12 +407,12 @@ impl DynClosure {
         self.0.signature.clone()
     }
 
-    /// Converts a known legacy signature into complete canonical metadata.
+    /// Enriches a complete canonical signature with explicitly supplied leaf factories.
     ///
     /// `leaf` looks up descriptors built while each concrete Rust type was
-    /// known; a `TypeId` is never used to synthesize a Rust monomorphization.
-    /// Factory capabilities are preserved independently. This converts metadata
-    /// only: the body, arguments, results, and interpreter storage do not change.
+    /// known; a `TypeId` never synthesizes a Rust monomorphization.
+    /// Factory capabilities remain independent of identity. This changes metadata
+    /// only; [`Self::value_type`] needs no factories for the existing complete signature.
     ///
     /// # Errors
     ///
@@ -430,6 +456,7 @@ impl DynClosure {
     /// # Errors
     /// Returns signature mismatch, reentrant body borrow, or body evaluation errors.
     /// - Complexity: body-dependent.
+    #[cfg(test)]
     pub(crate) unsafe fn call_raw(
         &self,
         expected: &ClosureSignature,
@@ -562,7 +589,6 @@ impl DynClosure {
     /// ```
     pub fn call<R: 'static>(&self, args: &[&dyn Any]) -> anyhow::Result<R> {
         debug_assert_eq!(args.len(), self.0.param_types.len());
-        debug_assert_eq!(TypeId::of::<R>(), self.0.return_type);
         self.0.body.borrow_mut().call_dyn::<R>(args)
     }
 
@@ -663,8 +689,8 @@ mod tests {
         use crate::value_type::{ValueKind, ValueType as Complete};
         let mut body = DynSegment::new::<()>();
         body.just(1i32);
-        body.make_tuple(1, 0);
-        let parameter = ValueType::array(crate::ArrayElementType::cloneable::<i32>().unwrap());
+        body.make_tuple(1, 0).unwrap();
+        let parameter = ValueType::array(ValueType::cloneable_leaf::<i32>());
         let closure = DynClosure::typed(vec![parameter], body).unwrap();
         let descriptor = closure
             .complete_value_type(|id| {
@@ -693,10 +719,10 @@ mod tests {
     fn complete_factory_preserves_nested_callable_and_unit() {
         use crate::value_type::{Nil, ValueKind, ValueRepr, ValueType as Complete};
         let mut inner_body = DynSegment::new::<()>();
-        inner_body.make_tuple(0, 0);
+        inner_body.make_tuple(0, 0).unwrap();
         let inner = DynClosure::typed(vec![ValueType::leaf::<()>()], inner_body).unwrap();
         let mut body = DynSegment::new::<()>();
-        body.push_closure(inner);
+        body.push_closure(inner).unwrap();
         let outer = DynClosure::typed(vec![], body).unwrap();
         let complete = outer
             .complete_value_type(|id| (id == TypeId::of::<()>()).then(Complete::leaf::<()>))
@@ -833,7 +859,7 @@ mod tests {
         parent.just(7u64);
         parent.just(true);
         let mut fragment = parent.new_fragment();
-        fragment.push_closure(closure);
+        fragment.push_closure(closure).unwrap();
         fragment.invoke_closure(0).unwrap();
 
         assert!(DynClosure::typed(vec![], fragment).is_err());
@@ -849,13 +875,13 @@ mod tests {
         parent.just(());
         parent.just(true);
         let mut fragment = parent.new_fragment();
-        fragment.push_closure(closure);
+        fragment.push_closure(closure).unwrap();
         fragment.invoke_closure(0).unwrap();
 
         let closure = DynClosure::typed(vec![], fragment).unwrap();
         assert_eq!(closure.call::<i32>(&[]).unwrap(), 42);
         let mut caller = DynSegment::new::<()>();
-        caller.push_closure(closure);
+        caller.push_closure(closure).unwrap();
         caller.invoke_closure(0).unwrap();
         assert_eq!(caller.call0::<i32>().unwrap(), 42);
     }
@@ -923,7 +949,7 @@ mod tests {
         body.push_arg::<i32>(0);
         let closure = DynClosure::typed(vec![ValueType::leaf::<i32>()], body).unwrap();
         let mut caller = DynSegment::new::<()>();
-        caller.push_closure(closure);
+        caller.push_closure(closure).unwrap();
         caller.just(false);
         assert!(caller.invoke_closure(1).is_err());
         assert_eq!(caller.peek_stack_infos(2).len(), 2);
@@ -938,7 +964,9 @@ mod tests {
         let mut body = DynSegment::new::<()>();
         body.just(1i32);
         let mut caller = DynSegment::new::<(i32,)>();
-        caller.push_closure(DynClosure::typed(vec![], body).unwrap());
+        caller
+            .push_closure(DynClosure::typed(vec![], body).unwrap())
+            .unwrap();
         assert!(caller.invoke_closure(0).is_err());
     }
 }

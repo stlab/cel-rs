@@ -83,13 +83,28 @@ where
 
         ensure!(
             ArgList::<Args>::LENGTH == value.argument_ids.len()
-                && TypeIdIterator::<ArgList::<Args>>::new().eq(value.argument_ids.iter().copied()),
+                && TypeIdIterator::<ArgList::<Args>>::new().eq(value
+                    .argument_ids
+                    .iter()
+                    .rev()
+                    .copied()),
             "argument type ids do not match"
+        );
+        for info in &value.stack_ids {
+            info.value_type
+                .validate_opaque_leaf(info.value_type.type_id())?;
+        }
+        ensure!(
+            value.argument_reads.is_empty() && value.base_stack_index == 0,
+            "typed conversion requires a direct preloaded frame without borrowed reads"
         );
         ensure!(
             Stack::LENGTH == value.stack_ids.len()
-                && TypeIdIterator::<Stack>::new()
-                    .eq(value.stack_ids.iter().map(|info| info.value_type.type_id())),
+                && TypeIdIterator::<Stack>::new().eq(value
+                    .stack_ids
+                    .iter()
+                    .rev()
+                    .map(|info| info.value_type.type_id())),
             "stack type ids do not match"
         );
         Ok(Segment {

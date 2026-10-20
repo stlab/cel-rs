@@ -21,7 +21,7 @@ use crate::{
 /// Retains monomorphized ownership adapters, independent of optional capabilities.
 #[derive(Clone, Debug)]
 pub(crate) struct LeafBridge {
-    name: &'static str,
+    pub(crate) name: Cow<'static, str>,
     write: unsafe fn(Box<dyn Any>, *mut u8),
     read: unsafe fn(*const u8) -> Box<dyn Any>,
     array_drop: crate::dyn_segment::RawDropper,
@@ -31,10 +31,14 @@ pub(crate) struct LeafBridge {
 }
 
 impl LeafBridge {
+    /// Borrows the concrete leaf's name for diagnostic compatibility.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
     /// Prepares native box moves without imposing clone, equality, or debug bounds.
     pub(crate) fn new<T: 'static>() -> Self {
         Self {
-            name: std::any::type_name::<T>(),
+            name: Cow::Borrowed(std::any::type_name::<T>()),
             write: crate::element_writer_for::<T>(),
             read: |source| Box::new(unsafe { source.cast::<T>().read() }),
             array_drop: crate::dyn_segment::raw_dropper_for::<T>(),
@@ -352,6 +356,7 @@ impl HostValuePlan {
     /// Rejects non-tuples, wrong arity, missing slots, or mismatching fields.
     /// - Complexity: O(v * d + s) time and O(s) converted storage for v values,
     ///   external array metadata depth d (at least 1), and s representation bytes.
+    #[cfg(test)]
     pub(crate) fn import_elements(
         &self,
         inputs: &mut [Option<Box<dyn Any>>],
@@ -481,7 +486,7 @@ impl HostValuePlan {
                 let host = self.value_type.host_leaf().unwrap();
                 Ok(DynElementSpec {
                     type_id: *id,
-                    type_name: Cow::Borrowed(host.name),
+                    type_name: host.name.clone(),
                     size: self.value_type.layout().size(),
                     align: self.value_type.layout().align(),
                     drop: self.value_type.leaf_drop().unwrap(),
@@ -524,12 +529,13 @@ impl HostValuePlan {
                 // Its concrete monomorphization is retained by the leaf factory.
                 let mut element = ArrayElementType::leaf_from_parts(
                     *id,
-                    Cow::Borrowed(host.name),
+                    host.name.clone(),
                     self.value_type.layout().size(),
                     self.value_type.layout().align(),
                     host.array_drop,
                 );
                 element.clone_value = host.clone;
+                element.complete = Some(self.value_type.clone());
                 element
             }
             ValueKind::Array(_) => ArrayElementType::array_of(self.children[0].array_element()),
@@ -550,6 +556,7 @@ impl HostValuePlan {
                 for child in &self.children {
                     layout = layout.extend(child.external_type().1)?.0;
                 }
+
                 let _ = layout.pad_to_align();
                 Ok(ExportPlan::Tuple(
                     self.children
@@ -566,6 +573,15 @@ impl HostValuePlan {
             }),
             ValueKind::Callable { .. } => unreachable!(),
         }
+    }
+
+    /// Checks all statically knowable external export capabilities before execution.
+    ///
+    /// # Errors
+    /// Rejects unavailable tuple adapters or unrepresentable external layouts.
+    /// - Complexity: O(n) metadata preparation for n descriptor nodes.
+    pub(crate) fn validate_export_capabilities(&self) -> anyhow::Result<()> {
+        self.prepare_export().map(|_| ())
     }
 
     /// Exports a whole canonical owner, preserving it on every conversion error.

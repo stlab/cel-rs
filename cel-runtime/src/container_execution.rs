@@ -1,20 +1,24 @@
-//! Prepares canonical ownership moves without changing the public interpreter.
+//! Prepares canonical ownership moves for the existing raw interpreter.
 //!
 //! Construction binds complete descriptors before touching live storage. Trusted
 //! execution uses those frozen layouts; it never infers ownership from markers.
 //! Prepare a `ContainerPlan` before evaluating its children, or a `StackFramePlan`
 //! before moving an initialized operand region. Use `ArgumentPlan` for borrowed
-//! clone adapters and `ResultPlan` to transfer a whole canonical result. Only
-//! `TrustedInvocation` bridges to the existing interpreter, after checking that
-//! its raw frame uses matching opaque leaf representations.
+//! clone adapters and `ResultPlan` to transfer a whole canonical result.
+//! Argument reads and closure invocations use frozen complete descriptors rather
+//! than checked external wrapper conversions.
 
 use std::alloc::Layout;
 use std::ptr;
 
+#[cfg(test)]
+use crate::DynClosure;
+use crate::RawStack;
 use crate::array::RawArray;
-use crate::owned_value::{Allocation, Children, OwnedValue, Prefix, clone_raw};
+#[cfg(test)]
+use crate::owned_value::clone_raw;
+use crate::owned_value::{Allocation, Children, OwnedValue, Prefix};
 use crate::value_type::{ValueKind, ValueType};
-use crate::{DynClosure, RawStack};
 
 /// Computes a stack value's aligned start and end using checked arithmetic.
 ///
@@ -252,12 +256,40 @@ pub(crate) struct ArgumentPlan {
 }
 
 impl ArgumentPlan {
+    /// Fills reusable pointer slots from a completely bound canonical borrowed frame.
+    ///
+    /// # Safety
+    /// `frame` must point to this plan's live tuple and `arguments` must have one
+    /// slot per field. The pointers may only be dereferenced while the frame lives.
+    /// - Complexity: O(n) time and O(1) extra space for n arguments.
+    pub(crate) unsafe fn bind_pointers(&self, frame: *const u8, arguments: &mut [*const u8]) {
+        let ValueKind::Tuple(fields) = self.container.value_type.kind() else {
+            unreachable!()
+        };
+        debug_assert_eq!(fields.len(), arguments.len());
+        for (field, pointer) in fields.iter().zip(arguments) {
+            *pointer = unsafe { frame.add(field.offset) };
+        }
+    }
+
+    /// Binds canonical borrowed frame offsets without requiring unused arguments to clone.
+    ///
+    /// Callers validate each emitted read's clone capability separately.
+    /// # Errors
+    /// Rejects non-list metadata.
+    pub(crate) fn borrowed(value_type: ValueType) -> anyhow::Result<Self> {
+        Ok(Self {
+            container: ContainerPlan::tuple(value_type)?,
+        })
+    }
+
     /// Borrows source-ordered field pointers from an already validated canonical frame.
     ///
     /// # Safety
     /// The frame must match this plan completely and remain live throughout
     /// `execute`, which must not retain any pointers beyond that call.
     /// - Complexity: O(n) time and pointer storage for n arguments.
+    #[cfg(test)]
     pub(crate) unsafe fn with_frame_arguments<R>(
         &self,
         frame: &OwnedValue,
@@ -277,6 +309,7 @@ impl ArgumentPlan {
     ///
     /// # Errors
     /// Returns an error for non-tuple metadata or any unavailable clone capability.
+    #[cfg(test)]
     pub(crate) fn new(value_type: ValueType) -> anyhow::Result<Self> {
         anyhow::ensure!(
             value_type.can_clone(),
@@ -299,6 +332,7 @@ impl ArgumentPlan {
     /// # Errors
     /// Reserved for propagation of construction errors; frozen clones cannot return errors.
     /// - Complexity: O(v) cloning work and storage for v contained values, excluding leaf costs.
+    #[cfg(test)]
     pub(crate) unsafe fn clone_frame(&self, arguments: &[*const u8]) -> anyhow::Result<OwnedValue> {
         debug_assert_eq!(arguments.len(), self.container.length);
         let ValueKind::Tuple(fields) = self.container.value_type.kind() else {
@@ -322,6 +356,19 @@ pub(crate) struct ResultPlan {
 }
 
 impl ResultPlan {
+    /// Moves an already witness-validated result directly into its concrete Rust type.
+    ///
+    /// # Safety
+    /// The live frame must match this plan and its descriptor must already have
+    /// been validated against exactly `T`. The caller assumes sole ownership.
+    /// - Complexity: O(s) representation move for s result bytes; no allocation.
+    pub(crate) unsafe fn take_typed<T>(&self, stack: &mut RawStack) -> T {
+        debug_assert_eq!(stack.len(), self.end);
+        let value = unsafe { stack.read_at(self.offset, |pointer| pointer.cast::<T>().read()) };
+        unsafe { stack.truncate_to(self.ambient, false) };
+        value
+    }
+
     /// Checks result layout and ambient-relative offset arithmetic.
     ///
     /// # Errors
@@ -382,10 +429,8 @@ impl ResultPlan {
 
 /// Binds a complete signature to one validated existing closure and raw frame.
 ///
-/// The legacy body uses different structural array/tuple representations.
-/// Preparation therefore accepts only opaque leaves at this boundary. Canonical
-/// aggregates remain fully supported by construction and frame plans, but are
-/// never cast into the legacy aggregate ABI.
+/// Body and caller share the same canonical structural ABI.
+#[cfg(test)]
 pub(crate) struct TrustedInvocation {
     closure: DynClosure,
     signature: ValueType,
@@ -393,15 +438,16 @@ pub(crate) struct TrustedInvocation {
     _lease: crate::dyn_closure::TrustedBindingLease,
 }
 
+#[cfg(test)]
 impl TrustedInvocation {
-    /// Freezes and validates the actual body, semantic identity, and legacy physical frame once.
+    /// Freezes and validates the actual body and complete canonical frame once.
     ///
     /// The body stays frozen across all carrier aliases for this binding's lifetime.
     /// Failed construction releases its lease, including during unwinding.
     ///
     /// # Errors
     /// Rejects non-callable descriptors, missing/mismatched signatures, incompatible
-    /// structural frames, an executing body, an unrepresentable lease count, or
+    /// frames, an executing body, an unrepresentable lease count, or
     /// current body reads, origin, or result violating its signature.
     /// - Complexity: O(n) comparisons for n parameters and recursive body read/result nodes.
     pub(crate) fn new(closure: DynClosure, signature: ValueType) -> anyhow::Result<Self> {
@@ -421,7 +467,7 @@ impl TrustedInvocation {
             .zip(&legacy.parameters)
             .chain(std::iter::once((result.as_ref(), &legacy.result)))
         {
-            Self::validate_legacy_leaf(complete, old)?;
+            anyhow::ensure!(complete.same_shape(old), "closure representation mismatch");
         }
         closure.validate_body_signature()?;
         let result = ResultPlan::new(0, result.as_ref().clone())?;
@@ -431,29 +477,6 @@ impl TrustedInvocation {
             result,
             _lease: lease,
         })
-    }
-
-    /// Checks that a complete opaque leaf exactly matches legacy raw storage.
-    ///
-    /// # Errors
-    /// Rejects structural metadata even if sizes happen to match.
-    fn validate_legacy_leaf(complete: &ValueType, legacy: &crate::ValueType) -> anyhow::Result<()> {
-        let ValueKind::Leaf(id) = complete.kind() else {
-            anyhow::bail!("canonical structural frame is incompatible with legacy closure body");
-        };
-        anyhow::ensure!(
-            legacy.tuple_elements().is_none()
-                && legacy.array_element().is_none()
-                && legacy.callable.is_none(),
-            "legacy structural frame requires an explicit representation adapter"
-        );
-        anyhow::ensure!(
-            *id == legacy.type_id()
-                && complete.layout().size() == legacy.size()
-                && complete.layout().align() == legacy.align(),
-            "closure leaf representation mismatch"
-        );
-        Ok(())
     }
 
     /// Runs the bound body without external signature/conversion checks and moves its result.
@@ -698,7 +721,7 @@ mod tests {
         assert_eq!(input, "input");
     }
 
-    /// Rejects canonical aggregates before a legacy body can reinterpret their storage.
+    /// Rejects complete mismatches and accepts canonical aggregate argument metadata.
     #[test]
     fn trusted_preparation_rejects_mismatch_and_legacy_aggregate_frames() {
         let mut body = DynSegment::new::<()>();
@@ -714,13 +737,14 @@ mod tests {
         assert!(TrustedInvocation::new(closure, ValueType::leaf::<DynClosure>()).is_err());
         let mut body = DynSegment::new::<()>();
         body.just(1_i32);
-        let closure = DynClosure::typed(vec![crate::ValueType::tuple(vec![])], body).unwrap();
+        let closure =
+            DynClosure::typed(vec![crate::ValueType::tuple(vec![]).unwrap()], body).unwrap();
         assert!(
             TrustedInvocation::new(
                 closure,
                 ValueType::callable(vec![Nil::value_type()], ValueType::leaf::<i32>(),)
             )
-            .is_err()
+            .is_ok()
         );
         let mut body = DynSegment::new::<()>();
         body.just(1_i32);

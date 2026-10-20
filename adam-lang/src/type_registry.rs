@@ -275,6 +275,37 @@ unsafe fn extract_box_impl<T: Clone + 'static>(ptr: *const u8) -> Box<dyn Any> {
 }
 
 impl TypeRegistry {
+    /// Retains recursive identities while installing registered leaf capabilities.
+    ///
+    /// # Errors
+    /// Returns an error if a tuple layout is unrepresentable.
+    ///
+    /// - Complexity: O(n) in descriptor nodes.
+    pub(crate) fn enrich_value_type(
+        &self,
+        ty: &cel_runtime::ValueType,
+    ) -> anyhow::Result<cel_runtime::ValueType> {
+        use cel_runtime::{AssociatedType, ValueKind, ValueType};
+        match ty.kind() {
+            ValueKind::Leaf(id) => Ok(self
+                .entry_by_type_id(*id)
+                .map_or_else(|| ty.clone(), |entry| (entry.value_type_fn)())),
+            ValueKind::Array(element) => Ok(ValueType::array(self.enrich_value_type(element)?)),
+            ValueKind::Tuple(fields) => ValueType::tuple(
+                fields
+                    .iter()
+                    .map(|field| {
+                        Ok(AssociatedType {
+                            offset: 0,
+                            value_type: self.enrich_value_type(&field.value_type)?,
+                        })
+                    })
+                    .collect::<anyhow::Result<_>>()?,
+            ),
+            ValueKind::Callable { .. } => Ok(ty.clone()),
+        }
+    }
+
     /// Returns a registered leaf's source-facing name and complete CEL element descriptor.
     ///
     /// - Complexity: O(l) to clone the registered name of length l.
@@ -592,7 +623,7 @@ impl TypeRegistry {
     }
 
     /// Returns the `(Drop, Clone, PartialEq, Debug)` quadruple registered for `type_id`, for use
-    /// as the `leaf` callback `cel_runtime::DynSegment::call_dyn_as_dynamic_sequence` needs.
+    /// for checked external tuple extraction.
     #[must_use]
     pub fn element_descriptor(
         &self,
@@ -659,9 +690,11 @@ impl TypeRegistry {
             );
             return Vec::new();
         };
-        let mut associated: Vec<_> = elements.iter().map(|e| self.one_associated(e)).collect();
-        cel_runtime::layout_associated(&mut associated);
-        associated
+        cel_runtime::ValueType::tuple(elements.iter().map(|e| self.one_associated(e)).collect())
+            .expect("registered tuple layout")
+            .tuple_elements()
+            .expect("tuple descriptor")
+            .to_vec()
     }
 
     /// Builds one `AssociatedType` entry describing `shape`: a leaf's own registered layout for
@@ -671,24 +704,19 @@ impl TypeRegistry {
     /// - Precondition: every leaf `TypeId` reachable from `shape` is registered.
     ///
     /// - Postcondition: the returned entry's `offset` is always 0; the caller
-    ///   (`associated_prototype`) lays out sibling entries via `cel_runtime::layout_associated`.
+    ///   (`associated_prototype`) computes canonical tail-first sibling offsets.
     fn one_associated(&self, shape: &TypeShape) -> cel_runtime::AssociatedType {
         let value_type = match shape {
             TypeShape::Named(type_id) => {
                 let entry = self
                     .entry_by_type_id(*type_id)
                     .expect("one_associated: type registered");
-                cel_runtime::ValueType::leaf_from_parts(
-                    *type_id,
-                    std::borrow::Cow::Owned(entry.type_name.to_string()),
-                    entry.size,
-                    entry.align,
-                    entry.raw_dropper,
-                )
+                (entry.value_type_fn)()
             }
             TypeShape::Tuple(elements) => cel_runtime::ValueType::tuple(
                 elements.iter().map(|e| self.one_associated(e)).collect(),
-            ),
+            )
+            .expect("registered tuple layout"),
         };
         cel_runtime::AssociatedType {
             offset: 0,
@@ -1207,7 +1235,8 @@ mod tests {
         assert_eq!(prototype.len(), 2);
         assert_eq!(prototype[0].value_type.type_id(), TypeId::of::<i32>());
         assert_eq!(prototype[1].value_type.type_id(), TypeId::of::<f64>());
-        assert_eq!(prototype[1].offset, 8); // i32 at [0,4); f64 aligned up to 8
+        assert_eq!(prototype[0].offset, 8);
+        assert_eq!(prototype[1].offset, 0);
     }
 
     #[test]

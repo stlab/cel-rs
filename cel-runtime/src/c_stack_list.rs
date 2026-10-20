@@ -380,6 +380,7 @@ where
 
 /// Empty `repr(C)` list used as the tail sentinel for [`CStackList`].
 #[repr(C)]
+#[derive(Clone)]
 pub struct CNil<T: CStackListHeadLimit>(T);
 
 impl<T: CStackListHeadLimit> EmptyList for CNil<T> {

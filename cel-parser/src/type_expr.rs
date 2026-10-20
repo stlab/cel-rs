@@ -182,9 +182,9 @@ pub fn resolve_builtin_named_type(name: &str, args: &[ResolvedType]) -> Option<R
 /// Hosts use [`ArrayElementType::cloneable`] when this leaf may also appear in a closure
 /// annotation; the same descriptor then supplies its checked argument-cloning adapter.
 ///
-/// Complete metadata is optional for the legacy erased constructor. Use
-/// [`Self::leaf`] or attach a registration-time descriptor with
-/// [`Self::with_complete_value_type`]; metadata cannot be recovered from a `TypeId`.
+/// Concrete element factories retain complete metadata. Use
+/// [`Self::with_complete_value_type`] to enrich its optional capabilities;
+/// metadata cannot be recovered from a `TypeId`.
 /// Equality compares registered identity, not optional capability availability.
 #[derive(Clone, Debug)]
 pub struct ResolvedLeafType {
@@ -228,9 +228,7 @@ impl ResolvedLeafType {
     pub fn leaf<T: 'static>(
         type_name: impl Into<Cow<'static, str>>,
     ) -> std::result::Result<Self, cel_runtime::ArrayBuildErrorKind> {
-        let mut leaf = Self::new(type_name, ArrayElementType::leaf::<T>()?);
-        leaf.complete = Some(cel_runtime::value_type::ValueType::leaf::<T>());
-        Ok(leaf)
+        Ok(Self::new(type_name, ArrayElementType::leaf::<T>()?))
     }
 
     /// Creates one resolved leaf from a user-facing type name and runtime element descriptor.
@@ -246,16 +244,19 @@ impl ResolvedLeafType {
         let type_name = type_name.into();
         Self {
             type_id: element_type.type_id(),
+            complete: element_type
+                .value_type()
+                .ok()
+                .map(|ty| ty.with_type_name(type_name.clone())),
             element_type: element_type.with_type_name(type_name.clone()),
             type_name,
-            complete: None,
         }
     }
 
     /// Attaches a complete leaf descriptor built while its concrete type was known.
     ///
-    /// Optional capabilities are retained unchanged and independently; this does
-    /// not alter the legacy interpreter's descriptor or emitted operations.
+    /// Optional capabilities are retained unchanged and independently; attaching
+    /// metadata emits no interpreter instructions.
     ///
     /// # Errors
     ///
@@ -285,7 +286,7 @@ impl ResolvedLeafType {
                 && complete.layout().align() == self.element_type.align(),
             "complete leaf layout mismatch"
         );
-        self.complete = Some(complete);
+        self.complete = Some(complete.with_type_name(self.type_name.clone()));
         Ok(self)
     }
 
@@ -348,7 +349,7 @@ pub enum ResolvedType {
 }
 
 impl ResolvedType {
-    /// Builds canonical recursive metadata without changing legacy interpreter storage.
+    /// Builds canonical recursive metadata for interpreter storage.
     ///
     /// Empty tuples describe source unit, not an opaque host `()`.
     ///
@@ -399,31 +400,27 @@ impl ResolvedType {
             }
         }
     }
-
-    fn into_array_element_type(self, span: ExprSpan) -> Result<ArrayElementType> {
-        match self {
-            ResolvedType::Scalar(leaf) => Ok(leaf.element_type),
-            ResolvedType::Array { element } => {
-                Ok(ArrayElementType::array_of(element.into_array_element_type(span)?))
-            }
-            ResolvedType::Tuple { .. } => Err(ParseError::new_range(
-                "tuple-valued array elements are not supported; see https://github.com/stlab/cel-rs/issues/213"
-                    .to_string(),
-                span.start,
-                span.end,
-            )),
-        }
-    }
 }
 
 /// The resolved descriptor for one complete array type annotation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ResolvedArrayType {
-    element_type: ArrayElementType,
+    element_type: cel_runtime::ValueType,
+}
+
+impl PartialEq for ResolvedArrayType {
+    /// Compares recursive identities independently of optional capabilities.
+    ///
+    /// - Complexity: O(n) in descriptor nodes.
+    fn eq(&self, other: &Self) -> bool {
+        self.element_type.same_shape(&other.element_type)
+    }
 }
 
 impl ResolvedArrayType {
     /// Creates a resolved array type from its already-resolved element descriptor.
+    ///
+    /// - Precondition: `element_type` retains a concrete canonical factory.
     ///
     /// - Postcondition: [`element_type`](Self::element_type) returns `element_type` unchanged, so
     ///   the result describes an array whose elements have exactly that type.
@@ -439,19 +436,24 @@ impl ResolvedArrayType {
     /// ```
     #[must_use]
     pub fn from_element_type(element_type: ArrayElementType) -> Self {
-        Self { element_type }
+        Self {
+            element_type: element_type
+                .value_type()
+                .expect("registered element factory"),
+        }
     }
 
     /// Creates a resolved array type from a fully resolved recursive type expression.
     ///
     /// # Errors
     ///
-    /// Returns `Err` if `resolved` is not an array type or if its element type is a tuple, which
-    /// remains unsupported for runtime CEL arrays (issue #213).
+    /// Returns `Err` if `resolved` is not an array type or its layout is unrepresentable.
     pub fn from_resolved_type(resolved: ResolvedType, span: ExprSpan) -> Result<Self> {
         match resolved {
             ResolvedType::Array { element } => Ok(Self {
-                element_type: element.into_array_element_type(span)?,
+                element_type: element.complete_value_type().map_err(|error| {
+                    ParseError::new_range(error.to_string(), span.start, span.end)
+                })?,
             }),
             other => Err(ParseError::new_range(
                 format!(
@@ -466,13 +468,13 @@ impl ResolvedArrayType {
 
     /// Returns the recursive element descriptor this array annotation resolves to.
     #[must_use]
-    pub fn element_type(&self) -> &ArrayElementType {
+    pub fn element_type(&self) -> &cel_runtime::ValueType {
         &self.element_type
     }
 
     /// Returns the recursive element descriptor, consuming `self`.
     #[must_use]
-    pub fn into_element_type(self) -> ArrayElementType {
+    pub fn into_element_type(self) -> cel_runtime::ValueType {
         self.element_type
     }
 }
@@ -611,7 +613,7 @@ mod tests {
                 ArrayElementType::leaf::<i32>().unwrap(),
             ))),
         };
-        assert!(unresolved.complete_value_type().is_err());
+        assert!(unresolved.complete_value_type().is_ok());
     }
 
     /// Keeps source unit distinct from an explicitly registered opaque host unit.
@@ -626,7 +628,7 @@ mod tests {
         assert!(
             ResolvedLeafType::new("old", ArrayElementType::leaf::<i32>().unwrap())
                 .complete_value_type()
-                .is_err()
+                .is_ok()
         );
     }
 

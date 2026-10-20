@@ -84,6 +84,7 @@ pub struct ArrayElementType {
     nested: Option<Box<ArrayElementType>>,
     pub(crate) push_arg: Option<fn(&mut crate::DynSegment, usize, crate::ValueType)>,
     pub(crate) clone_value: Option<crate::ElementCloner>,
+    pub(crate) complete: Option<crate::ValueType>,
 }
 
 impl ArrayElementType {
@@ -115,6 +116,7 @@ impl ArrayElementType {
             nested: None,
             push_arg: None,
             clone_value: None,
+            complete: Some(crate::ValueType::leaf::<T>()),
         })
     }
 
@@ -133,6 +135,7 @@ impl ArrayElementType {
         let mut descriptor = Self::leaf::<T>()?;
         descriptor.push_arg = Some(crate::DynSegment::push_typed_arg::<T>);
         descriptor.clone_value = Some(crate::element_cloner_for::<T>());
+        descriptor.complete = Some(crate::ValueType::cloneable_leaf::<T>());
         Ok(descriptor)
     }
 
@@ -149,9 +152,8 @@ impl ArrayElementType {
     /// descriptor is built by [`array_of`](Self::array_of) so its nested descriptor travels with
     /// it, and a leaf descriptor claiming the array marker would describe elements as
     /// `DynamicArray` values with no element type of their own (the same malformed state
-    /// [`leaf`](Self::leaf) refuses to build). This check is unconditional, matching
-    /// [`ValueType::leaf_from_parts`](crate::ValueType::leaf_from_parts), because the resulting
-    /// descriptor governs how element bytes are interpreted.
+    /// [`leaf`](Self::leaf) refuses to build). This check is unconditional because
+    /// the resulting descriptor governs how element bytes are interpreted.
     pub(crate) fn leaf_from_parts(
         type_id: TypeId,
         type_name: Cow<'static, str>,
@@ -177,6 +179,7 @@ impl ArrayElementType {
             nested: None,
             push_arg: None,
             clone_value: None,
+            complete: None,
         }
     }
 
@@ -193,6 +196,10 @@ impl ArrayElementType {
     /// assert_eq!(element.nested().unwrap().type_id(), TypeId::of::<i32>());
     /// ```
     pub fn array_of(element: ArrayElementType) -> Self {
+        let complete = element
+            .complete
+            .as_ref()
+            .map(|element| crate::ValueType::array(element.clone()));
         Self {
             type_id: TypeId::of::<DynamicArray>(),
             type_name: Cow::Borrowed(std::any::type_name::<DynamicArray>()),
@@ -202,7 +209,25 @@ impl ArrayElementType {
             nested: Some(Box::new(element)),
             push_arg: None,
             clone_value: None,
+            complete,
         }
+    }
+
+    /// Returns complete canonical metadata retained by a concrete leaf factory.
+    ///
+    /// This converts metadata only, not an external array's larger header.
+    /// # Errors
+    /// Rejects erased metadata that lacks its original concrete factory.
+    ///
+    /// # Examples
+    /// ```
+    /// let external = cel_runtime::ArrayElementType::cloneable::<i32>().unwrap();
+    /// assert!(external.value_type().unwrap().same_shape(&cel_runtime::ValueType::leaf::<i32>()));
+    /// ```
+    pub fn value_type(&self) -> anyhow::Result<crate::ValueType> {
+        self.complete
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("external element has no complete concrete factory"))
     }
 
     /// Returns the concrete Rust [`TypeId`] stored by this descriptor.
@@ -301,15 +326,6 @@ impl ArrayElementType {
         self.nested.as_deref()
     }
 
-    /// Reports whether every recursive leaf has a registered clone hook.
-    ///
-    /// - Complexity: O(array nesting depth).
-    pub(crate) fn supports_clone(&self) -> bool {
-        self.nested
-            .as_deref()
-            .map_or(self.clone_value.is_some(), Self::supports_clone)
-    }
-
     /// Returns the recursive name used in type mismatch diagnostics.
     ///
     /// - Complexity: O(depth).
@@ -335,6 +351,7 @@ impl ArrayElementType {
     /// descriptor.
     ///
     /// - Complexity: O(depth).
+    #[cfg(test)]
     pub(crate) fn same_shape_and_layout(&self, other: &Self) -> bool {
         self.type_id == other.type_id
             && self.size == other.size
@@ -633,6 +650,7 @@ fn checked_array_layout(
 /// [`DynamicArrayBuilder::with_capacity`] would.
 ///
 /// - Complexity: O(1).
+#[cfg(test)]
 pub(crate) fn check_array_capacity(
     element: &ArrayElementType,
     capacity: usize,
@@ -831,32 +849,6 @@ impl DynamicArray {
         // SAFETY: ManuallyDrop suppresses the only other descriptor owner.
         let element = unsafe { std::ptr::read(&this.element) };
         (this.ptr, this.len, this.capacity, element)
-    }
-
-    /// Deep-clones this array using an exactly matching descriptor with validated clone hooks.
-    ///
-    /// # Safety
-    /// `element` must have this array's recursive shape and layout, and every leaf must carry
-    /// a clone hook. The caller validates those requirements before executing a closure body.
-    ///
-    /// - Complexity: O(total recursive element count), plus leaf clone costs.
-    pub(crate) unsafe fn clone_as(&self, element: &ArrayElementType) -> Self {
-        debug_assert!(self.element.same_shape_and_layout(element));
-        let value_type = crate::ValueType::registered(element.clone());
-        let mut builder = DynamicArrayBuilder::with_capacity(element.clone(), self.len)
-            .expect("a live array's length has a representable matching layout");
-        for index in 0..self.len {
-            // Safety: both allocations contain this exact layout. Incrementing the initialized
-            // prefix only after cloning keeps completed values owned by the builder.
-            unsafe {
-                value_type.clone_into(
-                    self.ptr.as_ptr().add(index * element.size),
-                    builder.ptr.as_ptr().add(index * element.size),
-                );
-            }
-            builder.len += 1;
-        }
-        builder.finish()
     }
 
     /// Takes ownership of a concrete vector without moving or reallocating its elements.

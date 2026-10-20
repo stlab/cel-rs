@@ -44,9 +44,11 @@
 //!
 //! ## Parsing an Array Literal
 //!
-//! A non-empty CEL array literal evaluates to one
-//! [`DynamicArray`](cel_runtime::DynamicArray) that converts to the corresponding `Vec<T>`
-//! without moving or reallocating its elements:
+//! CEL array literals use canonical [`Array`](cel_runtime::Array) storage.
+//! A checked host call exports supported leaf arrays as
+//! [`DynamicArray`](cel_runtime::DynamicArray), which converts to `Vec<T>` without
+//! moving or reallocating its elements. Recursive tuple arrays use
+//! [`DynSegment::prepare`](cel_runtime::DynSegment::prepare) and representation witnesses:
 //!
 //! ```rust
 //! use cel_rs::parser::{CELParser, OpLookup};

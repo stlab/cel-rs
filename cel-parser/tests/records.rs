@@ -231,7 +231,11 @@ fn unresolved_array_operands_do_not_select_known_results() {
             ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap()),
         )],
         result: leaf::<usize>("usize"),
-        emit: Arc::new(|s, _| s.op1(|array: cel_runtime::DynamicArray| array.len())),
+        emit: Arc::new(|s, _| {
+            s.op1_repr::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>, cel_runtime::Leaf<usize>, _>(
+                |array| array.len(),
+            )
+        }),
     })
     .unwrap();
     for (source, expected) in [("[custom()].length", Ty::Any), ("[1].length", Ty::Usize)] {
@@ -796,7 +800,11 @@ fn record_array_descriptor_identity_is_exact() {
                 ArrayElementType::array_of(ArrayElementType::leaf::<i32>().unwrap()),
             ),
         }],
-        emit: Arc::new(|s, _, _, _| s.op1(|_: cel_runtime::DynamicArray| ())),
+        emit: Arc::new(|s, _, _, _| {
+            s.op1_repr::<cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>, cel_runtime::Leaf<()>, _>(
+                |_| (),
+            )
+        }),
     })
     .unwrap();
     for (source, errors) in [

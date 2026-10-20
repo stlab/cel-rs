@@ -610,7 +610,20 @@ impl ParserContext for AstContext {
         Ok(())
     }
 
-    fn make_tuple(&mut self, n: usize, ambient_start: usize, start: Span, end: Span) {
+    fn make_tuple(
+        &mut self,
+        n: usize,
+        ambient_start: usize,
+        start: Span,
+        end: Span,
+    ) -> crate::Result<()> {
+        if n == 0 {
+            self.values.push(Expr::Literal {
+                value: Literal::Unit,
+                span: ExprSpan { start, end },
+            });
+            return Ok(());
+        }
         let elements = self.values.split_off(ambient_start);
         debug_assert_eq!(
             elements.len(),
@@ -621,6 +634,7 @@ impl ParserContext for AstContext {
             elements,
             span: ExprSpan { start, end },
         });
+        Ok(())
     }
 
     fn make_array(
@@ -678,13 +692,14 @@ impl ParserContext for AstContext {
         Some(usize::MAX)
     }
 
-    fn tuple_index(&mut self, index: usize, start: Span, end: Span) {
+    fn tuple_index(&mut self, index: usize, start: Span, end: Span) -> crate::Result<()> {
         let base = self.pop();
         self.values.push(Expr::TupleIndex {
             base: Box::new(base),
             index,
             span: ExprSpan { start, end },
         });
+        Ok(())
     }
 
     fn current_stack_offset(&self) -> usize {
@@ -978,9 +993,11 @@ mod tests {
         let ambient_start = ctx.current_stack_offset();
         ctx.push_literal(1i32, Span::call_site());
         ctx.push_literal(2i32, Span::call_site());
-        ctx.make_tuple(2, ambient_start, Span::call_site(), Span::call_site());
+        ctx.make_tuple(2, ambient_start, Span::call_site(), Span::call_site())
+            .unwrap();
         assert_eq!(ctx.peek_tuple_arity(), Some(usize::MAX));
-        ctx.tuple_index(1, Span::call_site(), Span::call_site());
+        ctx.tuple_index(1, Span::call_site(), Span::call_site())
+            .unwrap();
         match ctx.into_expr() {
             Expr::TupleIndex { base, index, .. } => {
                 assert_eq!(index, 1);

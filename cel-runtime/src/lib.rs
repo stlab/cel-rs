@@ -37,13 +37,8 @@ pub mod array;
 /// Compile-time stack list implementation for type-safe stack operations.
 pub mod c_stack_list;
 /// Private validated canonical host-operation emission into the existing raw segment.
-#[allow(dead_code, reason = "Prepared for the atomic interpreter cutover.")]
 mod canonical_operation;
 /// Private canonical container construction and trusted frame moves.
-#[allow(
-    dead_code,
-    reason = "Prepared for the later atomic interpreter cutover."
-)]
 mod container_execution;
 /// First-class callable CEL values with declared signatures.
 pub mod dyn_closure;
@@ -54,10 +49,6 @@ pub mod dynamic_array;
 /// Owned, type-erased CEL tuple value that can outlive a `DynSegment` evaluation.
 pub mod dynamic_sequence;
 /// Checked adapters for the existing external host boundaries.
-#[allow(
-    dead_code,
-    reason = "Prepared for the later atomic interpreter cutover."
-)]
 mod host_value_bridge;
 /// Traits for working with type lists and type information.
 pub mod list_traits;
@@ -65,6 +56,8 @@ pub mod list_traits;
 pub mod memory;
 /// Whole-value ownership with complete checked representation witnesses.
 pub mod owned_value;
+/// Prepared typed execution over the existing raw interpreter.
+pub mod prepared_segment;
 /// Raw segment implementation without type safety.
 pub mod raw_segment;
 /// Raw sequence implementation for operation sequences.
@@ -79,7 +72,7 @@ pub mod segment;
 pub mod tuple_list;
 /// Canonical tuple-list layout support.
 mod tuple_value;
-/// Replacement recursive metadata, kept separate until the interpreter cutover.
+/// Complete recursive canonical metadata and sealed concrete representation witnesses.
 pub mod value_type;
 
 pub use array::Array;
@@ -90,9 +83,12 @@ pub use dynamic_array::*;
 pub use dynamic_sequence::*;
 pub use list_traits::*;
 pub use memory::*;
+pub use owned_value::OwnedValue;
+pub use prepared_segment::PreparedSegment;
 pub use raw_segment::*;
 pub use raw_sequence::*;
 pub use raw_stack::*;
 pub use raw_vec::*;
 pub use segment::*;
 pub use tuple_list::*;
+pub use value_type::{ArrayOf, AssociatedType, Cons, Leaf, Nil, ValueKind, ValueRepr, ValueType};

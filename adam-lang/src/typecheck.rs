@@ -1028,22 +1028,10 @@ mod tests {
     }
 
     #[test]
-    fn tuple_typed_array_annotations_report_the_existing_issue_213_diagnostic() {
+    fn tuple_typed_array_annotations_are_accepted_by_cel_checking() {
         let sheet = parse("sheet s { out values := []: [(i32, f64)]; }");
         let diagnostics = check_sheet(&sheet, &TypeRegistry::new(), &cel_parser::OpLookup::new());
-        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-        assert!(
-            diagnostics[0]
-                .message()
-                .contains("tuple-valued array elements are not supported"),
-            "got: {}",
-            diagnostics[0].message()
-        );
-        assert!(
-            diagnostics[0].message().contains("issues/213"),
-            "the diagnostic must reference the tuple-array issue, got: {}",
-            diagnostics[0].message()
-        );
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
     #[test]

@@ -154,7 +154,9 @@
 //!
 //! ## Array Literals
 //!
-//! A `[...]` literal evaluates to one [`cel_runtime::DynamicArray`] owning every element.
+//! A `[...]` literal constructs one canonical [`cel_runtime::Array`] owning every element.
+//! Checked host calls can export supported leaf/nested-array shapes as
+//! [`cel_runtime::DynamicArray`]; prepared calls use exact recursive witnesses instead.
 //! Unannotated non-empty arrays keep their existing inference, while postfix annotations let
 //! callers state the complete scalar, nested-array, custom-registry, or empty-array type
 //! explicitly. Elements must share one complete recursive runtime type — a heterogeneous literal
@@ -239,10 +241,10 @@
 //!
 //! - An unannotated empty literal (`[]`) is a parse error: with no element there is nothing to
 //!   infer the array's element type from (<https://github.com/stlab/cel-rs/issues/212>).
-//! - A CEL tuple cannot be an array element, so both `[(0i32, 1i32)]` and `[]: [(i32, i32)]`
-//!   are rejected with the explicit tuple-array diagnostic: a tuple is a stack-layout
-//!   pseudo-value with no concrete Rust element representation
-//!   (<https://github.com/stlab/cel-rs/issues/213>).
+//! - Tuples and recursively nested arrays use canonical representations. Use
+//!   [`cel_runtime::DynSegment::prepare`] with [`cel_runtime::ArrayOf`] and
+//!   [`cel_runtime::Cons`] witnesses for tuple-valued arrays; the external
+//!   [`cel_runtime::DynamicArray`] wrapper cannot export those elements.
 //! - A type-mismatch diagnostic from the compiling path ([`CELParser`], which type-checks
 //!   elements against their compiled runtime types) spans the whole `[...]` literal and names the
 //!   offending element only in its message text (`array element 1 has type ...`). The static
@@ -516,39 +518,19 @@ pub fn validate_literal(lit: &CelLiteral) -> Result<()> {
 /// Resolves a closure annotation through the configured registry without erasing its shape.
 ///
 /// # Errors
-/// Returns annotation resolution errors, or unsupported tuple-valued array element errors.
+/// Returns annotation resolution errors or unrepresentable layout errors.
 /// - Complexity: O(number of type nodes).
 fn closure_param_type_from_type_expr(
     type_expr: &TypeExpr,
     resolver: &dyn TypeResolver,
 ) -> Result<cel_runtime::ValueType> {
-    /// Converts a resolved type tree into runtime descriptors.
-    ///
-    /// - Complexity: O(number of type nodes).
-    fn convert(ty: ResolvedType, span: ExprSpan) -> Result<cel_runtime::ValueType> {
-        match ty {
-            ResolvedType::Scalar(leaf) => Ok(cel_runtime::ValueType::registered(
-                leaf.element_type().clone(),
-            )),
-            ResolvedType::Tuple { elements } => Ok(cel_runtime::ValueType::tuple(
-                elements
-                    .into_iter()
-                    .map(|ty| {
-                        Ok(cel_runtime::AssociatedType {
-                            offset: 0,
-                            value_type: convert(ty, span)?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?,
-            )),
-            ResolvedType::Array { element } => {
-                let array =
-                    ResolvedArrayType::from_resolved_type(ResolvedType::Array { element }, span)?;
-                Ok(cel_runtime::ValueType::array(array.into_element_type()))
-            }
-        }
-    }
-    convert(type_expr.resolve(resolver)?, type_expr.span())
+    type_expr
+        .resolve(resolver)?
+        .complete_value_type()
+        .map_err(|error| {
+            let span = type_expr.span();
+            ParseError::new_range(error.to_string(), span.start, span.end)
+        })
 }
 
 /// A recursive descent parser for expressions, generic over the [`ParserContext`] it emits
@@ -1745,7 +1727,7 @@ impl<C: ParserContext> Parser<C> {
                 "tuple index `{index}` out of range for tuple of arity {arity}"
             )));
         }
-        self.context.tuple_index(index, start, self.last_span);
+        self.context.tuple_index(index, start, self.last_span)?;
         Ok(())
     }
 
@@ -1944,7 +1926,12 @@ impl<C: ParserContext> Parser<C> {
             })
         ) {
             self.advance();
-            self.context.push_literal((), self.last_span);
+            self.context.make_tuple(
+                0,
+                self.context.current_stack_offset(),
+                open_span,
+                self.last_span,
+            )?;
             return Ok(true);
         }
         let ambient_start = self.context.current_stack_offset();
@@ -1976,7 +1963,7 @@ impl<C: ParserContext> Parser<C> {
             // Single element + trailing comma: 1-tuple.
             self.advance();
             self.context
-                .make_tuple(count, ambient_start, open_span, self.last_span);
+                .make_tuple(count, ambient_start, open_span, self.last_span)?;
             return Ok(true);
         }
         loop {
@@ -1999,7 +1986,7 @@ impl<C: ParserContext> Parser<C> {
             }
         }
         self.context
-            .make_tuple(count, ambient_start, open_span, self.last_span);
+            .make_tuple(count, ambient_start, open_span, self.last_span)?;
         Ok(true)
     }
 
@@ -2775,7 +2762,7 @@ mod tests {
         let mut parser = CELParser::new(OpLookup::new());
         let mut seg = parser.parse_str("(1i32,)").unwrap();
         assert_eq!(seg.peek_tuple_arity(), Some(1));
-        seg.tuple_index(0);
+        seg.tuple_index(0).unwrap();
         assert_eq!(seg.call0::<i32>().unwrap(), 1);
     }
 
@@ -3961,20 +3948,12 @@ mod tests {
         // parameter type is a tuple.
         let mut pair = DynSegment::new::<()>();
         let ambient_start = pair.current_stack_offset();
-        pair.op0(|| 10i32);
-        pair.op0(|| 20i32);
-        pair.make_tuple(2, ambient_start);
-        let leaf = |type_id: TypeId| {
-            (type_id == TypeId::of::<i32>()).then(|| {
-                (
-                    cel_runtime::element_dropper_for::<i32>(),
-                    cel_runtime::element_cloner_for::<i32>(),
-                    cel_runtime::element_eq_for::<i32>(),
-                    cel_runtime::element_debug_for::<i32>(),
-                )
-            })
-        };
-        let pair: cel_runtime::DynamicSequence = pair.call_dyn_as_dynamic_sequence(&[], &leaf)?;
+        pair.just(10i32);
+        pair.annotate_top(crate::op_table::builtin_value_type(TypeId::of::<i32>()).unwrap())?;
+        pair.just(20i32);
+        pair.annotate_top(crate::op_table::builtin_value_type(TypeId::of::<i32>()).unwrap())?;
+        pair.make_tuple(2, ambient_start)?;
+        let pair: cel_runtime::DynamicSequence = pair.call_dyn_as_dynamic_sequence(&[])?;
 
         assert_eq!(closure.call::<i32>(&[&pair])?, 30);
         Ok(())
@@ -4386,13 +4365,14 @@ mod tests {
     }
 
     #[test]
-    fn array_literal_rejects_a_tuple_element() {
-        let err = array_parse_error("[(0i32, 1i32)]");
-        assert!(err.message().contains("tuple"), "got: {}", err.message());
+    fn array_literal_accepts_a_tuple_element() {
+        use cel_runtime::{ArrayOf, Cons, Leaf, Nil};
+        let body = CELParser::new(OpLookup::new())
+            .parse_str("[(0i32, 1i32)]")
+            .unwrap();
         assert!(
-            err.message().contains("issues/213"),
-            "the diagnostic must reference the tuple-element issue, got: {}",
-            err.message()
+            body.prepare::<Nil, ArrayOf<Cons<Leaf<i32>, Cons<Leaf<i32>, Nil>>>>()
+                .is_ok()
         );
     }
 
@@ -4549,13 +4529,14 @@ mod tests {
     }
 
     #[test]
-    fn typed_array_annotation_keeps_tuple_type_syntax_but_rejects_tuple_array_elements() {
-        let err = array_parse_error("[]: [(i32, f64)]");
-        assert!(err.message().contains("tuple"), "got: {}", err.message());
+    fn typed_array_annotation_accepts_tuple_array_elements() {
+        use cel_runtime::{ArrayOf, Cons, Leaf, Nil};
+        let body = CELParser::new(OpLookup::new())
+            .parse_str("[]: [(i32, f64)]")
+            .unwrap();
         assert!(
-            err.message().contains("issues/213"),
-            "the diagnostic must reference the tuple-element issue, got: {}",
-            err.message()
+            body.prepare::<Nil, ArrayOf<Cons<Leaf<i32>, Cons<Leaf<f64>, Nil>>>>()
+                .is_ok()
         );
     }
 
@@ -4569,7 +4550,8 @@ mod tests {
                     Ok(true)
                 }
                 ("()", 2) => {
-                    segment.op2(|_callee: i32, arg: cel_runtime::DynamicArray| arg.len() as i32)?;
+                    segment.op2_repr::<cel_runtime::Leaf<i32>, cel_runtime::ArrayOf<cel_runtime::Leaf<i32>>, cel_runtime::Leaf<i32>, _>(
+                        |_callee, arg| arg.len() as i32)?;
                     Ok(true)
                 }
                 _ => Ok(false),

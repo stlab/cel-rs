@@ -258,13 +258,20 @@ fn closure_postfix_formatting_preserves_evaluation() {
     let mut lookup = lookup();
     lookup.push_scope(|name, s, arity, _| {
         if name == "()" && arity == 1 {
-            s.op1r(|closure: cel_runtime::DynClosure| closure.call::<i32>(&[]))?;
+            s.invoke_closure(0)?;
             return Ok(true);
         }
         if name != "arity" || arity != 1 {
             return Ok(false);
         }
-        s.op1(|closure: cel_runtime::DynClosure| closure.param_types().len())?;
+        let cel_runtime::ValueKind::Callable { parameters, .. } =
+            s.peek_stack_infos(1)[0].value_type.kind()
+        else {
+            anyhow::bail!("callable required");
+        };
+        let count = parameters.len();
+        s.drop_value()?;
+        s.just(count);
         Ok(true)
     });
     let mut parser = CELParser::new(lookup);
