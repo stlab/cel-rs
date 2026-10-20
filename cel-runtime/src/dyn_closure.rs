@@ -362,6 +362,37 @@ impl DynClosure {
         unsafe { body.execute_raw(arguments) }
     }
 
+    /// Executes this carrier with a construction-validated, representation-matched frame.
+    ///
+    /// This path deliberately omits the external signature check. The prepared
+    /// invocation owns a clone of this exact carrier, preventing substitution.
+    ///
+    /// # Safety
+    ///
+    /// Preparation must bind this closure's full signature and its legacy
+    /// physical frame. Every pointer must remain a live matching borrowed value
+    /// until execution returns; operations must not retain argument pointers.
+    /// The binding must remain valid: a legacy `CallDynFn` dispatcher must not
+    /// modify the compiled body between preparation and execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns reentrant body borrow or body evaluation errors.
+    /// - Complexity: Body-dependent time and independent evaluation stack storage.
+    pub(crate) unsafe fn call_raw_trusted(
+        &self,
+        arguments: &[*const u8],
+    ) -> anyhow::Result<crate::raw_stack::RawStack> {
+        debug_assert_eq!(arguments.len(), self.0.param_types.len());
+        debug_assert!(self.0.signature.is_some());
+        let mut body = self
+            .0
+            .body
+            .try_borrow_mut()
+            .map_err(|_| anyhow::anyhow!("closure body is already executing"))?;
+        unsafe { body.execute_raw(arguments) }
+    }
+
     /// Returns this closure's declared parameter types, in order.
     ///
     /// # Examples

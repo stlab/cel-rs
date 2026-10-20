@@ -36,6 +36,12 @@
 pub mod array;
 /// Compile-time stack list implementation for type-safe stack operations.
 pub mod c_stack_list;
+/// Private canonical container construction and trusted frame moves.
+#[allow(
+    dead_code,
+    reason = "Prepared for the later atomic interpreter cutover."
+)]
+mod container_execution;
 /// First-class callable CEL values with declared signatures.
 pub mod dyn_closure;
 /// Dynamic segment implementation with runtime type checking.

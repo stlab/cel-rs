@@ -23,14 +23,14 @@ use crate::value_type::{AssociatedType, ValueKind, ValueRepr, ValueType};
 /// Owns one aligned allocation, including an aligned dangling pointer for ZSTs.
 ///
 /// This owner deallocates storage but does not destroy its contents.
-struct Allocation {
-    pointer: NonNull<u8>,
-    layout: Layout,
+pub(crate) struct Allocation {
+    pub(crate) pointer: NonNull<u8>,
+    pub(crate) layout: Layout,
 }
 
 impl Allocation {
     /// Allocates uninitialized storage or an aligned dangling pointer for a ZST.
-    fn new(layout: Layout) -> Self {
+    pub(crate) fn new(layout: Layout) -> Self {
         let pointer = if layout.size() == 0 {
             NonNull::new(ptr::without_provenance_mut(layout.align())).unwrap()
         } else {
@@ -74,6 +74,21 @@ pub struct OwnedValue {
 }
 
 impl OwnedValue {
+    /// Adopts an allocation containing one fully initialized canonical value.
+    ///
+    /// # Safety
+    ///
+    /// The allocation must uniquely own one live value of exactly `value_type`,
+    /// including all nested allocations, with no other destruction responsibility.
+    pub(crate) unsafe fn from_allocation(allocation: Allocation, value_type: ValueType) -> Self {
+        debug_assert_eq!(allocation.layout, value_type.layout());
+        Self {
+            allocation,
+            value_type,
+            live: true,
+        }
+    }
+
     /// Takes ownership using the sealed witness's canonical descriptor.
     ///
     /// Moving an array copies only its header and preserves its element allocation.
@@ -315,7 +330,7 @@ impl Drop for OwnedValue {
 }
 
 /// Describes initialized children without per-element descriptors or allocations.
-enum Children<'a> {
+pub(crate) enum Children<'a> {
     /// Source-ordered tuple fields at canonical offsets.
     Fields(&'a [AssociatedType]),
     /// Homogeneous elements at their concrete stride.
@@ -333,10 +348,10 @@ impl Children<'_> {
 }
 
 /// Destroys a live child prefix backwards, including remaining children on unwind.
-struct Prefix<'a> {
-    base: *mut u8,
-    children: Children<'a>,
-    initialized: usize,
+pub(crate) struct Prefix<'a> {
+    pub(crate) base: *mut u8,
+    pub(crate) children: Children<'a>,
+    pub(crate) initialized: usize,
 }
 
 impl Prefix<'_> {
@@ -351,7 +366,7 @@ impl Prefix<'_> {
     ///
     /// The prefix must uniquely own exactly `initialized` live children matching
     /// `children`, at their validated offsets from `base`.
-    unsafe fn destroy(&mut self) {
+    pub(crate) unsafe fn destroy(&mut self) {
         while self.initialized != 0 {
             self.initialized -= 1;
             let (value_type, offset) = self.children.child(self.initialized);
