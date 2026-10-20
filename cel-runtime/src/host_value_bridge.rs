@@ -60,6 +60,27 @@ pub(crate) struct HostValuePlan {
 }
 
 impl HostValuePlan {
+    /// Validates a borrowed host value and returns its external storage pointer.
+    ///
+    /// The pointer remains valid only while the input stays live. Leaf storage
+    /// is representation-identical to canonical storage; structural wrappers
+    /// require conversion before raw execution.
+    ///
+    /// # Errors
+    /// Rejects mismatched recursive shapes or missing leaf clone capabilities.
+    /// - Complexity: O(v * d + n) time and O(d) call space for v values,
+    ///   n descriptor nodes, and nesting depth d (at least 1).
+    pub(crate) fn validate_any(&self, input: &dyn Any) -> anyhow::Result<*const u8> {
+        anyhow::ensure!(
+            input.type_id() == self.external_type().0,
+            "external box type mismatch"
+        );
+        let source = input as *const dyn Any as *const u8;
+        unsafe { self.validate_raw(source)? };
+        self.validate_clone()?;
+        Ok(source)
+    }
+
     /// Clones a checked borrowed host value without consuming its original.
     ///
     /// Complete representation and recursive leaf capabilities are checked
@@ -72,13 +93,7 @@ impl HostValuePlan {
     ///   clone costs, for v values, external array metadata depth d (at least 1),
     ///   and s representation bytes.
     pub(crate) fn clone_any(&self, input: &dyn Any) -> anyhow::Result<OwnedValue> {
-        anyhow::ensure!(
-            input.type_id() == self.external_type().0,
-            "external box type mismatch"
-        );
-        let source = input as *const dyn Any as *const u8;
-        unsafe { self.validate_raw(source)? };
-        self.validate_clone()?;
+        let source = self.validate_any(input)?;
         // SAFETY: The complete external shape and every leaf clone are checked.
         unsafe { self.clone_external(source) }
     }

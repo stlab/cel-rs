@@ -9,6 +9,145 @@ use cel_runtime::*;
 /// Records destruction of actual runtime operands, not registration data.
 struct Tracked(&'static str, Rc<RefCell<Vec<&'static str>>>);
 
+/// Owns text and counts clones, optionally rejecting every attempted clone.
+struct CloneProbe {
+    text: String,
+    clones: Rc<Cell<usize>>,
+    panic_on_clone: bool,
+}
+
+impl Clone for CloneProbe {
+    /// Records an actual read, panicking when cloning this input is forbidden.
+    fn clone(&self) -> Self {
+        assert!(!self.panic_on_clone, "unused input must not be cloned");
+        self.clones.set(self.clones.get() + 1);
+        Self {
+            text: self.text.clone(),
+            clones: self.clones.clone(),
+            panic_on_clone: self.panic_on_clone,
+        }
+    }
+}
+
+/// External scalar inputs clone once per executed read, not once per boundary.
+#[test]
+fn external_scalar_clones_only_executed_reads() -> anyhow::Result<()> {
+    let clones = Rc::new(Cell::new(0));
+    let mut body = DynSegment::new::<()>();
+    body.push_arg::<CloneProbe>(0);
+    body.push_arg::<CloneProbe>(0);
+    body.op2(|a: CloneProbe, b: CloneProbe| format!("{}{}", a.text, b.text))?;
+    let first = {
+        let input = CloneProbe {
+            text: "first".into(),
+            clones: clones.clone(),
+            panic_on_clone: false,
+        };
+        let result = body.call_dyn::<String>(&[&input])?;
+        assert_eq!(clones.get(), 2);
+        assert_eq!(input.text, "first");
+        result
+    };
+    let input = CloneProbe {
+        text: "second".into(),
+        clones: clones.clone(),
+        panic_on_clone: false,
+    };
+    assert_eq!(body.call_dyn::<String>(&[&input])?, "secondsecond");
+    assert_eq!(clones.get(), 4);
+    assert_eq!(first, "firstfirst");
+    Ok(())
+}
+
+/// Unselected scalar reads are still validated but never invoke their clone.
+#[test]
+fn external_scalar_unselected_panic_on_clone() -> anyhow::Result<()> {
+    let mut body = DynSegment::new::<()>();
+    body.just(false);
+    let mut yes = body.new_fragment();
+    yes.push_arg::<CloneProbe>(0);
+    yes.op1(|value: CloneProbe| value.text.len())?;
+    let mut no = body.new_fragment();
+    no.just(7usize);
+    body.join2(yes, no)?;
+    let input = CloneProbe {
+        text: "unused".into(),
+        clones: Rc::new(Cell::new(0)),
+        panic_on_clone: true,
+    };
+    assert!(body.call_dyn::<usize>(&[&1i32]).is_err());
+    assert!(body.call_dyn::<usize>(&[]).is_err());
+    for _ in 0..2 {
+        assert_eq!(body.call_dyn::<usize>(&[&input])?, 7);
+        assert_eq!(input.clones.get(), 0);
+    }
+    Ok(())
+}
+
+/// Recursive input rejection precedes any earlier scalar clone or body effect.
+#[test]
+fn external_scalar_preflight_checks_all_inputs() -> anyhow::Result<()> {
+    let calls = Rc::new(Cell::new(0));
+    let mut body = DynSegment::new::<()>();
+    let counter = calls.clone();
+    body.op0(move || counter.set(counter.get() + 1));
+    body.drop_value()?;
+    body.push_arg::<CloneProbe>(0);
+    body.drop_value()?;
+    body.push_argument(
+        1,
+        ValueType::array(ValueType::array(ValueType::cloneable_leaf::<i32>())),
+    )?;
+    body.drop_value()?;
+    body.just(7usize);
+    let input = CloneProbe {
+        text: "must not be read".into(),
+        clones: Rc::new(Cell::new(0)),
+        panic_on_clone: true,
+    };
+    let wrong =
+        DynamicArray::try_from_vec(vec![DynamicArray::try_from_vec(vec![true]).unwrap()]).unwrap();
+    assert!(body.call_dyn::<usize>(&[&input, &wrong]).is_err());
+    assert_eq!(calls.get(), 0);
+    assert_eq!(input.clones.get(), 0);
+    Ok(())
+}
+
+/// Nested checked calls restore the enclosing borrowed scalar frame.
+#[test]
+fn external_scalar_nested_calls_restore_borrowed_inputs() -> anyhow::Result<()> {
+    let clones = Rc::new(Cell::new(0));
+    let mut inner = DynSegment::new::<()>();
+    inner.push_arg::<CloneProbe>(0);
+    inner.op1(|value: CloneProbe| value.text)?;
+    let mut outer = DynSegment::new::<()>();
+    let inner = RefCell::new(inner);
+    let counter = clones.clone();
+    outer.op0r(move || {
+        let input = CloneProbe {
+            text: "inner".into(),
+            clones: counter.clone(),
+            panic_on_clone: false,
+        };
+        inner.borrow_mut().call_dyn::<String>(&[&input])
+    });
+    outer.push_arg::<CloneProbe>(0);
+    outer.op2(|inner: String, outer: CloneProbe| format!("{inner}:{}", outer.text))?;
+    for text in ["first", "second"] {
+        let input = CloneProbe {
+            text: text.into(),
+            clones: clones.clone(),
+            panic_on_clone: false,
+        };
+        assert_eq!(
+            outer.call_dyn::<String>(&[&input])?,
+            format!("inner:{text}")
+        );
+    }
+    assert_eq!(clones.get(), 4);
+    Ok(())
+}
+
 impl Drop for Tracked {
     /// Appends this live owner's unique destruction event.
     fn drop(&mut self) {

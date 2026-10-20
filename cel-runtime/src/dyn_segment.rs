@@ -1373,6 +1373,8 @@ impl DynSegment {
     ///
     /// Structural results export legacy host wrappers; callable results return
     /// their concrete carrier. Interpreter operations never use this conversion.
+    /// Scalar inputs are borrowed after complete input preflight and cloned only
+    /// by executed reads; legacy structural inputs require ownership conversion.
     ///
     /// # Errors
     /// Rejects dependent bodies, non-single results, unsupported external shapes,
@@ -1645,11 +1647,15 @@ impl DynSegment {
             .collect()
     }
 
-    /// Validates and imports external owners before entering the raw interpreter.
+    /// Validates all external inputs, then borrows leaves and imports structural owners.
+    ///
+    /// Scalar inputs remain borrowed for this call, including nested calls.
+    /// Only executed scalar reads clone them. Recursive validation completes
+    /// before any structural conversion or body operation runs.
     ///
     /// # Errors
     /// Rejects dependent bodies or invalid external reads; propagates body errors.
-    /// - Complexity: Boundary checking/cloning plus body execution.
+    /// - Complexity: Boundary checking/structural cloning plus body execution.
     fn call_external(&mut self, inputs: &[&dyn Any]) -> Result<RawStack> {
         self.validate_independent_body()?;
         for (position, (index, ty)) in self.argument_reads.iter().enumerate() {
@@ -1661,21 +1667,28 @@ impl DynSegment {
                 );
             }
         }
-        let mut owners: Vec<Option<OwnedValue>> = (0..inputs.len()).map(|_| None).collect();
+        let mut plans: Vec<Option<HostValuePlan>> = (0..inputs.len()).map(|_| None).collect();
+        let mut pointers = vec![std::ptr::null(); inputs.len()];
         for (index, ty) in &self.argument_reads {
-            if owners[*index].is_some() {
+            if plans[*index].is_some() {
                 continue;
             }
-            let input = inputs
-                .get(*index)
-                .ok_or_else(|| anyhow!("missing argument {index}"))?;
-            let owner = HostValuePlan::new(ty.clone())?.clone_any(*input)?;
+            let plan = HostValuePlan::new(ty.clone())?;
+            pointers[*index] = plan.validate_any(inputs[*index])?;
+            plans[*index] = Some(plan);
+        }
+        let mut owners: Vec<Option<OwnedValue>> = (0..inputs.len()).map(|_| None).collect();
+        for (index, ty) in &self.argument_reads {
+            if matches!(ty.kind(), ValueKind::Leaf(_)) || owners[*index].is_some() {
+                continue;
+            }
+            let owner = plans[*index]
+                .as_ref()
+                .expect("external argument preflight completed")
+                .clone_any(inputs[*index])?;
+            pointers[*index] = owner.as_ptr();
             owners[*index] = Some(owner);
         }
-        let pointers: Vec<_> = owners
-            .iter()
-            .map(|owner| owner.as_ref().map_or(std::ptr::null(), OwnedValue::as_ptr))
-            .collect();
         unsafe { self.execute_raw(&pointers) }
     }
 
