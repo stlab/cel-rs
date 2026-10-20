@@ -48,6 +48,8 @@ pub mod dynamic_sequence;
 pub mod list_traits;
 /// Memory management and alignment utilities for the runtime.
 pub mod memory;
+/// Whole-value ownership with complete checked representation witnesses.
+pub mod owned_value;
 /// Raw segment implementation without type safety.
 pub mod raw_segment;
 /// Raw sequence implementation for operation sequences.
@@ -62,6 +64,8 @@ pub mod segment;
 pub mod tuple_list;
 /// Canonical tuple-list layout support.
 mod tuple_value;
+/// Replacement recursive metadata, kept separate until the interpreter cutover.
+pub mod value_type;
 
 pub use array::Array;
 pub use c_stack_list::*;
