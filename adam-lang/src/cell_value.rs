@@ -2,7 +2,7 @@
 //!
 //! Primitive cells remain concrete Rust values. Compound access passes through
 //! `ParsedSheet`'s checked representation-witness boundary.
-use std::any::Any;
+use std::any::{Any, TypeId};
 
 use cel_runtime::{DynSegment, OwnedValue, ValueType, prepared_segment::PreparedRawSegment};
 
@@ -137,8 +137,34 @@ pub(crate) struct Frame {
 /// Binds Adam storage addresses to the canonical runtime's one raw execution engine.
 pub(crate) struct RawFrame {
     body: PreparedRawSegment,
-    compound_inputs: Vec<bool>,
+    inputs: Vec<Input>,
     pointers: Vec<*const u8>,
+}
+
+/// Retains the complete storage identity required at an erased host boundary.
+enum Input {
+    /// A concrete registered Rust leaf.
+    Leaf(TypeId),
+    /// A private carrier with an exact recursive canonical shape.
+    Compound(ValueType),
+}
+
+impl Input {
+    /// Checks storage identity and complete shape without binding or reading raw pointers.
+    ///
+    /// # Errors
+    /// Rejects a different concrete type, compound carrier, or recursive shape.
+    /// - Complexity: O(n) for n compound descriptor nodes; O(1) for leaves.
+    fn validate(&self, input: &dyn Any) -> anyhow::Result<()> {
+        let matches = match self {
+            Self::Leaf(id) => input.type_id() == *id,
+            Self::Compound(expected) => input
+                .downcast_ref::<CellValue>()
+                .is_some_and(|value| value.0.value_type().same_shape(expected)),
+        };
+        anyhow::ensure!(matches, "Adam argument storage or shape mismatch");
+        Ok(())
+    }
 }
 
 impl Frame {
@@ -238,18 +264,16 @@ impl RawFrame {
         result: &ValueType,
         types: &TypeRegistry,
     ) -> anyhow::Result<Self> {
+        let input_types: Vec<_> = inputs.iter().map(|shape| types.value_type(shape)).collect();
         Ok(Self {
-            body: PreparedRawSegment::new(
-                body,
-                &inputs
-                    .iter()
-                    .map(|s| types.value_type(s))
-                    .collect::<Vec<_>>(),
-                result,
-            )?,
-            compound_inputs: inputs
+            body: PreparedRawSegment::new(body, &input_types, result)?,
+            inputs: inputs
                 .iter()
-                .map(|s| !matches!(s, TypeShape::Named(_)))
+                .zip(input_types)
+                .map(|(shape, value_type)| match shape {
+                    TypeShape::Named(id) => Input::Leaf(*id),
+                    _ => Input::Compound(value_type),
+                })
                 .collect(),
             pointers: vec![std::ptr::null(); inputs.len()],
         })
@@ -282,6 +306,32 @@ impl RawFrame {
         )
     }
 
+    /// Checks every erased input before binding any address or executing the prefixed frame.
+    ///
+    /// # Errors
+    /// Rejects missing or extra inputs, wrong scalar identities, compound carriers, or
+    /// recursive shapes on every invocation; propagates operation failures after cleanup.
+    /// Rejection leaves previously bound pointers unused and permits later valid calls.
+    /// - Complexity: O(a + n) validation for a inputs and n compound descriptor nodes,
+    ///   plus pointer binding and body costs.
+    pub(crate) fn call_checked_with_prefix(
+        &mut self,
+        value: &dyn Any,
+        inputs: &[&dyn Any],
+    ) -> anyhow::Result<OwnedValue> {
+        anyhow::ensure!(
+            inputs.len().checked_add(1) == Some(self.inputs.len()),
+            "Adam argument count mismatch"
+        );
+        for (input, expected) in std::iter::once(value)
+            .chain(inputs.iter().copied())
+            .zip(&self.inputs)
+        {
+            expected.validate(input)?;
+        }
+        self.call_with_prefix(value, inputs)
+    }
+
     /// Binds borrowed host addresses into the reusable canonical pointer slots.
     ///
     /// - Precondition: Input count and types match preparation.
@@ -294,19 +344,19 @@ impl RawFrame {
         arity: usize,
     ) -> anyhow::Result<OwnedValue> {
         debug_assert_eq!(arity, self.pointers.len());
-        for ((input, compound), pointer) in
-            inputs.zip(&self.compound_inputs).zip(&mut self.pointers)
-        {
+        for ((input, adapter), pointer) in inputs.zip(&self.inputs).zip(&mut self.pointers) {
             let data = std::ptr::from_ref(input).cast::<()>();
-            *pointer = if *compound {
-                // SAFETY: Adam verifies the private CellValue storage TypeId.
-                unsafe { &*data.cast::<CellValue>() }.0.as_ptr()
-            } else {
-                data.cast()
+            *pointer = match adapter {
+                Input::Compound(_) => {
+                    // SAFETY: Adam's internal boundary or the checked public
+                    // adapter verifies the private carrier and complete shape.
+                    unsafe { &*data.cast::<CellValue>() }.0.as_ptr()
+                }
+                Input::Leaf(_) => data.cast(),
             };
         }
-        // SAFETY: Construction validates every read. Adam's callback contract
-        // guarantees storage types; private compound writes validate full shapes.
+        // SAFETY: Construction validates every read. The internal callback boundary
+        // or checked entry point guarantees storage types and complete compound shapes.
         unsafe { self.body.call(&self.pointers) }
     }
 }

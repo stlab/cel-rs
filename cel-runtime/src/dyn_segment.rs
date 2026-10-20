@@ -1502,15 +1502,11 @@ impl DynSegment {
         self.argument_reads.extend(yes.argument_reads);
         self.argument_reads.extend(no.argument_reads);
         self.segment.raw0_(move |stack| {
-            let mut owner = unsafe { condition.take(stack) };
-            let mut value = MaybeUninit::<bool>::uninit();
-            unsafe { owner.move_into(value.as_mut_ptr().cast()) };
+            // SAFETY: Construction validates bool; the bound plan restores the
+            // exact ambient origin before the cleanup guard is armed.
+            let value = unsafe { condition.take_typed::<bool>(stack) };
             let mut guard = cleanup.guard(stack);
-            let branch = if unsafe { value.assume_init() } {
-                &yes.segment
-            } else {
-                &no.segment
-            };
+            let branch = if value { &yes.segment } else { &no.segment };
             match unsafe { branch.call0_stack(guard.stack) } {
                 Ok(()) => {
                     guard.armed = false;
@@ -1752,6 +1748,72 @@ mod performance_tests {
                 drop(body);
                 crate::canonical_operation::LIVE_CLEANUP_SLOTS
                     .with(|count| assert_eq!(count.get(), before));
+            }
+        }
+    }
+
+    /// Checks that prepared conditionals and short-circuit branches allocate no owners.
+    #[test]
+    fn prepared_branches_avoid_temporary_allocations() {
+        type Inputs = Cons<Leaf<bool>, Cons<Leaf<bool>, Nil>>;
+        for kind in ["if", "&&", "||"] {
+            for conditions in [1u64, 10, 100] {
+                let mut body = DynSegment::new::<()>();
+                body.just(17u64);
+                for _ in 0..conditions {
+                    body.push_arg::<bool>(0);
+                    let mut yes = body.new_fragment();
+                    let mut no = body.new_fragment();
+                    match kind {
+                        "if" => {
+                            yes.push_arg::<bool>(1);
+                            no.push_arg::<bool>(1);
+                            no.op1(|value: bool| !value).unwrap();
+                        }
+                        "&&" => {
+                            yes.push_arg::<bool>(1);
+                            no.just(false);
+                        }
+                        "||" => {
+                            yes.just(true);
+                            no.push_arg::<bool>(1);
+                        }
+                        _ => unreachable!(),
+                    }
+                    body.join2(yes, no).unwrap();
+                    body.op2r(|total: u64, value: bool| {
+                        total
+                            .checked_add(u64::from(value))
+                            .ok_or_else(|| anyhow!("overflow"))
+                    })
+                    .unwrap();
+                }
+                let mut prepared = body.prepare::<Inputs, Leaf<u64>>().unwrap();
+                for condition in [false, true] {
+                    for rhs in [false, true] {
+                        let value = match kind {
+                            "if" => {
+                                if condition {
+                                    rhs
+                                } else {
+                                    !rhs
+                                }
+                            }
+                            "&&" => condition && rhs,
+                            "||" => condition || rhs,
+                            _ => unreachable!(),
+                        };
+                        let expected = 17 + conditions * u64::from(value);
+                        let inputs = (condition, rhs).into_c_stack_list();
+                        assert_eq!(prepared.call(&inputs).unwrap(), expected);
+                        crate::owned_value::ALLOCATIONS.with(|count| count.set(0));
+                        for _ in 0..100 {
+                            assert_eq!(prepared.call(&inputs).unwrap(), expected);
+                        }
+                        let allocations = crate::owned_value::ALLOCATIONS.with(Cell::get);
+                        assert_eq!(allocations, 0, "{kind}, {conditions} conditions");
+                    }
+                }
             }
         }
     }

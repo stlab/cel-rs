@@ -758,50 +758,11 @@ fn named_key<'a>(name: &'a str, args: &[ResolvedType]) -> std::borrow::Cow<'a, s
         std::borrow::Cow::Owned(format!(
             "{name}({})",
             args.iter()
-                .map(resolved_name)
+                .map(ResolvedType::display_name)
                 .collect::<Vec<_>>()
                 .join(", ")
         ))
     }
-}
-
-/// Formats a resolved generic argument using registered names.
-///
-/// - Complexity: O(n) in type nodes and name bytes.
-fn resolved_name(ty: &ResolvedType) -> String {
-    match ty {
-        ResolvedType::Scalar(leaf) => leaf.type_name().to_string(),
-        ResolvedType::Array { element } => format!("[{}]", resolved_name(element)),
-        ResolvedType::Tuple { elements } => format!(
-            "({}{})",
-            elements
-                .iter()
-                .map(resolved_name)
-                .collect::<Vec<_>>()
-                .join(", "),
-            if elements.len() == 1 { "," } else { "" }
-        ),
-        ResolvedType::Callable { parameters, result } => format!(
-            "Fn({}, {})",
-            resolved_parameters(parameters),
-            resolved_name(result)
-        ),
-    }
-}
-
-/// Formats source-ordered callable parameters without cloning their type trees.
-///
-/// - Complexity: O(n) in parameter type nodes and name bytes.
-fn resolved_parameters(parameters: &[ResolvedType]) -> String {
-    format!(
-        "({}{})",
-        parameters
-            .iter()
-            .map(resolved_name)
-            .collect::<Vec<_>>()
-            .join(", "),
-        if parameters.len() == 1 { "," } else { "" }
-    )
 }
 
 impl Default for TypeRegistry {
@@ -1181,6 +1142,9 @@ mod tests {
                 "Bounds([i32])",
                 "Bounds((i32, [Integer]))",
                 "Bounds((i32,))",
+                "Bounds(Fn((), Integer))",
+                "Bounds(Fn((Integer,), [i32]))",
+                "Bounds(Fn((Integer, [i32]), ()))",
             ];
             for name in names {
                 registry.register_no_default::<RangeInclusive<i32>>(name);
@@ -1196,7 +1160,7 @@ mod tests {
                         .unwrap();
                     let copied = expr.resolve(&snapshot).unwrap().into_value_type().unwrap();
                     let direct = expr.resolve(&registry).unwrap();
-                    assert_eq!(resolved_name(&direct), source);
+                    assert_eq!(direct.display_name(), source);
                     let direct = direct.into_value_type().unwrap();
                     assert!(direct.same_shape(&copied), "{source}");
                     assert_eq!(

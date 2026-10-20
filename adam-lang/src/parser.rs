@@ -683,7 +683,7 @@ impl AdamParser {
                     bounds_fn(
                         bounds_segment
                             .borrow_mut()
-                            .call_with_prefix(placeholder.as_ref(), args)
+                            .call_checked_with_prefix(placeholder.as_ref(), args)
                             .ok()?,
                     )
                     .ok()
@@ -2257,6 +2257,67 @@ mod tests {
         parsed.sheet.write(a_id, 500i32).unwrap();
         parsed.sheet.propagate().unwrap();
         assert_eq!(*parsed.sheet.read::<i32>(a_id).unwrap(), 100);
+    }
+
+    /// Rejects invalid public erased inputs on every call without poisoning later bounds.
+    #[test]
+    fn public_range_bounds_rejects_invalid_scalar_inputs() {
+        let parsed = AdamParser::new(TypeRegistry::new(), OpLookup::new())
+            .parse_str("sheet s { cell hi: f64 = 10.0; cell value: f64 filter 0.0..=hi; }")
+            .unwrap();
+        let Some(adam_rs::FilterKind::Range { bounds }) =
+            parsed.sheet.filter_kind(parsed.cell_names["value"].0)
+        else {
+            panic!("expected range filter");
+        };
+        let invalid: [&[&dyn Any]; 4] = [&[&42u64], &[&1u8], &[], &[&10.0f64, &20.0f64]];
+        for _ in 0..2 {
+            for args in invalid {
+                let (lo, hi) = bounds(&[&10.0f64]).unwrap();
+                assert_eq!(*lo.downcast::<f64>().unwrap(), 0.0);
+                assert_eq!(*hi.downcast::<f64>().unwrap(), 10.0);
+                // The first mismatch has f64's size and alignment, so the pre-fix
+                // regression fails by accepting it, without an undersized raw read.
+                assert!(bounds(args).is_none(), "invalid scalar inputs accepted");
+                let (_, hi) = bounds(&[&25.0f64]).unwrap();
+                assert_eq!(*hi.downcast::<f64>().unwrap(), 25.0);
+            }
+        }
+    }
+
+    /// Checks complete compound shapes, carrier identity, arity, and recovery.
+    #[test]
+    fn public_range_bounds_rejects_invalid_compound_inputs() {
+        use cel_runtime::{Cons, IntoCStackList, Leaf, Nil, OwnedValue};
+
+        let parsed = AdamParser::new(TypeRegistry::new(), OpLookup::new())
+            .parse_str(
+                "sheet s { cell limits: (f64, f64) = (0.0, 10.0); \
+                 cell value: f64 filter limits.0..=limits.1; }",
+            )
+            .unwrap();
+        let Some(adam_rs::FilterKind::Range { bounds }) =
+            parsed.sheet.filter_kind(parsed.cell_names["value"].0)
+        else {
+            panic!("expected range filter");
+        };
+        type Limits = Cons<Leaf<f64>, Cons<Leaf<f64>, Nil>>;
+        type WrongLimits = Cons<Leaf<f64>, Cons<Leaf<u64>, Nil>>;
+        let valid = CellValue(OwnedValue::new::<Limits>((0.0, 10.0).into_c_stack_list()));
+        // Identical field sizes and valid f64 bits keep this regression safe pre-fix.
+        let wrong_shape = CellValue(OwnedValue::new::<WrongLimits>(
+            (0.0, 10.0f64.to_bits()).into_c_stack_list(),
+        ));
+        let invalid: [&[&dyn Any]; 4] = [&[&wrong_shape], &[&false], &[], &[&valid, &valid]];
+        for _ in 0..2 {
+            for args in invalid {
+                let (lo, hi) = bounds(&[&valid]).unwrap();
+                assert_eq!(*lo.downcast::<f64>().unwrap(), 0.0);
+                assert_eq!(*hi.downcast::<f64>().unwrap(), 10.0);
+                assert!(bounds(args).is_none(), "invalid compound inputs accepted");
+                assert!(bounds(&[&valid]).is_some());
+            }
+        }
     }
 
     #[test]

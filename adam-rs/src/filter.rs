@@ -34,6 +34,11 @@ pub enum FilterKind {
     Range {
         /// Re-evaluates the range expression, returning `(lo, hi)` as type-erased values, or
         /// `None` if evaluation fails.
+        ///
+        /// Adam-compiled evaluators also return `None` for missing or extra arguments,
+        /// incorrect scalar identities, or mismatched compound carriers or shapes.
+        /// They validate every argument before binding raw addresses or evaluating,
+        /// including on calls following a successful evaluation or rejection.
         #[allow(clippy::type_complexity)]
         bounds: Box<dyn Fn(&[&dyn Any]) -> Option<(Box<dyn Any>, Box<dyn Any>)>>,
     },
